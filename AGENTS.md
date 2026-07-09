@@ -4,14 +4,16 @@ These are enforceable rules for the native PHP accelerator. Wishes are ignored; 
 
 This is the universal base. It assumes plain, framework-agnostic PHP (Composer + PSR standards). Framework-specific behavior (Laravel, Symfony, etc.) lives in dedicated branches, not here. If the working project is built on a framework, prefer the matching framework branch of this accelerator.
 
+This policy is shared across editions. The same accelerator is mirrored for **Claude Code** (`.claude/`), **Cursor** (`.cursor/`), and **Codex** (`.agents/skills` + `.codex/`). Below, paths like `<edition>/hooks` and `<edition>/skills` refer to whichever edition is active.
+
 ## Hierarchy of Sources of Truth
 
-1. **Enforcement** (`.claude/hooks`, CI, linters, static analysis) - automated, highest authority.
+1. **Enforcement** (`<edition>/hooks`, CI, linters, static analysis) - automated, highest authority.
 2. **Policy** (`AGENTS.md`) - mandatory behavior and safety rules.
 3. **Architecture** (`specs/`) - project-specific decisions.
-4. **Operations** (`.claude/skills/`) - how skills execute.
+4. **Operations** (`<edition>/skills/`) - how skills execute.
 5. **Examples** (`examples/`) - reference outputs, never stronger than policy.
-6. **Documentation** (`README.md`, `.claude/README.md` if present) - human reference.
+6. **Documentation** (`README.md`, per-edition `README.md`) - human reference.
 
 ## File Naming
 
@@ -44,7 +46,7 @@ This is the universal base. It assumes plain, framework-agnostic PHP (Composer +
 
 ## Verification
 
-- MUST run applicable checks from `.claude/DOD.md` before claiming completion.
+- MUST run applicable checks from the active edition's `DOD.md` (`.claude/DOD.md`, `.cursor/DOD.md`, or `.codex/DOD.md`) before claiming completion.
 - MUST run tests if test tooling exists.
 - MUST run formatting/lint/static analysis if configured.
 - MUST NOT claim completion with failing tests, failing static analysis, or known broken entry points.
@@ -75,5 +77,5 @@ This is the universal base. It assumes plain, framework-agnostic PHP (Composer +
 
 ## Definition Of Done
 
-- See `.claude/DOD.md` for the tiered native PHP verification checklist.
+- See the active edition's `DOD.md` (`.claude/`, `.cursor/`, or `.codex/`) for the tiered native PHP verification checklist.
 - MUST include verification evidence in final Context Summary when implementation work is performed.

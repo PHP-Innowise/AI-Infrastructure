@@ -30,10 +30,10 @@ specs/
 
 ## Key Decisions
 
-- Backend: Laravel
-- Auth: Sanctum, Passport, session auth, or JWT depending on client needs
-- DB: PostgreSQL or MySQL
-- Frontend: Blade, Livewire, Inertia, or API-only frontend depending on the project
+- Backend: native PHP (Composer + PSR)
+- Auth: session auth or token/JWT depending on client needs
+- DB: PostgreSQL or MySQL via PDO
+- Frontend: server-rendered PHP templates with progressive enhancement, or an API-only backend
 ```
 
 ---

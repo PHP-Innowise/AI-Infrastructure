@@ -2,37 +2,52 @@
 
 > **For enforceable agent policy rules, see [AGENTS.md](AGENTS.md).**
 
-A Laravel-first accelerator framework for Claude Code. It provides structured slash-command workflows, isolated agents, reusable skills, quality gates, and documentation conventions for PHP teams building Laravel applications.
+A native-PHP accelerator framework for AI coding agents. It provides structured slash-command workflows, isolated agents, reusable skills, quality gates, and documentation conventions for PHP teams — usable from **Claude Code**, **Cursor**, and **OpenAI Codex** out of the same repository.
 
-This repository is a PHP adaptation. Universal workflow assets were copied where they are framework-neutral; Laravel-specific guidance was written intentionally rather than converted by word replacement.
+`main` is the universal, framework-agnostic base (Composer + PSR). Framework-specific behavior (Laravel, Symfony, etc.) belongs on dedicated branches, not here.
 
 ## What This Is
 
-Accelerator Core PHP is not a generated Laravel application. It is a team workflow layer for Claude Code:
+Accelerator Core PHP is not a generated PHP application. It is a team workflow layer for AI agents:
 
 - Commands route user intent to the right agent.
-- Agents run one skill in isolated context.
+- Agents run one skill in isolated context, then stop.
 - Skills define reliable workflows, examples, checklists, and output formats.
 - Hooks and policy files enforce naming, safety, and verification conventions.
-- `tasks/` stores temporary task documents.
-- `specs/` stores living project specifications.
+- `tasks/` stores temporary task documents; `specs/` stores living project specifications.
+
+## Multi-Tool Editions
+
+The same accelerator is mirrored for three agents. Each tool reads its own directory, so they coexist without conflict; the root `AGENTS.md` is the shared policy for all of them.
+
+| Tool | Reads | Notes |
+| --- | --- | --- |
+| **Claude Code** | `.claude/` (agents, commands, hooks, skills, `settings.json`) | Original edition. |
+| **Cursor** | `.cursor/` (agents, commands, `hooks.json`, `rules/*.mdc`, skills) | Self-contained; keep Cursor's "read `.claude`" setting **off** to avoid double-loading. See `.cursor/README.md`. |
+| **Codex** | `.agents/skills/` + `.codex/` (`config.toml`, `hooks.json`) | Skills live in `.agents/skills`; no command layer (Codex deprecated custom prompts in favor of skills). See `.codex/README.md`. |
+
+When you change a skill, mirror the edit across the editions you support (or regenerate).
 
 ## Directory Structure
 
 ```
-.claude/
+AGENTS.md                # Shared, enforceable policy (all tools)
+
+.claude/                 # Claude Code edition
 ├── agents/              # Agent wrappers that execute one skill and stop
 ├── commands/            # Slash commands invoked by users
 ├── hooks/               # Shell checks triggered by Claude Code events
 ├── skills/              # Skill implementations and references
-├── DOD.md               # Laravel/PHP Definition of Done
+├── DOD.md               # Native PHP Definition of Done
 ├── GOLDEN-PRINCIPLES.md # Engineering principles for reviews
-└── settings.json        # Team configuration for permissions and hooks
+├── STABILIZATION.md     # Error-to-rule process
+└── settings.json        # Permissions and hook wiring
 
-Task/
-├── Epics/               # Product/domain planning material
-└── designs/             # Shared visual design references
+.cursor/                 # Cursor edition (skills, agents, commands, rules/*.mdc, hooks.json, docs)
+.agents/skills/          # Codex skills (shared .agents convention)
+.codex/                  # Codex config.toml, hooks.json, hooks/, docs
 
+Task/                    # Product/domain planning material and design references
 tasks/                   # Temporary task documentation
 specs/                   # Permanent living specifications
 examples/                # Workflow output examples
@@ -40,7 +55,7 @@ examples/                # Workflow output examples
 
 ## Architecture: Command -> Agent -> Skill
 
-The accelerator uses a manual flow. Each command starts a focused agent, that agent executes one skill, and then it stops with a context summary and suggested next steps. The main conversation stays clean and the user controls the workflow.
+Each command starts a focused agent, that agent executes one skill, and then it stops with a context summary and suggested next steps. The main conversation stays clean and the user controls the workflow. (In Codex there is no command layer — you invoke a skill by name and Codex can also trigger it implicitly.)
 
 ```
 User runs: /requirements-analyst [prompt]
@@ -55,77 +70,60 @@ User runs: /requirements-analyst [prompt]
       Output: result + context summary + next steps
 ```
 
-## Laravel Default Stack
+## Native PHP Stack
 
-The PHP guidance in this accelerator assumes Laravel as the default backend framework.
-
-Recommended baseline:
+The guidance assumes plain, framework-agnostic PHP. Recommended baseline:
 
 - PHP 8.2+
-- Composer 2+
-- Laravel 11 or 12
-- PHPUnit or Pest
-- Laravel Pint
-- PHPStan with Larastan, or Psalm if the project already uses Psalm
-- Laravel Sanctum for first-party API auth when appropriate
-- Eloquent, migrations, factories, seeders, policies, jobs, events, queues, and API resources
+- Composer 2+ with PSR-4 autoloading
+- PSR-1 / PSR-12 / PER coding style; `declare(strict_types=1)`
+- PHPUnit or Pest for tests
+- PHP-CS-Fixer or PHP_CodeSniffer for formatting
+- PHPStan or Psalm for static analysis
+- Rector (optional) for automated refactors/upgrades
+- PDO (or a documented data layer) with prepared statements for persistence
 
-This accelerator does not force every project into a heavy layered architecture. It encourages Laravel-native structure first, then adds services, actions, repositories, DTOs, or domain modules only when they reduce real complexity.
+The accelerator does not force a heavy layered architecture. It encourages the simplest structure that fits — front controller, handlers, use-case/service classes, domain objects, data-access gateways — and adds interfaces, DTOs, or repositories only when they reduce real complexity.
 
 ## Prerequisites
-
-### PHP and Composer
 
 ```bash
 php -v
 composer --version
 ```
 
-Install PHP and Composer using your operating system package manager, Laravel Herd, Docker, or your team-standard PHP runtime.
-
-### Laravel Tooling
-
-For an existing Laravel app, install dependencies from the Laravel project directory:
+Install PHP and Composer via your OS package manager, Docker, or your team-standard PHP runtime. For an existing project:
 
 ```bash
 composer install
 ```
 
-Common verification tools:
-
-```bash
-php artisan test
-vendor/bin/pint --test
-vendor/bin/phpstan analyse
-composer validate
-```
-
-If the project uses Pest:
-
-```bash
-vendor/bin/pest
-```
-
-### Optional Frontend Tooling
-
-Laravel projects may use Blade, Livewire, Inertia, or an API-only backend with a separate frontend. If a project includes Vite or other JavaScript tooling, run frontend commands only in the project that owns that tooling and only when the team has explicitly configured those commands.
-
 ## Quick Start
 
-Use slash commands to move through the workflow:
+Use slash commands (Claude Code / Cursor) to move through the workflow:
 
 | Command | Purpose |
 | --- | --- |
 | `/requirements-analyst` | Clarify and decompose requirements |
 | `/brainstorm` | Explore solution options |
-| `/architect` | Make Laravel architecture decisions |
-| `/api-designer` | Design REST APIs, requests, resources, and OpenAPI docs |
+| `/researcher` | Evaluate libraries and compare approaches |
+| `/council` | Weigh high-stakes decisions from multiple expert views |
+| `/architect` | Make native PHP architecture decisions |
+| `/api-designer` | Design REST APIs, DTOs, serializers, and OpenAPI docs |
+| `/database-designer` | Design schemas, keys, indexing, and migrations |
 | `/writing-plans` | Create implementation plans |
-| `/coder` | Implement Laravel backend features |
-| `/coder-frontend` | Implement frontend work when the project has a frontend |
+| `/architecture-implementer` | Scaffold an approved architecture (skeletons, DI, PSR-4) |
+| `/coder` | Implement native PHP backend features |
+| `/coder-frontend` | Implement server-rendered frontend work |
+| `/refactorer` | Behavior-preserving refactors and PHP upgrades |
 | `/test-generator` | Add PHPUnit/Pest tests |
 | `/code-reviewer` | Review code for correctness, maintainability, and risk |
-| `/verify` | Run the Laravel/PHP Definition of Done |
+| `/security-reviewer` | Audit changes against the OWASP Top 10 |
+| `/performance-optimization` | Diagnose and fix performance problems |
+| `/dependency-manager` | Audit and manage Composer dependencies |
+| `/systematic-debugger` (`/debugger`) | Find root cause before fixing bugs |
+| `/verify` | Run the native PHP Definition of Done |
+| `/review-pr` | Review a GitHub pull request |
 | `/finishing-branch` | Prepare branch completion or PR |
 | `/release` | Prepare release notes and changelog |
 
@@ -136,7 +134,7 @@ Example:
 
 [Agent returns requirements and context summary]
 
-/architect Based on TASK-001, design the Laravel module boundaries and authorization model
+/architect Based on TASK-001, design the module boundaries and authorization model
 ```
 
 ## Documentation System
@@ -146,8 +144,8 @@ Example:
 Temporary task documents live in `tasks/TASK-N/`.
 
 - Created by: requirements analysis, brainstorming, and implementation planning.
-- Naming: files must be prefixed with the skill name, for example `requirements-analyst-requirements.md`.
-- Lifecycle: delete or archive after the implementation is complete.
+- Naming: files must be prefixed with the skill name, e.g. `requirements-analyst-requirements.md`.
+- Lifecycle: delete or archive after implementation is complete.
 
 ### Living Specifications
 
@@ -158,52 +156,36 @@ Living specifications live in `specs/`.
 - Updates: append new sections with `[TASK-N]` prefixes.
 - Lifecycle: permanent project knowledge.
 
-## Laravel Implementation Philosophy
+## Native PHP Implementation Philosophy
 
-Use Laravel conventions before inventing abstractions:
+Prefer explicit, minimal structure over framework imitation:
 
-- HTTP boundary: routes, controllers, form requests, middleware.
-- Validation: form requests or explicit validators at input boundaries.
-- Authorization: policies and gates.
-- Persistence: Eloquent models, migrations, factories, seeders.
-- Output: API resources for stable response shapes.
-- Business logic: services or actions when controller/model code becomes unclear.
-- Async work: jobs, queues, events, listeners, notifications, and mailables.
-- Integration boundaries: typed clients or dedicated services for external APIs.
-
-Avoid copying patterns from other ecosystems unless they solve a clear Laravel problem.
+- HTTP boundary: front controller, routing, handlers/controllers, PSR-15 middleware.
+- Validation: typed DTOs / value objects / explicit validators at input boundaries.
+- Authorization: an explicit access-control layer, never hidden UI.
+- Persistence: PDO with prepared statements; repositories/gateways in the infrastructure layer.
+- Output: serializers/DTOs for stable API response shapes.
+- Business logic: use-case/service classes when handler code becomes unclear.
+- Async work: explicit workers/queues with typed payloads and retry behavior.
+- Integration boundaries: typed clients with timeouts, retries, and error mapping for external APIs.
 
 ## Verification
 
-Before claiming completion, agents must run applicable checks from `.claude/DOD.md`. Missing tooling is reported as `N/A - tooling not configured`; it is not installed silently.
-
-Typical Laravel verification:
+Before claiming completion, agents run applicable checks from `DOD.md` (per edition: `.claude/DOD.md`, `.cursor/DOD.md`, `.codex/DOD.md`). Missing tooling is reported as `N/A - tooling not configured`; it is not installed silently. Prefer the project's Composer scripts so local and CI use the same entry points:
 
 ```bash
-composer validate
-php artisan test
-vendor/bin/pint --test
-vendor/bin/phpstan analyse
-php artisan route:list
+composer validate --strict
+composer test        # or vendor/bin/phpunit / vendor/bin/pest
+composer lint        # or vendor/bin/php-cs-fixer fix --dry-run --diff / vendor/bin/phpcs
+composer analyse     # or vendor/bin/phpstan analyse / vendor/bin/psalm
+php -l path/to/File.php
 ```
 
 ## Sharing With a Team
 
-Recommended team setup:
-
-1. Keep `.claude/settings.json`, `.claude/commands`, `.claude/agents`, `.claude/skills`, and `.claude/hooks` committed.
-2. Keep `.claude/settings.local.json` uncommitted for personal overrides.
-3. Agree on project-level PHP tooling: PHPUnit or Pest, Pint, PHPStan/Larastan or Psalm.
+1. Commit the edition(s) your team uses: `.claude/`, `.cursor/`, and/or `.agents/` + `.codex/`, plus the shared root `AGENTS.md`.
+2. Keep personal overrides uncommitted (e.g. `.claude/settings.local.json`).
+3. Agree on project-level PHP tooling: PHPUnit or Pest, PHP-CS-Fixer or PHP_CodeSniffer, PHPStan or Psalm.
 4. Keep specs current as features evolve.
 5. Treat generated task docs as temporary working material, not permanent architecture records.
-
-## Adaptation Notes
-
-The following were intentionally rewritten for PHP/Laravel accuracy:
-
-- Top-level onboarding and policy docs.
-- Definition of Done.
-- Claude settings and allowed shell commands.
-- Backend implementation, architecture, API design, testing, verification, and documentation skills.
-- Command and agent descriptions that previously assumed a non-PHP backend.
-
+6. Cursor: keep the "read `.claude` files" setting off. Codex: trust the project so `.codex/` config and hooks load.
