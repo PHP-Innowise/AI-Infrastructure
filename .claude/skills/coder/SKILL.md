@@ -70,26 +70,35 @@ Locate the app root by finding `composer.json` and the autoload `psr-4` mapping.
 - Depend on interfaces at boundaries; inject collaborators via the constructor (PSR-11 container or manual wiring).
 - Use versioned migrations or reviewed SQL for schema changes.
 - Throw typed exceptions for error conditions; map them to responses/exit codes at the edge.
+- Prefer guard clauses and early returns over deep nesting; keep functions small and single-purpose.
+- Preserve backward compatibility of public signatures: add optional parameters rather than reordering/removing, and deprecate (with a documented path) before breaking callers.
 - Never read or edit `.env`; read configuration through a config layer and document required variables.
 
 ## Common Patterns
 
+> Note: helper types below (`JsonResponse`, `ValidationException`, `ServerRequestFactory`, `SapiEmitter`) are illustrative stand-ins for whatever your project/PSR packages provide. Import them with `use` in real code.
+
 ### Front Controller
+
+A PSR-7 `ResponseInterface` is a value object with no `send()` method; emit it through an SAPI emitter (for example `laminas/httphandlerrunner`) or a project-specific emitter.
 
 ```php
 <?php
 
 declare(strict_types=1);
 
-use App\Http\Kernel;
+use Laminas\HttpHandlerRunner\Emitter\SapiEmitter;
+use Laminas\Diactoros\ServerRequestFactory;
 
 require __DIR__ . '/../vendor/autoload.php';
 
+/** @var App\Http\Kernel $kernel */
 $kernel = require __DIR__ . '/../config/bootstrap.php';
 
-$kernel->handle(
-    ServerRequestFactory::fromGlobals()
-)->send();
+$request = ServerRequestFactory::fromGlobals();
+$response = $kernel->handle($request);
+
+(new SapiEmitter())->emit($response);
 ```
 
 ### Routing (framework-agnostic, e.g. nikic/fast-route)
@@ -158,12 +167,18 @@ use Psr\Http\Message\ServerRequestInterface;
 
 final class UserController
 {
-    public function __construct(private readonly CreateUser $createUser)
-    {
+    public function __construct(
+        private readonly CreateUser $createUser,
+        private readonly AccessControl $accessControl,
+    ) {
     }
 
     public function store(ServerRequestInterface $request): ResponseInterface
     {
+        // Authorize before acting; never rely on hidden UI. Use $request attributes
+        // populated by auth middleware. (Omit only for genuinely public endpoints.)
+        $this->accessControl->assertCan($request->getAttribute('user'), 'user.create');
+
         $data = CreateUserRequest::fromArray((array) $request->getParsedBody());
 
         $user = $this->createUser->handle($data);
@@ -175,6 +190,22 @@ final class UserController
 
 ### Use Case / Service With Transaction
 
+The Application layer depends on an **interface** (defined in the domain) and a small transaction boundary, not on `PDO` directly. SQL lives in the Infrastructure implementation. This keeps the use case unit-testable with a fake repository and honors the "depend on abstractions" rule.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Domain\User;
+
+interface UserRepository
+{
+    /** @throws DuplicateEmailException */
+    public function add(User $user): User;
+}
+```
+
 ```php
 <?php
 
@@ -182,42 +213,70 @@ declare(strict_types=1);
 
 namespace App\Application;
 
+use App\Domain\User\{User, UserRepository};
 use App\Http\Request\CreateUserRequest;
-use App\Domain\User;
-use PDO;
+use App\Infrastructure\Persistence\TransactionManager;
 
 final class CreateUser
+{
+    public function __construct(
+        private readonly UserRepository $users,
+        private readonly TransactionManager $transaction,
+    ) {
+    }
+
+    public function handle(CreateUserRequest $request): User
+    {
+        // Run the write inside a transaction boundary; the manager commits on
+        // success and rolls back on any thrown exception.
+        return $this->transaction->run(
+            fn (): User => $this->users->add(
+                User::register($request->email, $request->name),
+            ),
+        );
+    }
+}
+```
+
+```php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Infrastructure\Persistence;
+
+use App\Domain\User\{DuplicateEmailException, User, UserRepository};
+use PDO;
+
+final class PdoUserRepository implements UserRepository
 {
     public function __construct(private readonly PDO $pdo)
     {
     }
 
-    public function handle(CreateUserRequest $request): User
+    public function add(User $user): User
     {
-        $this->pdo->beginTransaction();
-
         try {
             $statement = $this->pdo->prepare(
                 'INSERT INTO users (email, name) VALUES (:email, :name)'
             );
-            $statement->execute([
-                'email' => $request->email,
-                'name' => $request->name,
-            ]);
-
-            $user = new User((int) $this->pdo->lastInsertId(), $request->email, $request->name);
-
-            $this->pdo->commit();
-
-            return $user;
-        } catch (\Throwable $e) {
-            $this->pdo->rollBack();
+            $statement->execute(['email' => $user->email, 'name' => $user->name]);
+        } catch (\PDOException $e) {
+            // Rely on a UNIQUE(email) constraint to close the check-then-insert
+            // race; translate the driver error into a domain exception.
+            if ($e->getCode() === '23000') {
+                throw new DuplicateEmailException($user->email, previous: $e);
+            }
 
             throw $e;
         }
+
+        return $user->withId((int) $this->pdo->lastInsertId());
     }
 }
 ```
+
+Enforce uniqueness in the schema (`UNIQUE(email)`), not just in application code — concurrent requests can both pass an application-level "does this email exist?" check. See `/architect` for concurrency, idempotency, and locking guidance the code must respect.
 
 ## Modern PHP Best Practices
 
