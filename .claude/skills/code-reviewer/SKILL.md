@@ -13,6 +13,8 @@ related: [coder, test-generator, verify, security-reviewer]
 
 Prioritize defects, regressions, security issues, missing tests, and operational risks. Do not spend review budget on stylistic preferences unless they affect correctness or maintainability. Leave deep security audits to `/security-reviewer`, but flag obvious risks here.
 
+**Scope boundary:** this skill reviews **local changes** (working tree / branch diff) for **broad** quality. Use `/security-reviewer` for a dedicated OWASP-depth security-only pass, and `/review-pr` when the target is a **remote GitHub pull request** (fetched and commented on via the `gh` CLI).
+
 ## Native PHP Review Checklist
 
 ### HTTP / CLI Boundary

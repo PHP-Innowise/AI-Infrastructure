@@ -7,6 +7,10 @@ description: WCAG 2.2 accessibility guidelines for reviewing and writing accessi
 
 Practical accessibility rules for code review and implementation, based on WCAG 2.2 Level AA. Contains 30 rules across 8 categories, prioritized by impact.
 
+## Scope Boundary
+
+This skill is the authority for **accessibility (a11y)** only. For broader UX/interaction/visual review that is not accessibility-specific, use `web-design-guidelines`.
+
 ## When to Apply
 
 Reference these guidelines when:

@@ -1,6 +1,6 @@
 ---
 name: web-design-guidelines
-description: Review UI code for Web Interface Guidelines compliance. Use when asked to "review my UI", "check accessibility", "audit design", "review UX", or "check my site against best practices".
+description: Review UI code for general Web Interface Guidelines compliance (interaction, layout, visual, UX polish). Use when asked to "review my UI", "audit design", "review UX", or "check my site against best practices". For accessibility/WCAG/a11y specifically, use wcag-accessibility instead.
 metadata:
   author: vercel
   version: "1.0.0"
@@ -10,6 +10,10 @@ metadata:
 # Web Interface Guidelines
 
 Review files for compliance with Web Interface Guidelines.
+
+## Scope Boundary
+
+This skill covers **general UX and interface quality** (interaction, layout, visual polish, content). For **accessibility-specific** review (WCAG 2.2, screen readers, keyboard, ARIA, contrast, focus), use `wcag-accessibility`, which contains the dedicated 30-rule ruleset. The two are complementary: run `wcag-accessibility` for a11y depth and this skill for broader UX.
 
 ## How It Works
 

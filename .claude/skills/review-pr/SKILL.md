@@ -11,6 +11,10 @@ related: [code-reviewer, debugger, coder]
 
 Review GitHub pull requests using the `gh` CLI, find issues, and take action -- either fix them locally or post comments back to the PR.
 
+## Scope Boundary
+
+This skill is for a **remote GitHub PR** (fetched via `gh`, comments posted back to GitHub). For **local** uncommitted or branch changes, use `/code-reviewer` (broad quality) or `/security-reviewer` (security-only). This skill reuses that review judgment but adds PR fetching and GitHub comment posting.
+
 ## Prerequisites
 
 This skill requires the [GitHub CLI](https://cli.github.com/) (`gh`) to be installed and authenticated. If `gh` is not available, tell the user to install it and run `gh auth login`.

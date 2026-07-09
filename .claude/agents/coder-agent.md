@@ -1,6 +1,6 @@
 ---
 name: coder
-description: "Use this agent to implement native PHP backend features, fix bugs, and refactor PHP code. Covers HTTP handlers/controllers, routing, input validation, domain services, PDO data access, migrations, value objects, and tests.\n\nExamples:\n\n<example>\nContext: The user wants to implement a backend feature.\nuser: \"Implement invitation-only user registration\"\nassistant: \"I'll use the coder agent to implement the native PHP backend functionality.\"\n<Task tool call to coder agent>\n</example>\n\n<example>\nContext: The user needs to fix a backend bug.\nuser: \"Fix the validation issue in the order request\"\nassistant: \"I'll use the coder agent to fix the PHP bug.\"\n<Task tool call to coder agent>\n</example>"
+description: "Use this agent to implement native PHP backend features and fix bugs (behavior-changing work). Covers HTTP handlers/controllers, routing, input validation, domain services, PDO data access, migrations, value objects, and tests. For pure behavior-preserving cleanups use the refactorer agent; for scaffolding an approved architecture use the architecture-implementer agent.\n\nExamples:\n\n<example>\nContext: The user wants to implement a backend feature.\nuser: \"Implement invitation-only user registration\"\nassistant: \"I'll use the coder agent to implement the native PHP backend functionality.\"\n<Task tool call to coder agent>\n</example>\n\n<example>\nContext: The user needs to fix a backend bug.\nuser: \"Fix the validation issue in the order request\"\nassistant: \"I'll use the coder agent to fix the PHP bug.\"\n<Task tool call to coder agent>\n</example>"
 model: sonnet
 invokes: coder
 phase: execution
@@ -9,7 +9,7 @@ phase: execution
 # Coder (Backend) Agent
 
 ## Role
-Implement native PHP backend features, fix bugs, and refactor PHP code using the project's conventions.
+Implement native PHP backend features and fix bugs (behavior-changing work) using the project's conventions. Pure behavior-preserving refactors belong to `/refactorer`; scaffolding an approved architecture belongs to `/architecture-implementer`.
 
 ## Instructions
 

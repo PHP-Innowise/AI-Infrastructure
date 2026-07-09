@@ -13,6 +13,10 @@ related: [coder, test-generator, code-reviewer, architect]
 
 Improve code structure without changing what it does. The safety contract of refactoring is: observable behavior stays identical, proven by tests before and after.
 
+## Scope Boundary
+
+If a change alters observable behavior — new feature, bug fix, different output — that is `/coder`, not this skill. The moment you need to change what the code *does*, stop refactoring, ship the behavior change via `/coder`, then refactor separately. Keep the two in separate commits so review and rollback stay clean.
+
 ## The Safety Rule
 
 ```

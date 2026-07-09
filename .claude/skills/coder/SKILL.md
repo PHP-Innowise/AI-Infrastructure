@@ -1,6 +1,6 @@
 ---
 name: coder
-description: Implement native PHP backend features, bug fixes, and refactors. Use for HTTP handlers/controllers, routing, input validation, domain services, PDO data access, value objects, and PHP business logic.
+description: Implement native PHP backend features and bug fixes (behavior-changing work). Use for HTTP handlers/controllers, routing, input validation, domain services, PDO data access, value objects, and PHP business logic. For pure behavior-preserving cleanups use refactorer; for scaffolding an approved architecture use architecture-implementer.
 phase: execution
 flow-next: code-reviewer
 flow-alternatives: [test-generator, verify]
@@ -14,6 +14,14 @@ related: [architect, architecture-implementer, api-designer, test-generator]
 Implement backend work in plain, framework-agnostic PHP using the project's existing conventions. Read the relevant entry points, routing, handlers, services, data access, tests, and specs before editing.
 
 This skill targets native PHP (Composer + PSR). If the project is built on a framework, prefer the matching accelerator branch instead of hand-rolling framework features here.
+
+## Scope Boundary
+
+`coder` owns **behavior-changing** work — new features, bug fixes, and the incidental cleanup that comes with them. Use a sibling skill when the task is narrower:
+
+- **`/refactorer`** — pure behavior-preserving change (extract, dedupe, improve types, PHP upgrade) under a characterization test net. If observable behavior must stay identical, that is refactorer, not coder.
+- **`/architecture-implementer`** — lay down the structural skeleton (directories, namespaces, interfaces, DI wiring) for an approved architecture before feature logic exists. If there is no structure yet from `/architect`, scaffold there first, then return here to fill in behavior.
+- **`/coder-frontend`** — server-rendered templates, HTML, CSS, and progressive-enhancement JS.
 
 ## Project Structure
 

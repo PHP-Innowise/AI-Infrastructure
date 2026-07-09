@@ -15,6 +15,10 @@ Take an approved architecture (from `/architect`, a spec in `specs/`, or a `/cou
 
 This skill builds the frame, not the whole house. It should produce a compiling, autoloadable, testable skeleton with seams in the right places.
 
+## Scope Boundary
+
+This skill stops at the **skeleton**: interfaces, empty/thin classes, DI wiring, namespaces, and TODO markers. The moment real feature logic goes inside a method, that is `/coder`. Upstream, the architectural *decision* itself belongs to `/architect` (or `/council`) — if no approved decision exists, do that first. In short: `/architect` decides → `architecture-implementer` scaffolds → `/coder` fills in behavior.
+
 ## Preconditions
 
 Before scaffolding, confirm:
