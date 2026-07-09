@@ -1,0 +1,20 @@
+---
+name: coder
+description: "Spawn coder agent to implement native PHP backend features using the project's entry points, routing, input validation, domain/service classes, PDO data access, migrations, and tests."
+---
+
+# Coder Backend
+
+Spawn coder agent to implement native PHP backend features using the project's entry points, routing, input validation, domain/service classes, PDO data access, migrations, and tests.
+
+## Input
+$ARGUMENTS
+
+## Instructions
+
+Use the Task tool to spawn a sub-agent:
+- **subagent_type:** `coder`
+- **description:** `Implement backend feature`
+- **prompt:** `$ARGUMENTS`
+
+The agent will use the coder skill and suggest next steps when done.

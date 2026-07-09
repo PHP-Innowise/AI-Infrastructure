@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": ".cursor/hooks/local-context.sh",
+        "timeout": 10
+      }
+    ],
+    "beforeShellExecution": [
+      {
+        "command": ".cursor/hooks/bash-validator.sh",
+        "timeout": 5
+      }
+    ],
+    "afterFileEdit": [
+      {
+        "command": ".cursor/hooks/file-naming-validator.sh",
+        "timeout": 5
+      },
+      {
+        "command": ".cursor/hooks/loop-detection.sh",
+        "timeout": 5
+      }
+    ]
+  }
+}

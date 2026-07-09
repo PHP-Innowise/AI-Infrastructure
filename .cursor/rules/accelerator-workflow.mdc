@@ -1,0 +1,26 @@
+---
+description: Native PHP Accelerator - how commands, agents, and skills work together
+alwaysApply: true
+---
+
+# Native PHP Accelerator
+
+This project ships a skill-based workflow for native, framework-agnostic PHP (Composer + PSR). `main` is the universal base; framework specifics (Laravel, Symfony) live on dedicated branches.
+
+## Command -> Agent -> Skill
+
+- **Commands** (`.cursor/commands/*.md`) are `/slash` entry points; invoke with `/name` and pass context as `$ARGUMENTS`.
+- **Agents** (`.cursor/agents/*.md`) run one skill in an isolated context, then stop.
+- **Skills** (`.cursor/skills/<name>/SKILL.md`) contain the actual workflow.
+
+Execute only the selected skill, then stop. Do not auto-chain. Always end with a Context Summary and Next Steps.
+
+## Typical Flow
+
+`brainstorm` -> `requirements-analyst` -> `architect` -> `api-designer` -> `writing-plans` -> `architecture-implementer` -> `coder` / `coder-frontend` -> `test-generator` -> `code-reviewer` / `security-reviewer` -> `verify` -> `finishing-branch` / `release`
+
+Support skills: `researcher`, `council`, `database-designer`, `dependency-manager`, `refactorer`, `performance-optimization`, `systematic-debugger`, `documentation-generator`, `review-pr`, `reflect`.
+
+## Sources Of Truth
+
+Enforcement (`.cursor/hooks`) > Policy (`AGENTS.md`) > Architecture (`specs/`) > Skills (`.cursor/skills/`) > Examples > Docs. See `.cursor/DOD.md` and `.cursor/GOLDEN-PRINCIPLES.md`.
