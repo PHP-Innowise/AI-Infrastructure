@@ -31,4 +31,4 @@ Honor `prefers-reduced-motion` to disable or reduce animations. WCAG 2.3.3.
 }
 ```
 
-In Blade, Livewire, or Inertia views, prefer CSS media queries for this rule so the behavior works regardless of JavaScript framework.
+Prefer CSS media queries for this rule so the behavior works regardless of any JavaScript layer.

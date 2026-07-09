@@ -56,22 +56,23 @@ Any additional ad-hoc files (summaries, notes, reports) MUST also follow this ru
 ## Requirement: [Name]
 
 ### Backend Tasks
-- [ ] Migration: [schema change]
-- [ ] Model: [Eloquent model]
-- [ ] Request: [Form Request validation/authorization]
-- [ ] Policy/Gate: [authorization rule]
-- [ ] Controller: [HTTP endpoint]
-- [ ] Resource: [API response shape]
-- [ ] Service/Action/Job: [only when workflow complexity needs it]
+- [ ] Migration/SQL: [schema change]
+- [ ] Entity/Value Object: [domain type]
+- [ ] Request DTO/Validator: [input validation]
+- [ ] Access control: [authorization rule]
+- [ ] Handler/Controller: [HTTP endpoint]
+- [ ] Response serializer: [API response shape]
+- [ ] Use-case/Service/Worker: [only when workflow complexity needs it]
+- [ ] Repository/Gateway: [PDO data access]
 
-### Frontend Tasks
-- [ ] Component: [ComponentName]
-- [ ] State: [state management needs]
-- [ ] API Integration: [endpoints to call]
+### Frontend Tasks (server-rendered)
+- [ ] Template/partial: [view]
+- [ ] Progressive enhancement: [minimal JS behavior]
+- [ ] Accessibility: [semantic markup, labels, focus]
 
 ### Testing Tasks
-- [ ] Feature Tests: HTTP behavior, validation, authorization, persistence
-- [ ] Unit Tests: pure logic, services/actions
+- [ ] Integration Tests: HTTP behavior, validation, authorization, persistence
+- [ ] Unit Tests: pure logic, services, value objects
 - [ ] Browser/E2E Tests: user flows if tooling exists
 ```
 

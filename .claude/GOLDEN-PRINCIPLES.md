@@ -1,47 +1,49 @@
 # Golden Principles
 
-These principles guide implementation, review, and debugging in Laravel/PHP projects.
+These principles guide implementation, review, and debugging in native PHP projects. They are framework-agnostic; framework-specific conventions belong in the matching accelerator branch.
 
-## 1. Laravel Conventions First
+## 1. PSR And Explicit, Minimal Architecture First
 
-Use the framework shape before adding custom architecture. Routes, controllers, form requests, Eloquent models, policies, API resources, jobs, events, notifications, migrations, factories, and seeders are first-class Laravel tools.
+Write modern PHP: `declare(strict_types=1)`, typed properties, parameters, and return types, PSR-1/PSR-12/PER style, and Composer PSR-4 autoloading.
 
-Add services, actions, repositories, DTOs, or domain modules when they reduce real complexity. Do not add them only to imitate another ecosystem.
+Reach for the simplest structure that fits: a front controller, request handlers, use-case/service classes, domain objects, and data-access gateways. Add layers (interfaces, DTOs, repositories, event dispatchers) only when they reduce real complexity, not to imitate a framework.
 
 ## 2. Boundaries Must Be Explicit
 
 Validate and authorize at system boundaries:
 
-- HTTP requests: Form Requests, validators, middleware, policies, gates.
-- Console commands: argument validation and clear failure output.
-- Jobs/listeners: typed payloads and retry/failure behavior.
-- External APIs: typed clients, timeouts, retries, and error mapping.
+- HTTP requests: validate and normalize input into typed DTOs/value objects; authorize before acting.
+- CLI commands: validate arguments and produce clear failure output and exit codes.
+- Background workers: typed payloads and explicit retry/failure behavior.
+- External APIs: typed clients with timeouts, retries, and error mapping.
+
+Depend on interfaces at these boundaries and inject collaborators; avoid global state and hidden singletons.
 
 ## 3. Persistence Is A Contract
 
-Schema changes belong in migrations. Model behavior must respect mass assignment, casts, relationships, scopes, and database constraints.
+Schema changes belong in versioned migrations or reviewed SQL. Access data through PDO (or a documented data layer) using prepared statements with bound parameters.
 
-When data integrity matters, prefer database constraints plus application validation over application validation alone.
+When data integrity matters, prefer database constraints (keys, uniqueness, foreign keys) plus application validation over application validation alone.
 
 ## 4. Tests Should Prove Behavior
 
 Use the smallest test that gives confidence:
 
-- Unit tests for pure logic and focused services/actions.
-- Feature tests for HTTP behavior, validation, authorization, and persistence.
-- Integration tests for queues, events, external API wrappers, and complex database behavior.
+- Unit tests for pure logic, services, and value objects.
+- Integration/feature tests for HTTP handlers, validation, authorization, and persistence.
+- Contract tests for external API clients and message workers.
 
-Use factories and fakes to keep tests readable and deterministic.
+Use fixtures, factories, and test doubles to keep tests readable and deterministic; isolate the database with transactions or a disposable test database.
 
 ## 5. Security Is Part Of The Design
 
-Review changes for authentication, authorization, injection, mass assignment, file upload, session/CSRF, rate limiting, sensitive logging, and secret handling risks.
+Review changes for authentication, authorization, SQL injection, output escaping/XSS, CSRF, session handling, file upload, rate limiting, sensitive logging, unsafe deserialization, and secret handling.
 
 Never rely on hidden UI controls as authorization.
 
 ## 6. Readability Beats Cleverness
 
-Prefer clear names, small methods, explicit errors, and simple control flow. If a future teammate needs project history to understand the code, simplify it or document the decision in specs.
+Prefer clear names, small methods, explicit errors (typed exceptions), and simple control flow. If a future teammate needs project history to understand the code, simplify it or document the decision in specs.
 
 ## 7. Verification Is Evidence
 

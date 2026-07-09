@@ -1,6 +1,6 @@
 ---
 name: verify
-description: Run the Laravel/PHP Definition of Done and report pass/fail status. Use before claiming completion, creating a PR, or merging.
+description: Run the native PHP Definition of Done and report pass/fail status. Use before claiming completion, creating a PR, or merging.
 phase: execution
 flow-next: finishing-branch
 flow-alternatives: [coder, debugger, test-generator]
@@ -11,7 +11,7 @@ related: [code-reviewer, test-generator]
 
 ## Overview
 
-Run `.claude/DOD.md` and produce a clear pass/fail report. Do not install missing tools. Report missing tooling as `N/A - tooling not configured`.
+Run `.claude/DOD.md` and produce a clear pass/fail report. Do not install missing tools. Report missing tooling as `N/A - tooling not configured`. Prefer the project's Composer scripts when they exist.
 
 ## Step 1: Determine Tier
 
@@ -35,31 +35,30 @@ Also check:
 
 ### Standard
 
-Run when files/tooling exist:
+Run when files/tooling exist (prefer Composer scripts, fall back to `vendor/bin/*`):
 
 ```bash
-composer validate
-php artisan test
-vendor/bin/pest
-vendor/bin/phpunit
-vendor/bin/pint --test
-vendor/bin/phpstan analyse
-vendor/bin/psalm
-php artisan route:list
+composer validate --strict
+php -l <changed-files>
+composer test        # or vendor/bin/phpunit / vendor/bin/pest
+composer lint        # or vendor/bin/php-cs-fixer fix --dry-run --diff / vendor/bin/phpcs
+composer analyse     # or vendor/bin/phpstan analyse / vendor/bin/psalm
 ```
 
-Pick the commands that match the project. For example, do not run both Pest and PHPUnit if the project clearly standardizes on one command.
+Pick the commands that match the project. Do not run both Pest and PHPUnit if the project standardizes on one.
 
-If frontend tooling exists and frontend files changed:
+If server-rendered frontend files changed and tooling exists:
 
 ```bash
-<frontend-lint-command>
+<html-or-template-lint-command>
+<css-lint-command>
 <frontend-build-command>
 ```
 
 ### Full
 
 ```bash
+composer audit
 gh run list --limit 1
 ```
 
@@ -68,7 +67,7 @@ Also verify:
 - PR description has summary and test plan.
 - Changelog/specs/docs updated when required.
 - No unresolved TODO/FIXME/HACK in changed source files.
-- Migration, queue, schedule, and cache impacts are documented.
+- Migration, worker/queue, and cache impacts are documented.
 
 ## Report Template
 
@@ -81,9 +80,9 @@ Also verify:
 | Check | Status | Evidence |
 | --- | --- | --- |
 | Working tree | PASS | `git diff --stat` reviewed |
-| Composer | PASS | `composer validate` |
-| Tests | PASS | `php artisan test` |
-| Formatting | N/A | Pint not configured |
+| Composer | PASS | `composer validate --strict` |
+| Tests | PASS | `composer test` |
+| Formatting | N/A | php-cs-fixer not configured |
 | Static analysis | PASS | `vendor/bin/phpstan analyse` |
 
 **Result:** PASS

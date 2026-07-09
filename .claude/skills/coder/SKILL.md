@@ -1,171 +1,264 @@
 ---
 name: coder
-description: Implement Laravel backend features, bug fixes, and refactors. Use for controllers, routes, Form Requests, Eloquent models, migrations, services/actions, policies, jobs, resources, and PHP business logic.
+description: Implement native PHP backend features, bug fixes, and refactors. Use for HTTP handlers/controllers, routing, input validation, domain services, PDO data access, value objects, and PHP business logic.
 phase: execution
 flow-next: code-reviewer
 flow-alternatives: [test-generator, verify]
-related: [architect, api-designer, test-generator]
+related: [architect, architecture-implementer, api-designer, test-generator]
 ---
 
 # Coder
 
 ## Overview
 
-Implement backend work in Laravel using the project's existing conventions. Read the relevant routes, controllers, requests, models, migrations, tests, policies, and specs before editing.
+Implement backend work in plain, framework-agnostic PHP using the project's existing conventions. Read the relevant entry points, routing, handlers, services, data access, tests, and specs before editing.
+
+This skill targets native PHP (Composer + PSR). If the project is built on a framework, prefer the matching accelerator branch instead of hand-rolling framework features here.
 
 ## Project Structure
 
-Laravel code normally belongs in the Laravel application root:
+A conventional native PHP layout:
 
 ```
-app/
+public/
+└── index.php          # front controller (single entry point)
+
+src/                   # PSR-4 autoloaded application code
 ├── Http/
-│   ├── Controllers/
-│   ├── Requests/
-│   └── Resources/
-├── Models/
-├── Policies/
-├── Services/
-├── Actions/
-├── Jobs/
-├── Events/
-└── Listeners/
+│   ├── Controller/    # or Action/Handler classes
+│   ├── Middleware/    # PSR-15 middleware
+│   └── Request/       # input DTOs / validators
+├── Domain/            # entities, value objects, domain services
+├── Application/       # use cases / service layer
+└── Infrastructure/
+    ├── Persistence/   # PDO gateways / repositories
+    └── Support/       # clients, adapters
 
-routes/
-├── api.php
-└── web.php
-
-database/
-├── migrations/
-├── factories/
-└── seeders/
-
+config/                # config arrays, DI definitions
+bin/                   # CLI entry points
+templates/             # server-rendered views (if any)
 tests/
-├── Feature/
-└── Unit/
+├── Unit/
+└── Integration/
 ```
 
-If the repository contains multiple apps, first identify the Laravel app root by locating `artisan` and `composer.json`.
+Locate the app root by finding `composer.json` and the autoload `psr-4` mapping. Follow the structure already present rather than imposing this one.
 
 ## Workflow
 
-1. **Understand** - read existing implementation, specs, migrations, and tests.
-2. **Plan** - decide route, request, model, service/action, policy, migration, and tests.
-3. **Implement** - keep changes scoped and idiomatic.
+1. **Understand** - read existing implementation, specs, schema, and tests.
+2. **Plan** - decide entry point, validation, domain/service, persistence, and tests.
+3. **Implement** - keep changes scoped, typed, and idiomatic.
 4. **Test** - run focused tests first, then applicable DoD checks.
-5. **Review** - check security, validation, authorization, and data integrity.
+5. **Review** - check input validation, authorization, and data integrity.
 
-## Laravel Implementation Rules
+## Native PHP Implementation Rules
 
-- Keep controllers focused on HTTP orchestration.
-- Put validation in Form Requests unless the project uses a different clear convention.
-- Put authorization in policies/gates or Form Request `authorize()`.
-- Use API Resources for stable JSON response shapes.
-- Use migrations for schema changes and factories for test data.
-- Use services/actions for multi-step business behavior.
-- Use jobs/events for slow or side-effect-heavy operations.
-- Use `DB::transaction()` for atomic multi-write workflows.
-- Avoid repositories unless they provide a real boundary, not just a wrapper around Eloquent.
-- Never read or edit `.env`; use config keys and document required variables.
+- Start new files with `declare(strict_types=1);` and full type declarations.
+- Keep controllers/handlers thin: parse and validate input, call a service, format a response.
+- Validate and normalize input into typed DTOs or value objects at the boundary.
+- Authorize protected actions through an explicit access-control check, not hidden UI.
+- Access the database through PDO with prepared statements and bound parameters.
+- Depend on interfaces at boundaries; inject collaborators via the constructor (PSR-11 container or manual wiring).
+- Use versioned migrations or reviewed SQL for schema changes.
+- Throw typed exceptions for error conditions; map them to responses/exit codes at the edge.
+- Never read or edit `.env`; read configuration through a config layer and document required variables.
 
 ## Common Patterns
 
-### Route
+### Front Controller
 
 ```php
-use App\Http\Controllers\UserController;
-use Illuminate\Support\Facades\Route;
+<?php
 
-Route::middleware('auth:sanctum')->group(function (): void {
-    Route::apiResource('users', UserController::class);
+declare(strict_types=1);
+
+use App\Http\Kernel;
+
+require __DIR__ . '/../vendor/autoload.php';
+
+$kernel = require __DIR__ . '/../config/bootstrap.php';
+
+$kernel->handle(
+    ServerRequestFactory::fromGlobals()
+)->send();
+```
+
+### Routing (framework-agnostic, e.g. nikic/fast-route)
+
+```php
+$dispatcher = FastRoute\simpleDispatcher(function (FastRoute\RouteCollector $r): void {
+    $r->addRoute('GET', '/users/{id:\d+}', [UserController::class, 'show']);
+    $r->addRoute('POST', '/users', [UserController::class, 'store']);
 });
 ```
 
-### Form Request
+### Input Validation DTO
 
 ```php
-namespace App\Http\Requests;
+<?php
 
-use Illuminate\Foundation\Http\FormRequest;
+declare(strict_types=1);
 
-class StoreUserRequest extends FormRequest
+namespace App\Http\Request;
+
+final class CreateUserRequest
 {
-    public function authorize(): bool
-    {
-        return $this->user()?->can('create', User::class) ?? false;
+    public function __construct(
+        public readonly string $email,
+        public readonly string $name,
+    ) {
     }
 
-    public function rules(): array
+    /** @param array<string, mixed> $input */
+    public static function fromArray(array $input): self
     {
-        return [
-            'email' => ['required', 'email:rfc,dns', 'max:255', 'unique:users,email'],
-            'name' => ['required', 'string', 'max:120'],
-        ];
-    }
-}
-```
+        $errors = [];
 
-### Controller
+        $email = trim((string) ($input['email'] ?? ''));
+        if ($email === '' || filter_var($email, FILTER_VALIDATE_EMAIL) === false) {
+            $errors['email'] = 'A valid email is required.';
+        }
 
-```php
-namespace App\Http\Controllers;
+        $name = trim((string) ($input['name'] ?? ''));
+        if ($name === '') {
+            $errors['name'] = 'Name is required.';
+        }
 
-use App\Http\Requests\StoreUserRequest;
-use App\Http\Resources\UserResource;
-use App\Models\User;
+        if ($errors !== []) {
+            throw ValidationException::withErrors($errors);
+        }
 
-class UserController
-{
-    public function store(StoreUserRequest $request): UserResource
-    {
-        $user = User::create($request->validated());
-
-        return new UserResource($user);
+        return new self($email, $name);
     }
 }
 ```
 
-### Service Or Action
+### Controller / Handler
 
 ```php
-namespace App\Actions;
+<?php
 
-use App\Models\Invitation;
-use App\Models\User;
-use Illuminate\Support\Facades\DB;
+declare(strict_types=1);
 
-class AcceptInvitation
+namespace App\Http\Controller;
+
+use App\Application\CreateUser;
+use App\Http\Request\CreateUserRequest;
+use Psr\Http\Message\ResponseInterface;
+use Psr\Http\Message\ServerRequestInterface;
+
+final class UserController
 {
-    public function handle(Invitation $invitation, array $data): User
+    public function __construct(private readonly CreateUser $createUser)
     {
-        return DB::transaction(function () use ($invitation, $data): User {
-            $user = User::create($data);
+    }
 
-            $invitation->forceFill(['accepted_at' => now()])->save();
+    public function store(ServerRequestInterface $request): ResponseInterface
+    {
+        $data = CreateUserRequest::fromArray((array) $request->getParsedBody());
+
+        $user = $this->createUser->handle($data);
+
+        return JsonResponse::created(['id' => $user->id, 'email' => $user->email]);
+    }
+}
+```
+
+### Use Case / Service With Transaction
+
+```php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Application;
+
+use App\Http\Request\CreateUserRequest;
+use App\Domain\User;
+use PDO;
+
+final class CreateUser
+{
+    public function __construct(private readonly PDO $pdo)
+    {
+    }
+
+    public function handle(CreateUserRequest $request): User
+    {
+        $this->pdo->beginTransaction();
+
+        try {
+            $statement = $this->pdo->prepare(
+                'INSERT INTO users (email, name) VALUES (:email, :name)'
+            );
+            $statement->execute([
+                'email' => $request->email,
+                'name' => $request->name,
+            ]);
+
+            $user = new User((int) $this->pdo->lastInsertId(), $request->email, $request->name);
+
+            $this->pdo->commit();
 
             return $user;
-        });
+        } catch (\Throwable $e) {
+            $this->pdo->rollBack();
+
+            throw $e;
+        }
     }
 }
 ```
 
-### API Resource
+## Modern PHP Best Practices
+
+Use the language's current features to make intent explicit and errors unrepresentable:
+
+- **Enums** for closed sets instead of string/int constants: `enum Role: string { case Trainer = 'trainer'; ... }`.
+- **`readonly` properties / classes** for value objects and DTOs so state cannot mutate after construction.
+- **Constructor property promotion** to keep DTOs/services concise.
+- **`match`** (strict, exhaustive) over long `switch`/`if` ladders.
+- **Named arguments** for calls with several optional parameters; **nullsafe** `?->` for optional chains.
+- **First-class callable syntax** (`$this->handle(...)`) for cleaner callbacks.
+- **`never` return type** for functions that always throw or exit.
+- Avoid `mixed` where a union or generic-via-docblock (`@param list<User>`) is clearer; let PHPStan/Psalm enforce it.
+
+## Error Handling
+
+- Define a small typed exception hierarchy (e.g. `DomainException` base, `ValidationException`, `NotFoundException`, `ConflictException`). Do not throw bare `\Exception`.
+- Throw at the point of failure; catch only where you can add value (map to a response, add context, retry). Never swallow with an empty `catch`.
+- Map exceptions to HTTP status/CLI exit codes at the edge (a single error-handling middleware or handler), not scattered through the code.
+- Preserve the original cause with the `$previous` argument when re-throwing.
+- Fail fast on programmer errors (invalid state) with exceptions; reserve return-value error signalling for expected, recoverable outcomes.
+
+## Logging (PSR-3)
+
+- Depend on `Psr\Log\LoggerInterface`, not a concrete logger; inject it. Use `NullLogger` in tests.
+- Use appropriate levels (`error` for failures needing attention, `warning` for recoverable anomalies, `info` for milestones, `debug` for diagnostics).
+- Log structured context as the second argument (`$logger->error('Payment failed', ['order_id' => $id])`); never log secrets, tokens, passwords, or full PII.
+
+## Configuration
+
+- Read config through a typed config layer/array, never `getenv()` scattered across the code or `.env` reads in app logic.
+- Validate required config at bootstrap and fail loudly if missing.
+- Keep environment-specific values out of source; document required variables by name.
+
+## Middleware (PSR-15)
+
+Use middleware for cross-cutting concerns (auth, CSRF, rate limiting, logging, error handling) so handlers stay focused:
 
 ```php
-namespace App\Http\Resources;
-
-use Illuminate\Http\Request;
-use Illuminate\Http\Resources\Json\JsonResource;
-
-class UserResource extends JsonResource
+final class AuthenticationMiddleware implements Psr\Http\Server\MiddlewareInterface
 {
-    public function toArray(Request $request): array
+    public function process(ServerRequestInterface $request, RequestHandlerInterface $handler): ResponseInterface
     {
-        return [
-            'id' => $this->id,
-            'email' => $this->email,
-            'name' => $this->name,
-        ];
+        $user = $this->authenticator->fromRequest($request);
+        if ($user === null) {
+            return JsonResponse::unauthorized();
+        }
+
+        return $handler->handle($request->withAttribute('user', $user));
     }
 }
 ```
@@ -175,16 +268,16 @@ class UserResource extends JsonResource
 Run focused checks first:
 
 ```bash
-php artisan test --filter=UserRegistrationTest
+vendor/bin/phpunit --filter=CreateUserTest
 ```
 
-Then run applicable project checks:
+Then run applicable project checks (prefer Composer scripts):
 
 ```bash
-composer validate
-php artisan test
-vendor/bin/pint --test
-vendor/bin/phpstan analyse
+composer validate --strict
+composer test        # or vendor/bin/phpunit / vendor/bin/pest
+composer lint        # or vendor/bin/php-cs-fixer fix --dry-run --diff / vendor/bin/phpcs
+composer analyse     # or vendor/bin/phpstan analyse / vendor/bin/psalm
 ```
 
 If a tool is missing, report `N/A - tooling not configured`.

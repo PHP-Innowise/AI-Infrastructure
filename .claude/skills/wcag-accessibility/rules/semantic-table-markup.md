@@ -34,4 +34,4 @@ Use `<table>` for tabular data instead of div-based grids. WCAG 1.3.1.
 </table>
 ```
 
-Blade loops can render rows inside `<tbody>` while preserving table semantics.
+PHP loops can render rows inside `<tbody>` while preserving table semantics.

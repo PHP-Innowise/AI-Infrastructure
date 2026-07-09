@@ -29,4 +29,4 @@ Use `<button>` for in-page actions and `<a>` for navigation to URLs. Using `<div
 <a href="/settings">Settings</a>
 ```
 
-In Blade, prefer reusable button/link components that preserve native semantics.
+In PHP templates, prefer reusable button/link partials that preserve native semantics.

@@ -25,4 +25,4 @@ Do not auto-play moving content unless users can pause, stop, or hide it. WCAG 2
 <button type="button" aria-controls="announcement-marquee">Pause animation</button>
 ```
 
-For Laravel Blade or Livewire, keep the control state server-side or in small client-side JavaScript, but ensure the rendered HTML exposes a real button and an understandable label.
+Keep the control state server-side or in small client-side JavaScript, but ensure the rendered HTML exposes a real button and an understandable label.

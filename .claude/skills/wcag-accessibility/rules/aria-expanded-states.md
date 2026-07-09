@@ -30,4 +30,4 @@ Disclosure controls must expose expanded/collapsed state. WCAG 4.1.2.
 </div>
 ```
 
-When state changes through Livewire, Alpine, or another client-side layer, keep `aria-expanded` and `hidden` synchronized with the visible state.
+When state changes through any client-side layer, keep `aria-expanded` and `hidden` synchronized with the visible state.

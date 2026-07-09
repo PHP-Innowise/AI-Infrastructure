@@ -31,4 +31,4 @@ When a modal is open, keyboard focus must stay inside it until the modal is clos
 </dialog>
 ```
 
-Use native `<dialog>` where possible, or a tested accessible dialog implementation. In Livewire/Alpine/Inertia, verify Tab, Shift+Tab, Escape, and focus restoration.
+Use native `<dialog>` where possible, or a tested accessible dialog implementation. Whatever client-side layer renders the dialog, verify Tab, Shift+Tab, Escape, and focus restoration.

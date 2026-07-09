@@ -100,12 +100,15 @@ When done, provide:
 | Agent | Skill | Next by Flow |
 |-------|-------|--------------|
 | `requirements-analyst-agent` | requirements-analyst | brainstorm |
+| `researcher-agent` | researcher | council |
 | `brainstorming-agent` | brainstorming | architect |
 
 ### Planning Phase
 | Agent | Skill | Next by Flow |
 |-------|-------|--------------|
+| `council-agent` | council | architect |
 | `architect-agent` | architect | api-designer |
+| `database-designer-agent` | database-designer | architecture-implementer |
 | `api-designer-agent` | api-designer | frontend-design |
 | `frontend-design-agent` | frontend-design | writing-plans |
 | `writing-plans-agent` | writing-plans | git-worktrees |
@@ -114,16 +117,20 @@ When done, provide:
 | Agent | Skill | Next by Flow |
 |-------|-------|--------------|
 | `using-git-worktrees-agent` | using-git-worktrees | coder / coder-frontend |
+| `architecture-implementer-agent` | architecture-implementer | coder |
 | `coder-agent` | coder | code-reviewer |
 | `coder-frontend-agent` | coder-frontend | code-reviewer |
+| `refactorer-agent` | refactorer | verify |
 
 ### Quality Phase
 | Agent | Skill | Next by Flow |
 |-------|-------|--------------|
 | `review-pr-agent` | review-pr | debugger |
 | `code-reviewer-agent` | code-reviewer | test-generator |
+| `security-reviewer-agent` | security-reviewer | verify |
 | `test-generator-agent` | test-generator | debugger (if failures) / finishing-branch |
 | `systematic-debugger-agent` | systematic-debugger | test-generator |
+| `performance-optimization-agent` | performance-optimization | verify |
 | `verify-agent` | verify | finishing-branch |
 | `finishing-branch-agent` | finishing-branch | (end) |
 
@@ -138,6 +145,7 @@ When done, provide:
 |-------|-------|--------------|
 | `reflect-agent` | reflect | (standalone) |
 | `skill-creator-agent` | skill-creator | (standalone) |
+| `dependency-manager-agent` | dependency-manager | verify |
 
 ## Flow Reference
 

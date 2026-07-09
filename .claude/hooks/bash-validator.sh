@@ -1,6 +1,6 @@
 #!/bin/bash
 # Bash Validator Hook
-# Blocks destructive commands for Laravel/PHP projects.
+# Blocks destructive commands for native PHP projects.
 # Hook type: PreToolUse:Bash
 # Exit codes: 0 = pass, 1 = warn (continue), 2 = block
 
@@ -19,22 +19,20 @@ BLOCKED_PATTERNS=(
   "git push.*-f"
   "git reset --hard"
   "git clean -f"
+  "git branch -D"
+  "--no-verify"
   "DROP TABLE"
   "DROP DATABASE"
   "TRUNCATE TABLE"
   "DELETE FROM .*WHERE 1=1"
-  "php artisan migrate:fresh"
-  "php artisan migrate:reset"
-  "php artisan db:wipe"
-  "php artisan schema:dump.*--prune"
+  "migrate.*(:|--)?(fresh|reset|refresh|rollback)"
+  "db:wipe"
+  "schema:drop"
   "composer config.*github-oauth"
   "composer config.*http-basic"
-  "composer publish"
   "rm -rf /"
   "rm -rf ~"
   "rm -rf \."
-  "git branch -D"
-  "--no-verify"
   "gh repo delete"
   "gh repo archive"
   "gh issue delete"

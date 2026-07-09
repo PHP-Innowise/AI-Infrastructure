@@ -25,7 +25,7 @@ When content changes without a full page load, announce important updates with l
 ```html
 <p role="status" aria-live="polite">12 results found</p>
 <div id="search-results">
-  <!-- Render Blade, Livewire, or Inertia result items here. -->
+  <!-- Render result items here (any PHP templating approach). -->
 </div>
 ```
 

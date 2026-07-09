@@ -13,7 +13,7 @@ Incident -> Root Cause -> Rule -> Example -> Enforcement -> Verification
 - The same mistake happens more than once.
 - A user correction reveals a missing rule.
 - A hook blocks too much or too little.
-- A Laravel/PHP convention is violated repeatedly.
+- A native PHP convention (PSR, boundary validation, parameterized queries) is violated repeatedly.
 - A workflow handoff is confusing.
 
 ## Rule Template
@@ -31,27 +31,37 @@ Incident -> Root Cause -> Rule -> Example -> Enforcement -> Verification
 **Added:** YYYY-MM-DD
 ```
 
-## Laravel Examples
+## Native PHP Examples
 
-### Rule: Validate At HTTP Boundary
+### Rule: Validate At The Boundary
 
-**Trigger:** Controller accepted raw request data directly.
-**Root cause:** Skill guidance did not require Form Requests for non-trivial input.
-**Rule:** MUST validate Laravel HTTP input with a Form Request, validator, or explicit validation before using it.
+**Trigger:** A handler used raw request data directly.
+**Root cause:** Skill guidance did not require validating/normalizing input into a typed DTO.
+**Rule:** MUST validate and normalize input into a typed request DTO/value object before using it.
 **Example:**
-- Incorrect: `User::create($request->all())`
-- Correct: `User::create($request->validated())`
+- Incorrect: `$this->createUser->handle($request->getParsedBody())`
+- Correct: `$this->createUser->handle(CreateUserRequest::fromArray((array) $request->getParsedBody()))`
 **Enforcement:** `AGENTS.md`, `coder` skill, code review checklist.
 
-### Rule: Policies Are Server-Side Authorization
+### Rule: Authorization Is Server-Side
 
-**Trigger:** A UI button was hidden, but the API action was still callable.
+**Trigger:** A UI button was hidden, but the endpoint was still callable.
 **Root cause:** Authorization was treated as a frontend concern.
-**Rule:** MUST enforce protected actions with Laravel policies, gates, or middleware.
+**Rule:** MUST enforce protected actions in an explicit server-side access-control layer.
 **Example:**
 - Incorrect: hide the Delete button only.
-- Correct: call `$this->authorize('delete', $model)` or use policy-backed Form Request authorization.
+- Correct: check `$accessControl->assertCan($user, 'delete', $resource)` in the handler/use case.
 **Enforcement:** `AGENTS.md`, `architect`, `coder`, `code-reviewer`.
+
+### Rule: Queries Must Be Parameterized
+
+**Trigger:** A query concatenated user input into SQL.
+**Root cause:** No rule mandated prepared statements.
+**Rule:** MUST use PDO prepared statements with bound parameters; never concatenate untrusted input into SQL.
+**Example:**
+- Incorrect: `$pdo->query("SELECT * FROM users WHERE email = '$email'")`
+- Correct: `$stmt = $pdo->prepare('SELECT * FROM users WHERE email = :email'); $stmt->execute(['email' => $email]);`
+**Enforcement:** `AGENTS.md`, `coder`, `code-reviewer`, `security-reviewer`.
 
 ## Verification
 

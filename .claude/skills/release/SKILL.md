@@ -1,6 +1,6 @@
 ---
 name: release
-description: Prepare PHP/Laravel project releases with changelog generation, version tags, and optional GitHub publishing. Use when creating a release, generating changelogs, tagging versions, or publishing release notes.
+description: Prepare native PHP project releases with changelog generation, version tags, and optional GitHub publishing. Use when creating a release, generating changelogs, tagging versions, or publishing release notes.
 phase: finalization
 flow-next: finishing-branch
 flow-alternatives: []

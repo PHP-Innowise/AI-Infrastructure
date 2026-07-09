@@ -28,4 +28,4 @@ Validation errors must be visible and programmatically associated with the field
 <p id="email-error" class="text-red-600" role="alert">Email is required.</p>
 ```
 
-In Blade, render Laravel validation errors with stable IDs and connect them through `aria-describedby`.
+In PHP templates, render server-side validation errors with stable IDs and connect them through `aria-describedby`.

@@ -26,4 +26,4 @@ Interactive controls should be at least 44 by 44 CSS pixels or have equivalent s
 </button>
 ```
 
-Apply the same rule in Blade components, Livewire components, and rendered Inertia components.
+Apply the same rule in every rendered template and partial, regardless of how it is generated.

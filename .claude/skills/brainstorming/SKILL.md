@@ -33,18 +33,18 @@ Any additional ad-hoc files (summaries, notes, explorations) MUST also follow th
 - Focus on understanding: purpose, constraints, success criteria
 
 **For new projects - gather tech stack info:**
-If this is a new project (no existing codebase), ask about tech stack. Keep it simple - these are small projects with straightforward architecture.
+If this is a new project (no existing codebase), ask about tech stack. Keep it simple - these are small projects with straightforward architecture. This base assumes native PHP; a specific framework belongs on the matching accelerator branch.
 
 | Question | Options | Default |
 |----------|---------|---------|
-| Project type? | Laravel API / Laravel full-stack / Frontend / Full-stack | - |
+| Project type? | PHP API / PHP full-stack (server-rendered) / Frontend / Full-stack | - |
 | Database? (backend) | PostgreSQL / MySQL / SQLite / Existing database / None | PostgreSQL |
-| UI stack? (frontend) | Blade / Livewire / Inertia / Separate frontend / Existing stack | Existing stack |
+| Rendering? (frontend) | Server-rendered PHP templates / Separate frontend / API-only / Existing stack | Server-rendered PHP templates |
 
 **Architecture defaults (don't over-question):**
-- Backend: Laravel conventions first (routes, controllers, Form Requests, Eloquent, policies, resources)
-- Business logic: services/actions/jobs only when they clarify the workflow
-- Frontend: use the existing Laravel stack, or choose Blade/Livewire/Inertia/API-only deliberately
+- Backend: front controller + router, request DTOs/validators, use-case/service classes, PDO repositories, PSR-15 middleware, PSR-11 DI
+- Business logic: extract use-case/service classes only when they clarify the workflow
+- Frontend: server-rendered PHP templates with semantic HTML and progressive enhancement, or an API-only backend
 
 **Library vs Custom decisions (MANDATORY):**
 - When the design involves functionality that established libraries solve (logging, validation, HTTP clients, date handling, state management, auth, caching, etc.), you MUST ask the user whether they want to use an existing library or build a custom solution.
@@ -52,7 +52,7 @@ If this is a new project (no existing codebase), ask about tech stack. Keep it s
 - Use AskUserQuestion with options like: `["Use <library-name> (Recommended)", "Use <alternative-library>", "Custom implementation"]`. The built-in "Other" option lets the user suggest their own library — mention this explicitly in the question text (e.g., "Pick a library, or choose Other to suggest your own").
 - If the user chooses a library, research it (via WebSearch or Context7) to confirm it fits their stack and is actively maintained.
 - If the user wants custom, ask WHY - ensure there's a real reason (licensing, bundle size, specific requirements) and document the rationale in the design doc.
-- **Never silently decide to write custom code when a proven framework feature or maintained package exists.** This prevents reinventing the wheel (e.g., writing custom auth instead of using Laravel auth/Sanctum when appropriate, or a custom validator instead of Form Requests/Validator).
+- **Never silently decide to write custom code when a proven, maintained package exists.** This prevents reinventing the wheel (e.g., using a maintained router, PSR-7/PSR-15 implementation, PSR-3 logger like Monolog, or a validation library instead of hand-rolling fragile equivalents).
 
 **Exploring approaches:**
 - Propose 2-3 different approaches with trade-offs
@@ -81,7 +81,7 @@ If this is a new project (no existing codebase), ask about tech stack. Keep it s
 [Components, layers, interactions]
 
 ## Data Model
-[Eloquent models, relationships, migrations, resources, request contracts]
+[Entities/value objects, relationships, migrations/SQL schema, repositories, request/response contracts]
 
 ## API Design (if applicable)
 [Endpoints, request/response formats]

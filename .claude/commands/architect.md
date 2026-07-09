@@ -2,12 +2,12 @@
 spawns: architect-agent
 phase: planning
 flow-next: api-designer
-flow-alternatives: [writing-plans, coder]
+flow-alternatives: [architecture-implementer, writing-plans, coder]
 ---
 
 # Architect
 
-Spawn architect agent to make system architecture decisions.
+Spawn architect agent to make native PHP system architecture decisions (layering, boundaries, dependency direction, persistence, async, scalability, security).
 
 ## Input
 $ARGUMENTS

@@ -1,14 +1,14 @@
 # WCAG Accessibility Guidelines
 
-Practical accessibility guidance for Laravel, Blade, Livewire, Inertia, and general HTML interfaces. These rules are based on WCAG 2.2 Level AA and should be used during frontend design, implementation, and review.
+Practical accessibility guidance for server-rendered PHP templates and general HTML interfaces. These rules are based on WCAG 2.2 Level AA and should be used during frontend design, implementation, and review.
 
 ## How To Use
 
 - Start with semantic HTML before adding ARIA.
 - Prefer native controls: `button`, `a`, `label`, `input`, `select`, `textarea`, `table`, `dialog`, and landmark elements.
-- In Blade and Livewire, ensure the rendered HTML is accessible, not just the template code.
-- In Inertia or separate JavaScript frontends, apply the same rendered-HTML rules.
-- Validate forms with Laravel on the server and expose errors accessibly in the UI.
+- In PHP templates, ensure the rendered HTML is accessible, not just the template source.
+- Whatever the rendering approach (plain PHP, a templating engine, or progressive enhancement), apply the same rendered-HTML rules.
+- Validate forms on the server and expose errors accessibly in the UI.
 
 ## Rule Map
 
@@ -53,12 +53,12 @@ Practical accessibility guidance for Laravel, Blade, Livewire, Inertia, and gene
 - `rules/responsive-text-resize.md`
 - `rules/responsive-touch-target.md`
 
-## Laravel Review Checklist
+## Review Checklist
 
 - Labels are associated with inputs using `for` and `id`, or wrapping labels.
-- Laravel validation errors are visible and connected with `aria-describedby`.
+- Server-side validation errors are visible and connected with `aria-describedby`.
 - Buttons and links use semantic elements.
-- Livewire/Inertia dynamic updates announce important changes with live regions.
+- Dynamic updates announce important changes with live regions.
 - Modals trap focus and restore focus when closed.
 - Color is not the only way information is communicated.
 - Motion respects `prefers-reduced-motion`.

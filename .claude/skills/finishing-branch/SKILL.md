@@ -33,10 +33,10 @@ This applies to ALL generated files — summaries, reports.
 **Before presenting options, verify tests pass:**
 
 ```bash
-composer validate
-php artisan test
-vendor/bin/pint --test
-vendor/bin/phpstan analyse
+composer validate --strict
+composer test        # or vendor/bin/phpunit / vendor/bin/pest
+composer lint        # or vendor/bin/php-cs-fixer fix --dry-run --diff
+composer analyse     # or vendor/bin/phpstan analyse / vendor/bin/psalm
 ```
 
 **If tests fail:** Stop. Don't proceed. Fix issues first.
@@ -74,7 +74,7 @@ Which option?
 git checkout <base-branch>
 git pull
 git merge <feature-branch>
-php artisan test  # Verify on merged result
+composer test  # Verify on merged result
 git branch -d <feature-branch>
 ```
 

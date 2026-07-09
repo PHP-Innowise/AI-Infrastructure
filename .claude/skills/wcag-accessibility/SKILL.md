@@ -10,7 +10,7 @@ Practical accessibility rules for code review and implementation, based on WCAG 
 ## When to Apply
 
 Reference these guidelines when:
-- Reviewing frontend code (Blade, Livewire, Inertia, HTML, or JavaScript components)
+- Reviewing frontend code (server-rendered PHP templates, HTML, CSS, or progressive-enhancement JavaScript)
 - Writing new UI components
 - Auditing existing interfaces for accessibility
 - Checking WCAG AA compliance

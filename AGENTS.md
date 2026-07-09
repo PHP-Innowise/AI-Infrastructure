@@ -1,6 +1,8 @@
 # AGENTS.md - Policy Rules
 
-These are enforceable rules for the Laravel/PHP accelerator. Wishes are ignored; constraints are enforced.
+These are enforceable rules for the native PHP accelerator. Wishes are ignored; constraints are enforced.
+
+This is the universal base. It assumes plain, framework-agnostic PHP (Composer + PSR standards). Framework-specific behavior (Laravel, Symfony, etc.) lives in dedicated branches, not here. If the working project is built on a framework, prefer the matching framework branch of this accelerator.
 
 ## Hierarchy of Sources of Truth
 
@@ -25,25 +27,27 @@ These are enforceable rules for the Laravel/PHP accelerator. Wishes are ignored;
 - MUST NOT chain to another skill automatically.
 - MUST output a Context Summary and Next Steps.
 - MUST NOT make workflow decisions for the user when a command is supposed to offer alternatives.
-- MUST read relevant Laravel code, routes, migrations, tests, and specs before modifying behavior.
+- MUST read relevant PHP code, autoload config, routes/entry points, database access, tests, and specs before modifying behavior.
 
-## Laravel Code Quality
+## PHP Code Quality
 
-- MUST prefer Laravel conventions before adding custom architecture.
-- MUST validate request input at boundaries with Form Requests, validators, or explicit validation.
-- MUST authorize protected actions with policies, gates, middleware, or route model binding constraints.
-- MUST keep controllers thin when behavior becomes non-trivial; use services/actions/jobs where they clarify intent.
-- MUST protect Eloquent mass assignment with `$fillable`, `$guarded`, DTOs, or explicit assignment.
-- MUST use migrations for schema changes.
-- MUST add or update factories/seeders when tests require realistic data.
-- MUST use API Resources or a documented response contract for stable public APIs.
+- MUST target the project's declared PHP version and follow PSR-1, PSR-12, and PER Coding Style.
+- MUST use `declare(strict_types=1);` in new PHP files.
+- MUST autoload via Composer PSR-4; MUST NOT add manual `require` chains for application classes.
+- MUST validate and normalize external input at the boundary with explicit validators, value objects, or typed DTOs.
+- MUST authorize protected actions through an explicit access-control layer, not by hiding UI or relying on obscurity.
+- MUST keep entry points (controllers/handlers/commands) thin; move multi-step behavior into services or use-case classes.
+- MUST access the database through PDO (or a documented data layer) with prepared statements and bound parameters.
+- MUST depend on abstractions (interfaces) at boundaries and inject dependencies rather than using globals or `new` for collaborators.
+- MUST manage schema changes through versioned migrations or reviewed SQL, never ad-hoc production edits.
+- MUST document a stable response contract (serializers/DTOs) for public APIs.
 
 ## Verification
 
 - MUST run applicable checks from `.claude/DOD.md` before claiming completion.
 - MUST run tests if test tooling exists.
 - MUST run formatting/lint/static analysis if configured.
-- MUST NOT claim completion with failing tests, failing static analysis, or known broken routes.
+- MUST NOT claim completion with failing tests, failing static analysis, or known broken entry points.
 - MUST report unavailable tooling as `N/A - tooling not configured`; do not install tooling without user approval.
 
 ## Git Safety
@@ -56,10 +60,11 @@ These are enforceable rules for the Laravel/PHP accelerator. Wishes are ignored;
 
 - MUST NOT read, print, edit, or commit `.env` files or secrets.
 - MUST NOT introduce OWASP Top 10 vulnerabilities.
+- MUST escape output in templates to prevent XSS; MUST use CSRF protection for state-changing web requests.
 - MUST validate file uploads by type, size, storage location, and visibility.
-- MUST avoid raw SQL unless bindings are used and the reason is documented.
+- MUST use parameterized queries; never concatenate untrusted input into SQL.
 - MUST keep secrets in environment/config systems, never in source code.
-- MUST consider CSRF/session behavior for web routes and token behavior for API routes.
+- MUST avoid `eval`, unsafe `unserialize` of untrusted data, and dynamic includes of untrusted paths.
 
 ## Context And Documentation
 
@@ -70,5 +75,5 @@ These are enforceable rules for the Laravel/PHP accelerator. Wishes are ignored;
 
 ## Definition Of Done
 
-- See `.claude/DOD.md` for the tiered Laravel/PHP verification checklist.
+- See `.claude/DOD.md` for the tiered native PHP verification checklist.
 - MUST include verification evidence in final Context Summary when implementation work is performed.

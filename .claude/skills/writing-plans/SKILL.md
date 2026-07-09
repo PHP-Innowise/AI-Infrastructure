@@ -1,6 +1,6 @@
 ---
 name: writing-plans
-description: Create implementation plans for Laravel/PHP work. Use after requirements, brainstorming, architecture, or API design when execution needs clear steps.
+description: Create implementation plans for native PHP work. Use after requirements, brainstorming, architecture, or API design when execution needs clear steps.
 phase: planning
 flow-next: git-worktrees
 flow-alternatives: [coder, test-generator]
@@ -11,7 +11,7 @@ related: [requirements-analyst, brainstorming, architect, api-designer]
 
 ## Overview
 
-Create precise implementation plans for Laravel/PHP projects. Plans should be specific enough for an implementer to execute without rediscovering the architecture.
+Create precise implementation plans for native PHP projects. Plans should be specific enough for an implementer to execute without rediscovering the architecture.
 
 ## Required Inputs
 
@@ -19,8 +19,8 @@ Read available context:
 
 - Requirement docs in `tasks/TASK-N/`.
 - Living specs in `specs/`.
-- Relevant Laravel files: routes, controllers, requests, models, migrations, tests, policies, services/actions.
-- Existing project conventions for tests, formatting, static analysis, and frontend tooling.
+- Relevant PHP files: entry points/routing, handlers, request validators, domain/services, data access, migrations, tests.
+- Existing project conventions for tests, formatting, static analysis, and any frontend tooling.
 
 ## Plan Structure
 
@@ -33,42 +33,53 @@ Read available context:
 ## Existing Context
 - Relevant files and current behavior.
 
-## Proposed Laravel Design
-- Routes/controllers/requests/resources.
-- Models/migrations/factories.
-- Policies/gates.
-- Services/actions/jobs/events if needed.
+## Proposed Design
+- Routes/entry points and handlers.
+- Request DTOs / validators.
+- Domain entities / value objects.
+- Use-case / service classes.
+- Repositories/gateways and migrations.
+- Middleware, workers/queue jobs, cache if needed.
 
 ## Implementation Steps
 1. [Specific file-level step]
 2. [Specific file-level step]
 
 ## Test Plan
-- Feature tests.
 - Unit tests.
+- Integration/HTTP handler tests.
 - Authorization/validation cases.
 
 ## Verification
-- `php artisan test`
-- `vendor/bin/pint --test`
-- `vendor/bin/phpstan analyse`
+- `composer test`
+- `composer lint`
+- `composer analyse`
 
 ## Risks
-- [Migration, security, queue, cache, API compatibility risks]
+- [Migration, security, worker, cache, API compatibility risks]
 ```
 
-## Laravel Planning Checklist
+## Planning Checklist
 
 - Does a migration need a backfill or safe rollout?
-- Does route model binding apply?
-- Which Form Requests validate input?
-- Which policies authorize behavior?
-- Are API Resources needed for response stability?
-- Are factories needed for tests?
-- Should work be queued or synchronous?
-- Are events/notifications/mail/storage involved?
-- Are indexes needed?
-- Are frontend assets or Blade/Livewire/Inertia views affected?
+- How is the route parameter resolved to an entity?
+- Which request DTO/validator guards input?
+- Which access-control check authorizes behavior?
+- Is a response serializer needed for a stable contract?
+- Are fixtures/factories needed for tests?
+- Should work be queued or run synchronously?
+- Are events/mail/external clients involved?
+- Are indexes needed for new query patterns?
+- Are server-rendered templates affected?
+
+## Plan Quality Best Practices
+
+- **Sequence for safety:** order steps so the build stays green after each one; put risky/uncertain work early to surface unknowns.
+- **Deliver incrementally:** slice into independently mergeable, testable steps rather than one big drop. Each step should leave the system working.
+- **Make it reversible:** note how each risky step is rolled back (feature flag, expand/contract migration, revertible commit).
+- **State assumptions and open questions explicitly;** flag anything that needs a decision before coding.
+- **Right-size:** if a step is too vague to implement directly, break it down; if the whole plan is large, mark the smallest shippable milestone.
+- **Tie each step to verification:** name the test/check that proves the step is done, not just "implement X".
 
 ## Output Rules
 

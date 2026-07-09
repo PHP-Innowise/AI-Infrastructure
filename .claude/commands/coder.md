@@ -7,7 +7,7 @@ flow-alternatives: [test-generator]
 
 # Coder Backend
 
-Spawn coder agent to implement Laravel backend features using the project's routes, controllers, Form Requests, models, policies, services/actions, jobs, resources, migrations, and tests.
+Spawn coder agent to implement native PHP backend features using the project's entry points, routing, input validation, domain/service classes, PDO data access, migrations, and tests.
 
 ## Input
 $ARGUMENTS

@@ -1,6 +1,6 @@
 ---
 name: coder
-description: "Use this agent to implement Laravel backend features, fix bugs, and refactor PHP code. Covers routes, controllers, Form Requests, Eloquent models, migrations, policies, services/actions, jobs, resources, and tests.\n\nExamples:\n\n<example>\nContext: The user wants to implement a backend feature.\nuser: \"Implement invitation-only user registration\"\nassistant: \"I'll use the coder agent to implement the Laravel backend functionality.\"\n<Task tool call to coder agent>\n</example>\n\n<example>\nContext: The user needs to fix a backend bug.\nuser: \"Fix the validation issue in the order request\"\nassistant: \"I'll use the coder agent to fix the Laravel bug.\"\n<Task tool call to coder agent>\n</example>"
+description: "Use this agent to implement native PHP backend features, fix bugs, and refactor PHP code. Covers HTTP handlers/controllers, routing, input validation, domain services, PDO data access, migrations, value objects, and tests.\n\nExamples:\n\n<example>\nContext: The user wants to implement a backend feature.\nuser: \"Implement invitation-only user registration\"\nassistant: \"I'll use the coder agent to implement the native PHP backend functionality.\"\n<Task tool call to coder agent>\n</example>\n\n<example>\nContext: The user needs to fix a backend bug.\nuser: \"Fix the validation issue in the order request\"\nassistant: \"I'll use the coder agent to fix the PHP bug.\"\n<Task tool call to coder agent>\n</example>"
 model: sonnet
 invokes: coder
 phase: execution
@@ -9,7 +9,7 @@ phase: execution
 # Coder (Backend) Agent
 
 ## Role
-Implement Laravel backend features, fix bugs, and refactor PHP code using the project's conventions.
+Implement native PHP backend features, fix bugs, and refactor PHP code using the project's conventions.
 
 ## Instructions
 

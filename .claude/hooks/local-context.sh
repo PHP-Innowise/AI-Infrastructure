@@ -1,6 +1,6 @@
 #!/bin/bash
 # Local Context Session Start Hook
-# Scans a Laravel/PHP working directory at session start.
+# Scans a native PHP working directory at session start.
 # Hook type: SessionStart
 # Exit codes: always 0 (informational only)
 
@@ -14,27 +14,48 @@ if git rev-parse --git-dir > /dev/null 2>&1; then
   echo "Branch: $BRANCH ($STATUS uncommitted changes)"
 fi
 
-# Package managers and framework markers
+# Dependency managers
 MANAGERS=""
-[ -f "composer.lock" ] && MANAGERS="$MANAGERS composer"
+[ -f "composer.json" ] && MANAGERS="$MANAGERS composer"
+[ -f "composer.lock" ] && MANAGERS="$MANAGERS composer.lock"
 [ -f "package-lock.json" ] && MANAGERS="$MANAGERS npm"
 [ -f "yarn.lock" ] && MANAGERS="$MANAGERS yarn"
 [ -f "pnpm-lock.yaml" ] && MANAGERS="$MANAGERS pnpm"
-[ -n "$MANAGERS" ] && echo "Package managers:$MANAGERS"
+[ -n "$MANAGERS" ] && echo "Dependencies:$MANAGERS"
 
-[ -f "artisan" ] && echo "Framework: Laravel"
-[ -f "composer.json" ] && echo "PHP project: composer.json present"
-[ -f "phpunit.xml" ] && echo "Tests: PHPUnit config present"
-[ -f "pint.json" ] && echo "Formatter: Laravel Pint config present"
+# PHP runtime
+command -v php > /dev/null 2>&1 && echo "PHP: $(php -r 'echo PHP_VERSION;' 2>/dev/null)"
+
+# Tooling markers
+[ -f "phpunit.xml" ] || [ -f "phpunit.xml.dist" ] && echo "Tests: PHPUnit config present"
+[ -f "tests/Pest.php" ] && echo "Tests: Pest present"
+[ -f ".php-cs-fixer.php" ] || [ -f ".php-cs-fixer.dist.php" ] && echo "Formatter: PHP-CS-Fixer config present"
+[ -f "phpcs.xml" ] || [ -f "phpcs.xml.dist" ] && echo "Formatter: PHP_CodeSniffer config present"
 [ -f "phpstan.neon" ] || [ -f "phpstan.neon.dist" ] && echo "Static analysis: PHPStan config present"
-[ -f "psalm.xml" ] && echo "Static analysis: Psalm config present"
-[ -f "vite.config.js" ] || [ -f "vite.config.ts" ] && echo "Frontend build: Vite"
+[ -f "psalm.xml" ] || [ -f "psalm.xml.dist" ] && echo "Static analysis: Psalm config present"
+[ -f "rector.php" ] && echo "Refactoring: Rector config present"
+[ -f "phpbench.json" ] && echo "Benchmarks: PHPBench config present"
+[ -f "public/index.php" ] && echo "Entry point: public/index.php (front controller)"
 [ -f "Makefile" ] && echo "Build system: Make"
+[ -f "Dockerfile" ] || [ -f "docker-compose.yml" ] || [ -f "compose.yaml" ] && echo "Containers: Docker present"
+
+# Framework detection: this base branch targets native PHP.
+# If a framework is present, prefer the matching accelerator branch.
+FRAMEWORK=""
+[ -f "artisan" ] && FRAMEWORK="Laravel"
+[ -f "bin/console" ] && FRAMEWORK="Symfony"
+if grep -qi "cakephp/cakephp" composer.json 2>/dev/null; then FRAMEWORK="CakePHP"; fi
+if grep -qi "yiisoft/yii2" composer.json 2>/dev/null; then FRAMEWORK="Yii"; fi
+if [ -n "$FRAMEWORK" ]; then
+  echo ""
+  echo "NOTE: $FRAMEWORK detected. This is the native-PHP base branch."
+  echo "      For framework-specific conventions, switch to the matching accelerator branch."
+fi
 
 # Project structure
 echo ""
 echo "Structure:"
-for DIR in app routes database tests resources config tasks specs examples .claude; do
+for DIR in src app public config bin templates views tests specs tasks examples .claude; do
   if [ -d "$DIR" ]; then
     COUNT=$(find "$DIR" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
     echo "  $DIR/ ($COUNT files)"

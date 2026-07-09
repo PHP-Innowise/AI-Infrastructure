@@ -1,6 +1,6 @@
 ---
 name: test-generator
-description: "Use this agent to generate Laravel tests following project patterns. Creates PHPUnit or Pest unit/feature tests, API tests, validation and authorization tests, and tests using Laravel fakes for queues, events, mail, notifications, storage, and HTTP clients.\n\nExamples:\n\n<example>\nContext: The user wants tests for new code.\nuser: \"Generate tests for the invitation registration service\"\nassistant: \"I'll use the test-generator agent to create Laravel tests.\"\n<Task tool call to test-generator agent>\n</example>\n\n<example>\nContext: The user needs HTTP workflow tests.\nuser: \"Create feature tests for the checkout flow\"\nassistant: \"I'll use the test-generator agent to generate Laravel feature test coverage.\"\n<Task tool call to test-generator agent>\n</example>"
+description: "Use this agent to generate native PHP tests following project patterns. Creates PHPUnit or Pest unit/integration tests, HTTP handler tests, validation and authorization tests, data-access tests, and tests using test doubles/fakes for queues, mail, and external clients.\n\nExamples:\n\n<example>\nContext: The user wants tests for new code.\nuser: \"Generate tests for the invitation registration service\"\nassistant: \"I'll use the test-generator agent to create native PHP tests.\"\n<Task tool call to test-generator agent>\n</example>\n\n<example>\nContext: The user needs HTTP workflow tests.\nuser: \"Create integration tests for the checkout flow\"\nassistant: \"I'll use the test-generator agent to generate integration test coverage.\"\n<Task tool call to test-generator agent>\n</example>"
 model: sonnet
 invokes: test-generator
 phase: execution
@@ -9,7 +9,7 @@ phase: execution
 # Test Generator Agent
 
 ## Role
-Generate comprehensive tests (unit, integration, E2E) following project patterns.
+Generate focused tests (unit, integration, contract) following the project's existing PHPUnit or Pest patterns.
 
 ## Instructions
 
