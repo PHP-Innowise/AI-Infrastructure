@@ -56,24 +56,25 @@ Any additional ad-hoc files (summaries, notes, reports) MUST also follow this ru
 ## Requirement: [Name]
 
 ### Backend Tasks
-- [ ] Migration/SQL: [schema change]
-- [ ] Entity/Value Object: [domain type]
-- [ ] Request DTO/Validator: [input validation]
-- [ ] Access control: [authorization rule]
-- [ ] Handler/Controller: [HTTP endpoint]
-- [ ] Response serializer: [API response shape]
-- [ ] Use-case/Service/Worker: [only when workflow complexity needs it]
-- [ ] Repository/Gateway: [PDO data access]
+- [ ] Migration: [schema change]
+- [ ] Eloquent Model: [domain entity, relationships, casts]
+- [ ] Form Request: [input validation and authorization gate]
+- [ ] Policy/Gate: [authorization rule]
+- [ ] Controller/Action: [route handler]
+- [ ] API Resource: [response contract shape]
+- [ ] Job/Event/Listener/Notification: [only when workflow complexity needs it]
+- [ ] Factory/Seeder: [test and local data]
 
-### Frontend Tasks (server-rendered)
-- [ ] Template/partial: [view]
-- [ ] Progressive enhancement: [minimal JS behavior]
+### Frontend Tasks (Blade / Livewire / Inertia)
+- [ ] Blade view / Livewire component / Inertia page: [view]
+- [ ] Vite asset: [CSS/JS bundling, component styling]
+- [ ] Progressive enhancement: [minimal JS behavior if not using Livewire/Inertia]
 - [ ] Accessibility: [semantic markup, labels, focus]
 
 ### Testing Tasks
-- [ ] Integration Tests: HTTP behavior, validation, authorization, persistence
-- [ ] Unit Tests: pure logic, services, value objects
-- [ ] Browser/E2E Tests: user flows if tooling exists
+- [ ] Feature Tests: HTTP behavior, validation, authorization, persistence (PHPUnit/Pest)
+- [ ] Unit Tests: pure logic, Actions/Services, value objects
+- [ ] Browser/E2E Tests: user flows via Dusk or Playwright if tooling exists
 ```
 
 ### Step 4: Validate Completeness
@@ -113,20 +114,20 @@ Any additional ad-hoc files (summaries, notes, reports) MUST also follow this ru
 
 ## Task Breakdown
 
-### Entities
-| Entity | Properties | Relations |
-|--------|------------|-----------|
-| X | name, status | belongs to Y |
+### Eloquent Models
+| Model | Attributes | Relations |
+|-------|------------|-----------|
+| X | name, status | belongsTo Y |
 
-### Services
-| Service | Purpose | Methods |
-|---------|---------|---------|
+### Actions/Services
+| Class | Purpose | Methods |
+|-------|---------|---------|
 | XService | Handle X operations | create, update, delete |
 
-### Controllers
-| Controller | Endpoints | Purpose |
-|------------|-----------|---------|
-| XController | /api/x | CRUD for X |
+### Controllers/Routes
+| Controller | Route | Purpose |
+|------------|-------|---------|
+| XController | `/api/x` (routes/api.php) | CRUD for X |
 
 ## Gap Analysis
 - [ ] [Any unclear requirements]

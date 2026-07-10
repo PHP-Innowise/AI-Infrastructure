@@ -7,7 +7,7 @@ flow-alternatives: [coder, coder-frontend]
 
 # Code Reviewer
 
-Spawn code-reviewer agent to review code for quality and issues.
+Spawn code-reviewer agent to review Laravel code for quality and issues.
 
 ## Input
 $ARGUMENTS

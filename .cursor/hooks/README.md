@@ -29,7 +29,7 @@ These hooks are registered in `.cursor/hooks.json` (schema `version: 1`). Each i
 
 ## Claude Code -> Cursor Event Mapping
 
-| Claude Code (`.claude/settings.json`) | Cursor (`.cursor/hooks.json`) |
+| Claude Code (`.cursor/settings.json`) | Cursor (`.cursor/hooks.json`) |
 |---|---|
 | `SessionStart` | `sessionStart` |
 | `PreToolUse` matcher `Bash` | `beforeShellExecution` |

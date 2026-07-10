@@ -1,6 +1,6 @@
 ---
 name: coder
-description: Implement native PHP backend features and bug fixes (behavior-changing work). Use for HTTP handlers/controllers, routing, input validation, domain services, PDO data access, value objects, and PHP business logic. For pure behavior-preserving cleanups use refactorer; for scaffolding an approved architecture use architecture-implementer.
+description: Implement Laravel backend features and bug fixes (behavior-changing work). Use for routes/controllers, Form Request validation, Eloquent models, Policies, API Resources, Actions/Services, and queued jobs. For pure behavior-preserving cleanups use refactorer; for scaffolding an approved architecture use architecture-implementer.
 phase: execution
 flow-next: code-reviewer
 flow-alternatives: [test-generator, verify]
@@ -11,340 +11,363 @@ related: [architect, architecture-implementer, api-designer, test-generator]
 
 ## Overview
 
-Implement backend work in plain, framework-agnostic PHP using the project's existing conventions. Read the relevant entry points, routing, handlers, services, data access, tests, and specs before editing.
+Implement backend work in Laravel using the framework's conventions. Read the relevant routes, controllers, models, migrations, policies, tests, and specs before editing.
 
-This skill targets native PHP (Composer + PSR). If the project is built on a framework, prefer the matching accelerator branch instead of hand-rolling framework features here.
+This branch targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (current LTS) and Laravel 13 (current release). For framework-agnostic native PHP, use the `main` branch instead.
 
 ## Scope Boundary
 
 `coder` owns **behavior-changing** work — new features, bug fixes, and the incidental cleanup that comes with them. Use a sibling skill when the task is narrower:
 
-- **`/refactorer`** — pure behavior-preserving change (extract, dedupe, improve types, PHP upgrade) under a characterization test net. If observable behavior must stay identical, that is refactorer, not coder.
-- **`/architecture-implementer`** — lay down the structural skeleton (directories, namespaces, interfaces, DI wiring) for an approved architecture before feature logic exists. If there is no structure yet from `/architect`, scaffold there first, then return here to fill in behavior.
-- **`/coder-frontend`** — server-rendered templates, HTML, CSS, and progressive-enhancement JS.
+- **`/refactorer`** — pure behavior-preserving change (extract, dedupe, improve types, Laravel/PHP version upgrade) under a characterization test net. If observable behavior must stay identical, that is refactorer, not coder.
+- **`/architecture-implementer`** — lay down the structural skeleton (models, policies, Form Requests, Resources, Service Provider bindings) for an approved architecture before feature logic exists. If there is no structure yet from `/architect`, scaffold there first, then return here to fill in behavior.
+- **`/coder-frontend`** — server-rendered templates (Blade), HTML, CSS, and progressive-enhancement JS.
 
 ## Project Structure
 
-A conventional native PHP layout:
+A conventional Laravel layout:
 
 ```
-public/
-└── index.php          # front controller (single entry point)
-
-src/                   # PSR-4 autoloaded application code
+app/
 ├── Http/
-│   ├── Controller/    # or Action/Handler classes
-│   ├── Middleware/    # PSR-15 middleware
-│   └── Request/       # input DTOs / validators
-├── Domain/            # entities, value objects, domain services
-├── Application/       # use cases / service layer
-└── Infrastructure/
-    ├── Persistence/   # PDO gateways / repositories
-    └── Support/       # clients, adapters
+│   ├── Controllers/     # thin controllers
+│   ├── Middleware/      # HTTP middleware
+│   ├── Requests/        # Form Request validation
+│   └── Resources/       # API Resources / Resource Collections
+├── Models/               # Eloquent models
+├── Policies/             # authorization policies
+├── Actions/              # single-purpose business logic (or Services/)
+├── Services/             # multi-step / cross-cutting business logic
+├── Providers/            # Service Providers (bindings, boot logic)
+├── Jobs/                 # queued jobs
+├── Events/ Listeners/    # event-driven side effects
+├── Notifications/        # notifications (mail, database, etc.)
+└── Exceptions/           # custom exceptions, Handler.php (Laravel <11)
 
-config/                # config arrays, DI definitions
-bin/                   # CLI entry points
-templates/             # server-rendered views (if any)
+bootstrap/
+└── app.php               # exception handling + middleware config (Laravel 11+)
+
+config/                   # config files, read via config()
+database/
+├── migrations/
+├── factories/
+└── seeders/
+routes/
+├── web.php
+└── api.php
+resources/views/          # Blade templates (if any)
 tests/
 ├── Unit/
-└── Integration/
+└── Feature/
 ```
 
-Locate the app root by finding `composer.json` and the autoload `psr-4` mapping. Follow the structure already present rather than imposing this one.
+Locate the app root by finding `composer.json` and confirming the Laravel version (`composer.json` `laravel/framework` constraint, or `php artisan --version`). Follow the structure already present rather than imposing this one.
 
 ## Workflow
 
-1. **Understand** - read existing implementation, specs, schema, and tests.
-2. **Plan** - decide entry point, validation, domain/service, persistence, and tests.
-3. **Implement** - keep changes scoped, typed, and idiomatic.
+1. **Understand** - read existing routes, controllers, models, migrations, policies, and tests.
+2. **Plan** - decide route, Form Request, authorization (Policy/Gate), Eloquent model/relationships, Action/Service, and tests.
+3. **Implement** - keep changes scoped, typed, and idiomatic to Laravel conventions.
 4. **Test** - run focused tests first, then applicable DoD checks.
 5. **Review** - check input validation, authorization, and data integrity.
 
-## Native PHP Implementation Rules
+## Laravel Implementation Rules
 
-- Start new files with `declare(strict_types=1);` and full type declarations.
-- Keep controllers/handlers thin: parse and validate input, call a service, format a response.
-- Validate and normalize input into typed DTOs or value objects at the boundary.
-- Authorize protected actions through an explicit access-control check, not hidden UI.
-- Access the database through PDO with prepared statements and bound parameters.
-- Depend on interfaces at boundaries; inject collaborators via the constructor (PSR-11 container or manual wiring).
-- Use versioned migrations or reviewed SQL for schema changes.
-- Throw typed exceptions for error conditions; map them to responses/exit codes at the edge.
-- Prefer guard clauses and early returns over deep nesting; keep functions small and single-purpose.
-- Preserve backward compatibility of public signatures: add optional parameters rather than reordering/removing, and deprecate (with a documented path) before breaking callers.
-- Never read or edit `.env`; read configuration through a config layer and document required variables.
+- Start new files with `declare(strict_types=1);` and full type declarations (return types, property types, param types) even though Laravel doesn't require it — it still catches bugs.
+- Keep controllers thin: resolve the model via route-model binding, validate via a Form Request, call an Action/Service or model method, return an API Resource.
+- Validate input with Form Requests (`php artisan make:request`), not inline `$request->validate()` in controllers, once rules grow beyond a couple of trivial fields.
+- Authorize protected actions through Policies (`php artisan make:policy`) or Gates, called via `$this->authorize()`, `Gate::authorize()`, or the `can:` middleware — never by hiding UI only.
+- Access the database through Eloquent models or the query builder; avoid raw SQL string concatenation. Use `DB::raw()` only with bound parameters when the query builder can't express something.
+- Depend on interfaces at integration boundaries (e.g. `PaymentGateway`) bound in a Service Provider, so the concrete client is swappable and mockable.
+- Manage schema changes through versioned Artisan migrations; never edit a released migration.
+- Let Laravel's exception handling map exceptions to responses: customize in `bootstrap/app.php`'s `->withExceptions()` (Laravel 11+) or `app/Exceptions/Handler.php` (Laravel 10 and earlier / explicit Handler still supported). Throw typed, specific exceptions from domain code.
+- Prefer guard clauses and early returns over deep nesting; keep methods small and single-purpose.
+- Preserve backward compatibility of public signatures and API Resource shapes: add optional parameters/fields rather than reordering/removing, and version the API before making a breaking change.
+- Never read or edit `.env`; read configuration through `config()` and document required variables in `config/*.php` with `env()` defaults.
+- Use Eloquent relationships with eager loading (`with()`, `load()`) to avoid N+1 queries; verify with `DB::listen()`/Telescope/Debugbar during development.
 
 ## Common Patterns
 
-> Note: helper types below (`JsonResponse`, `ValidationException`, `ServerRequestFactory`, `SapiEmitter`) are illustrative stand-ins for whatever your project/PSR packages provide. Import them with `use` in real code.
-
-### Front Controller
-
-A PSR-7 `ResponseInterface` is a value object with no `send()` method; emit it through an SAPI emitter (for example `laminas/httphandlerrunner`) or a project-specific emitter.
+### Routes
 
 ```php
-<?php
+// routes/api.php
+use App\Http\Controllers\Api\UserController;
 
-declare(strict_types=1);
-
-use Laminas\HttpHandlerRunner\Emitter\SapiEmitter;
-use Laminas\Diactoros\ServerRequestFactory;
-
-require __DIR__ . '/../vendor/autoload.php';
-
-/** @var App\Http\Kernel $kernel */
-$kernel = require __DIR__ . '/../config/bootstrap.php';
-
-$request = ServerRequestFactory::fromGlobals();
-$response = $kernel->handle($request);
-
-(new SapiEmitter())->emit($response);
-```
-
-### Routing (framework-agnostic, e.g. nikic/fast-route)
-
-```php
-$dispatcher = FastRoute\simpleDispatcher(function (FastRoute\RouteCollector $r): void {
-    $r->addRoute('GET', '/users/{id:\d+}', [UserController::class, 'show']);
-    $r->addRoute('POST', '/users', [UserController::class, 'store']);
+Route::middleware('auth:sanctum')->group(function (): void {
+    Route::apiResource('users', UserController::class)->only(['index', 'store', 'show', 'update']);
 });
 ```
 
-### Input Validation DTO
+Route-model binding resolves `{user}` to an `App\Models\User` instance automatically, returning a 404 if not found — prefer it over manual `User::findOrFail($id)` lookups in the controller.
+
+### Form Request
 
 ```php
 <?php
 
 declare(strict_types=1);
 
-namespace App\Http\Request;
+namespace App\Http\Requests;
 
-final class CreateUserRequest
+use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
+
+final class StoreUserRequest extends FormRequest
 {
-    public function __construct(
-        public readonly string $email,
-        public readonly string $name,
-    ) {
-    }
-
-    /** @param array<string, mixed> $input */
-    public static function fromArray(array $input): self
+    public function authorize(): bool
     {
-        $errors = [];
-
-        $email = trim((string) ($input['email'] ?? ''));
-        if ($email === '' || filter_var($email, FILTER_VALIDATE_EMAIL) === false) {
-            $errors['email'] = 'A valid email is required.';
-        }
-
-        $name = trim((string) ($input['name'] ?? ''));
-        if ($name === '') {
-            $errors['name'] = 'Name is required.';
-        }
-
-        if ($errors !== []) {
-            throw ValidationException::withErrors($errors);
-        }
-
-        return new self($email, $name);
-    }
-}
-```
-
-### Controller / Handler
-
-```php
-<?php
-
-declare(strict_types=1);
-
-namespace App\Http\Controller;
-
-use App\Application\CreateUser;
-use App\Http\Request\CreateUserRequest;
-use Psr\Http\Message\ResponseInterface;
-use Psr\Http\Message\ServerRequestInterface;
-
-final class UserController
-{
-    public function __construct(
-        private readonly CreateUser $createUser,
-        private readonly AccessControl $accessControl,
-    ) {
+        return $this->user()?->can('create', \App\Models\User::class) ?? false;
     }
 
-    public function store(ServerRequestInterface $request): ResponseInterface
+    /** @return array<string, mixed> */
+    public function rules(): array
     {
-        // Authorize before acting; never rely on hidden UI. Use $request attributes
-        // populated by auth middleware. (Omit only for genuinely public endpoints.)
-        $this->accessControl->assertCan($request->getAttribute('user'), 'user.create');
-
-        $data = CreateUserRequest::fromArray((array) $request->getParsedBody());
-
-        $user = $this->createUser->handle($data);
-
-        return JsonResponse::created(['id' => $user->id, 'email' => $user->email]);
+        return [
+            'email' => ['required', 'email', 'max:255', Rule::unique('users', 'email')],
+            'name' => ['required', 'string', 'max:255'],
+        ];
     }
 }
 ```
 
-### Use Case / Service With Transaction
-
-The Application layer depends on an **interface** (defined in the domain) and a small transaction boundary, not on `PDO` directly. SQL lives in the Infrastructure implementation. This keeps the use case unit-testable with a fake repository and honors the "depend on abstractions" rule.
+### Controller
 
 ```php
 <?php
 
 declare(strict_types=1);
 
-namespace App\Domain\User;
+namespace App\Http\Controllers\Api;
 
-interface UserRepository
+use App\Actions\CreateUser;
+use App\Http\Requests\StoreUserRequest;
+use App\Http\Resources\UserResource;
+use Illuminate\Http\JsonResponse;
+
+final class UserController extends Controller
 {
-    /** @throws DuplicateEmailException */
-    public function add(User $user): User;
+    public function __construct(private readonly CreateUser $createUser)
+    {
+    }
+
+    public function store(StoreUserRequest $request): JsonResponse
+    {
+        // Authorization already ran in StoreUserRequest::authorize().
+        $user = $this->createUser->handle($request->validated());
+
+        return UserResource::make($user)->response()->setStatusCode(201);
+    }
 }
 ```
 
+### Policy
+
 ```php
 <?php
 
 declare(strict_types=1);
 
-namespace App\Application;
+namespace App\Policies;
 
-use App\Domain\User\{User, UserRepository};
-use App\Http\Request\CreateUserRequest;
-use App\Infrastructure\Persistence\TransactionManager;
+use App\Models\User;
+
+final class UserPolicy
+{
+    public function create(User $actor): bool
+    {
+        return $actor->hasRole('admin');
+    }
+
+    public function update(User $actor, User $target): bool
+    {
+        return $actor->id === $target->id || $actor->hasRole('admin');
+    }
+}
+```
+
+Register the policy in a Service Provider (or rely on Laravel's naming-convention auto-discovery) and enforce it with `$this->authorize('update', $user)`, `Gate::allows(...)`, or the `can:update,user` middleware on the route. For complex role/permission models beyond simple Gates, consider `spatie/laravel-permission`.
+
+### API Resource
+
+```php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Http\Resources;
+
+use Illuminate\Http\Request;
+use Illuminate\Http\Resources\Json\JsonResource;
+
+final class UserResource extends JsonResource
+{
+    /** @return array<string, mixed> */
+    public function toArray(Request $request): array
+    {
+        return [
+            'id' => $this->id,
+            'email' => $this->email,
+            'name' => $this->name,
+            'created_at' => $this->created_at?->toAtomString(),
+        ];
+    }
+}
+```
+
+### Eloquent Model With Relationships
+
+```php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+
+final class User extends Model
+{
+    use HasFactory;
+
+    /** @var list<string> */
+    protected $fillable = ['email', 'name'];
+
+    protected function casts(): array
+    {
+        return [
+            'email_verified_at' => 'datetime',
+        ];
+    }
+
+    /** @return HasMany<Order, $this> */
+    public function orders(): HasMany
+    {
+        return $this->hasMany(Order::class);
+    }
+}
+```
+
+Eager-load relationships that will be accessed (`User::with('orders')->get()`) instead of triggering N+1 lazy loads; enable `Model::preventLazyLoading()` in local/testing environments to catch violations early.
+
+### Action / Service With A DB Transaction
+
+Use an Action (single-purpose invokable class) or a Service (broader collaborator) once controller logic grows past simple CRUD. Wrap multi-step writes in `DB::transaction()` so partial failures roll back cleanly.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Actions;
+
+use App\Models\User;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 final class CreateUser
 {
-    public function __construct(
-        private readonly UserRepository $users,
-        private readonly TransactionManager $transaction,
-    ) {
-    }
-
-    public function handle(CreateUserRequest $request): User
+    /** @param array<string, mixed> $data */
+    public function handle(array $data): User
     {
-        // Run the write inside a transaction boundary; the manager commits on
-        // success and rolls back on any thrown exception.
-        return $this->transaction->run(
-            fn (): User => $this->users->add(
-                User::register($request->email, $request->name),
-            ),
-        );
+        return DB::transaction(function () use ($data): User {
+            $user = User::create($data);
+
+            Log::info('User created', ['user_id' => $user->id]);
+
+            // Dispatch side effects (welcome email, event) after the transaction commits.
+            \App\Events\UserRegistered::dispatch($user);
+
+            return $user;
+        });
     }
 }
 ```
+
+Enforce uniqueness in the schema (`unique()` in the migration), not just in the Form Request — concurrent requests can both pass an application-level "does this email exist?" check. See `/architect` for concurrency, idempotency, and locking guidance the code must respect.
+
+## Modern PHP Best Practices
+
+Use the language's current features to make intent explicit and errors unrepresentable — these apply just as much inside a Laravel app:
+
+- **Enums** for closed sets instead of string/int constants: `enum Role: string { case Admin = 'admin'; ... }`. Cast Eloquent attributes to enums via `casts()`.
+- **`readonly` properties / classes** for value objects and DTOs (e.g. Action input objects) so state cannot mutate after construction.
+- **Constructor property promotion** to keep Actions/Services/DTOs concise.
+- **`match`** (strict, exhaustive) over long `switch`/`if` ladders.
+- **Named arguments** for calls with several optional parameters; **nullsafe** `?->` for optional chains (handy on Eloquent relationships that may be null).
+- **First-class callable syntax** (`$this->handle(...)`) for cleaner callbacks and job dispatch.
+- **`never` return type** for functions that always throw or exit.
+- Avoid `mixed` where a union or generic-via-docblock (`@param list<User>`) is clearer; let Larastan enforce it.
+
+## Error Handling
+
+- Define a small typed exception hierarchy for domain errors (e.g. `DomainException` base, `InsufficientStockException`) rather than throwing bare `\Exception`.
+- Throw at the point of failure; catch only where you can add value (map to a response, add context, retry). Never swallow with an empty `catch`.
+- Map exceptions to HTTP responses centrally: in Laravel 11+, register handling in `bootstrap/app.php`'s `->withExceptions(function (Exceptions $exceptions) { ... })`; on Laravel 10 and earlier, override `register()`/`render()` in `app/Exceptions/Handler.php`.
+- Preserve the original cause with the `$previous` argument when re-throwing.
+- Fail fast on programmer errors (invalid state) with exceptions; reserve return-value error signalling for expected, recoverable outcomes.
+- Let validation exceptions (`ValidationException` from Form Requests) surface as Laravel's standard 422 response; don't catch and re-wrap them without reason.
+
+## Logging
+
+- Use the `Log::` facade (`Log::info()`, `Log::error()`, ...) or inject `Psr\Log\LoggerInterface` for testability; configure channels in `config/logging.php` (stack, single, daily, Slack, etc.).
+- Use appropriate levels (`error` for failures needing attention, `warning` for recoverable anomalies, `info` for milestones, `debug` for diagnostics).
+- Log structured context as the second argument (`Log::error('Payment failed', ['order_id' => $id])`); never log secrets, tokens, passwords, or full PII.
+
+## Configuration
+
+- Read config through `config('app.name')` / typed config, never `getenv()` scattered across the code or `.env` reads in app logic.
+- Add new environment variables to a `config/*.php` file with an `env()` default, and document them; don't reference `env()` directly outside config files.
+- Validate required config at boot (a Service Provider or a config validation package) and fail loudly if missing.
+
+## Middleware
+
+Use Laravel HTTP middleware for cross-cutting concerns (auth, rate limiting, logging) so controllers stay focused. Register global/group/route middleware in `bootstrap/app.php`'s `->withMiddleware()` (Laravel 11+) or `app/Http/Kernel.php` (Laravel 10 and earlier):
 
 ```php
 <?php
 
 declare(strict_types=1);
 
-namespace App\Infrastructure\Persistence;
+namespace App\Http\Middleware;
 
-use App\Domain\User\{DuplicateEmailException, User, UserRepository};
-use PDO;
+use Closure;
+use Illuminate\Http\Request;
+use Symfony\Component\HttpFoundation\Response;
 
-final class PdoUserRepository implements UserRepository
+final class EnsureUserIsActive
 {
-    public function __construct(private readonly PDO $pdo)
+    public function handle(Request $request, Closure $next): Response
     {
-    }
-
-    public function add(User $user): User
-    {
-        try {
-            $statement = $this->pdo->prepare(
-                'INSERT INTO users (email, name) VALUES (:email, :name)'
-            );
-            $statement->execute(['email' => $user->email, 'name' => $user->name]);
-        } catch (\PDOException $e) {
-            // Rely on a UNIQUE(email) constraint to close the check-then-insert
-            // race; translate the driver error into a domain exception.
-            if ($e->getCode() === '23000') {
-                throw new DuplicateEmailException($user->email, previous: $e);
-            }
-
-            throw $e;
+        if (! $request->user()?->is_active) {
+            abort(403, 'Account is disabled.');
         }
 
-        return $user->withId((int) $this->pdo->lastInsertId());
+        return $next($request);
     }
 }
 ```
 
-Enforce uniqueness in the schema (`UNIQUE(email)`), not just in application code — concurrent requests can both pass an application-level "does this email exist?" check. See `/architect` for concurrency, idempotency, and locking guidance the code must respect.
-
-## Modern PHP Best Practices
-
-Use the language's current features to make intent explicit and errors unrepresentable:
-
-- **Enums** for closed sets instead of string/int constants: `enum Role: string { case Trainer = 'trainer'; ... }`.
-- **`readonly` properties / classes** for value objects and DTOs so state cannot mutate after construction.
-- **Constructor property promotion** to keep DTOs/services concise.
-- **`match`** (strict, exhaustive) over long `switch`/`if` ladders.
-- **Named arguments** for calls with several optional parameters; **nullsafe** `?->` for optional chains.
-- **First-class callable syntax** (`$this->handle(...)`) for cleaner callbacks.
-- **`never` return type** for functions that always throw or exit.
-- Avoid `mixed` where a union or generic-via-docblock (`@param list<User>`) is clearer; let PHPStan/Psalm enforce it.
-
-## Error Handling
-
-- Define a small typed exception hierarchy (e.g. `DomainException` base, `ValidationException`, `NotFoundException`, `ConflictException`). Do not throw bare `\Exception`.
-- Throw at the point of failure; catch only where you can add value (map to a response, add context, retry). Never swallow with an empty `catch`.
-- Map exceptions to HTTP status/CLI exit codes at the edge (a single error-handling middleware or handler), not scattered through the code.
-- Preserve the original cause with the `$previous` argument when re-throwing.
-- Fail fast on programmer errors (invalid state) with exceptions; reserve return-value error signalling for expected, recoverable outcomes.
-
-## Logging (PSR-3)
-
-- Depend on `Psr\Log\LoggerInterface`, not a concrete logger; inject it. Use `NullLogger` in tests.
-- Use appropriate levels (`error` for failures needing attention, `warning` for recoverable anomalies, `info` for milestones, `debug` for diagnostics).
-- Log structured context as the second argument (`$logger->error('Payment failed', ['order_id' => $id])`); never log secrets, tokens, passwords, or full PII.
-
-## Configuration
-
-- Read config through a typed config layer/array, never `getenv()` scattered across the code or `.env` reads in app logic.
-- Validate required config at bootstrap and fail loudly if missing.
-- Keep environment-specific values out of source; document required variables by name.
-
-## Middleware (PSR-15)
-
-Use middleware for cross-cutting concerns (auth, CSRF, rate limiting, logging, error handling) so handlers stay focused:
-
-```php
-final class AuthenticationMiddleware implements Psr\Http\Server\MiddlewareInterface
-{
-    public function process(ServerRequestInterface $request, RequestHandlerInterface $handler): ResponseInterface
-    {
-        $user = $this->authenticator->fromRequest($request);
-        if ($user === null) {
-            return JsonResponse::unauthorized();
-        }
-
-        return $handler->handle($request->withAttribute('user', $user));
-    }
-}
-```
+Prefer built-in middleware (`auth`, `auth:sanctum`, `throttle:60,1`, `can:`, `verified`) before writing custom middleware for a concern Laravel already covers.
 
 ## Verification
 
 Run focused checks first:
 
 ```bash
-vendor/bin/phpunit --filter=CreateUserTest
+php artisan test --filter=CreateUserTest
+# or: vendor/bin/pest --filter=CreateUserTest
 ```
 
-Then run applicable project checks (prefer Composer scripts):
+Then run applicable project checks (prefer Composer scripts if defined):
 
 ```bash
 composer validate --strict
-composer test        # or vendor/bin/phpunit / vendor/bin/pest
-composer lint        # or vendor/bin/php-cs-fixer fix --dry-run --diff / vendor/bin/phpcs
-composer analyse     # or vendor/bin/phpstan analyse / vendor/bin/psalm
+php artisan test              # or vendor/bin/pest
+vendor/bin/pint --test        # formatting check (drop --test to auto-fix)
+vendor/bin/phpstan analyse    # Larastan-configured static analysis
 ```
 
 If a tool is missing, report `N/A - tooling not configured`.

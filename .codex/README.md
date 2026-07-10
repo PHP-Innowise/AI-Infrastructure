@@ -1,10 +1,10 @@
-# Native PHP Accelerator - Codex Edition
+# Laravel Accelerator - Codex Edition
 
 The Codex edition of the accelerator, laid out the way OpenAI Codex actually discovers things. Codex's model differs from Claude Code and Cursor, so the pieces live in three places:
 
 | Piece | Location | Why |
 |---|---|---|
-| **Skills** (30 workflows) | `.agents/skills/<name>/SKILL.md` | Codex discovers repo skills from `.agents/skills`, not `.codex/`. |
+| **Skills** (31 workflows) | `.agents/skills/<name>/SKILL.md` | Codex discovers repo skills from `.agents/skills`, not `.codex/`. |
 | **Policy** | root `AGENTS.md` | Read natively by Codex (walked root -> cwd, concatenated). Shared with Claude/Cursor. |
 | **Config** | `.codex/config.toml` | Project-scoped model/approval/sandbox/MCP + enables hooks. Loads only when the project is trusted. |
 | **Hooks** | `.codex/hooks.json` + `.codex/hooks/*.sh` | Lifecycle hooks (same event schema as Claude Code). |

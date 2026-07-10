@@ -2,7 +2,7 @@
 
 This directory holds the accelerator's skills in the cross-tool `.agents/` convention. **OpenAI Codex discovers repo skills here** (`.agents/skills/<name>/SKILL.md`), so this is where the Codex edition of the accelerator lives.
 
-- **Skills:** `.agents/skills/<name>/SKILL.md` - 30 native-PHP workflows (coder, architect, test-generator, security-reviewer, ...), plus `SKILL FLOW.md` describing the end-to-end flow.
+- **Skills:** `.agents/skills/<name>/SKILL.md` - 31 Laravel workflows (coder, architect, filament, test-generator, security-reviewer, ...), plus `SKILL FLOW.md` describing the end-to-end flow.
 - Codex loads these automatically for a trusted project; invoke a skill by name (explicitly or let Codex trigger it implicitly).
 
 Companion Codex config lives in `.codex/` (config, hooks, DOD, principles). Policy is the shared root `AGENTS.md`.

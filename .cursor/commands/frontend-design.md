@@ -1,11 +1,11 @@
 ---
 name: frontend-design
-description: "Spawn frontend-design agent to create distinctive UI designs."
+description: "Spawn frontend-design agent to create distinctive UI designs for Laravel's Blade, Livewire, or Inertia.js stacks."
 ---
 
 # Frontend Design
 
-Spawn frontend-design agent to create distinctive UI designs.
+Spawn frontend-design agent to create distinctive UI designs for Laravel's Blade, Livewire, or Inertia.js stacks.
 
 ## Input
 $ARGUMENTS

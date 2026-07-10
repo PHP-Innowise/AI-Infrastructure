@@ -1,6 +1,6 @@
 ---
 name: refactorer
-description: Perform behavior-preserving refactors and safe PHP upgrades in native PHP. Use to reduce duplication, extract seams, improve types, or apply Rector rules without changing observable behavior. Triggers on "refactor", "clean up", "extract", "reduce duplication", "modernize", "upgrade PHP".
+description: Perform behavior-preserving refactors and safe Laravel/PHP upgrades. Use to reduce duplication, extract Actions/Services from fat controllers, convert raw queries to Eloquent, improve types, or apply Rector/rector-laravel rules without changing observable behavior. Triggers on "refactor", "clean up", "extract", "reduce duplication", "modernize", "upgrade Laravel", "upgrade PHP".
 phase: execution
 flow-next: verify
 flow-alternatives: [code-reviewer, test-generator, performance-optimization]
@@ -12,6 +12,8 @@ related: [coder, test-generator, code-reviewer, architect]
 ## Overview
 
 Improve code structure without changing what it does. The safety contract of refactoring is: observable behavior stays identical, proven by tests before and after.
+
+This branch targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (current LTS) and Laravel 13 (current release). For framework-agnostic native PHP, use the `main` branch instead.
 
 ## Scope Boundary
 
@@ -30,7 +32,7 @@ Before changing structure, ensure tests cover the behavior you are about to move
 1. **Pin behavior.** Run the existing tests; if the area is untested, write characterization tests that capture current behavior (including quirks). Record a green baseline.
 2. **Refactor in small steps.** One transformation at a time; keep the suite green after each step. Commit-sized increments, not a big-bang rewrite.
 3. **Modernize types.** Add `declare(strict_types=1)`, parameter/return/property types, and readonly where safe.
-4. **Automate where possible.** Use Rector for mechanical, rule-based changes (dead code, type declarations, PHP version migrations); review each diff.
+4. **Automate where possible.** Use Rector (with `driftingly/rector-laravel` for framework-aware rules) for mechanical, rule-based changes (dead code, type declarations, PHP/Laravel version migrations); review each diff.
 5. **Re-verify.** Run tests, static analysis, and formatting. Behavior and public signatures must be unchanged unless the task explicitly allows API changes.
 
 ## Common Refactorings
@@ -43,6 +45,14 @@ Before changing structure, ensure tests cover the behavior you are about to move
 - Replace magic arrays with typed DTOs.
 - Guard clauses to flatten nested conditionals.
 
+## Laravel-Specific Refactor Targets
+
+- **Fat controllers → Actions/Services.** When a controller method does more than parse input, authorize, delegate, and respond, extract the workflow into an Action or Service class (see `/architect` for when to use which) — this is a pure extraction if behavior is preserved.
+- **Raw queries → Eloquent.** Replace hand-written SQL/`DB::select()` calls with Eloquent query builder or model relationships where it doesn't sacrifice necessary performance; verify the generated SQL is equivalent (check with `DB::listen()` or `->toSql()`) before and after.
+- **Manual array shaping → API Resources.** Replace ad hoc `return response()->json([...])` shaping with a proper `JsonResource` when the same shape is duplicated across controllers.
+- **Duplicated validation → Form Requests.** Consolidate repeated inline `$request->validate([...])` rule arrays into a shared Form Request.
+- **Laravel major-version upgrades.** Treat an upgrade (e.g. Laravel 10 → 11 → 12) as a refactor: follow the official `laravel/upgrade` guide as a *process* (read the upgrade guide for the target version, update `composer.json` constraints, run `composer update`, apply `rector-laravel` rules for mechanical changes, fix deprecations, re-run the full suite) rather than following exact fixed steps, since guidance changes per release.
+
 ## Rector Usage
 
 ```bash
@@ -50,7 +60,7 @@ vendor/bin/rector process --dry-run   # preview changes
 vendor/bin/rector process             # apply, then review the diff
 ```
 
-Prefer curated rule sets (dead code, code quality, a specific PHP version upgrade set). Never blindly accept a large Rector diff; review it like any change.
+Prefer curated rule sets (dead code, code quality, a specific PHP version upgrade set, plus `RectorLaravel\Set\LaravelSetList` sets from `driftingly/rector-laravel` for framework-specific mechanical upgrades). Never blindly accept a large Rector diff; review it like any change.
 
 ## Code Smell Catalog
 
@@ -82,9 +92,9 @@ For risky, large-scale change, do not rewrite in place. Build the new implementa
 ## Verification
 
 ```bash
-composer test        # must match the pre-refactor result
-composer analyse     # equal or fewer errors than baseline
-composer lint
+php artisan test          # or vendor/bin/pest — must match the pre-refactor result
+vendor/bin/phpstan analyse # Larastan-configured; equal or fewer errors than baseline
+vendor/bin/pint --test
 ```
 
 ## Final Output

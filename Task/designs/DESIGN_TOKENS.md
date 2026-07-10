@@ -1,10 +1,10 @@
 # PracticePerfect Design Tokens
 
 Extracted from SVG design files. These tokens are implemented in the application via:
-- CSS custom properties, for example `public/css/app.css`
-- A CSS framework's configuration if the project uses one
-- Server-rendered PHP templates and components through shared design-token variables
-- Dynamic branding through a config value, database setting, or template provider depending on the project architecture
+- CSS custom properties, for example `resources/css/app.css`
+- Tailwind CSS configuration if the Laravel project uses Tailwind
+- Blade, Livewire, Inertia, or frontend components through shared design-token variables
+- Dynamic branding through a Laravel config value, database setting, or frontend provider depending on the project architecture
 
 ## Typography Scale (from text.svg)
 

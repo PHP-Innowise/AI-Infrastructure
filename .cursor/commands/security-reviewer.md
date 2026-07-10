@@ -1,11 +1,11 @@
 ---
 name: security-reviewer
-description: "Spawn security-reviewer agent to audit native PHP changes against the OWASP Top 10 (injection, XSS, access control, auth/session, CSRF, file upload, secrets, deserialization, SSRF) and run a dependency audit."
+description: "Spawn security-reviewer agent to audit Laravel changes against the OWASP Top 10 (injection, XSS, mass assignment, access control, auth/session, CSRF, file upload, secrets, deserialization, SSRF) and run a dependency audit."
 ---
 
 # Security Reviewer
 
-Spawn security-reviewer agent to audit native PHP changes against the OWASP Top 10 (injection, XSS, access control, auth/session, CSRF, file upload, secrets, deserialization, SSRF) and run a dependency audit.
+Spawn security-reviewer agent to audit Laravel changes against the OWASP Top 10 (injection, XSS, mass assignment, access control, auth/session, CSRF, file upload, secrets, deserialization, SSRF) and run a dependency audit.
 
 ## Input
 $ARGUMENTS

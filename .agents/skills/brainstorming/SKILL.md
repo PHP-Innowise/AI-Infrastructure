@@ -33,26 +33,26 @@ Any additional ad-hoc files (summaries, notes, explorations) MUST also follow th
 - Focus on understanding: purpose, constraints, success criteria
 
 **For new projects - gather tech stack info:**
-If this is a new project (no existing codebase), ask about tech stack. Keep it simple - these are small projects with straightforward architecture. This base assumes native PHP; a specific framework belongs on the matching accelerator branch.
+If this is a new project (no existing codebase), ask about tech stack. Keep it simple - these are small projects with straightforward architecture. This branch targets Laravel as the default backend framework unless the user says otherwise; for framework-agnostic native PHP, use the `main` branch instead.
 
 | Question | Options | Default |
 |----------|---------|---------|
-| Project type? | PHP API / PHP full-stack (server-rendered) / Frontend / Full-stack | - |
-| Database? (backend) | PostgreSQL / MySQL / SQLite / Existing database / None | PostgreSQL |
-| Rendering? (frontend) | Server-rendered PHP templates / Separate frontend / API-only / Existing stack | Server-rendered PHP templates |
+| Project type? | Laravel API / Laravel full-stack (Blade or Inertia) / Frontend / Full-stack | Laravel full-stack |
+| Database? (backend) | MySQL / PostgreSQL / SQLite / Existing database / None | MySQL |
+| Rendering? (frontend) | Blade / Livewire / Inertia (Vue or React) / API-only / Existing stack | Blade |
 
 **Architecture defaults (don't over-question):**
-- Backend: front controller + router, request DTOs/validators, use-case/service classes, PDO repositories, PSR-15 middleware, PSR-11 DI
-- Business logic: extract use-case/service classes only when they clarify the workflow
-- Frontend: server-rendered PHP templates with semantic HTML and progressive enhancement, or an API-only backend
+- Backend: Laravel routing (`routes/web.php` / `routes/api.php`), Controllers/Actions, Form Requests for validation, Eloquent models + migrations, Policies/Gates for authorization, API Resources for response shaping
+- Business logic: extract Action or Service classes only when they clarify the workflow; keep controllers thin
+- Frontend: Blade templates with semantic HTML and progressive enhancement, or Livewire/Inertia when interactivity needs it, or an API-only backend consumed by a separate SPA
 
 **Library vs Custom decisions (MANDATORY):**
-- When the design involves functionality that established libraries solve (logging, validation, HTTP clients, date handling, state management, auth, caching, etc.), you MUST ask the user whether they want to use an existing library or build a custom solution.
-- **Default to recommending well-known libraries** - custom implementations should require justification.
-- Use AskUserQuestion with options like: `["Use <library-name> (Recommended)", "Use <alternative-library>", "Custom implementation"]`. The built-in "Other" option lets the user suggest their own library — mention this explicitly in the question text (e.g., "Pick a library, or choose Other to suggest your own").
-- If the user chooses a library, research it (via WebSearch or Context7) to confirm it fits their stack and is actively maintained.
-- If the user wants custom, ask WHY - ensure there's a real reason (licensing, bundle size, specific requirements) and document the rationale in the design doc.
-- **Never silently decide to write custom code when a proven, maintained package exists.** This prevents reinventing the wheel (e.g., using a maintained router, PSR-7/PSR-15 implementation, PSR-3 logger like Monolog, or a validation library instead of hand-rolling fragile equivalents).
+- When the design involves functionality that Laravel or its ecosystem already solves (auth, validation, HTTP clients, date handling, queues, caching, search, etc.), you MUST ask the user whether they want to use the built-in/ecosystem solution or build a custom one.
+- **Default to recommending Laravel's built-in features and well-maintained first-party/Spatie packages** - custom implementations should require justification.
+- Use AskUserQuestion with options like: `["Use Sanctum (Recommended)", "Use Passport", "Custom implementation"]`. The built-in "Other" option lets the user suggest their own package — mention this explicitly in the question text (e.g., "Pick an approach, or choose Other to suggest your own").
+- If the user chooses a package, research it (via WebSearch or Context7) to confirm it fits Laravel's current version and is actively maintained.
+- If the user wants custom, ask WHY - ensure there's a real reason (licensing, specific requirements, learning goals) and document the rationale in the design doc.
+- **Never silently decide to write custom code when a proven, maintained solution exists.** This prevents reinventing the wheel: use Sanctum instead of hand-rolling token auth, a Form Request instead of custom inline validation, Laravel's queue system instead of a bespoke background-job runner, and Eloquent relationships instead of manual join queries.
 
 **Exploring approaches:**
 - Propose 2-3 different approaches with trade-offs
@@ -81,7 +81,7 @@ If this is a new project (no existing codebase), ask about tech stack. Keep it s
 [Components, layers, interactions]
 
 ## Data Model
-[Entities/value objects, relationships, migrations/SQL schema, repositories, request/response contracts]
+[Eloquent models, relationships, migrations/schema, factories/seeders, API Resource contracts]
 
 ## API Design (if applicable)
 [Endpoints, request/response formats]

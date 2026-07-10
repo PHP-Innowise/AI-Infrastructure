@@ -1,6 +1,6 @@
 ---
 name: documentation-generator
-description: Generate and maintain native PHP project documentation, READMEs, ADRs, API docs, changelogs, and living specs.
+description: Generate and maintain Laravel project documentation, READMEs, ADRs, API docs, changelogs, and living specs.
 phase: finalization
 flow-next: release
 flow-alternatives: [finishing-branch, verify]
@@ -11,7 +11,7 @@ related: [architect, api-designer, coder]
 
 ## Overview
 
-Document native PHP implementation details in a way that helps future maintainers run, test, extend, and safely operate the system.
+Document Laravel implementation details in a way that helps future maintainers run, test, extend, and safely operate the system.
 
 ## Documentation Targets
 
@@ -25,13 +25,13 @@ Document native PHP implementation details in a way that helps future maintainer
 
 Include:
 
-- Required PHP version and extensions (e.g. `ext-pdo`, `ext-mbstring`).
-- Composer install/usage.
-- Local setup and how to run the app (front controller / built-in server).
-- Database setup and migration commands.
-- Worker/queue, cron, cache, and mail setup if used.
-- Test, format, and static-analysis commands (prefer Composer scripts).
-- Any frontend asset build commands if a pipeline exists.
+- Required PHP version (8.2+) and extensions (e.g. `ext-pdo`, `ext-mbstring`).
+- Laravel version (11 or 12) and Composer install/usage.
+- Local setup and how to run the app (`php artisan serve`, or Sail/Docker if configured).
+- Database setup and migration commands (`php artisan migrate`, `php artisan migrate --seed`).
+- Queue worker, scheduler, cache, and mail setup if used (`php artisan queue:work`, `php artisan schedule:work`).
+- Test, format, and static-analysis commands (`php artisan test`, `vendor/bin/pint`, `vendor/bin/phpstan analyse`).
+- Frontend asset build commands if a pipeline exists (`npm install && npm run dev` / `npm run build` via Vite).
 - Environment variables by name only, never secret values.
 
 Example local setup commands:
@@ -39,9 +39,10 @@ Example local setup commands:
 ```bash
 composer install
 cp .env.example .env   # then fill values locally (never commit real secrets)
-php bin/migrate.php    # or the project's migration command
-php -S localhost:8000 -t public
-composer test
+php artisan key:generate
+php artisan migrate
+php artisan serve
+php artisan test
 ```
 
 ## Living Specification Updates
@@ -53,34 +54,34 @@ Use task-prefixed sections:
 ```markdown
 ### [TASK-001] Invitation Registration Tooling (2026-06-29)
 
-**Runtime:** PHP 8.3+, PDO MySQL
+**Runtime:** Laravel 12, PHP 8.3+, MySQL
 
 **Verification:**
-- `composer test`
-- `composer lint`
-- `composer analyse`
+- `php artisan test`
+- `vendor/bin/pint --test`
+- `vendor/bin/phpstan analyse`
 
 **Operational Notes:**
-- Invitation emails are dispatched by a queue worker.
-- A cron entry must run the scheduler script every minute in production.
+- Invitation emails are dispatched via a queued Notification.
+- The scheduler (`php artisan schedule:work` or a cron entry running `php artisan schedule:run` every minute) drives the invitation-expiry job in production.
 ```
 
 ## API Documentation
 
 For API changes, include:
 
-- Route table.
-- Auth requirements.
-- Request validation.
-- Response serializer shapes.
+- Route table (`routes/api.php`).
+- Auth requirements (Sanctum tokens/guards).
+- Form Request validation rules.
+- API Resource response shapes.
 - Error codes.
-- Rate limits.
+- Rate limits (`throttle` middleware).
 - OpenAPI generation command if configured.
 
 ## ADR Template
 
 ```markdown
-# ADR-0001: Use A Dedicated Access-Control Service For Invitation Authorization
+# ADR-0001: Use A Dedicated Policy Class For Invitation Authorization
 
 ## Status
 Accepted

@@ -1,8 +1,6 @@
 # Definition of Done
 
-Tiered checklist for native PHP work. Every item should be verified by command when tooling exists. If tooling is missing, report `N/A - tooling not configured` and do not install it without user approval.
-
-Prefer running checks through the project's Composer scripts (for example `composer test`, `composer analyse`, `composer lint`) so local and CI use the same entry points. Fall back to the direct `vendor/bin/*` commands when no script is defined.
+Tiered checklist for Laravel work. Every item should be verified by command when tooling exists. If tooling is missing, report `N/A - tooling not configured` and do not install it without user approval.
 
 ## Minimum
 
@@ -19,14 +17,15 @@ Use for implementation tasks.
 
 All Minimum items, plus:
 
-- [ ] Composer metadata is valid: `composer validate --strict` if `composer.json` exists.
-- [ ] Syntax is clean: `php -l` on changed files (or `find src -name '*.php' -print0 | xargs -0 -n1 php -l`).
-- [ ] Tests pass: `composer test`, `vendor/bin/phpunit`, or `vendor/bin/pest` depending on the project.
-- [ ] Formatting passes: `vendor/bin/php-cs-fixer fix --dry-run --diff` or `vendor/bin/phpcs` if configured.
-- [ ] Static analysis passes: `vendor/bin/phpstan analyse` or `vendor/bin/psalm` if configured.
+- [ ] Composer metadata is valid: `composer validate --strict`.
+- [ ] Syntax is clean: `php -l` on changed files (or `find app -name '*.php' -print0 | xargs -0 -n1 php -l`).
+- [ ] Tests pass: `php artisan test` (or `vendor/bin/pest` / `vendor/bin/phpunit`).
+- [ ] Formatting passes: `vendor/bin/pint --test`.
+- [ ] Static analysis passes: `vendor/bin/phpstan analyse` (Larastan) or `vendor/bin/psalm` if configured.
 - [ ] New behavior has focused test coverage, at least the happy path and the highest-risk failure path.
-- [ ] Database changes include versioned migrations (or reviewed SQL) and any needed seed/fixture data.
-- [ ] Input validation and authorization are implemented at the boundary.
+- [ ] Database changes include a migration (and factory/seeder updates where relevant).
+- [ ] Input validation is via a Form Request (or explicit validator) and authorization via a Policy/Gate.
+- [ ] No N+1 queries introduced (`with()`/`load()` used for relationships accessed in loops).
 - [ ] No OWASP Top 10 risk was introduced.
 - [ ] Code was self-reviewed against `.cursor/GOLDEN-PRINCIPLES.md`.
 
@@ -43,7 +42,8 @@ All Standard items, plus:
 - [ ] Living specs updated when architecture, API behavior, database schema, or user-facing workflows changed.
 - [ ] No unresolved TODO/FIXME/HACK comments remain in changed source files.
 - [ ] Public documentation updated for user-facing changes.
-- [ ] Cron/worker/queue, cache, and migration impacts are documented when applicable.
+- [ ] Queue/job, cache, scheduled-command (`app/Console/Kernel.php` or `routes/console.php`), and migration impacts are documented when applicable.
+- [ ] If this release includes a major Laravel version bump or changes queued job payload shapes, queues are drained/compatible before deploying (mixed-version job payloads across a Laravel major upgrade can fail).
 
 ## Command Selection
 
@@ -52,18 +52,18 @@ Prefer the command already used by the project:
 ```bash
 composer validate --strict
 composer audit
-composer test           # or: vendor/bin/phpunit / vendor/bin/pest
-composer lint           # or: vendor/bin/php-cs-fixer fix --dry-run --diff / vendor/bin/phpcs
-composer analyse        # or: vendor/bin/phpstan analyse / vendor/bin/psalm
+php artisan test          # or: vendor/bin/pest / vendor/bin/phpunit
+php artisan test --parallel  # preferred for larger suites when brianium/paratest is configured
+vendor/bin/pint --test
+vendor/bin/phpstan analyse  # Larastan
 php -l path/to/File.php
 ```
 
-For server-rendered frontend work (PHP templates + HTML/CSS), run the project-specific checks only if tooling exists:
+For frontend work (Blade, Livewire, Inertia, or a Vite-built SPA), run the project-specific checks only if tooling exists:
 
 ```bash
-<html-or-template-lint-command>
-<css-lint-command>
-<frontend-build-command>
+npm run build
+npm run lint
 ```
 
 Otherwise verify markup manually: valid HTML5, semantic structure, and the accessibility rules in `.cursor/skills/wcag-accessibility/`.

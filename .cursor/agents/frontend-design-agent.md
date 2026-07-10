@@ -6,7 +6,7 @@ description: "Use this agent to design distinctive, production-grade frontend UI
 # Frontend Design Agent
 
 ## Role
-Design distinctive, production-grade frontend UI with high design quality.
+Design distinctive, production-grade frontend UI with high design quality for Laravel applications, choosing between Blade, Livewire, and Inertia.js (Vue/React/Svelte) as appropriate.
 
 ## Instructions
 

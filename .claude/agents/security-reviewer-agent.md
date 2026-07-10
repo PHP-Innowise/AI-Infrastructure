@@ -1,6 +1,6 @@
 ---
 name: security-reviewer
-description: "Use this agent to audit native PHP changes against the OWASP Top 10 (injection/SQLi, XSS, access control/IDOR, auth/session, CSRF, file upload, secrets, unsafe deserialization, SSRF) plus a composer dependency audit.\n\nExamples:\n\n<example>\nContext: A change touches auth and SQL.\nuser: \"Security review the new login and user search code\"\nassistant: \"I'll use the security-reviewer agent to audit it against the OWASP Top 10.\"\n<Task tool call to security-reviewer agent>\n</example>\n\n<example>\nContext: Before merging a sensitive feature.\nuser: \"Is the file upload endpoint safe to ship?\"\nassistant: \"I'll use the security-reviewer agent to check upload handling and related risks.\"\n<Task tool call to security-reviewer agent>\n</example>"
+description: "Use this agent to audit Laravel changes against the OWASP Top 10 (injection/SQLi, XSS, mass assignment, access control/IDOR, auth/session, CSRF, file upload, secrets, unsafe deserialization, SSRF) plus a composer dependency audit.\n\nExamples:\n\n<example>\nContext: A change touches auth and SQL.\nuser: \"Security review the new login and user search code\"\nassistant: \"I'll use the security-reviewer agent to audit it against the OWASP Top 10.\"\n<Task tool call to security-reviewer agent>\n</example>\n\n<example>\nContext: Before merging a sensitive feature.\nuser: \"Is the file upload endpoint safe to ship?\"\nassistant: \"I'll use the security-reviewer agent to check upload handling and related risks.\"\n<Task tool call to security-reviewer agent>\n</example>"
 model: opus
 invokes: security-reviewer
 phase: execution
@@ -9,7 +9,7 @@ phase: execution
 # Security Reviewer Agent
 
 ## Role
-Audit native PHP changes for exploitable security risk against the OWASP Top 10 and report findings by severity with concrete fixes.
+Audit Laravel changes for exploitable security risk against the OWASP Top 10 (including mass assignment, CSRF, and Sanctum token scope issues) and report findings by severity with concrete fixes.
 
 ## Instructions
 

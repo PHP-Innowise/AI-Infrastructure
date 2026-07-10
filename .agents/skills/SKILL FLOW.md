@@ -1,6 +1,6 @@
 # Skill Flow
 
-This flow keeps native PHP work structured while preserving user control. Agents suggest the next command but do not automatically chain.
+This flow keeps Laravel work structured while preserving user control. Agents suggest the next command but do not automatically chain.
 
 ## Main Flow
 
@@ -16,7 +16,7 @@ This flow keeps native PHP work structured while preserving user control. Agents
   -> /writing-plans
   -> /git-worktrees
   -> /architecture-implementer   (scaffold the decided structure)
-  -> /coder or /coder-frontend
+  -> /coder or /coder-frontend or /filament (admin panel work)
   -> /code-reviewer
   -> /security-reviewer (for security-sensitive changes)
   -> /test-generator
@@ -27,12 +27,13 @@ This flow keeps native PHP work structured while preserving user control. Agents
 
 ## Shortcuts
 
-- Use `/coder` directly for small, well-understood native PHP fixes.
+- Use `/coder` directly for small, well-understood Laravel fixes.
 - Use `/researcher` before `/council` or `/architect` when you need sourced evidence.
 - Use `/council` when a decision has real, competing trade-offs.
 - Use `/architecture-implementer` to turn an `/architect` decision into a compiling skeleton before `/coder`.
 - Use `/database-designer` before `/coder` when schema, keys, or indexing are unclear.
 - Use `/api-designer` before `/coder` when route, request, response, or error contracts are unclear.
+- Use `/filament` for admin-panel/internal-tooling CRUD screens; use `/coder-frontend` for customer-facing UI even on the same project.
 - Use `/test-generator` after `/coder` when coverage is missing.
 - Use `/refactorer` for behavior-preserving cleanup under a test safety net.
 - Use `/security-reviewer` for auth, input-handling, SQL, upload, or secret-touching changes.
@@ -47,7 +48,7 @@ This flow keeps native PHP work structured while preserving user control. Agents
 | --- | --- |
 | Understanding | `/requirements-analyst`, `/researcher`, `/brainstorm` |
 | Planning | `/council`, `/architect`, `/database-designer`, `/api-designer`, `/frontend-design`, `/writing-plans` |
-| Implementation | `/git-worktrees`, `/architecture-implementer`, `/coder`, `/coder-frontend`, `/refactorer` |
+| Implementation | `/git-worktrees`, `/architecture-implementer`, `/coder`, `/coder-frontend`, `/filament`, `/refactorer` |
 | Quality | `/code-reviewer`, `/security-reviewer`, `/test-generator`, `/performance-optimization`, `/debugger`, `/verify` |
 | Finalization | `/docs-generator`, `/release`, `/finishing-branch` |
 | Utility | `/reflect`, `/skill-creator`, `/review-pr`, `/browser-verify`, `/dependency-manager` |

@@ -7,7 +7,7 @@ flow-alternatives: [security-reviewer, researcher, code-reviewer]
 
 # Dependency Manager
 
-Spawn dependency-manager agent to audit, update, and vet Composer dependencies (composer audit, outdated review, version constraints, autoload optimization, package vetting).
+Spawn dependency-manager agent to audit, update, and vet Composer dependencies for a Laravel project (composer audit, outdated review, Laravel version compatibility, autoload optimization, package vetting).
 
 ## Input
 $ARGUMENTS

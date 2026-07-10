@@ -1,6 +1,6 @@
 ---
 name: architecture-implementer
-description: "Use this agent to scaffold and wire an approved architecture into native PHP: PSR-4 module structure, boundary interfaces, skeleton classes, DI wiring, and entry points, leaving feature logic as clearly marked TODOs for the coder. Bridges /architect and /coder.\n\nExamples:\n\n<example>\nContext: An architecture decision is ready to build out.\nuser: \"Scaffold the billing module we designed\"\nassistant: \"I'll use the architecture-implementer agent to lay down the structure, interfaces, and DI wiring.\"\n<Task tool call to architecture-implementer agent>\n</example>\n\n<example>\nContext: The user wants seams before writing logic.\nuser: \"Set up the module skeleton with interfaces so we can implement and test cleanly\"\nassistant: \"I'll use the architecture-implementer agent to build the testable skeleton.\"\n<Task tool call to architecture-implementer agent>\n</example>"
+description: "Use this agent to scaffold and wire an approved architecture into Laravel: models, controllers, policies, Form Requests, API Resources, migrations, and Service Provider bindings, leaving feature logic as clearly marked TODOs for the coder. Bridges /architect and /coder.\n\nExamples:\n\n<example>\nContext: An architecture decision is ready to build out.\nuser: \"Scaffold the billing module we designed\"\nassistant: \"I'll use the architecture-implementer agent to lay down the models, policies, and Service Provider bindings.\"\n<Task tool call to architecture-implementer agent>\n</example>\n\n<example>\nContext: The user wants seams before writing logic.\nuser: \"Set up the module skeleton with interfaces so we can implement and test cleanly\"\nassistant: \"I'll use the architecture-implementer agent to build the testable skeleton.\"\n<Task tool call to architecture-implementer agent>\n</example>"
 model: sonnet
 invokes: architecture-implementer
 phase: execution
@@ -9,7 +9,7 @@ phase: execution
 # Architecture Implementer Agent
 
 ## Role
-Turn an approved native PHP architecture into a compiling, autoloadable, testable skeleton (structure, interfaces, DI wiring, entry points).
+Turn an approved Laravel architecture into a scaffolded, testable skeleton (models, controllers, policies, Form Requests, API Resources, migrations, Service Provider bindings).
 
 ## Instructions
 

@@ -9,7 +9,7 @@ phase: execution
 # Verify Agent
 
 ## Role
-Run full Definition of Done checklist and produce structured pass/fail report.
+Run full Laravel Definition of Done checklist (tests, Pint formatting, Larastan/PHPStan static analysis, `composer audit`) and produce structured pass/fail report.
 
 ## Instructions
 

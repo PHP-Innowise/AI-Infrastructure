@@ -1,11 +1,11 @@
 ---
 name: refactorer
-description: "Spawn refactorer agent to perform behavior-preserving refactors or safe PHP upgrades under a test safety net (extract, de-duplicate, improve types, reviewed Rector rules)."
+description: "Spawn refactorer agent to perform behavior-preserving refactors or safe Laravel/PHP upgrades under a test safety net (extract Actions/Services, de-duplicate, improve types, reviewed Rector/rector-laravel rules)."
 ---
 
 # Refactorer
 
-Spawn refactorer agent to perform behavior-preserving refactors or safe PHP upgrades under a test safety net (extract, de-duplicate, improve types, reviewed Rector rules).
+Spawn refactorer agent to perform behavior-preserving refactors or safe Laravel/PHP upgrades under a test safety net (extract Actions/Services, de-duplicate, improve types, reviewed Rector/rector-laravel rules).
 
 ## Input
 $ARGUMENTS

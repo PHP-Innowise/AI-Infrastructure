@@ -1,11 +1,11 @@
 ---
 name: performance-optimization
-description: "Spawn performance-optimization agent to baseline, profile, fix the top hotspots (N+1/PDO, caching, memory, OPcache/JIT), and re-measure a native PHP performance problem."
+description: "Spawn performance-optimization agent to baseline, profile (Telescope/Debugbar/Pulse), fix the top hotspots (N+1 Eloquent queries, caching, memory, OPcache/JIT), and re-measure a Laravel performance problem."
 ---
 
 # Performance Optimization
 
-Spawn performance-optimization agent to baseline, profile, fix the top hotspots (N+1/PDO, caching, memory, OPcache/JIT), and re-measure a native PHP performance problem.
+Spawn performance-optimization agent to baseline, profile (Telescope/Debugbar/Pulse), fix the top hotspots (N+1 Eloquent queries, caching, memory, OPcache/JIT), and re-measure a Laravel performance problem.
 
 ## Input
 $ARGUMENTS

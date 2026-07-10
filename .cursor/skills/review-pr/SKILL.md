@@ -68,8 +68,10 @@ Review the diff against these categories (same rigor as the code-reviewer skill)
 **Major (should fix):**
 - Bugs and logic errors
 - Missing error handling
-- Performance problems (N+1 queries, unbounded loops)
-- Missing validation on external input
+- Performance problems (N+1 queries missing eager loading via `with()`/`load()`, unbounded loops)
+- Missing input validation via Form Requests (validation logic inlined in controllers instead)
+- Missing or incorrect Policy/Gate authorization checks on protected actions
+- Unsafe migrations (no rollback path in `down()`, destructive schema changes without a data migration plan)
 - Breaking changes without migration path
 
 **Minor (consider fixing):**

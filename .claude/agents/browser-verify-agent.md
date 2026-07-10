@@ -1,6 +1,6 @@
 ---
 name: browser-verify
-description: "Use this agent to visually verify UI changes in a running native PHP app. Opens the app with the available browser tooling, observes behavior, catches errors, and reports evidence.\n\nExamples:\n\n<example>\nContext: The user implemented a frontend feature and wants to verify it visually.\nuser: \"Check if the login form looks correct in the browser\"\nassistant: \"I'll use the browser-verify agent to visually verify the UI.\"\n<Task tool call to browser-verify agent>\n</example>\n\n<example>\nContext: The user wants to verify a UI fix works.\nuser: \"Open the app and check if the button alignment is fixed\"\nassistant: \"I'll use the browser-verify agent to verify the fix in the browser.\"\n<Task tool call to browser-verify agent>\n</example>"
+description: "Use this agent to visually verify UI changes in a running Laravel app (Blade, Livewire, or Inertia.js). Opens the app with the available browser tooling, observes behavior, catches errors, and reports evidence.\n\nExamples:\n\n<example>\nContext: The user implemented a frontend feature and wants to verify it visually.\nuser: \"Check if the login form looks correct in the browser\"\nassistant: \"I'll use the browser-verify agent to visually verify the UI.\"\n<Task tool call to browser-verify agent>\n</example>\n\n<example>\nContext: The user wants to verify a UI fix works.\nuser: \"Open the app and check if the button alignment is fixed\"\nassistant: \"I'll use the browser-verify agent to verify the fix in the browser.\"\n<Task tool call to browser-verify agent>\n</example>"
 model: sonnet
 invokes: browser-verify
 phase: execution
@@ -9,7 +9,7 @@ phase: execution
 # Browser Verify Agent
 
 ## Role
-Visually verify UI changes in the running native PHP app using the available browser verification tooling.
+Visually verify UI changes in the running Laravel app (Blade pages, Livewire components, or Inertia.js pages) using the available browser verification tooling.
 
 ## Instructions
 

@@ -1,11 +1,11 @@
 ---
 name: architect
-description: "Spawn architect agent to make native PHP system architecture decisions (layering, boundaries, dependency direction, persistence, async, scalability, security)."
+description: "Spawn architect agent to make Laravel architecture decisions (Actions vs Services vs model logic, Eloquent boundaries, Service Provider bindings, queues/async, scalability, security)."
 ---
 
 # Architect
 
-Spawn architect agent to make native PHP system architecture decisions (layering, boundaries, dependency direction, persistence, async, scalability, security).
+Spawn architect agent to make Laravel architecture decisions (Actions vs Services vs model logic, Eloquent boundaries, Service Provider bindings, queues/async, scalability, security).
 
 ## Input
 $ARGUMENTS

@@ -7,7 +7,7 @@ flow-alternatives: [coder, coder-frontend]
 
 # Systematic Debugger
 
-Spawn systematic-debugger agent to find root cause before fixing bugs.
+Spawn systematic-debugger agent to find root cause before fixing bugs in a Laravel application.
 
 ## Input
 $ARGUMENTS

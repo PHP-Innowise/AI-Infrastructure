@@ -66,7 +66,7 @@ Choose where the rule belongs:
 | Scope | File | When |
 |-------|------|------|
 | Global policy | `AGENTS.md` | Applies to all agents and skills |
-| Code style | `.claude/GOLDEN-PRINCIPLES.md` | Naming, native PHP/PSR conventions, error handling, tests |
+| Code style | `.claude/GOLDEN-PRINCIPLES.md` | Naming, Laravel conventions, error handling, tests |
 | Specific skill | `.claude/skills/{name}/SKILL.md` | Only relevant to one skill's workflow |
 | Process | `.claude/STABILIZATION.md` | Add as example cycle for future reference |
 

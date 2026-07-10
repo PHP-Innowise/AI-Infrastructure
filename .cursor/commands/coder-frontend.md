@@ -1,11 +1,11 @@
 ---
 name: coder-frontend
-description: "Spawn coder-frontend agent to implement frontend features."
+description: "Spawn coder-frontend agent to implement frontend features using Blade, Livewire, or Inertia.js."
 ---
 
 # Coder Frontend
 
-Spawn coder-frontend agent to implement frontend features.
+Spawn coder-frontend agent to implement frontend features using Blade, Livewire, or Inertia.js.
 
 ## Input
 $ARGUMENTS

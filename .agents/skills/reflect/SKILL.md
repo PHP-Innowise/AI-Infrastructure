@@ -66,8 +66,8 @@ Choose where the rule belongs:
 | Scope | File | When |
 |-------|------|------|
 | Global policy | `AGENTS.md` | Applies to all agents and skills |
-| Code style | `.codex/GOLDEN-PRINCIPLES.md` | Naming, native PHP/PSR conventions, error handling, tests |
-| Specific skill | `.agents/skills/{name}/SKILL.md` | Only relevant to one skill's workflow |
+| Code style | `.codex/GOLDEN-PRINCIPLES.md` | Naming, Laravel conventions, error handling, tests |
+| Specific skill | `.codex/skills/{name}/SKILL.md` | Only relevant to one skill's workflow |
 | Process | `.codex/STABILIZATION.md` | Add as example cycle for future reference |
 
 If enforcement is automatable, also identify which hook to create/update.

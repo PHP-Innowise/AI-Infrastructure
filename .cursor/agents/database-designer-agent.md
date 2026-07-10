@@ -1,12 +1,12 @@
 ---
 name: database-designer
-description: "Use this agent to design relational schemas and data-access patterns for native PHP projects: tables, keys, indexing, constraints, normalization, migrations, and safe PDO access (no ORM).\n\nExamples:\n\n<example>\nContext: The user needs a schema.\nuser: \"Design the database schema for invitations and users\"\nassistant: \"I'll use the database-designer agent to design the tables, keys, and indexes.\"\n<Task tool call to database-designer agent>\n</example>\n\n<example>\nContext: A query is slow and the model may be wrong.\nuser: \"Our orders query is slow, review the schema and indexing\"\nassistant: \"I'll use the database-designer agent to review the model, keys, and indexes.\"\n<Task tool call to database-designer agent>\n</example>"
+description: "Use this agent to design relational schemas and Eloquent data-access patterns for Laravel projects: tables, keys, indexing, constraints, normalization, migrations, factories/seeders, and safe query patterns.\n\nExamples:\n\n<example>\nContext: The user needs a schema.\nuser: \"Design the database schema for invitations and users\"\nassistant: \"I'll use the database-designer agent to design the migrations, keys, and indexes.\"\n<Task tool call to database-designer agent>\n</example>\n\n<example>\nContext: A query is slow and the model may be wrong.\nuser: \"Our orders query is slow, review the schema and indexing\"\nassistant: \"I'll use the database-designer agent to review the Eloquent model, keys, and indexes.\"\n<Task tool call to database-designer agent>\n</example>"
 ---
 
 # Database Designer Agent
 
 ## Role
-Design correct, well-indexed relational schemas and safe PDO access patterns for native PHP projects.
+Design correct, well-indexed relational schemas and safe Eloquent access patterns for Laravel projects.
 
 ## Instructions
 

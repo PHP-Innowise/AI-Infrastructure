@@ -1,11 +1,11 @@
 ---
 name: browser-verify
-description: "Spawn browser-verify agent to visually verify UI changes in the running app."
+description: "Spawn browser-verify agent to visually verify UI changes in the running Laravel app (Blade, Livewire, or Inertia.js)."
 ---
 
 # Browser Verify
 
-Spawn browser-verify agent to visually verify UI changes in the running app.
+Spawn browser-verify agent to visually verify UI changes in the running Laravel app (Blade, Livewire, or Inertia.js).
 
 ## Input
 $ARGUMENTS

@@ -1,6 +1,6 @@
 ---
 name: verify
-description: Run the native PHP Definition of Done and report pass/fail status. Use before claiming completion, creating a PR, or merging.
+description: Run the Laravel Definition of Done and report pass/fail status. Use before claiming completion, creating a PR, or merging.
 phase: execution
 flow-next: finishing-branch
 flow-alternatives: [coder, debugger, test-generator]
@@ -11,7 +11,7 @@ related: [code-reviewer, test-generator]
 
 ## Overview
 
-Run `.cursor/DOD.md` and produce a clear pass/fail report. Do not install missing tools. Report missing tooling as `N/A - tooling not configured`. Prefer the project's Composer scripts when they exist.
+Run `.cursor/DOD.md` and produce a clear pass/fail report. Do not install missing tools. Report missing tooling as `N/A - tooling not configured`. Prefer the project's Composer/Artisan scripts when they exist. This branch targets Laravel; for framework-agnostic native PHP, use the `main` branch.
 
 ## Step 1: Determine Tier
 
@@ -35,24 +35,24 @@ Also check:
 
 ### Standard
 
-Run when files/tooling exist (prefer Composer scripts, fall back to `vendor/bin/*`):
+Run when files/tooling exist (prefer Composer/Artisan scripts, fall back to `vendor/bin/*`):
 
 ```bash
 composer validate --strict
 php -l <changed-files>
-composer test        # or vendor/bin/phpunit / vendor/bin/pest
-composer lint        # or vendor/bin/php-cs-fixer fix --dry-run --diff / vendor/bin/phpcs
-composer analyse     # or vendor/bin/phpstan analyse / vendor/bin/psalm
+php artisan test          # or vendor/bin/pest / vendor/bin/phpunit
+vendor/bin/pint --test    # Laravel Pint formatting check
+vendor/bin/phpstan analyse  # Larastan config, or vendor/bin/psalm
 ```
 
-Pick the commands that match the project. Do not run both Pest and PHPUnit if the project standardizes on one.
+Pick the commands that match the project. Do not run both Pest and PHPUnit as separate suites if the project standardizes on one (Pest can run PHPUnit-style test classes too). For larger suites, prefer `php artisan test --parallel` when the project already has `brianium/paratest` configured; do not force it onto a project that doesn't use it.
 
-If server-rendered frontend files changed and tooling exists:
+If server-rendered Blade/frontend files changed and tooling exists:
 
 ```bash
-<html-or-template-lint-command>
+<blade-or-template-lint-command>
 <css-lint-command>
-<frontend-build-command>
+<frontend-build-command>   # e.g. npm run build (Vite)
 ```
 
 ### Full
@@ -67,7 +67,8 @@ Also verify:
 - PR description has summary and test plan.
 - Changelog/specs/docs updated when required.
 - No unresolved TODO/FIXME/HACK in changed source files.
-- Migration, worker/queue, and cache impacts are documented.
+- New/changed migrations are reversible and reviewed for production data impact.
+- Queue/Horizon, cache, and config-cache impacts are documented.
 
 ## Report Template
 
@@ -81,9 +82,9 @@ Also verify:
 | --- | --- | --- |
 | Working tree | PASS | `git diff --stat` reviewed |
 | Composer | PASS | `composer validate --strict` |
-| Tests | PASS | `composer test` |
-| Formatting | N/A | php-cs-fixer not configured |
-| Static analysis | PASS | `vendor/bin/phpstan analyse` |
+| Tests | PASS | `php artisan test` |
+| Formatting | PASS | `vendor/bin/pint --test` |
+| Static analysis | PASS | `vendor/bin/phpstan analyse` (Larastan) |
 
 **Result:** PASS
 

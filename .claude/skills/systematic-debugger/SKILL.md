@@ -41,20 +41,24 @@ Use for ANY technical issue:
 - Build failures
 - Integration issues
 
-## Native PHP Debugging Toolbox
+## Laravel Debugging Toolbox
 
 Reach for the least invasive tool that answers the question:
 
-- **Read the error first.** PHP notices/warnings/exceptions carry file, line, and a stack trace. Enable `display_errors`/`error_reporting(E_ALL)` in dev; read `error_log` / the PSR-3 log otherwise.
-- **Step debugging:** Xdebug (`xdebug.mode=debug`) with breakpoints in the IDE is the fastest way to inspect state without editing code.
-- **Targeted tracing:** `var_dump()`, `var_export()`, `error_log()`, or a PSR-3 logger at the exact data-flow point identified in Phase 1 (remove before committing).
-- **Assertions:** `assert()` and typed arguments/return types surface contract violations early.
-- **Stack traces on demand:** `debug_print_backtrace()` or `(new \Exception())->getTraceAsString()`.
-- **Database:** log the actual SQL and bound parameters; run the query manually with `EXPLAIN` when results look wrong.
-- **Reproduce in a test:** encode the failing scenario as a PHPUnit/Pest test (see Phase 4) so the bug cannot silently return.
+- **Read the error first.** Laravel's exception page (local) and `storage/logs/laravel.log` carry file, line, and a full stack trace. Enable `APP_DEBUG=true` only in local/testing; never in production.
+- **REPL exploration:** `php artisan tinker` to interactively call Eloquent models, Actions, and services with real application state and config already booted.
+- **Request/query/job inspection:** Laravel Telescope shows recorded requests, executed queries (with bindings and duplicate-query flags), dispatched jobs, cache hits/misses, and exceptions in one place — usually the fastest way to see what actually happened.
+- **Targeted tracing:** `dd()`/`dump()` for quick inline inspection, `ray()` (Spatie Ray) for out-of-band debugging without polluting the response, or `Log::channel('...')->debug(...)` at the exact data-flow point identified in Phase 1 (remove before committing).
+- **Log channels:** check `storage/logs/laravel.log` and any custom channels configured in `config/logging.php`; use `Log::channel('slack')`/`stack` channels to see where an error was actually reported.
+- **Routing:** `php artisan route:list` (add `--path=` or `--name=` filters) to confirm which route, middleware stack, and controller action actually handles a request.
+- **Queues:** inspect the `failed_jobs` table (or `php artisan queue:failed`) for queued job failures, and `php artisan queue:retry` to replay after a fix; Horizon's dashboard surfaces the same data with metrics.
+- **Stack traces on demand:** `debug_print_backtrace()` or `(new \Exception())->getTraceAsString()` when a caught exception needs more context than the log gives.
+- **Database:** Telescope/Debugbar show the actual SQL and bound parameters; run the query manually with `EXPLAIN` when results look wrong.
+- **Reproduce in a test:** encode the failing scenario as a Pest/PHPUnit feature test (see Phase 4) so the bug cannot silently return.
 - **Bisect:** `git bisect` when a regression appeared but the cause is unclear.
+- **Step debugging:** Xdebug (`xdebug.mode=debug`) with breakpoints in the IDE still applies and is the fastest way to inspect state without editing code, especially for logic Telescope doesn't surface.
 
-Xdebug's profiler answers "why is it slow"; for deeper performance work, hand off to `/performance-optimization`.
+Xdebug's profiler and Laravel Pulse answer "why is it slow"; for deeper performance work, hand off to `/performance-optimization`.
 
 ## The Four Phases
 

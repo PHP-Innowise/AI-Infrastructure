@@ -1,6 +1,6 @@
 #!/bin/bash
 # Local Context Session Start Hook
-# Scans a native PHP working directory at session start.
+# Scans a Laravel working directory at session start.
 # Hook type: SessionStart
 # Exit codes: always 0 (informational only)
 
@@ -26,36 +26,44 @@ MANAGERS=""
 # PHP runtime
 command -v php > /dev/null 2>&1 && echo "PHP: $(php -r 'echo PHP_VERSION;' 2>/dev/null)"
 
+# Laravel detection
+if [ -f "artisan" ]; then
+  LARAVEL_VERSION=$(php artisan --version 2>/dev/null)
+  echo "Laravel: ${LARAVEL_VERSION:-artisan present}"
+else
+  echo ""
+  echo "NOTE: No artisan file found. This branch targets Laravel;"
+  echo "      for framework-agnostic native PHP, use the main branch."
+fi
+
 # Tooling markers
 [ -f "phpunit.xml" ] || [ -f "phpunit.xml.dist" ] && echo "Tests: PHPUnit config present"
 [ -f "tests/Pest.php" ] && echo "Tests: Pest present"
-[ -f ".php-cs-fixer.php" ] || [ -f ".php-cs-fixer.dist.php" ] && echo "Formatter: PHP-CS-Fixer config present"
-[ -f "phpcs.xml" ] || [ -f "phpcs.xml.dist" ] && echo "Formatter: PHP_CodeSniffer config present"
-[ -f "phpstan.neon" ] || [ -f "phpstan.neon.dist" ] && echo "Static analysis: PHPStan config present"
+[ -f "pint.json" ] && echo "Formatter: Pint config present"
+[ -f "phpstan.neon" ] || [ -f "phpstan.neon.dist" ] && echo "Static analysis: PHPStan/Larastan config present"
 [ -f "psalm.xml" ] || [ -f "psalm.xml.dist" ] && echo "Static analysis: Psalm config present"
 [ -f "rector.php" ] && echo "Refactoring: Rector config present"
 [ -f "phpbench.json" ] && echo "Benchmarks: PHPBench config present"
-[ -f "public/index.php" ] && echo "Entry point: public/index.php (front controller)"
-[ -f "Makefile" ] && echo "Build system: Make"
+[ -f "public/index.php" ] && echo "Entry point: public/index.php (Laravel front controller)"
 [ -f "Dockerfile" ] || [ -f "docker-compose.yml" ] || [ -f "compose.yaml" ] && echo "Containers: Docker present"
+[ -f "vite.config.js" ] || [ -f "vite.config.ts" ] && echo "Frontend build: Vite present"
 
-# Framework detection: this base branch targets native PHP.
-# If a framework is present, prefer the matching accelerator branch.
-FRAMEWORK=""
-[ -f "artisan" ] && FRAMEWORK="Laravel"
-[ -f "bin/console" ] && FRAMEWORK="Symfony"
-if grep -qi "cakephp/cakephp" composer.json 2>/dev/null; then FRAMEWORK="CakePHP"; fi
-if grep -qi "yiisoft/yii2" composer.json 2>/dev/null; then FRAMEWORK="Yii"; fi
-if [ -n "$FRAMEWORK" ]; then
+# Frontend stack detection (informational)
+STACK=""
+if grep -q '"livewire/livewire"' composer.json 2>/dev/null; then STACK="Livewire"; fi
+if grep -q '"inertiajs/inertia-laravel"' composer.json 2>/dev/null; then STACK="Inertia"; fi
+[ -n "$STACK" ] && echo "Frontend stack: $STACK"
+
+# Other frameworks present alongside Laravel (unexpected, worth flagging)
+if [ -f "bin/console" ]; then
   echo ""
-  echo "NOTE: $FRAMEWORK detected. This is the native-PHP base branch."
-  echo "      For framework-specific conventions, switch to the matching accelerator branch."
+  echo "NOTE: Symfony console detected alongside Laravel. Verify project intent."
 fi
 
 # Project structure
 echo ""
 echo "Structure:"
-for DIR in src app public config bin templates views tests specs tasks examples .codex; do
+for DIR in app bootstrap config database public resources routes storage tests specs tasks examples .claude; do
   if [ -d "$DIR" ]; then
     COUNT=$(find "$DIR" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
     echo "  $DIR/ ($COUNT files)"

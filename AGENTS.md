@@ -1,8 +1,8 @@
 # AGENTS.md - Policy Rules
 
-These are enforceable rules for the native PHP accelerator. Wishes are ignored; constraints are enforced.
+These are enforceable rules for the Laravel accelerator. Wishes are ignored; constraints are enforced.
 
-This is the universal base. It assumes plain, framework-agnostic PHP (Composer + PSR standards). Framework-specific behavior (Laravel, Symfony, etc.) lives in dedicated branches, not here. If the working project is built on a framework, prefer the matching framework branch of this accelerator.
+This branch targets **Laravel** as the default backend framework. It assumes Composer + a current Laravel LTS release, Eloquent, Artisan, and the Laravel ecosystem's conventional packages. The framework-agnostic native-PHP base lives on `main`; other frameworks (Symfony, etc.) belong on their own dedicated branches.
 
 This policy is shared across editions. The same accelerator is mirrored for **Claude Code** (`.claude/`), **Cursor** (`.cursor/`), and **Codex** (`.agents/skills` + `.codex/`). Below, paths like `<edition>/hooks` and `<edition>/skills` refer to whichever edition is active.
 
@@ -31,18 +31,19 @@ This policy is shared across editions. The same accelerator is mirrored for **Cl
 - MUST NOT make workflow decisions for the user when a command is supposed to offer alternatives.
 - MUST read relevant PHP code, autoload config, routes/entry points, database access, tests, and specs before modifying behavior.
 
-## PHP Code Quality
+## Laravel Code Quality
 
-- MUST target the project's declared PHP version and follow PSR-1, PSR-12, and PER Coding Style.
-- MUST use `declare(strict_types=1);` in new PHP files.
+- MUST target the project's declared PHP and Laravel version and follow PSR-12 / PER Coding Style (enforced via Pint).
+- MUST use `declare(strict_types=1);` in new PHP files and add return/property types.
 - MUST autoload via Composer PSR-4; MUST NOT add manual `require` chains for application classes.
-- MUST validate and normalize external input at the boundary with explicit validators, value objects, or typed DTOs.
-- MUST authorize protected actions through an explicit access-control layer, not by hiding UI or relying on obscurity.
-- MUST keep entry points (controllers/handlers/commands) thin; move multi-step behavior into services or use-case classes.
-- MUST access the database through PDO (or a documented data layer) with prepared statements and bound parameters.
-- MUST depend on abstractions (interfaces) at boundaries and inject dependencies rather than using globals or `new` for collaborators.
-- MUST manage schema changes through versioned migrations or reviewed SQL, never ad-hoc production edits.
-- MUST document a stable response contract (serializers/DTOs) for public APIs.
+- MUST validate external input via Form Requests (or equivalent explicit validators), not inline in controllers.
+- MUST authorize protected actions through Policies/Gates, not by hiding UI or relying on obscurity.
+- MUST keep controllers thin; move multi-step business logic into Actions, Services, or the model layer as the project's convention dictates.
+- MUST access the database through Eloquent or the query builder with bound parameters; MUST NOT concatenate untrusted input into raw SQL.
+- MUST depend on abstractions (interfaces bound in a Service Provider) at integration boundaries rather than `new`-ing concrete external clients.
+- MUST manage schema changes through versioned Artisan migrations, never ad-hoc production edits.
+- MUST document a stable response contract via API Resources for public APIs.
+- MUST use Eloquent relationships and eager loading (`with()`/`load()`) to avoid N+1 queries.
 
 ## Verification
 
@@ -77,5 +78,5 @@ This policy is shared across editions. The same accelerator is mirrored for **Cl
 
 ## Definition Of Done
 
-- See the active edition's `DOD.md` (`.claude/`, `.cursor/`, or `.codex/`) for the tiered native PHP verification checklist.
+- See the active edition's `DOD.md` (`.claude/`, `.cursor/`, or `.codex/`) for the tiered Laravel verification checklist.
 - MUST include verification evidence in final Context Summary when implementation work is performed.

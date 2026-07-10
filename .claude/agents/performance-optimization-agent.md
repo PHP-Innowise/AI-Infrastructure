@@ -1,6 +1,6 @@
 ---
 name: performance-optimization
-description: "Use this agent to diagnose and fix performance problems in native PHP applications with a measure-first workflow. Covers baselining, profiling (Xdebug/SPX/Blackfire/Tideways), N+1 and PDO tuning, caching, memory, and OPcache/JIT.\n\nExamples:\n\n<example>\nContext: An endpoint is slow.\nuser: \"The /reports page takes 4 seconds, make it faster\"\nassistant: \"I'll use the performance-optimization agent to baseline, profile, and fix the top hotspots.\"\n<Task tool call to performance-optimization agent>\n</example>\n\n<example>\nContext: A CLI script uses too much memory.\nuser: \"This import script runs out of memory on large files\"\nassistant: \"I'll use the performance-optimization agent to profile memory and stream the data.\"\n<Task tool call to performance-optimization agent>\n</example>"
+description: "Use this agent to diagnose and fix performance problems in Laravel applications with a measure-first workflow. Covers baselining, profiling (Telescope/Debugbar/Pulse/Xdebug/Blackfire), N+1 Eloquent query and caching tuning, memory, and OPcache/JIT.\n\nExamples:\n\n<example>\nContext: An endpoint is slow.\nuser: \"The /reports page takes 4 seconds, make it faster\"\nassistant: \"I'll use the performance-optimization agent to baseline, profile, and fix the top hotspots.\"\n<Task tool call to performance-optimization agent>\n</example>\n\n<example>\nContext: A CLI script uses too much memory.\nuser: \"This import script runs out of memory on large files\"\nassistant: \"I'll use the performance-optimization agent to profile memory and stream the data with chunk()/cursor().\"\n<Task tool call to performance-optimization agent>\n</example>"
 model: sonnet
 invokes: performance-optimization
 phase: execution
@@ -9,7 +9,7 @@ phase: execution
 # Performance Optimization Agent
 
 ## Role
-Diagnose and fix native PHP performance problems using a measure-first workflow (baseline, profile, targeted fix, re-measure).
+Diagnose and fix Laravel performance problems using a measure-first workflow (baseline with Telescope/Debugbar/Pulse, profile, targeted fix, re-measure).
 
 ## Instructions
 

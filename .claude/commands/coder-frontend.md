@@ -7,7 +7,7 @@ flow-alternatives: [browser-verify, test-generator]
 
 # Coder Frontend
 
-Spawn coder-frontend agent to implement frontend features.
+Spawn coder-frontend agent to implement frontend features using Blade, Livewire, or Inertia.js.
 
 ## Input
 $ARGUMENTS

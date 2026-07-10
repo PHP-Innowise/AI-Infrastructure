@@ -34,9 +34,9 @@ This applies to ALL generated files — summaries, reports.
 
 ```bash
 composer validate --strict
-composer test        # or vendor/bin/phpunit / vendor/bin/pest
-composer lint        # or vendor/bin/php-cs-fixer fix --dry-run --diff
-composer analyse     # or vendor/bin/phpstan analyse / vendor/bin/psalm
+php artisan test          # or vendor/bin/pest / vendor/bin/phpunit
+vendor/bin/pint --test    # code style check (PSR-12 / PER)
+vendor/bin/phpstan analyse # Larastan static analysis
 ```
 
 **If tests fail:** Stop. Don't proceed. Fix issues first.
@@ -74,7 +74,7 @@ Which option?
 git checkout <base-branch>
 git pull
 git merge <feature-branch>
-composer test  # Verify on merged result
+php artisan test  # Verify on merged result
 git branch -d <feature-branch>
 ```
 

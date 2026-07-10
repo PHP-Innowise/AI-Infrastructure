@@ -6,7 +6,7 @@ description: "Use this agent to run the full Definition of Done checklist before
 # Verify Agent
 
 ## Role
-Run full Definition of Done checklist and produce structured pass/fail report.
+Run full Laravel Definition of Done checklist (tests, Pint formatting, Larastan/PHPStan static analysis, `composer audit`) and produce structured pass/fail report.
 
 ## Instructions
 

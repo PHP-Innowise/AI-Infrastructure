@@ -7,15 +7,16 @@ alwaysApply: true
 
 ## Security
 - Never read, print, edit, or commit `.env` files or secrets.
-- Use parameterized queries; never concatenate untrusted input into SQL.
-- Escape output in templates (XSS); use CSRF protection for state-changing web requests.
-- Validate file uploads by type, size, storage location, and visibility.
+- Use Eloquent/query builder bound parameters; never concatenate untrusted input into raw SQL.
+- Rely on Blade's default `{{ }}` escaping for untrusted output; never disable it (`{!! !!}`) for user-controlled data. Keep `@csrf` on state-changing forms.
+- Enforce authorization server-side via Policies/Gates, not by hiding UI controls.
+- Validate file uploads by type, size, storage disk/visibility, and filename handling.
 - Avoid `eval`, unsafe `unserialize` of untrusted data, and dynamic includes of untrusted paths.
 - Do not introduce OWASP Top 10 vulnerabilities.
 
 ## Git Safety
 - Never skip hooks with `--no-verify`.
-- Never force-push, hard-reset, or drop database tables without explicit user consent.
+- Never force-push, hard-reset, or run destructive Artisan commands (`migrate:fresh`, `migrate:reset`, `db:wipe`) without explicit user consent.
 - Never overwrite unrelated user changes.
 
 ## Verification (Definition of Done)

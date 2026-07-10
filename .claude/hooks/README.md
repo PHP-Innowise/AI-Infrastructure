@@ -4,7 +4,7 @@
 
 ### SessionStart: Local Context Scanner
 **Script:** `local-context.sh`
-**Purpose:** Outputs project context at session start: git branch, Composer markers, PHP version, configured test/format/static-analysis tools, framework detection (with a note to use the matching branch), and project structure.
+**Purpose:** Outputs project context at session start: git branch, Composer markers, PHP/Laravel version (via `artisan --version`), configured test/format/static-analysis tools, Livewire/Inertia detection, and project structure.
 **Return:** Always 0 (informational only)
 
 ### PreToolUse (Write|Edit): File Naming Validator
@@ -15,7 +15,7 @@
 
 ### PreToolUse (Bash): Bash Validator
 **Script:** `bash-validator.sh`
-**Purpose:** Blocks destructive commands: force-push, hard reset, database drops/truncates, destructive migration resets/rollbacks, secret-writing Composer config, and `--no-verify`.
+**Purpose:** Blocks destructive commands: force-push, hard reset, database drops/truncates, destructive `artisan migrate:*` resets/rollbacks/`db:wipe`, forced production seeding, secret-writing Composer config, and `--no-verify`.
 **Return:** 0 = safe command, 2 = block
 
 ### PostToolUse (Edit): Loop Detection

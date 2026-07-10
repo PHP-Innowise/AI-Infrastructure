@@ -1,11 +1,11 @@
 ---
 name: debugger
-description: "Spawn systematic-debugger agent to find root cause before fixing bugs."
+description: "Spawn systematic-debugger agent to find root cause before fixing bugs in a Laravel application."
 ---
 
 # Systematic Debugger
 
-Spawn systematic-debugger agent to find root cause before fixing bugs.
+Spawn systematic-debugger agent to find root cause before fixing bugs in a Laravel application.
 
 ## Input
 $ARGUMENTS

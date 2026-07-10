@@ -1,11 +1,11 @@
 ---
 name: code-reviewer
-description: "Spawn code-reviewer agent to review code for quality and issues."
+description: "Spawn code-reviewer agent to review Laravel code for quality and issues."
 ---
 
 # Code Reviewer
 
-Spawn code-reviewer agent to review code for quality and issues.
+Spawn code-reviewer agent to review Laravel code for quality and issues.
 
 ## Input
 $ARGUMENTS

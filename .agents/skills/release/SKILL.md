@@ -1,6 +1,6 @@
 ---
 name: release
-description: Prepare native PHP project releases with changelog generation, version tags, and optional GitHub publishing. Use when creating a release, generating changelogs, tagging versions, or publishing release notes.
+description: Prepare Laravel project releases with changelog generation, version tags, and optional GitHub publishing. Use when creating a release, generating changelogs, tagging versions, or publishing release notes.
 phase: finalization
 flow-next: finishing-branch
 flow-alternatives: []
@@ -65,7 +65,7 @@ git diff --name-only <last-tag>..HEAD
 
 **Categorize commits** using the bundled script:
 ```bash
-python3 .agents/skills/release/scripts/categorize_commits.py /tmp/commits.txt
+python3 .codex/skills/release/scripts/categorize_commits.py /tmp/commits.txt
 ```
 
 The script categorizes commits into:
@@ -145,6 +145,20 @@ Update CHANGELOG.md with this entry? (yes/no)
 **Write the file** only after confirmation.
 
 ### Step 5: Publish Release
+
+**Verify the release branch is green before tagging.** Run the project's Laravel verification commands and confirm they pass:
+
+```bash
+php artisan test        # or vendor/bin/pest / vendor/bin/phpunit
+vendor/bin/pint --test
+vendor/bin/phpstan analyse
+```
+
+If any check fails, stop and fix it before continuing — never tag a release on top of a failing test suite or static analysis run.
+
+**Also confirm deployment readiness:**
+- If this release includes a Laravel major-version bump, verify no queued jobs are in-flight with a payload shape incompatible with the new version (drain the queue, or keep a compatible worker running through the cutover).
+- Verify the deploy process invalidates and regenerates config/route/view caches (`config:cache`, `route:cache`, `view:cache`) rather than leaving them stale from before the deploy.
 
 **Commit, tag, and optionally publish** the release. First determine the active release branch:
 

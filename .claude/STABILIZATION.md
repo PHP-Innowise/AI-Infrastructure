@@ -13,7 +13,7 @@ Incident -> Root Cause -> Rule -> Example -> Enforcement -> Verification
 - The same mistake happens more than once.
 - A user correction reveals a missing rule.
 - A hook blocks too much or too little.
-- A native PHP convention (PSR, boundary validation, parameterized queries) is violated repeatedly.
+- A Laravel convention (Form Request validation, Policy authorization, Eloquent parameter binding) is violated repeatedly.
 - A workflow handoff is confusing.
 
 ## Rule Template
@@ -31,37 +31,37 @@ Incident -> Root Cause -> Rule -> Example -> Enforcement -> Verification
 **Added:** YYYY-MM-DD
 ```
 
-## Native PHP Examples
+## Laravel Examples
 
-### Rule: Validate At The Boundary
+### Rule: Validate Via Form Requests
 
-**Trigger:** A handler used raw request data directly.
-**Root cause:** Skill guidance did not require validating/normalizing input into a typed DTO.
-**Rule:** MUST validate and normalize input into a typed request DTO/value object before using it.
+**Trigger:** A controller read `$request->input(...)` directly and acted on it without validation.
+**Root cause:** Skill guidance did not require a Form Request at the boundary.
+**Rule:** MUST validate input via a Form Request (or explicit validator) before using it in a controller.
 **Example:**
-- Incorrect: `$this->createUser->handle($request->getParsedBody())`
-- Correct: `$this->createUser->handle(CreateUserRequest::fromArray((array) $request->getParsedBody()))`
+- Incorrect: `$user = User::create($request->all());`
+- Correct: `$user = User::create($request->validated());` with a `StoreUserRequest` defining the rules.
 **Enforcement:** `AGENTS.md`, `coder` skill, code review checklist.
 
 ### Rule: Authorization Is Server-Side
 
 **Trigger:** A UI button was hidden, but the endpoint was still callable.
 **Root cause:** Authorization was treated as a frontend concern.
-**Rule:** MUST enforce protected actions in an explicit server-side access-control layer.
+**Rule:** MUST enforce protected actions via a Policy or Gate checked in the controller/Action, not by hiding UI.
 **Example:**
 - Incorrect: hide the Delete button only.
-- Correct: check `$accessControl->assertCan($user, 'delete', $resource)` in the handler/use case.
+- Correct: `$this->authorize('delete', $post);` (or `Gate::authorize(...)`) before acting.
 **Enforcement:** `AGENTS.md`, `architect`, `coder`, `code-reviewer`.
 
-### Rule: Queries Must Be Parameterized
+### Rule: Avoid N+1 Queries
 
-**Trigger:** A query concatenated user input into SQL.
-**Root cause:** No rule mandated prepared statements.
-**Rule:** MUST use PDO prepared statements with bound parameters; never concatenate untrusted input into SQL.
+**Trigger:** A Blade view or API Resource looped over a relationship inside a collection, issuing one query per row.
+**Root cause:** No eager loading was applied before the loop.
+**Rule:** MUST eager-load relationships (`with()`/`load()`) that will be accessed across a collection.
 **Example:**
-- Incorrect: `$pdo->query("SELECT * FROM users WHERE email = '$email'")`
-- Correct: `$stmt = $pdo->prepare('SELECT * FROM users WHERE email = :email'); $stmt->execute(['email' => $email]);`
-**Enforcement:** `AGENTS.md`, `coder`, `code-reviewer`, `security-reviewer`.
+- Incorrect: `Post::all()` then `$post->author->name` inside the view loop.
+- Correct: `Post::with('author')->get()` before the loop.
+**Enforcement:** `AGENTS.md`, `coder`, `performance-optimization`, `code-reviewer`.
 
 ## Verification
 

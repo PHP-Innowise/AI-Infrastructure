@@ -1,6 +1,6 @@
 ---
 name: code-reviewer
-description: "Use this agent to review code for quality, standards compliance, security issues, and performance problems. Essential after implementation to ensure code quality.\n\nExamples:\n\n<example>\nContext: The user wants code reviewed.\nuser: \"Review the changes in my authentication module\"\nassistant: \"I'll use the code-reviewer agent to analyze the code for quality and issues.\"\n<Task tool call to code-reviewer agent>\n</example>\n\n<example>\nContext: The user wants to check for security issues.\nuser: \"Check this code for security vulnerabilities\"\nassistant: \"I'll use the code-reviewer agent to review for security and quality issues.\"\n<Task tool call to code-reviewer agent>\n</example>"
+description: "Use this agent to review Laravel code for quality, standards compliance, security issues, and performance problems. Essential after implementation to ensure code quality.\n\nExamples:\n\n<example>\nContext: The user wants code reviewed.\nuser: \"Review the changes in my authentication module\"\nassistant: \"I'll use the code-reviewer agent to analyze the code for quality and issues.\"\n<Task tool call to code-reviewer agent>\n</example>\n\n<example>\nContext: The user wants to check for security issues.\nuser: \"Check this code for security vulnerabilities\"\nassistant: \"I'll use the code-reviewer agent to review for security and quality issues.\"\n<Task tool call to code-reviewer agent>\n</example>"
 model: opus
 invokes: code-reviewer
 phase: execution
@@ -9,7 +9,7 @@ phase: execution
 # Code Reviewer Agent
 
 ## Role
-Review code for quality, standards compliance, security issues, and performance problems.
+Review Laravel code for quality, standards compliance (Form Requests, Policies, Eloquent conventions), security issues, and performance problems.
 
 ## Instructions
 

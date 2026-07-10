@@ -1,6 +1,6 @@
 ---
 name: council
-description: Convene a multi-perspective advisory council for high-stakes or ambiguous native PHP decisions. Use when a choice has significant trade-offs (architecture, security, performance, testing, maintainability, cost) and one viewpoint is not enough. Triggers on "council", "get multiple perspectives", "weigh trade-offs", "which approach", "decision".
+description: Convene a multi-perspective advisory council for high-stakes or ambiguous Laravel decisions. Use when a choice has significant trade-offs (architecture, security, performance, testing, maintainability, cost) and one viewpoint is not enough. Triggers on "council", "get multiple perspectives", "weigh trade-offs", "which approach", "decision".
 phase: planning
 flow-next: architect
 flow-alternatives: [writing-plans, researcher, architecture-implementer]
@@ -13,7 +13,7 @@ related: [architect, researcher, security-reviewer, performance-optimization]
 
 Simulate a panel of senior specialists debating one decision, then synthesize a recommendation. The value is surfacing the strongest argument from each viewpoint plus the disagreements, so the user decides with full context.
 
-Use this for decisions that are expensive to reverse: architecture boundaries, persistence strategy, sync vs. async, build vs. buy, framework/library selection, data model, rollout strategy.
+Use this for decisions that are expensive to reverse: architecture boundaries, persistence strategy, queued job vs. synchronous execution, Livewire vs. Inertia vs. plain Blade, build vs. buy (Laravel ecosystem package vs. custom), data model, rollout strategy.
 
 ## Generated File Naming Convention (MANDATORY)
 
@@ -25,12 +25,12 @@ Any file created by this skill MUST be prefixed with `council-`:
 
 Convene the perspectives that matter for the decision (default set below). Add or drop members based on relevance; state which you used.
 
-| Member | Advocates for | Typical concerns (native PHP) |
+| Member | Advocates for | Typical concerns (Laravel) |
 | --- | --- | --- |
-| Architect | Simplicity, clear boundaries, changeability | Coupling, dependency direction, YAGNI, layering |
-| Security Engineer | Safety and least privilege | Injection, authz, secrets, input trust, attack surface |
-| Performance Engineer | Latency, throughput, resource use | N+1, hot paths, caching, memory, OPcache/JIT |
-| Test/Quality Engineer | Verifiability | Testability, seams, flaky risk, coverage cost |
+| Architect | Simplicity, clear boundaries, changeability | Controller/Action/Service boundaries, dependency direction, YAGNI, layering |
+| Security Engineer | Safety and least privilege | Mass assignment, authz via Policies/Gates, secrets, input trust via Form Requests, attack surface |
+| Performance Engineer | Latency, throughput, resource use | N+1 (eager loading), hot paths, cache (Redis), queue throughput, OPcache/JIT |
+| Test/Quality Engineer | Verifiability | Testability, Feature/Unit test seams, factories, flaky risk, coverage cost |
 | Maintainer | Long-term cost | Readability, onboarding, operational burden, docs |
 | Pragmatist | Shipping value | Effort vs. payoff, deadline risk, reversibility |
 

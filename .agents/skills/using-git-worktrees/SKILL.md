@@ -1,6 +1,6 @@
 ---
 name: using-git-worktrees
-description: Create and use isolated git worktrees for native PHP implementation tasks.
+description: Create and use isolated git worktrees for Laravel implementation tasks.
 phase: planning
 flow-next: coder
 flow-alternatives: [coder-frontend, test-generator]
@@ -13,13 +13,14 @@ related: [writing-plans, coder]
 
 Use git worktrees to isolate feature work, experiments, or parallel implementations without disturbing the main working directory.
 
-## PHP Considerations
+## Laravel Considerations
 
 - Run `composer install` in the worktree if `vendor/` is not shared or present.
-- Do not copy `.env` from another worktree automatically.
-- Use a separate local database or SQLite test database if migrations/tests would conflict.
-- Run migrations only against the intended local database.
-- Run focused tests before returning work to the main branch.
+- Copy or symlink `.env` from the main worktree rather than committing it; never copy it automatically without confirming secrets/DB credentials are appropriate for the new worktree.
+- Run `php artisan key:generate` if the copied `.env` has no `APP_KEY` or a fresh one is needed.
+- Use a separate local database (or SQLite in-memory/file database for tests) so migrations don't conflict with other worktrees.
+- Run `php artisan migrate` (or `migrate:fresh` for a clean local DB) against the intended local database only.
+- Run `php artisan test` before returning work to the main branch.
 
 ## Safe Workflow
 
@@ -27,7 +28,10 @@ Use git worktrees to isolate feature work, experiments, or parallel implementati
 git worktree add ../project-feature feature/project-feature
 cd ../project-feature
 composer install
-composer test
+cp ../project/.env .env          # or symlink; adjust DB_DATABASE per worktree
+php artisan key:generate          # only if APP_KEY is missing
+php artisan migrate               # or migrate:fresh for a clean local DB
+php artisan test
 ```
 
 If frontend tooling exists:

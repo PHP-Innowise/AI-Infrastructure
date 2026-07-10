@@ -1,6 +1,6 @@
 ---
 name: researcher
-description: Run structured research to inform a native PHP decision. Use to evaluate libraries/packages, compare approaches, study an unfamiliar codebase area, or gather authoritative references before committing. Triggers on "research", "compare", "evaluate", "which library", "investigate options", "find out how".
+description: Run structured research to inform a Laravel decision. Use to evaluate libraries/packages, compare approaches, study an unfamiliar codebase area, or gather authoritative references before committing. Triggers on "research", "compare", "evaluate", "which library", "investigate options", "find out how".
 phase: understanding
 flow-next: council
 flow-alternatives: [architect, brainstorming, writing-plans]
@@ -16,7 +16,7 @@ Turn an open question into a sourced, decision-ready findings document. Research
 Two research surfaces:
 
 - **Internal:** the current codebase (how something works, where behavior lives, current conventions). Use `Glob`/`Grep`/`Read`.
-- **External:** libraries, standards (PSR), language features, and best practices. Use `WebFetch`/`WebSearch` within the allowed domains (php.net, php-fig.org, packagist.org, getcomposer.org, phpstan.org, psalm.dev, phpunit.de, pestphp.com, github.com).
+- **External:** Laravel-ecosystem packages, standards (PSR), language/framework features, and best practices. Use `WebFetch`/`WebSearch` within the allowed domains (laravel.com, laravel-news.com, spatie.be, php.net, php-fig.org, packagist.org, getcomposer.org, phpstan.org, psalm.dev, pestphp.com, phpunit.de, github.com).
 
 ## Generated File Naming Convention (MANDATORY)
 
@@ -26,22 +26,22 @@ Any file created by this skill MUST be prefixed with `researcher-`:
 
 ## Process
 
-1. **Scope the question.** Write the exact question and the decision it will inform. List the constraints that matter (PHP version, license, maintenance, dependencies, performance, team familiarity). If the question is too broad, narrow it or ask one clarifying question.
+1. **Scope the question.** Write the exact question and the decision it will inform. List the constraints that matter (PHP/Laravel version, license, maintenance, dependencies, performance, team familiarity). If the question is too broad, narrow it or ask one clarifying question.
 2. **Set acceptance criteria.** Define what a good answer must include so research has a clear finish line.
-3. **Gather evidence.** Read primary sources first (official docs, the package repo, PSR text, source code). Note version and date; APIs drift.
-4. **Evaluate options.** Score each option against the constraints in a comparison table. Prefer maintained, widely used, standards-aligned packages over bespoke code unless there is a real reason.
-5. **Check the project fit.** Confirm the option works with the project's PHP version and existing dependencies (`composer.json`), and check for conflicts.
+3. **Gather evidence.** Read primary sources first (Laravel docs, the package repo/README, PSR text, source code). Note version and date; APIs drift, especially across Laravel LTS releases.
+4. **Evaluate options.** Score each option against the constraints in a comparison table. Prefer maintained, widely used, Laravel-idiomatic packages (first-party, Spatie, or otherwise well-known in the ecosystem) over bespoke code unless there is a real reason.
+5. **Check the project fit.** Confirm the option works with the project's Laravel/PHP version and existing dependencies (`composer.json`), and check for conflicts.
 6. **Recommend.** Give a clear recommendation with rationale, risks, and what you did not verify.
 
 ## Library Evaluation Checklist
 
 - Actively maintained (recent commits/releases; open issue responsiveness)?
-- Compatible with the project's PHP version and dependencies?
+- Compatible with the project's Laravel and PHP version and dependencies (check `composer.json` constraints)?
 - License compatible with the project?
 - Reasonable dependency footprint (no heavy transitive tree)?
 - Security posture (advisories via `composer audit`, known CVEs)?
-- Typed, documented, and tested? PSR-compliant where relevant?
-- Popularity/support (downloads on Packagist, community usage) as a tie-breaker, not the sole criterion?
+- Typed, documented, and tested? Laravel/PSR conventions followed (service provider, config publishing, facades where idiomatic)?
+- Popularity/support (downloads on Packagist filtered for Laravel compatibility, GitHub stars, community usage) as a tie-breaker, not the sole criterion?
 
 ## Output Template
 
@@ -52,10 +52,10 @@ Any file created by this skill MUST be prefixed with `researcher-`:
 [What we need to decide and why]
 
 ## Constraints
-- PHP version, license, dependencies, performance, maintenance, team familiarity
+- Laravel/PHP version, license, dependencies, performance, maintenance, team familiarity
 
 ## Options Compared
-| Option | Maintained | PHP compat | License | Deps | Notes |
+| Option | Maintained | Laravel/PHP compat | License | Deps | Notes |
 | --- | --- | --- | --- | --- | --- |
 | A | ... | ... | ... | ... | ... |
 

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Bash Validator Hook
-# Blocks destructive commands for native PHP projects.
+# Blocks destructive commands for Laravel projects.
 # Hook type: PreToolUse:Bash
 # Exit codes: 0 = pass, 1 = warn (continue), 2 = block
 
@@ -28,6 +28,8 @@ BLOCKED_PATTERNS=(
   "migrate.*(:|--)?(fresh|reset|refresh|rollback)"
   "db:wipe"
   "schema:drop"
+  "artisan.*db:seed --force"
+  "artisan.*model:prune"
   "composer config.*github-oauth"
   "composer config.*http-basic"
   "rm -rf /"

@@ -1,6 +1,6 @@
 ---
 name: writing-plans
-description: Create implementation plans for native PHP work. Use after requirements, brainstorming, architecture, or API design when execution needs clear steps.
+description: Create implementation plans for Laravel work. Use after requirements, brainstorming, architecture, or API design when execution needs clear steps.
 phase: planning
 flow-next: git-worktrees
 flow-alternatives: [coder, test-generator]
@@ -11,7 +11,7 @@ related: [requirements-analyst, brainstorming, architect, api-designer]
 
 ## Overview
 
-Create precise implementation plans for native PHP projects. Plans should be specific enough for an implementer to execute without rediscovering the architecture.
+Create precise implementation plans for Laravel projects. Plans should be specific enough for an implementer to execute without rediscovering the architecture.
 
 ## Required Inputs
 
@@ -19,8 +19,8 @@ Read available context:
 
 - Requirement docs in `tasks/TASK-N/`.
 - Living specs in `specs/`.
-- Relevant PHP files: entry points/routing, handlers, request validators, domain/services, data access, migrations, tests.
-- Existing project conventions for tests, formatting, static analysis, and any frontend tooling.
+- Relevant Laravel files: `routes/web.php`/`routes/api.php`, Controllers/Actions, Form Requests, Eloquent models, migrations, Policies/Gates, API Resources, existing tests.
+- Existing project conventions: `composer.json` scripts, Pint/Larastan config, and any frontend tooling (Blade, Livewire, Inertia, Vite).
 
 ## Plan Structure
 
@@ -34,43 +34,43 @@ Read available context:
 - Relevant files and current behavior.
 
 ## Proposed Design
-- Routes/entry points and handlers.
-- Request DTOs / validators.
-- Domain entities / value objects.
-- Use-case / service classes.
-- Repositories/gateways and migrations.
-- Middleware, workers/queue jobs, cache if needed.
+- Routes (`routes/web.php` / `routes/api.php`) and Controllers/Actions.
+- Form Requests for validation and inline authorization.
+- Eloquent models, relationships, migrations, factories/seeders.
+- Policies/Gates for authorization.
+- API Resources for response shape (if API work).
+- Jobs/queues, Events/Listeners, Notifications, cache if needed.
 
 ## Implementation Steps
 1. [Specific file-level step]
 2. [Specific file-level step]
 
 ## Test Plan
-- Unit tests.
-- Integration/HTTP handler tests.
-- Authorization/validation cases.
+- Unit tests (Actions/Services, value objects).
+- Feature tests (HTTP behavior, validation, authorization, persistence).
+- Policy/Gate authorization cases.
 
 ## Verification
-- `composer test`
-- `composer lint`
-- `composer analyse`
+- `php artisan test` (or `vendor/bin/pest`)
+- `vendor/bin/pint --test`
+- `vendor/bin/phpstan analyse` (or `vendor/bin/psalm`)
 
 ## Risks
-- [Migration, security, worker, cache, API compatibility risks]
+- [Migration, security, queue, cache, API compatibility risks]
 ```
 
 ## Planning Checklist
 
-- Does a migration need a backfill or safe rollout?
-- How is the route parameter resolved to an entity?
-- Which request DTO/validator guards input?
-- Which access-control check authorizes behavior?
-- Is a response serializer needed for a stable contract?
-- Are fixtures/factories needed for tests?
-- Should work be queued or run synchronously?
-- Are events/mail/external clients involved?
-- Are indexes needed for new query patterns?
-- Are server-rendered templates affected?
+- Does a migration need a backfill or safe rollout (e.g. nullable column first, backfill, then constrain)?
+- How is the route-model binding resolved (implicit binding vs explicit lookup)?
+- Which Form Request guards input, and does it also carry the `authorize()` check?
+- Which Policy/Gate authorizes the controller action?
+- Is an API Resource needed for a stable response contract?
+- Are factories/seeders needed for tests and local data?
+- Should work be queued (`ShouldQueue`) or run synchronously?
+- Are Events/Listeners, Notifications, or Mailables involved?
+- Are indexes needed for new query patterns, and is eager loading (`with()`/`load()`) used to avoid N+1s?
+- Are Blade views, Livewire components, or Inertia pages affected?
 
 ## Plan Quality Best Practices
 

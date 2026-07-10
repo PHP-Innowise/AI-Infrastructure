@@ -1,11 +1,11 @@
 ---
 name: verify
-description: "Run full Definition of Done checklist and report pass/fail status."
+description: "Run full Laravel Definition of Done checklist (tests, Pint, Larastan/PHPStan) and report pass/fail status."
 ---
 
 # Verify
 
-Run full Definition of Done checklist and report pass/fail status.
+Run full Laravel Definition of Done checklist (tests, Pint, Larastan/PHPStan) and report pass/fail status.
 
 ## Input
 $ARGUMENTS

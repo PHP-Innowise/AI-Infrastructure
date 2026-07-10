@@ -1,28 +1,35 @@
 ---
-description: Native PHP code quality standards (PSR, boundaries, persistence)
+description: Laravel code quality standards (PSR/Pint, boundaries, persistence)
 globs: **/*.php
 alwaysApply: false
 ---
 
-# Native PHP Standards
+# Laravel Standards
 
-- Follow PSR-1, PSR-12, and PER Coding Style; target the project's declared PHP version.
-- Start new files with `declare(strict_types=1);` and use full type declarations.
+This branch targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (current LTS) and Laravel 13 (current release). For framework-agnostic native PHP, use the `main` branch instead.
+
+- Follow PSR-12 / PER Coding Style, enforced via Pint; target the project's declared PHP and Laravel version.
+- Start new files with `declare(strict_types=1);` and use full type declarations (params, returns, properties).
 - Autoload via Composer PSR-4; never add manual `require` chains for application classes.
-- Validate and normalize external input at the boundary with explicit validators, value objects, or typed DTOs.
-- Authorize protected actions through an explicit access-control layer, not by hiding UI.
-- Keep entry points (controllers/handlers/CLI commands) thin; move multi-step behavior into services or use-case classes.
-- Access the database through PDO (or a documented data layer) with prepared statements and bound parameters.
-- Depend on interfaces at boundaries and inject collaborators; avoid globals and `new` for collaborators.
-- Manage schema changes through versioned migrations or reviewed SQL.
-- Throw typed exceptions; map them to responses/exit codes at the edge.
+- Validate external input via Form Requests (or explicit validators), not inline in controllers.
+- Authorize protected actions through Policies/Gates (`$this->authorize(...)`, `Gate::authorize(...)`), not by hiding UI.
+- Keep controllers thin; move multi-step business logic into Actions, Services, or the model layer.
+- Access the database through Eloquent or the query builder with bound parameters; never concatenate untrusted input into raw SQL.
+- Depend on abstractions (interfaces bound in a Service Provider) at integration boundaries rather than `new`-ing concrete external clients.
+- Manage schema changes through versioned Artisan migrations, never ad-hoc production edits.
+- Use Eloquent relationships and eager loading (`with()`/`load()`) to avoid N+1 queries.
+- Document a stable response contract via API Resources for public APIs.
 
 ```php
-// GOOD: validated input, injected dependency, prepared statement
-public function store(ServerRequestInterface $request): ResponseInterface
+// GOOD: Form Request validation, Policy authorization, Eloquent persistence
+public function store(StoreUserRequest $request): JsonResponse
 {
-    $this->accessControl->assertCan($request->getAttribute('user'), 'user.create');
-    $data = CreateUserRequest::fromArray((array) $request->getParsedBody());
-    return JsonResponse::created($this->createUser->handle($data));
+    $this->authorize('create', User::class);
+
+    $user = User::create($request->validated());
+
+    return UserResource::make($user)
+        ->response()
+        ->setStatusCode(201);
 }
 ```

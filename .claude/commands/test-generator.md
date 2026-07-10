@@ -7,7 +7,7 @@ flow-alternatives: [debugger]
 
 # Test Generator
 
-Spawn test-generator agent to create comprehensive tests.
+Spawn test-generator agent to create comprehensive Pest/PHPUnit tests for Laravel routes, Form Requests, Policies, and Eloquent models.
 
 ## Input
 $ARGUMENTS

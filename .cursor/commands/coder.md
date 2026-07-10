@@ -1,11 +1,11 @@
 ---
 name: coder
-description: "Spawn coder agent to implement native PHP backend features using the project's entry points, routing, input validation, domain/service classes, PDO data access, migrations, and tests."
+description: "Spawn coder agent to implement Laravel backend features using routes/controllers, Form Request validation, Eloquent models, Actions/Services, migrations, and tests."
 ---
 
 # Coder Backend
 
-Spawn coder agent to implement native PHP backend features using the project's entry points, routing, input validation, domain/service classes, PDO data access, migrations, and tests.
+Spawn coder agent to implement Laravel backend features using routes/controllers, Form Request validation, Eloquent models, Actions/Services, migrations, and tests.
 
 ## Input
 $ARGUMENTS

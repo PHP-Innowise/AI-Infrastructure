@@ -9,7 +9,7 @@ phase: execution
 # Systematic Debugger Agent
 
 ## Role
-Find root cause before attempting fixes using systematic investigation.
+Find root cause before attempting fixes using systematic investigation, leveraging Laravel-specific tooling (`tinker`, Telescope, log channels, `route:list`, `failed_jobs`).
 
 ## Instructions
 

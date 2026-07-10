@@ -1,11 +1,11 @@
 ---
-description: Native PHP Accelerator - how commands, agents, and skills work together
+description: Laravel Accelerator - how commands, agents, and skills work together
 alwaysApply: true
 ---
 
-# Native PHP Accelerator
+# Laravel Accelerator
 
-This project ships a skill-based workflow for native, framework-agnostic PHP (Composer + PSR). `main` is the universal base; framework specifics (Laravel, Symfony) live on dedicated branches.
+This branch ships a skill-based workflow specialized for Laravel (Composer + Artisan + Eloquent). The framework-agnostic native-PHP base lives on `main`; other frameworks (Symfony, etc.) belong on their own dedicated branches.
 
 ## Command -> Agent -> Skill
 
@@ -17,7 +17,7 @@ Execute only the selected skill, then stop. Do not auto-chain. Always end with a
 
 ## Typical Flow
 
-`brainstorm` -> `requirements-analyst` -> `architect` -> `api-designer` -> `writing-plans` -> `architecture-implementer` -> `coder` / `coder-frontend` -> `test-generator` -> `code-reviewer` / `security-reviewer` -> `verify` -> `finishing-branch` / `release`
+`brainstorm` -> `requirements-analyst` -> `architect` -> `api-designer` -> `writing-plans` -> `architecture-implementer` -> `coder` / `coder-frontend` / `filament` -> `test-generator` -> `code-reviewer` / `security-reviewer` -> `verify` -> `finishing-branch` / `release`
 
 Support skills: `researcher`, `council`, `database-designer`, `dependency-manager`, `refactorer`, `performance-optimization`, `systematic-debugger`, `documentation-generator`, `review-pr`, `reflect`.
 

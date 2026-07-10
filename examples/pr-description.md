@@ -2,16 +2,16 @@
 
 ## Summary
 
-- Added invitation-only registration endpoints for native PHP API clients.
-- Added input-DTO validation, explicit authorization, PDO persistence, and JSON serializer responses.
-- Added tests for successful registration, validation failure, authorization failure, and expired invitations.
+- Added invitation-only registration endpoints for Laravel API clients.
+- Added Form Request validation, Policy authorization, Eloquent persistence, and API Resource responses.
+- Added feature tests for successful registration, validation failure, authorization failure, and expired invitations.
 
 ## Test Plan
 
 - [x] `composer validate --strict`
-- [x] `composer test` (or `vendor/bin/phpunit --filter=InvitationRegistrationTest`)
-- [x] `composer lint` (php-cs-fixer / phpcs)
-- [x] `composer analyse` (phpstan / psalm)
+- [x] `php artisan test --filter=InvitationRegistrationTest`
+- [x] `vendor/bin/pint --test`
+- [x] `vendor/bin/phpstan analyse`
 
 ## Risk Notes
 
