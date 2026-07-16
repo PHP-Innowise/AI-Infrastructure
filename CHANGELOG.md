@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Cross-platform memory bank workflow** with one canonical indexed chunk store, native Claude/Cursor command-agent adapters, a Codex-discovered skill, selective retrieval, source verification, lifecycle management, session metadata, privacy controls, deterministic validation, and DOD integration.
+
 ## 1.3.0 - 2026-07-15
 
 ### Added

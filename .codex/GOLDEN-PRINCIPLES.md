@@ -60,3 +60,7 @@ Use `examples/symfony-clean-code-patterns.md` as an illustrative review catalog,
 ## 9. Verification Is Evidence
 
 Do not claim success without evidence. Run the applicable DoD checks, report what passed, and call out missing tooling or remaining risk.
+
+## 10. Memory Is Evidence, Not Authority
+
+Read indexed memory selectively, verify it against current policy, specs, code, configuration, migrations, and tests, and repair stale chunks. Store only durable source-backed context; never persist secrets, transient reasoning, or duplicated specifications.

@@ -21,6 +21,8 @@ Codex does not use duplicate `.codex/skills`, `.codex/commands`, or `.codex/agen
 3. Invoke a skill by name or describe work that matches its trigger description.
 4. Follow root `AGENTS.md`; run `.codex/DOD.md` before claiming completion.
 
+Use the `memory-bank` skill to retrieve, capture, audit, supersede, archive, or initialize durable project memory in the shared root `memory-bank/`. Codex session hooks report bank counts only; the skill selectively loads relevant chunks and verifies them against current sources.
+
 ## Architecture
 
 The default is `Controller -> Service -> Repository`: framework entry points stay thin, services own workflows and transactions, repositories own Doctrine queries, and input/authorization/output contracts are explicit.

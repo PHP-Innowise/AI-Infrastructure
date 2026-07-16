@@ -54,6 +54,7 @@ All implementation, review, and planning work must respect root `AGENTS.md`, `sp
 - Use `/dependency-manager` for Composer audits, Symfony bundle vetting, Symfony Flex recipe impact, and dependency updates.
 - Use `/debugger` when tests fail for unclear reasons or behavior is unexpected.
 - Use `/docs-generator` when setup, deployment, worker/cron, API, or architecture documentation changed.
+- Use `/memory-bank` only to retrieve, capture, audit, supersede, archive, or initialize durable source-backed project memory; keep transient progress in task context.
 
 ## Phase Map
 
@@ -64,7 +65,7 @@ All implementation, review, and planning work must respect root `AGENTS.md`, `sp
 | Implementation | `/git-worktrees`, `/architecture-implementer`, `/coder`, `/coder-frontend`, `/console-command-coder`, `/fixture-factory-generator`, `/refactorer` |
 | Quality | `/architecture-boundary-reviewer`, `/code-reviewer`, `/repository-reviewer`, `/security-reviewer`, `/twig-ux-reviewer`, `/container-reviewer`, `/test-generator`, `/performance-optimization`, `/debugger`, `/verify` |
 | Finalization | `/docs-generator`, `/release`, `/finishing-branch` |
-| Utility | `/reflect`, `/skill-creator`, `/review-pr`, `/browser-verify`, `/dependency-manager` |
+| Utility | `/memory-bank`, `/reflect`, `/skill-creator`, `/review-pr`, `/browser-verify`, `/dependency-manager` |
 
 ## Context Handoff
 
@@ -75,4 +76,5 @@ Every skill must finish with:
 - Files/specs touched.
 - Verification evidence or planned verification.
 - Risks and assumptions.
+- Memory chunk IDs used or changed, when applicable.
 - Recommended next command.

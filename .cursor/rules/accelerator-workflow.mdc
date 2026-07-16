@@ -23,8 +23,8 @@ Execute only the selected skill, then stop. Do not auto-chain. Always end with a
 
 `requirements-analyst` -> `researcher` -> `brainstorm` -> `council` -> `architect` -> `database-designer` -> `api-designer` -> `writing-plans` -> `architecture-implementer` -> `coder` / `coder-frontend` -> `test-generator` -> `code-reviewer` / `security-reviewer` -> `verify` -> `finishing-branch` / `release`
 
-Support skills: `dependency-manager`, `refactorer`, `performance-optimization`, `systematic-debugger`, `documentation-generator`, `review-pr`, `reflect`.
+Support skills: `dependency-manager`, `refactorer`, `performance-optimization`, `systematic-debugger`, `documentation-generator`, `memory-bank`, `review-pr`, `reflect`.
 
 ## Sources Of Truth
 
-Enforcement (`.cursor/hooks`) > Policy (`AGENTS.md`) > Architecture (`specs/`) > Skills (`.cursor/skills/`) > Examples > Docs. See `.cursor/DOD.md`, `.cursor/GOLDEN-PRINCIPLES.md`, and `examples/symfony-clean-code-patterns.md`.
+Enforcement (`.cursor/hooks`) > Policy (`AGENTS.md`) > Architecture/code/tests (`specs/` and project sources) > Verified memory (`memory-bank/`) > Skills (`.cursor/skills/`) > Examples > Docs. See `.cursor/DOD.md`, `.cursor/GOLDEN-PRINCIPLES.md`, and `examples/symfony-clean-code-patterns.md`.

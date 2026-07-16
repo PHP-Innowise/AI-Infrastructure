@@ -143,6 +143,7 @@ When done, provide:
 ### Utility
 | Agent | Skill | Next by Flow |
 |-------|-------|--------------|
+| `memory-bank-agent` | memory-bank | (standalone) |
 | `reflect-agent` | reflect | (standalone) |
 | `skill-creator-agent` | skill-creator | (standalone) |
 | `dependency-manager-agent` | dependency-manager | verify |

@@ -12,6 +12,8 @@ Use for documentation, planning, and small non-code tasks.
 - [ ] Task/spec file naming follows skill-prefix convention.
 - [ ] Context Summary provided with 2-3 sentences and Next Steps.
 - [ ] No `.env`, secrets, credentials, database dumps, or personal local settings were read or modified.
+- [ ] Relevant active memory chunks were verified against current sources; stale chunks were updated or reported.
+- [ ] Memory-bank structure passes `python3 memory-bank/scripts/validate.py` when `memory-bank/` exists.
 
 ## Standard
 
@@ -47,6 +49,7 @@ All Standard items, plus:
 - [ ] Living specs updated when architecture, API behavior, database schema, security behavior, async behavior, or user-facing workflows changed.
 - [ ] No unresolved TODO/FIXME/HACK comments remain in changed source files.
 - [ ] Public documentation updated for user-facing changes.
+- [ ] Durable reusable context was added to `memory-bank/` only when source-backed, non-sensitive, indexed, and not already authoritative in a spec.
 - [ ] Messenger workers, cron jobs, cache, migrations, and rollout impacts are documented when applicable.
 - [ ] Production cache warmup/build succeeds when deployment configuration changed.
 - [ ] New Symfony/PHP deprecations are absent or explicitly triaged when deprecation tooling is configured.

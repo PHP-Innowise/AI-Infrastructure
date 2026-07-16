@@ -69,7 +69,7 @@ SKILLS_DIR="$ROOT_DIR/.claude/skills"
 
 block() {
   printf 'BLOCKED: %s\n' "$1" >&2
-  printf '  See AGENTS.md for task/spec naming rules.\n' >&2
+  printf '  See AGENTS.md for repository file-naming rules.\n' >&2
   return 2
 }
 
@@ -84,6 +84,18 @@ validate_path() {
     normalized=${file_path#./}
   fi
   filename=$(basename "$normalized")
+
+  if [[ "$normalized" == memory-bank/chunks/* ]]; then
+    if [[ "$(dirname "$normalized")" != "memory-bank/chunks" ]]; then
+      block "Memory chunks must be stored directly in memory-bank/chunks/: '$file_path'"
+      return 2
+    fi
+    if [[ ! "$filename" =~ ^MEM-[0-9]{4,}-[a-z0-9]+(-[a-z0-9]+)*\.md$ ]]; then
+      block "Memory chunks must use memory-bank/chunks/MEM-0001-short-slug.md: '$file_path'"
+      return 2
+    fi
+    return 0
+  fi
 
   if [[ "$normalized" == tasks/* ]]; then
     relative=${normalized#tasks/}

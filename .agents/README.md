@@ -14,4 +14,6 @@ When updating a workflow:
 
 Do not create duplicate skills under `.codex/skills`.
 
-Invoke Codex skills by their discovered names, such as `brainstorming`, `systematic-debugger`, `documentation-generator`, and `using-git-worktrees`. Claude/Cursor slash-command aliases such as `/brainstorm`, `/debugger`, `/docs-generator`, and `/git-worktrees` are not Codex skill names.
+Invoke Codex skills by their discovered names, such as `brainstorming`, `systematic-debugger`, `documentation-generator`, `memory-bank`, and `using-git-worktrees`. Claude/Cursor slash-command aliases such as `/brainstorm`, `/debugger`, `/docs-generator`, `/memory-bank`, and `/git-worktrees` are not Codex skill names.
+
+The `memory-bank` skill manages the shared root `memory-bank/`. It retrieves only relevant indexed chunks and verifies them against current sources before use; session hooks report memory counts but never load chunk contents automatically.

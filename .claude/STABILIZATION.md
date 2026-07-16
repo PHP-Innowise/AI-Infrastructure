@@ -17,6 +17,8 @@ Incident -> Root Cause -> Rule -> Example -> Enforcement -> Verification
 - Controller -> Service -> Repository boundaries are violated repeatedly.
 - A workflow handoff is confusing.
 
+Use stabilization for enforceable behavior that prevents a repeated agent failure. Use `memory-bank/` for verified project facts and durable context that help future work but do not impose policy. Use `specs/` for authoritative architecture and behavioral contracts.
+
 ## Rule Template
 
 ```markdown

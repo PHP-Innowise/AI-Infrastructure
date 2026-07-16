@@ -8,9 +8,9 @@ Project-scoped hooks load only when the project is **trusted**.
 
 | Event | Script | Purpose | Exit codes |
 |---|---|---|---|
-| `SessionStart` | `local-context.sh` | Print project context (git, Composer, PHP version, tooling, structure). | always `0` |
+| `SessionStart` | `local-context.sh` | Print project context and memory-bank counts without printing memory contents. | always `0` |
 | `PreToolUse` | `bash-validator.sh` | Block destructive shell commands (force-push, hard reset, database/schema drops, unsafe down migrations, purging fixtures, failed-message bulk removal, destructive SQL, and secret-writing Composer config). | `0` allow / `2` block |
-| `PreToolUse` | `file-naming-validator.sh` | Block `.md` files that break skill-prefix or zero-padded task-directory conventions. | `0` allow / `2` block |
+| `PreToolUse` | `file-naming-validator.sh` | Block `.md` files that break skill-prefix, task-directory, or memory-chunk naming conventions. | `0` allow / `2` block |
 | `PostToolUse` | `loop-detection.sh` | Track per-session edit count per file; counters reset on `SessionStart`. | `0` / `1` warn / `2` block |
 
 No `matcher` is set on any group: each script self-filters on its input (command string or file path), so it is safe to run on every tool call and returns `0` when not applicable.

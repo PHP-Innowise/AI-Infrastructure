@@ -4,3 +4,10 @@
 
 # Personal IDE state
 .idea/
+
+# Python tooling caches
+__pycache__/
+*.py[cod]
+
+# Uncommitted personal agent memory
+memory-bank/local/

@@ -6,7 +6,7 @@ These hooks are registered in `.cursor/hooks.json` (schema `version: 1`). Each i
 
 ### sessionStart: Local Context Scanner
 **Script:** `local-context.sh`
-**Purpose:** Prints project context at session start: git branch, Composer markers, PHP version, configured test/format/static-analysis tools, framework detection, and project structure.
+**Purpose:** Prints project context at session start: git branch, Composer markers, PHP version, configured test/format/static-analysis tools, framework detection, project structure, and memory-bank counts. It never prints memory contents.
 **Return:** Always `0` (informational only).
 
 ### beforeShellExecution: Bash Validator
@@ -17,7 +17,7 @@ These hooks are registered in `.cursor/hooks.json` (schema `version: 1`). Each i
 
 ### afterFileEdit: File Naming Validator
 **Script:** `file-naming-validator.sh`
-**Purpose:** Enforces discovered skill prefixes and zero-padded `tasks/TASK-001/` directories for task/spec Markdown.
+**Purpose:** Enforces discovered skill prefixes, zero-padded `tasks/TASK-001/` directories, and `memory-bank/chunks/MEM-0001-short-slug.md` naming.
 **Return:** `0` = valid/not applicable, `2` = violation. Because Cursor invokes this after an edit, a violation stops continuation and must be corrected; it cannot undo the completed write.
 **Allowlist:** `README.md`, `CHANGELOG.md`, `MANIFEST.md`.
 

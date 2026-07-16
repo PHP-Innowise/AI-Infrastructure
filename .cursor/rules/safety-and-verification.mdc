@@ -15,6 +15,7 @@ alwaysApply: true
 - Use typed, trusted Messenger payloads and avoid unsafe deserialization.
 - Avoid `eval`, unsafe `unserialize`, and dynamic includes of untrusted paths.
 - Do not introduce OWASP Top 10 vulnerabilities.
+- Never store secrets, personal data, raw customer data, production identifiers, or unredacted logs in `memory-bank/`.
 
 ## Git Safety
 - Never skip hooks with `--no-verify`.
@@ -31,3 +32,4 @@ alwaysApply: true
 ## File Naming
 - Prefix generated task/spec markdown with the skill name: `{skill-name}-{purpose}.md`.
 - Use zero-padded task directories (`TASK-001/`); place temporary task docs in `tasks/TASK-{N}/` and living specs in `specs/`.
+- Name committed memory chunks `memory-bank/chunks/MEM-0001-short-slug.md`; update the memory index and counter in the same change.

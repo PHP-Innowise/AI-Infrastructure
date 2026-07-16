@@ -19,6 +19,7 @@ This repository is not a generated Symfony application. It is an engineering wor
 - Skills define repeatable design, implementation, review, debugging, and delivery practices.
 - Hooks enforce skill-prefixed task/spec names, zero-padded task directories, Git safety, database safety, and workflow constraints.
 - `tasks/` stores temporary task artifacts; `specs/` stores durable architecture knowledge.
+- `memory-bank/` stores small indexed chunks of verified reusable context shared across AI tools.
 
 ## Supported Baseline
 
@@ -62,6 +63,7 @@ CHANGELOG.md              # Versioned accelerator changes
 .codex/                   # Codex config, hooks, and references
 tasks/TASK-N/             # Temporary prefixed task artifacts
 specs/                    # Permanent living specifications
+memory-bank/              # Indexed durable cross-session project memory
 examples/                 # Workflow output examples
 ```
 
@@ -154,6 +156,7 @@ Frontend workflows cover semantic HTML, accessible form errors, focus management
 - PHPUnit or Pest, KernelBrowser/WebTestCase, repository integration tests, voter/constraint tests, CommandTester, Messenger tests, fixtures, Foundry, object mothers, and deterministic builders.
 - Symfony Profiler, Web Debug Toolbar, Monolog, Blackfire when available, Doctrine query profiling, explain plans, cache, Messenger throughput, memory, and OPcache.
 - Composer/Flex recipe review, dependency audits, deprecations, upgrades, releases, changelogs, migrations, cache warmup, worker restart/drain, rollback limitations, and living documentation.
+- Indexed cross-session memory with selective retrieval, source verification, review dates, supersession, privacy controls, and deterministic validation.
 
 ## Prerequisites
 
@@ -210,6 +213,7 @@ Do not install Symfony CLI, bundles, npm packages, or analysis tools without app
 | `code-reviewer` | Review correctness, maintainability, security, and tests |
 | `verify` | Run the active edition's Definition of Done |
 | `documentation-generator` | Maintain README, ADR, API, worker, and deployment docs |
+| `memory-bank` | Retrieve, capture, audit, supersede, or archive durable project memory |
 | `finishing-branch` | Present merge, PR, or cleanup alternatives |
 | `release` | Prepare versioning, changelog, tag, and release notes |
 
@@ -229,6 +233,16 @@ Example flow:
 Temporary artifacts live in zero-padded `tasks/TASK-N/` directories and must be prefixed with the producing skill, for example `writing-plans-registration.md`.
 
 Permanent decisions live in `specs/` and are indexed by `specs/MANIFEST.md`. Update living specs when architecture, API contracts, schema, security, asynchronous behavior, operations, or user workflows change.
+
+## Memory Bank
+
+The optional root `memory-bank/` is one canonical shared store for Claude Code, Cursor, and Codex. It contains small source-backed chunks for durable project constraints, conventions, decisions, domain knowledge, integrations, and operational lessons.
+
+Memory is deliberately below policy, specs, code, configuration, migrations, and tests in the authority hierarchy. Agents read `memory-bank/README.md` and `memory-bank/INDEX.md`, retrieve only relevant active chunks, and verify every material claim before relying on it. Stale chunks are updated, superseded, or archived instead of silently remaining active.
+
+Use the `memory-bank` skill directly in Codex or `/memory-bank` in Claude/Cursor to retrieve, capture, audit, supersede, archive, or initialize memory. Do not use it for transient plans, chat transcripts, generic Symfony advice, command output, or information already owned by a living spec. Secrets, `.env` contents, personal data, production identifiers, raw logs, and customer payloads are prohibited. Non-sensitive personal notes belong in ignored `memory-bank/local/`.
+
+Each committed chunk uses `memory-bank/chunks/MEM-NNNN-short-slug.md`, is cataloged in `INDEX.md`, and cites its authoritative sources. The session-start hooks report counts only; they never inject chunk contents into logs or context automatically.
 
 ## Verification
 
