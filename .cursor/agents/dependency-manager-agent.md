@@ -1,12 +1,12 @@
 ---
 name: dependency-manager
-description: "Use this agent to manage Composer dependencies for native PHP projects: run composer audit, review outdated packages, tighten version constraints, optimize autoloading, and vet new packages before adding them.\n\nExamples:\n\n<example>\nContext: The user wants a dependency health check.\nuser: \"Check our dependencies for vulnerabilities and outdated packages\"\nassistant: \"I'll use the dependency-manager agent to audit and review the tree.\"\n<Task tool call to dependency-manager agent>\n</example>\n\n<example>\nContext: Adding a package.\nuser: \"We need a UUID library, add a good one\"\nassistant: \"I'll use the dependency-manager agent to vet and add a maintained package with a sane constraint.\"\n<Task tool call to dependency-manager agent>\n</example>"
+description: "Use this agent to manage Composer dependencies for Symfony projects: run composer audit, review outdated packages, tighten version constraints, optimize autoloading, and vet new packages before adding them.\n\nExamples:\n\n<example>\nContext: The user wants a dependency health check.\nuser: \"Check our dependencies for vulnerabilities and outdated packages\"\nassistant: \"I'll use the dependency-manager agent to audit and review the tree.\"\n<Task tool call to dependency-manager agent>\n</example>\n\n<example>\nContext: Adding a package.\nuser: \"We need a UUID library, add a good one\"\nassistant: \"I'll use the dependency-manager agent to vet and add a maintained package with a sane constraint.\"\n<Task tool call to dependency-manager agent>\n</example>"
 ---
 
 # Dependency Manager Agent
 
 ## Role
-Keep Composer dependencies secure, current, reproducible, and lean for native PHP projects.
+Keep Composer dependencies secure, current, reproducible, and lean for Symfony projects.
 
 ## Instructions
 

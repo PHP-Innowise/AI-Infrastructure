@@ -11,21 +11,21 @@ These hooks are registered in `.cursor/hooks.json` (schema `version: 1`). Each i
 
 ### beforeShellExecution: Bash Validator
 **Script:** `bash-validator.sh`
-**Purpose:** Blocks destructive shell commands: force-push, hard reset, database drops/truncates, destructive migration resets/rollbacks, secret-writing Composer config, and `--no-verify`.
+**Purpose:** Blocks destructive shell commands: force-push, hard reset, database/schema drops, unsafe down migrations, purging fixture loads, failed-message bulk removal, destructive SQL, secret-writing Composer config, and verification bypass.
 **Input key:** `.command` (Cursor supplies the full command string).
 **Return:** `0` = safe, `2` = block.
 
 ### afterFileEdit: File Naming Validator
 **Script:** `file-naming-validator.sh`
-**Purpose:** Flags `.md` files in `tasks/` and `specs/` that do not follow the skill-prefix naming convention.
-**Return:** `0` = valid, `1` = warning (currently active).
+**Purpose:** Enforces discovered skill prefixes and zero-padded `tasks/TASK-001/` directories for task/spec Markdown.
+**Return:** `0` = valid/not applicable, `2` = violation. Because Cursor invokes this after an edit, a violation stops continuation and must be corrected; it cannot undo the completed write.
 **Allowlist:** `README.md`, `CHANGELOG.md`, `MANIFEST.md`.
 
 ### afterFileEdit: Loop Detection
 **Script:** `loop-detection.sh`
 **Purpose:** Tracks edit count per file to detect doom loops.
 **Return:** `0` = normal, `1` = warning at 7 edits, `2` = block at 10 edits.
-**Tracking:** `/tmp/cursor-loop-detection/` (resets on reboot).
+**Tracking:** `/tmp/cursor-loop-detection/`, reset by `sessionStart`.
 
 ## Claude Code -> Cursor Event Mapping
 
@@ -33,12 +33,12 @@ These hooks are registered in `.cursor/hooks.json` (schema `version: 1`). Each i
 |---|---|
 | `SessionStart` | `sessionStart` |
 | `PreToolUse` matcher `Bash` | `beforeShellExecution` |
-| `PreToolUse` matcher `Write\|Edit` | `afterFileEdit` (post-edit; warns rather than blocks pre-write) |
+| `PreToolUse` matcher `Write\|Edit` | `afterFileEdit` (post-edit; reports a blocking violation that must be corrected) |
 | `PostToolUse` matcher `Edit` | `afterFileEdit` |
 | `Notification` | No direct equivalent (closest: `permission: "ask"` on `beforeShellExecution`) |
 
 Notes:
-- Cursor `timeout` is in **seconds** (Claude Code used milliseconds).
+- Cursor and current Claude Code hook `timeout` values are in **seconds**.
 - Cursor matchers use JavaScript regex, not POSIX; these hooks self-filter in-script, so no matcher is set.
 - To fail-closed on hook crash/timeout, add `"failClosed": true` to a hook entry.
 

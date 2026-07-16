@@ -1,122 +1,98 @@
 ---
 name: performance-optimization
-description: Diagnose and fix performance problems in native PHP applications with a measure-first workflow. Use for slow endpoints/scripts, high latency, high memory, N+1 queries, and throughput tuning. Triggers on "slow", "performance", "optimize", "latency", "memory", "profiling", "bottleneck".
+description: "Diagnose and fix Symfony performance problems with a measure-first workflow: Symfony Profiler/Blackfire, Doctrine N+1/query tuning, cache, Twig, Messenger, memory, OPcache."
 phase: execution
 flow-next: verify
-flow-alternatives: [debugger, code-reviewer, test-generator]
-related: [systematic-debugger, code-reviewer, architect, database-designer]
+flow-alternatives: [code-reviewer, systematic-debugger, test-generator]
 ---
 
-# Performance Optimization
+# Symfony Performance Optimization
 
-## Overview
+Optimize only measured bottlenecks. Preserve correctness, authorization, consistency, and operability while reducing latency or resource use.
 
-Make it measurably faster without guessing. The iron rule: measure, then change one thing, then measure again. Optimizing without a baseline wastes effort and risks regressions.
+## Required Context
 
-**Core loop:** baseline -> profile -> fix top 1-3 hotspots -> re-measure -> lock in a budget.
+Inspect the affected route/command/worker, service and repository calls, Doctrine mappings/indexes, cache configuration, Twig/Serializer behavior, Messenger transport/worker settings, deployment/runtime configuration, existing metrics, and performance tests. Confirm PHP/Symfony/database versions and whether Profiler, Blackfire, APM, or production-like data is available.
 
-## Generated File Naming Convention (MANDATORY)
+## Baseline First
 
-Any file created by this skill MUST be prefixed with `performance-optimization-`:
-- Correct: `performance-optimization-baseline.md`, `performance-optimization-report.md`
-- Incorrect: `PERF.md`, `benchmark.md`
+Define one reproducible scenario and record:
 
-## The Iron Law
+- environment, dataset size, warm/cold cache state, concurrency, and request/command/message inputs;
+- median and tail latency (`p50`/`p95`/`p99`) where multiple samples are possible;
+- Doctrine query count/time, duplicate queries, rows/hydration volume, and database plan;
+- memory peak, CPU time, network/external-call time, cache hit rate, or worker throughput as relevant;
+- correctness assertions so a faster but wrong result cannot pass.
 
-```
-NO OPTIMIZATION WITHOUT A MEASUREMENT THAT PROVES THE HOTSPOT
-```
+Do not compare a cold baseline with a warm result or development Profiler overhead with production numbers without stating the limitation.
 
-If you cannot point to a number, you are guessing. Do not micro-optimize cold code.
+## Profile
 
-## Step 1: Baseline
+Use the least invasive available evidence:
 
-Capture a realistic, repeatable measurement before touching code.
+1. Symfony Profiler/Web Debug Toolbar for request timeline, Doctrine, Twig, Serializer, cache, events, and logs.
+2. Blackfire or the installed APM for call graphs, wall/CPU time, memory, I/O, and repeated production-like samples.
+3. Doctrine SQL logger/profiler plus `EXPLAIN`/`EXPLAIN ANALYZE` on the supported database.
+4. Stopwatch/PSR-3 metrics around the suspected service or external boundary.
+5. Messenger worker metrics, transport depth, retry/failure rate, processing time, and memory growth.
+6. `phpbench` or a focused repeatable harness for CPU-bound code when already configured.
 
-- End-to-end: response time (p50/p95), requests/sec (e.g. `ab`, `wrk`, `k6`).
-- Micro: `phpbench` for hot functions; a `microtime(true)`/`memory_get_peak_usage()` harness for a quick suspicion.
-- Record environment: PHP version, OPcache on/off, dataset size. Numbers are meaningless without context.
+Form one hypothesis at a time and connect it to measured evidence.
 
-Save the baseline to `performance-optimization-baseline.md`.
+## Doctrine And Database
 
-## Step 2: Profile
+- Eliminate N+1 access with an intentional fetch join, projection/read model, batch query, or extra-lazy association as appropriate.
+- Select only required data for read-heavy lists; avoid partial entities that may later be treated as complete managed objects.
+- Align equality/range/order predicates with composite index order and verify the actual plan/cardinality.
+- Bound result sets and use deterministic pagination; prefer keyset pagination when large offsets dominate cost.
+- Avoid unbounded `IN` clauses, collection hydration, cascade operations, and flush loops. Batch and clear carefully for long commands/workers.
+- Review transaction duration, locks, deadlocks, retry behavior, and connection use before adding concurrency.
+- Never add an index without assessing write/storage cost and migration lock behavior.
 
-Find where time and memory actually go. Pick the tool for the environment:
+## Symfony Runtime And Rendering
 
-| Tool | Best for | Notes |
-| --- | --- | --- |
-| Xdebug profiler | Local dev deep dive | High overhead; over-weights frequent small calls. Reads as callgrind (KCachegrind/QCachegrind). |
-| SPX (`php-spx`) | Local/CLI flame graphs | Low overhead, easy setup, subtracts profiling overhead. |
-| Blackfire | On-demand + CI perf assertions | Production-safe triggered profiles; before/after comparison. |
-| Tideways / XHProf | Always-on APM, sampled traces | Continuous monitoring, regression detection. |
+- Keep production debug off; warm and verify cache during deployment rather than clearing it destructively in request paths.
+- Verify OPcache/preloading/runtime settings through deployment configuration, not source-code toggles.
+- Reduce repeated container/config work only after profiling; compiled private services and autowiring are normally not the bottleneck.
+- In Twig, measure expensive includes/components, repeated property access, translation loops, and lazy Doctrine access.
+- In Serializer/API Platform, constrain groups/depth, avoid circular graphs, and use explicit read models/providers for large collections.
+- Cache only data with a defined key, scope/tenant boundary, TTL, invalidation owner, stampede behavior, and observability.
 
-Read the profile top-down: which few calls dominate wall time and memory. Fix causes, not leaves.
+## Messenger, External I/O, And Long Processes
 
-## Step 3: Fix The Top Hotspots
+- Keep handlers thin and services idempotent; tune worker count/prefetch/time/memory limits from measured throughput and downstream capacity.
+- Investigate retry storms, poison messages, failure transport growth, serialization size, and database connection/memory retention.
+- Batch safely and restart workers during deployments when code/container state changes.
+- Set outbound HTTP connect/total timeouts, bounded retries with jitter, circuit/concurrency limits, and response-size constraints.
+- Move work async only when latency/retry/isolation benefits justify queue complexity and consistency implications.
 
-Address the biggest levers first (usually in this order):
+## Change And Re-measure
 
-### Database (most common)
-- Kill N+1 queries: batch with `WHERE id IN (...)` or a join instead of a query per row.
-- Add targeted indexes; confirm with `EXPLAIN`.
-- Use prepared statements for repeated queries; paginate with `LIMIT`/keyset.
-- Avoid `SELECT *` on wide/hot tables; select needed columns.
+Make the smallest change that tests the top hypothesis. Repeat the same scenario and report before/after values, sample count, variance, cache state, and trade-offs. Re-run correctness, authorization, and concurrency tests.
 
-### I/O and external calls
-- Set timeouts; batch or parallelize independent calls.
-- Move slow, non-critical work to a queue/worker.
+Reject optimizations that merely move cost to another request, worker, tenant, deployment step, or failure path without documenting that trade-off.
 
-### Caching
-- Cache hot, expensive, reusable results: APCu (single process) or a shared cache (Redis) via PSR-6/PSR-16.
-- Make cache keys and invalidation explicit; a wrong cache is worse than none.
+## Regression Protection
 
-### Algorithms and memory
-- Replace O(n^2) scans over large arrays; index with maps.
-- Stream large datasets with generators (`yield`) instead of building giant arrays.
-- Free large variables and use `unset()` in long-running scripts.
+- Add a query-count assertion only when stable and meaningful.
+- Add repository integration tests for changed query shape and results.
+- Add a benchmark/performance budget when the project has reliable infrastructure for it.
+- Record monitoring thresholds and dashboards for production-sensitive improvements.
+- Document cache invalidation, worker tuning, indexes/migrations, and rollback requirements.
 
-### Runtime
-- Ensure OPcache is enabled in production (`opcache.validate_timestamps=0`, sized `memory_consumption` and `max_accelerated_files`).
-- Consider OPcache preloading and, for CPU-bound work, evaluate JIT (measure; it does not help I/O-bound code).
-- Optimize the Composer autoloader for production: `composer dump-autoload -o` (or `--classmap-authoritative`).
-
-## Step 4: Re-measure And Prevent Regression
-
-- Re-run the exact baseline scenario; report before/after with the same environment.
-- Add a `phpbench` benchmark or a Blackfire assertion so the win is protected in CI.
-- If a change did not help, revert it. Keeping "probably faster" code adds risk without benefit.
+Use [Symfony clean-code patterns](../../../examples/symfony-clean-code-patterns.md) to keep query optimization in repositories/query services and orchestration in application services. Do not trade boundary clarity for an unmeasured micro-optimization.
 
 ## Report Template
 
-```markdown
-# Performance Report: [Target]
-
-## Baseline
-- Scenario: [endpoint/script + dataset]
-- p95: [X ms], throughput: [Y req/s], peak memory: [Z MB]
-- Environment: PHP [ver], OPcache [on/off]
-
-## Profile Findings
-1. [Hotspot] - [% of wall time] - [cause]
-
-## Changes
-1. [Change] -> [before] to [after]
-
-## Result
-- p95: [X -> X'] ms ([%] improvement)
-- Regression guard: [phpbench/Blackfire assertion added]
-
-## Remaining Risks / Follow-ups
-- [...]
+```text
+Scenario/environment:
+Baseline:
+Evidence and root cause:
+Change:
+After:
+Correctness checks:
+Operational trade-offs:
+Remaining bottlenecks/risks:
 ```
 
-## Red Flags - STOP
-
-- "This is obviously the slow part" without a profile.
-- Changing several things at once so you cannot attribute the win.
-- Adding a cache to hide an N+1 instead of fixing the query.
-- Enabling JIT and declaring victory without measuring.
-
-## Final Output
-
-Return the baseline, profiling findings, changes with before/after numbers, regression guard, Context Summary, and next step (`/verify`, `/code-reviewer`, or `/debugger`).
+Include exact commands/tools and clearly label unavailable tooling or non-production measurements. Include Context Summary and Next Steps.

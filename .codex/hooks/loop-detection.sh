@@ -1,7 +1,7 @@
 #!/bin/bash
 # Loop Detection Hook
 # Tracks edit count per file to detect doom loops.
-# Cursor hook event: afterFileEdit.
+# Codex hook event: PostToolUse (self-filters to file-edit payloads).
 # Exit codes: 0 = pass, 1 = warn (continue), 2 = block
 #
 # Currently: warn at 7, block at 10.
@@ -9,7 +9,7 @@
 INPUT=$(cat)
 
 # Extract file path from JSON input (POSIX-compatible, no grep -P).
-# Cursor payloads may use "file_path" or "path"; try both.
+# Codex payloads may use "file_path" or "path"; try both.
 FILE_PATH=$(echo "$INPUT" | sed -n 's/.*"file_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
 if [ -z "$FILE_PATH" ]; then
   FILE_PATH=$(echo "$INPUT" | sed -n 's/.*"path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
@@ -45,14 +45,14 @@ echo "$COUNT" > "$TRACK_FILE"
 
 # Check thresholds
 if [ "$COUNT" -ge 10 ]; then
-  echo "🚫 BLOCKED: File '$FILE_PATH' edited $COUNT times this session."
-  echo "   This looks like a doom loop. Consider:"
-  echo "   - /debugger to investigate the root cause"
-  echo "   - Reassessing your approach"
+  echo "BLOCKED: File '$FILE_PATH' edited $COUNT times this session." >&2
+  echo "   This looks like a repeated-edit loop. Consider:" >&2
+  echo "   - systematic-debugger to investigate the root cause" >&2
+  echo "   - Reassessing your approach" >&2
   exit 2
 elif [ "$COUNT" -ge 7 ]; then
   echo "⚠️  WARNING: File '$FILE_PATH' edited $COUNT times this session."
-  echo "   If you're stuck in a loop, consider using /debugger."
+  echo "   If you're stuck in a loop, consider using systematic-debugger."
   exit 1
 fi
 

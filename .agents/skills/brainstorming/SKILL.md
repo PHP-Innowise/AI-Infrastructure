@@ -33,18 +33,18 @@ Any additional ad-hoc files (summaries, notes, explorations) MUST also follow th
 - Focus on understanding: purpose, constraints, success criteria
 
 **For new projects - gather tech stack info:**
-If this is a new project (no existing codebase), ask about tech stack. Keep it simple - these are small projects with straightforward architecture. This base assumes native PHP; a specific framework belongs on the matching accelerator branch.
+If this is a new project (no existing codebase), ask about tech stack. Keep it simple - these are small projects with straightforward architecture. This branch assumes Symfony and Controller -> Service -> Repository layering.
 
 | Question | Options | Default |
 |----------|---------|---------|
-| Project type? | PHP API / PHP full-stack (server-rendered) / Frontend / Full-stack | - |
+| Project type? | Symfony API / Symfony full-stack (server-rendered) / Frontend / Full-stack | - |
 | Database? (backend) | PostgreSQL / MySQL / SQLite / Existing database / None | PostgreSQL |
-| Rendering? (frontend) | Server-rendered PHP templates / Separate frontend / API-only / Existing stack | Server-rendered PHP templates |
+| Rendering? (frontend) | Twig/Symfony UX / Separate frontend / API-only / Existing stack | Twig/Symfony UX |
 
 **Architecture defaults (don't over-question):**
-- Backend: front controller + router, request DTOs/validators, use-case/service classes, PDO repositories, PSR-15 middleware, PSR-11 DI
-- Business logic: extract use-case/service classes only when they clarify the workflow
-- Frontend: server-rendered PHP templates with semantic HTML and progressive enhancement, or an API-only backend
+- Backend: Symfony routes/controllers, request DTOs/Forms/Validator, application services, Doctrine repositories, voters, Messenger, Symfony DI
+- Business logic: keep controllers thin and put workflows in services
+- Frontend: Twig, Symfony Forms, Symfony UX/Stimulus/Turbo, or an API-only backend
 
 **Library vs Custom decisions (MANDATORY):**
 - When the design involves functionality that established libraries solve (logging, validation, HTTP clients, date handling, state management, auth, caching, etc.), you MUST ask the user whether they want to use an existing library or build a custom solution.
@@ -52,7 +52,7 @@ If this is a new project (no existing codebase), ask about tech stack. Keep it s
 - Use AskUserQuestion with options like: `["Use <library-name> (Recommended)", "Use <alternative-library>", "Custom implementation"]`. The built-in "Other" option lets the user suggest their own library — mention this explicitly in the question text (e.g., "Pick a library, or choose Other to suggest your own").
 - If the user chooses a library, research it (via WebSearch or Context7) to confirm it fits their stack and is actively maintained.
 - If the user wants custom, ask WHY - ensure there's a real reason (licensing, bundle size, specific requirements) and document the rationale in the design doc.
-- **Never silently decide to write custom code when a proven, maintained package exists.** This prevents reinventing the wheel (e.g., using a maintained router, PSR-7/PSR-15 implementation, PSR-3 logger like Monolog, or a validation library instead of hand-rolling fragile equivalents).
+- **Never silently decide to write custom code when a proven, maintained package exists.** This prevents reinventing the wheel (e.g., using Symfony Security, Validator, Forms, Messenger, Cache, HttpClient, Monolog, Doctrine, or maintained bundles instead of hand-rolling fragile equivalents).
 
 **Exploring approaches:**
 - Propose 2-3 different approaches with trade-offs
@@ -81,7 +81,7 @@ If this is a new project (no existing codebase), ask about tech stack. Keep it s
 [Components, layers, interactions]
 
 ## Data Model
-[Entities/value objects, relationships, migrations/SQL schema, repositories, request/response contracts]
+[Doctrine entities, relationships, migrations, indexes, repositories, request/response contracts]
 
 ## API Design (if applicable)
 [Endpoints, request/response formats]
@@ -106,7 +106,7 @@ If this is a new project (no existing codebase), ask about tech stack. Keep it s
 ### Task Numbering Logic
 
 1. **Check if task number provided:**
-   - If coming from `/requirements-analyst`, use the task number from context (e.g., "TASK-001")
+   - If coming from `requirements-analyst`, use the task number from context (e.g., "TASK-001")
    - If no task number: run task counter logic (same as requirements-analyst)
 
 2. **Task counter logic (if no task number provided):**
@@ -115,7 +115,7 @@ If this is a new project (no existing codebase), ask about tech stack. Keep it s
 
 3. **Create task directory:** `tasks/TASK-{N}/` (if not already created)
 
-4. **Write design:** `tasks/TASK-{N}/brainstorming-design.md`
+4. **Write design:** `tasks/TASK-{N}brainstorming-design.md`
    - Use the Design Document Template as the structure
    - Include all design decisions, architecture, data model, API design, and open questions
 
@@ -138,10 +138,10 @@ This file preserves the design context so the conversation can be cleared before
 
 After design document is written to file, STOP and present these options:
 
-**Next by flow:** [[/writing-plans]] `[TASK-{N} context]` - Create detailed implementation tasks from the design. See [[moc-understanding]] for phase context.
+**Next by flow:** writing-plans `[TASK-{N} context]` - Create detailed implementation tasks from the design.
 
 **Pass to next skill:** Include the task number in your context summary (e.g., "TASK-001: User notifications design completed")
 
 **Alternatives:**
-- [[/architect]] `[TASK-{N} context]` - Review architecture implications before creating the plan.
-- [[/api-designer]] `[TASK-{N} context]` - Design REST APIs if the feature involves API work.
+- architect `[TASK-{N} context]` - Review architecture implications before creating the plan.
+- api-designer `[TASK-{N} context]` - Design REST APIs if the feature involves API work.

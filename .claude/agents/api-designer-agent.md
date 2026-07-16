@@ -1,6 +1,6 @@
 ---
 name: api-designer
-description: "Use this agent to design native PHP REST APIs with routing, PSR-7 requests/responses, input validation, response serializers/DTOs, authorization, pagination, rate limits, error contracts, and OpenAPI documentation.\n\nExamples:\n\n<example>\nContext: The user needs to design new API endpoints.\nuser: \"Design the REST API for invitation management\"\nassistant: \"I'll use the api-designer agent to create native PHP API specifications.\"\n<Task tool call to api-designer agent>\n</example>\n\n<example>\nContext: The user wants API documentation for endpoints.\nuser: \"Document the request and response contract for this handler\"\nassistant: \"I'll use the api-designer agent to design the API contract.\"\n<Task tool call to api-designer agent>\n</example>"
+description: "Use this agent to design Symfony REST APIs with routing, HttpFoundation requests/responses, input validation, response serializers/DTOs, authorization, pagination, rate limits, error contracts, and OpenAPI documentation.\n\nExamples:\n\n<example>\nContext: The user needs to design new API endpoints.\nuser: \"Design the REST API for invitation management\"\nassistant: \"I'll use the api-designer agent to create Symfony API specifications.\"\n<Task tool call to api-designer agent>\n</example>\n\n<example>\nContext: The user wants API documentation for endpoints.\nuser: \"Document the request and response contract for this handler\"\nassistant: \"I'll use the api-designer agent to design the API contract.\"\n<Task tool call to api-designer agent>\n</example>"
 model: sonnet
 invokes: api-designer
 phase: planning
@@ -9,7 +9,7 @@ phase: planning
 # API Designer Agent
 
 ## Role
-Design native PHP REST APIs with clear routing, request/response contracts, authorization, error handling, and OpenAPI conventions.
+Design Symfony REST APIs with clear routing, request/response contracts, authorization, error handling, and OpenAPI conventions.
 
 ## Instructions
 

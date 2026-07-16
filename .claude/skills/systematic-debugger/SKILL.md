@@ -41,20 +41,26 @@ Use for ANY technical issue:
 - Build failures
 - Integration issues
 
-## Native PHP Debugging Toolbox
+## Symfony Debugging Toolbox
 
 Reach for the least invasive tool that answers the question:
 
-- **Read the error first.** PHP notices/warnings/exceptions carry file, line, and a stack trace. Enable `display_errors`/`error_reporting(E_ALL)` in dev; read `error_log` / the PSR-3 log otherwise.
-- **Step debugging:** Xdebug (`xdebug.mode=debug`) with breakpoints in the IDE is the fastest way to inspect state without editing code.
-- **Targeted tracing:** `var_dump()`, `var_export()`, `error_log()`, or a PSR-3 logger at the exact data-flow point identified in Phase 1 (remove before committing).
-- **Assertions:** `assert()` and typed arguments/return types surface contract violations early.
-- **Stack traces on demand:** `debug_print_backtrace()` or `(new \Exception())->getTraceAsString()`.
-- **Database:** log the actual SQL and bound parameters; run the query manually with `EXPLAIN` when results look wrong.
-- **Reproduce in a test:** encode the failing scenario as a PHPUnit/Pest test (see Phase 4) so the bug cannot silently return.
-- **Bisect:** `git bisect` when a regression appeared but the cause is unclear.
+- **Exception and logs:** read the full Symfony exception page only in `dev`, then inspect the configured Monolog channel/log destination with correlation/request IDs. Never enable debug output in production.
+- **Profiler and Web Debug Toolbar:** inspect timeline, request/response, route, security, forms, validation, Doctrine queries, Twig, Serializer, cache, events, Messenger, HTTP client, and logs for the failing request.
+- **Routing:** use `php bin/console debug:router [name]` and `router:match <path>` to confirm method, host, locale, format, requirements, and controller.
+- **Container/config:** use `debug:container`, `debug:autowiring`, `debug:config <extension>`, `lint:container`, and `lint:yaml` to inspect effective wiring/config rather than guessing from one file.
+- **Events:** use `debug:event-dispatcher [event]` to verify listener/subscriber registration, priority, and unexpected ordering.
+- **Messenger:** inspect routing/transports, worker logs, retry classification, failure transport, message serialization, duplicate delivery, and transaction/dispatch timing. Replaying or removing failed messages requires explicit operational care.
+- **Doctrine:** inspect Profiler queries and bound parameters, mapping/schema validation, UnitOfWork/identity-map effects, transaction boundaries, lazy loading, and the database `EXPLAIN` plan.
+- **Twig/Forms/UX:** run `lint:twig`, inspect form view/submission errors and CSRF, verify Turbo frame/redirect/status behavior, and reproduce Stimulus lifecycle issues across reconnects.
+- **Cache/environment:** confirm `APP_ENV`/debug mode through safe runtime commands, effective config, cache pool/key/namespace, and warmed container. Do not read or print `.env` or secrets.
+- **Targeted tracing:** prefer Symfony VarDumper `dump()` in local debugging or temporary PSR-3 logging at the identified boundary. Remove temporary output/logging before completion.
+- **Step debugging:** use Xdebug breakpoints when control flow or state cannot be isolated from logs/tests.
+- **External boundaries:** inspect HttpClient/Mailer/Notifier responses, timeouts, retries, mock transports, and sanitized traces without printing credentials or personal data.
+- **Reproduce in a test:** encode the failing scenario at the lowest useful layer with PHPUnit/Pest so the bug cannot silently return.
+- **Regression search:** use `git log`, `git show`, and `git bisect` when recent code/config/dependency changes correlate with the failure.
 
-Xdebug's profiler answers "why is it slow"; for deeper performance work, hand off to `/performance-optimization`.
+Use only commands/components installed by the consuming project. Xdebug/Blackfire profiling and performance changes belong in `performance-optimization` after correctness is understood.
 
 ## The Four Phases
 
@@ -169,9 +175,9 @@ If you catch yourself thinking:
 
 After debugging is complete and fix is verified, STOP and present these options:
 
-**Next by flow:** [[/test-generator]] `[context]` - Generate/update tests to prevent regression. See [[moc-execution]] for phase context.
+**Next by flow:** /test-generator `[context]` - Generate/update tests to prevent regression.
 
 **Alternatives:**
-- [[/docs-generator]] `[context]` - Update documentation after the fix.
-- [[/code-reviewer]] `[context]` - Review the fix for quality issues.
-- [[/finishing-branch]] `[context]` - Complete branch if fix was the last blocker.
+- /docs-generator `[context]` - Update documentation after the fix.
+- /code-reviewer `[context]` - Review the fix for quality issues.
+- /finishing-branch `[context]` - Complete branch if fix was the last blocker.

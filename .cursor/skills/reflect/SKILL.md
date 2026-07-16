@@ -66,7 +66,7 @@ Choose where the rule belongs:
 | Scope | File | When |
 |-------|------|------|
 | Global policy | `AGENTS.md` | Applies to all agents and skills |
-| Code style | `.cursor/GOLDEN-PRINCIPLES.md` | Naming, native PHP/PSR conventions, error handling, tests |
+| Code style | `.cursor/GOLDEN-PRINCIPLES.md` | Naming, Symfony/PSR conventions, error handling, tests |
 | Specific skill | `.cursor/skills/{name}/SKILL.md` | Only relevant to one skill's workflow |
 | Process | `.cursor/STABILIZATION.md` | Add as example cycle for future reference |
 

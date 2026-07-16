@@ -1,5 +1,43 @@
 # Changelog
 
+## 1.3.0 - 2026-07-15
+
+### Added
+
+- **Symfony 7.4 LTS and Symfony 8.1 accelerator baseline** with consuming-project version detection and PHP 8.2+/8.4+ compatibility guidance.
+- **Twelve Symfony specialist workflows** across Claude Code, Cursor, and Codex: API Platform design, architecture-boundary review, console-command implementation, container review, Doctrine migration design, event-subscriber design, fixture/factory generation, Form/Validator design, Messenger design, repository review, voter/security design, and Twig/UX review.
+- **Shared architecture policy and clean-code catalog** covering Controller -> Service -> Repository responsibilities, pragmatic SOLID, DTO/Form/Validator boundaries, authorization, Doctrine, Messenger, console, events, API Platform, Twig, and Symfony UX.
+- **Complete public onboarding** for prerequisites, native edition layouts, skill flow, security, frontend integration, testing, debugging, performance, research, operations, team adoption, and verification.
+- **Senior Symfony clean-code pattern catalog** with paired bad/good examples for layered workflows, pragmatic SOLID, validation, authorization, Doctrine, transactions, Messenger, events, console commands, API Platform, Twig, and tests.
+- **Native skill evaluation and benchmarking toolchains for Codex and Cursor** with isolated trigger probes, description optimization, held-out evaluation loops, benchmark aggregation, HTML review, schemas, and deterministic no-credit adapter tests.
+
+### Changed
+
+- **Specialized the framework-neutral branch for Symfony** across root policy, DOD, principles, stabilization guidance, hooks, rules, skills, commands, agents, examples, and edition documentation.
+- **Restored Codex's native repository layout**: skills now live in `.agents/skills`; `.codex` contains only project configuration, hooks, and reference documentation.
+- **Expanded core Symfony workflows to reference depth** with executable API contract design, layered testing patterns, Twig/Forms/UX implementation, measure-first performance diagnostics, operations documentation, and Symfony Profiler/container/Messenger debugging.
+- **Made native handoffs platform-correct**: Codex flow metadata and documentation use discovered skill names, while Cursor retains its supported command aliases without Claude-only wiki syntax or attribution.
+- **Expanded Symfony security and operational guidance** for voters, firewalls, CSRF, Serializer exposure, Doctrine parameters, uploads, SSRF, Messenger payloads/retries, Composer advisories, migrations, cache warmup, worker lifecycle, and rollback planning.
+- **Expanded frontend guidance** for Twig, Forms, Stimulus, Turbo, Live Components, AssetMapper, Encore compatibility, accessibility, progressive enhancement, validation UX, and browser verification.
+- **Established pragmatic SOLID enforcement** across policy and technical workflows: cohesive responsibilities, inward dependencies, narrow real-boundary interfaces, explicit side effects, typed contracts, and resistance to speculative abstraction.
+- **Consolidated completed accelerator decisions into root policy, public documentation, and the compact specs manifest**, removing temporary `TASK-001` artifacts and the redundant accelerator implementation spec after review.
+- **Removed redundant edition playbooks and unsupported Cursor-style `.codex/rules`**, consolidating enforceable guidance in root policy, living specs, technical skills, Golden Principles, and the shared example catalog.
+
+### Fixed
+
+- Reworked all active PHP examples so good patterns use compatible narrow ports/fakes, deterministic time, non-null authenticated users, bounded queries, explicit runtime type checks, and atomic outbox semantics; bad snippets are now explicitly marked as non-copyable counterexamples.
+- Corrected the Codex `systematic-debugger` frontmatter name so repository discovery matches its skill directory.
+- Corrected Claude Code hook registration to pass native stdin JSON directly to validators and use the current seconds-based timeout contract.
+- Enforced skill-prefixed task/spec Markdown and zero-padded `TASK-001/` directories across all edition hooks using structured JSON path extraction.
+- Removed stale phase-map links, cross-product PR attribution, and non-Symfony authorization terminology from native workflows and policy.
+- Hardened shell safety hooks with structured JSON command extraction, detection of nested force-push variants such as `--force-with-lease`, and comment-aware fixture safeguards.
+- Corrected YAML frontmatter quoting in skill and PHP rule metadata so standard parsers can load every edition reliably.
+- Restored the `skill-creator` evaluation resources for Cursor and Codex and replaced Claude-specific subprocess calls, discovery assumptions, schemas, templates, and report copy with isolated native CLI adapters.
+- Removed the forced Claude `APP_ENV=local` override and reset loop-detection counters at session start to prevent cross-session false positives.
+- Fixed shell safety hooks so blocked patterns beginning with `-` are treated as patterns rather than `grep` options.
+- Removed the self-contained `.codex/skills`, `.codex/commands`, and `.codex/agents` duplication that conflicted with Codex repository skill discovery.
+- Corrected documentation that previously described Laravel-first history or Codex paths as current Symfony behavior.
+
 ## 1.1.0 - 2026-07-09
 
 ### Added

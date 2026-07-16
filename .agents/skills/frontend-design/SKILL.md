@@ -1,71 +1,77 @@
 ---
 name: frontend-design
-description: Design user interfaces for native PHP projects using server-rendered templates, semantic HTML, CSS, and progressive enhancement. Framework-neutral (no assumed JS framework).
+description: Design Symfony frontend experiences using Twig, Symfony Forms, Symfony UX, Stimulus/Turbo, semantic HTML, CSS, and accessibility rules.
 phase: planning
 flow-next: writing-plans
 flow-alternatives: [coder-frontend, api-designer]
-related: [api-designer, coder-frontend, wcag-accessibility, web-design-guidelines]
 ---
 
-# Frontend Design
+# Symfony Frontend Design
 
-## Overview
+Design UI around the project's existing Symfony frontend stack.
 
-Design frontend experiences for native PHP applications. This base assumes server-rendered PHP templates with semantic HTML, CSS, and progressive enhancement. A specific JS framework (React, Vue, etc.) is out of scope on this branch; it belongs on a framework-specific branch.
-
-Do not assume a rendering approach until the project reveals it.
-
-## Rendering Decision
-
-| Need | Good fit |
-| --- | --- |
-| Content pages, simple forms | Server-rendered PHP templates + plain HTML |
-| Small dynamic touches (toggles, validation hints) | Server-rendered templates + progressive enhancement with vanilla JS |
-| Highly interactive UI | API-only PHP backend + the team's chosen frontend (out of scope here) |
-| Admin CRUD | Server-rendered templates or a project-standard admin approach |
-
-Default to the least JavaScript that meets the requirement. Pages must work without JS first, then enhance.
+Design the complete user workflow around the consuming project's existing frontend stack. Do not introduce a new framework or asset pipeline without an explicit architecture decision.
 
 ## Required Context
 
-Read:
+Inspect routes/controllers, Twig layouts/components/macros, Forms/themes, translations, Stimulus controllers, Turbo/Live Components, AssetMapper/Encore/Vite configuration, CSS/design tokens, CSP, API contracts, authorization, existing UI patterns, analytics, and browser/functional tests.
 
-- Existing templates/views directory and layout/partials.
-- Existing CSS and any design tokens.
-- API design when the UI consumes API endpoints.
-- Accessibility rules in `wcag-accessibility`.
+Identify the audience, primary task, frequency, device/context constraints, data sensitivity, failure consequences, and accessibility needs before selecting interaction patterns.
+
+## Stack Decision
+
+- Prefer Twig + Symfony Forms for server-rendered workflows.
+- Add Stimulus for focused client behavior and Turbo for navigation, frames, or streams when progressive enhancement remains intact.
+- Use Live Components only when installed and when server-driven interactivity reduces overall state/contract complexity.
+- Prefer AssetMapper for modest modern asset needs; retain Encore/Vite or an existing SPA when compilation, TypeScript, framework integration, team ownership, or ecosystem constraints justify it.
+- Treat a separate frontend as an API, authentication, deployment, observability, and versioning decision rather than a template refactor.
+
+Record why the existing stack is sufficient or why a change is justified, including migration and rollback costs.
+
+## Page And State Contract
+
+Define:
+
+- route, controller/component, service call, voter/authorization behavior, and typed view model;
+- document title, page heading, landmarks, navigation/breadcrumbs, content hierarchy, and primary action;
+- initial/loading/success/empty/no-results/validation/authorization/not-found/conflict/offline/system-error states;
+- redirects, flash messages, duplicate submission, refresh/back behavior, and preservation of user input;
+- responsive layout, long content/translations, zoom/reflow, print behavior where relevant, and supported browsers;
+- analytics/telemetry events without sensitive payloads.
+
+Do not hide error or permission states behind generic blank screens.
+
+## Forms And Input
+
+Specify fields, types, labels, help, defaults, constraints, transformations, conditional behavior, autocomplete, keyboard order, and server-side error mapping. Define CSRF, upload limits, destructive-action confirmation, focus after failure, error summary, and resubmission/idempotency behavior.
+
+Privileged values such as roles, ownership, tenant, price, audit metadata, or workflow state must not be trusted from hidden controls.
+
+## Interaction Model
+
+- Start with semantic HTML and a complete server round trip.
+- Add Stimulus targets/actions/values only for local interaction state.
+- Define Turbo Frame boundaries, navigation/history, redirects, validation rendering, stream targets, and fallback behavior.
+- Define Live Component writable properties/actions, validation, authorization, hydration exposure, latency, and request frequency.
+- For async API calls, define cancellation, stale response handling, retry, loading/error recovery, authentication/CSRF, and response contract.
+
+## Accessibility Contract
+
+Specify semantic elements, accessible names/descriptions, heading order, landmarks, keyboard interaction, visible focus, focus movement, live announcements, error association, contrast, non-color cues, reduced motion, touch targets, captions/alternatives, and 400% zoom/reflow behavior. Use native elements before ARIA and hand detailed review to `wcag-accessibility` when needed.
+
+## Security And Privacy
+
+- Preserve Twig auto-escaping and define any sanitized rich-text boundary.
+- Keep authorization server-side and CSRF on state-changing browser requests.
+- Avoid exposing sensitive entity fields, secrets, internal state, or personal data through HTML, JavaScript state, logs, analytics, or Turbo streams.
+- Define CSP implications, allowed remote media/origins, upload behavior, and cache visibility for personalized pages.
+
+Use the frontend boundary examples in [Symfony clean-code patterns](../../../examples/symfony-clean-code-patterns.md) to specify escaped output, CSRF-protected mutations, view models, and progressive enhancement.
+
+## Verification Plan
+
+Plan functional tests for server behavior, component/Stimulus tests where configured, template/build linting, and browser verification. Browser scenarios must cover keyboard-only use, invalid forms, focus, Turbo reconnect/navigation, no-JavaScript fallback, narrow/wide viewports, zoom/reflow, loading/error states, and no overlapping/clipped content.
 
 ## Design Output
 
-Include:
-
-- User flow.
-- Page/partial list.
-- Form fields, validation feedback, loading states, empty states, and error states.
-- Accessibility notes (semantic structure, labels, focus, keyboard).
-- Responsive behavior.
-- Data dependencies and endpoints.
-- Recommended rendering approach for this feature.
-
-## Native PHP UI Notes
-
-- Server-rendered forms must include a CSRF token for state-changing requests.
-- Authorization stays server-side; hiding a control is not authorization.
-- Escape all dynamic output in templates (`htmlspecialchars`) to prevent XSS.
-- Re-render forms with prior input and per-field error messages on validation failure.
-- Progressive enhancement: the baseline HTML flow must work if JavaScript fails to load.
-
-## Frontend Best Practices
-
-- **Semantic HTML first:** use the right element (`button`, `a`, `nav`, `main`, `form`, `table`, `dialog`) before reaching for `div` + ARIA. Correct semantics give you accessibility and keyboard support for free.
-- **Progressive enhancement:** the core flow works with HTML alone; CSS improves presentation; JS adds convenience. Never make required functionality JS-only.
-- **Responsive and fluid:** mobile-first CSS, relative units (`rem`, `%`, `clamp()`), flexbox/grid, and `max-width` containers. Test at small and large widths.
-- **Performance:** minimize render-blocking assets, defer non-critical JS, lazy-load below-the-fold images (`loading="lazy"`), set width/height to avoid layout shift, and compress/serve modern image formats.
-- **Forms UX:** label every field, show inline per-field errors, preserve entered values on failure, use correct `type`/`inputmode`/`autocomplete`, and disable the submit button only after starting submission (never as the sole guard).
-- **CSS architecture:** keep it consistent (utility classes, BEM, or design tokens); avoid deep specificity wars and `!important`. Define spacing/color/type scales as tokens.
-- **State feedback:** always design loading, empty, error, and success states, not just the happy path.
-- **Accessibility as a requirement:** color contrast, visible focus, keyboard operability, and reduced-motion support are acceptance criteria, not extras. See `wcag-accessibility`.
-
-## Final Output
-
-Return the design, rendering recommendation, implementation notes, Context Summary, and next step.
+Provide a route/page inventory, state matrix, Twig/component structure, Form/view-model contract, Stimulus/Turbo/Live Component behavior, authorization/security boundaries, responsive/accessibility rules, testing/browser plan, assumptions, and rollout risks. Record approved user-facing workflow decisions in `specs/`.

@@ -1,38 +1,32 @@
-# Native PHP Accelerator - Codex Edition
+# Symfony Layered Architecture Accelerator - Codex Edition
 
-The Codex edition of the accelerator, laid out the way OpenAI Codex actually discovers things. Codex's model differs from Claude Code and Cursor, so the pieces live in three places:
+Codex uses the shared root policy, repository skills discovered under `.agents/skills`, and project integration files under `.codex`.
 
-| Piece | Location | Why |
-|---|---|---|
-| **Skills** (30 workflows) | `.agents/skills/<name>/SKILL.md` | Codex discovers repo skills from `.agents/skills`, not `.codex/`. |
-| **Policy** | root `AGENTS.md` | Read natively by Codex (walked root -> cwd, concatenated). Shared with Claude/Cursor. |
-| **Config** | `.codex/config.toml` | Project-scoped model/approval/sandbox/MCP + enables hooks. Loads only when the project is trusted. |
-| **Hooks** | `.codex/hooks.json` + `.codex/hooks/*.sh` | Lifecycle hooks (same event schema as Claude Code). |
-| **Reference docs** | `.codex/DOD.md`, `.codex/GOLDEN-PRINCIPLES.md`, `.codex/STABILIZATION.md` | Definition of Done, principles, error-to-rule process. |
+## Directory Map
 
-## Key differences from the Cursor/Claude editions
+| Piece | Location | Purpose |
+| --- | --- | --- |
+| Skills | `.agents/skills/<name>/SKILL.md` | Codex-discovered Symfony workflows |
+| Policy | `AGENTS.md` | Shared enforceable architecture and safety rules |
+| Config | `.codex/config.toml` | Trusted project configuration and feature flags |
+| Hooks | `.codex/hooks.json`, `.codex/hooks/*.sh` | Context, command safety, naming, and loop checks |
+| References | `.codex/DOD.md`, `.codex/GOLDEN-PRINCIPLES.md`, `.codex/STABILIZATION.md` | Completion, quality, and learning guidance |
 
-- **No command layer.** Codex **deprecated and removed custom prompts / slash commands** (v0.117+). Skills are the superset replacement, so the `.claude/commands` and `.cursor/commands` entry points are **not** mirrored - you invoke a skill by name and Codex can also trigger it implicitly.
-- **No subagents ported.** The `.claude/agents` wrappers just ran one skill; since Codex invokes skills directly, they add nothing here. (Codex does support subagents via `.agents/` + `agents.<name>.config_file` if you later want explicit delegation.)
-- **Skills live in `.agents/skills`**, deliberately, because that is the path Codex loads.
+Codex does not use duplicate `.codex/skills`, `.codex/commands`, or `.codex/agents` trees. Skills replace the deprecated project custom-prompt pattern, and ordinary collaboration/subagent support does not require Markdown wrapper files.
 
-## Setup for a Codex user
+## Setup
 
-1. Open the repo with the Codex CLI or IDE extension.
-2. **Trust the project** when prompted (project-scoped `.codex/` config, hooks, and rules load only for trusted projects).
-3. Confirm skills are visible: type `/` (skills menu) or ask Codex to run one, e.g. "use the coder skill to ...".
-4. Hooks require `features.hooks = true` (already set in `.codex/config.toml`).
+1. Open the repository in Codex and trust the project.
+2. Confirm repository skills are visible from `.agents/skills`.
+3. Invoke a skill by name or describe work that matches its trigger description.
+4. Follow root `AGENTS.md`; run `.codex/DOD.md` before claiming completion.
 
-## Relationship to `.claude/` and `.cursor/`
+## Architecture
 
-Each tool reads its own directory, so all three coexist without conflict:
+The default is `Controller -> Service -> Repository`: framework entry points stay thin, services own workflows and transactions, repositories own Doctrine queries, and input/authorization/output contracts are explicit.
 
-- Claude Code -> `.claude/` (skills, agents, commands, `settings.json` hooks)
-- Cursor -> `.cursor/` (skills, agents, commands, `hooks.json`)
-- Codex -> `.agents/skills` + `.codex/` + root `AGENTS.md`
+The baseline supports Symfony 7.4 LTS on PHP 8.2+ and Symfony 8.1 on PHP 8.4+, while always following the consuming project's declared versions.
 
-Codex does **not** auto-read `.claude/` or `.cursor/`, so there is no double-loading. When you change a skill, mirror the edit across the editions you support (or regenerate).
+## Synchronization
 
-## Keeping in sync
-
-`.agents/skills` was generated from `.claude/skills`; internal `.claude`/`.cursor` path references were rewritten to `.agents`/`.codex`. Hooks were copied and their event wiring translated to Codex's `hooks.json` schema.
+`.claude/skills` is the canonical authored content. Mirror shared Symfony workflow changes into `.cursor/skills` and `.agents/skills`, adapting paths, frontmatter, and tool-integrated mechanics such as `skill-creator` to each platform. Keep `.codex` support files aligned with the root policy and Codex's supported configuration model.

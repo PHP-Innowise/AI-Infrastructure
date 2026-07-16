@@ -7,7 +7,7 @@ flow-alternatives: [code-reviewer, debugger, test-generator]
 
 # Performance Optimization
 
-Spawn performance-optimization agent to baseline, profile, fix the top hotspots (N+1/PDO, caching, memory, OPcache/JIT), and re-measure a native PHP performance problem.
+Spawn performance-optimization agent to baseline, profile, fix the top hotspots (N+1/Doctrine, caching, memory, OPcache/JIT), and re-measure a Symfony performance problem.
 
 ## Input
 $ARGUMENTS

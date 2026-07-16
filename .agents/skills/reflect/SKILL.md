@@ -66,7 +66,7 @@ Choose where the rule belongs:
 | Scope | File | When |
 |-------|------|------|
 | Global policy | `AGENTS.md` | Applies to all agents and skills |
-| Code style | `.codex/GOLDEN-PRINCIPLES.md` | Naming, native PHP/PSR conventions, error handling, tests |
+| Code style | `.codex/GOLDEN-PRINCIPLES.md` | Naming, Symfony/PSR conventions, error handling, tests |
 | Specific skill | `.agents/skills/{name}/SKILL.md` | Only relevant to one skill's workflow |
 | Process | `.codex/STABILIZATION.md` | Add as example cycle for future reference |
 
@@ -101,5 +101,5 @@ After reflection is complete, STOP and present these options:
 
 **Suggested follow-ups:**
 - Test the new rule by re-running the scenario that triggered it.
-- `/verify` — Run DoD checklist if changes affect enforcement.
-- `/skill-creator` — If a new hook or skill modification is needed.
+- `verify` — Run DoD checklist if changes affect enforcement.
+- `skill-creator` — If a new hook or skill modification is needed.

@@ -9,20 +9,20 @@
 
 ### PreToolUse (Write|Edit): File Naming Validator
 **Script:** `file-naming-validator.sh`
-**Purpose:** Validates that .md files in `tasks/` and `specs/` follow skill-prefix naming convention.
-**Return:** 0 = valid name, 1 = warning (currently active), 2 = block (after tuning)
+**Purpose:** Enforces discovered skill prefixes and zero-padded `tasks/TASK-001/` directories for task/spec Markdown.
+**Return:** 0 = valid/not applicable, 2 = block
 **Allowlist:** README.md, CHANGELOG.md, MANIFEST.md
 
 ### PreToolUse (Bash): Bash Validator
 **Script:** `bash-validator.sh`
-**Purpose:** Blocks destructive commands: force-push, hard reset, database drops/truncates, destructive migration resets/rollbacks, secret-writing Composer config, and `--no-verify`.
+**Purpose:** Blocks destructive commands: force-push, hard reset, database/schema drops, unsafe down migrations, purging fixture loads, failed-message bulk removal, destructive SQL, secret-writing Composer config, and verification bypass.
 **Return:** 0 = safe command, 2 = block
 
 ### PostToolUse (Edit): Loop Detection
 **Script:** `loop-detection.sh`
 **Purpose:** Tracks edit count per file per session. Detects doom loops.
 **Return:** 0 = normal, 1 = warning at 7 edits, 2 = block at 10 edits
-**Tracking:** Uses `/tmp/claude-loop-detection/` (resets on reboot)
+**Tracking:** Uses `/tmp/claude-loop-detection/` and resets at `SessionStart`.
 
 ### Notification: Desktop Alert
 **Purpose:** Desktop notification when Claude needs user attention.

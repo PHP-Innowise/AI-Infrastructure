@@ -1,93 +1,40 @@
 ---
 name: writing-plans
-description: Create implementation plans for native PHP work. Use after requirements, brainstorming, architecture, or API design when execution needs clear steps.
+description: Create implementation plans for Symfony layered architecture work after requirements, brainstorming, architecture, API design, or database design.
 phase: planning
-flow-next: git-worktrees
-flow-alternatives: [coder, test-generator]
-related: [requirements-analyst, brainstorming, architect, api-designer]
+flow-next: using-git-worktrees
+flow-alternatives: [coder, architecture-implementer]
 ---
 
-# Writing Plans
+# Symfony Writing Plans
 
-## Overview
+Create plans specific enough for implementation without rediscovering the architecture.
 
-Create precise implementation plans for native PHP projects. Plans should be specific enough for an implementer to execute without rediscovering the architecture.
+## Planning Method
 
-## Required Inputs
+1. Read the approved requirements/design/specs and the concrete controllers, services, repositories, entities, migrations, security config, templates, messages, and tests affected.
+2. State current behavior, target behavior, non-goals, compatibility constraints, and assumptions that still need proof.
+3. Assign every decision to its owning layer and call out deliberate deviations from Controller -> Service -> Repository.
+4. Break work into independently verifiable, dependency-ordered steps. Each step names exact files, behavior, tests, commands, and expected outcome.
+5. Sequence risky changes for reversibility: contract compatibility, expand/backfill/contract migrations, feature flags, worker deployment, cache invalidation, and rollback.
+6. End with a Definition of Done mapped to the active edition's `DOD.md`.
 
-Read available context:
+Each plan must include:
 
-- Requirement docs in `tasks/TASK-N/`.
-- Living specs in `specs/`.
-- Relevant PHP files: entry points/routing, handlers, request validators, domain/services, data access, migrations, tests.
-- Existing project conventions for tests, formatting, static analysis, and any frontend tooling.
+- Goal and non-goals.
+- Controller/service/repository placement.
+- DTO/Form/Validator changes.
+- Authorization/voter changes.
+- Doctrine entity/migration/repository changes.
+- Messenger/console/event subscriber impacts.
+- Test plan by layer.
+- Verification commands.
+- Rollout risks.
 
-## Plan Structure
+Every implementation step must preserve pragmatic SOLID: cohesive responsibilities, inward dependency direction, interfaces only at real boundaries, and explicit validation/authorization/transaction/side-effect ownership. Use [Symfony clean-code patterns](../../../examples/symfony-clean-code-patterns.md) to make structural expectations concrete without copying illustrative names.
 
-```markdown
-# [Feature] Implementation Plan
+Do not hide long-lived architecture decisions only in task docs; update `specs/` when behavior or architecture changes.
 
-## Goal
-[1-2 sentence outcome]
+## Output Quality
 
-## Existing Context
-- Relevant files and current behavior.
-
-## Proposed Design
-- Routes/entry points and handlers.
-- Request DTOs / validators.
-- Domain entities / value objects.
-- Use-case / service classes.
-- Repositories/gateways and migrations.
-- Middleware, workers/queue jobs, cache if needed.
-
-## Implementation Steps
-1. [Specific file-level step]
-2. [Specific file-level step]
-
-## Test Plan
-- Unit tests.
-- Integration/HTTP handler tests.
-- Authorization/validation cases.
-
-## Verification
-- `composer test`
-- `composer lint`
-- `composer analyse`
-
-## Risks
-- [Migration, security, worker, cache, API compatibility risks]
-```
-
-## Planning Checklist
-
-- Does a migration need a backfill or safe rollout?
-- How is the route parameter resolved to an entity?
-- Which request DTO/validator guards input?
-- Which access-control check authorizes behavior?
-- Is a response serializer needed for a stable contract?
-- Are fixtures/factories needed for tests?
-- Should work be queued or run synchronously?
-- Are events/mail/external clients involved?
-- Are indexes needed for new query patterns?
-- Are server-rendered templates affected?
-
-## Plan Quality Best Practices
-
-- **Sequence for safety:** order steps so the build stays green after each one; put risky/uncertain work early to surface unknowns.
-- **Deliver incrementally:** slice into independently mergeable, testable steps rather than one big drop. Each step should leave the system working.
-- **Make it reversible:** note how each risky step is rolled back (feature flag, expand/contract migration, revertible commit).
-- **State assumptions and open questions explicitly;** flag anything that needs a decision before coding.
-- **Right-size:** if a step is too vague to implement directly, break it down; if the whole plan is large, mark the smallest shippable milestone.
-- **Tie each step to verification:** name the test/check that proves the step is done, not just "implement X".
-
-## Output Rules
-
-- Generated markdown must be prefixed with `writing-plans-`.
-- Store temporary plans in `tasks/TASK-N/`.
-- Include commands that actually match the project tooling.
-- Do not include fake certainty about unavailable tests or tools.
-
-## Final Output
-
-Return the plan path, key decisions, Context Summary, and recommended next command.
+Avoid vague steps such as "implement service" or "add tests." A developer should be able to execute the plan without redesigning the feature. Identify unknowns explicitly instead of silently choosing product behavior.

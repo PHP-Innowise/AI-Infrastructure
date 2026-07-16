@@ -1,6 +1,6 @@
 ---
 name: using-git-worktrees
-description: Create and use isolated git worktrees for native PHP implementation tasks.
+description: Create and use isolated git worktrees for Symfony implementation tasks.
 phase: planning
 flow-next: coder
 flow-alternatives: [coder-frontend, test-generator]

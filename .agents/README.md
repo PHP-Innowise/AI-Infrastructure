@@ -1,10 +1,17 @@
-# .agents/ - Shared Agent Skills
+# Symfony Accelerator Skills For Codex
 
-This directory holds the accelerator's skills in the cross-tool `.agents/` convention. **OpenAI Codex discovers repo skills here** (`.agents/skills/<name>/SKILL.md`), so this is where the Codex edition of the accelerator lives.
+Codex discovers repository skills from `.agents/skills/<name>/SKILL.md`.
 
-- **Skills:** `.agents/skills/<name>/SKILL.md` - 30 native-PHP workflows (coder, architect, test-generator, security-reviewer, ...), plus `SKILL FLOW.md` describing the end-to-end flow.
-- Codex loads these automatically for a trusted project; invoke a skill by name (explicitly or let Codex trigger it implicitly).
+These skills are the Codex-native mirror of the canonical Symfony workflows in `.claude/skills`. Shared workflow contracts stay aligned, while tool-specific mechanics such as `skill-creator` use Codex-native capabilities. Supporting Codex configuration, hooks, and engineering references live in `.codex`; enforceable shared policy lives in root `AGENTS.md`.
 
-Companion Codex config lives in `.codex/` (config, hooks, DOD, principles). Policy is the shared root `AGENTS.md`.
+When updating a workflow:
 
-See `.codex/README.md` for the full Codex setup and how it relates to the `.claude/` and `.cursor/` editions.
+1. Change the canonical Claude skill.
+2. Mirror its behavior into `.cursor/skills` and `.agents/skills`.
+3. Rewrite tool-specific paths and mechanics without changing the shared Symfony workflow contract.
+4. Compare inventories and validate internal references.
+5. Run the active edition's Definition of Done.
+
+Do not create duplicate skills under `.codex/skills`.
+
+Invoke Codex skills by their discovered names, such as `brainstorming`, `systematic-debugger`, `documentation-generator`, and `using-git-worktrees`. Claude/Cursor slash-command aliases such as `/brainstorm`, `/debugger`, `/docs-generator`, and `/git-worktrees` are not Codex skill names.

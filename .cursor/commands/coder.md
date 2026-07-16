@@ -1,11 +1,11 @@
 ---
 name: coder
-description: "Spawn coder agent to implement native PHP backend features using the project's entry points, routing, input validation, domain/service classes, PDO data access, migrations, and tests."
+description: "Spawn coder agent to implement Symfony backend features using the project's entry points, routing, input validation, domain/service classes, Doctrine repositories, migrations, and tests."
 ---
 
 # Coder Backend
 
-Spawn coder agent to implement native PHP backend features using the project's entry points, routing, input validation, domain/service classes, PDO data access, migrations, and tests.
+Spawn coder agent to implement Symfony backend features using the project's entry points, routing, input validation, domain/service classes, Doctrine repositories, migrations, and tests.
 
 ## Input
 $ARGUMENTS

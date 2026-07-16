@@ -1,3 +1,6 @@
 # Worktrees
 .worktrees/
 .DS_Store
+
+# Personal IDE state
+.idea/

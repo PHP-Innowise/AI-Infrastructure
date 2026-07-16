@@ -1,6 +1,6 @@
-# Stabilization
+# Stabilization - Symfony Layered Architecture
 
-Use this document to turn repeated agent mistakes, workflow friction, and user corrections into durable rules.
+Use this document to turn repeated agent mistakes, workflow friction, and user corrections into durable Symfony rules.
 
 ## Cycle
 
@@ -13,7 +13,8 @@ Incident -> Root Cause -> Rule -> Example -> Enforcement -> Verification
 - The same mistake happens more than once.
 - A user correction reveals a missing rule.
 - A hook blocks too much or too little.
-- A native PHP convention (PSR, boundary validation, parameterized queries) is violated repeatedly.
+- A Symfony convention is violated repeatedly.
+- Controller -> Service -> Repository boundaries are violated repeatedly.
 - A workflow handoff is confusing.
 
 ## Rule Template
@@ -31,37 +32,47 @@ Incident -> Root Cause -> Rule -> Example -> Enforcement -> Verification
 **Added:** YYYY-MM-DD
 ```
 
-## Native PHP Examples
+## Symfony Examples
 
 ### Rule: Validate At The Boundary
 
-**Trigger:** A handler used raw request data directly.
-**Root cause:** Skill guidance did not require validating/normalizing input into a typed DTO.
-**Rule:** MUST validate and normalize input into a typed request DTO/value object before using it.
+**Trigger:** A controller used raw request data directly.
+**Root cause:** Skill guidance did not require Symfony Forms, Validator, request DTOs, or explicit validation before service calls.
+**Rule:** MUST validate and normalize Symfony HTTP input before using it.
 **Example:**
-- Incorrect: `$this->createUser->handle($request->getParsedBody())`
-- Correct: `$this->createUser->handle(CreateUserRequest::fromArray((array) $request->getParsedBody()))`
+- Incorrect: `$service->create($request->request->all())`
+- Correct: `$service->create($createInvitationRequest)` after `#[MapRequestPayload]`, Form handling, Validator, or explicit DTO validation.
 **Enforcement:** `AGENTS.md`, `coder` skill, code review checklist.
 
 ### Rule: Authorization Is Server-Side
 
-**Trigger:** A UI button was hidden, but the endpoint was still callable.
+**Trigger:** A UI button was hidden, but the route was still callable.
 **Root cause:** Authorization was treated as a frontend concern.
-**Rule:** MUST enforce protected actions in an explicit server-side access-control layer.
+**Rule:** MUST enforce protected actions with Symfony voters, `access_control`, security attributes, or explicit server-side checks.
 **Example:**
 - Incorrect: hide the Delete button only.
-- Correct: check `$accessControl->assertCan($user, 'delete', $resource)` in the handler/use case.
-**Enforcement:** `AGENTS.md`, `architect`, `coder`, `code-reviewer`.
+- Correct: `$this->denyAccessUnlessGranted('DELETE', $resource)` in the controller or a dedicated service authorization check.
+**Enforcement:** `AGENTS.md`, `architect`, `coder`, `code-reviewer`, `security-reviewer`.
 
-### Rule: Queries Must Be Parameterized
+### Rule: Doctrine Queries Must Be Bound
 
-**Trigger:** A query concatenated user input into SQL.
-**Root cause:** No rule mandated prepared statements.
-**Rule:** MUST use PDO prepared statements with bound parameters; never concatenate untrusted input into SQL.
+**Trigger:** A Doctrine query concatenated user input into DQL/SQL.
+**Root cause:** No rule mandated parameters for QueryBuilder/DQL/raw SQL.
+**Rule:** MUST bind Doctrine parameters; never concatenate untrusted input into DQL or SQL.
 **Example:**
-- Incorrect: `$pdo->query("SELECT * FROM users WHERE email = '$email'")`
-- Correct: `$stmt = $pdo->prepare('SELECT * FROM users WHERE email = :email'); $stmt->execute(['email' => $email]);`
-**Enforcement:** `AGENTS.md`, `coder`, `code-reviewer`, `security-reviewer`.
+- Incorrect: `->andWhere("user.email = '$email'")`
+- Correct: `->andWhere('user.email = :email')->setParameter('email', $email)`
+**Enforcement:** `AGENTS.md`, `coder`, `repository-reviewer`, `code-reviewer`, `security-reviewer`.
+
+### Rule: Controllers Are Not Use Cases
+
+**Trigger:** A controller performed validation, business decisions, Doctrine writes, and side effects.
+**Root cause:** The implementation skipped the service layer.
+**Rule:** MUST move multi-step workflows into an application service.
+**Example:**
+- Incorrect: controller queries Doctrine, creates entity, flushes, sends mail, returns entity.
+- Correct: controller validates/authorizes, calls `CreateInvitationService::create()`, returns a response DTO.
+**Enforcement:** `AGENTS.md`, `coder`, `architecture-boundary-reviewer`, `code-reviewer`.
 
 ## Verification
 

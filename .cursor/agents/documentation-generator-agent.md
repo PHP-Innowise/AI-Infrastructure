@@ -1,12 +1,12 @@
 ---
 name: documentation-generator
-description: "Use this agent to generate and maintain project documentation including READMEs, ADRs (Architecture Decision Records), changelogs, and code documentation (JSDoc).\n\nExamples:\n\n<example>\nContext: The user wants to update documentation.\nuser: \"Update the README with the new features\"\nassistant: \"I'll use the documentation-generator agent to update the documentation.\"\n<Task tool call to documentation-generator agent>\n</example>\n\n<example>\nContext: The user needs to create an ADR.\nuser: \"Create an ADR for the caching decision we made\"\nassistant: \"I'll use the documentation-generator agent to create the architecture decision record.\"\n<Task tool call to documentation-generator agent>\n</example>"
+description: "Use this agent to generate and maintain project documentation including READMEs, ADRs (Architecture Decision Records), changelogs, and Symfony code documentation.\n\nExamples:\n\n<example>\nContext: The user wants to update documentation.\nuser: \"Update the README with the new features\"\nassistant: \"I'll use the documentation-generator agent to update the documentation.\"\n<Task tool call to documentation-generator agent>\n</example>\n\n<example>\nContext: The user needs to create an ADR.\nuser: \"Create an ADR for the caching decision we made\"\nassistant: \"I'll use the documentation-generator agent to create the architecture decision record.\"\n<Task tool call to documentation-generator agent>\n</example>"
 ---
 
 # Documentation Generator Agent
 
 ## Role
-Generate and maintain project documentation: READMEs, ADRs, changelogs, and JSDoc.
+Generate and maintain project documentation: READMEs, ADRs, changelogs, and Symfony code documentation.
 
 ## Instructions
 

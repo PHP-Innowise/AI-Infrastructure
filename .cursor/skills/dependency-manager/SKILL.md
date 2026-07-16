@@ -1,68 +1,43 @@
 ---
 name: dependency-manager
-description: Manage Composer dependencies for native PHP projects: audit for vulnerabilities, review outdated packages, tighten version constraints, optimize autoloading, and vet new packages before adding them. Triggers on "composer", "dependency", "update packages", "composer audit", "outdated", "add a library".
+description: "Manage Symfony Composer dependencies: audit vulnerabilities, review outdated packages, evaluate bundles/components, inspect Flex recipe impact, and update safely."
 phase: execution
 flow-next: verify
 flow-alternatives: [security-reviewer, researcher, code-reviewer]
-related: [researcher, security-reviewer, verify]
 ---
 
-# Dependency Manager
+# Symfony Dependency Manager
 
-## Overview
+## Rules
 
-Keep the dependency tree healthy, secure, and reproducible. Dependencies are attack surface and maintenance cost, so every addition and update is a deliberate decision.
+- Prefer Symfony components and maintained bundles with clear compatibility.
+- Check Symfony version constraints before adding/updating packages.
+- Inspect Symfony Flex recipes before accepting generated config changes.
+- Run `composer audit` and triage advisories.
+- Avoid adding packages for trivial code.
+- Document new environment variables/configuration without reading `.env`.
 
-## Core Commands
+## Workflow
+
+1. Read `composer.json`, `composer.lock`, Symfony Flex state, configured repositories, PHP extensions, and CI/deployment constraints without reading secrets.
+2. State the capability gap before selecting a package. Compare Symfony-native support, a small local implementation, and maintained packages.
+3. Check PHP/Symfony constraints, transitive dependency impact, release cadence, open security advisories, license, abandonment status, and upgrade path.
+4. Make the smallest Composer change that proves compatibility. Review lockfile changes for unrelated upgrades and inspect every Flex recipe diff before accepting it.
+5. Audit generated configuration, routes, migrations, public assets, environment variables, service registration, worker requirements, and rollback/removal behavior.
+6. Run the project test/lint/static-analysis suite, `composer audit`, container compilation, and relevant functional smoke tests.
+
+Do not introduce a package to hide a poorly placed responsibility. Use [Symfony clean-code patterns](../../../examples/symfony-clean-code-patterns.md) to keep vendor adapters at infrastructure boundaries and application services vendor-independent.
+
+## Common Commands
 
 ```bash
-composer validate --strict     # composer.json/lock integrity
-composer audit                 # known security advisories in the tree
-composer outdated --direct     # direct deps with newer versions
-composer show --tree           # inspect the dependency graph
-composer why <package>         # why a package is installed
-composer why-not <package> <version>  # what blocks an upgrade
+composer validate --strict
+composer audit
+composer outdated --direct
+composer why-not symfony/framework-bundle <version>
+composer recipes
 ```
 
-## Health Check Workflow
+## Output
 
-1. **Integrity.** `composer validate --strict`; confirm `composer.lock` is committed and in sync.
-2. **Security.** `composer audit`; triage each advisory (severity, whether the vulnerable path is used, fixed version available).
-3. **Freshness.** `composer outdated --direct`; separate patch/minor (low risk) from major (needs review/changelog).
-4. **Footprint.** Look for redundant, abandoned, or overly heavy packages (`composer show --tree`).
-5. **Autoload.** Ensure PSR-4 autoload is correct; for production builds recommend `composer dump-autoload -o` (or `--classmap-authoritative`).
-
-## Updating Safely
-
-- Prefer scoped updates: `composer update vendor/package --with-dependencies` over a blanket `composer update`.
-- Read the changelog/UPGRADE notes for minor/major bumps.
-- Run the full test suite and static analysis after any update; a green build is the acceptance gate.
-- Commit `composer.json` and `composer.lock` together with a note on what changed and why.
-
-## Version Constraints
-
-- Use caret constraints (`^1.2`) for libraries following SemVer to allow safe minor/patch updates.
-- Avoid `*` and unbounded `>=` constraints; they make builds non-reproducible.
-- Pin only when necessary (a known incompatibility) and document the reason.
-- Keep `require` (runtime) and `require-dev` (tooling: PHPUnit, PHPStan, php-cs-fixer, Rector) correctly separated.
-
-## Vetting A New Package
-
-Before adding a dependency (coordinate with `/researcher` for deeper comparisons):
-
-- Actively maintained and compatible with the project's PHP version?
-- License compatible with the project?
-- Reasonable transitive dependency footprint?
-- No open advisories (`composer audit` after install)?
-- Would a small amount of first-party code avoid a heavy dependency? Weigh it.
-
-## Guardrails
-
-- Never write credentials into `composer.json` (`github-oauth`, `http-basic`); use auth outside the repo.
-- Do not commit `vendor/`.
-- Do not run a blanket `composer update` right before release; do scoped, tested updates.
-- Do not add a dependency to solve a one-line problem.
-
-## Final Output
-
-Return audit/outdated results, actions taken (updates, constraint changes, autoload optimization), residual advisories/risks, verification run, Context Summary, and next step (`/verify`, `/security-reviewer`, or `/researcher`).
+Include packages and exact constraints changed, rejected alternatives, lockfile/recipe/config impact, security/license/maintenance assessment, operational requirements, rollback plan, and verification evidence.

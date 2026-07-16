@@ -1,6 +1,6 @@
 ---
 name: browser-verify
-description: Visually verify native PHP web UI changes in a running app. Use for server-rendered pages, forms, and progressive-enhancement workflows that need browser evidence.
+description: Visually verify Symfony web UI changes in a running app. Use for server-rendered pages, forms, and progressive-enhancement workflows that need browser evidence.
 phase: execution
 flow-next: verify
 flow-alternatives: [coder-frontend, debugger]
@@ -11,7 +11,7 @@ related: [coder-frontend, frontend-design, wcag-accessibility]
 
 ## Overview
 
-Verify the user-facing behavior of a running native PHP application. Browser verification supplements tests; it does not replace PHPUnit/Pest coverage.
+Verify the user-facing behavior of a running Symfony application. Browser verification supplements tests; it does not replace PHPUnit/Pest coverage.
 
 ## Before Starting
 

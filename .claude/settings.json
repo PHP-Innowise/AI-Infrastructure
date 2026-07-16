@@ -1,6 +1,5 @@
 {
   "env": {
-    "APP_ENV": "local",
     "FORCE_COLOR": "1"
   },
   "permissions": {
@@ -38,6 +37,11 @@
       "WebFetch(domain:www.php-fig.org)",
       "WebFetch(domain:getcomposer.org)",
       "WebFetch(domain:packagist.org)",
+      "WebFetch(domain:symfony.com)",
+      "WebFetch(domain:doctrine-project.org)",
+      "WebFetch(domain:www.doctrine-project.org)",
+      "WebFetch(domain:api-platform.com)",
+      "WebFetch(domain:symfonycasts.com)",
       "WebFetch(domain:pestphp.com)",
       "WebFetch(domain:phpunit.de)",
       "WebFetch(domain:phpstan.org)",
@@ -63,7 +67,7 @@
           {
             "type": "command",
             "command": ".claude/hooks/local-context.sh",
-            "timeout": 10000
+            "timeout": 10
           }
         ]
       }
@@ -74,8 +78,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo '$TOOL_INPUT' | .claude/hooks/file-naming-validator.sh",
-            "timeout": 5000
+            "command": ".claude/hooks/file-naming-validator.sh",
+            "timeout": 5
           }
         ]
       },
@@ -84,8 +88,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo '$TOOL_INPUT' | .claude/hooks/bash-validator.sh",
-            "timeout": 5000
+            "command": ".claude/hooks/bash-validator.sh",
+            "timeout": 5
           }
         ]
       }
@@ -96,8 +100,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo '$TOOL_INPUT' | .claude/hooks/loop-detection.sh",
-            "timeout": 5000
+            "command": ".claude/hooks/loop-detection.sh",
+            "timeout": 5
           }
         ]
       }
@@ -108,7 +112,7 @@
           {
             "type": "command",
             "command": "osascript -e 'display notification \"Claude needs your attention\" with title \"Claude Code\"' 2>/dev/null || notify-send 'Claude Code' 'Claude needs your attention' 2>/dev/null || echo 'Claude Code notification'",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       }

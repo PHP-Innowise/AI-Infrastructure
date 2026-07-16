@@ -1,116 +1,81 @@
 ---
 name: documentation-generator
-description: Generate and maintain native PHP project documentation, READMEs, ADRs, API docs, changelogs, and living specs.
+description: Generate and maintain Symfony project documentation, READMEs, ADRs, API docs, worker/cron docs, deployment notes, and living specs.
 phase: finalization
-flow-next: release
-flow-alternatives: [finishing-branch, verify]
-related: [architect, api-designer, coder]
+flow-next: verify
+flow-alternatives: [release, finishing-branch]
 ---
 
-# Documentation Generator
+# Symfony Documentation Generator
 
-## Overview
+Write documentation that is accurate, runnable, appropriately scoped, and maintainable with the code.
 
-Document native PHP implementation details in a way that helps future maintainers run, test, extend, and safely operate the system.
+## Choose The Right Artifact
 
-## Documentation Targets
+| Information | Location |
+| --- | --- |
+| Setup, local development, common commands | Root or project README |
+| Durable architecture/security/data/API decision | Skill-prefixed living spec in `specs/` |
+| Significant decision and alternatives | Project ADR location when configured |
+| Temporary implementation/research notes | `tasks/TASK-N/{skill-name}-{purpose}.md` |
+| Public HTTP contract | OpenAPI/API Platform config plus API documentation |
+| Deployment/worker/cron/runbook behavior | Operations documentation used by the project |
+| User-visible release change | `CHANGELOG.md` following project format |
 
-- `README.md` for setup, local development, test commands, deployment notes, and troubleshooting.
-- `specs/docs-generator-implementation.md` for living implementation details.
-- ADRs for durable architecture decisions.
-- API docs for public or cross-team endpoints.
-- Changelog entries for release-visible changes.
+Read `specs/MANIFEST.md` before changing living specs and check `tasks/.task-counter` before creating a task directory. Do not duplicate a durable decision across multiple files; link to its source of truth.
 
-## README Checklist
+## Workflow
 
-Include:
+1. Identify the audience, decision or workflow, owner, and event that should cause the documentation to change.
+2. Read the implemented code/config/tests and existing documentation. Documentation does not override runtime behavior or policy.
+3. Verify every command, path, option, route, environment/config key, version statement, and example against the repository.
+4. Write the smallest complete document with prerequisites, expected result, failure/recovery behavior, and links to deeper sources.
+5. Run snippets or validation commands where safe. Mark placeholders clearly and never invent successful output.
+6. Check local links, headings, naming policy, sensitive-data exposure, and duplication.
+7. Update `specs/MANIFEST.md`, changelog, OpenAPI, or runbook indexes when their contracts require it.
 
-- Required PHP version and extensions (e.g. `ext-pdo`, `ext-mbstring`).
-- Composer install/usage.
-- Local setup and how to run the app (front controller / built-in server).
-- Database setup and migration commands.
-- Worker/queue, cron, cache, and mail setup if used.
-- Test, format, and static-analysis commands (prefer Composer scripts).
-- Any frontend asset build commands if a pipeline exists.
-- Environment variables by name only, never secret values.
+## Symfony Content Checklist
 
-Example local setup commands:
+Document applicable concerns:
 
-```bash
-composer install
-cp .env.example .env   # then fill values locally (never commit real secrets)
-php bin/migrate.php    # or the project's migration command
-php -S localhost:8000 -t public
-composer test
-```
+- supported PHP/Symfony/component versions and consuming-project detection;
+- Composer/Flex setup and recipe/config files, without exposing `.env` or secrets;
+- routes/controllers, request DTOs/Forms/Validator behavior, voters/access rules, response/error contracts;
+- Controller -> Service -> Repository placement and transaction/side-effect boundaries;
+- Doctrine entities, constraints, migrations, backfills, compatibility windows, and rollback limitations;
+- Messenger transports/routing, retry/failure policy, worker start/stop/restart, monitoring, replay, and payload compatibility;
+- console commands, Scheduler/cron ownership, locking, idempotency, exit codes, and alerting;
+- Twig/Symfony UX asset build, progressive enhancement, accessibility, and browser support;
+- cache pools/keys/invalidation/warmup, external services, timeouts, and degraded behavior;
+- deployment order, migrations, cache warmup, worker drain/restart, health checks, observability, abort conditions, and forward recovery.
 
-## Living Specification Updates
+## Environment And Secret Safety
 
-Read `specs/MANIFEST.md` first. Update or create `specs/docs-generator-implementation.md` when build process, deployment, tooling, worker/cron behavior, or development workflow changes.
+- Document variable/secret names, purpose, required/optional status, format, and source system; never include real values.
+- Prefer Symfony config, Symfony secrets, and deployment secret managers; document configuration contracts without inspecting secret-bearing files.
+- Do not read, print, edit, or quote `.env` files while generating documentation.
+- Redact tokens, credentials, private URLs, personal data, database dumps, and production identifiers from examples and command output.
 
-Use task-prefixed sections:
+## API And Operations Examples
 
-```markdown
-### [TASK-001] Invitation Registration Tooling (2026-06-29)
+- Keep examples minimal and executable, using reserved domains and synthetic data.
+- Show authentication placeholders without plausible secrets.
+- Include expected status/exit behavior and the most important failure/recovery command.
+- Explain destructive or irreversible commands before showing them; do not normalize unsafe flags.
+- For workers/cron, include process ownership, concurrency, time/memory limits, signals, retries, failure inspection, and deployment restart behavior.
 
-**Runtime:** PHP 8.3+, PDO MySQL
+## Quality Rules
 
-**Verification:**
-- `composer test`
-- `composer lint`
-- `composer analyse`
+- Use precise headings, short paragraphs, tables only for comparable data, and code fences with language identifiers.
+- Prefer links to official Symfony/Doctrine/API Platform documentation for version-sensitive details.
+- Avoid promises such as “always safe,” “zero downtime,” or “fully compatible” without evidence and stated assumptions.
+- Keep examples aligned with declared PHP/Symfony versions and existing project conventions.
+- Use Keep a Changelog/SemVer only when the project already follows them or explicitly adopts them.
 
-**Operational Notes:**
-- Invitation emails are dispatched by a queue worker.
-- A cron entry must run the scheduler script every minute in production.
-```
+## Verification
 
-## API Documentation
+Run applicable checks such as Markdown/local-link validation, OpenAPI validation, example command help, config linting, route inspection, and the active edition's DOD. Report unavailable tooling as N/A rather than installing it.
 
-For API changes, include:
+## Output
 
-- Route table.
-- Auth requirements.
-- Request validation.
-- Response serializer shapes.
-- Error codes.
-- Rate limits.
-- OpenAPI generation command if configured.
-
-## ADR Template
-
-```markdown
-# ADR-0001: Use A Dedicated Access-Control Service For Invitation Authorization
-
-## Status
-Accepted
-
-## Context
-[Why this decision exists]
-
-## Decision
-[What was decided]
-
-## Consequences
-[Trade-offs and follow-up requirements]
-```
-
-## Documentation Best Practices
-
-- **Keep docs next to the code** and update them in the same change that alters behavior; stale docs are worse than none.
-- **Write for the newcomer:** a reader should be able to clone, install, configure, and run from the README alone.
-- **Show runnable examples;** prefer copy-pasteable commands and real code over prose. Verify the commands actually work.
-- **Explain the "why", not just the "what":** reserve rationale and trade-offs for ADRs so history is not lost.
-- **Follow Keep a Changelog + SemVer** for `CHANGELOG.md`: group by Added/Changed/Fixed/Removed, newest first, human-readable.
-- **Document by name, never by value:** list required environment variables and secrets by name only.
-- **One source of truth:** link to the canonical spec instead of duplicating long-lived information across docs.
-
-## Final Output
-
-Return:
-
-- Documents updated.
-- Key operational details.
-- Verification performed.
-- Context Summary.
-- Next by flow: `/release`, `/finishing-branch`, or `/verify`.
+Report documents changed, audience and source-of-truth decisions, commands/examples verified, indexes/specs/changelog updated, unresolved assumptions, Context Summary, and Next Steps.

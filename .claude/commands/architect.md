@@ -7,7 +7,7 @@ flow-alternatives: [architecture-implementer, writing-plans, coder]
 
 # Architect
 
-Spawn architect agent to make native PHP system architecture decisions (layering, boundaries, dependency direction, persistence, async, scalability, security).
+Spawn architect agent to make Symfony system architecture decisions (layering, boundaries, dependency direction, persistence, async, scalability, security).
 
 ## Input
 $ARGUMENTS

@@ -127,7 +127,7 @@ Just keep the review for reference without taking action.
    ```bash
    gh pr checkout <number>
    ```
-2. Hand off to [[/debugger]] with context about which issues to investigate and fix.
+2. Hand off to /debugger with context about which issues to investigate and fix.
 
 ### Executing Option B: Post Comments to PR
 
@@ -188,9 +188,9 @@ Ask the user which event type to use. Default to `COMMENT` unless the user expli
 
 After PR review is complete, STOP and present these options:
 
-**Next by flow:** [[/debugger]] `[context]` - Fix bugs found in the review.
+**Next by flow:** /debugger `[context]` - Fix bugs found in the review.
 
 **Alternatives:**
-- [[/coder]] `[context]` - Implement fixes for issues found.
-- [[/code-reviewer]] `[context]` - Do a deeper local code review.
-- [[/finishing-branch]] `[context]` - Complete branch if review passes.
+- /coder `[context]` - Implement fixes for issues found.
+- /code-reviewer `[context]` - Do a deeper local code review.
+- /finishing-branch `[context]` - Complete branch if review passes.

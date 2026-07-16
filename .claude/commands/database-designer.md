@@ -7,7 +7,7 @@ flow-alternatives: [coder, writing-plans, api-designer]
 
 # Database Designer
 
-Spawn database-designer agent to design a relational schema and safe PDO access patterns (tables, keys, indexing, constraints, normalization, migrations) for a native PHP project.
+Spawn database-designer agent to design a relational schema and Doctrine repository access patterns (tables, keys, indexing, constraints, normalization, migrations) for a Symfony project.
 
 ## Input
 $ARGUMENTS

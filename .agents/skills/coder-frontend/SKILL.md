@@ -1,98 +1,123 @@
 ---
 name: coder-frontend
-description: Implement frontend work in native PHP projects using server-rendered templates, semantic HTML, CSS, and progressive enhancement with vanilla JS. Framework-neutral (no assumed JS framework).
+description: Implement Symfony frontend work with Twig, Forms, Symfony UX, Stimulus/Turbo, semantic HTML, CSS, and accessibility.
 phase: execution
 flow-next: code-reviewer
-flow-alternatives: [browser-verify, test-generator]
-related: [frontend-design, coder, browser-verify]
+flow-alternatives: [browser-verify, verify]
 ---
 
-# Coder Frontend
+# Symfony Frontend Coder
 
-## Overview
+Implement frontend changes using existing project conventions.
 
-Implement frontend changes for native PHP applications using server-rendered templates and progressive enhancement. Do not introduce a component library or a JavaScript framework without confirming it fits the project; framework-specific frontends belong on a framework-specific branch.
+## Required Context
 
-## Locate The Frontend
+Inspect controllers/Twig components, template inheritance, macros, Form types/themes, translations, asset configuration, Stimulus controllers, Turbo/Live Component usage, CSS tokens/layout conventions, CSP, and existing functional/browser tests. Preserve the installed stack; do not introduce a frontend framework or build pipeline without an approved architecture decision.
 
-Check for:
+## Boundary Rules
 
-- Templates: `templates/`, `views/`, `resources/views/`, or `*.php`/`*.phtml` view files.
-- A templating engine if one is used (e.g. Twig `*.twig`).
-- CSS/asset location and any build pipeline (`package.json`, a bundler config) if present.
-- Static assets under `public/`.
+- Controllers/components prepare typed view data, authorize, and delegate workflows to services.
+- Twig renders presentation. It does not query Doctrine, make external calls, mutate entities, or decide business policy.
+- Form types and request DTOs define input shape; Validator constraints protect the boundary; services own stateful decisions.
+- Stimulus, Turbo, and Live Components enhance a complete server-rendered workflow rather than becoming a hidden business layer.
+- Public JSON calls follow the API contract and CSRF/authentication rules; never duplicate server authorization in JavaScript only.
 
-## Implementation Rules
+## Twig Implementation
 
-- Preserve server-side authorization. UI visibility is not authorization.
-- Escape all dynamic output with `htmlspecialchars(...)` (or the engine's auto-escaping) to prevent XSS.
-- Include a CSRF token in every state-changing form.
-- Re-render forms with prior input and per-field errors on validation failure.
-- Provide loading, empty, and error states for any async behavior.
-- Maintain accessibility: labels, focus states, keyboard support, semantic landmarks (see `wcag-accessibility`).
-- Progressive enhancement: baseline HTML must work without JavaScript, then enhance.
-- Keep any frontend build/lint commands scoped to the project that owns them.
+- Extend the established base layout and reuse existing components/macros before adding another abstraction.
+- Preserve auto-escaping. Use context-correct escaping for HTML, attributes, URLs, JavaScript, and JSON.
+- Render `|raw` only for content sanitized by a trusted server-side policy; document the trust boundary in code.
+- Avoid broad entity exposure that can trigger lazy loading or leak sensitive fields. Prefer explicit view DTOs for complex pages.
+- Use semantic landmarks, one logical `h1`, ordered headings, real buttons/links, labelled tables, and meaningful empty states.
+- Keep translation keys stable and pass variables explicitly; do not concatenate translated fragments that break grammar.
 
-## Server-Rendered Form Pattern (plain PHP)
+Example structure:
 
-```php
-<form method="post" action="/invitations">
-    <input type="hidden" name="_csrf" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES) ?>">
+```twig
+{% extends 'base.html.twig' %}
 
-    <label for="email">Email</label>
-    <input
-        id="email"
-        name="email"
-        type="email"
-        value="<?= htmlspecialchars($old['email'] ?? '', ENT_QUOTES) ?>"
-        required
-        <?= isset($errors['email']) ? 'aria-invalid="true" aria-describedby="email-error"' : '' ?>
-    >
-    <?php if (isset($errors['email'])): ?>
-        <p id="email-error" role="alert"><?= htmlspecialchars($errors['email'], ENT_QUOTES) ?></p>
-    <?php endif; ?>
-
-    <button type="submit">Send invitation</button>
-</form>
+{% block body %}
+  <main id="main-content">
+    <h1>{{ page.title }}</h1>
+    {% include 'invitation/_form.html.twig' with { form: form } only %}
+  </main>
+{% endblock %}
 ```
 
-## Progressive Enhancement Notes
+## Symfony Forms
 
-- Add small vanilla-JS behaviors (inline validation hints, disclosure toggles) on top of working HTML.
-- Never move authorization or required validation into the client only.
-- Avoid leaking secrets or hidden authorization state into rendered markup or data attributes.
+- Set method/action deliberately and keep CSRF enabled for state-changing browser forms.
+- Render visible labels, required state, help, field errors, and an error summary where multiple failures are likely.
+- Ensure errors/help are associated through Form rendering or explicit `aria-describedby`; focus the summary/first invalid field after failure where appropriate.
+- Use correct `autocomplete`, `inputmode`, input type, constraints, empty-data behavior, transformers, and collection prototypes.
+- Do not bind privileged entity fields, ownership, roles, prices, tenant IDs, or workflow state directly from submitted data.
+- Preserve submitted values on validation failure and prevent double submission when the workflow is not naturally idempotent.
 
-## Output Escaping By Context (XSS)
+## Stimulus And Turbo
 
-Escaping is context-sensitive; `htmlspecialchars` alone is not always enough:
+- Keep controllers small, target/value/class driven, and safe across repeated `connect()`/`disconnect()` under Turbo.
+- Remove listeners, observers, timers, and pending requests during disconnect; cancel or ignore stale responses.
+- Provide a working non-JavaScript submit/navigation path and expose loading, success, empty, and recoverable error states.
+- For Turbo Frames, return correct frame content, redirects, and validation status codes; handle missing-frame responses deliberately.
+- For Turbo Streams, authorize every mutation server-side and keep stream targets stable and unique.
+- Mark persistent elements only when their lifecycle and state transfer are understood.
+- Live Component writable properties and actions require validation, authorization, bounded payloads, and hydration-exposure review.
 
-- **HTML body / attribute:** `htmlspecialchars($v, ENT_QUOTES, 'UTF-8')`; always quote attribute values.
-- **URL parameter:** `urlencode()`/`rawurlencode()`; validate the scheme (allow only `http`/`https`/`mailto`) to block `javascript:` URLs.
-- **Inside `<script>` / JS context:** prefer `json_encode($v, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP)`; do not hand-concatenate into scripts.
-- **CSS context:** avoid injecting user data into styles; if unavoidable, allowlist strictly.
+Example controller lifecycle:
 
-Consider a Content-Security-Policy header as defense-in-depth, and avoid inline event handlers/`style` so a stricter CSP is possible.
+```js
+import { Controller } from '@hotwired/stimulus';
 
-## Asset And Progressive-Enhancement Hygiene
+export default class extends Controller {
+  connect() {
+    this.abortController = new AbortController();
+  }
 
-- Keep JS unobtrusive: attach behavior via `addEventListener`, not inline `onclick`. Feature-detect; degrade gracefully.
-- Version/cache-bust static assets; set sensible cache headers.
-- Do not block first paint on non-critical scripts (`defer`/`async`); avoid layout shift by reserving image/media dimensions.
-- Keep templates logic-light: format and escape in the view, compute in the handler/service.
+  disconnect() {
+    this.abortController.abort();
+  }
+}
+```
 
-## Verification
+## CSS And Responsive Behavior
 
-Possible checks:
+- Reuse design tokens and existing layout primitives. Avoid page-local near-duplicates.
+- Define stable dimensions for toolbars, grids, media, and asynchronous regions so loading and error states do not shift the layout.
+- Support narrow mobile, zoom/reflow at 400%, long translations/content, keyboard focus, reduced motion, high contrast, and touch targets.
+- Never communicate state by color alone. Keep focus visible and verify text/background and UI-component contrast.
+- Avoid fixed heights for text containers and hidden overflow that clips validation or translated content.
+
+## Security
+
+- Preserve Twig auto-escaping and sanitize trusted rich text before storage/rendering.
+- Keep CSRF on state-changing browser actions and use same-origin/CORS policy intentionally for API calls.
+- Do not place secrets, authorization decisions, internal identifiers, or sensitive serialized entities in HTML data attributes.
+- Validate URLs and allowed origins before rendering user-controlled links, embeds, or remote media.
+- Follow the project's Content Security Policy; avoid new inline script/style exceptions.
+
+Use the Twig/Form/progressive-enhancement examples in [Symfony clean-code patterns](../../../examples/symfony-clean-code-patterns.md) as a security and responsibility check.
+
+## Testing And Verification
+
+Add the lowest useful evidence:
+
+- functional tests for route, authorization, form submission, validation, redirect, flash, and rendered contract;
+- component/Live Component tests for server-driven state;
+- JavaScript tests for stateful Stimulus logic when configured;
+- browser verification for focus, keyboard, Turbo lifecycle, responsive layout, loading/error states, and no-JavaScript fallback.
+
+Run configured equivalents:
 
 ```bash
-composer test
-php -l path/to/template.php
-<frontend-lint-command>
-<frontend-build-command>
+php bin/console lint:twig
+vendor/bin/phpunit
+npm test
+npm run lint
+npm run build
 ```
 
-Use only commands present in the project. Also verify markup against `wcag-accessibility` rules.
+Report unavailable tooling as N/A. Use `browser-verify` when a runnable application exists.
 
-## Final Output
+## Output
 
-Return what changed, rendering approach used, tests/checks run, accessibility notes, Context Summary, and next step.
+Report templates/components/controllers/assets changed, server/client boundary decisions, accessibility and security behavior, tests/build/browser checks, unavailable tooling, and remaining risks. Include Context Summary and Next Steps.

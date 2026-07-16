@@ -1,50 +1,62 @@
-# Golden Principles
+# Golden Principles - Symfony Layered Architecture
 
-These principles guide implementation, review, and debugging in native PHP projects. They are framework-agnostic; framework-specific conventions belong in the matching accelerator branch.
+These principles guide implementation, review, and debugging in Symfony projects using Controller -> Service -> Repository.
 
-## 1. PSR And Explicit, Minimal Architecture First
+## 1. Symfony Conventions First
 
-Write modern PHP: `declare(strict_types=1)`, typed properties, parameters, and return types, PSR-1/PSR-12/PER style, and Composer PSR-4 autoloading.
+Use Symfony's strengths before inventing custom infrastructure: routing attributes/config, dependency injection, Validator, Forms, Security voters, Messenger, Console, EventDispatcher, Serializer, Doctrine migrations, and Symfony testing tools.
 
-Reach for the simplest structure that fits: a front controller, request handlers, use-case/service classes, domain objects, and data-access gateways. Add layers (interfaces, DTOs, repositories, event dispatchers) only when they reduce real complexity, not to imitate a framework.
+Custom abstractions are justified when they remove real complexity, protect a boundary, or match existing project patterns.
 
 ## 2. Boundaries Must Be Explicit
 
 Validate and authorize at system boundaries:
 
-- HTTP requests: validate and normalize input into typed DTOs/value objects; authorize before acting.
-- CLI commands: validate arguments and produce clear failure output and exit codes.
-- Background workers: typed payloads and explicit retry/failure behavior.
-- External APIs: typed clients with timeouts, retries, and error mapping.
+- HTTP controllers map request data, validate, authorize, call a service, and return a response.
+- Console commands validate arguments/options, call services, and return correct exit codes.
+- Messenger handlers accept typed messages, call services, and define retry/failure behavior.
+- Event subscribers adapt framework events and delegate business decisions to services.
+- External APIs are accessed through typed clients with timeouts, retries, and error mapping.
 
-Depend on interfaces at these boundaries and inject collaborators; avoid global state and hidden singletons.
+## 3. Services Own Workflows
 
-## 3. Persistence Is A Contract
+Business workflows belong in services/use cases. A service should be understandable without HTTP, Twig, Messenger, or Console context.
 
-Schema changes belong in versioned migrations or reviewed SQL. Access data through PDO (or a documented data layer) using prepared statements with bound parameters.
+Services may coordinate repositories, transactions, domain objects, voters/policy checks, messages, and external clients. They should not format HTTP responses or read raw request objects.
 
-When data integrity matters, prefer database constraints (keys, uniqueness, foreign keys) plus application validation over application validation alone.
+## 4. Persistence Is A Contract
 
-## 4. Tests Should Prove Behavior
+Doctrine repositories own query shape, persistence helpers, and performance-sensitive data access. Controllers must not contain QueryBuilder/DQL/SQL.
+
+When data integrity matters, enforce it with database constraints, indexes, foreign keys, optimistic/pessimistic locking, idempotency keys, or a documented transaction strategy. Application validation alone is not enough under concurrency.
+
+## 5. Tests Should Prove Behavior
 
 Use the smallest test that gives confidence:
 
-- Unit tests for pure logic, services, and value objects.
-- Integration/feature tests for HTTP handlers, validation, authorization, and persistence.
-- Contract tests for external API clients and message workers.
+- Unit tests for services, value objects, DTOs, and pure policies.
+- Functional tests for controllers, validation, authorization, and API responses.
+- Repository integration tests for Doctrine queries and persistence edge cases.
+- Messenger/console tests for async and CLI workflows.
 
-Use fixtures, factories, and test doubles to keep tests readable and deterministic; isolate the database with transactions or a disposable test database.
+Use fixtures, factories, Foundry, object mothers, and builders to keep tests readable and deterministic.
 
-## 5. Security Is Part Of The Design
+## 6. Security Is Part Of The Design
 
-Review changes for authentication, authorization, SQL injection, output escaping/XSS, CSRF, session handling, file upload, rate limiting, sensitive logging, unsafe deserialization, and secret handling.
+Review every change for authentication, authorization, IDOR, validation, Doctrine injection, output escaping/XSS, CSRF, session handling, file uploads, rate limiting, sensitive logging, unsafe deserialization, SSRF, and secret handling.
 
 Never rely on hidden UI controls as authorization.
 
-## 6. Readability Beats Cleverness
+## 7. Readability Beats Cleverness
 
-Prefer clear names, small methods, explicit errors (typed exceptions), and simple control flow. If a future teammate needs project history to understand the code, simplify it or document the decision in specs.
+Prefer clear names, small methods, guard clauses, typed DTOs, typed exceptions, and simple control flow. If a future teammate needs project history to understand the code, simplify it or document the decision in specs.
 
-## 7. Verification Is Evidence
+## 8. SOLID Is A Design Test, Not A Class Count
+
+Use SOLID to protect cohesion, dependency direction, substitutable behavior, and narrow consumer contracts. Add interfaces for real variants, volatile infrastructure, or package ownership; do not create pass-through layers or one interface per class. Prefer composition, typed immutable contracts, explicit side effects, and business-readable names.
+
+Use `examples/symfony-clean-code-patterns.md` as an illustrative review catalog, never as a reason to override a consuming project's simpler valid convention.
+
+## 9. Verification Is Evidence
 
 Do not claim success without evidence. Run the applicable DoD checks, report what passed, and call out missing tooling or remaining risk.

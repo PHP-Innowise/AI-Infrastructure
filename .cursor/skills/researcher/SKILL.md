@@ -1,82 +1,41 @@
 ---
 name: researcher
-description: Run structured research to inform a native PHP decision. Use to evaluate libraries/packages, compare approaches, study an unfamiliar codebase area, or gather authoritative references before committing. Triggers on "research", "compare", "evaluate", "which library", "investigate options", "find out how".
+description: "Run structured research for Symfony decisions: components, bundles, Doctrine/API Platform approaches, package options, or unfamiliar codebase areas."
 phase: understanding
 flow-next: council
 flow-alternatives: [architect, brainstorming, writing-plans]
-related: [council, architect, brainstorming, dependency-manager]
 ---
 
-# Researcher
+# Symfony Researcher
 
-## Overview
+Research with decision-ready output.
 
-Turn an open question into a sourced, decision-ready findings document. Research is not open-ended browsing: scope the question, gather evidence, compare options against the project's real constraints, and recommend.
+## Method
 
-Two research surfaces:
+1. Frame one answerable decision with constraints, non-goals, installed versions, operational environment, and acceptance criteria.
+2. Inspect the local codebase and Composer metadata first so research answers the actual integration problem.
+3. Prefer current primary sources: official Symfony/Doctrine/API Platform documentation, package source and release notes, relevant standards, and original benchmarks or papers.
+4. Record version/date context for claims that may change. Separate sourced facts, local observations, assumptions, and inferences.
+5. Compare at least the credible status quo and proposed option. Use a weighted matrix only when the criteria and weights are defensible.
+6. Verify critical API/config claims with a minimal local experiment when tooling exists; do not treat a blog snippet as compatibility proof.
 
-- **Internal:** the current codebase (how something works, where behavior lives, current conventions). Use `Glob`/`Grep`/`Read`.
-- **External:** libraries, standards (PSR), language features, and best practices. Use `WebFetch`/`WebSearch` within the allowed domains (php.net, php-fig.org, packagist.org, getcomposer.org, phpstan.org, psalm.dev, phpunit.de, pestphp.com, github.com).
+Prioritize:
 
-## Generated File Naming Convention (MANDATORY)
+- Existing project code and specs.
+- Official Symfony documentation.
+- Doctrine documentation.
+- API Platform documentation when relevant.
+- Package repositories, Packagist metadata, release notes, and security advisories.
 
-Any file created by this skill MUST be prefixed with `researcher-`:
-- Correct: `researcher-findings.md`, `researcher-library-comparison.md`
-- Incorrect: `RESEARCH.md`, `NOTES.md`
+Compare options against:
 
-## Process
+- Symfony version compatibility.
+- Maintenance health.
+- Security posture.
+- Fit with Controller -> Service -> Repository.
+- Testing and operational complexity.
+- Dependency direction, coupling, data ownership, migration cost, observability, reversibility, and team familiarity.
 
-1. **Scope the question.** Write the exact question and the decision it will inform. List the constraints that matter (PHP version, license, maintenance, dependencies, performance, team familiarity). If the question is too broad, narrow it or ask one clarifying question.
-2. **Set acceptance criteria.** Define what a good answer must include so research has a clear finish line.
-3. **Gather evidence.** Read primary sources first (official docs, the package repo, PSR text, source code). Note version and date; APIs drift.
-4. **Evaluate options.** Score each option against the constraints in a comparison table. Prefer maintained, widely used, standards-aligned packages over bespoke code unless there is a real reason.
-5. **Check the project fit.** Confirm the option works with the project's PHP version and existing dependencies (`composer.json`), and check for conflicts.
-6. **Recommend.** Give a clear recommendation with rationale, risks, and what you did not verify.
+Use [Symfony clean-code patterns](../../../examples/symfony-clean-code-patterns.md) when evaluating whether an option keeps framework/vendor code at the boundary or leaks it into application workflows.
 
-## Library Evaluation Checklist
-
-- Actively maintained (recent commits/releases; open issue responsiveness)?
-- Compatible with the project's PHP version and dependencies?
-- License compatible with the project?
-- Reasonable dependency footprint (no heavy transitive tree)?
-- Security posture (advisories via `composer audit`, known CVEs)?
-- Typed, documented, and tested? PSR-compliant where relevant?
-- Popularity/support (downloads on Packagist, community usage) as a tie-breaker, not the sole criterion?
-
-## Output Template
-
-```markdown
-# Research: [Question]
-
-## Question & Decision
-[What we need to decide and why]
-
-## Constraints
-- PHP version, license, dependencies, performance, maintenance, team familiarity
-
-## Options Compared
-| Option | Maintained | PHP compat | License | Deps | Notes |
-| --- | --- | --- | --- | --- | --- |
-| A | ... | ... | ... | ... | ... |
-
-## Evidence
-- [Source] ([date/version]) - [what it establishes]
-
-## Recommendation
-**Use: [Option]** because [rationale].
-- Risks: [...]
-- Not verified: [...]
-
-## Sources
-- [Title](url) - accessed [date]
-```
-
-## Guardrails
-
-- Cite sources; do not present recollection as fact. Note version and access date.
-- Distinguish verified findings from assumptions.
-- Do not install packages or modify code; this skill produces knowledge, not changes. Hand off to `/coder`, `/dependency-manager`, or `/architecture-implementer`.
-
-## Final Output
-
-Return the findings document (path if written), the recommendation, key risks, Context Summary, and next step (`/council`, `/architect`, `/brainstorm`, or `/writing-plans`).
+Finish with a concise recommendation, comparison table, evidence links, local compatibility notes, risks, rejected alternatives, confidence/unknowns, and next command. Do not present inference as sourced fact.

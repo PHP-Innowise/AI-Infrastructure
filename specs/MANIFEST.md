@@ -1,6 +1,6 @@
-# Project: [Project Name]
+# Project: Symfony Layered Architecture Accelerator
 
-[2-3 sentence core purpose - will be filled by first task]
+An AI-assisted development accelerator for Symfony 7.4 LTS and Symfony 8.1 projects. It provides native Claude Code, Cursor, and Codex workflows centered on pragmatic Controller -> Service -> Repository architecture and Symfony conventions.
 
 ## Specs Index
 
@@ -13,11 +13,14 @@
 
 ## Key Decisions
 
-[Will be populated by architect agent as decisions are made]
+- Target Symfony 7.4 LTS and Symfony 8.1 while detecting each consuming project's installed versions.
+- Use `.claude/skills` as canonical authored content, mirror Cursor semantics natively, and expose Codex skills through `.agents/skills` with `.codex` support files.
+- Enforce Controller -> Service -> Repository pragmatically, without requiring pass-through layers or interfaces without a real boundary.
 
 ## Tech Stack
 
-[Will be populated by skills as project grows]
+- PHP 8.2+ for Symfony 7.4 LTS; PHP 8.4+ for Symfony 8.1.
+- Symfony components and conventions, Doctrine ORM/Migrations, Symfony Security, Messenger, Forms, Validator, Serializer, Twig, and Symfony UX as installed by the consuming project.
 
 ---
 

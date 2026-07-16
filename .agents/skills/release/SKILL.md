@@ -1,6 +1,6 @@
 ---
 name: release
-description: Prepare native PHP project releases with changelog generation, version tags, and optional GitHub publishing. Use when creating a release, generating changelogs, tagging versions, or publishing release notes.
+description: Prepare Symfony project releases with changelog generation, version tags, and optional GitHub publishing. Use when creating a release, generating changelogs, tagging versions, or publishing release notes.
 phase: finalization
 flow-next: finishing-branch
 flow-alternatives: []
@@ -249,7 +249,7 @@ Display the release summary:
 
 After release creation is complete:
 
-**Next by flow:** [[/finishing-branch]] `[release summary]` - Complete the branch and prepare for merge/PR. See [[moc-finalization]] for phase context.
+**Next by flow:** finishing-branch `[release summary]` - Complete the branch and prepare for merge/PR.
 
 **Alternatives:**
 - No further action needed - Release is complete and published.

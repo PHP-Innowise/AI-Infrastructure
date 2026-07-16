@@ -7,7 +7,7 @@ flow-alternatives: [writing-plans, architecture-implementer, coder]
 
 # API Designer
 
-Spawn api-designer agent to design native PHP REST APIs with routing, PSR-7 requests/responses, input validation, response serializers, authorization, pagination, error contracts, and OpenAPI docs.
+Spawn api-designer agent to design Symfony REST APIs with routing, HttpFoundation requests/responses, input validation, response serializers, authorization, pagination, error contracts, and OpenAPI docs.
 
 ## Input
 $ARGUMENTS

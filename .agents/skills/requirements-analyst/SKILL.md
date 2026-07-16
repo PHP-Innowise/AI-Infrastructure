@@ -63,7 +63,7 @@ Any additional ad-hoc files (summaries, notes, reports) MUST also follow this ru
 - [ ] Handler/Controller: [HTTP endpoint]
 - [ ] Response serializer: [API response shape]
 - [ ] Use-case/Service/Worker: [only when workflow complexity needs it]
-- [ ] Repository/Gateway: [PDO data access]
+- [ ] Repository: [Doctrine repository methods]
 
 ### Frontend Tasks (server-rendered)
 - [ ] Template/partial: [view]
@@ -150,7 +150,7 @@ Any additional ad-hoc files (summaries, notes, reports) MUST also follow this ru
 
 2. **Create task directory:** `tasks/TASK-{N}/` (e.g., `tasks/TASK-001/`)
 
-3. **Write requirements:** `tasks/TASK-{N}/requirements-analyst-requirements.md`
+3. **Write requirements:** `tasks/TASK-{N}requirements-analyst-requirements.md`
    - Use the Requirements Document Template from Step 5 as the structure
    - Include all gathered requirements, task breakdown, and gap analysis
 
@@ -175,10 +175,10 @@ This file preserves the analysis context so the conversation can be cleared befo
 
 After requirements document is written to file, STOP and present these options:
 
-**Next by flow:** [[/brainstorm]] `[TASK-{N} context]` - Refine requirements into a concrete design through collaborative dialogue. See [[moc-understanding]] for phase context.
+**Next by flow:** brainstorming `[TASK-{N} context]` - Refine requirements into a concrete design through collaborative dialogue.
 
 **Pass to next skill:** Include the task number in your context summary (e.g., "TASK-001: User authentication requirements analyzed")
 
 **Alternatives:**
-- [[/architect]] `[TASK-{N} context]` - Skip brainstorming if requirements are clear and jump to architecture decisions.
-- [[/writing-plans]] `[TASK-{N} context]` - Create implementation plan directly if design is already established.
+- architect `[TASK-{N} context]` - Skip brainstorming if requirements are clear and jump to architecture decisions.
+- writing-plans `[TASK-{N} context]` - Create implementation plan directly if design is already established.

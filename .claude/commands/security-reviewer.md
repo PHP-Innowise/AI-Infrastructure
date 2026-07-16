@@ -7,7 +7,7 @@ flow-alternatives: [coder, code-reviewer, debugger]
 
 # Security Reviewer
 
-Spawn security-reviewer agent to audit native PHP changes against the OWASP Top 10 (injection, XSS, access control, auth/session, CSRF, file upload, secrets, deserialization, SSRF) and run a dependency audit.
+Spawn security-reviewer agent to audit Symfony changes against the OWASP Top 10 (injection, XSS, access control, auth/session, CSRF, file upload, secrets, deserialization, SSRF) and run a dependency audit.
 
 ## Input
 $ARGUMENTS

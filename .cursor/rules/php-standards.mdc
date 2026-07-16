@@ -1,28 +1,22 @@
 ---
-description: Native PHP code quality standards (PSR, boundaries, persistence)
-globs: **/*.php
+description: Symfony layered architecture code quality standards
+globs: "**/*.php"
 alwaysApply: false
 ---
 
-# Native PHP Standards
+# Symfony Standards
 
-- Follow PSR-1, PSR-12, and PER Coding Style; target the project's declared PHP version.
-- Start new files with `declare(strict_types=1);` and use full type declarations.
-- Autoload via Composer PSR-4; never add manual `require` chains for application classes.
-- Validate and normalize external input at the boundary with explicit validators, value objects, or typed DTOs.
-- Authorize protected actions through an explicit access-control layer, not by hiding UI.
-- Keep entry points (controllers/handlers/CLI commands) thin; move multi-step behavior into services or use-case classes.
-- Access the database through PDO (or a documented data layer) with prepared statements and bound parameters.
-- Depend on interfaces at boundaries and inject collaborators; avoid globals and `new` for collaborators.
-- Manage schema changes through versioned migrations or reviewed SQL.
-- Throw typed exceptions; map them to responses/exit codes at the edge.
-
-```php
-// GOOD: validated input, injected dependency, prepared statement
-public function store(ServerRequestInterface $request): ResponseInterface
-{
-    $this->accessControl->assertCan($request->getAttribute('user'), 'user.create');
-    $data = CreateUserRequest::fromArray((array) $request->getParsedBody());
-    return JsonResponse::created($this->createUser->handle($data));
-}
-```
+- Follow the project's declared PHP/Symfony versions and configured coding standard.
+- Baseline Symfony 7.4 LTS on PHP 8.2+ and Symfony 8.1 on PHP 8.4+; never use APIs newer than the consuming project.
+- Start new files with `declare(strict_types=1);` when project convention allows it.
+- Keep controllers thin: map input, authorize, call one service, return a response.
+- Validate and normalize external input with Symfony Forms, Validator, request DTOs, or explicit validation.
+- Authorize protected actions with voters, controller attributes, `access_control`, firewall rules, scoped providers/repositories, or route constraints.
+- Put business workflows and transaction boundaries in services.
+- Put Doctrine QueryBuilder/DQL/SQL in repositories or dedicated query services, not controllers.
+- Use Doctrine migrations for schema changes.
+- Enforce important invariants with database constraints, locks, or idempotency keys when concurrency matters.
+- Use response DTOs/serializers/normalizers/API Platform contracts for public APIs.
+- Throw typed exceptions from services; map them to HTTP errors at the edge.
+- Keep responsibilities cohesive and dependencies pointing inward; introduce narrow interfaces only at real substitution, infrastructure, or package boundaries.
+- Use `examples/symfony-clean-code-patterns.md` for maintained good/bad examples instead of duplicating snippets in rules.

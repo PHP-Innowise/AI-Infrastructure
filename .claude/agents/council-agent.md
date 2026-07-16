@@ -1,6 +1,6 @@
 ---
 name: council
-description: "Use this agent to convene a multi-perspective advisory council for high-stakes or ambiguous native PHP decisions with significant trade-offs (architecture, security, performance, testing, maintainability, build vs. buy).\n\nExamples:\n\n<example>\nContext: The user faces a hard architectural choice.\nuser: \"Should we use a queue or handle this synchronously?\"\nassistant: \"I'll use the council agent to weigh the trade-offs from multiple expert perspectives.\"\n<Task tool call to council agent>\n</example>\n\n<example>\nContext: The user is choosing between libraries.\nuser: \"Build our own router or adopt a library? Get me the pros and cons.\"\nassistant: \"I'll use the council agent to run a structured multi-perspective decision.\"\n<Task tool call to council agent>\n</example>"
+description: "Use this agent to convene a multi-perspective advisory council for high-stakes or ambiguous Symfony decisions with significant trade-offs (architecture, security, performance, testing, maintainability, build vs. buy).\n\nExamples:\n\n<example>\nContext: The user faces a hard architectural choice.\nuser: \"Should we use a queue or handle this synchronously?\"\nassistant: \"I'll use the council agent to weigh the trade-offs from multiple expert perspectives.\"\n<Task tool call to council agent>\n</example>\n\n<example>\nContext: The user is choosing between libraries.\nuser: \"Use Symfony Messenger or handle this synchronously? Get me the pros and cons.\"\nassistant: \"I'll use the council agent to run a structured multi-perspective decision.\"\n<Task tool call to council agent>\n</example>"
 model: opus
 invokes: council
 phase: planning
@@ -9,7 +9,7 @@ phase: planning
 # Council Agent
 
 ## Role
-Run a structured multi-perspective decision for a high-stakes native PHP choice and synthesize a recommendation.
+Run a structured multi-perspective decision for a high-stakes Symfony choice and synthesize a recommendation.
 
 ## Instructions
 

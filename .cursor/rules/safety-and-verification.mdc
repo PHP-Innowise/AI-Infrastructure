@@ -7,10 +7,13 @@ alwaysApply: true
 
 ## Security
 - Never read, print, edit, or commit `.env` files or secrets.
-- Use parameterized queries; never concatenate untrusted input into SQL.
-- Escape output in templates (XSS); use CSRF protection for state-changing web requests.
-- Validate file uploads by type, size, storage location, and visibility.
-- Avoid `eval`, unsafe `unserialize` of untrusted data, and dynamic includes of untrusted paths.
+- Use Doctrine parameters; never concatenate untrusted input into DQL or SQL.
+- Preserve Twig auto-escaping; use CSRF protection for state-changing web forms.
+- Validate uploads by MIME/content, size, storage name/location, visibility, and authorization.
+- Constrain user-influenced HttpClient destinations to prevent SSRF.
+- Protect Serializer/API Platform write and read fields from privilege or sensitive-data exposure.
+- Use typed, trusted Messenger payloads and avoid unsafe deserialization.
+- Avoid `eval`, unsafe `unserialize`, and dynamic includes of untrusted paths.
 - Do not introduce OWASP Top 10 vulnerabilities.
 
 ## Git Safety
@@ -21,7 +24,7 @@ alwaysApply: true
 ## Verification (Definition of Done)
 - Run applicable checks from `.cursor/DOD.md` before claiming completion.
 - Run tests, formatting/lint, and static analysis when the tooling exists.
-- Never claim completion with failing tests, failing static analysis, or known broken entry points.
+- Never claim completion with failing tests, static analysis, container, route, schema, or known entry-point checks.
 - Report unavailable tooling as `N/A - tooling not configured`; do not install tooling without user approval.
 - Include verification evidence in the final Context Summary for implementation work.
 

@@ -1,186 +1,76 @@
 ---
 name: architect
-description: Make native PHP architecture decisions. Use when designing features, choosing module boundaries, layering, dependency direction, persistence, concurrency/async, scalability, or security trade-offs.
+description: Design Symfony features using Controller -> Service -> Repository layered architecture, SOLID, Doctrine, validation, authorization, and clean code.
 phase: planning
 flow-next: api-designer
-flow-alternatives: [architecture-implementer, writing-plans, coder]
-related: [brainstorming, api-designer, architecture-implementer, coder]
+flow-alternatives: [writing-plans, architecture-implementer, coder]
 ---
 
-# Architect
+# Symfony Architect
 
-## Overview
+## Goal
 
-Design features in plain PHP with the simplest structure that stays testable and changeable. Add layers only when they reduce real complexity.
+Choose a simple, maintainable Symfony design before implementation.
 
-This is the native-PHP base. Do not assume a framework. If the project uses one, prefer the matching accelerator branch for framework-native placement.
+Default to:
 
-## Core Rule
-
-Prefer standard, explicit PHP building blocks over ceremony:
-
-- Front controller + router for HTTP entry points.
-- Request DTOs / validators for input at the boundary.
-- Use-case (application) classes for workflows that do not belong in controllers or entities.
-- Domain entities and value objects for business rules and invariants.
-- Repository/gateway interfaces with PDO implementations for persistence.
-- PSR-15 middleware for cross-cutting HTTP concerns (auth, logging, CORS).
-- PSR-11 container (or explicit manual wiring) for dependency injection.
-- Interfaces at boundaries so infrastructure can be swapped and mocked.
-- Message/queue workers for slow or side-effect-heavy operations.
-
-## Layering And Dependency Direction
-
-```
-HTTP / CLI (entry)   ->  Application (use cases)  ->  Domain (entities, rules)
-        |                        |                          ^
-        v                        v                          |
-   Infrastructure  <----  interfaces defined by Domain/Application
-   (PDO, HTTP clients, queues, cache, filesystem)
+```text
+Controller -> Service -> Repository
 ```
 
-Dependencies point inward. Domain knows nothing about the database or HTTP; infrastructure implements interfaces the inner layers declare.
+Add more structure only when it solves a real problem.
 
-## Decision Tree
+## Required Analysis
 
-```
-New behavior
-        |
-        |-- HTTP input?
-        |     |-- Route -> Controller/Handler
-        |     |-- Request DTO / validator
-        |
-        |-- Authorization rule?
-        |     |-- Access-control service or middleware
-        |
-        |-- Database-backed entity?
-        |     |-- Migration (schema)
-        |     |-- Entity + Repository interface
-        |     |-- PDO repository implementation
-        |
-        |-- Multi-step business workflow?
-        |     |-- Application/use-case class (+ transaction)
-        |
-        |-- Slow/external/side-effect operation?
-              |-- Queue job / worker / event dispatch
-```
+Before deciding, inspect:
 
-## Pattern Guidance
+- Existing routes/controllers/commands/handlers.
+- Service and repository patterns already used.
+- Doctrine entities, migrations, and indexes.
+- Form/request DTO/Validator conventions.
+- Security voters, roles, `access_control`, and route constraints.
+- Tests and fixtures/factories.
+- Relevant specs and task docs.
 
-| Situation | Preferred native PHP approach |
-| --- | --- |
-| Simple CRUD | Controller + Request DTO + Repository + response serializer |
-| Complex write workflow | Controller + Request DTO + use-case class + PDO transaction |
-| User-specific permissions | Access-control service checked in the use case or middleware |
-| Reusable query logic | Repository methods or query objects |
-| External API integration | Dedicated client behind an interface, with timeout and error mapping |
-| Expensive side effect | Queue job dispatched after the transaction commits |
-| Public API response | Serializer/DTO with a documented, stable JSON shape |
-| Admin screens | Server-rendered templates or a project-standard admin approach |
+## Architecture Decision Template
 
-## Transaction Boundaries
+Document:
 
-Use PDO transactions when multiple writes must succeed or fail together.
+- Entry point: controller, console command, Messenger handler, event subscriber, or API Platform resource.
+- Validation: Form, request DTO, Validator constraints, custom constraints, or explicit validation.
+- Authorization: voter, attribute, `access_control`, service policy, or route constraint.
+- Service boundary: one use case per cohesive workflow.
+- Repository boundary: query/persistence methods with business-readable names.
+- Transaction boundary: where writes commit/rollback.
+- Response contract: DTO, serializer group, normalizer, API Platform output, Twig model, or redirect.
+- Tests: unit, functional, repository integration, Messenger, console.
+- Rollout risk: migrations, workers, cache, BC breaks, data backfill.
 
-```php
-$pdo->beginTransaction();
+## Good Decisions
 
-try {
-    // multiple related writes
-    $pdo->commit();
-} catch (\Throwable $e) {
-    $pdo->rollBack();
+- Put a multi-step registration flow in `CreateRegistrationService`.
+- Put `existsForEmail()` and `findActiveForUser()` in repositories, not controllers.
+- Use a voter for object-level permissions.
+- Use a migration unique index to enforce uniqueness under concurrency.
+- Use Messenger for slow/retryable email or integration work.
 
-    throw $e;
-}
-```
+## Bad Decisions
 
-Avoid holding a transaction open around slow external API calls. Persist intent first, then dispatch a worker after commit.
+- Controller queries Doctrine, mutates entities, sends mail, and returns raw entities.
+- Event subscriber contains the business workflow.
+- Service returns `JsonResponse`.
+- Repository authorizes users.
+- DTO validation is skipped because the UI already validates.
 
-## Security Checklist
+Use [Symfony clean-code patterns](../../../examples/symfony-clean-code-patterns.md) to review dependency direction and responsibility placement. Treat them as contrastive examples, not a requirement to create every shown type.
 
-- Is the entry point authenticated?
-- Is the action authorized in an explicit access-control layer?
-- Is input validated and normalized at the boundary?
-- Are queries parameterized (PDO prepared statements)?
-- Is output escaped in templates (XSS)?
-- Are state-changing web requests CSRF-protected?
-- Are database constraints backing important invariants?
-- Are file uploads validated and stored safely?
-- Are secrets kept out of logs and source code?
-- Are rate limits needed?
-- Does the feature expose personal, payment, or minor data?
+## Output
 
-## Scalability Checklist
+Finish with:
 
-- Are indexes needed for new query patterns?
-- Could N+1 queries appear? Batch or join instead.
-- Should slow work be queued?
-- Is cache invalidation clear (PSR-6/PSR-16)?
-- Are external calls retried safely with timeouts?
-- Does the design behave correctly under concurrent requests?
-
-## When NOT To Add A Layer
-
-Layers have a cost. Add one only when it earns its keep:
-
-- Do not add a repository interface if there is exactly one implementation and no test seam benefit; use the query directly until a second reason appears.
-- Do not add a service/use-case class for a pure passthrough; let the handler call the gateway.
-- Do not introduce a DTO where a typed parameter is clearer.
-- Do not build an event system for one synchronous caller.
-
-Rule of thumb: introduce the abstraction on the *second* concrete need, not in anticipation of a hypothetical one (YAGNI). Prefer deleting a layer that no longer pays for itself.
-
-## Ports And Adapters (Hexagonal-lite)
-
-For anything touching the outside world (DB, HTTP clients, queue, cache, filesystem, clock), define the contract (port) in the inner layer and put the implementation (adapter) in Infrastructure. Benefits: the domain is testable with fakes, and vendors are swappable without touching business rules. Keep ports small and expressed in domain terms, not vendor terms.
-
-## Concurrency And Idempotency
-
-- Assume requests race. Protect invariants with database constraints (uniqueness) and locking (optimistic `version` column or `SELECT ... FOR UPDATE`), not just application checks.
-- Make write operations idempotent where clients may retry (idempotency keys, upserts, or natural-key uniqueness).
-- Guard critical sections that cross processes with an advisory/named lock or a queue with a single consumer, not an in-memory flag.
-- Design workers to be at-least-once safe: the same message may be delivered twice.
-
-## Failure And Resilience
-
-- Set timeouts on every external call; add bounded retries with backoff only for idempotent operations.
-- Consider a circuit breaker for a flaky dependency; degrade gracefully (cached/last-known value) where correctness allows.
-- Persist intent before side effects; dispatch the side effect after commit so a rollback cannot leave an orphaned email/charge.
-
-## Living Specification Update
-
-Before final output, update `specs/architect-architecture.md` and `specs/MANIFEST.md` when architecture decisions changed.
-
-If `specs/architect-architecture.md` does not exist, create it using `spec-desc.md` as the structure reference. Append task-specific sections with this shape:
-
-```markdown
-### [TASK-001] Invitation Registration (2026-06-29)
-
-**Module:** Registration
-
-**Placement:**
-- Entry: `src/Http/Controller/RegistrationController.php`
-- Request: `src/Http/Request/RegisterUserRequest.php`
-- Use case: `src/Application/RegisterUser.php`
-- Domain: `src/Domain/User.php`, `src/Domain/Invitation.php`
-- Persistence: `src/Infrastructure/Persistence/PdoUserRepository.php`
-
-**Decisions:**
-- Validate input in a request DTO; authorize in an access-control service.
-- Wrap registration writes in a PDO transaction.
-- Dispatch the welcome-email job after commit.
-
-**Risks:**
-- Token guessing must be prevented with high-entropy invitation tokens.
-```
-
-## Final Output
-
-Return:
-
-- Architecture decision summary.
-- Files/specs updated.
-- Security and scalability considerations.
-- Context Summary.
-- Next by flow: `/api-designer`, `/architecture-implementer`, or `/writing-plans`.
+- Recommended design.
+- Layer placement table.
+- Files likely touched.
+- Tests needed.
+- Risks and assumptions.
+- Next command recommendation.

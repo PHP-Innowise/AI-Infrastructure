@@ -1,173 +1,138 @@
 ---
 name: test-generator
-description: Generate PHPUnit or Pest tests for native PHP applications. Use for unit tests, integration tests, HTTP handler tests, input-validation and authorization tests, data-access tests, and coverage gaps.
-phase: execution
-flow-next: documentation-generator
-flow-alternatives: [debugger, coder]
-related: [coder, code-reviewer, verify]
+description: "Generate Symfony tests: controller functional tests, service unit tests, repository integration tests, validation tests, authorization/voter tests, console tests, and Messenger tests."
+phase: quality
+flow-next: verify
+flow-alternatives: [coder, code-reviewer]
 ---
 
-# Test Generator
+# Symfony Test Generator
 
-## Overview
+## Goal
 
-Create focused tests that prove behavior. Match the project's existing style: PHPUnit classes if the project uses PHPUnit, Pest functions if it uses Pest.
+Add focused tests that prove behavior without overfitting implementation details.
 
-## Test Selection
+## Required Context
 
-```
-What are you testing?
-        |
-        |-- Pure PHP logic (services, value objects)?
-        |     |-- Unit test with mocked collaborators
-        |
-        |-- HTTP handler: routing, validation, auth, response?
-        |     |-- Integration test against the handler/PSR-7 request
-        |
-        |-- Persistence (repository/gateway)?
-        |     |-- Integration test against a disposable test database
-        |
-        |-- External service / queue / mail?
-        |     |-- Contract test with a test double / fake
-```
+Inspect `composer.json`, PHPUnit/Pest configuration, bootstrap/kernel setup, existing test base classes, fixtures/factories, database reset strategy, HTTP helpers, Messenger transports, and adjacent tests. Follow the consuming project's conventions before introducing helpers or dependencies.
 
-## Native PHP Test Tools
+## Select The Lowest Useful Layer
 
-- PHPUnit `TestCase` or Pest `test()`/`it()`.
-- Test doubles: `createMock()`, `createStub()`, or hand-written fakes for interfaces.
-- Database isolation: a dedicated SQLite/MySQL test database, wrapped per test in a transaction that is rolled back in `tearDown()`.
-- Fixtures/builders/factories to construct entities and rows deterministically.
-- PSR-7 request factories to exercise HTTP handlers without booting a server.
-- `vfsStream` or a temp directory for filesystem behavior.
+| Behavior | Preferred test |
+| --- | --- |
+| Service decisions and orchestration | Unit test with narrow collaborators |
+| Route/input/auth/response contract | `WebTestCase`/`KernelBrowser` functional test |
+| Doctrine QueryBuilder/DQL/SQL | Kernel-backed repository integration test |
+| Entity/value-object invariant | Plain unit test |
+| DTO/Form/Validator constraint | Validator/Form integration test |
+| Voter/access rule | Voter unit test plus protected-route functional test |
+| Messenger handler | Handler unit test; transport integration test when routing/serialization matters |
+| Console command | `CommandTester`/`ApplicationTester` |
+| Twig/UX behavior | Controller/component test plus browser test when interaction matters |
 
-## PHPUnit Integration Test Example
+Do not boot the kernel for behavior that can be proven with a plain object test. Do not mock Doctrine query behavior that must be verified against the configured database platform.
+
+## Coverage Contract
+
+For each changed behavior cover:
+
+1. the primary successful path;
+2. the highest-risk invalid or denied path;
+3. relevant boundary values and state transitions;
+4. concurrency, retry, serialization, or persistence behavior when the feature depends on it;
+5. regression reproduction before fixing a reported bug.
+
+Prioritize externally observable behavior. Avoid assertions against private methods, framework internals, incidental call order, generated IDs, or complete HTML snapshots unless those are the contract.
+
+## Test Data
+
+- Prefer existing Foundry factories, fixtures, object mothers, builders, or project helpers.
+- Keep defaults valid, realistic, explicit, and overrideable. Seed randomness and freeze/inject clocks.
+- Model required relations, tenant ownership, roles, and entity states deliberately.
+- Respect unique/database constraints; never use production data, real credentials, or personal information.
+- Keep destructive fixture loading isolated to the test database. Do not invoke purging fixture commands without explicit consent.
+
+## Unit-Test Pattern
 
 ```php
-<?php
-
-declare(strict_types=1);
-
-namespace Tests\Integration;
-
-use App\Http\Controller\InvitationController;
-use PHPUnit\Framework\TestCase;
-
 final class CreateInvitationTest extends TestCase
 {
-    private \PDO $pdo;
-
-    protected function setUp(): void
+    public function testItRejectsAnExistingInvitation(): void
     {
-        $this->pdo = TestDatabase::migrated();
-        $this->pdo->beginTransaction();
-    }
+        $repository = new InMemoryInvitationRepository([
+            Invitation::create(EmailAddress::fromString('person@example.test'), InvitationRole::Member),
+        ]);
 
-    protected function tearDown(): void
-    {
-        $this->pdo->rollBack();
-    }
+        $createInvitation = new CreateInvitation(
+            $repository,
+            new ImmediateTransactionManager(),
+            new CollectingInvitationOutbox(),
+        );
 
-    public function test_trainer_can_create_invitation(): void
-    {
-        $controller = new InvitationController(new CreateInvitation($this->pdo));
-
-        $request = RequestFactory::post('/api/invitations', [
-            'email' => 'player@example.com',
-            'role' => 'player',
-        ])->withAttribute('user', TrainerFixture::create($this->pdo));
-
-        $response = $controller->store($request);
-
-        self::assertSame(201, $response->getStatusCode());
-
-        $statement = $this->pdo->query("SELECT COUNT(*) FROM invitations WHERE email = 'player@example.com'");
-        self::assertSame(1, (int) $statement->fetchColumn());
-    }
-
-    public function test_email_is_required(): void
-    {
-        $controller = new InvitationController(new CreateInvitation($this->pdo));
-
-        $request = RequestFactory::post('/api/invitations', ['role' => 'player']);
-
-        $this->expectException(ValidationException::class);
-
-        $controller->store($request);
+        $this->expectException(InvitationAlreadyExists::class);
+        $createInvitation(new CreateInvitationInput('person@example.test', 'member'));
     }
 }
 ```
 
-## Pest Example
+Use test doubles only at real boundaries. Prefer fakes for stateful collaborators, stubs for returned data, spies for meaningful side effects, and mocks only when an interaction is itself the contract.
+
+## Functional-Test Pattern
 
 ```php
-<?php
+final class CreateInvitationControllerTest extends WebTestCase
+{
+    public function testDeniedUserCannotCreateInvitation(): void
+    {
+        $client = static::createClient();
+        $client->loginUser(TestUserFactory::member());
+        $client->jsonRequest('POST', '/api/invitations', ['email' => 'person@example.test']);
 
-declare(strict_types=1);
-
-it('creates an invitation for a valid request', function (): void {
-    $invitation = (new CreateInvitation(TestDatabase::migrated()))->handle(
-        new StoreInvitationRequest('player@example.com', 'player', null)
-    );
-
-    expect($invitation->email)->toBe('player@example.com');
-});
+        self::assertResponseStatusCodeSame(403);
+    }
+}
 ```
 
-## Coverage Priorities
+Functional tests should assert route/method, validation status and violation paths, authentication/authorization, redirects or JSON contract, CSRF for web forms, and absence of sensitive fields. Use the project authentication helper rather than disabling security.
 
-For new backend behavior, cover:
+## Doctrine And Transaction Tests
 
-- Happy path.
-- Validation failure.
-- Authorization failure.
-- Missing resource or invalid state.
-- Persistence side effects.
-- Queued/event/mail side effects if present (via fakes).
+- Boot the kernel and use the real repository/entity manager for custom queries.
+- Exercise empty, single, multiple, ordering, pagination, relation, uniqueness, and locking behavior relevant to the query.
+- Use the configured reset/transaction mechanism; close or clear the entity manager when proving persisted state rather than relying on the identity map.
+- Test database constraints when correctness depends on concurrency or uniqueness.
+- Keep platform-specific SQL tests explicit and run them on the supported CI database when possible.
 
-## Test Quality Best Practices
+## Forms, Validation, Security, Messenger, And Console
 
-- **Structure with AAA:** Arrange, Act, Assert. One logical behavior per test; a clear failure message.
-- **Name for behavior:** `test_rejects_invitation_after_expiry`, not `test_invitation2`. The name should read as a spec.
-- **Test behavior, not implementation:** assert on outcomes and observable state, not private internals; this keeps tests green through refactors.
-- **Pick the smallest real double:**
-  - *Stub* — returns canned data (a query result).
-  - *Mock* — asserts an interaction happened (an email was sent). Use sparingly.
-  - *Fake* — a lightweight working implementation (in-memory repository). Often the cleanest.
-  - Avoid over-mocking: mocking everything tests your mocks, not your code. Prefer real objects and fakes at boundaries.
-- **Data providers** for the same logic across many inputs (`@dataProvider` / Pest `->with([...])`), instead of copy-pasted tests.
-- **Determinism:** inject a `Clock` for time, seed randomness, and never depend on real network/filesystem/order. Fakes over the network.
-- **Coverage that matters:** target meaningful branch coverage of business logic (a pragmatic ~80% on core code), not 100% everywhere. Every bug fix gets a regression test first.
-- **Mutation testing:** if configured, run Infection (`vendor/bin/infection`) to check tests actually catch changes; a high MSI beats a high line-coverage number.
-- **Keep them fast:** unit tests in milliseconds; reserve slow DB/integration tests for behavior that needs them.
+- Form/Validator: valid data, each high-risk constraint, nested property paths, transformation failure, validation groups, and CSRF behavior.
+- Voter: supported/unsupported attributes and subjects, anonymous/denied/allowed, wrong owner/tenant, privileged role, and relevant object states.
+- Messenger: immutable payload, serialization compatibility, handler delegation, duplicate delivery/idempotency, retry classification, terminal failure, and transaction timing.
+- Console: arguments/options, invalid input, non-interactive mode, stdout/stderr, service failure, and exit codes.
 
-## Running Tests
+## Determinism And Quality
 
-Use the project-standard command:
+- Use Arrange-Act-Assert and descriptive behavior names.
+- Use data providers for the same behavior over meaningful cases, not to hide unrelated scenarios.
+- Avoid sleeps, network access, shared mutable globals, unordered assertions, and dependence on test execution order.
+- Freeze clocks, inject UUID/ID generators, use fake transports/clients, and set locale/timezone where output depends on them.
+- Clean up filesystem and external resources even when assertions fail.
+- Add mutation testing only when already configured; never claim line coverage proves behavioral quality.
 
-```bash
-vendor/bin/phpunit --filter=CreateInvitationTest
-vendor/bin/pest --filter=invitation
-```
+Use the behavior-focused examples in [Symfony clean-code patterns](../../../examples/symfony-clean-code-patterns.md). Test public behavior at the layer that owns it and avoid mocks coupled to private implementation details.
 
-Then run the broader applicable suite (prefer Composer scripts):
+## Run And Failure Loop
+
+Run the narrow test first, then the relevant suite and configured quality gates:
 
 ```bash
+vendor/bin/phpunit --filter CreateInvitation
+vendor/bin/phpunit
 composer test
 ```
 
-## Failure Loop
+If a test fails, read the full failure, confirm whether production behavior or the test assumption is wrong, make one evidence-based correction, and rerun the narrow test. Do not weaken an assertion merely to obtain green output.
 
-1. Read the full failure.
-2. Fix the root cause.
-3. Re-run the focused failing test.
-4. Stop after three failed fix attempts and escalate to `/debugger`.
+## Output
 
-## Final Output
-
-Return:
-
-- Tests created or updated.
-- Behavior covered.
-- Commands run and results.
-- Remaining gaps.
-- Context Summary and Next Steps.
+Report tests added, behavior and risk paths covered, fixtures/factories introduced, commands and results, unavailable tooling, and intentional remaining gaps. Include Context Summary and Next Steps.

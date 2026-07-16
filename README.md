@@ -1,191 +1,262 @@
-# Accelerator Core PHP
+# Symfony Layered Architecture Accelerator
 
-> **For enforceable agent policy rules, see [AGENTS.md](AGENTS.md).**
+> **Enforceable agent policy lives in [AGENTS.md](AGENTS.md).**
 
-A native-PHP accelerator framework for AI coding agents. It provides structured slash-command workflows, isolated agents, reusable skills, quality gates, and documentation conventions for PHP teams — usable from **Claude Code**, **Cursor**, and **OpenAI Codex** out of the same repository.
+A Symfony-first workflow accelerator for AI coding agents. It provides focused commands, single-skill agents, reusable engineering workflows, safety hooks, quality gates, and documentation conventions for teams building maintainable Symfony applications with a pragmatic default:
 
-`main` is the universal, framework-agnostic base (Composer + PSR). Framework-specific behavior (Laravel, Symfony, etc.) belongs on dedicated branches, not here.
+```text
+Controller -> Service -> Repository
+```
+
+This is the `feature/symfony-accelerator` branch. The framework-neutral PHP base lives on `main`; `feature/laravel-accelerator` is the equivalent Laravel specialization.
 
 ## What This Is
 
-Accelerator Core PHP is not a generated PHP application. It is a team workflow layer for AI agents:
+This repository is not a generated Symfony application. It is an engineering workflow layer that can be placed alongside an existing project:
 
-- Commands route user intent to the right agent.
-- Agents run one skill in isolated context, then stop.
-- Skills define reliable workflows, examples, checklists, and output formats.
-- Hooks and policy files enforce naming, safety, and verification conventions.
-- `tasks/` stores temporary task documents; `specs/` stores living project specifications.
+- Commands route intent to a focused workflow.
+- Agent wrappers execute one skill, return context, and stop.
+- Skills define repeatable design, implementation, review, debugging, and delivery practices.
+- Hooks enforce skill-prefixed task/spec names, zero-padded task directories, Git safety, database safety, and workflow constraints.
+- `tasks/` stores temporary task artifacts; `specs/` stores durable architecture knowledge.
+
+## Supported Baseline
+
+| Symfony | PHP | Position |
+| --- | --- | --- |
+| **7.4 LTS** | 8.2+ | Long-term support baseline for production projects |
+| **8.1** | 8.4+ | Current stable feature line as of July 2026 |
+
+Every workflow must inspect the consuming project's `composer.json`, lock file, installed components, and conventions before recommending APIs. The accelerator does not silently upgrade Symfony or install optional bundles.
 
 ## Multi-Tool Editions
 
-The same accelerator is mirrored for three agents. Each tool reads its own directory, so they coexist without conflict; the root `AGENTS.md` is the shared policy for all of them.
+The root `AGENTS.md` policy is shared. Each tool keeps its native integration model:
 
-| Tool | Reads | Notes |
+| Tool | Reads | Native integration |
 | --- | --- | --- |
-| **Claude Code** | `.claude/` (agents, commands, hooks, skills, `settings.json`) | Original edition. |
-| **Cursor** | `.cursor/` (agents, commands, `hooks.json`, `rules/*.mdc`, skills) | Self-contained; keep Cursor's "read `.claude`" setting **off** to avoid double-loading. See `.cursor/README.md`. |
-| **Codex** | `.agents/skills/` + `.codex/` (`config.toml`, `hooks.json`) | Skills live in `.agents/skills`; no command layer (Codex deprecated custom prompts in favor of skills). See `.codex/README.md`. |
+| **Claude Code** | `.claude/` | Skills, commands, agent wrappers, settings, hooks, and engineering references |
+| **Cursor** | `.cursor/` | Self-contained skills, commands, agents, rules, hooks, and references |
+| **OpenAI Codex** | `.agents/skills/` + `.codex/` | Skills from `.agents/skills`; project config, hooks, and references from `.codex` |
 
-When you change a skill, mirror the edit across the editions you support (or regenerate).
+Do not enable Cursor's optional Claude-file loading when using the self-contained `.cursor` edition. Codex does not use duplicated `.codex/skills`, command, or wrapper trees.
 
 ## Directory Structure
 
-```
-AGENTS.md                # Shared, enforceable policy (all tools)
+```text
+AGENTS.md                 # Shared enforceable policy
+README.md                 # Public Symfony accelerator guide
+CHANGELOG.md              # Versioned accelerator changes
 
-.claude/                 # Claude Code edition
-├── agents/              # Agent wrappers that execute one skill and stop
-├── commands/            # Slash commands invoked by users
-├── hooks/               # Shell checks triggered by Claude Code events
-├── skills/              # Skill implementations and references
-├── DOD.md               # Native PHP Definition of Done
-├── GOLDEN-PRINCIPLES.md # Engineering principles for reviews
-├── STABILIZATION.md     # Error-to-rule process
-└── settings.json        # Permissions and hook wiring
+.claude/                  # Claude Code edition
+├── agents/               # One-skill wrappers
+├── commands/             # Slash-command entry points
+├── hooks/                # Safety and workflow hooks
+├── skills/               # Canonical authored workflows
+├── DOD.md
+├── GOLDEN-PRINCIPLES.md
+└── STABILIZATION.md
 
-.cursor/                 # Cursor edition (skills, agents, commands, rules/*.mdc, hooks.json, docs)
-.agents/skills/          # Codex skills (shared .agents convention)
-.codex/                  # Codex config.toml, hooks.json, hooks/, docs
-
-Task/                    # Product/domain planning material and design references
-tasks/                   # Temporary task documentation
-specs/                   # Permanent living specifications
-examples/                # Workflow output examples
-```
-
-## Architecture: Command -> Agent -> Skill
-
-Each command starts a focused agent, that agent executes one skill, and then it stops with a context summary and suggested next steps. The main conversation stays clean and the user controls the workflow. (In Codex there is no command layer — you invoke a skill by name and Codex can also trigger it implicitly.)
-
-```
-User runs: /requirements-analyst [prompt]
-              |
-              v
-      Command selects agent
-              |
-              v
-      Agent executes one skill
-              |
-              v
-      Output: result + context summary + next steps
+.cursor/                  # Cursor-native mirror and adapters
+.agents/skills/           # Codex-discovered skill mirror
+.codex/                   # Codex config, hooks, and references
+tasks/TASK-N/             # Temporary prefixed task artifacts
+specs/                    # Permanent living specifications
+examples/                 # Workflow output examples
 ```
 
-## Native PHP Stack
+## Workflow Model
 
-The guidance assumes plain, framework-agnostic PHP. Recommended baseline:
+Claude Code and Cursor expose command -> agent -> skill routing. Codex invokes the matching skill directly from `.agents/skills`; use discovered names such as `brainstorming`, `systematic-debugger`, `documentation-generator`, and `using-git-worktrees` rather than Claude/Cursor command aliases.
 
-- PHP 8.2+
-- Composer 2+ with PSR-4 autoloading
-- PSR-1 / PSR-12 / PER coding style; `declare(strict_types=1)`
-- PHPUnit or Pest for tests
-- PHP-CS-Fixer or PHP_CodeSniffer for formatting
-- PHPStan or Psalm for static analysis
-- Rector (optional) for automated refactors/upgrades
-- PDO (or a documented data layer) with prepared statements for persistence
+```text
+User request
+    -> command or implicit skill selection
+    -> one focused skill
+    -> artifact or implementation
+    -> Context Summary + Next Steps
+    -> stop for user control
+```
 
-The accelerator does not force a heavy layered architecture. It encourages the simplest structure that fits — front controller, handlers, use-case/service classes, domain objects, data-access gateways — and adds interfaces, DTOs, or repositories only when they reduce real complexity.
+Skills must not silently chain into another workflow. This keeps requirements, architecture, implementation, review, and release decisions observable.
+
+## Architecture Policy
+
+Default placement in a conventional application:
+
+```text
+src/
+├── Controller/          # Map input, authorize, call one service, map output
+├── Service/             # Use cases, decisions, transactions, side effects
+├── Repository/          # Doctrine queries, persistence, pagination, locking
+├── Entity/              # Local invariants only
+├── DTO/                 # Request, response, command, and result contracts
+├── Form/                # Server-rendered form boundaries
+├── Validator/           # Reusable constraints and validators
+├── Security/Voter/      # Object/action authorization
+├── Message/             # Immutable Messenger payloads
+├── MessageHandler/      # Thin handlers delegating to services
+├── EventSubscriber/     # Framework adapters
+└── Command/             # Thin console entry points
+```
+
+The layer rule is pragmatic:
+
+- Controllers, commands, handlers, subscribers, and UX components must not hide business workflows.
+- Services own application orchestration and multi-write transaction boundaries.
+- Repositories own QueryBuilder, DQL, SQL, hydration, and query-performance decisions.
+- Entities protect local invariants without knowing HTTP, sessions, templates, queues, or mailers.
+- Forms, request DTOs, Validator constraints, and explicit validation protect external input.
+- Voters, attributes, firewalls, `access_control`, and route constraints enforce authorization.
+- Public APIs use response DTOs, Serializer configuration, normalizers, documented contracts, or API Platform resources.
+- Interfaces are added only for multiple implementations, external/package boundaries, or a useful narrow testing contract.
+
+### Pragmatic SOLID
+
+The accelerator applies SOLID through outcomes rather than class-count ceremony:
+
+- one cohesive reason to change per controller adapter, use-case service, repository/query service, and infrastructure adapter;
+- dependencies point inward from Symfony/framework code toward application behavior;
+- narrow interfaces exist at real substitution, vendor, storage, time, or package boundaries;
+- implementations preserve contract inputs, outputs, errors, side effects, and nullability;
+- typed DTOs/value objects, composition, explicit transactions, and business-readable names are preferred over array contracts, service locators, boolean mode flags, global state, and speculative inheritance.
+
+See [Symfony clean-code patterns](examples/symfony-clean-code-patterns.md) for paired bad/good examples covering controllers, services, Doctrine, validation, voters, Messenger, console, events, API Platform, Twig, and tests. The examples are illustrative; project versions, conventions, policy, specifications, and tests remain authoritative.
+
+## Symfony Capability Coverage
+
+### Backend And Data
+
+- Controllers, services, repositories, DTOs, Forms, Validator, dependency injection, decorators, tags, and compiler passes.
+- Doctrine entities, mappings, relationships, indexes, constraints, repositories, transactions, locking, migrations, backfills, and safe rollout.
+- Console commands, events/subscribers, Scheduler or cron integration, cache, and configuration.
+
+### APIs And Async Work
+
+- REST routes, request mapping, validation, stable errors, pagination, idempotency, rate limits, Serializer, and OpenAPI.
+- API Platform resources, operations, state providers/processors, filters, security, and documentation.
+- Messenger transports, routing, retries, failure transports, idempotency, worker lifecycle, observability, and deployment compatibility.
+
+### Security
+
+- Firewalls, authenticators, password hashing/upgrades, login throttling, voters, role hierarchy, `access_control`, CSRF, sessions/cookies, remember-me behavior, token lifecycle, trusted proxies/hosts, security headers, and authorization tests.
+- Safe Serializer exposure, parameterized Doctrine queries, upload validation, Twig escaping, constrained outbound HTTP, secret handling, and Composer advisories.
+- OWASP Top 10 review with concrete exploit scenarios and ship/block findings.
+
+### Frontend
+
+The default server-rendered stack is Twig + Symfony Forms + Stimulus/Turbo, using AssetMapper where it fits. Existing Encore, Vite, SPA, or separate-frontend stacks are supported rather than replaced without justification.
+
+Frontend workflows cover semantic HTML, accessible form errors, focus management, progressive enhancement, Turbo navigation/frames/streams, Stimulus controller lifecycle, Live Components when installed, loading/empty/error states, responsive behavior, WCAG 2.2, asset builds, and browser verification.
+
+### Quality And Operations
+
+- PHPUnit or Pest, KernelBrowser/WebTestCase, repository integration tests, voter/constraint tests, CommandTester, Messenger tests, fixtures, Foundry, object mothers, and deterministic builders.
+- Symfony Profiler, Web Debug Toolbar, Monolog, Blackfire when available, Doctrine query profiling, explain plans, cache, Messenger throughput, memory, and OPcache.
+- Composer/Flex recipe review, dependency audits, deprecations, upgrades, releases, changelogs, migrations, cache warmup, worker restart/drain, rollback limitations, and living documentation.
 
 ## Prerequisites
+
+Check the project-provided tools before using them:
 
 ```bash
 php -v
 composer --version
+php bin/console about
+php bin/console debug:container
 ```
 
-Install PHP and Composer via your OS package manager, Docker, or your team-standard PHP runtime. For an existing project:
+For an existing application, install dependencies through its documented workflow, typically:
 
 ```bash
 composer install
 ```
 
+Do not install Symfony CLI, bundles, npm packages, or analysis tools without approval. Symfony CLI is useful but optional; `php bin/console` remains the portable application entry point.
+
 ## Quick Start
 
-Use slash commands (Claude Code / Cursor) to move through the workflow:
-
-| Command | Purpose |
+| Skill / command | Purpose |
 | --- | --- |
-| `/requirements-analyst` | Clarify and decompose requirements |
-| `/brainstorm` | Explore solution options |
-| `/researcher` | Evaluate libraries and compare approaches |
-| `/council` | Weigh high-stakes decisions from multiple expert views |
-| `/architect` | Make native PHP architecture decisions |
-| `/api-designer` | Design REST APIs, DTOs, serializers, and OpenAPI docs |
-| `/database-designer` | Design schemas, keys, indexing, and migrations |
-| `/writing-plans` | Create implementation plans |
-| `/architecture-implementer` | Scaffold an approved architecture (skeletons, DI, PSR-4) |
-| `/coder` | Implement native PHP backend features |
-| `/coder-frontend` | Implement server-rendered frontend work |
-| `/refactorer` | Behavior-preserving refactors and PHP upgrades |
-| `/test-generator` | Add PHPUnit/Pest tests |
-| `/code-reviewer` | Review code for correctness, maintainability, and risk |
-| `/security-reviewer` | Audit changes against the OWASP Top 10 |
-| `/performance-optimization` | Diagnose and fix performance problems |
-| `/dependency-manager` | Audit and manage Composer dependencies |
-| `/systematic-debugger` (`/debugger`) | Find root cause before fixing bugs |
-| `/verify` | Run the native PHP Definition of Done |
-| `/review-pr` | Review a GitHub pull request |
-| `/finishing-branch` | Prepare branch completion or PR |
-| `/release` | Prepare release notes and changelog |
+| `requirements-analyst` | Clarify requirements and create task-ready acceptance criteria |
+| `brainstorming` | Compare solution approaches before implementation |
+| `researcher` | Evaluate components, bundles, packages, and unfamiliar subsystems |
+| `council` | Weigh high-impact architecture, security, or operational decisions |
+| `architect` | Design Symfony boundaries and layered placement |
+| `api-designer` | Design routes, DTOs, validation, errors, pagination, and OpenAPI |
+| `api-platform-designer` | Design API Platform resources, providers, processors, and security |
+| `database-designer` | Design Doctrine entities, constraints, indexes, and queries |
+| `doctrine-migration-designer` | Plan safe schema rollout, backfills, and recovery |
+| `form-validator-designer` | Design Forms, request DTOs, constraints, and error behavior |
+| `security-voter-designer` | Design voters, firewalls, access rules, and authorization tests |
+| `messenger-designer` | Design messages, handlers, retries, idempotency, and workers |
+| `frontend-design` | Design Twig, Forms, Symfony UX, and accessible interactions |
+| `writing-plans` | Produce file-specific implementation plans |
+| `architecture-implementer` | Scaffold approved Symfony layers |
+| `coder` | Implement behavior-changing backend work |
+| `coder-frontend` | Implement Twig/Symfony UX frontend behavior |
+| `console-command-coder` | Implement thin, testable console commands |
+| `fixture-factory-generator` | Build deterministic fixtures and test data helpers |
+| `refactorer` | Perform behavior-preserving cleanup under tests |
+| `systematic-debugger` | Investigate root cause before fixing failures |
+| `test-generator` | Add focused tests at the correct layer |
+| `architecture-boundary-reviewer` | Review Controller/Service/Repository responsibilities |
+| `repository-reviewer` | Review Doctrine queries and persistence boundaries |
+| `container-reviewer` | Review autowiring, aliases, tags, decorators, and config |
+| `twig-ux-reviewer` | Review Twig, Forms, UX behavior, and accessibility |
+| `security-reviewer` | Audit Symfony and OWASP risks |
+| `performance-optimization` | Measure and fix Symfony performance problems |
+| `dependency-manager` | Audit and safely update Composer dependencies |
+| `code-reviewer` | Review correctness, maintainability, security, and tests |
+| `verify` | Run the active edition's Definition of Done |
+| `documentation-generator` | Maintain README, ADR, API, worker, and deployment docs |
+| `finishing-branch` | Present merge, PR, or cleanup alternatives |
+| `release` | Prepare versioning, changelog, tag, and release notes |
 
-Example:
+Example flow:
 
 ```text
-/requirements-analyst Add invitation-only registration for trainers and players
-
-[Agent returns requirements and context summary]
-
-/architect Based on TASK-001, design the module boundaries and authorization model
+/requirements-analyst Add invitation-only registration
+/architect Use TASK-001 to design services, repositories, voters, and Doctrine changes
+/writing-plans Create an implementation plan for TASK-001
+/coder Implement TASK-001
+/code-reviewer Review TASK-001
+/verify Run the Symfony Definition of Done
 ```
 
-## Documentation System
+## Documentation Lifecycle
 
-### Temporary Task Docs
+Temporary artifacts live in zero-padded `tasks/TASK-N/` directories and must be prefixed with the producing skill, for example `writing-plans-registration.md`.
 
-Temporary task documents live in `tasks/TASK-N/`.
-
-- Created by: requirements analysis, brainstorming, and implementation planning.
-- Naming: files must be prefixed with the skill name, e.g. `requirements-analyst-requirements.md`.
-- Lifecycle: delete or archive after implementation is complete.
-
-### Living Specifications
-
-Living specifications live in `specs/`.
-
-- Entry point: `specs/MANIFEST.md`.
-- Files: architecture, API, frontend, and implementation specifications.
-- Updates: append new sections with `[TASK-N]` prefixes.
-- Lifecycle: permanent project knowledge.
-
-## Native PHP Implementation Philosophy
-
-Prefer explicit, minimal structure over framework imitation:
-
-- HTTP boundary: front controller, routing, handlers/controllers, PSR-15 middleware.
-- Validation: typed DTOs / value objects / explicit validators at input boundaries.
-- Authorization: an explicit access-control layer, never hidden UI.
-- Persistence: PDO with prepared statements; repositories/gateways in the infrastructure layer.
-- Output: serializers/DTOs for stable API response shapes.
-- Business logic: use-case/service classes when handler code becomes unclear.
-- Async work: explicit workers/queues with typed payloads and retry behavior.
-- Integration boundaries: typed clients with timeouts, retries, and error mapping for external APIs.
+Permanent decisions live in `specs/` and are indexed by `specs/MANIFEST.md`. Update living specs when architecture, API contracts, schema, security, asynchronous behavior, operations, or user workflows change.
 
 ## Verification
 
-Before claiming completion, agents run applicable checks from `DOD.md` (per edition: `.claude/DOD.md`, `.cursor/DOD.md`, `.codex/DOD.md`). Missing tooling is reported as `N/A - tooling not configured`; it is not installed silently. Prefer the project's Composer scripts so local and CI use the same entry points:
+Use project Composer scripts first, then configured equivalents:
 
 ```bash
 composer validate --strict
-composer test        # or vendor/bin/phpunit / vendor/bin/pest
-composer lint        # or vendor/bin/php-cs-fixer fix --dry-run --diff / vendor/bin/phpcs
-composer analyse     # or vendor/bin/phpstan analyse / vendor/bin/psalm
-php -l path/to/File.php
+composer audit
+composer test
+composer lint
+composer analyse
+php bin/console lint:container
+php bin/console debug:router
+php bin/console doctrine:schema:validate --skip-sync
 ```
 
-## Sharing With a Team
+Frontend work also runs configured template, JavaScript, CSS, test, and production-build checks. Missing tooling is reported as `N/A - tooling not configured`; it is never installed or silently treated as passing.
 
-1. Commit the edition(s) your team uses: `.claude/`, `.cursor/`, and/or `.agents/` + `.codex/`, plus the shared root `AGENTS.md`.
-2. Keep personal overrides uncommitted (e.g. `.claude/settings.local.json`).
-3. Agree on project-level PHP tooling: PHPUnit or Pest, PHP-CS-Fixer or PHP_CodeSniffer, PHPStan or Psalm.
-4. Keep specs current as features evolve.
-5. Treat generated task docs as temporary working material, not permanent architecture records.
-6. Cursor: keep the "read `.claude` files" setting off. Codex: trust the project so `.codex/` config and hooks load.
+## Team Usage
+
+1. Commit the shared policy and every edition used by the team.
+2. Keep personal settings, IDE state, secrets, caches, and local overrides uncommitted.
+3. Agree on project-level PHPUnit/Pest, coding-standard, and PHPStan/Psalm commands.
+4. Keep edition skills semantically aligned while preserving native frontmatter and hook schemas.
+5. Treat task docs as temporary execution context and specs as durable knowledge.
+6. Review Flex recipe changes and environment/config requirements with dependency updates.
+7. Trust the project in Codex so `.codex/config.toml` and hooks load.
+
+## Symfony Adaptation Notes
+
+This branch specializes the universal PHP accelerator by replacing framework-neutral persistence, routing, security, async, frontend, debugging, and verification guidance with Symfony-native practices. The Laravel branch is used only as a reference for workflow maturity and documentation completeness; Laravel-specific concepts are not mechanically mapped into Symfony.

@@ -1,11 +1,14 @@
 #!/bin/bash
 # Local Context Session Start Hook
-# Scans a native PHP working directory at session start.
+# Scans a Symfony working directory at session start.
 # Hook type: SessionStart
 # Exit codes: always 0 (informational only)
 
 echo "Project Context"
 echo "==============="
+
+# Loop detection is session-scoped; discard counters from earlier sessions.
+find /tmp/codex-loop-detection -type f -delete 2>/dev/null || true
 
 # Git info
 if git rev-parse --git-dir > /dev/null 2>&1; then
@@ -39,23 +42,21 @@ command -v php > /dev/null 2>&1 && echo "PHP: $(php -r 'echo PHP_VERSION;' 2>/de
 [ -f "Makefile" ] && echo "Build system: Make"
 [ -f "Dockerfile" ] || [ -f "docker-compose.yml" ] || [ -f "compose.yaml" ] && echo "Containers: Docker present"
 
-# Framework detection: this base branch targets native PHP.
-# If a framework is present, prefer the matching accelerator branch.
+# Symfony project detection.
 FRAMEWORK=""
-[ -f "artisan" ] && FRAMEWORK="Laravel"
 [ -f "bin/console" ] && FRAMEWORK="Symfony"
-if grep -qi "cakephp/cakephp" composer.json 2>/dev/null; then FRAMEWORK="CakePHP"; fi
-if grep -qi "yiisoft/yii2" composer.json 2>/dev/null; then FRAMEWORK="Yii"; fi
 if [ -n "$FRAMEWORK" ]; then
   echo ""
-  echo "NOTE: $FRAMEWORK detected. This is the native-PHP base branch."
-  echo "      For framework-specific conventions, switch to the matching accelerator branch."
+  echo "Framework: $FRAMEWORK detected. Use Symfony Controller -> Service -> Repository conventions."
+else
+  echo ""
+  echo "NOTE: Symfony bin/console was not detected. Apply these Symfony rules only after confirming this is a Symfony project."
 fi
 
 # Project structure
 echo ""
 echo "Structure:"
-for DIR in src app public config bin templates views tests specs tasks examples .codex; do
+for DIR in src app public config bin templates views tests specs tasks examples .agents .codex; do
   if [ -d "$DIR" ]; then
     COUNT=$(find "$DIR" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
     echo "  $DIR/ ($COUNT files)"

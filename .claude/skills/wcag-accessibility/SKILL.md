@@ -14,7 +14,7 @@ This skill is the authority for **accessibility (a11y)** only. For broader UX/in
 ## When to Apply
 
 Reference these guidelines when:
-- Reviewing frontend code (server-rendered PHP templates, HTML, CSS, or progressive-enhancement JavaScript)
+- Reviewing frontend code (Twig templates, HTML, CSS, or progressive-enhancement JavaScript)
 - Writing new UI components
 - Auditing existing interfaces for accessibility
 - Checking WCAG AA compliance

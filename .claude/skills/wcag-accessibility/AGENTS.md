@@ -1,13 +1,13 @@
 # WCAG Accessibility Guidelines
 
-Practical accessibility guidance for server-rendered PHP templates and general HTML interfaces. These rules are based on WCAG 2.2 Level AA and should be used during frontend design, implementation, and review.
+Practical accessibility guidance for Twig templates and general HTML interfaces. These rules are based on WCAG 2.2 Level AA and should be used during frontend design, implementation, and review.
 
 ## How To Use
 
 - Start with semantic HTML before adding ARIA.
 - Prefer native controls: `button`, `a`, `label`, `input`, `select`, `textarea`, `table`, `dialog`, and landmark elements.
 - In PHP templates, ensure the rendered HTML is accessible, not just the template source.
-- Whatever the rendering approach (plain PHP, a templating engine, or progressive enhancement), apply the same rendered-HTML rules.
+- Whatever the Symfony rendering approach (Twig, Forms, UX, Stimulus/Turbo, or progressive enhancement), apply the same rendered-HTML rules.
 - Validate forms on the server and expose errors accessibly in the UI.
 
 ## Rule Map

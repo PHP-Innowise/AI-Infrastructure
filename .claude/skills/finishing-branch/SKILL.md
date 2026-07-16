@@ -92,9 +92,7 @@ gh pr create --title "<title>" --body "$(cat <<'EOF'
 ## Test Plan
 - [ ] <verification steps>
 
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
 
-Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>
 EOF
 )"
 ```
@@ -160,7 +158,7 @@ git worktree remove <worktree-path>
 
 After branch is finished (merged, PR created, or kept), STOP and present these options:
 
-**Next by flow:** [[/verify]] `[context]` - Verify implementation meets requirements. See [[moc-execution]] for phase context.
+**Next by flow:** /verify `[context]` - Verify implementation meets requirements.
 
 **Alternatives:**
-- [[/docs-generator]] `[context]` - Update documentation for the changes.
+- /docs-generator `[context]` - Update documentation for the changes.

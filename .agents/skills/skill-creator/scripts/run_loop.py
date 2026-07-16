@@ -23,19 +23,27 @@ from scripts.utils import parse_skill_md
 
 def split_eval_set(eval_set: list[dict], holdout: float, seed: int = 42) -> tuple[list[dict], list[dict]]:
     """Split eval set into train and test sets, stratified by should_trigger."""
+    if not 0 < holdout < 1:
+        raise ValueError("holdout must be greater than 0 and less than 1")
+
     random.seed(seed)
 
     # Separate by should_trigger
     trigger = [e for e in eval_set if e["should_trigger"]]
     no_trigger = [e for e in eval_set if not e["should_trigger"]]
 
+    if len(trigger) < 2 or len(no_trigger) < 2:
+        raise ValueError(
+            "A holdout split requires at least two positive and two negative queries"
+        )
+
     # Shuffle each group
     random.shuffle(trigger)
     random.shuffle(no_trigger)
 
     # Calculate split points
-    n_trigger_test = max(1, int(len(trigger) * holdout))
-    n_no_trigger_test = max(1, int(len(no_trigger) * holdout))
+    n_trigger_test = min(len(trigger) - 1, max(1, int(len(trigger) * holdout)))
+    n_no_trigger_test = min(len(no_trigger) - 1, max(1, int(len(no_trigger) * holdout)))
 
     # Split
     test_set = trigger[:n_trigger_test] + no_trigger[:n_no_trigger_test]
@@ -54,7 +62,7 @@ def run_loop(
     runs_per_query: int,
     trigger_threshold: float,
     holdout: float,
-    model: str,
+    model: str | None,
     verbose: bool,
     live_report_path: Path | None = None,
     log_dir: Path | None = None,
@@ -148,7 +156,10 @@ def run_loop(
                 "test_size": len(test_set),
                 "history": history,
             }
-            live_report_path.write_text(generate_html(partial_output, auto_refresh=True, skill_name=name))
+            live_report_path.write_text(
+                generate_html(partial_output, auto_refresh=True, skill_name=name),
+                encoding="utf-8",
+            )
 
         if verbose:
             def print_eval_stats(label, results, elapsed):
@@ -246,20 +257,29 @@ def main():
     parser.add_argument("--eval-set", required=True, help="Path to eval set JSON file")
     parser.add_argument("--skill-path", required=True, help="Path to skill directory")
     parser.add_argument("--description", default=None, help="Override starting description")
-    parser.add_argument("--num-workers", type=int, default=10, help="Number of parallel workers")
-    parser.add_argument("--timeout", type=int, default=30, help="Timeout per query in seconds")
+    parser.add_argument("--num-workers", type=int, default=4, help="Number of parallel native CLI workers")
+    parser.add_argument("--timeout", type=int, default=60, help="Timeout per query in seconds")
     parser.add_argument("--max-iterations", type=int, default=5, help="Max improvement iterations")
     parser.add_argument("--runs-per-query", type=int, default=3, help="Number of runs per query")
     parser.add_argument("--trigger-threshold", type=float, default=0.5, help="Trigger rate threshold")
     parser.add_argument("--holdout", type=float, default=0.4, help="Fraction of eval set to hold out for testing (0 to disable)")
-    parser.add_argument("--model", required=True, help="Model for improvement")
+    parser.add_argument("--model", default=None, help="Optional native CLI model")
     parser.add_argument("--verbose", action="store_true", help="Print progress to stderr")
     parser.add_argument("--report", default="auto", help="Generate HTML report at this path (default: 'auto' for temp file, 'none' to disable)")
     parser.add_argument("--results-dir", default=None, help="Save all outputs (results.json, report.html, log.txt) to a timestamped subdirectory here")
     args = parser.parse_args()
 
-    eval_set = json.loads(Path(args.eval_set).read_text())
-    skill_path = Path(args.skill_path)
+    if not 0 <= args.holdout < 1:
+        parser.error("--holdout must be at least 0 and less than 1")
+
+    try:
+        eval_set = json.loads(Path(args.eval_set).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        parser.error(f"Cannot read eval set: {error}")
+    if not isinstance(eval_set, list) or not eval_set:
+        parser.error("Eval set must be a non-empty JSON array")
+
+    skill_path = Path(args.skill_path).resolve()
 
     if not (skill_path / "SKILL.md").exists():
         print(f"Error: No SKILL.md found at {skill_path}", file=sys.stderr)
@@ -275,7 +295,11 @@ def main():
         else:
             live_report_path = Path(args.report)
         # Open the report immediately so the user can watch
-        live_report_path.write_text("<html><body><h1>Starting optimization loop...</h1><meta http-equiv='refresh' content='5'></body></html>")
+        live_report_path.write_text(
+            "<html><body><h1>Starting optimization loop...</h1>"
+            "<meta http-equiv='refresh' content='5'></body></html>",
+            encoding="utf-8",
+        )
         webbrowser.open(str(live_report_path))
     else:
         live_report_path = None
@@ -310,15 +334,21 @@ def main():
     json_output = json.dumps(output, indent=2)
     print(json_output)
     if results_dir:
-        (results_dir / "results.json").write_text(json_output)
+        (results_dir / "results.json").write_text(json_output, encoding="utf-8")
 
     # Write final HTML report (without auto-refresh)
     if live_report_path:
-        live_report_path.write_text(generate_html(output, auto_refresh=False, skill_name=name))
+        live_report_path.write_text(
+            generate_html(output, auto_refresh=False, skill_name=name),
+            encoding="utf-8",
+        )
         print(f"\nReport: {live_report_path}", file=sys.stderr)
 
     if results_dir and live_report_path:
-        (results_dir / "report.html").write_text(generate_html(output, auto_refresh=False, skill_name=name))
+        (results_dir / "report.html").write_text(
+            generate_html(output, auto_refresh=False, skill_name=name),
+            encoding="utf-8",
+        )
 
     if results_dir:
         print(f"Results saved to: {results_dir}", file=sys.stderr)

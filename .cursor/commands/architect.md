@@ -1,11 +1,11 @@
 ---
 name: architect
-description: "Spawn architect agent to make native PHP system architecture decisions (layering, boundaries, dependency direction, persistence, async, scalability, security)."
+description: "Spawn architect agent to make Symfony system architecture decisions (layering, boundaries, dependency direction, persistence, async, scalability, security)."
 ---
 
 # Architect
 
-Spawn architect agent to make native PHP system architecture decisions (layering, boundaries, dependency direction, persistence, async, scalability, security).
+Spawn architect agent to make Symfony system architecture decisions (layering, boundaries, dependency direction, persistence, async, scalability, security).
 
 ## Input
 $ARGUMENTS

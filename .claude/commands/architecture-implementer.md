@@ -7,7 +7,7 @@ flow-alternatives: [test-generator, code-reviewer, verify]
 
 # Architecture Implementer
 
-Spawn architecture-implementer agent to scaffold and wire an approved architecture into native PHP (PSR-4 structure, boundary interfaces, skeleton classes, DI wiring, entry points), ready for feature code.
+Spawn architecture-implementer agent to scaffold and wire an approved architecture into Symfony (Symfony controller-service-repository structure, controllers, services, repositories, DTOs, voters, messages, DI wiring, entry points), ready for feature code.
 
 ## Input
 $ARGUMENTS

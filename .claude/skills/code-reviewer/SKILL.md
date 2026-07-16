@@ -1,99 +1,48 @@
 ---
 name: code-reviewer
-description: Review native PHP changes for correctness, security, maintainability, tests, and operational risk.
-phase: execution
+description: Review Symfony changes for correctness, Controller -> Service -> Repository boundaries, security, maintainability, tests, and operational risk.
+phase: quality
 flow-next: test-generator
-flow-alternatives: [coder, verify]
-related: [coder, test-generator, verify, security-reviewer]
+flow-alternatives: [security-reviewer, verify, coder]
 ---
 
-# Code Reviewer
+# Symfony Code Reviewer
 
 ## Review Stance
 
-Prioritize defects, regressions, security issues, missing tests, and operational risks. Do not spend review budget on stylistic preferences unless they affect correctness or maintainability. Leave deep security audits to `/security-reviewer`, but flag obvious risks here.
+Lead with findings. Prioritize bugs, regressions, security risk, broken boundaries, and missing tests. Keep summary secondary.
 
-**Scope boundary:** this skill reviews **local changes** (working tree / branch diff) for **broad** quality. Use `/security-reviewer` for a dedicated OWASP-depth security-only pass, and `/review-pr` when the target is a **remote GitHub pull request** (fetched and commented on via the `gh` CLI).
+## Checklist
 
-## Native PHP Review Checklist
+- Controllers are thin and do not own Doctrine queries or business workflows.
+- Services own use cases, transaction boundaries, and side-effect orchestration.
+- Repositories own Doctrine query shape and persistence helpers.
+- Validation happens before service behavior uses external input.
+- Authorization happens server-side with Symfony Security conventions.
+- Public API responses have stable DTO/serializer contracts.
+- Doctrine writes are flushed/transactional at clear boundaries.
+- Database constraints enforce critical invariants.
+- Messenger handlers and event subscribers delegate to services.
+- Tests cover happy path and highest-risk failure path.
+- Migrations, workers, cache, and rollout impacts are documented.
+- Classes are cohesive, dependencies point inward, and interfaces represent real substitution/ownership boundaries rather than ceremony.
+- Implementations preserve contract behavior; broad interfaces, boolean mode flags, service locators, hidden write side effects, and array-shaped public contracts are challenged.
 
-### HTTP / CLI Boundary
+Compare relevant changes with [Symfony clean-code patterns](../../../examples/symfony-clean-code-patterns.md). Report observable risk, not stylistic preference, and do not require every illustrative layer for a simple cohesive feature.
 
-- Are entry points wrapped by the right middleware (auth, throttling, CSRF)?
-- Is input validated and normalized into typed DTOs/value objects before use?
-- Is authorization enforced server-side in an explicit access-control layer?
-- Are request inputs trusted only after validation?
-- Do handlers return correct status codes and stable response shapes?
+## Output
 
-### Persistence
+Use:
 
-- Are migrations (or reviewed SQL) reversible and safe for existing data?
-- Are indexes and constraints present for important invariants?
-- Are all queries parameterized with bound values (no string concatenation)?
-- Are transactions used for atomic multi-write workflows and rolled back on failure?
-- Are N+1 query patterns avoided (batch/join instead of per-row queries)?
+```text
+Findings
+- [severity] file:line - issue, impact, fix
 
-### Types And Structure
+Open Questions
+- ...
 
-- Is `declare(strict_types=1)` present and are types complete?
-- Do classes depend on interfaces at boundaries and receive collaborators via injection?
-- Is there hidden global state or `new` for collaborators that blocks testing?
-- Are exceptions typed and mapped to responses/exit codes at the edge?
-
-### Security
-
-- Any raw/concatenated SQL?
-- Any unescaped output in templates (XSS)?
-- Any missing authorization or CSRF check on state-changing actions?
-- Any secret in source, logs, exceptions, tests, or docs?
-- Any unsafe file upload, `unserialize`, `eval`, or dynamic include of untrusted input?
-- Any missing rate limit on sensitive endpoints?
-
-### Tests
-
-- Happy path covered?
-- Validation failure covered?
-- Authorization failure covered?
-- Important persistence side effects covered?
-- Queues/mail/external clients faked and asserted where applicable?
-
-### Operations
-
-- Cron/worker/queue, cache, and config impacts documented?
-- Long-running work moved out of the request cycle?
-- External API calls have timeout and error behavior?
-
-## Review Conduct Best Practices
-
-- **Severity-label every finding** (High/Medium/Low/Nit) so the author knows what blocks merge vs. what is optional.
-- **Be specific and actionable:** cite `file:line`, explain the risk, and suggest the fix. Avoid vague "this could be better".
-- **Separate must-fix from preference:** prefix optional style comments with "Nit:" and do not block on them.
-- **Explain the why:** tie feedback to a concrete failure mode, a principle in `.claude/GOLDEN-PRINCIPLES.md`, or a rule in `AGENTS.md`.
-- **Respect scope:** review the diff and what it touches; do not demand unrelated refactors (note them separately as follow-ups).
-- **Acknowledge good decisions**, and ask questions instead of asserting when intent is unclear.
-- **Right-size the review:** if the change is too large to review well, say so and suggest splitting.
-
-## Output Format
-
-Lead with findings ordered by severity:
-
-```markdown
-## Findings
-
-- **High:** `src/Http/Controller/...` allows unauthorized updates because ...
-- **Medium:** `migrations/...` adds a queried column without an index ...
-
-## Open Questions
-
-- [Only questions that affect correctness or rollout]
-
-## Summary
-
-[Brief summary after findings]
+Summary
+- ...
 ```
 
-If there are no findings, say so clearly and mention residual test or rollout risk.
-
-## Final Output
-
-Return findings, questions, short summary, Context Summary, and next step.
+If no issues are found, say that clearly and mention residual test or tooling gaps.

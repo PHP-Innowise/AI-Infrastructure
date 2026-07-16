@@ -1,10 +1,10 @@
 ---
 name: review-pr
-description: Review a GitHub pull request using gh CLI, analyze the diff for bugs, security issues, and code quality problems, then let the user choose next action - either run the systematic debugger to fix issues locally or post review comments directly to the PR on GitHub. Use this skill whenever the user wants to review a PR, check a pull request, audit PR changes, or analyze a GitHub PR. Triggers on "review PR", "check PR", "review pull request", "PR review", "look at this PR", "audit PR", gh pr references, or GitHub PR URLs.
+description: Review a GitHub pull request using gh CLI, analyze the diff for bugs, security issues, and code quality problems, then let the user choose next action - either run the systematic systematic-debugger to fix issues locally or post review comments directly to the PR on GitHub. Use this skill whenever the user wants to review a PR, check a pull request, audit PR changes, or analyze a GitHub PR. Triggers on "review PR", "check PR", "review pull request", "PR review", "look at this PR", "audit PR", gh pr references, or GitHub PR URLs.
 phase: execution
-flow-next: debugger
+flow-next: systematic-debugger
 flow-alternatives: [coder, code-reviewer, finishing-branch]
-related: [code-reviewer, debugger, coder]
+related: [code-reviewer, systematic-debugger, coder]
 ---
 
 # PR Reviewer
@@ -13,7 +13,7 @@ Review GitHub pull requests using the `gh` CLI, find issues, and take action -- 
 
 ## Scope Boundary
 
-This skill is for a **remote GitHub PR** (fetched via `gh`, comments posted back to GitHub). For **local** uncommitted or branch changes, use `/code-reviewer` (broad quality) or `/security-reviewer` (security-only). This skill reuses that review judgment but adds PR fetching and GitHub comment posting.
+This skill is for a **remote GitHub PR** (fetched via `gh`, comments posted back to GitHub). For **local** uncommitted or branch changes, use `code-reviewer` (broad quality) or `security-reviewer` (security-only). This skill reuses that review judgment but adds PR fetching and GitHub comment posting.
 
 ## Prerequisites
 
@@ -113,7 +113,7 @@ Present the review in this format:
 After presenting findings, STOP and ask the user what they want to do next:
 
 **Option A: Fix issues locally with the debugger**
-Use `/debugger` to investigate and fix the bugs found in the review. This is the right choice when the PR is yours or you're a collaborator who can push fixes.
+Use `systematic-debugger` to investigate and fix the bugs found in the review. This is the right choice when the PR is yours or you're a collaborator who can push fixes.
 
 **Option B: Post comments to the PR on GitHub**
 Submit the review findings as comments directly on the PR using `gh`. This is the right choice when you want the PR author to see your feedback on GitHub.
@@ -127,7 +127,7 @@ Just keep the review for reference without taking action.
    ```bash
    gh pr checkout <number>
    ```
-2. Hand off to [[/debugger]] with context about which issues to investigate and fix.
+2. Hand off to systematic-debugger with context about which issues to investigate and fix.
 
 ### Executing Option B: Post Comments to PR
 
@@ -188,9 +188,9 @@ Ask the user which event type to use. Default to `COMMENT` unless the user expli
 
 After PR review is complete, STOP and present these options:
 
-**Next by flow:** [[/debugger]] `[context]` - Fix bugs found in the review.
+**Next by flow:** systematic-debugger `[context]` - Fix bugs found in the review.
 
 **Alternatives:**
-- [[/coder]] `[context]` - Implement fixes for issues found.
-- [[/code-reviewer]] `[context]` - Do a deeper local code review.
-- [[/finishing-branch]] `[context]` - Complete branch if review passes.
+- coder `[context]` - Implement fixes for issues found.
+- code-reviewer `[context]` - Do a deeper local code review.
+- finishing-branch `[context]` - Complete branch if review passes.

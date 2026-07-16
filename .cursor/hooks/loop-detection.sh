@@ -45,10 +45,10 @@ echo "$COUNT" > "$TRACK_FILE"
 
 # Check thresholds
 if [ "$COUNT" -ge 10 ]; then
-  echo "🚫 BLOCKED: File '$FILE_PATH' edited $COUNT times this session."
-  echo "   This looks like a doom loop. Consider:"
-  echo "   - /debugger to investigate the root cause"
-  echo "   - Reassessing your approach"
+  echo "BLOCKED: File '$FILE_PATH' edited $COUNT times this session." >&2
+  echo "   This looks like a repeated-edit loop. Consider:" >&2
+  echo "   - /debugger to investigate the root cause" >&2
+  echo "   - Reassessing your approach" >&2
   exit 2
 elif [ "$COUNT" -ge 7 ]; then
   echo "⚠️  WARNING: File '$FILE_PATH' edited $COUNT times this session."

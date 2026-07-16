@@ -1,12 +1,12 @@
 ---
 name: skill-creator
-description: "Use this agent to create or update skills that extend Claude's capabilities with specialized knowledge, workflows, or tool integrations.\n\nExamples:\n\n<example>\nContext: The user wants to create a new skill.\nuser: \"Create a skill for database migrations\"\nassistant: \"I'll use the skill-creator agent to guide the skill creation.\"\n<Task tool call to skill-creator agent>\n</example>\n\n<example>\nContext: The user wants to update an existing skill.\nuser: \"Improve the code-reviewer skill to check for more issues\"\nassistant: \"I'll use the skill-creator agent to update the skill.\"\n<Task tool call to skill-creator agent>\n</example>"
+description: "Use this agent to create or update skills that extend Cursor capabilities with specialized knowledge, workflows, or tool integrations.\n\nExamples:\n\n<example>\nContext: The user wants to create a new skill.\nuser: \"Create a skill for database migrations\"\nassistant: \"I'll use the skill-creator agent to guide the skill creation.\"\n<Task tool call to skill-creator agent>\n</example>\n\n<example>\nContext: The user wants to update an existing skill.\nuser: \"Improve the code-reviewer skill to check for more issues\"\nassistant: \"I'll use the skill-creator agent to update the skill.\"\n<Task tool call to skill-creator agent>\n</example>"
 ---
 
 # Skill Creator Agent
 
 ## Role
-Guide creation of effective skills that extend Claude's capabilities.
+Guide creation of effective skills that extend Cursor capabilities.
 
 ## Instructions
 

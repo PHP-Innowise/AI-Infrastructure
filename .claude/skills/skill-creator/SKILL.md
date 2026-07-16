@@ -27,6 +27,17 @@ Your job when using this skill is to figure out where the user is in this proces
 
 On the other hand, maybe they already have a draft of the skill. In this case you can go straight to the eval/iterate part of the loop.
 
+### Improving An Existing Repository Skill
+
+Before rewriting, inventory the existing trigger contract, required inputs, workflow steps, resources, native metadata, outputs, safety rules, callers/wrappers, and positive/negative evaluations. Identify a concrete failure or quality gap and preserve behavior that already works.
+
+- Prefer the smallest coherent change that fixes the gap; do not replace a mature skill merely to impose a different writing style.
+- Keep tool-native frontmatter, invocation, paths, and handoffs intact when mirroring behavior across editions.
+- Remove stale resources only after proving no skill, wrapper, script, or documentation references them.
+- Put reusable detail in `references/` or a governed shared example instead of duplicating long guidance into every skill.
+- For Symfony implementation workflows, enforce `AGENTS.md` and consult [Symfony clean-code patterns](../../../examples/symfony-clean-code-patterns.md); do not force PHP examples into non-code workflows where they reduce clarity.
+- Re-run baseline positive, negative, and edge prompts after each revision and distinguish manual judgment from measured trigger evidence.
+
 Of course, you should always be flexible and if the user is like "I don't need to run a bunch of evaluations, just vibe with me", you can do that instead.
 
 Then after the skill is done (but again, the order is flexible), you can also run the skill description improver, which we have a whole separate script for, to optimize the triggering of the skill.
@@ -512,5 +523,5 @@ After skill creation/update is complete, this is a **standalone** workflow.
 
 **Suggested follow-ups:**
 - Test the new skill by using its command.
-- [[/reflect]] `[context]` - Capture learnings from the skill creation process.
-- [[/docs-generator]] `[context]` - Document the new skill if needed.
+- /reflect `[context]` - Capture learnings from the skill creation process.
+- /docs-generator `[context]` - Document the new skill if needed.
