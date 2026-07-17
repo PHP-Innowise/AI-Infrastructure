@@ -4,7 +4,7 @@ description: Make Laravel architecture decisions. Use when designing features, c
 phase: planning
 flow-next: api-designer
 flow-alternatives: [architecture-implementer, writing-plans, coder]
-related: [brainstorming, api-designer, architecture-implementer, coder]
+related: [brainstorming, api-designer, architecture-implementer, coder, eloquent, queues-jobs, events-notifications, auth-scaffolding, caching, file-storage]
 ---
 
 # Architect
@@ -76,9 +76,12 @@ New behavior
 | User-specific permissions | Policy method checked via `$this->authorize()` or `can:` middleware |
 | Complex role/permission matrix | `spatie/laravel-permission` roles/permissions instead of ad hoc Gate logic |
 | External API integration | Client behind an interface, bound in a Service Provider, built on `Http::` with timeout/retry |
-| Expensive side effect | Queued Job or queued Listener dispatched after the transaction commits |
+| Expensive side effect | Queued Job or queued Listener dispatched after the transaction commits (see `queues-jobs` skill) |
 | Public API response | API Resource / Resource Collection with a documented, stable JSON shape |
-| Async notification (email, DB, Slack) | Notification class (queued) rather than manual `Mail::` calls scattered around |
+| Async notification (email, DB, Slack) | Notification class (queued) rather than manual `Mail::` calls scattered around (see `events-notifications` skill) |
+| Model-layer behavior beyond basic CRUD | Polymorphic relations, custom casts, scopes, Observers — see `eloquent` skill |
+| Web/session login, registration, authorization | Starter kit (Breeze/Jetstream/Fortify) + Policies/Gates — see `auth-scaffolding` skill; use `api-designer` instead for token-based API auth |
+| User-uploaded or served files | `Storage` facade, disk config, signed URLs — see `file-storage` skill |
 | Admin screens | Filament (the default choice for most new admin panels; see `filament` skill), Nova, or hand-rolled Blade views if the project already standardizes on one |
 | Multi-tenant SaaS | Single-database tenancy (`tenant_id` column + global Eloquent scope) by default; multi-database tenancy (`stancl/tenancy`) only when isolation/compliance/scaling needs justify the added ops cost |
 | Live updates (chat, presence, dashboards, notifications) | `ShouldBroadcast` events + Laravel Echo over Laravel Reverb (first-party WebSocket server) by default; `wire:poll`/polling as a low-effort fallback for infrequent updates |
@@ -140,7 +143,7 @@ DB::transaction(function () use ($orderData): Order {
 - Are indexes needed for new query patterns (add via migration `$table->index()`/`unique()`)?
 - Could N+1 queries appear? Eager-load with `with()`/`load()`, or use `withCount()`/`loadCount()` for counts.
 - Should slow work be queued (`ShouldQueue` job/listener) instead of run inline?
-- Is cache invalidation clear (`Cache::` facade, tagged cache where the driver supports it)?
+- Is cache invalidation clear (`Cache::` facade, tagged cache where the driver supports it — see `caching` skill for stampede prevention and invalidation-on-write)?
 - Are external calls retried safely with timeouts (`Http::timeout()->retry()`)?
 - Does the design behave correctly under concurrent requests (see Concurrency below)?
 - Would Horizon (queue monitoring) or Telescope (debugging) help observe this in practice?

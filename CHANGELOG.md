@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.4.0 - 2026-07-17
+
+### Added
+
+- **8 new Laravel-specific skills** (+ matching command + agent each, across all three editions): the accelerator now covers the core Laravel building blocks that sat below `coder`'s general-purpose level in depth.
+  - **`eloquent`** - deep model-layer patterns once the schema exists: polymorphic relationships, modern `Attribute::make()` accessors/mutators, custom cast classes vs. backed-enum casts, local/global query scopes, model events/Observers, mass-assignment protection, advanced eager loading (`withCount()`/`withExists()`), and large-dataset iteration (`chunk()`/`cursor()`).
+  - **`queues-jobs`** - queued Job class anatomy, job middleware (`WithoutOverlapping`, `RateLimited`, `ThrottlesExceptions`), unique jobs (`ShouldBeUnique`), batching vs. chaining, failed-job handling/retries, and Horizon supervisor configuration.
+  - **`events-notifications`** - Events/Listeners, model Observers, and Notifications (mail/database/broadcast/Slack) with Mailables, for decoupled side effects and multi-channel user communication.
+  - **`auth-scaffolding`** - web/session auth starter kits (Breeze/Jetstream/Fortify), multi-guard configuration, and Policy/Gate authorization; explicitly scoped away from token-based API auth, which stays with `api-designer`.
+  - **`caching`** - `Cache::` facade patterns, stampede prevention, driver-specific tagging caveats, model-level caching, and invalidation-on-write correctness.
+  - **`console-scheduler`** - custom Artisan command signatures/output and task scheduling (overlap prevention, multi-server safety, failure handling).
+  - **`file-storage`** - the `Storage` facade/disk abstraction, secure upload validation, signed/temporary URLs, and streaming large files; hands the security audit pass to `security-reviewer` rather than duplicating it.
+  - **`package-developer`** - Composer package skeleton and auto-discovery, Service Provider structure, config/migration/view publishing, and Orchestra Testbench testing; flagged as rarely needed and distinct from `dependency-manager` (consuming vs. building a package).
+- **Wired all 8 new skills** into `SKILL FLOW.md` (main flow, shortcuts, and phase map), `README.md`'s Quick Start command table, and targeted cross-references in `architect`, `database-designer`, `api-designer`, `security-reviewer`, `dependency-manager`, `coder`, and `performance-optimization` so the existing skills point to the new, deeper ones instead of duplicating their content.
+
+### Fixed
+
+- **Corrected drift between editions** introduced by the 1.3.0 round: `code-reviewer`/`reflect`/`release`/`verify`'s edition-specific path substitutions were untouched (correct), but `SKILL FLOW.md` and the seven cross-referenced skills above had fallen out of sync between `.claude/`, `.cursor/`, and `.agents/skills/` - re-synced across all three.
+- **Fixed a self-referential path bug** in `.cursor/README.md`'s "Keeping the two copies in sync" section, which incorrectly described `.cursor/` as generated from itself instead of from `.claude/`.
+- **Bumped stale skill-count references** (31 -> 39) in `.cursor/README.md`, `.agents/README.md`, and `.codex/README.md`.
+
 ## 1.3.0 - 2026-07-10
 
 ### Added

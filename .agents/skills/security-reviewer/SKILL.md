@@ -4,7 +4,7 @@ description: Audit Laravel changes for security risk against the OWASP Top 10. U
 phase: execution
 flow-next: verify
 flow-alternatives: [coder, code-reviewer, debugger]
-related: [code-reviewer, coder, dependency-manager, architect]
+related: [code-reviewer, coder, dependency-manager, architect, file-storage, auth-scaffolding]
 ---
 
 # Security Reviewer
@@ -69,7 +69,7 @@ Identify the attack surface of the change: which inputs cross a trust boundary (
 
 ### A08 Software & Data Integrity Failures
 - No `unserialize()` of untrusted data (use JSON, or Laravel's queue/cache serialization which is not user-controlled)?
-- Uploaded files validated by type/size (`'file' => 'mimes:...|max:...'`) and stored via `Storage::disk(...)->store()` with a non-executable, ideally non-public disk, never trusted by extension alone?
+- Uploaded files validated by type/size (`'file' => 'mimes:...|max:...'`) and stored via `Storage::disk(...)->store()` with a non-executable, ideally non-public disk, never trusted by extension alone? (See the `file-storage` skill for implementing this correctly — MIME-sniffing, generated filenames, signed/temporary URLs.)
 - Mass assignment guarded: model `$fillable` allow-lists sensitive attributes (`is_admin`, `role`) out, or they're excluded from request `$validated` before `create()`/`update()`.
 
 ### A09 Logging & Monitoring Failures

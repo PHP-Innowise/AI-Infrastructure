@@ -17,7 +17,7 @@ Execute only the selected skill, then stop. Do not auto-chain. Always end with a
 
 ## Typical Flow
 
-`brainstorm` -> `requirements-analyst` -> `architect` -> `api-designer` -> `writing-plans` -> `architecture-implementer` -> `coder` / `coder-frontend` / `filament` -> `test-generator` -> `code-reviewer` / `security-reviewer` -> `verify` -> `finishing-branch` / `release`
+`brainstorm` -> `requirements-analyst` -> `architect` -> `api-designer` -> `writing-plans` -> `architecture-implementer` -> `coder` / `coder-frontend` / `filament` / `eloquent` / `queues-jobs` / `events-notifications` / `auth-scaffolding` / `caching` / `console-scheduler` / `file-storage` / `package-developer` -> `test-generator` -> `code-reviewer` / `security-reviewer` -> `verify` -> `finishing-branch` / `release`
 
 Support skills: `researcher`, `council`, `database-designer`, `dependency-manager`, `refactorer`, `performance-optimization`, `systematic-debugger`, `documentation-generator`, `review-pr`, `reflect`.
 

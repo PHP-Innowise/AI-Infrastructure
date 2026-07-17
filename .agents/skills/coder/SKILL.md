@@ -4,7 +4,7 @@ description: Implement Laravel backend features and bug fixes (behavior-changing
 phase: execution
 flow-next: code-reviewer
 flow-alternatives: [test-generator, verify]
-related: [architect, architecture-implementer, api-designer, test-generator]
+related: [architect, architecture-implementer, api-designer, test-generator, eloquent, queues-jobs, events-notifications, auth-scaffolding, caching, console-scheduler, file-storage]
 ---
 
 # Coder
@@ -22,6 +22,13 @@ This branch targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports L
 - **`/refactorer`** — pure behavior-preserving change (extract, dedupe, improve types, Laravel/PHP version upgrade) under a characterization test net. If observable behavior must stay identical, that is refactorer, not coder.
 - **`/architecture-implementer`** — lay down the structural skeleton (models, policies, Form Requests, Resources, Service Provider bindings) for an approved architecture before feature logic exists. If there is no structure yet from `/architect`, scaffold there first, then return here to fill in behavior.
 - **`/coder-frontend`** — server-rendered templates (Blade), HTML, CSS, and progressive-enhancement JS.
+- **`/eloquent`** — deep model-layer behavior beyond basic CRUD: polymorphic relationships, custom accessor/cast classes, query scopes, model events/Observers, mass-assignment protection, large-dataset iteration.
+- **`/queues-jobs`** — a queued Job needs job middleware, batching/chaining, uniqueness, or Horizon configuration beyond a simple `dispatch()`.
+- **`/events-notifications`** — new Events/Listeners/Observers or Notifications/Mailables across mail/database/broadcast/Slack channels.
+- **`/auth-scaffolding`** — web/session auth starter kits (Breeze/Jetstream/Fortify), multi-guard setup, or a Policy/Gate layer being introduced from scratch.
+- **`/caching`** — introducing or fixing an application-data caching layer (stampede prevention, tagging, invalidation-on-write).
+- **`/console-scheduler`** — a new Artisan console command or scheduled/recurring task.
+- **`/file-storage`** — a feature that stores, serves, or accepts user-uploaded files (disk config, secure uploads, signed URLs).
 
 ## Project Structure
 

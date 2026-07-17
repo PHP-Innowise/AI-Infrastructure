@@ -4,7 +4,7 @@ description: Manage Composer dependencies for Laravel projects: audit for vulner
 phase: execution
 flow-next: verify
 flow-alternatives: [security-reviewer, researcher, code-reviewer]
-related: [researcher, security-reviewer, verify]
+related: [researcher, security-reviewer, verify, package-developer]
 ---
 
 # Dependency Manager
@@ -67,6 +67,8 @@ Before adding a dependency (coordinate with `/researcher` for deeper comparisons
 - Reasonable transitive dependency footprint?
 - No open advisories (`composer audit` after install)?
 - Would a small amount of first-party code, or a feature Laravel already ships (queues, notifications, Sanctum), avoid a heavy dependency? Weigh it.
+
+This skill covers *consuming* Composer packages. If the actual deliverable is a new, standalone reusable package (not an application feature), use `package-developer` instead.
 
 ## Guardrails
 

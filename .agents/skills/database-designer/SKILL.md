@@ -4,7 +4,7 @@ description: Design relational schemas and Eloquent data-access patterns for Lar
 phase: planning
 flow-next: architecture-implementer
 flow-alternatives: [coder, writing-plans, api-designer]
-related: [architect, coder, performance-optimization]
+related: [architect, coder, performance-optimization, eloquent, queues-jobs]
 ---
 
 # Database Designer
@@ -66,6 +66,8 @@ return new class extends Migration
 - Avoid N+1: eager-load related rows with `with()`/`load()`, or use `withCount()` for aggregate counts instead of looping and querying per row.
 - Select only needed columns on hot/wide tables (`select([...])`); paginate large sets with `paginate()`/`simplePaginate()`, or `cursorPaginate()` for keyset-style pagination.
 
+This skill designs the schema and the basic access patterns it implies; for deeper model-layer behavior once the schema exists — polymorphic relationships, custom accessor/cast classes, query scopes, model events/Observers, and large-dataset iteration (`chunk()`/`cursor()`) — see the `eloquent` skill.
+
 ```php
 $invitations = Invitation::query()
     ->select(['id', 'email', 'role'])
@@ -90,7 +92,7 @@ Invitation::factory()
 ## Migration Safety
 
 - Every migration has a tested `down()` rollback.
-- Large tables: prefer additive changes; backfill in batches (e.g. a queued job or `chunkById()`); avoid long locks. Add a nullable column, backfill, then add the constraint in a follow-up migration.
+- Large tables: prefer additive changes; backfill in batches (e.g. a queued job — see `queues-jobs` skill — or `chunkById()`); avoid long locks. Add a nullable column, backfill, then add the constraint in a follow-up migration.
 - Never edit a released (already-deployed) migration; add a new one.
 - Keep migrations independent of application/Eloquent model code (avoid referencing `App\Models\*` inside migrations) so they replay cleanly even as models evolve.
 

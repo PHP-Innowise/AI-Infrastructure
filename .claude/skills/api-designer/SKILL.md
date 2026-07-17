@@ -4,7 +4,7 @@ description: Design Laravel REST APIs with routes/api.php routing, Form Request 
 phase: planning
 flow-next: frontend-design
 flow-alternatives: [writing-plans, architecture-implementer, coder]
-related: [architect, coder, documentation-generator]
+related: [architect, coder, documentation-generator, auth-scaffolding, eloquent]
 ---
 
 # API Designer
@@ -55,6 +55,8 @@ Pick the lightest option that satisfies the actual client requirements:
 | **Sanctum** (`laravel/sanctum`) | Default choice. First-party SPA/mobile clients you control; simple API token or cookie-session auth; per-token ability scoping (`createToken('name', ['orders:read'])`) and revocation. Lowest setup and operational cost. |
 | **Passport** (`laravel/passport`) | Only when you must support third-party OAuth2 clients: delegated authorization ("Login with [App]" for other apps), authorization-code/PKCE flows, or client-credentials machine-to-machine grants with real OAuth2 semantics. Heavier (OAuth2 server, token/refresh-token tables) than most projects need — don't reach for it just because it's "more standard". |
 | **Stateless JWT** (e.g. `tymon/jwt-auth`) | Only when the API must be fully stateless across services with no shared session/database access (e.g. verified independently by multiple microservices). Flag the operational cost up front: you take on manual token rotation, revocation/blocklisting, and refresh-token handling that Sanctum and Passport otherwise give you for free. |
+
+This table covers token-based API authentication only. For web/session login, registration, starter kits (Breeze/Jetstream/Fortify), or Policy/Gate authorization, use the `auth-scaffolding` skill instead.
 
 ## Request Contract
 

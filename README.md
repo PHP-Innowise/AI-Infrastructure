@@ -150,6 +150,14 @@ Use slash commands to move through the workflow:
 | `/coder` | Implement Laravel backend features |
 | `/coder-frontend` | Implement Blade/Livewire/Inertia frontend work |
 | `/filament` | Build Filament admin panels: Resources, Schemas, Tables, Relation Managers, Widgets |
+| `/eloquent` | Deep Eloquent model-layer patterns: polymorphic relations, casts, scopes, Observers |
+| `/queues-jobs` | Design and implement queued Jobs, job middleware, batching, chaining, Horizon |
+| `/events-notifications` | Implement Events, Listeners, Observers, Notifications, and Mailables |
+| `/auth-scaffolding` | Set up web/session auth starter kits, multi-guard config, Policy/Gate patterns |
+| `/caching` | Design and implement a caching strategy: stampede prevention, tagging, invalidation |
+| `/console-scheduler` | Build custom Artisan commands and schedule recurring tasks |
+| `/file-storage` | Implement file storage/uploads: disk config, secure uploads, signed URLs |
+| `/package-developer` | Build and maintain a reusable Composer/Laravel package |
 | `/refactorer` | Behavior-preserving refactors and Laravel version upgrades |
 | `/test-generator` | Add PHPUnit/Pest tests |
 | `/code-reviewer` | Review code for correctness, maintainability, and risk |

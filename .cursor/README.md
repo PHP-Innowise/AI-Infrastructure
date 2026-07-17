@@ -6,7 +6,7 @@ This directory is the **Cursor-native** copy of the accelerator that lives in `.
 
 | Path | Purpose |
 |---|---|
-| `.cursor/skills/<name>/SKILL.md` | Workflows the agent executes (31 skills). |
+| `.cursor/skills/<name>/SKILL.md` | Workflows the agent executes (39 skills). |
 | `.cursor/agents/*.md` | Subagents that run one skill in isolation. |
 | `.cursor/commands/*.md` | `/slash` entry points. Invoke as `/name`; context passes via `$ARGUMENTS`. |
 | `.cursor/rules/*.mdc` | Always-on policy + Laravel/PHP standards (native Cursor rules). |
@@ -24,10 +24,10 @@ Cursor can *also* read the `.cursor/` folder directly, but only if you enable th
 
 ## Keeping the two copies in sync
 
-`.cursor/` was generated from `.cursor/` with these transforms:
+`.cursor/` was generated from `.claude/` with these transforms:
 - Command frontmatter converted to Cursor's `name` / `description` schema.
 - Agent frontmatter reduced to Cursor-supported keys (dropped `model` / `invokes` / `phase`).
-- Internal `.cursor/` path references rewritten to `.cursor/`.
+- Internal `.claude/` path references rewritten to `.cursor/`.
 - Hooks translated to Cursor events: `SessionStart -> sessionStart`, `PreToolUse(Bash) -> beforeShellExecution`, `PreToolUse/PostToolUse(Write|Edit) -> afterFileEdit`. See `.cursor/hooks/README.md`.
 
 When you change one side, mirror the edit on the other (or regenerate `.cursor/` from `.cursor/`).

@@ -4,7 +4,7 @@ description: Diagnose and fix performance problems in Laravel applications with 
 phase: execution
 flow-next: verify
 flow-alternatives: [debugger, code-reviewer, test-generator]
-related: [systematic-debugger, code-reviewer, architect, database-designer]
+related: [systematic-debugger, code-reviewer, architect, database-designer, caching, queues-jobs]
 ---
 
 # Performance Optimization
@@ -73,6 +73,7 @@ Address the biggest levers first (usually in this order):
 - Cache hot, expensive, reusable results with `Cache::remember()`/`Cache::rememberForever()` against a shared driver (Redis/Memcached) in production.
 - Cache framework artifacts in production: `php artisan route:cache`, `php artisan view:cache`, `php artisan config:cache` (and `event:cache` if applicable). Remember to clear/re-cache on every deploy.
 - Make cache keys and invalidation explicit (tag-based invalidation with `Cache::tags()` where the driver supports it); a wrong cache is worse than none.
+- For the implementation itself — stampede prevention, driver-specific tagging support, model-level caching, and a correct invalidation-on-write path — use the `caching` skill rather than bolting on an ad hoc `Cache::remember()` call.
 
 ### Algorithms and memory
 - Replace O(n^2) scans over large Collections; index with `keyBy()`/maps instead of nested `->first()` lookups.
