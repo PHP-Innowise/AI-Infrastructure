@@ -46,6 +46,8 @@ Route::middleware(['auth:sanctum', 'throttle:60,1'])->group(function (): void {
 
 `Route::apiResource()` wires the conventional CRUD verbs automatically and supports route-model binding (`{invitation}` resolves to an `Invitation` model, 404ing if missing). Apply authentication (`auth:sanctum`), throttling (`throttle:`), and any custom middleware as route/group middleware rather than reimplementing them.
 
+For the one-off action endpoints above (`accept`, `cancel`, `publish`), a method on the resource controller is fine by default. Once one of those actions grows enough of its own validation/authorization/side-effect logic to feel crowded on the resource controller, extract it into a single-action invokable controller (`__invoke()`) instead, routed as `Route::post('invitations/{invitation}/accept', AcceptInvitationController::class)` — the same "one clear use case" reasoning `architect` applies when choosing between a Service and an Action.
+
 ## Authentication Strategy
 
 Pick the lightest option that satisfies the actual client requirements:
@@ -91,6 +93,17 @@ final class StoreInvitationRequest extends FormRequest
 }
 ```
 
+For a handful of fields, pass `$this->validated()` (or a typed method parameter) straight into the Action/Service — it stays clear enough on its own. Once a request has enough fields that an untyped array becomes hard to follow (and array-key typos become a real risk), add a `toDto()` method that maps `validated()` into a typed value object instead of pushing the raw array further down the call stack:
+
+```php
+public function toDto(): InvitationData
+{
+    return InvitationData::from($this->validated());
+}
+```
+
+`spatie/laravel-data` (see `dependency-manager`) is the common fit for the `InvitationData` object above. Per `architect`'s guidance, introduce this on the second concrete need (a genuinely large or reused payload), not as a default on every Form Request — most single-purpose requests are clearer left as a plain array.
+
 ## Response Contract
 
 Use an API Resource for stable public JSON instead of returning Eloquent models directly.
@@ -125,7 +138,23 @@ Use a Resource Collection (`InvitationCollection`, or `InvitationResource::colle
 
 ## Pagination And Filtering
 
-Laravel's built-in paginator already produces a consistent envelope; return it via a Resource Collection rather than hand-rolling one:
+Default to `cursorPaginate()` for list endpoints, not `paginate()`. Offset pagination (`paginate()`) looks harmless on a small local/seeded dataset, which is exactly why it is easy to default to by mistake — it degrades on large tables (`OFFSET` scans get slower the deeper you page) and can skip or duplicate rows when data shifts between requests. Treat that as a real correctness/scalability cost to weigh in, not just an option reserved for tables you already know are huge. Return it via a Resource Collection rather than hand-rolling the envelope:
+
+```php
+return InvitationResource::collection(
+    Invitation::query()->latest()->cursorPaginate($request->integer('per_page', 15))
+);
+```
+
+```json
+{
+  "data": [],
+  "links": { "first": null, "last": null, "prev": "...", "next": "..." },
+  "meta": { "path": "...", "per_page": 15, "next_cursor": "...", "prev_cursor": null }
+}
+```
+
+Reach for offset pagination (`paginate()`) instead only when there is a genuine, deliberate reason a cursor can't satisfy — a client-facing numbered pager ("page 3 of 10") or a required total row count:
 
 ```php
 return InvitationResource::collection(
@@ -190,17 +219,6 @@ Domain errors should map to a stable code via a custom exception handled in `boo
 
 - Honor `Accept`; default to `application/json`. Laravel's `Request::expectsJson()` and API-focused controllers already assume JSON — keep API routes under `routes/api.php` free of session/CSRF assumptions (they get the `api` middleware group, which is stateless by default).
 - Set `Content-Type` on responses explicitly when returning non-standard payloads; API Resources default to `application/json` with UTF-8.
-
-## Cursor vs Offset Pagination
-
-- Offset pagination (`paginate()`) is simple but degrades on large tables and can skip/duplicate rows when data shifts.
-- Prefer `cursorPaginate()` (Eloquent's built-in keyset pagination) for large or frequently changing collections; it returns an opaque `next_cursor`/`prev_cursor` instead of a page number, avoiding `OFFSET` scans.
-
-```php
-return InvitationResource::collection(
-    Invitation::query()->latest()->cursorPaginate($request->integer('per_page', 15))
-);
-```
 
 ## OpenAPI Guidance
 

@@ -4,7 +4,7 @@ description: Scaffold and wire an approved architecture into Laravel. Use to tur
 phase: execution
 flow-next: coder
 flow-alternatives: [test-generator, code-reviewer, verify]
-related: [architect, coder, api-designer, test-generator]
+related: [architect, coder, api-designer, test-generator, eloquent]
 ---
 
 # Architecture Implementer
@@ -76,6 +76,8 @@ final class Invoice extends Model
     }
 }
 ```
+
+This property-based `$fillable` is the correct default because it scaffolds cleanly on either Laravel version this accelerator supports (12 or 13) — do not add a native `array` type to it, since `Model::$fillable` is declared untyped in Eloquent's base class and PHP's invariant property-typing rules make a typed override in a subclass a fatal error. On a project confirmed to be on Laravel 13 (PHP 8.3+), the `#[Fillable(['customer_id', 'total_cents', 'status'])]` class attribute is a valid alternative that sidesteps this entirely (see `eloquent`'s Mass Assignment Protection section) — but only reach for it when the project has already standardized on attribute-based model configuration, not as a blanket rewrite of every scaffolded model.
 
 ```php
 <?php

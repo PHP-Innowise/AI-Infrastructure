@@ -11,7 +11,7 @@ related: [code-reviewer, test-generator]
 
 ## Overview
 
-Run `.claude/DOD.md` and produce a clear pass/fail report. Do not install missing tools. Report missing tooling as `N/A - tooling not configured`. Prefer the project's Composer/Artisan scripts when they exist. This branch targets Laravel; for framework-agnostic native PHP, use the `main` branch.
+Run `.claude/DOD.md` and produce a clear pass/fail report. Do not install missing tools. Report missing tooling as `N/A - tooling not configured`. Prefer the project's Composer/Artisan scripts when they exist.
 
 ## Step 1: Determine Tier
 

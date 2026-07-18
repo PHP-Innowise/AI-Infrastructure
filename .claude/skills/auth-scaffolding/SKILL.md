@@ -13,7 +13,7 @@ related: [api-designer, coder, architect]
 
 Set up or extend web/session-based authentication — starter-kit scaffolding, guard configuration, and the Policy/Gate authorization layer — for server-rendered Blade, Livewire, or Inertia applications.
 
-This branch targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (current LTS) and Laravel 13 (current release, shipped March 2026). For framework-agnostic native PHP, use the `main` branch instead.
+Targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (current LTS) and Laravel 13 (current release, shipped March 2026).
 
 ## Scope Boundary
 

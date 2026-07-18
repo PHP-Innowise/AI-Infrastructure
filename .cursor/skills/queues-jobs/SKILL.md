@@ -13,7 +13,7 @@ related: [architect, coder, performance-optimization]
 
 Design and implement asynchronous work as Laravel queued Jobs: job class anatomy, job middleware (overlap prevention, rate limiting, throttled retries), unique jobs, batching vs chaining, failed-job handling, and Horizon supervisor configuration for Redis-backed queues.
 
-This branch targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (current LTS) and Laravel 13 (current release). For framework-agnostic native PHP, use the `main` branch instead.
+Targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (current LTS) and Laravel 13 (current release).
 
 ## Scope Boundary
 

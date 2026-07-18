@@ -15,8 +15,6 @@ Prioritize defects, regressions, security issues, missing tests, and operational
 
 **Scope boundary:** this skill reviews **local changes** (working tree / branch diff) for **broad** quality. Use `/security-reviewer` for a dedicated OWASP-depth security-only pass, and `/review-pr` when the target is a **remote GitHub pull request** (fetched and commented on via the `gh` CLI).
 
-This branch targets Laravel; for framework-agnostic native PHP, use the `main` branch.
-
 ## Laravel Review Checklist
 
 ### HTTP Boundary

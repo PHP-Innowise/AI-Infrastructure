@@ -13,7 +13,7 @@ related: [performance-optimization, architect, coder]
 
 Implement an application-data caching layer correctly: pick the right `Cache::` facade pattern, protect hot keys from stampede under concurrent load, respect what the configured cache driver actually supports, and — the part most guides skip — make sure every cached value has a correct invalidation path. A cache that returns stale/wrong data is a correctness bug, not just a missed optimization.
 
-This branch targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (current LTS) and Laravel 13 (current release). For framework-agnostic native PHP, use the `main` branch instead.
+Targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (current LTS) and Laravel 13 (current release).
 
 ## Scope Boundary
 

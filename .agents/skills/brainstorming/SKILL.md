@@ -33,7 +33,7 @@ Any additional ad-hoc files (summaries, notes, explorations) MUST also follow th
 - Focus on understanding: purpose, constraints, success criteria
 
 **For new projects - gather tech stack info:**
-If this is a new project (no existing codebase), ask about tech stack. Keep it simple - these are small projects with straightforward architecture. This branch targets Laravel as the default backend framework unless the user says otherwise; for framework-agnostic native PHP, use the `main` branch instead.
+If this is a new project (no existing codebase), ask about tech stack. Keep it simple - these are small projects with straightforward architecture. This accelerator targets Laravel as the default backend framework unless the user says otherwise.
 
 | Question | Options | Default |
 |----------|---------|---------|

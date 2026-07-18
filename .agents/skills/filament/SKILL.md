@@ -13,7 +13,7 @@ related: [coder-frontend, coder, architecture-implementer, database-designer]
 
 Implement or extend a Filament admin panel: Resources (CRUD over an Eloquent model), Schemas (Forms/Infolists), Tables, Relation Managers, Actions, custom Pages, and Widgets. Filament is a server-driven UI framework built on Livewire, Alpine.js, and Tailwind - panels are defined almost entirely in PHP.
 
-This branch targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (current LTS) and Laravel 13 (current release). Filament v5 requires Livewire v4; Filament v4 requires Livewire v3 - the application code is otherwise identical between the two major versions, so check `composer.json` before assuming which one a project is on. For framework-agnostic native PHP, use the `main` branch instead.
+Targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (current LTS) and Laravel 13 (current release). Filament v5 requires Livewire v4; Filament v4 requires Livewire v3 - the application code is otherwise identical between the two major versions, so check `composer.json` before assuming which one a project is on.
 
 ## Scope Boundary
 

@@ -13,7 +13,7 @@ related: [coder, coder-frontend, security-reviewer]
 
 Implement file storage, uploads, and file serving using Laravel's `Storage` facade and Filesystem abstraction. Covers disk configuration, secure upload handling, private vs. public visibility, signed/temporary URLs, and streaming large files without exhausting memory.
 
-This branch targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (current LTS) and Laravel 13 (current release); both share the same Filesystem API described here. For framework-agnostic native PHP, use the `main` branch instead.
+Targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (current LTS) and Laravel 13 (current release); both share the same Filesystem API described here.
 
 ## Scope Boundary
 

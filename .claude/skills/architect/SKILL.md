@@ -13,7 +13,7 @@ related: [brainstorming, api-designer, architecture-implementer, coder, eloquent
 
 Design features using Laravel's own conventions with the simplest structure that stays testable and changeable. Add layers (Actions, Services, interfaces, events) only when they reduce real complexity — Laravel already gives you routing, validation, ORM, DI, and queues out of the box.
 
-This branch targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (current LTS) and Laravel 13 (current release). For framework-agnostic native PHP, use the `main` branch instead.
+Targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (current LTS) and Laravel 13 (current release).
 
 ## Core Rule
 
@@ -109,6 +109,18 @@ For chat, presence, live dashboards, or notifications pushed to the browser:
 
 Rule of thumb: start logic in the model; extract to an Action the moment it orchestrates multiple models, external calls, or a transaction; group Actions into a Service only once there are several that clearly share state or a collaborator.
 
+## Repositories
+
+Eloquent is already an Active Record implementation — the model *is* the persistence layer, not a plain domain object that needs a separate Repository in front of it. Default to calling Eloquent (query builder, scopes, relationships) directly from Actions/Services/model methods; a generic `InvitationRepository` that just wraps `Invitation::query()` with no other purpose adds an indirection layer without adding any real capability, since Eloquent's own scopes and query builder are already that seam.
+
+Reach for a Repository (a small interface plus an Eloquent-backed implementation, bound in a Service Provider like any other external-boundary interface) when there is a concrete reason, not "we might swap databases someday":
+
+- You have a specific, real plan to swap the persistence backend for part of the data (e.g. migrating a table to a different store, or backing one entity with an external API instead of a local table) and want call sites to depend on the interface, not on Eloquent directly.
+- A complex, reused query (heavy joins, cross-model aggregation) needs one named seam that several Actions call, and a repository method reads more clearly than duplicating the query builder chain at every call site.
+- Tests need to substitute a fake/in-memory implementation because exercising the real query is slow or touches an external system.
+
+Even then, keep it thin: one interface per aggregate, methods named after use cases (`findActiveForTenant()`, not a generic `findBy()`), Eloquent behind it — not a second ORM-like abstraction layer. For most Laravel CRUD and reporting, model scopes and eager loading already solve this without a repository; add one on the same YAGNI basis as any other layer (see "When NOT To Add A Layer" below).
+
 ## Transaction Boundaries
 
 Use `DB::transaction()` when multiple writes must succeed or fail together.
@@ -159,6 +171,7 @@ DB::transaction(function () use ($orderData): Order {
 Layers have a cost. Add one only when it earns its keep:
 
 - Do not add an interface/binding for an Eloquent model or a single first-party implementation with no second implementation or test-seam benefit.
+- Do not wrap a single Eloquent model in a generic Repository with no second-backend or test-seam reason — model scopes and the query builder are already the persistence seam.
 - Do not add an Action/Service class for a pure passthrough; let the controller call the model directly.
 - Do not introduce a DTO where the Form Request's `validated()` array or a typed parameter is clearer.
 - Do not dispatch an Event for one synchronous listener with no other subscriber — call the method directly.

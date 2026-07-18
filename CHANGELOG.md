@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.4.1 - 2026-07-18
+
+### Changed
+
+- **Added**:
+  - **`api-designer`:** noted single-action invokable controllers as the natural next step once an action endpoint (`accept`/`cancel`/`publish`) outgrows a method on the resource controller; added `toDto()`-on-a-typed-value-object guidance for Form Requests once a payload has enough fields that an untyped array gets hard to follow (cross-referenced to `architect`'s existing YAGNI stance on DTOs so it doesn't contradict "don't reach for `spatie/laravel-data` by default"); restructured the pagination section so `cursorPaginate()` is the explicit default and `paginate()` is presented as a deliberate exception (client-facing numbered pager or a required total count) rather than an easy-to-reach-for alternative for "large tables" — folding the previously separate "Cursor vs Offset Pagination" section into it so the guidance can't be skimmed past.
+  - **`architect`:** added a "Repositories" section clarifying that Eloquent is already the persistence layer (Active Record), so a Repository is not the default — and naming the concrete cases (a real backend-swap plan, a complex reused query, or a test seam) where one earns its keep, with a matching bullet in "When NOT To Add A Layer".
+  - **`architecture-implementer`:** the scaffolded model's `$fillable` example intentionally stays property-based rather than adding a native `array` type, because `Model::$fillable` is declared untyped in Eloquent's base class and PHP's invariant property-typing rules turn a typed override into a fatal error; added a note pointing to Laravel 13's optional `#[Fillable(...)]` attribute (PHP 8.3+, `eloquent` skill) as an alternative for projects that have already standardized on attribute-based model configuration, without rewriting the default example in a way that would break on Laravel 12.
+- **Removed a repeated "for framework-agnostic native PHP, use the `main` branch instead" sentence** duplicated across 17 skills (`architect`, `auth-scaffolding`, `brainstorming`, `caching`, `code-reviewer`, `coder`, `console-scheduler`, `dependency-manager`, `eloquent`, `events-notifications`, `filament`, `file-storage`, `performance-optimization`, `queues-jobs`, `refactorer`, `security-reviewer`, `test-generator`, `verify`) — the branch-strategy pointer is stated once, authoritatively, in `AGENTS.md`/`README.md`/`GOLDEN-PRINCIPLES.md`, so repeating it as boilerplate in every skill was noise flagged in review.
+- Re-synced all of the above across `.claude/`, `.cursor/`, and `.agents/`/`.codex/`.
+
 ## 1.4.0 - 2026-07-17
 
 ### Added

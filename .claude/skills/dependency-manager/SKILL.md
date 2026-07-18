@@ -13,7 +13,7 @@ related: [researcher, security-reviewer, verify, package-developer]
 
 Keep the dependency tree healthy, secure, and reproducible. Dependencies are attack surface and maintenance cost, so every addition and update is a deliberate decision.
 
-This branch targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (current LTS) and Laravel 13 (current release). For framework-agnostic native PHP, use the `main` branch instead.
+Targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (current LTS) and Laravel 13 (current release).
 
 ## Core Commands
 

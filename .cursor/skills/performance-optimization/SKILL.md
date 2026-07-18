@@ -11,7 +11,7 @@ related: [systematic-debugger, code-reviewer, architect, database-designer, cach
 
 ## Overview
 
-Make it measurably faster without guessing. The iron rule: measure, then change one thing, then measure again. Optimizing without a baseline wastes effort and risks regressions. This branch targets Laravel; for framework-agnostic native PHP, use the `main` branch.
+Make it measurably faster without guessing. The iron rule: measure, then change one thing, then measure again. Optimizing without a baseline wastes effort and risks regressions.
 
 **Core loop:** baseline -> profile -> fix top 1-3 hotspots -> re-measure -> lock in a budget.
 

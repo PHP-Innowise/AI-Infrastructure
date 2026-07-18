@@ -13,7 +13,7 @@ related: [architect, architecture-implementer, api-designer, test-generator, elo
 
 Implement backend work in Laravel using the framework's conventions. Read the relevant routes, controllers, models, migrations, policies, tests, and specs before editing.
 
-This branch targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (current LTS) and Laravel 13 (current release). For framework-agnostic native PHP, use the `main` branch instead.
+Targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (current LTS) and Laravel 13 (current release).
 
 ## Scope Boundary
 

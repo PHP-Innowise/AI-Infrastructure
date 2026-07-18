@@ -13,7 +13,7 @@ related: [architect, coder, queues-jobs]
 
 Implement decoupled side effects (Events + Listeners, model Observers) and user-facing communication (Notifications, Mailables) using Laravel's own building blocks. Read the relevant Actions/controllers, existing `app/Events`, `app/Listeners`, `app/Notifications`, and `app/Mail` directories, and the model(s) involved before adding new classes.
 
-This branch targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (current LTS) and Laravel 13 (current release). For framework-agnostic native PHP, use the `main` branch instead.
+Targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (current LTS) and Laravel 13 (current release).
 
 ## Scope Boundary
 

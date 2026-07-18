@@ -13,7 +13,7 @@ related: [database-designer, coder, performance-optimization]
 
 Implement or review model-layer behavior once the underlying schema exists: polymorphic relationships, modern accessors/mutators, custom casts, query scopes, model events/Observers, mass-assignment protection, and eager loading/iteration strategy for large datasets. This is the layer between "the table exists" and "the controller calls a clean model API."
 
-This branch targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (current LTS) and Laravel 13 (current release). For framework-agnostic native PHP, use the `main` branch instead.
+Targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (current LTS) and Laravel 13 (current release).
 
 ## Scope Boundary
 
@@ -200,6 +200,8 @@ final class User extends Model
 ```
 
 `Model::unguard()` or `protected $guarded = []` disables mass-assignment protection entirely — every column becomes writable from an array, including ones no Form Request validates. This is appropriate inside a factory/seeder (trusted, test-only data) but dangerous anywhere near request input: a single `User::create($request->all())` on an unguarded model is a direct privilege-escalation vector (an attacker adding `is_admin=1` to the payload). Never unguard a model that is ever hydrated from user-controlled data.
+
+On a project confirmed to be on Laravel 13 (PHP 8.3+), `#[Fillable(...)]`/`#[Guarded(...)]`/`#[Hidden(...)]` class attributes (`Illuminate\Database\Eloquent\Attributes\*`) are an optional, purely stylistic alternative to the `$fillable`/`$guarded`/`$hidden` properties shown above — same behavior, declared above the class instead of as a property. They are not a replacement (the property form keeps working, and is the only option on Laravel 12), so pick whichever the project already standardizes on rather than mixing both styles in the same codebase; do not introduce them into a project that must still run on Laravel 12.
 
 ## Advanced Eager Loading
 

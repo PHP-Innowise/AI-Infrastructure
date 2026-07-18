@@ -11,7 +11,7 @@ related: [coder, code-reviewer, verify]
 
 ## Overview
 
-Create focused tests that prove behavior. This branch targets Laravel; for framework-agnostic native PHP, use the `main` branch. Match the project's existing style: Pest functions for new test files (preferred), or PHPUnit classes if the project already standardizes on PHPUnit. Both ship with Laravel out of the box.
+Create focused tests that prove behavior. Match the project's existing style: Pest functions for new test files (preferred), or PHPUnit classes if the project already standardizes on PHPUnit. Both ship with Laravel out of the box.
 
 ## Test Selection
 

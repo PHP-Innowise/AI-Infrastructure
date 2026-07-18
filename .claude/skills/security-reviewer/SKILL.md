@@ -13,7 +13,7 @@ related: [code-reviewer, coder, dependency-manager, architect, file-storage, aut
 
 Find security defects before attackers do. Focus on exploitable risk in the change under review and the code paths it touches. Report findings by severity with a concrete fix, not vague warnings.
 
-This complements `/code-reviewer` (which flags obvious risks) with a dedicated, deeper pass. This branch targets Laravel; for framework-agnostic native PHP, use the `main` branch.
+This complements `/code-reviewer` (which flags obvious risks) with a dedicated, deeper pass.
 
 ## Generated File Naming Convention (MANDATORY)
 

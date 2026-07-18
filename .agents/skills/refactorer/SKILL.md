@@ -13,7 +13,7 @@ related: [coder, test-generator, code-reviewer, architect]
 
 Improve code structure without changing what it does. The safety contract of refactoring is: observable behavior stays identical, proven by tests before and after.
 
-This branch targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (current LTS) and Laravel 13 (current release). For framework-agnostic native PHP, use the `main` branch instead.
+Targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (current LTS) and Laravel 13 (current release).
 
 ## Scope Boundary
 
