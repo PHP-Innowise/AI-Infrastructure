@@ -8,7 +8,7 @@ A Symfony-first workflow accelerator for AI coding agents. It provides focused c
 Controller -> Service -> Repository
 ```
 
-This is the `feature/symfony-accelerator` branch. The framework-neutral PHP base lives on `main`; `feature/laravel-accelerator` is the equivalent Laravel specialization.
+This is the `Symfony/` folder of the `accelerator-php` monorepo. The framework-neutral PHP base lives in the sibling `PHP Core/` folder; `Laravel/` is the equivalent Laravel specialization — see the [repository root README](../README.md) for the full comparison and usage instructions.
 
 ## What This Is
 
@@ -273,4 +273,4 @@ Frontend work also runs configured template, JavaScript, CSS, test, and producti
 
 ## Symfony Adaptation Notes
 
-This branch specializes the universal PHP accelerator by replacing framework-neutral persistence, routing, security, async, frontend, debugging, and verification guidance with Symfony-native practices. The Laravel branch is used only as a reference for workflow maturity and documentation completeness; Laravel-specific concepts are not mechanically mapped into Symfony.
+This folder specializes the universal `PHP Core/` accelerator by replacing framework-neutral persistence, routing, security, async, frontend, debugging, and verification guidance with Symfony-native practices. The sibling `Laravel/` folder is used only as a reference for workflow maturity and documentation completeness; Laravel-specific concepts are not mechanically mapped into Symfony.

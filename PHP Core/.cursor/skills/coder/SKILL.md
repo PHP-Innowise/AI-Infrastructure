@@ -13,7 +13,7 @@ related: [architect, architecture-implementer, api-designer, test-generator]
 
 Implement backend work in plain, framework-agnostic PHP using the project's existing conventions. Read the relevant entry points, routing, handlers, services, data access, tests, and specs before editing.
 
-This skill targets native PHP (Composer + PSR). If the project is built on a framework, prefer the matching accelerator branch instead of hand-rolling framework features here.
+This skill targets native PHP (Composer + PSR). If the project is built on a framework, prefer the matching sibling accelerator folder (`Laravel/`, `Symfony/`) instead of hand-rolling framework features here.
 
 ## Scope Boundary
 

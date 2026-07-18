@@ -13,7 +13,7 @@ related: [brainstorming, api-designer, architecture-implementer, coder]
 
 Design features in plain PHP with the simplest structure that stays testable and changeable. Add layers only when they reduce real complexity.
 
-This is the native-PHP base. Do not assume a framework. If the project uses one, prefer the matching accelerator branch for framework-native placement.
+This is the native-PHP base. Do not assume a framework. If the project uses one, prefer the matching sibling accelerator folder (`Laravel/`, `Symfony/`) for framework-native placement.
 
 ## Core Rule
 

@@ -4,7 +4,7 @@
 
 A native-PHP accelerator framework for AI coding agents. It provides structured slash-command workflows, isolated agents, reusable skills, quality gates, and documentation conventions for PHP teams — usable from **Claude Code**, **Cursor**, and **OpenAI Codex** out of the same repository.
 
-`main` is the universal, framework-agnostic base (Composer + PSR). Framework-specific behavior (Laravel, Symfony, etc.) belongs on dedicated branches, not here.
+This is the `PHP Core/` folder of the `accelerator-php` monorepo: the universal, framework-agnostic base (Composer + PSR). Framework-specific behavior (Laravel, Symfony, etc.) belongs in the sibling `Laravel/` and `Symfony/` folders, not here — see the [repository root README](../README.md) for the full comparison and usage instructions.
 
 ## What This Is
 
@@ -15,6 +15,7 @@ Accelerator Core PHP is not a generated PHP application. It is a team workflow l
 - Skills define reliable workflows, examples, checklists, and output formats.
 - Hooks and policy files enforce naming, safety, and verification conventions.
 - `tasks/` stores temporary task documents; `specs/` stores living project specifications.
+- `memory-bank/` stores small indexed chunks of verified reusable context shared across AI tools.
 
 ## Multi-Tool Editions
 
@@ -50,6 +51,7 @@ AGENTS.md                # Shared, enforceable policy (all tools)
 Task/                    # Product/domain planning material and design references
 tasks/                   # Temporary task documentation
 specs/                   # Permanent living specifications
+memory-bank/             # Indexed durable cross-session project memory
 examples/                # Workflow output examples
 ```
 
@@ -122,6 +124,7 @@ Use slash commands (Claude Code / Cursor) to move through the workflow:
 | `/performance-optimization` | Diagnose and fix performance problems |
 | `/dependency-manager` | Audit and manage Composer dependencies |
 | `/systematic-debugger` (`/debugger`) | Find root cause before fixing bugs |
+| `/memory-bank` | Retrieve, capture, audit, supersede, or archive durable project memory |
 | `/verify` | Run the native PHP Definition of Done |
 | `/review-pr` | Review a GitHub pull request |
 | `/finishing-branch` | Prepare branch completion or PR |
@@ -168,6 +171,16 @@ Prefer explicit, minimal structure over framework imitation:
 - Business logic: use-case/service classes when handler code becomes unclear.
 - Async work: explicit workers/queues with typed payloads and retry behavior.
 - Integration boundaries: typed clients with timeouts, retries, and error mapping for external APIs.
+
+## Memory Bank
+
+The optional root `memory-bank/` is one canonical shared store for Claude Code, Cursor, and Codex. It contains small source-backed chunks for durable project constraints, conventions, decisions, domain knowledge, integrations, and operational lessons.
+
+Memory is deliberately below policy, specs, code, configuration, migrations, and tests in the authority hierarchy. Agents read `memory-bank/README.md` and `memory-bank/INDEX.md`, retrieve only relevant active chunks, and verify every material claim before relying on it. Stale chunks are updated, superseded, or archived instead of silently remaining active.
+
+Use the `memory-bank` skill directly in Codex or `/memory-bank` in Claude/Cursor to retrieve, capture, audit, supersede, archive, or initialize memory. Do not use it for transient plans, chat transcripts, generic PHP advice, command output, or information already owned by a living spec. Secrets, `.env` contents, personal data, production identifiers, raw logs, and customer payloads are prohibited. Non-sensitive personal notes belong in ignored `memory-bank/local/`.
+
+Each committed chunk uses `memory-bank/chunks/MEM-NNNN-short-slug.md`, is cataloged in `INDEX.md`, and cites its authoritative sources. The session-start hooks report counts only; they never inject chunk contents into logs or context automatically.
 
 ## Verification
 

@@ -39,8 +39,8 @@ command -v php > /dev/null 2>&1 && echo "PHP: $(php -r 'echo PHP_VERSION;' 2>/de
 [ -f "Makefile" ] && echo "Build system: Make"
 [ -f "Dockerfile" ] || [ -f "docker-compose.yml" ] || [ -f "compose.yaml" ] && echo "Containers: Docker present"
 
-# Framework detection: this base branch targets native PHP.
-# If a framework is present, prefer the matching accelerator branch.
+# Framework detection: this folder (PHP Core/) targets native PHP.
+# If a framework is present, prefer the matching sibling accelerator folder.
 FRAMEWORK=""
 [ -f "artisan" ] && FRAMEWORK="Laravel"
 [ -f "bin/console" ] && FRAMEWORK="Symfony"
@@ -48,14 +48,25 @@ if grep -qi "cakephp/cakephp" composer.json 2>/dev/null; then FRAMEWORK="CakePHP
 if grep -qi "yiisoft/yii2" composer.json 2>/dev/null; then FRAMEWORK="Yii"; fi
 if [ -n "$FRAMEWORK" ]; then
   echo ""
-  echo "NOTE: $FRAMEWORK detected. This is the native-PHP base branch."
-  echo "      For framework-specific conventions, switch to the matching accelerator branch."
+  echo "NOTE: $FRAMEWORK detected. This is the native-PHP base folder (PHP Core/)."
+  echo "      For framework-specific conventions, switch to the matching sibling folder (Laravel/, Symfony/)."
+fi
+
+# Report memory metadata only; never print chunk contents from a hook.
+if [ -f "memory-bank/README.md" ] && [ -f "memory-bank/INDEX.md" ]; then
+  ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+  if command -v python3 >/dev/null 2>&1 && [ -f "$ROOT_DIR/memory-bank/scripts/validate.py" ]; then
+    MEMORY_SUMMARY=$(python3 "$ROOT_DIR/memory-bank/scripts/validate.py" --summary "memory-bank" 2>/dev/null)
+    echo "$MEMORY_SUMMARY Read memory-bank/README.md and INDEX.md before relevant work."
+  else
+    echo "Memory bank: available (counts unavailable). Read memory-bank/README.md and INDEX.md before relevant work."
+  fi
 fi
 
 # Project structure
 echo ""
 echo "Structure:"
-for DIR in src app public config bin templates views tests specs tasks examples .claude; do
+for DIR in src app public config bin templates views tests specs tasks memory-bank examples .claude; do
   if [ -d "$DIR" ]; then
     COUNT=$(find "$DIR" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
     echo "  $DIR/ ($COUNT files)"

@@ -15,9 +15,9 @@ These three used to live on separate branches (`feature/laravel-accelerator`, `f
 
 | Folder | Framework | PHP baseline | Skills | Best for |
 | --- | --- | --- | --- | --- |
-| [`Laravel/`](./Laravel/README.md) | Laravel 12 / 13 | 8.2+ (8.3+ for Laravel 13) | 39 | Projects built on Laravel: Eloquent, Artisan, Sanctum, Filament, queues, and the wider Laravel package ecosystem. |
+| [`Laravel/`](./Laravel/README.md) | Laravel 12 / 13 | 8.2+ (8.3+ for Laravel 13) | 40 | Projects built on Laravel: Eloquent, Artisan, Sanctum, Filament, queues, and the wider Laravel package ecosystem. |
 | [`Symfony/`](./Symfony/README.md) | Symfony 7.4 LTS / 8.1 | 8.2+ (8.4+ for 8.1) | 43 | Projects built on Symfony: Controller -> Service -> Repository, Doctrine, Messenger, API Platform, Voters. |
-| [`PHP Core/`](./PHP%20Core/README.md) | None (framework-agnostic) | 8.2+ | 30 | Plain PSR-based PHP, a framework not covered here, or as the universal reference the other two specialize from. |
+| [`PHP Core/`](./PHP%20Core/README.md) | None (framework-agnostic) | 8.2+ | 31 | Plain PSR-based PHP, a framework not covered here, or as the universal reference the other two specialize from. |
 
 If your project already runs Laravel or Symfony, use that folder directly. Use `PHP Core/` for anything else — vanilla PHP, a microframework, or a framework this repo doesn't have a dedicated edition for yet.
 
@@ -68,8 +68,10 @@ Each folder's own `AGENTS.md` is the enforceable policy for that stack; its `REA
 ## What's Different Between Editions
 
 - **Laravel** adds Laravel-only skills with no Symfony/native-PHP equivalent: `filament`, `eloquent`, `queues-jobs`, `events-notifications`, `auth-scaffolding`, `caching`, `console-scheduler`, `file-storage`, `package-developer`.
-- **Symfony** adds Symfony-only skills: `api-platform-designer`, `doctrine-migration-designer`, `event-subscriber-designer`, `form-validator-designer`, `security-voter-designer`, `messenger-designer`, `console-command-coder`, `fixture-factory-generator`, `architecture-boundary-reviewer`, `repository-reviewer`, `container-reviewer`, `twig-ux-reviewer`. It's also the only edition with a `memory-bank/` — an indexed, cross-session, source-verified project-memory store shared by all three tools.
+- **Symfony** adds Symfony-only skills: `api-platform-designer`, `doctrine-migration-designer`, `event-subscriber-designer`, `form-validator-designer`, `security-voter-designer`, `messenger-designer`, `console-command-coder`, `fixture-factory-generator`, `architecture-boundary-reviewer`, `repository-reviewer`, `container-reviewer`, `twig-ux-reviewer`.
 - **PHP Core** is deliberately the smallest and most conservative: no framework assumed, so no ORM/router/DI-container skills — just the framework-agnostic essentials (architecture, API design, database design, coding, testing, review, security, performance, dependency management, debugging, release).
+
+All three editions ship the same `memory-bank/` — an indexed, cross-session, source-verified project-memory store shared by Claude Code, Cursor, and Codex within each folder. The memory categories and examples are adapted per stack (e.g. Symfony's Controller -> Service -> Repository/Messenger wording vs. Laravel's Controller -> Action/Service -> Eloquent model boundaries vs. PHP Core's generic entry-point/service/data-access-gateway boundaries), but the store format, validator, and lifecycle (`active` / `needs-review` / `superseded` / `archived`) are identical, so a chunk from one edition's `memory-bank/README.md` is a familiar read in any other.
 
 Each folder's `CHANGELOG.md` tracks its own version history independently — the three no longer need to be merged or kept in lockstep now that they aren't sharing a branch.
 

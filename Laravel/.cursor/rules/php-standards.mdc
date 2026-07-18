@@ -6,7 +6,7 @@ alwaysApply: false
 
 # Laravel Standards
 
-This branch targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (current LTS) and Laravel 13 (current release). For framework-agnostic native PHP, use the `main` branch instead.
+This is the `Laravel/` accelerator folder (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (current LTS) and Laravel 13 (current release). For framework-agnostic native PHP, use the sibling `PHP Core/` folder instead.
 
 - Follow PSR-12 / PER Coding Style, enforced via Pint; target the project's declared PHP and Laravel version.
 - Start new files with `declare(strict_types=1);` and use full type declarations (params, returns, properties).

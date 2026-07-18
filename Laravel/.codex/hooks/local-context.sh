@@ -32,8 +32,8 @@ if [ -f "artisan" ]; then
   echo "Laravel: ${LARAVEL_VERSION:-artisan present}"
 else
   echo ""
-  echo "NOTE: No artisan file found. This branch targets Laravel;"
-  echo "      for framework-agnostic native PHP, use the main branch."
+  echo "NOTE: No artisan file found. This is the Laravel accelerator folder;"
+  echo "      for framework-agnostic native PHP, use the sibling PHP Core/ folder."
 fi
 
 # Tooling markers
@@ -60,10 +60,21 @@ if [ -f "bin/console" ]; then
   echo "NOTE: Symfony console detected alongside Laravel. Verify project intent."
 fi
 
+# Report memory metadata only; never print chunk contents from a hook.
+if [ -f "memory-bank/README.md" ] && [ -f "memory-bank/INDEX.md" ]; then
+  ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+  if command -v python3 >/dev/null 2>&1 && [ -f "$ROOT_DIR/memory-bank/scripts/validate.py" ]; then
+    MEMORY_SUMMARY=$(python3 "$ROOT_DIR/memory-bank/scripts/validate.py" --summary "memory-bank" 2>/dev/null)
+    echo "$MEMORY_SUMMARY Read memory-bank/README.md and INDEX.md before relevant work."
+  else
+    echo "Memory bank: available (counts unavailable). Read memory-bank/README.md and INDEX.md before relevant work."
+  fi
+fi
+
 # Project structure
 echo ""
 echo "Structure:"
-for DIR in app bootstrap config database public resources routes storage tests specs tasks examples .claude; do
+for DIR in app bootstrap config database public resources routes storage tests specs tasks memory-bank examples .agents .codex; do
   if [ -d "$DIR" ]; then
     COUNT=$(find "$DIR" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
     echo "  $DIR/ ($COUNT files)"

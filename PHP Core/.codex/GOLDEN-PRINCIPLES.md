@@ -1,6 +1,6 @@
 # Golden Principles
 
-These principles guide implementation, review, and debugging in native PHP projects. They are framework-agnostic; framework-specific conventions belong in the matching accelerator branch.
+These principles guide implementation, review, and debugging in native PHP projects. They are framework-agnostic; framework-specific conventions belong in the matching sibling folder (`Laravel/`, `Symfony/`).
 
 ## 1. PSR And Explicit, Minimal Architecture First
 

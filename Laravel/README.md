@@ -4,7 +4,7 @@
 
 A Laravel-first accelerator framework for AI coding agents. It provides structured slash-command workflows, isolated agents, reusable skills, quality gates, and documentation conventions for PHP teams building Laravel applications — usable from **Claude Code**, **Cursor**, and **OpenAI Codex** out of the same repository.
 
-This is the `feature/laravel-accelerator` branch: it specializes the accelerator for Laravel. The framework-agnostic native-PHP base lives on `main`; other frameworks get their own dedicated branches.
+This is the `Laravel/` folder of the `accelerator-php` monorepo: it specializes the accelerator for Laravel. The framework-agnostic native-PHP base lives in the sibling `PHP Core/` folder; other frameworks (Symfony, etc.) get their own sibling folder — see the [repository root README](../README.md) for the full comparison and usage instructions.
 
 ## What This Is
 
@@ -15,6 +15,7 @@ Accelerator Core PHP is not a generated Laravel application. It is a team workfl
 - Skills define reliable workflows, examples, checklists, and output formats.
 - Hooks and policy files enforce naming, safety, and verification conventions.
 - `tasks/` stores temporary task documents; `specs/` stores living project specifications.
+- `memory-bank/` stores small indexed chunks of verified reusable context shared across AI tools.
 
 ## Multi-Tool Editions
 
@@ -50,6 +51,7 @@ AGENTS.md                # Shared, enforceable policy (all tools)
 Task/                    # Product/domain planning material and design references
 tasks/                   # Temporary task documentation
 specs/                   # Permanent living specifications
+memory-bank/             # Indexed durable cross-session project memory
 examples/                # Workflow output examples
 ```
 
@@ -165,6 +167,7 @@ Use slash commands to move through the workflow:
 | `/performance-optimization` | Diagnose and fix performance problems (N+1 queries, caching) |
 | `/dependency-manager` | Audit and manage Composer/Laravel packages |
 | `/debugger` | Find root cause before fixing bugs |
+| `/memory-bank` | Retrieve, capture, audit, supersede, or archive durable project memory |
 | `/verify` | Run the Laravel Definition of Done |
 | `/review-pr` | Review a GitHub pull request |
 | `/finishing-branch` | Prepare branch completion or PR |
@@ -214,6 +217,16 @@ Use Laravel conventions before inventing abstractions:
 
 Avoid copying patterns from other ecosystems unless they solve a clear Laravel problem.
 
+## Memory Bank
+
+The optional root `memory-bank/` is one canonical shared store for Claude Code, Cursor, and Codex. It contains small source-backed chunks for durable project constraints, conventions, decisions, domain knowledge, integrations, and operational lessons.
+
+Memory is deliberately below policy, specs, code, configuration, migrations, and tests in the authority hierarchy. Agents read `memory-bank/README.md` and `memory-bank/INDEX.md`, retrieve only relevant active chunks, and verify every material claim before relying on it. Stale chunks are updated, superseded, or archived instead of silently remaining active.
+
+Use the `memory-bank` skill directly in Codex or `/memory-bank` in Claude/Cursor to retrieve, capture, audit, supersede, archive, or initialize memory. Do not use it for transient plans, chat transcripts, generic Laravel advice, command output, or information already owned by a living spec. Secrets, `.env` contents, personal data, production identifiers, raw logs, and customer payloads are prohibited. Non-sensitive personal notes belong in ignored `memory-bank/local/`.
+
+Each committed chunk uses `memory-bank/chunks/MEM-NNNN-short-slug.md`, is cataloged in `INDEX.md`, and cites its authoritative sources. The session-start hooks report counts only; they never inject chunk contents into logs or context automatically.
+
 ## Verification
 
 Before claiming completion, agents must run applicable checks from the active edition's `DOD.md` (`.claude/DOD.md`, `.cursor/DOD.md`, or `.codex/DOD.md`). Missing tooling is reported as `N/A - tooling not configured`; it is not installed silently.
@@ -239,7 +252,7 @@ php artisan route:list
 
 ## Adaptation Notes
 
-This branch specializes the universal `main` base for Laravel:
+This folder specializes the universal `PHP Core/` base for Laravel:
 
 - Top-level onboarding and policy docs rewritten for Laravel accuracy.
 - Definition of Done, Golden Principles, and Stabilization examples rewritten around Laravel conventions (Form Requests, Policies, Eloquent, Artisan).

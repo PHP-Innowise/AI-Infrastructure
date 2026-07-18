@@ -4,7 +4,7 @@ The Codex edition of the accelerator, laid out the way OpenAI Codex actually dis
 
 | Piece | Location | Why |
 |---|---|---|
-| **Skills** (30 workflows) | `.agents/skills/<name>/SKILL.md` | Codex discovers repo skills from `.agents/skills`, not `.codex/`. |
+| **Skills** (31 workflows) | `.agents/skills/<name>/SKILL.md` | Codex discovers repo skills from `.agents/skills`, not `.codex/`. |
 | **Policy** | root `AGENTS.md` | Read natively by Codex (walked root -> cwd, concatenated). Shared with Claude/Cursor. |
 | **Config** | `.codex/config.toml` | Project-scoped model/approval/sandbox/MCP + enables hooks. Loads only when the project is trusted. |
 | **Hooks** | `.codex/hooks.json` + `.codex/hooks/*.sh` | Lifecycle hooks (same event schema as Claude Code). |
@@ -15,6 +15,8 @@ The Codex edition of the accelerator, laid out the way OpenAI Codex actually dis
 - **No command layer.** Codex **deprecated and removed custom prompts / slash commands** (v0.117+). Skills are the superset replacement, so the `.claude/commands` and `.cursor/commands` entry points are **not** mirrored - you invoke a skill by name and Codex can also trigger it implicitly.
 - **No subagents ported.** The `.claude/agents` wrappers just ran one skill; since Codex invokes skills directly, they add nothing here. (Codex does support subagents via `.agents/` + `agents.<name>.config_file` if you later want explicit delegation.)
 - **Skills live in `.agents/skills`**, deliberately, because that is the path Codex loads.
+
+Use the `memory-bank` skill to retrieve, capture, audit, supersede, archive, or initialize durable project memory in the shared root `memory-bank/`. Codex session hooks report bank counts only; the skill selectively loads relevant chunks and verifies them against current sources.
 
 ## Setup for a Codex user
 

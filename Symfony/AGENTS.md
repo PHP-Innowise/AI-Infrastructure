@@ -2,7 +2,7 @@
 
 These are enforceable rules for the Symfony accelerator. Wishes are ignored; constraints are enforced.
 
-This branch is dedicated to Symfony applications built with a pragmatic layered architecture:
+This is the `Symfony/` accelerator folder, dedicated to Symfony applications built with a pragmatic layered architecture:
 
 ```text
 Controller -> Service -> Repository

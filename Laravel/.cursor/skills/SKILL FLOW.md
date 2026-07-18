@@ -52,6 +52,7 @@ This flow keeps Laravel work structured while preserving user control. Agents su
 - Use `/dependency-manager` for Composer audits, updates, and vetting new packages.
 - Use `/debugger` when tests fail for unclear reasons or behavior is unexpected.
 - Use `/docs-generator` when setup, deployment, worker/cron, API, or architecture documentation changed.
+- Use `/memory-bank` only to retrieve, capture, audit, supersede, archive, or initialize durable source-backed project memory; keep transient progress in task context.
 
 ## Phase Map
 
@@ -62,7 +63,7 @@ This flow keeps Laravel work structured while preserving user control. Agents su
 | Implementation | `/git-worktrees`, `/architecture-implementer`, `/coder`, `/coder-frontend`, `/filament`, `/eloquent`, `/queues-jobs`, `/events-notifications`, `/auth-scaffolding`, `/caching`, `/console-scheduler`, `/file-storage`, `/package-developer`, `/refactorer` |
 | Quality | `/code-reviewer`, `/security-reviewer`, `/test-generator`, `/performance-optimization`, `/debugger`, `/verify` |
 | Finalization | `/docs-generator`, `/release`, `/finishing-branch` |
-| Utility | `/reflect`, `/skill-creator`, `/review-pr`, `/browser-verify`, `/dependency-manager` |
+| Utility | `/memory-bank`, `/reflect`, `/skill-creator`, `/review-pr`, `/browser-verify`, `/dependency-manager` |
 
 ## Context Handoff
 
@@ -73,3 +74,4 @@ Every skill should finish with:
 - Verification evidence or planned verification.
 - Risks and assumptions.
 - Recommended next command.
+- Memory chunk IDs used or changed, when applicable.

@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.4.3 - 2026-07-18
+
+### Fixed
+
+- **Stale branch-based wording left over from the pre-monorepo layout** - `AGENTS.md`, `README.md` (intro + Adaptation Notes), `.cursor/rules/accelerator-workflow.mdc`, `.cursor/rules/php-standards.mdc`, `GOLDEN-PRINCIPLES.md` (all three editions), `local-context.sh` (all three editions), and the `package-developer` skill (all three editions) still said things like "this branch targets Laravel" / "use the `main` branch" / "feature/laravel-accelerator branch", which stopped being accurate once the accelerators were merged into sibling `Laravel/` / `Symfony/` / `PHP Core/` folders in one repo. Reworded all of these to point at the sibling `PHP Core/` folder instead of a `main` branch, consistent with the root `README.md`. (Legitimate git-branch mentions, like `using-git-worktrees`'s "return work to the main branch" referring to the consuming project's own Git history, were left untouched.)
+
+## 1.4.2 - 2026-07-18
+
+### Added
+
+- **`memory-bank`** - ported the indexed, cross-session, source-verified project-memory system from the Symfony edition, adapted for Laravel conventions instead of copied verbatim:
+  - New root `memory-bank/` store: `README.md` (contract/lifecycle), `INDEX.md`, `.memory-counter`, `chunks/MEM-0001-cross-edition-sync.md` (seed chunk documenting the Claude/Cursor/Codex mirroring convention), `templates/chunk.md`, `scripts/validate.py` (dependency-free structural validator), and `tests/test_validate.py`.
+  - New `memory-bank` skill/command/agent across `.claude/`, `.cursor/`, and `.agents/skills` (Codex has no command/agent layer, per convention). The Laravel-specific memory categories replace Symfony's Controller -> Service -> Repository/Messenger wording with Controller -> Action/Service -> Eloquent model boundaries and queue-worker operational lessons.
+  - Wired into `AGENTS.md` (hierarchy of sources of truth, file naming, agent behavior, and a new "Memory Bank" policy section), `SKILL FLOW.md` (utility row + shortcut + Context Handoff line), `README.md` (What This Is, directory structure, Quick Start table, and a new "Memory Bank" section), `.cursor/rules/accelerator-workflow.mdc`, and each edition's `README.md` (skill count bumped to 40).
+  - `local-context.sh` (all three editions) now reports memory-bank chunk counts at session start via `scripts/validate.py --summary`, and lists `memory-bank/` in the project structure scan. Also corrected the Codex hook's structure-scan marker from a stray `.claude` to `.agents .codex`.
+  - `.gitignore` updated to ignore `memory-bank/local/`, `.idea/`, and Python tooling caches, matching the Symfony edition.
+- All 14 validator tests (including the cross-edition hook-integration test) pass against the new store.
+
 ## 1.4.1 - 2026-07-18
 
 ### Changed

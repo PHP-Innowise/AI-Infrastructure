@@ -33,7 +33,7 @@ Any additional ad-hoc files (summaries, notes, explorations) MUST also follow th
 - Focus on understanding: purpose, constraints, success criteria
 
 **For new projects - gather tech stack info:**
-If this is a new project (no existing codebase), ask about tech stack. Keep it simple - these are small projects with straightforward architecture. This base assumes native PHP; a specific framework belongs on the matching accelerator branch.
+If this is a new project (no existing codebase), ask about tech stack. Keep it simple - these are small projects with straightforward architecture. This base assumes native PHP; a specific framework belongs in the matching sibling accelerator folder (`Laravel/`, `Symfony/`).
 
 | Question | Options | Default |
 |----------|---------|---------|

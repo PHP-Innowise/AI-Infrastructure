@@ -1,6 +1,6 @@
 # Golden Principles
 
-These principles guide implementation, review, and debugging in Laravel projects. Framework-agnostic native-PHP conventions live on the `main` branch; this branch specializes them for Laravel.
+These principles guide implementation, review, and debugging in Laravel projects. Framework-agnostic native-PHP conventions live in the sibling `PHP Core/` folder; this `Laravel/` folder specializes them for Laravel.
 
 ## 1. Laravel Conventions First
 

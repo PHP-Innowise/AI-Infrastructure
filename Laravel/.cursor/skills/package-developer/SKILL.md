@@ -15,7 +15,7 @@ Build and maintain a reusable Composer package consumed by other Laravel applica
 
 **This skill is rarely needed.** Most work in this accelerator is an application feature living inside a single Laravel app — that is `coder`/`coder-frontend`/`architecture-implementer` territory, not this one. Reach for `package-developer` only when the actual deliverable is a standalone, versioned, Composer-installable package meant to be reused across multiple applications (an internal shared library, an open-source package, an extraction of duplicated logic into its own repo). If you're unsure which one applies: if the code will only ever live in `app/` of one project, this is the wrong skill.
 
-This branch targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (current LTS) and Laravel 13 (current release). Verified current versions (2026): `orchestra/testbench` v10.x pairs with Laravel 12, v11.x with Laravel 13; `spatie/laravel-package-tools` 1.93.x supports Laravel 10-13. Confirm the exact Testbench major against the package's target Laravel version before scaffolding tests, since Testbench majors track Laravel majors one-to-one.
+This is the `Laravel/` accelerator folder (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (current LTS) and Laravel 13 (current release). Verified current versions (2026): `orchestra/testbench` v10.x pairs with Laravel 12, v11.x with Laravel 13; `spatie/laravel-package-tools` 1.93.x supports Laravel 10-13. Confirm the exact Testbench major against the package's target Laravel version before scaffolding tests, since Testbench majors track Laravel majors one-to-one.
 
 ## Scope Boundary
 

@@ -5,7 +5,7 @@ alwaysApply: true
 
 # Native PHP Accelerator
 
-This project ships a skill-based workflow for native, framework-agnostic PHP (Composer + PSR). `main` is the universal base; framework specifics (Laravel, Symfony) live on dedicated branches.
+This is the `PHP Core/` accelerator folder, shipping a skill-based workflow for native, framework-agnostic PHP (Composer + PSR). It is the universal base; framework specifics (Laravel, Symfony) live in the sibling `Laravel/` and `Symfony/` folders.
 
 ## Command -> Agent -> Skill
 
@@ -19,8 +19,8 @@ Execute only the selected skill, then stop. Do not auto-chain. Always end with a
 
 `brainstorm` -> `requirements-analyst` -> `architect` -> `api-designer` -> `writing-plans` -> `architecture-implementer` -> `coder` / `coder-frontend` -> `test-generator` -> `code-reviewer` / `security-reviewer` -> `verify` -> `finishing-branch` / `release`
 
-Support skills: `researcher`, `council`, `database-designer`, `dependency-manager`, `refactorer`, `performance-optimization`, `systematic-debugger`, `documentation-generator`, `review-pr`, `reflect`.
+Support skills: `researcher`, `council`, `database-designer`, `dependency-manager`, `refactorer`, `performance-optimization`, `systematic-debugger`, `documentation-generator`, `review-pr`, `reflect`, `memory-bank`.
 
 ## Sources Of Truth
 
-Enforcement (`.cursor/hooks`) > Policy (`AGENTS.md`) > Architecture (`specs/`) > Skills (`.cursor/skills/`) > Examples > Docs. See `.cursor/DOD.md` and `.cursor/GOLDEN-PRINCIPLES.md`.
+Enforcement (`.cursor/hooks`) > Policy (`AGENTS.md`) > Architecture/runtime truth (`specs/`, code, config, migrations, tests) > Verified memory (`memory-bank/`) > Skills (`.cursor/skills/`) > Examples > Docs. See `.cursor/DOD.md` and `.cursor/GOLDEN-PRINCIPLES.md`.

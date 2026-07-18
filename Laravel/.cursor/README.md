@@ -6,7 +6,7 @@ This directory is the **Cursor-native** copy of the accelerator that lives in `.
 
 | Path | Purpose |
 |---|---|
-| `.cursor/skills/<name>/SKILL.md` | Workflows the agent executes (39 skills). |
+| `.cursor/skills/<name>/SKILL.md` | Workflows the agent executes (40 skills). |
 | `.cursor/agents/*.md` | Subagents that run one skill in isolation. |
 | `.cursor/commands/*.md` | `/slash` entry points. Invoke as `/name`; context passes via `$ARGUMENTS`. |
 | `.cursor/rules/*.mdc` | Always-on policy + Laravel/PHP standards (native Cursor rules). |
@@ -34,4 +34,6 @@ When you change one side, mirror the edit on the other (or regenerate `.cursor/`
 
 ## Usage
 
-Type `/` in Cursor chat to see the commands (e.g. `/coder`, `/architect`, `/security-reviewer`), or ask the agent to run a skill by name. Start big/ambiguous work with `/brainstorm` and follow the flow in `.cursor/rules/accelerator-workflow.mdc`.
+Type `/` in Cursor chat to see the commands (e.g. `/coder`, `/architect`, `/security-reviewer`, `/memory-bank`), or ask the agent to run a skill by name. Start big/ambiguous work with `/brainstorm` and follow the flow in `.cursor/rules/accelerator-workflow.mdc`.
+
+`/memory-bank` manages the canonical root `memory-bank/` shared by all editions. Keep Cursor's optional Claude-file loading disabled so the native command, agent, skill, and hooks are not duplicated.
