@@ -1,0 +1,6 @@
+.worktrees/
+.DS_Store
+.idea/
+__pycache__/
+*.py[cod]
+memory-bank/local/
