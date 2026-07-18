@@ -1,0 +1,25 @@
+---
+description: Infrastructure-Creator - safety boundaries and verification gates
+alwaysApply: true
+---
+
+# Safety and Verification
+
+## Hard Boundaries
+
+- Read-only on the target during `infra-scan`. Only `infra-generate` writes into the target, and only after the collision guard passes (explicit overwrite/merge/abort decision when the target already has an accelerator).
+- Never read, print, edit, or copy `.env` files, credentials, or anything under a `secrets/`-style path - in this folder or the target.
+- Never carry secrets or customer data into a finding, a generated file, or a seeded memory chunk.
+- Never force-push, hard-reset, `--no-verify`, or drop database tables/schemas in the target without explicit user consent.
+
+## Evidence Discipline
+
+- Every finding cites a real file in the target (path + line/excerpt where practical).
+- Mark confidence: `confirmed`, `inferred`, or `unknown`. Route genuinely ambiguous items to `clarifying-interview`; never present a guess as fact.
+- Distinguish `require` from `require-dev` and confirm runtime wiring before marking an integration `confirmed`.
+
+## Verification Gates
+
+- Re-validate the Project Profile against the target's current files before generating; flag any drift.
+- Generate only the selected AI-tool edition(s) - never more, never fewer.
+- `bootstrap-verifier` must pass before `infra-generate` reports success: valid frontmatter, resolving cross-references, hooks pass `bash -n` and are executable, the seeded memory bank passes `validate.py`, and no template placeholders remain.

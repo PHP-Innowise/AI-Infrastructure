@@ -4,10 +4,13 @@ A collection of framework-specific AI coding-agent accelerators for PHP teams. E
 
 ```
 accelerator-php/
-├── Laravel/     # Laravel-first accelerator
-├── Symfony/     # Symfony-first accelerator
-└── PHP Core/    # Framework-agnostic native PHP accelerator
+├── Laravel/                  # Laravel-first accelerator
+├── Symfony/                  # Symfony-first accelerator
+├── PHP Core/                 # Framework-agnostic native PHP accelerator
+└── Infrastructure-Creator/   # PHP accelerator GENERATOR (builds a bespoke accelerator for your own project)
 ```
+
+The first three are ready-to-use accelerators. `Infrastructure-Creator/` is a different kind of tool: it *generates* a custom accelerator for whatever specific PHP project you point it at (see [its section below](#infrastructure-creator-generate-an-accelerator-for-your-own-project)).
 
 These three used to live on separate branches (`feature/laravel-accelerator`, `feature/symfony-accelerator`, `main`). They are now grouped as sibling folders in one place so the whole department can browse, compare, and pick the right one without switching branches.
 
@@ -74,6 +77,17 @@ Each folder's own `AGENTS.md` is the enforceable policy for that stack; its `REA
 All three editions ship the same `memory-bank/` — an indexed, cross-session, source-verified project-memory store shared by Claude Code, Cursor, and Codex within each folder. The memory categories and examples are adapted per stack (e.g. Symfony's Controller -> Service -> Repository/Messenger wording vs. Laravel's Controller -> Action/Service -> Eloquent model boundaries vs. PHP Core's generic entry-point/service/data-access-gateway boundaries), but the store format, validator, and lifecycle (`active` / `needs-review` / `superseded` / `archived`) are identical, so a chunk from one edition's `memory-bank/README.md` is a familiar read in any other.
 
 Each folder's `CHANGELOG.md` tracks its own version history independently — the three no longer need to be merged or kept in lockstep now that they aren't sharing a branch.
+
+## Infrastructure-Creator: Generate An Accelerator For Your Own Project
+
+The three folders above are pre-built accelerators. [`Infrastructure-Creator/`](./Infrastructure-Creator/README.md) is a **generator**: instead of giving you a generic stack accelerator, it scans *your specific PHP project* - its real framework, dependencies, integrations, architecture, and CI/CD - and writes a bespoke accelerator (its own `AGENTS.md`, skills, agents, commands, hooks, and a seeded `memory-bank/`) directly into that project, for only the AI tool(s) your team uses.
+
+- Use it when your project has a specific layer the generic editions can't anticipate (a particular payment provider, queue, service topology, or internal conventions).
+- Two-phase, load-and-run workflow: `infra-scan <your-project>` produces a reviewable Project Profile; `infra-generate <your-project>` writes the accelerator (or `infra-build <your-project>` does both in one step).
+- It is 100% discovery-driven and fully independent - it does not template from `Laravel/`, `Symfony/`, or `PHP Core/`; every artifact is authored from evidence in your project.
+- Like the others, the generator itself ships for Claude Code, Cursor, and Codex, so you can run it from whichever tool you use. Keep it *outside* the project it generates for (its own workspace or a sibling folder).
+
+See [`Infrastructure-Creator/README.md`](./Infrastructure-Creator/README.md) for the full quick start.
 
 ## Contributing
 

@@ -1,0 +1,35 @@
+---
+description: Infrastructure-Creator - how commands, agents, and skills work together
+alwaysApply: true
+---
+
+# Infrastructure-Creator Workflow
+
+This is a PHP accelerator **generator**, not a ready-to-use accelerator. It scans a target PHP project by path, researches its real dependencies/integrations, asks the few questions evidence cannot answer, and generates a bespoke accelerator (`AGENTS.md`, skills, agents, commands, hooks, `memory-bank/`) directly into that target project's own root, for only the AI tool(s) the target team selects.
+
+## Command -> Agent -> Skill
+
+- **Commands** (`.cursor/commands/*.md`) are `/slash` entry points; the user-facing ones are `infra-scan`, `infra-generate`, and `infra-build`. Pass the target project path as `$ARGUMENTS`.
+- **Agents** (`.cursor/agents/*.md`) each run one skill in an isolated context, then stop - except `infra-scan`, `infra-generate`, and `infra-build`, the sanctioned orchestrators (see `AGENTS.md`'s Orchestration Exception).
+- **Skills** (`.cursor/skills/<name>/SKILL.md`) contain the actual workflow.
+
+Execute only the selected skill, then stop (unless it is one of the three orchestrators). Always end with a Context Summary and Next Steps.
+
+## Two-Phase Flow
+
+```text
+/infra-scan <target-path>
+  -> stack-scanner / architecture-scanner / integration-scanner /
+     infra-ops-scanner / security-compliance-scanner / conventions-scanner (parallel)
+  -> stack-researcher -> clarifying-interview -> profile-synthesizer
+
+  <-- HUMAN REVIEW CHECKPOINT: read tasks/TASK-{N}/infra-scan-project-profile.md -->
+
+/infra-generate <target-path>
+  -> policy-forge / skill-forge / hook-forge / memory-seed (parallel)
+  -> agent-forge -> command-forge -> skill-flow-composer -> bootstrap-verifier
+```
+
+## Workspace Boundary
+
+Infrastructure-Creator stays outside the project it scans/generates for, and every command requires an explicit target-path argument. Never point a command at this folder's own tree. Phase 1 is read-only on the target; Phase 2 is the only writer.

@@ -1,0 +1,28 @@
+---
+description: PHP target awareness the generator applies when scanning and generating
+alwaysApply: false
+---
+
+# PHP Standards Awareness
+
+Infrastructure-Creator targets PHP projects. When scanning a target and shaping generated skills, apply this baseline PHP knowledge (always subordinate to actual evidence in the target).
+
+## Detection Signals
+
+- **Project manifest:** `composer.json` (name, `require`, `require-dev`, `autoload` PSR-4 map, `scripts`), `composer.lock` (resolved versions).
+- **PHP version:** `require.php` constraint in `composer.json`; `platform.php` in config; `.php-version`.
+- **Framework entry points:** `artisan` + `bootstrap/app.php` (Laravel), `bin/console` + `config/bundles.php` (Symfony), `public/index.php` (most), framework packages under `require`.
+- **Testing:** `phpunit.xml`/`phpunit.xml.dist` (PHPUnit), `pest` in `require-dev` + `tests/Pest.php` (Pest).
+- **Static analysis:** `phpstan.neon`/`phpstan.neon.dist` (PHPStan/Larastan), `psalm.xml` (Psalm).
+- **Style/format:** `.php-cs-fixer.dist.php` (PHP-CS-Fixer), `pint.json` (Pint), `phpcs.xml`/`.phpcs.xml.dist` (PHP_CodeSniffer), `rector.php` (Rector).
+
+## Standards To Encode
+
+- PSR-4 autoloading and PSR-12 / framework-native code style (respect the target's configured tool, do not impose a different one).
+- Typed properties and return types where the detected PHP version supports them.
+- Dependency boundaries appropriate to the detected architecture (layered, modular, hexagonal).
+- Persistence, HTTP, queue, and testing conventions inferred from the detected framework and packages - never invented.
+
+## Non-PHP Neighbors
+
+Capture non-PHP components (JS/TS frontend, external services, managed queues) only as integration contracts. Do not generate deep skills for them.

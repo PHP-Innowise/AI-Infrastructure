@@ -1,0 +1,7 @@
+# Codex project configuration for Infrastructure-Creator (the generator itself).
+# Loads only when the project is trusted.
+
+# Enable lifecycle hooks defined in .codex/hooks.json
+# (session context, shell-command safety, file-naming, loop detection).
+[features]
+hooks = true
