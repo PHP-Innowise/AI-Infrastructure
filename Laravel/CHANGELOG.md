@@ -10,6 +10,7 @@
   - **`architecture-implementer`:** the scaffolded model's `$fillable` example intentionally stays property-based rather than adding a native `array` type, because `Model::$fillable` is declared untyped in Eloquent's base class and PHP's invariant property-typing rules turn a typed override into a fatal error; added a note pointing to Laravel 13's optional `#[Fillable(...)]` attribute (PHP 8.3+, `eloquent` skill) as an alternative for projects that have already standardized on attribute-based model configuration, without rewriting the default example in a way that would break on Laravel 12.
 - **Removed a repeated "for framework-agnostic native PHP, use the `main` branch instead" sentence** duplicated across 17 skills (`architect`, `auth-scaffolding`, `brainstorming`, `caching`, `code-reviewer`, `coder`, `console-scheduler`, `dependency-manager`, `eloquent`, `events-notifications`, `filament`, `file-storage`, `performance-optimization`, `queues-jobs`, `refactorer`, `security-reviewer`, `test-generator`, `verify`) — the branch-strategy pointer is stated once, authoritatively, in `AGENTS.md`/`README.md`/`GOLDEN-PRINCIPLES.md`, so repeating it as boilerplate in every skill was noise flagged in review.
 - Re-synced all of the above across `.claude/`, `.cursor/`, and `.agents/`/`.codex/`.
+- **Grouped into laravel folder**
 
 ## 1.4.0 - 2026-07-17
 
