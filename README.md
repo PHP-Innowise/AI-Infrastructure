@@ -87,7 +87,15 @@ The three folders above are pre-built accelerators. [`Infrastructure-Creator/`](
 - It is 100% discovery-driven and fully independent - it does not template from `Laravel/`, `Symfony/`, or `PHP Core/`; every artifact is authored from evidence in your project.
 - Like the others, the generator itself ships for Claude Code, Cursor, and Codex, so you can run it from whichever tool you use. Keep it *outside* the project it generates for (its own workspace or a sibling folder).
 
-See [`Infrastructure-Creator/README.md`](./Infrastructure-Creator/README.md) for the full quick start.
+### How To Use It
+
+1. **Setup (once):** keep `Infrastructure-Creator/` outside your real project (its own workspace or a sibling folder), and open it in your AI tool.
+2. **Scan:** `infra-scan ../your-php-app` - reads your `composer.json`, framework, integrations, and CI (read-only; writes nothing to your project). It asks the one required question: which AI tool(s) your team uses.
+3. **Review:** open `Infrastructure-Creator/tasks/TASK-{N}/infra-scan-project-profile.md` and correct anything wrong (usually nothing).
+4. **Generate:** `infra-generate ../your-php-app` - writes `AGENTS.md`, skills, agents, commands, hooks, and `memory-bank/` into your project, for only the tool(s) you selected. It asks before overwriting anything.
+5. **Shortcut:** trust the scan? `infra-build ../your-php-app` does both steps in one, pausing only on ambiguity or a collision.
+
+See [`Infrastructure-Creator/README.md`](./Infrastructure-Creator/README.md) for the full quick start and directory layout.
 
 ## Contributing
 
