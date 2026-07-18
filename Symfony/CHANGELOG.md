@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+
+## 1.3.1 - 2026-07-18
+
+- **Grouped into Symfony folder**
+
+
+## 1.3.0 - 2026-07-15
+
 ### Added
 
 - **Cross-platform memory bank workflow** with one canonical indexed chunk store, native Claude/Cursor command-agent adapters, a Codex-discovered skill, selective retrieval, source verification, lifecycle management, session metadata, privacy controls, deterministic validation, and DOD integration.
