@@ -1,0 +1,122 @@
+{
+  "env": {
+    "APP_ENV": "local",
+    "FORCE_COLOR": "1"
+  },
+  "permissions": {
+    "allow": [
+      "Read(**)",
+      "Edit(**)",
+      "Write(**)",
+      "Glob(**)",
+      "Grep(**)",
+      "Bash(php:*)",
+      "Bash(php artisan:*)",
+      "Bash(composer:*)",
+      "Bash(vendor/bin/phpunit:*)",
+      "Bash(vendor/bin/pest:*)",
+      "Bash(vendor/bin/pint:*)",
+      "Bash(vendor/bin/phpstan:*)",
+      "Bash(vendor/bin/psalm:*)",
+      "Bash(vendor/bin/rector:*)",
+      "Bash(vendor/bin/phpbench:*)",
+      "Bash(npm:*)",
+      "Bash(npx:*)",
+      "Bash(git:*)",
+      "Bash(gh:*)",
+      "Bash(ls:*)",
+      "Bash(mkdir:*)",
+      "Bash(cp:*)",
+      "Bash(mv:*)",
+      "Bash(echo:*)",
+      "Bash(make:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:api.github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:php.net)",
+      "WebFetch(domain:www.php.net)",
+      "WebFetch(domain:laravel.com)",
+      "WebFetch(domain:www.laravel.com)",
+      "WebFetch(domain:laravel-news.com)",
+      "WebFetch(domain:livewire.laravel.com)",
+      "WebFetch(domain:inertiajs.com)",
+      "WebFetch(domain:spatie.be)",
+      "WebFetch(domain:getcomposer.org)",
+      "WebFetch(domain:packagist.org)",
+      "WebFetch(domain:pestphp.com)",
+      "WebFetch(domain:phpunit.de)",
+      "WebFetch(domain:phpstan.org)",
+      "WebFetch(domain:psalm.dev)"
+    ],
+    "deny": [
+      "Read(.env)",
+      "Read(.env.*)",
+      "Edit(.env)",
+      "Edit(.env.*)",
+      "Write(.env)",
+      "Write(.env.*)",
+      "Read(./secrets/**)",
+      "Bash(rm -rf:*)",
+      "Bash(sudo:*)",
+      "Bash(chmod 777:*)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/local-context.sh",
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '$TOOL_INPUT' | .claude/hooks/file-naming-validator.sh",
+            "timeout": 5000
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '$TOOL_INPUT' | .claude/hooks/bash-validator.sh",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '$TOOL_INPUT' | .claude/hooks/loop-detection.sh",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "osascript -e 'display notification \"Claude needs your attention\" with title \"Claude Code\"' 2>/dev/null || notify-send 'Claude Code' 'Claude needs your attention' 2>/dev/null || echo 'Claude Code notification'",
+            "timeout": 5000
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,35 @@
+---
+description: Laravel code quality standards (PSR/Pint, boundaries, persistence)
+globs: **/*.php
+alwaysApply: false
+---
+
+# Laravel Standards
+
+This branch targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (current LTS) and Laravel 13 (current release). For framework-agnostic native PHP, use the `main` branch instead.
+
+- Follow PSR-12 / PER Coding Style, enforced via Pint; target the project's declared PHP and Laravel version.
+- Start new files with `declare(strict_types=1);` and use full type declarations (params, returns, properties).
+- Autoload via Composer PSR-4; never add manual `require` chains for application classes.
+- Validate external input via Form Requests (or explicit validators), not inline in controllers.
+- Authorize protected actions through Policies/Gates (`$this->authorize(...)`, `Gate::authorize(...)`), not by hiding UI.
+- Keep controllers thin; move multi-step business logic into Actions, Services, or the model layer.
+- Access the database through Eloquent or the query builder with bound parameters; never concatenate untrusted input into raw SQL.
+- Depend on abstractions (interfaces bound in a Service Provider) at integration boundaries rather than `new`-ing concrete external clients.
+- Manage schema changes through versioned Artisan migrations, never ad-hoc production edits.
+- Use Eloquent relationships and eager loading (`with()`/`load()`) to avoid N+1 queries.
+- Document a stable response contract via API Resources for public APIs.
+
+```php
+// GOOD: Form Request validation, Policy authorization, Eloquent persistence
+public function store(StoreUserRequest $request): JsonResponse
+{
+    $this->authorize('create', User::class);
+
+    $user = User::create($request->validated());
+
+    return UserResource::make($user)
+        ->response()
+        ->setStatusCode(201);
+}
+```
