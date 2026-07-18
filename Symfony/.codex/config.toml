@@ -1,0 +1,19 @@
+# Symfony Layered Architecture Accelerator - project-scoped Codex configuration.
+#
+# Codex loads this file only when you TRUST the project
+# (run `codex` in the repo and accept the trust prompt, or `/trust`).
+# User-level settings in ~/.codex/config.toml still apply and take lower
+# precedence than this file.
+
+# Enable lifecycle hooks defined in .codex/hooks.json.
+# Hooks provide session context, shell-command safety, file naming, and loop detection.
+[features]
+hooks = true
+
+# MCP servers used by the accelerator (none required today).
+# Add servers here when a workflow needs external systems, e.g.:
+#
+# [mcp_servers.github]
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-github"]
+# enabled = true

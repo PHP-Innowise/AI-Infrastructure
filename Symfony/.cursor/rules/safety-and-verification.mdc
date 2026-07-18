@@ -1,0 +1,35 @@
+---
+description: Mandatory safety, security, and verification rules for all work
+alwaysApply: true
+---
+
+# Safety, Security & Verification
+
+## Security
+- Never read, print, edit, or commit `.env` files or secrets.
+- Use Doctrine parameters; never concatenate untrusted input into DQL or SQL.
+- Preserve Twig auto-escaping; use CSRF protection for state-changing web forms.
+- Validate uploads by MIME/content, size, storage name/location, visibility, and authorization.
+- Constrain user-influenced HttpClient destinations to prevent SSRF.
+- Protect Serializer/API Platform write and read fields from privilege or sensitive-data exposure.
+- Use typed, trusted Messenger payloads and avoid unsafe deserialization.
+- Avoid `eval`, unsafe `unserialize`, and dynamic includes of untrusted paths.
+- Do not introduce OWASP Top 10 vulnerabilities.
+- Never store secrets, personal data, raw customer data, production identifiers, or unredacted logs in `memory-bank/`.
+
+## Git Safety
+- Never skip hooks with `--no-verify`.
+- Never force-push, hard-reset, or drop database tables without explicit user consent.
+- Never overwrite unrelated user changes.
+
+## Verification (Definition of Done)
+- Run applicable checks from `.cursor/DOD.md` before claiming completion.
+- Run tests, formatting/lint, and static analysis when the tooling exists.
+- Never claim completion with failing tests, static analysis, container, route, schema, or known entry-point checks.
+- Report unavailable tooling as `N/A - tooling not configured`; do not install tooling without user approval.
+- Include verification evidence in the final Context Summary for implementation work.
+
+## File Naming
+- Prefix generated task/spec markdown with the skill name: `{skill-name}-{purpose}.md`.
+- Use zero-padded task directories (`TASK-001/`); place temporary task docs in `tasks/TASK-{N}/` and living specs in `specs/`.
+- Name committed memory chunks `memory-bank/chunks/MEM-0001-short-slug.md`; update the memory index and counter in the same change.

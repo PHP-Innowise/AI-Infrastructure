@@ -1,0 +1,22 @@
+---
+description: Symfony layered architecture code quality standards
+globs: "**/*.php"
+alwaysApply: false
+---
+
+# Symfony Standards
+
+- Follow the project's declared PHP/Symfony versions and configured coding standard.
+- Baseline Symfony 7.4 LTS on PHP 8.2+ and Symfony 8.1 on PHP 8.4+; never use APIs newer than the consuming project.
+- Start new files with `declare(strict_types=1);` when project convention allows it.
+- Keep controllers thin: map input, authorize, call one service, return a response.
+- Validate and normalize external input with Symfony Forms, Validator, request DTOs, or explicit validation.
+- Authorize protected actions with voters, controller attributes, `access_control`, firewall rules, scoped providers/repositories, or route constraints.
+- Put business workflows and transaction boundaries in services.
+- Put Doctrine QueryBuilder/DQL/SQL in repositories or dedicated query services, not controllers.
+- Use Doctrine migrations for schema changes.
+- Enforce important invariants with database constraints, locks, or idempotency keys when concurrency matters.
+- Use response DTOs/serializers/normalizers/API Platform contracts for public APIs.
+- Throw typed exceptions from services; map them to HTTP errors at the edge.
+- Keep responsibilities cohesive and dependencies pointing inward; introduce narrow interfaces only at real substitution, infrastructure, or package boundaries.
+- Use `examples/symfony-clean-code-patterns.md` for maintained good/bad examples instead of duplicating snippets in rules.

@@ -1,0 +1,121 @@
+{
+  "env": {
+    "FORCE_COLOR": "1"
+  },
+  "permissions": {
+    "allow": [
+      "Read(**)",
+      "Edit(**)",
+      "Write(**)",
+      "Glob(**)",
+      "Grep(**)",
+      "Bash(php:*)",
+      "Bash(composer:*)",
+      "Bash(vendor/bin/phpunit:*)",
+      "Bash(vendor/bin/pest:*)",
+      "Bash(vendor/bin/php-cs-fixer:*)",
+      "Bash(vendor/bin/phpcs:*)",
+      "Bash(vendor/bin/phpcbf:*)",
+      "Bash(vendor/bin/phpstan:*)",
+      "Bash(vendor/bin/psalm:*)",
+      "Bash(vendor/bin/rector:*)",
+      "Bash(vendor/bin/phpbench:*)",
+      "Bash(git:*)",
+      "Bash(gh:*)",
+      "Bash(ls:*)",
+      "Bash(mkdir:*)",
+      "Bash(cp:*)",
+      "Bash(mv:*)",
+      "Bash(echo:*)",
+      "Bash(make:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:api.github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:php.net)",
+      "WebFetch(domain:www.php.net)",
+      "WebFetch(domain:php-fig.org)",
+      "WebFetch(domain:www.php-fig.org)",
+      "WebFetch(domain:getcomposer.org)",
+      "WebFetch(domain:packagist.org)",
+      "WebFetch(domain:symfony.com)",
+      "WebFetch(domain:doctrine-project.org)",
+      "WebFetch(domain:www.doctrine-project.org)",
+      "WebFetch(domain:api-platform.com)",
+      "WebFetch(domain:symfonycasts.com)",
+      "WebFetch(domain:pestphp.com)",
+      "WebFetch(domain:phpunit.de)",
+      "WebFetch(domain:phpstan.org)",
+      "WebFetch(domain:psalm.dev)"
+    ],
+    "deny": [
+      "Read(.env)",
+      "Read(.env.*)",
+      "Edit(.env)",
+      "Edit(.env.*)",
+      "Write(.env)",
+      "Write(.env.*)",
+      "Read(./secrets/**)",
+      "Bash(rm -rf:*)",
+      "Bash(sudo:*)",
+      "Bash(chmod 777:*)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/local-context.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/file-naming-validator.sh",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/bash-validator.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/loop-detection.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "osascript -e 'display notification \"Claude needs your attention\" with title \"Claude Code\"' 2>/dev/null || notify-send 'Claude Code' 'Claude needs your attention' 2>/dev/null || echo 'Claude Code notification'",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
