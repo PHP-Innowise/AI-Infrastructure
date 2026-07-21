@@ -53,7 +53,20 @@ Infrastructure-Creator only generates PHP accelerators directly - but it does no
 - **Recognized:** it offers to build `stack-adapter` - a brand-new, fully independent sibling generator, `Infrastructure-Creator-[Stack]/`, next to this folder. That sibling shares this generator's architecture (21 skills, three editions, same policy shape) but every stack-specific artifact is freshly researched and authored for the detected stack - zero PHP content, zero dependency on this folder. Confirm once, and it builds the whole thing; open the new folder as its own workspace and run `infra-scan` there against your original target.
 - **Not recognized at all:** it reports the target out of scope, same as before.
 
-Already know your target isn't PHP and want the sibling generator directly, without going through `infra-scan` first? Run `infra-adapt ../my-flutter-app`.
+### Quick Guide: Building A Sibling Generator
+
+Your project isn't PHP (Flutter, Node.js, Python, Go, or similar) but you still want the same kind of bespoke, discovery-driven accelerator? Here's the whole path, start to finish:
+
+1. **Point at your project, same as always.** From this folder, in your AI tool: `infra-scan ../my-flutter-app`.
+2. **Let it detect the stack.** No `composer.json`/`*.php` found, so it checks for a recognizable manifest (`pubspec.yaml`, `package.json`, `go.mod`, etc.) instead of just giving up.
+3. **Confirm the offer.** It asks once: *"This uses Flutter/Dart, not PHP - want me to build `Infrastructure-Creator-Flutter`, an independent sibling generator for it?"* Say yes.
+   - Already certain you need this and don't want to go through `infra-scan` first? Skip straight to it: `infra-adapt ../my-flutter-app`.
+4. **Wait for it to build.** `stack-adapter` takes it from here, unattended: it researches the real Flutter/Dart ecosystem (framework, tooling, common integrations, architecture patterns), builds the new folder next to this one, re-authors all 21 skills for that stack, mirrors all three AI-tool editions, and self-verifies the result. You don't need to do anything during this step.
+5. **Check the report.** It tells you the new generator's path (e.g. `../Infrastructure-Creator-Flutter/`) and whether self-verification passed. If it flags a problem, don't proceed until that's resolved.
+6. **Switch workspaces.** Open `Infrastructure-Creator-Flutter/` (the new folder) as its own workspace - separate from both this generator and your target project.
+7. **Use it exactly like this one.** From inside the new folder: `infra-scan ../my-flutter-app`, review the profile, then `infra-generate ../my-flutter-app` (or `infra-build` for the one-shot). From this point on, everything works the same as the PHP flow above - just for Flutter.
+
+One confirmation, one wait, then a brand-new generator ready to use for that stack.
 
 ## What Gets Generated
 
