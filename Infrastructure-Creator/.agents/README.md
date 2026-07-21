@@ -2,7 +2,7 @@
 
 This directory exists because Codex loads repository skills from `.agents/skills/`, deliberately outside `.codex/`.
 
-- `.agents/skills/<name>/SKILL.md` - the 20 generator skills, byte-identical to the Claude edition's `.claude/skills`.
+- `.agents/skills/<name>/SKILL.md` - the 21 generator skills, byte-identical to the Claude edition's `.claude/skills`.
 - Codex configuration, hooks, and this edition's policy docs live in `.codex/`; the shared policy is the root `AGENTS.md`.
 - There are no agents or commands here - Codex invokes skills directly by name.
 

@@ -1,6 +1,6 @@
 # Infrastructure-Creator - Cursor Edition
 
-This is the Cursor edition of the generator. It mirrors the Claude edition's 20 skills exactly and adds Cursor-native wiring.
+This is the Cursor edition of the generator. It mirrors the Claude edition's 21 skills exactly and adds Cursor-native wiring.
 
 - **Skills:** `.cursor/skills/<name>/SKILL.md` (byte-identical to the Claude edition).
 - **Agents:** `.cursor/agents/<name>-agent.md` - reduced frontmatter (`name` + `description` only).

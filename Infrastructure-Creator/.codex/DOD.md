@@ -14,7 +14,7 @@ Pick the tier that matches the work performed. Higher tiers include all lower-ti
 
 - [ ] Every finding cites concrete evidence: a real file path (with line numbers or an excerpt where practical) inside the target.
 - [ ] Confidence is marked per finding: `confirmed`, `inferred`, or `unknown`. No guess is presented as fact.
-- [ ] The target was confirmed to be a PHP project (`composer.json` and/or `*.php` present); a non-PHP target was reported out of scope instead of scanned.
+- [ ] The target was confirmed to be a PHP project (`composer.json` and/or `*.php` present) before running the six scanners; a non-PHP target was either offered `stack-adapter` (if a recognizable stack was found) or reported out of scope (if nothing recognizable was found) instead of being scanned.
 - [ ] Any failed/skipped scanner is reported as a gap in the confidence summary, not silently dropped.
 - [ ] The clarifying interview asked the mandatory AI-tool-selection question and recorded the answer.
 - [ ] The Project Profile validates against `profile-synthesizer/references/project-profile-schema.md`.
@@ -33,9 +33,19 @@ Pick the tier that matches the work performed. Higher tiers include all lower-ti
 
 ## Tier 3 - Release of this generator itself
 
-- [ ] All 19 skills exist in `.claude/skills`, `.cursor/skills`, and `.agents/skills`, byte-identical where required.
+- [ ] All 21 skills exist in `.claude/skills`, `.cursor/skills`, and `.agents/skills`, byte-identical where required.
 - [ ] Agents/commands exist for the editions that carry them; Cursor frontmatter is the reduced form.
 - [ ] Hooks are present and wired in all three editions (`settings.json`, `.cursor/hooks.json`, `.codex/hooks.json` + `config.toml`).
 - [ ] `CHANGELOG.md` records the change.
+
+## Tier 4 - Stack Adaptation (`stack-adapter`)
+
+- [ ] The user gave explicit confirmation before the sibling generator was built - detection alone was never treated as consent.
+- [ ] The collision guard passed on the sibling folder path (overwrite/merge/abort decided explicitly, not assumed).
+- [ ] Every stack-specific claim (framework, tooling, integration categories, architecture patterns) is grounded in this run's own research, cited to an authoritative source - never carried over from PHP knowledge.
+- [ ] The sibling generator contains zero mentions of PHP, Laravel, Symfony, PHP Core, or "Infrastructure-Creator" anywhere in its own content.
+- [ ] All 21 skills were re-authored (not left as PHP copies), including `stack-adapter`'s own identity-swapped copy, and mirrored byte-identically across its three editions.
+- [ ] The copied stack-agnostic assets (`memory-seed` validator/template, `bootstrap-verifier`'s `validate_generated.py`) were copied verbatim, unmodified.
+- [ ] The sibling generator's own self-verification (its copy of `bootstrap-verifier`'s script, plus `bash -n`/executable-bit checks on its hooks) passed before reporting done.
 
 Report unavailable tooling as `N/A - tooling not configured` rather than installing it without approval.

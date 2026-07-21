@@ -12,7 +12,7 @@ The generator authors each artifact from the target's own facts. It does not tem
 
 ## 3. PHP Is the Domain, Not a Guess
 
-Depth of generated skills is spent on PHP: the detected framework, its persistence layer, its queues, its HTTP layer, its testing and static-analysis tooling. Non-PHP neighbors are documented as integration contracts, never given deep skills. A target with no PHP is out of scope, reported plainly.
+Depth of generated skills is spent on PHP: the detected framework, its persistence layer, its queues, its HTTP layer, its testing and static-analysis tooling. Non-PHP neighbors are documented as integration contracts, never given deep skills. A target with no PHP is out of scope for this generator directly - see Principle 9 for what that means in practice.
 
 ## 4. The Profile Is the Only Contract
 
@@ -33,3 +33,7 @@ A failed scanner, missing tooling, or drift between scan and generate is surface
 ## 8. Least Access, No Secrets
 
 The generator reads only what it needs inside the target path, never `.env`/secrets, and never carries sensitive values into any output. Read-only in Phase 1; the single writer is Phase 2, and only after the collision guard passes.
+
+## 9. Honest Scope Over Silent Failure or Scope Creep
+
+Finding a non-PHP target is not a dead end and not an invitation to stretch this generator beyond PHP. `infra-scan` says plainly what it found and, if a stack is recognizable, offers `stack-adapter` - a distinct, independently built sibling generator for that stack - rather than either failing silently or bolting non-PHP generation onto this tool. The offer always requires explicit consent; detection is never treated as permission.

@@ -23,6 +23,8 @@ Generic PHP boilerplate covers common stacks in the abstract, but real projects 
 
 In a hurry and you trust the scan? Run the one-shot: `infra-build ../my-php-app` chains scan -> generate and only pauses if it hits a blocking ambiguity or a collision.
 
+**Target isn't PHP?** `infra-scan` will tell you rather than silently failing - see "Non-PHP Targets" below.
+
 ## Two-Phase Workflow
 
 ```text
@@ -43,6 +45,15 @@ infra-generate <path-to-php-project>       (the only step that writes into the t
    -> skill-flow-composer, then bootstrap-verifier
    -> Target now has its own working AGENTS.md + selected edition(s) + memory-bank/
 ```
+
+## Non-PHP Targets
+
+Infrastructure-Creator only generates PHP accelerators directly - but it does not silently fail on a non-PHP target either. When `infra-scan` finds no PHP evidence, it checks for a *recognizable* non-PHP stack (Flutter/Dart, Node.js, Python, Go, Ruby, Java/Kotlin, .NET, Rust, Swift, or similar, detected from real manifest files like `pubspec.yaml`, `package.json`, `go.mod`, etc.):
+
+- **Recognized:** it offers to build `stack-adapter` - a brand-new, fully independent sibling generator, `Infrastructure-Creator-[Stack]/`, next to this folder. That sibling shares this generator's architecture (21 skills, three editions, same policy shape) but every stack-specific artifact is freshly researched and authored for the detected stack - zero PHP content, zero dependency on this folder. Confirm once, and it builds the whole thing; open the new folder as its own workspace and run `infra-scan` there against your original target.
+- **Not recognized at all:** it reports the target out of scope, same as before.
+
+Already know your target isn't PHP and want the sibling generator directly, without going through `infra-scan` first? Run `infra-adapt ../my-flutter-app`.
 
 ## What Gets Generated
 
