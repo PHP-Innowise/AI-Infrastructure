@@ -59,7 +59,7 @@ All output from this run lives under `tasks/TASK-{N}/` in Infrastructure-Creator
 [2-4 sentences: PHP framework, architecture pattern, key integrations]
 
 ## What Will Be Generated (see profile sections 10-11 for full detail)
-- **Skills:** [count] - [one-line list by category: architecture / universal / integrations], each with a target-specific description in section 10.1 (not just a bare name)
+- **Skills:** [total count] across architecture (1) / design & interaction (3) / frontend (0 or 5) / process & workflow (14) / universal PHP (7) / framework-specialty ([N], evidence-driven) / integrations ([M], one per confirmed integration) - each with a target-specific description in section 10.1 (not just a bare name)
 - **Agents & commands:** [counts from section 10.2, for the selected edition(s)]
 - **Memory bank:** [count] chunks planned in section 11, one per durable confirmed fact, each cited to its source
 

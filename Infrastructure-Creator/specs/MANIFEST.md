@@ -16,6 +16,7 @@ A standalone, PHP-only generator that scans a target PHP project and writes a be
 - **The generator ships tripled.** It runs natively from Claude Code (`.claude/`), Cursor (`.cursor/`), and Codex (`.agents/skills` + `.codex/`).
 - **Workspace boundary + collision guard.** It runs outside the target, takes the target path as a required argument, is read-only in Phase 1, and never overwrites a pre-existing accelerator without an explicit decision.
 - **Self-adapting for non-PHP stacks.** `infra-scan` never silently fails on a non-PHP target: it probes for a recognizable non-PHP stack and, with explicit consent, hands off to `stack-adapter` to build an entirely independent sibling generator for that stack, rather than stretching this PHP-only generator beyond its domain.
+- **Broad, evidence-gated target skill catalog.** `skill-forge` generates six skill groups per target - architecture; always-on design & interaction (`architecture-implementer`/`api-designer`/`database-designer`); a conditional frontend group; 14 always-on, framework-agnostic process/workflow skills; the 7 universal PHP skills; and an evidence-gated framework-specialty catalog (ORM patterns, migration safety, async/queue jobs, event/notification design, caching, storage, auth scaffolding, form/validator design, admin panel, console commands, repository/container review, test-data factories, package authoring) plus one skill per confirmed integration - so a generated target's depth approaches the hand-built Laravel/Symfony/PHP-Core accelerators without ever templating from them.
 
 ## Skill Inventory (21)
 
@@ -33,5 +34,5 @@ A standalone, PHP-only generator that scans a target PHP project and writes a be
 
 ## Bundled References
 
-- `skill-forge/references/php-frameworks.md`, `php-architecture-patterns.md`, `php-integration-catalog.md`.
+- `skill-forge/references/php-frameworks.md`, `php-architecture-patterns.md`, `php-integration-catalog.md`, `php-process-skills.md`, `php-specialty-skills.md`.
 - `profile-synthesizer/references/project-profile-schema.md`.

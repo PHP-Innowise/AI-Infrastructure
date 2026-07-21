@@ -11,7 +11,7 @@ related: [infra-generate, policy-forge, skill-forge, agent-forge, command-forge,
 
 ## Overview
 
-`skill-flow-composer` writes the target project's navigational map - `SKILL FLOW.md` - describing how the generated skills chain together for that specific project. It is assembled dynamically from the skills `skill-forge` actually produced (read from the skill-forge log), so the flow reflects the target's real architecture skill, universal PHP skills, and one skill per confirmed integration - never a fixed template. Every arrow, shortcut, and table row references only a skill that exists in the generated set. The composed `SKILL FLOW.md` is written into each selected edition's skills directory so each edition is independently navigable.
+`skill-flow-composer` writes the target project's navigational map - `SKILL FLOW.md` - describing how the generated skills chain together for that specific project. It is assembled dynamically from the skills `skill-forge` actually produced (read from the skill-forge log) - whatever mix of architecture, design & interaction, frontend, process & workflow, universal PHP, framework-specialty, and integration skills that run generated - never a fixed template. Every arrow, shortcut, and table row references only a skill that exists in the generated set. The composed `SKILL FLOW.md` is written into each selected edition's skills directory so each edition is independently navigable.
 
 Consumes the **skill-forge log** (`tasks/TASK-{N}/skill-forge-log.md`) as its source of truth, plus profile section 1 for the selected editions.
 
@@ -22,7 +22,7 @@ For each selected edition, write `<edition-skills-dir>/SKILL FLOW.md` (literal f
 ## Process
 
 1. **Require the target-project-path argument.** Resolve the selected editions from profile section 1 and their skills dirs.
-2. **Read the skill-forge log** to obtain the EXACT generated skill set (architecture skill, universal skills, integration skills) and each skill's declared `phase`/`flow-next`.
+2. **Read the skill-forge log** to obtain the EXACT generated skill set, grouped by category (architecture / design & interaction / frontend / process & workflow / universal / specialty / integrations), and each skill's declared `phase`/`flow-next`.
 3. **Build the Main Flow** as a diagram that orders the generated skills by phase, wiring each skill to the successor it actually declares - only among generated skills. Drop any edge whose target was not generated.
 4. **Build Shortcuts** - the common jump-in entry points (e.g. straight to the coding or review skill) using only generated skill names.
 5. **Build the Phase Map table** mapping each phase to the generated skills that occupy it.

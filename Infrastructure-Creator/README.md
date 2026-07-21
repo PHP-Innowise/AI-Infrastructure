@@ -74,7 +74,14 @@ One confirmation, one wait, then a brand-new generator ready to use for that sta
 For the selected AI-tool edition(s) only (Claude Code / Cursor / Codex - chosen during `clarifying-interview`):
 
 - `AGENTS.md`, `DOD.md`, `GOLDEN-PRINCIPLES.md`, `STABILIZATION.md` - policy tailored to what was found.
-- A custom PHP skill set - one per detected domain/integration (e.g. a payment-integration skill if a Stripe SDK was found, a queue skill if a Redis/SQS worker was found) plus adapted universal skills (architecture, coding, testing, review, security, performance, release) for the target's actual PHP framework.
+- A full, custom PHP skill set in six groups - not just a handful of generic skills:
+  - **Architecture** (1) - grounded in the detected pattern (monolith/modular-monolith/microservices/event-driven).
+  - **Design & interaction** (3, always) - `architecture-implementer`, `api-designer`, `database-designer`, shaped to the target's real scaffolding tooling, API shape, and persistence layer.
+  - **Frontend** (0 or 5, only if a rendering/asset layer exists) - `frontend-design`, `coder-frontend`, `wcag-accessibility`, `web-design-guidelines`, `browser-verify`.
+  - **Process & workflow** (14, always, framework-agnostic) - `requirements-analyst`, `researcher`, `brainstorming`, `council`, `writing-plans`, `using-git-worktrees`, `systematic-debugger`, `refactorer`, `dependency-manager`, `review-pr`, `finishing-branch`, `documentation-generator`, `skill-creator`, `reflect`.
+  - **Universal PHP** (7) - `coding`, `testing`, `code-review`, `security-review`, `performance`, `release`, `debugging`, adapted to the target's actual PHP framework/version/tooling.
+  - **Framework-specialty** (evidence-gated, one per confirmed pattern) - e.g. ORM patterns, migration safety, async/queue jobs, event-boundary review, caching strategy, file storage, auth scaffolding, form/validator design, admin panel, console commands, test-data factories - generated only where the scan found real evidence, never speculatively.
+  - **Integrations** (one per detected package/service) - e.g. a payment-integration skill if a Stripe SDK was found, a queue skill if a Redis/SQS worker was found.
 - Matching agents and commands (commands only for editions with a command layer; Codex invokes skills directly).
 - Hooks (`local-context.sh`, `bash-validator.sh`, `file-naming-validator.sh`, `loop-detection.sh`) tuned to the target's real tooling and destructive-command risks.
 - A seeded `memory-bank/` whose initial chunks are strictly the confirmed findings from the scan, each cited to the real file that proves it.

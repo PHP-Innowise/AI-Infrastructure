@@ -17,8 +17,8 @@ Pick the tier that matches the work performed. Higher tiers include all lower-ti
 - [ ] The target was confirmed to be a PHP project (`composer.json` and/or `*.php` present) before running the six scanners; a non-PHP target was either offered `stack-adapter` (if a recognizable stack was found) or reported out of scope (if nothing recognizable was found) instead of being scanned.
 - [ ] Any failed/skipped scanner is reported as a gap in the confidence summary, not silently dropped.
 - [ ] The clarifying interview asked the mandatory AI-tool-selection question and recorded the answer.
-- [ ] The Project Profile validates against `profile-synthesizer/references/project-profile-schema.md`.
-- [ ] Section 10.1 gives every proposed skill a one-line, target-specific description (not a bare name and not generic boilerplate); section 10.2's agent/command counts are arithmetically consistent with the skill count and selected editions.
+- [ ] The Project Profile validates against `profile-synthesizer/references/project-profile-schema.md`, including sections 3.1 (Framework-Specialty Signals) and 3.2 (Frontend Presence) with a confidence tag on every line.
+- [ ] Section 10.1 gives every proposed skill a one-line, target-specific description (not a bare name and not generic boilerplate, except the 14 fixed process/workflow skills which may share one group sentence); the group breakdown (architecture / design / frontend / process / universal / specialty / integrations) is present, and no framework-specialty skill is proposed for a `none`/`unknown` section 3.1 signal, and no frontend group unless section 3.2's verdict applies. Section 10.2's agent/command counts are arithmetically consistent with the skill count and selected editions.
 - [ ] Section 11 (Memory Bank Preview) lists exactly one planned chunk per durable `confirmed` fact, with no `inferred`/`unknown` fact included, so the user can review the memory bank's contents before ever running `infra-generate`.
 
 ## Tier 2 - Generate (`infra-generate` and forges)
@@ -26,6 +26,8 @@ Pick the tier that matches the work performed. Higher tiers include all lower-ti
 - [ ] The profile was re-validated against the target's *current* files; any drift since the scan was flagged.
 - [ ] The collision guard passed: an explicit overwrite/merge/abort decision was obtained before writing, if the target already had an accelerator.
 - [ ] Only the selected edition(s) were written - no unselected edition folders were created, and no selected edition was skipped.
+- [ ] `skill-forge` generated all 3 design & interaction skills and all 14 process & workflow skills for every target (never conditional); the frontend group's 5 skills were generated if and only if section 3.2's verdict applied; framework-specialty skills exist for every `confirmed`/`inferred` section 3.1 signal and for no others.
+- [ ] Every scope-split skill pair stays non-duplicative and cross-references its counterpart: `debugging` (tools/logs) vs. `systematic-debugger` (methodology); `database-designer` (schema design) vs. `orm-patterns` (ORM usage patterns, when generated); `performance` (hot-path measurement) vs. `caching-strategy` (cache correctness, when generated); `api-designer` (hand-rolled routes) vs. `api-platform-design` (declarative resources, when generated).
 - [ ] Every generated skill/agent/command carries valid frontmatter for its edition (see the forge skills' contracts).
 - [ ] Every `flow-next`, `flow-alternatives`, `related`, `invokes`, and `spawns` reference resolves to a skill/agent that was actually generated.
 - [ ] Every generated hook script passes `bash -n` and carries the executable bit.
