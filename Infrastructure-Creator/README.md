@@ -16,7 +16,7 @@ Generic PHP boilerplate covers common stacks in the abstract, but real projects 
 2. Have the target project available as a sibling directory (or note its path).
 3. From your AI tool, run the scan against the target:
    - `infra-scan ../my-php-app`
-4. Glance at `tasks/TASK-{N}/infra-scan-project-profile.md`. Fix anything the scan got wrong (there is rarely much - the interview already asked about the ambiguous parts, including which AI tool your team uses).
+4. Read `tasks/TASK-{N}/infra-scan-project-profile.md`. It's not just evidence - sections 10-11 spell out a one-line description of every skill about to be written, the exact agent/command counts, and a full preview table of every memory-bank chunk that will be seeded. Fix anything the scan got wrong (there is rarely much - the interview already asked about the ambiguous parts, including which AI tool your team uses).
 5. Generate:
    - `infra-generate ../my-php-app`
 6. Open the target project. Its new `AGENTS.md`, the AI-tool edition(s) you selected, and `memory-bank/` are ready to use.
@@ -35,8 +35,9 @@ infra-scan <path-to-php-project>          (read-only; never writes into the targ
    -> clarifying-interview (asks only what evidence could not settle,
       including which AI tool(s) the target team uses)
    -> profile-synthesizer -> tasks/TASK-{N}/infra-scan-project-profile.md
+      (incl. per-skill descriptions, agent/command counts, memory-bank chunk preview)
 
-   <-- REVIEW THE PROFILE (quick glance; edit if anything is wrong) -->
+   <-- REVIEW THE PROFILE (what you read here is what infra-generate will build) -->
 
 infra-generate <path-to-php-project>       (the only step that writes into the target)
    -> re-validates the profile against the target's current files
@@ -78,6 +79,8 @@ For the selected AI-tool edition(s) only (Claude Code / Cursor / Codex - chosen 
 - Hooks (`local-context.sh`, `bash-validator.sh`, `file-naming-validator.sh`, `loop-detection.sh`) tuned to the target's real tooling and destructive-command risks.
 - A seeded `memory-bank/` whose initial chunks are strictly the confirmed findings from the scan, each cited to the real file that proves it.
 - A `SKILL FLOW.md` built from the skills that were actually generated, not a template.
+
+None of this is a surprise at generation time: the profile you review after `infra-scan` (step 4 of the Quick Start above) already spells out a one-line description of every skill about to be written, the exact agent/command counts for your selected edition(s), and a full preview table of every memory-bank chunk `infra-generate` will seed.
 
 ## Directory Structure
 

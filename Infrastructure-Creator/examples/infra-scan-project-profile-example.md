@@ -64,8 +64,53 @@
 
 ## 10. Generation Notes
 - Pre-existing accelerator in target: no
-- Skills to generate: architecture (modular-monolith); universal (coding, testing, code-review, security-review, performance, release, debugging); integrations (stripe-payments, redis-queue, redis-cache, s3-storage, ses-mail, sanctum-auth, sentry-observability)
-- Non-PHP neighbors (integration contracts only): none
+
+### 10.1 Skills To Generate (with what each will do)
+- Architecture: `billing-modular-monolith-architecture` - guidance for working within this modular monolith's Billing/Accounts/Notifications module boundaries and their layered Domain/Application/Http structure per module (from section 3)
+- Universal PHP:
+  - `coding` - Laravel 11 + PHP 8.2 conventions, formatted with Laravel Pint's default preset (pint.json)
+  - `testing` - Pest 2.x via tests/Pest.php; run through `./vendor/bin/pest`
+  - `code-review` - reviews against Larastan/PHPStan level 6 (phpstan.neon) and the module boundaries above
+  - `security-review` - Sanctum ability-scoped token checks, `composer audit` gate already wired into CI
+  - `performance` - Redis-backed queue/cache paths and outbound Guzzle-style HTTP calls as the primary hot paths
+  - `release` - GitHub Actions pipeline (pint -> phpstan -> pest) as the release gate
+  - `debugging` - Sentry (sentry-laravel) as the first place to check for production errors
+- Integrations (one per confirmed integration in section 4):
+  - `stripe-payments` - Stripe wired via a StripeClient binding in config/services.php, not just a listed dependency
+  - `redis-queue` - Redis queue connection (predis/predis) per config/queue.php
+  - `redis-cache` - Redis as the default cache store per config/cache.php
+  - `s3-storage` - AWS S3 object storage via league/flysystem-aws-s3-v3, config/filesystems.php's s3 disk
+  - `ses-mail` - Symfony Mailer routed over AWS SES per config/mail.php
+  - `sanctum-auth` - Laravel Sanctum token authentication per config/sanctum.php
+  - `sentry-observability` - Sentry error tracking per sentry/sentry-laravel and config/sentry.php
+
+### 10.2 Agents & Commands Preview
+- Agents: 15 skills (1 architecture + 7 universal + 7 integrations) x 1 agent-carrying selected edition (Cursor) = 15 agents.
+- Commands: 15 skills x 1 command-carrying selected edition (Cursor) = 15 commands.
+- Claude and Codex were not selected, so no Claude agents/commands and no Codex skills tree are generated for this target.
+
+### 10.3 Non-PHP Neighbors (integration contracts only)
+- none
+
+## 11. Memory Bank Preview
+
+One shared `memory-bank/` will be created at `acme-billing/`'s root. `memory-seed` will seed the following 11 chunks - one per durable `confirmed` fact - and none for the `inferred` architecture-pattern label or the `unknown` deployment target:
+
+| Planned ID | Title | Type | Source |
+| --- | --- | --- | --- |
+| MEM-0001 | Framework: Laravel 11 on PHP 8.2.15 | architecture | composer.json:L11,L14 |
+| MEM-0002 | Module boundaries: Billing, Accounts, Notifications | architecture | app/Modules tree |
+| MEM-0003 | Payment: Stripe via StripeClient binding | integration | composer.json:L18; config/services.php:L22 |
+| MEM-0004 | Queue: Redis connection (predis/predis) | integration | config/queue.php |
+| MEM-0005 | Cache: Redis default store | integration | config/cache.php |
+| MEM-0006 | Object storage: AWS S3 via league/flysystem-aws-s3-v3 | integration | config/filesystems.php |
+| MEM-0007 | Email: Symfony Mailer over AWS SES | integration | config/mail.php |
+| MEM-0008 | Auth: Laravel Sanctum token authentication | integration | config/sanctum.php |
+| MEM-0009 | Observability: Sentry | integration | sentry/sentry-laravel; config/sentry.php |
+| MEM-0010 | CI/CD: GitHub Actions runs Pint, PHPStan, Pest | operations | .github/workflows/ci.yml |
+| MEM-0011 | Code style: Laravel Pint default preset | convention | pint.json |
+
+**Chunks to be seeded:** 11
 
 ## Confidence Summary
 21 confirmed, 3 inferred, 3 unknown

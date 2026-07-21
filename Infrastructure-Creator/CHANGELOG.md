@@ -2,6 +2,17 @@
 
 All notable changes to Infrastructure-Creator are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/); versions are for this generator tool, not for anything it generates.
 
+## [1.2.0] - 2026-07-21
+
+### Added
+
+- The Project Profile's "Generation Notes" section is now split into 10.1 (Skills To Generate), 10.2 (Agents & Commands Preview), and 10.3 (Non-PHP Neighbors). 10.1 now requires a one-line, target-specific description for every proposed skill (naming the real package/pattern/tool found) instead of a bare skill name; 10.2 states the exact agent and command counts implied by the selected edition(s).
+- New Project Profile section 11 ("Memory Bank Preview") - `profile-synthesizer` now previews every memory-bank chunk `memory-seed` will seed (planned ID, title, type, source) before the user ever runs `infra-generate`, using the same confirmed-only selection rule `memory-seed` applies.
+- `memory-seed` now treats the profile's section 11 as its authoritative seed plan and reports any drift between the preview and what it actually seeds, rather than silently reconciling differences.
+- `infra-scan`'s final report now surfaces a "What Will Be Generated" summary (skill/agent/command counts and memory-bank chunk count) alongside the existing confidence summary, so the scope of a generation run is visible without opening the full profile.
+- New DOD checks (Tier 1 and Tier 2) verifying the enriched profile sections and that seeded memory-bank chunks match their preview.
+- `examples/infra-scan-project-profile-example.md` rewritten to demonstrate the new sections 10.1-10.3 and 11 end to end.
+
 ## [1.1.0] - 2026-07-20
 
 ### Added

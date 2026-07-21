@@ -18,6 +18,8 @@ Pick the tier that matches the work performed. Higher tiers include all lower-ti
 - [ ] Any failed/skipped scanner is reported as a gap in the confidence summary, not silently dropped.
 - [ ] The clarifying interview asked the mandatory AI-tool-selection question and recorded the answer.
 - [ ] The Project Profile validates against `profile-synthesizer/references/project-profile-schema.md`.
+- [ ] Section 10.1 gives every proposed skill a one-line, target-specific description (not a bare name and not generic boilerplate); section 10.2's agent/command counts are arithmetically consistent with the skill count and selected editions.
+- [ ] Section 11 (Memory Bank Preview) lists exactly one planned chunk per durable `confirmed` fact, with no `inferred`/`unknown` fact included, so the user can review the memory bank's contents before ever running `infra-generate`.
 
 ## Tier 2 - Generate (`infra-generate` and forges)
 
@@ -27,7 +29,7 @@ Pick the tier that matches the work performed. Higher tiers include all lower-ti
 - [ ] Every generated skill/agent/command carries valid frontmatter for its edition (see the forge skills' contracts).
 - [ ] Every `flow-next`, `flow-alternatives`, `related`, `invokes`, and `spawns` reference resolves to a skill/agent that was actually generated.
 - [ ] Every generated hook script passes `bash -n` and carries the executable bit.
-- [ ] The seeded `memory-bank/` passes its own `scripts/validate.py`.
+- [ ] The seeded `memory-bank/` passes its own `scripts/validate.py`, and its chunks match the profile's section 11 preview (same count, same facts); any drift was reported explicitly, not silently absorbed.
 - [ ] No template placeholders (e.g. `{skill-name}`, `TODO`, `YYYY-MM-DD` left literal) remain in any generated file.
 - [ ] `bootstrap-verifier` was run and reported no unresolved failures.
 

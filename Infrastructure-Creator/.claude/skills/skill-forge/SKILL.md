@@ -24,7 +24,7 @@ Into the target, for each selected edition, write `<edition-skills-dir>/<skill-n
 
 ## Process
 
-1. **Read the profile** (sections 2-4, and section 10's "Skills to generate"). Re-confirm the selected editions from section 1.
+1. **Read the profile** (sections 2-4, and section 10.1's "Skills To Generate" - its draft descriptions are a useful starting point, not a substitute for authoring from evidence). Re-confirm the selected editions from section 1.
 2. **Generate the architecture skill** from section 3, using `references/php-architecture-patterns.md` to shape guidance appropriate to the detected pattern (monolith / modular-monolith / microservices / event-driven) and layering.
 3. **Generate the universal PHP skills** adapted to the detected framework/version and tooling (from `references/php-frameworks.md`):
    - `coding`, `testing`, `code-review`, `security-review`, `performance`, `release`, `debugging`.

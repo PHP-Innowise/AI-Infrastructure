@@ -58,11 +58,16 @@ All output from this run lives under `tasks/TASK-{N}/` in Infrastructure-Creator
 ## What Was Found
 [2-4 sentences: PHP framework, architecture pattern, key integrations]
 
+## What Will Be Generated (see profile sections 10-11 for full detail)
+- **Skills:** [count] - [one-line list by category: architecture / universal / integrations], each with a target-specific description in section 10.1 (not just a bare name)
+- **Agents & commands:** [counts from section 10.2, for the selected edition(s)]
+- **Memory bank:** [count] chunks planned in section 11, one per durable confirmed fact, each cited to its source
+
 ## Open Items
 [Anything still `unknown` after the interview, or flagged for the user to double check]
 
 ## Review This Before Generating
-Read `tasks/TASK-{N}/infra-scan-project-profile.md`. Correct anything wrong, then run `infra-generate` against `[target path]`.
+Read `tasks/TASK-{N}/infra-scan-project-profile.md` in full - not just the confidence summary. Section 10 tells you exactly what each generated skill/agent/command will be; section 11 previews every memory-bank chunk before it exists. Correct anything wrong, then run `infra-generate` against `[target path]`.
 ```
 
 ## Guardrails
@@ -77,7 +82,7 @@ Read `tasks/TASK-{N}/infra-scan-project-profile.md`. Correct anything wrong, the
 
 ## Final Output
 
-For a PHP target: return the task directory path, the confidence summary, the detected PHP stack, explicit open items, the selected AI tool(s), and the exact next step (run `infra-generate` against `[target path]`) - framed as something the user runs only after reviewing the profile.
+For a PHP target: return the task directory path, the confidence summary, the detected PHP stack, a preview of what will be generated (skill/agent/command counts and the memory-bank chunk count, per profile sections 10-11), explicit open items, the selected AI tool(s), and the exact next step (run `infra-generate` against `[target path]`) - framed as something the user runs only after reviewing the profile.
 
 For a non-PHP target where the user opted into adaptation: return `stack-adapter`'s result (the new sibling generator's path and the suggested next command to run there) instead of a Project Profile.
 
