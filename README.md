@@ -95,6 +95,8 @@ The three folders above are pre-built accelerators. [`Infrastructure-Creator/`](
 4. **Generate:** `infra-generate ../your-php-app` - writes `AGENTS.md`, skills, agents, commands, hooks, and `memory-bank/` into your project, for only the tool(s) you selected. It asks before overwriting anything.
 5. **Shortcut:** trust the scan? `infra-build ../your-php-app` does both steps in one, pausing only on ambiguity or a collision.
 
+**Not a PHP project?** `infra-scan` won't just fail - if it recognizes the stack (Flutter, Node.js, Python, Go, etc.), it offers to build you an entirely independent sibling generator, `Infrastructure-Creator-[Stack]/`, with the same architecture freshly researched and authored for that stack. Confirm once, wait for it to build, then open that new folder and use it exactly like this one - see [`Infrastructure-Creator/README.md`](./Infrastructure-Creator/README.md#quick-guide-building-a-sibling-generator) for the full step-by-step guide. Already know you need one? Run `infra-adapt ../your-project` directly.
+
 See [`Infrastructure-Creator/README.md`](./Infrastructure-Creator/README.md) for the full quick start and directory layout.
 
 ## Contributing
