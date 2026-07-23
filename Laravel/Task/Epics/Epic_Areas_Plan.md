@@ -55,7 +55,7 @@ The history-derived epics describe the current baseline and should be used to ve
 |---|---|
 | Initial Project domain, Mandant, voter/defaults | Epics 01 and 03 |
 | Search index, contacts, deadlines, fixtures, translations | Epics 01, 04, 05, and 06 |
-| Dashboard, building detail, menus, local dates, notifications | Epic 06 |
+| Dashboard, building detail, menus, overlay positioning, local dates, notifications | Epic 06 |
 | Contract enums, names, translations, classifications, external references | Epic 03 |
 | Person/Company split | Epics 01 and 03 |
 | BuildingComponent, BuildingDefect, InspectorRequirement, Inspection | Epic 03 |
@@ -67,9 +67,11 @@ The history-derived epics describe the current baseline and should be used to ve
 | Multi-tenancy and object/project grants | Epic 01 |
 | Password login/reset/change and Remember Me | Epic 02 |
 | WebAuthn/TOTP MFA, rate limits, remembered device, enrollment gate, key rotation | Epic 02 |
-| Stateless bearer token after MFA | Epic 02 |
+| Stateless bearer token after MFA, rotating refresh-token families, reuse detection, and family revocation | Epic 02 |
 | Project phases/status transitions and contract fields | Epic 04 |
-| Per-Mandant host branding | Epic 06 |
+| Per-Mandant host branding, private host-owned logo delivery, and protected mail sender identity | Epic 06 |
+| Nested BuiltStructure creation with role-gated writes and server-assigned Mandant defaults | Epics 01 and 03 |
+| Shared current-password reauthentication, throttling, and security audit events | Epic 02 |
 | Confidential document policy | Epic 05 |
 | Document versioning, OCR, metadata/full-text search, as-of reconstruction | Epic 05 |
 | S3, Meilisearch, cron, supervisor, Jenkins, DigitalOcean deployment | Epic 08 |
@@ -81,6 +83,9 @@ The history-derived epics describe the current baseline and should be used to ve
 - Object/project access grants are honored consistently across admin, API, search, export, and download paths.
 - Confidential documents do not leak through metadata, counts, nested fields, search, or storage URLs.
 - Security-sensitive flows fail closed, are rate-limited where exposed, and never log secrets.
+- New nested tenant-owned records inherit their Mandant server-side and cannot cross tenant boundaries.
+- Branding files and platform mail sender identity cannot be selected or changed across Mandant or role boundaries.
+- Refresh-token rotation, reuse detection, and family revocation invalidate related bearer access consistently.
 - History-derived items are not presented as new Stripe functionality.
 - Stripe billing belongs to the Mandant platform subscription, not construction projects, contractors, tasks, or token wallets.
 - Each framework mirror contains the same filenames and byte-identical content.

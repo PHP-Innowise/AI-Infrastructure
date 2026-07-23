@@ -12,6 +12,7 @@ Each Mandant maintains a contract-aligned digital building register containing s
 
 - [ ] Manage property parcels, addresses, geo-information, buildings, BuiltStructures, and Units.
 - [ ] Require the relationships that make a building part of a valid structure.
+- [ ] Allow authorized tenant administrators to create a BuiltStructure with nested Buildings while assigning missing child Mandants server-side.
 - [ ] Display a building detail view with its Unit hierarchy.
 - [ ] Keep all roots and descendants inside one Mandant.
 
@@ -63,6 +64,7 @@ Each Mandant maintains a contract-aligned digital building register containing s
 - A BuildingRegister is the navigable root for its components, projects, and documents.
 - Components, inspections, defects, requirements, decisions, and changes cannot cross Mandant or register boundaries.
 - Contract enums and classifications are validated consistently in API and admin inputs.
+- Nested BuiltStructure creation cannot produce tenantless or cross-Mandant Building children.
 - Remediation and governance history remains traceable after ordinary record updates.
 - Admin users can inspect the Unit tree, defects, requirements, decisions, and typed changes.
 
@@ -79,6 +81,7 @@ Each Mandant maintains a contract-aligned digital building register containing s
 - `3044a38` — document interoperability fields and classification relationship.
 - `9cc18da`, `e2fdc01` — administration views and inline reference pickers.
 - `96638cb`, `6e115ec`, `7177bbb` — BuiltStructure and remaining contract slots.
+- `209e927` — role-gated nested Building writes and Mandant defaults for new entity graphs.
 
 ## Dependencies
 
@@ -92,4 +95,3 @@ Each Mandant maintains a contract-aligned digital building register containing s
 - BIM authoring or 3D model editing.
 - Automated defect recognition.
 - Cross-Mandant building-register federation.
-

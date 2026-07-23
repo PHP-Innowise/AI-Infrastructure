@@ -14,6 +14,7 @@ Each role receives a usable Project administration experience with relevant dash
 - [ ] Use tenant-scoped selectors and authorization-aware nested views.
 - [ ] Provide dedicated views for BuildingRegister, components, defects, inspections, requirements, decisions, changes, projects, processes, tasks, documents, users, and grants.
 - [ ] Keep navigation organized around Project rather than the inherited starter domain.
+- [ ] Keep navigation tooltips and color-mode dropdowns correctly positioned and unclipped in the narrow sidebar.
 
 ### E06-T02 — Building and governance views
 
@@ -33,12 +34,15 @@ Each role receives a usable Project administration experience with relevant dash
 
 - [ ] Resolve the Mandant from the configured host.
 - [ ] Apply Mandant name, logo, colors, and related branding to the login and admin experience.
+- [ ] Store tenant logos in dedicated private branding storage.
+- [ ] Serve only the unique, non-document logo attached to the host-resolved Mandant; return a non-revealing not-found response otherwise.
 - [ ] Reject unknown or ambiguous hosts safely.
 - [ ] Prevent host selection from granting access to another Mandant's data.
 
 ### E06-T05 — Notifications and messages
 
 - [ ] Send transactional notifications for relevant account and deadline events.
+- [ ] Allow only platform administrators to read or change the sender email address and display name used by platform mail.
 - [ ] Keep templates consistent with Project branding and translations.
 - [ ] Avoid duplicate sends when commands or workers retry.
 - [ ] Do not include confidential document content in notifications unless the recipient is authorized and the channel is approved.
@@ -52,8 +56,11 @@ Each role receives a usable Project administration experience with relevant dash
 ## Acceptance criteria
 
 - Every role lands on an authorized, relevant dashboard.
+- Navigation overlays remain visible and correctly positioned without escaping their intended stacking order.
 - Building, Unit, governance, defect, requirement, and change views are navigable without cross-tenant leakage.
 - Host-based branding changes presentation but never authorization.
+- A branding logo cannot be served from another Mandant, general media storage, a Document, or an unattached or ambiguous file record.
+- Tenant users cannot spoof platform mail by changing its sender identity.
 - User-facing dates use the intended local timezone.
 - Retried notification jobs do not send duplicates.
 
@@ -68,6 +75,9 @@ Each role receives a usable Project administration experience with relevant dash
 - `955254d` — role-based dashboards.
 - `e511c9e` — host-based Mandant branding and resolution.
 - `bcaeb98` — valid fixture media.
+- `24ee683` — correctly positioned sidebar tooltips and color-mode dropdowns.
+- `94f0fe9` — platform-administrator-only sender email and display name.
+- `a5dd4a5` — host-owned logo delivery from dedicated private branding storage.
 
 ## Dependencies
 
@@ -79,4 +89,3 @@ Each role receives a usable Project administration experience with relevant dash
 - Visual page builder or per-user theme editor.
 - Marketing website/content management.
 - Push and SMS notifications not present in the history.
-

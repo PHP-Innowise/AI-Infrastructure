@@ -2,7 +2,7 @@
 
 ## Outcome
 
-Active users authenticate through a hardened password and MFA flow, can manage their credentials safely, and receive scoped API tokens only after successful authentication.
+Active users authenticate through a hardened password and MFA flow, can manage their credentials safely, and receive scoped, revocable API token families only after successful authentication.
 
 **Scope status:** Existing baseline from Project history.
 
@@ -19,8 +19,9 @@ Active users authenticate through a hardened password and MFA flow, can manage t
 ### E02-T02 — Password lifecycle
 
 - [ ] Provide password reset through a time-limited, single-use flow.
-- [ ] Let authenticated users change their password after current-password verification.
-- [ ] Revoke or rotate affected sessions and long-lived credentials after a password change.
+- [ ] Let authenticated users change their password after shared, per-user-throttled current-password verification.
+- [ ] Audit failed and throttled current-password checks with the user and operation, never the supplied password.
+- [ ] Invalidate remembered-device trust after a password change.
 - [ ] Apply the configured password policy at every password-setting boundary.
 
 ### E02-T03 — WebAuthn and TOTP MFA
@@ -30,6 +31,7 @@ Active users authenticate through a hardened password and MFA flow, can manage t
 - [ ] Store TOTP secrets encrypted at rest.
 - [ ] Apply rate limits to registration, enrollment, and verification attempts.
 - [ ] Require MFA enrollment for roles covered by the deny-by-default policy, including authority access.
+- [ ] Require current-password reauthentication before adding another factor or removing or disabling an active factor.
 
 ### E02-T04 — MFA device trust and recovery
 
@@ -46,11 +48,14 @@ Active users authenticate through a hardened password and MFA flow, can manage t
 - [ ] Provide a command to validate, generate, and re-encrypt stored MFA secrets.
 - [ ] Never print keys or decrypted secrets to logs or command output.
 
-### E02-T06 — Stateless API authentication
+### E02-T06 — API authentication and refresh-token families
 
-- [ ] Issue bearer access and refresh credentials only after password and required MFA checks pass.
+- [ ] Issue bearer access and rotating refresh credentials only after password and required MFA checks pass.
 - [ ] Scope API authorization to the same roles, Mandant, and access grants as browser access.
-- [ ] Rotate refresh credentials and reject replayed, expired, or revoked tokens.
+- [ ] Rotate the refresh credential on every use without extending the original token-family expiry.
+- [ ] Serialize refresh and revoke operations per family; treat reuse of any consumed refresh credential as compromise and revoke the family.
+- [ ] Bind each access JWT to its owning user's active token family and give it a unique `jti`, without maintaining a separate per-JWT denylist.
+- [ ] Allow only the owner or a non-impersonating platform administrator to revoke a token family, and audit revocation or reuse against the affected Mandant.
 - [ ] Avoid mutating shared login state in tests or long-running processes.
 
 ## Acceptance criteria
@@ -59,6 +64,9 @@ Active users authenticate through a hardened password and MFA flow, can manage t
 - Password, MFA, and token endpoints remain rate-limited and non-enumerating.
 - A remembered device expires and can be invalidated without disabling MFA itself.
 - Invalid MFA encryption configuration stops normal application boot before encrypted data is used.
+- Failed current-password checks for password and protected MFA changes are per-user rate-limited and auditable.
+- At most one concurrent refresh succeeds; consumed-token reuse revokes the family and invalidates its access and refresh credentials.
+- A user cannot revoke another user's token family unless acting as a non-impersonating platform administrator.
 - API tokens never bypass Mandant or object-level access rules.
 
 ## Commit evidence
@@ -74,6 +82,9 @@ Active users authenticate through a hardened password and MFA flow, can manage t
 - `daeb837` — MFA key validation and rotation.
 - `4080e38` — MFA enrollment gate and authority-role policy.
 - `7a7d794` — login-test isolation, encrypted mapping, cookie flags, and MFA cleanup.
+- `91d529a` — current-password reauthentication when adding another MFA factor.
+- `ea420ac` — shared current-password throttling and audit logging.
+- `911c399` — rotating refresh-token families, reuse detection, family-bound JWT revocation, and administrative family revocation.
 
 ## Dependencies
 
@@ -85,4 +96,3 @@ Active users authenticate through a hardened password and MFA flow, can manage t
 - Passwordless-only login.
 - Social login and enterprise SSO.
 - SMS as a second factor.
-
