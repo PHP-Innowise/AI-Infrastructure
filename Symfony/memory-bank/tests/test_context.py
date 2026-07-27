@@ -585,6 +585,16 @@ class ContextEngineTest(unittest.TestCase):
         self.assertIn("possible GitHub token", result.stderr)
         self.assertNotIn("ABCDEFGHIJKLMNOPQRSTUVWXYZ", result.stderr)
 
+    def test_working_get_and_clear_reject_secret_task_id_without_echoing_it(self) -> None:
+        fake_token = "ghp_" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
+
+        for command in ("get", "clear"):
+            with self.subTest(command=command):
+                result = self.run_context(command, "--task-id", fake_token)
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn("possible GitHub token", result.stderr)
+                self.assertNotIn("ABCDEFGHIJKLMNOPQRSTUVWXYZ", result.stderr)
+
     def test_status_reports_document_and_episode_counts(self) -> None:
         self.repository.joinpath("specs/status.md").write_text(
             "# Status\n\nStatus context.\n",

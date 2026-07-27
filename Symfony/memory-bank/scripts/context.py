@@ -310,6 +310,7 @@ def validate_task_id(task_id: str) -> str:
     normalized = task_id.strip()
     if TASK_ID_PATTERN.fullmatch(normalized) is None:
         raise ContextError("Task ID must use letters, digits, '.', '_', '/', or '-'")
+    reject_secrets("working task", [normalized])
     return normalized
 
 
