@@ -47,35 +47,37 @@ def connect(database: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(database)
     connection.row_factory = sqlite3.Row
     try:
-        with connection:
-            connection.execute(
-                """
-                CREATE VIRTUAL TABLE IF NOT EXISTS documents USING fts5(
-                    path UNINDEXED,
-                    kind UNINDEXED,
-                    title,
-                    content,
-                    tokenize = 'unicode61'
-                )
-                """
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS documents USING fts5(
+                path UNINDEXED,
+                kind UNINDEXED,
+                title,
+                content,
+                tokenize = 'unicode61'
             )
-            episode_schema = connection.execute(
-                "SELECT sql FROM sqlite_master WHERE name = 'episodes'"
-            ).fetchone()
-            if episode_schema is None:
-                create_episode_table(connection)
-            elif any(
-                re.search(
-                    rf"\b{column}\s+UNINDEXED\b",
-                    episode_schema["sql"],
-                    flags=re.IGNORECASE,
-                )
-                for column in ("files", "verification", "sources")
-            ):
-                migrate_episode_table(connection)
-    except sqlite3.OperationalError as error:
+            """
+        )
+        episode_schema = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'episodes'"
+        ).fetchone()
+        if episode_schema is None:
+            create_episode_table(connection)
+        elif any(
+            re.search(
+                rf"\b{column}\s+UNINDEXED\b",
+                episode_schema["sql"],
+                flags=re.IGNORECASE,
+            )
+            for column in ("files", "verification", "sources")
+        ):
+            migrate_episode_table(connection)
+        connection.commit()
+    except Exception as error:
+        connection.rollback()
         connection.close()
-        if "fts5" in str(error).lower():
+        if isinstance(error, sqlite3.OperationalError) and "fts5" in str(error).lower():
             raise ContextError("SQLite FTS5 support is required") from error
         raise
     return connection

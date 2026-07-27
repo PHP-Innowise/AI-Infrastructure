@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import sqlite3
 import subprocess
@@ -11,9 +12,19 @@ import tempfile
 import unittest
 from datetime import date, timedelta
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "context.py"
+SPEC = importlib.util.spec_from_file_location("memory_bank_context", SCRIPT)
+if SPEC is None or SPEC.loader is None:
+    raise RuntimeError("Cannot load context engine")
+CONTEXT = importlib.util.module_from_spec(SPEC)
+sys.path.insert(0, str(SCRIPT.parent))
+try:
+    SPEC.loader.exec_module(CONTEXT)
+finally:
+    sys.path.pop(0)
 
 
 class ContextEngineTest(unittest.TestCase):
@@ -58,6 +69,37 @@ class ContextEngineTest(unittest.TestCase):
             f"---\n{json.dumps(metadata, indent=2)}\n---\n\n{body}\n",
             encoding="utf-8",
         )
+
+    def create_old_episode_database(self) -> Path:
+        database = self.repository / "memory-bank/local/context.db"
+        database.parent.mkdir()
+        connection = sqlite3.connect(database)
+        connection.executescript(
+            """
+            CREATE VIRTUAL TABLE episodes USING fts5(
+                summary,
+                outcome,
+                files UNINDEXED,
+                verification UNINDEXED,
+                sources UNINDEXED,
+                created_at UNINDEXED,
+                tokenize = 'unicode61'
+            );
+            INSERT INTO episodes(
+                rowid, summary, outcome, files, verification, sources, created_at
+            ) VALUES (
+                7,
+                'Legacy task',
+                'Legacy task completed',
+                '["src/LegacyHandler.php"]',
+                '["LegacyTest passed"]',
+                '["specs/legacy.md"]',
+                '2026-07-27T00:00:00+00:00'
+            );
+            """
+        )
+        connection.close()
+        return database
 
     def test_index_makes_living_spec_searchable(self) -> None:
         self.repository.joinpath("specs/billing.md").write_text(
@@ -148,34 +190,7 @@ class ContextEngineTest(unittest.TestCase):
                 self.assertEqual([], json.loads(searched.stdout)["documents"])
 
     def test_old_episode_schema_is_migrated_without_data_loss(self) -> None:
-        database = self.repository / "memory-bank/local/context.db"
-        database.parent.mkdir()
-        connection = sqlite3.connect(database)
-        connection.executescript(
-            """
-            CREATE VIRTUAL TABLE episodes USING fts5(
-                summary,
-                outcome,
-                files UNINDEXED,
-                verification UNINDEXED,
-                sources UNINDEXED,
-                created_at UNINDEXED,
-                tokenize = 'unicode61'
-            );
-            INSERT INTO episodes(
-                rowid, summary, outcome, files, verification, sources, created_at
-            ) VALUES (
-                7,
-                'Legacy task',
-                'Legacy task completed',
-                '["src/LegacyHandler.php"]',
-                '["LegacyTest passed"]',
-                '["specs/legacy.md"]',
-                '2026-07-27T00:00:00+00:00'
-            );
-            """
-        )
-        connection.close()
+        database = self.create_old_episode_database()
 
         searched = self.run_context("search", "LegacyHandler", "--json")
         self.assertEqual(0, searched.returncode, searched.stderr)
@@ -190,6 +205,34 @@ class ContextEngineTest(unittest.TestCase):
         connection.close()
         self.assertNotIn("files UNINDEXED", schema)
         self.assertEqual(1, count)
+
+    def test_failed_episode_migration_rolls_back(self) -> None:
+        database = self.create_old_episode_database()
+        create_episode_table = CONTEXT.create_episode_table
+
+        def fail_after_create(connection: sqlite3.Connection) -> None:
+            create_episode_table(connection)
+            raise sqlite3.OperationalError("simulated migration failure")
+
+        with mock.patch.object(
+            CONTEXT,
+            "create_episode_table",
+            side_effect=fail_after_create,
+        ):
+            with self.assertRaises(sqlite3.OperationalError):
+                CONTEXT.connect(database)
+
+        connection = sqlite3.connect(database)
+        schema = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'episodes'"
+        ).fetchone()[0]
+        rowids = [
+            row[0]
+            for row in connection.execute("SELECT rowid FROM episodes").fetchall()
+        ]
+        connection.close()
+        self.assertIn("files UNINDEXED", schema)
+        self.assertEqual([7], rowids)
 
     def test_recorded_episode_is_searchable(self) -> None:
         recorded = self.run_context(
