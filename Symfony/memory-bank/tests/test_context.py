@@ -101,6 +101,42 @@ class ContextEngineTest(unittest.TestCase):
         connection.close()
         return database
 
+    def create_old_document_database(self) -> Path:
+        database = self.repository / "memory-bank/local/context.db"
+        database.parent.mkdir()
+        connection = sqlite3.connect(database)
+        connection.executescript(
+            """
+            CREATE VIRTUAL TABLE documents USING fts5(
+                path UNINDEXED,
+                kind UNINDEXED,
+                title,
+                content,
+                tokenize = 'unicode61'
+            );
+            INSERT INTO documents(path, kind, title, content) VALUES (
+                'README.md', 'overview', 'Legacy', 'Legacy document content.'
+            );
+            CREATE VIRTUAL TABLE episodes USING fts5(
+                summary,
+                outcome,
+                files,
+                verification,
+                sources,
+                created_at UNINDEXED,
+                tokenize = 'unicode61'
+            );
+            INSERT INTO episodes(
+                summary, outcome, files, verification, sources, created_at
+            ) VALUES (
+                'Keep episode', 'Episode remains after document migration.',
+                '[]', '[]', '[]', '2026-07-27T00:00:00+00:00'
+            );
+            """
+        )
+        connection.close()
+        return database
+
     def test_index_makes_living_spec_searchable(self) -> None:
         self.repository.joinpath("specs/billing.md").write_text(
             "# Billing\n\nInvoice ownership stays with the tenant account.\n",
@@ -117,6 +153,39 @@ class ContextEngineTest(unittest.TestCase):
             ["specs/billing.md"],
             [item["path"] for item in payload["documents"]],
         )
+
+    def test_index_classifies_layers_and_deduplicates_mirrored_skills(self) -> None:
+        self.repository.joinpath("AGENTS.md").write_text(
+            "# Policy\n\nUse the cobalt review procedure.\n",
+            encoding="utf-8",
+        )
+        self.repository.joinpath("README.md").write_text(
+            "# Domain\n\nInvoices follow the amber ownership rule.\n",
+            encoding="utf-8",
+        )
+        self.repository.joinpath("CHANGELOG.md").write_text(
+            "# Changes\n\nAdded the violet retry boundary.\n",
+            encoding="utf-8",
+        )
+        for tool in (".agents", ".claude", ".cursor"):
+            skill = self.repository / tool / "skills/review/SKILL.md"
+            skill.parent.mkdir(parents=True)
+            skill.write_text(
+                "# Review\n\nRun the indigo verification procedure.\n",
+                encoding="utf-8",
+            )
+
+        indexed = self.run_context("index", "--json")
+        self.assertEqual(0, indexed.returncode, indexed.stderr)
+        self.assertEqual(
+            {"procedural": 2, "semantic": 1, "episodic": 1},
+            json.loads(indexed.stdout)["layers"],
+        )
+
+        searched = self.run_context("search", "indigo", "--json")
+        documents = json.loads(searched.stdout)["documents"]
+        self.assertEqual(1, len(documents))
+        self.assertEqual("procedural", documents[0]["layer"])
 
     def test_index_includes_common_project_documentation(self) -> None:
         self.repository.joinpath("CLAUDE.md").write_text(
@@ -236,6 +305,20 @@ class ContextEngineTest(unittest.TestCase):
         connection.close()
         self.assertNotIn("files UNINDEXED", schema)
         self.assertEqual(1, count)
+
+    def test_old_document_schema_is_recreated_without_dropping_episodes(self) -> None:
+        database = self.create_old_document_database()
+
+        status = self.run_context("status", "--json")
+        self.assertEqual(0, status.returncode, status.stderr)
+        self.assertEqual(1, json.loads(status.stdout)["episodes"])
+
+        connection = sqlite3.connect(database)
+        columns = [
+            row[1] for row in connection.execute("PRAGMA table_info(documents)").fetchall()
+        ]
+        connection.close()
+        self.assertEqual(["path", "layer", "kind", "title", "content"], columns)
 
     def test_failed_episode_migration_rolls_back(self) -> None:
         database = self.create_old_episode_database()
@@ -360,6 +443,10 @@ class ContextEngineTest(unittest.TestCase):
         payload = json.loads(status.stdout)
         self.assertEqual(1, payload["documents"])
         self.assertEqual(1, payload["episodes"])
+        self.assertEqual(
+            {"procedural": 0, "semantic": 1, "episodic": 0},
+            payload["layers"],
+        )
         self.assertTrue(payload["database"].endswith("memory-bank/local/context.db"))
 
     def test_search_rejects_unusable_query_and_limit(self) -> None:

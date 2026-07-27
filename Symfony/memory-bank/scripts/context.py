@@ -10,6 +10,7 @@ import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from validate import (
     SECRET_PATTERNS,
@@ -25,16 +26,21 @@ class ContextError(Exception):
 
 
 SOURCE_PATTERNS = (
-    ("policy", "AGENTS.md"),
-    ("policy", "CLAUDE.md"),
-    ("overview", "README.md"),
-    ("spec", "specs/**/*.md"),
-    ("spec", "docs/**/*.md"),
-    ("memory", "memory-bank/chunks/*.md"),
-    ("task", "tasks/**/*.md"),
-    ("capability", "Task/Epics/**/*.md"),
-    ("changelog", "CHANGELOG.md"),
+    ("procedural", "policy", "AGENTS.md"),
+    ("procedural", "policy", "CLAUDE.md"),
+    ("procedural", "skill", ".agents/skills/**/*.md"),
+    ("procedural", "skill", ".claude/skills/**/*.md"),
+    ("procedural", "skill", ".cursor/skills/**/*.md"),
+    ("procedural", "skill", ".codex/skills/**/*.md"),
+    ("semantic", "overview", "README.md"),
+    ("semantic", "spec", "specs/**/*.md"),
+    ("semantic", "spec", "docs/**/*.md"),
+    ("semantic", "memory", "memory-bank/chunks/*.md"),
+    ("semantic", "task", "tasks/**/*.md"),
+    ("semantic", "capability", "Task/Epics/**/*.md"),
+    ("episodic", "changelog", "CHANGELOG.md"),
 )
+DOCUMENT_LAYERS = ("procedural", "semantic", "episodic")
 
 
 def default_root() -> Path:
@@ -51,17 +57,14 @@ def connect(database: Path) -> sqlite3.Connection:
     connection.row_factory = sqlite3.Row
     try:
         connection.execute("BEGIN IMMEDIATE")
-        connection.execute(
-            """
-            CREATE VIRTUAL TABLE IF NOT EXISTS documents USING fts5(
-                path UNINDEXED,
-                kind UNINDEXED,
-                title,
-                content,
-                tokenize = 'unicode61'
-            )
-            """
-        )
+        document_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(documents)")
+        }
+        if document_columns and "layer" not in document_columns:
+            connection.execute("DROP TABLE documents")
+            document_columns = set()
+        if not document_columns:
+            create_document_table(connection)
         episode_schema = connection.execute(
             "SELECT sql FROM sqlite_master WHERE name = 'episodes'"
         ).fetchone()
@@ -84,6 +87,21 @@ def connect(database: Path) -> sqlite3.Connection:
             raise ContextError("SQLite FTS5 support is required") from error
         raise
     return connection
+
+
+def create_document_table(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE VIRTUAL TABLE documents USING fts5(
+            path UNINDEXED,
+            layer UNINDEXED,
+            kind UNINDEXED,
+            title,
+            content,
+            tokenize = 'unicode61'
+        )
+        """
+    )
 
 
 def create_episode_table(connection: sqlite3.Connection) -> None:
@@ -138,18 +156,26 @@ def active_memory(path: Path, repository: Path) -> bool:
     return metadata["status"] == "active"
 
 
-def discover_documents(repository: Path) -> list[tuple[str, str, str, str]]:
-    documents: list[tuple[str, str, str, str]] = []
-    for kind, pattern in SOURCE_PATTERNS:
+def discover_documents(repository: Path) -> list[tuple[str, str, str, str, str]]:
+    documents: list[tuple[str, str, str, str, str]] = []
+    skill_keys: set[str] = set()
+    for layer, kind, pattern in SOURCE_PATTERNS:
         for path in sorted(repository.glob(pattern)):
             if not path.is_file() or path.is_symlink():
                 continue
+            relative_path = path.relative_to(repository).as_posix()
+            if kind == "skill":
+                skill_key = relative_path.split("/skills/", maxsplit=1)[1]
+                if skill_key in skill_keys:
+                    continue
+                skill_keys.add(skill_key)
             content = path.read_text(encoding="utf-8")
             if kind == "memory" and not active_memory(path, repository):
                 continue
             documents.append(
                 (
-                    path.relative_to(repository).as_posix(),
+                    relative_path,
+                    layer,
                     kind,
                     document_title(path, content),
                     content,
@@ -158,9 +184,9 @@ def discover_documents(repository: Path) -> list[tuple[str, str, str, str]]:
     return documents
 
 
-def index_repository(connection: sqlite3.Connection, repository: Path) -> dict[str, int]:
+def index_repository(connection: sqlite3.Connection, repository: Path) -> dict[str, object]:
     documents = discover_documents(repository)
-    indexed_paths = {path for path, _, _, _ in documents}
+    indexed_paths = {path for path, _, _, _, _ in documents}
 
     with connection:
         existing_paths = {
@@ -170,11 +196,18 @@ def index_repository(connection: sqlite3.Connection, repository: Path) -> dict[s
         stale_paths = existing_paths - indexed_paths
         connection.execute("DELETE FROM documents")
         connection.executemany(
-            "INSERT INTO documents(path, kind, title, content) VALUES (?, ?, ?, ?)",
+            "INSERT INTO documents(path, layer, kind, title, content) VALUES (?, ?, ?, ?, ?)",
             documents,
         )
 
-    return {"documents": len(documents), "removed": len(stale_paths)}
+    return {
+        "documents": len(documents),
+        "removed": len(stale_paths),
+        "layers": {
+            layer: sum(document[1] == layer for document in documents)
+            for layer in DOCUMENT_LAYERS
+        },
+    }
 
 
 def fts_query(query: str) -> str:
@@ -190,20 +223,28 @@ def search_documents(
     connection: sqlite3.Connection,
     query: str,
     limit: int,
+    layer: Optional[str] = None,
 ) -> list[dict[str, object]]:
+    conditions = ["documents MATCH ?"]
+    parameters: list[object] = [fts_query(query)]
+    if layer is not None:
+        conditions.append("layer = ?")
+        parameters.append(layer)
+    parameters.append(limit)
     rows = connection.execute(
-        """
+        f"""
         SELECT
             path,
+            layer,
             kind,
             title,
-            snippet(documents, 3, '[', ']', ' … ', 18) AS snippet
+            snippet(documents, 4, '[', ']', ' … ', 18) AS snippet
         FROM documents
-        WHERE documents MATCH ?
+        WHERE {' AND '.join(conditions)}
         ORDER BY bm25(documents), path
         LIMIT ?
         """,
-        (fts_query(query), limit),
+        parameters,
     ).fetchall()
     return [dict(row) for row in rows]
 
@@ -301,6 +342,7 @@ def build_parser() -> argparse.ArgumentParser:
     search = commands.add_parser("search", help="search indexed repository context")
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=8)
+    search.add_argument("--layer", choices=DOCUMENT_LAYERS)
     search.add_argument("--json", action="store_true")
 
     record = commands.add_parser("record", help="store a local completed-task episode")
@@ -356,6 +398,11 @@ def main() -> int:
                 return 0
 
             if arguments.command == "status":
+                layers = {layer: 0 for layer in DOCUMENT_LAYERS}
+                for row in connection.execute(
+                    "SELECT layer, COUNT(*) AS count FROM documents GROUP BY layer"
+                ):
+                    layers[row["layer"]] = row["count"]
                 result = {
                     "documents": connection.execute(
                         "SELECT COUNT(*) FROM documents"
@@ -363,6 +410,7 @@ def main() -> int:
                     "episodes": connection.execute(
                         "SELECT COUNT(*) FROM episodes"
                     ).fetchone()[0],
+                    "layers": layers,
                     "database": str(database),
                 }
                 if arguments.json:
@@ -370,14 +418,18 @@ def main() -> int:
                 else:
                     print(
                         f"Context index: {result['documents']} documents, "
-                        f"{result['episodes']} episodes ({result['database']})."
+                        f"{result['episodes']} episodes "
+                        f"({', '.join(f'{layer}: {count}' for layer, count in layers.items())}; "
+                        f"{result['database']})."
                     )
                 return 0
 
             if arguments.command == "search":
                 if arguments.limit < 1:
                     raise ContextError("--limit must be a positive integer")
-                documents = search_documents(connection, arguments.query, arguments.limit)
+                documents = search_documents(
+                    connection, arguments.query, arguments.limit, arguments.layer
+                )
                 episodes = search_episodes(connection, arguments.query, arguments.limit)
                 result = {
                     "query": arguments.query,
@@ -388,7 +440,10 @@ def main() -> int:
                     print(json.dumps(result, ensure_ascii=False))
                 else:
                     for item in documents:
-                        print(f"{item['kind']}: {item['path']} — {item['title']}")
+                        print(
+                            f"{item['layer']} {item['kind']}: "
+                            f"{item['path']} — {item['title']}"
+                        )
                         print(f"  {item['snippet']}")
                     for item in episodes:
                         print(f"episode {item['id']}: {item['summary']}")
