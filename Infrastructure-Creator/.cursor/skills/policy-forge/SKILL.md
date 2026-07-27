@@ -1,6 +1,6 @@
 ---
 name: policy-forge
-description: Generate the target PHP project's governing policy documents from an approved Project Profile - one shared AGENTS.md at the target root, plus DOD.md, GOLDEN-PRINCIPLES.md, and STABILIZATION.md duplicated into each selected edition folder. Content is tailored to the target's real stack, architecture, security posture, and conventions - never templated. Use once profile-synthesizer has produced a profile. Triggers on "generate policy", "forge AGENTS.md", "write the target's DOD/principles".
+description: Generate the target PHP project's governing policy documents from an approved Project Profile - one shared AGENTS.md at the target root, plus DOD.md, GOLDEN-PRINCIPLES.md, and STABILIZATION.md duplicated into each selected edition folder. Content is tailored to the target's real stack, architecture, security posture, conventions, sources of truth, and confirmed behavioral contract - never templated. Use once profile-synthesizer has produced a profile. Triggers on "generate policy", "forge AGENTS.md", "write the target's DOD/principles".
 phase: generation
 flow-next: skill-forge
 flow-alternatives: [hook-forge, memory-seed]
@@ -11,9 +11,9 @@ related: [infra-generate, skill-forge, agent-forge, command-forge, hook-forge, m
 
 ## Overview
 
-`policy-forge` writes the target project's governance layer: the operational rules any AI edition must obey when working in that repository. It produces one shared `AGENTS.md` at the target root - the single source of policy truth regardless of which editions are installed - and duplicates the three enforcement companions (`DOD.md`, `GOLDEN-PRINCIPLES.md`, `STABILIZATION.md`) inside each selected edition folder so each edition ships self-contained. Every rule is authored from the profile's confirmed evidence: the real PHP version and framework (section 2), the detected architecture and layering (section 3), the actual auth/secrets/security posture (section 6), and the real code-style/git-hook/docs conventions (section 7). It never emits a rule for tooling the target does not have.
+`policy-forge` writes the target project's governance layer: the operational rules any AI edition must obey when working in that repository. It produces one shared `AGENTS.md` at the target root - the single source of policy truth regardless of which editions are installed - and duplicates the three enforcement companions (`DOD.md`, `GOLDEN-PRINCIPLES.md`, `STABILIZATION.md`) inside each selected edition folder so each edition ships self-contained. Every rule is authored from confirmed profile evidence: the real PHP stack (section 2), architecture (section 3), security posture (section 6), conventions (section 7), and only the high-value behavioral contract in section 8 (project-specific authority, critical invariants, authorization boundaries, forbidden/high-risk behavior with documented governance, audit obligations, and required regression scenarios). It never emits a rule for absent tooling or turns inferred behavior into policy.
 
-Consumes profile sections **1** (which editions), **2** (stack + real command lines), **3** (architecture boundaries), **6** (security/secrets), and **7** (conventions).
+Consumes profile sections **1** (which editions), **2** (stack + real command lines), **3** (architecture boundaries), **6** (security/secrets), **7** (conventions), and confirmed high-value rules from **8** (behavioral contract).
 
 ## Generated File Naming Convention (MANDATORY)
 
@@ -25,10 +25,10 @@ Append a generation log to `tasks/TASK-{N}/policy-forge-log.md` listing every fi
 
 ## Process
 
-1. **Read the profile.** Confirm selected editions (section 1). Extract the real toolchain from section 2 (test runner + config, lint/format tool, static-analysis tool + config, entry points, package manager), architecture facts (section 3), security facts (section 6), and conventions (section 7).
-2. **Author `AGENTS.md`** at the target root as the shared policy. Encode: the target's real tooling command lines (only commands whose tools were detected), safety rules derived from section 6 (never read/print/commit secrets, parameterized queries, upload/authorization constraints as applicable), the target's architecture boundaries from section 3, and the target's own file-naming + verification policy. Each command line MUST cite the config/file that proves it exists.
-3. **Author `DOD.md`** as the Definition of Done: the exact checks to run before claiming completion (tests, format/lint, static analysis) using only the tools found; report absent tooling as `N/A - not configured`.
-4. **Author `GOLDEN-PRINCIPLES.md`**: the durable, stack-specific non-negotiables (SOLID/DRY/KISS applied to the detected framework, the source-of-truth hierarchy, secrets discipline).
+1. **Read the profile.** Confirm selected editions (section 1). Extract the real toolchain from section 2, architecture facts from section 3, security facts from section 6, conventions from section 7, and confirmed high-value behavioral rules from section 8. Preserve source type and any contradiction; an interview answer or implementation path does not silently outrank an explicit spec/ADR or database constraint.
+2. **Author `AGENTS.md`** at the target root as the shared policy. Encode: real tooling commands; safety rules; architecture boundaries; project-specific sources of truth; critical confirmed invariants and authorization boundaries; documented forbidden/high-risk actions and approvals; audit obligations; and affected critical regression scenarios. Keep it concise: link to canonical sources rather than copying full schemas, matrices, specs, or test inventories.
+3. **Author `DOD.md`** as the Definition of Done: exact tests/format/static-analysis commands plus affected confirmed critical scenarios, denied paths, transitions, and audit checks when a change touches their scope. Report absent tooling as `N/A - not configured`.
+4. **Author `GOLDEN-PRINCIPLES.md`**: durable stack-specific non-negotiables, project-specific source authority, critical behavioral invariants, and secrets discipline.
 5. **Author `STABILIZATION.md`**: the error-to-rule loop the target uses to convert recurring mistakes into permanent rules.
 6. **Duplicate** `DOD.md`, `GOLDEN-PRINCIPLES.md`, `STABILIZATION.md` into every selected edition folder (byte-identical copies). Do NOT write into unselected editions.
 7. **Log** every written path and the profile line backing each command/rule.
@@ -47,6 +47,7 @@ Append a generation log to `tasks/TASK-{N}/policy-forge-log.md` listing every fi
 - Architecture rules: [section 3]
 - Security rules: [section 6]
 - Conventions: [section 7]
+- Behavioral rules: [confirmed section 8 lines and canonical sources]
 
 ## Log
 tasks/TASK-{N}/policy-forge-log.md
@@ -60,6 +61,9 @@ skill-forge; hook-forge/memory-seed if not already run.
 - MUST write `AGENTS.md` as a SINGLE shared file at the target root - never per edition.
 - MUST duplicate `DOD.md`, `GOLDEN-PRINCIPLES.md`, `STABILIZATION.md` into EACH selected edition folder, and only selected ones.
 - MUST author every command/rule from confirmed profile evidence with a source citation; MUST NOT emit a check for a tool the target lacks.
+- MUST preserve section 8 source type and contradictions; MUST NOT turn implementation behavior or an interview answer into stronger policy than its evidence supports.
+- MUST include only high-value behavioral rules in policy and link canonical sources; MUST NOT copy the full domain profile into every policy file.
+- MUST NOT invent severity, ownership, approval, legal obligations, or a complete permission/transition matrix.
 - MUST NOT include any secret or credential value in any generated document.
 - MUST keep the three companions byte-identical across editions in a single run.
 

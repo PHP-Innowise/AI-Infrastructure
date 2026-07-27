@@ -9,25 +9,30 @@ This is a PHP accelerator **generator**, not a ready-to-use accelerator. It scan
 
 ## Command -> Agent -> Skill
 
-- **Commands** (`.cursor/commands/*.md`) are `/slash` entry points; the user-facing ones are `infra-scan`, `infra-generate`, and `infra-build`. Pass the target project path as `$ARGUMENTS`.
-- **Agents** (`.cursor/agents/*.md`) each run one skill in an isolated context, then stop - except `infra-scan`, `infra-generate`, and `infra-build`, the sanctioned orchestrators (see `AGENTS.md`'s Orchestration Exception).
+- **Commands** (`.cursor/commands/*.md`) are `/slash` entry points: `infra-scan`, `infra-generate`, `infra-build`, and `infra-adapt`. Pass the target project path as `$ARGUMENTS`.
+- **Agents** (`.cursor/agents/*.md`) each run one skill in an isolated context, then stop - except the four sanctioned orchestrators (`infra-scan`, `infra-generate`, `infra-build`, and `stack-adapter`).
 - **Skills** (`.cursor/skills/<name>/SKILL.md`) contain the actual workflow.
 
-Execute only the selected skill, then stop (unless it is one of the three orchestrators). Always end with a Context Summary and Next Steps.
+Execute only the selected skill, then stop unless it is one of the four orchestrators. Always end with a Context Summary and Next Steps.
 
 ## Two-Phase Flow
 
 ```text
 /infra-scan <target-path>
   -> stack-scanner / architecture-scanner / integration-scanner /
-     infra-ops-scanner / security-compliance-scanner / conventions-scanner (parallel)
+     infra-ops-scanner / security-compliance-scanner / conventions-scanner /
+     domain-behavior-scanner (parallel)
   -> stack-researcher -> clarifying-interview -> profile-synthesizer
+  -> profile section 8: behavioral contract
+  -> profile section 11: generated infrastructure
+  -> profile section 12: memory preview
 
   <-- HUMAN REVIEW CHECKPOINT: read tasks/TASK-{N}/infra-scan-project-profile.md -->
 
 /infra-generate <target-path>
   -> policy-forge / skill-forge / hook-forge / memory-seed (parallel)
   -> agent-forge -> command-forge -> skill-flow-composer -> bootstrap-verifier
+  -> generated domain skills when evidence-gated + operational memory-bank skill
 ```
 
 ## Workspace Boundary

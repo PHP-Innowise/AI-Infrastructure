@@ -24,7 +24,7 @@ Stabilize whenever the generator:
 ## Examples
 
 - *Mistake:* a scanner reported "uses Redis" because a Redis client was in `composer.json`, but it was a dev-only dependency never wired in. *Rule:* `integration-scanner` must distinguish `require` from `require-dev` and confirm runtime wiring (config/service registration) before marking an integration `confirmed`; downgrade to `inferred` otherwise.
-- *Mistake:* generation created a `.codex/` folder for a Cursor-only team. *Rule:* `hook-forge`/`agent-forge`/`command-forge` must read the profile's AI Tool Selection field and hard-skip unselected editions; `bootstrap-verifier` must assert no unselected edition folder exists.
+- *Mistake:* generation created a `.codex/` folder when the target profile selected Cursor and did not select Codex. *Rule:* `hook-forge`/`agent-forge`/`command-forge` must read the profile's AI Tool Selection field and hard-skip unselected editions; `bootstrap-verifier` must assert no unselected edition folder exists.
 - *Mistake:* a generated skill's `related:` pointed at a skill that was never generated. *Rule:* `skill-flow-composer` must build cross-references only from the actually-generated skill set, and `bootstrap-verifier` must fail on any dangling reference.
 - *Mistake:* `stack-adapter` re-authored a scanner for a new stack by lightly editing PHP wording instead of researching the stack fresh, leaving a stray PHP-era assumption in the detection logic. *Rule:* `stack-adapter` must treat every `.claude/skills/*/SKILL.md` in this folder as a structural exemplar only (frontmatter shape, section headings) and must ground every stack-specific claim in its own research step, never in the PHP skill's content.
 

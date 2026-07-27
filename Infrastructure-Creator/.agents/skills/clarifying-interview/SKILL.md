@@ -1,6 +1,6 @@
 ---
 name: clarifying-interview
-description: Turn the genuinely ambiguous or unverifiable items left by the six scanners and stack-researcher into a short, concrete question set for the user, always including the mandatory AI-tool-selection question, then record the answers. Takes a required target-project-path argument. Use after stack-researcher (or directly after the scanners if research flagged nothing) and before profile-synthesizer. Triggers on "clarifying interview", "ask the user", "what's still unknown", "which AI tool", "resolve open questions".
+description: Turn the genuinely ambiguous or unverifiable items left by the seven scanners and stack-researcher into a short, concrete question set for the user, always including the mandatory AI-tool-selection question, then record the answers with their provenance. Takes a required target-project-path argument. Use after stack-researcher (or directly after the scanners if research flagged nothing) and before profile-synthesizer. Triggers on "clarifying interview", "ask the user", "what's still unknown", "which AI tool", "resolve open questions".
 phase: synthesis
 flow-next: profile-synthesizer
 flow-alternatives: []
@@ -23,11 +23,11 @@ Write two files into the current run's task directory:
 
 ## Process
 
-1. **Gather open items.** Collect every finding marked `inferred` or `unknown` across the six `*-findings.md` and `stack-researcher-findings.md`. Discard items that do not change what gets generated (keep the question set short).
+1. **Gather open items.** Collect every finding marked `inferred` or `unknown` across the seven `*-findings.md` and `stack-researcher-findings.md`. Discard items that do not change generated policy, skill selection/content, memory seeding, or required review/testing behavior.
 2. **Always include the AI-tool question** (mandatory, even if an edition folder exists elsewhere): "Which AI tool(s) does this project's team use - Claude Code, Cursor, Codex, or more than one?" Only the selected edition(s) will be generated.
-3. **Phrase remaining questions concretely**, each tied to the finding it resolves and offering the most likely options. Examples: "A Redis client is in composer.json but no queue connection is configured - is Redis used in production (cache? queue? both?) or dev-only?"; "Two bounded contexts share a namespace - are these separate modules or one?"
+3. **Phrase remaining questions concretely**, each tied to the finding it resolves and offering the most likely options. Examples: "A Redis client is in composer.json but no queue connection is configured - is Redis used in production (cache? queue? both?) or dev-only?"; "The code exposes statuses `draft`, `issued`, and `paid`, but no source proves whether `paid -> draft` is allowed - is there an authoritative workflow specification, or should this remain unknown?" Ask about domain behavior only when the answer materially changes generated policy, skills, memory, or required verification; never ask the user to manually complete every possible domain field.
 4. **Ask.** Use the AI tool's structured question mechanism when available; otherwise write the questions to `clarifying-interview-questions.md` and ask the user to answer inline.
-5. **Record answers** verbatim in `clarifying-interview-answers.md`, including the AI-tool selection as a discrete, machine-readable line (e.g. `editions: [cursor]`).
+5. **Record answers** verbatim in `clarifying-interview-answers.md`, including the AI-tool selection as a discrete, machine-readable line (e.g. `editions: [cursor]`). Label behavioral resolutions as `source type: interview answer`; do not make them indistinguishable from repository-backed evidence.
 6. **Do not over-ask.** If nothing is genuinely ambiguous beyond the tool question, ask only that one.
 
 ## Output Template
@@ -51,6 +51,7 @@ Write two files into the current run's task directory:
 - MUST keep the question set minimal - only items that change generation.
 - MUST NOT ask for secrets or credentials.
 - MUST record answers verbatim; MUST NOT infer an answer the user did not give.
+- MUST NOT turn an interview answer into a repository-backed fact or silently use it to invent owners, severity, approval thresholds, legal obligations, or complete permission/transition matrices.
 
 ## Final Output
 

@@ -2,6 +2,23 @@
 
 All notable changes to Infrastructure-Creator are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/); versions are for this generator tool, not for anything it generates.
 
+## [1.3.5] - 2026-07-27
+
+### Added
+
+- New Claude `domain-behavior-scanner` skill and agent, expanding Phase 1 from six to seven scanners. It discovers project-specific sources of truth, domain vocabulary, core entities, business invariants, proven lifecycle transitions, roles/permissions, audit obligations, high-risk workflows, critical regression scenarios, sanitized incident lessons, and cohesive domain-skill candidates.
+- Behavioral findings preserve both confidence and source type and surface contradictions; statuses are not treated as transitions, observed enforcement is not treated as a complete permission matrix, and risk indicators do not invent severity/owners/approval.
+- Project Profile schema now includes section 8 (Domain & Behavioral Contract), section 11 generation preview, and section 12 cohesive memory preview.
+- New `php-domain-behavior.md` generation reference. Existing requirements/architecture/API/database/testing/review/security/debugging/documentation skills are enriched first; separate domain skills are generated only for cohesive confirmed bounded contexts.
+- The operational `memory-bank` skill is now always generated and counted alongside the shared bank created by `memory-seed`.
+- Memory seeding now groups confirmed facts into cohesive concepts and links canonical sources instead of producing one small chunk per fact or duplicating specs/schemas/tests.
+
+### Changed
+
+- Mirrored the complete 22-skill implementation to Cursor (`.cursor/skills`) and Codex (`.agents/skills`), including the domain scanner, profile schema, generation references, memory behavior, and verifier updates.
+- Added the matching reduced-frontmatter Cursor `domain-behavior-scanner` agent and updated Cursor orchestration commands/rules. Codex continues to invoke skills directly without agents or commands.
+- `bootstrap-verifier` now enforces AI-tool selection directly in its Python validator: every selected edition root must exist, while any unselected `.claude`, `.cursor`, `.agents`, or `.codex` root causes generation verification to fail.
+
 ## [1.3.0] - 2026-07-21
 
 ### Added

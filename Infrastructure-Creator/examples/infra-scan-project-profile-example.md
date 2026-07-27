@@ -9,8 +9,8 @@
 - Generator version: 1.0.0
 
 ## 1. AI Tool Selection (MANDATORY)
-- Selected editions: [cursor]
-- Source: clarifying-interview answer ("we use Cursor")
+- Selected editions: [claude]
+- Source: clarifying-interview answer ("we use Claude Code")
 
 ## 2. PHP Stack
 - PHP version: ^8.2, resolved 8.2.15 (confirmed - composer.json:L14, composer.lock)
@@ -78,94 +78,129 @@
 - Git hooks: none detected (unknown)
 - Docs/ADRs: docs/ with 4 markdown files; no formal ADRs (confirmed - docs/)
 
-## 8. Research Notes (from stack-researcher)
+## 8. Domain & Behavioral Contract
+
+### 8.1 Project Purpose & Domain Vocabulary
+- Purpose: API service for issuing invoices, collecting payments, and processing refunds for customer accounts (confirmed; spec/ADR - README.md:L5-L12)
+- Invoice: billing record with draft/issued/paid/refunded lifecycle (confirmed; domain code - app/Models/Invoice.php:L18-L44)
+- Settlement: confirmed provider capture after which a payment may be refunded (confirmed; domain code - app/Modules/Billing/Domain/Payment.php:L31-L49)
+
+### 8.2 Project Sources of Truth
+- Payment-provider contract: docs/payments.md governs idempotency, webhook verification, and refund behavior (confirmed; spec/ADR - docs/payments.md:L1-L58)
+- Invoice lifecycle: tests/Feature/Billing/InvoiceLifecycleTest.php is executable authority for allowed/forbidden transitions (confirmed; test - tests/Feature/Billing/InvoiceLifecycleTest.php:L12-L96)
+- Database shape: database/migrations/ is authoritative for deployed schema, not model docblocks (confirmed; configuration - docs/architecture.md:L22-L25)
+- Contradictions: README calls `voided` a status, but no enum, migration, workflow, or test supports it (inferred; spec/ADR + domain code - README.md:L31; app/Enums/InvoiceStatus.php)
+
+### 8.3 Core Modules & Domain Model
+- Billing: invoices, payment capture, refund workflow; app/Modules/Billing (confirmed; domain code - app/Modules/Billing/)
+- Accounts: account ownership and billing access; app/Modules/Accounts (confirmed; domain code - app/Modules/Accounts/)
+- Invoice: belongs to Account; has many Payments; status and total are integrity-sensitive (confirmed; domain code + database constraint - app/Models/Invoice.php:L18-L44; database/migrations/2026_01_10_create_invoices.php)
+
+### 8.4 Business Invariants
+- A paid invoice is immutable except through the refund workflow (confirmed; test - tests/Feature/Billing/InvoiceLifecycleTest.php:L55-L72)
+- A refund requires a settled payment and may not exceed the remaining refundable amount (confirmed; domain code + test - app/Modules/Billing/Domain/Refund.php:L24-L51; tests/Feature/Billing/RefundTest.php:L30-L68)
+- Stripe capture uses the invoice UUID as the idempotency key (confirmed; application code - app/Services/StripePaymentService.php:L42-L48)
+
+### 8.5 Lifecycles & Transitions
+- Statuses discovered: Invoice -> draft, issued, paid, refunded (confirmed; domain code - app/Enums/InvoiceStatus.php:L7-L14)
+- Confirmed transition: Invoice draft -> issued; allowed when at least one line exists; forbidden when total is non-positive (confirmed; test - tests/Feature/Billing/InvoiceLifecycleTest.php:L20-L38)
+- Confirmed transition: Invoice issued -> paid; allowed after confirmed provider capture (confirmed; test - tests/Feature/Billing/InvoiceLifecycleTest.php:L40-L53)
+- Confirmed transition: Invoice paid -> refunded; allowed through RefundService with remaining refundable amount (confirmed; test - tests/Feature/Billing/RefundTest.php:L30-L68)
+
+### 8.6 Roles & Permissions
+- Account owner -> view invoices for owned account; cross-account access denied (confirmed; authorization rule + test - app/Policies/InvoicePolicy.php:L18-L31; tests/Feature/Billing/InvoiceAuthorizationTest.php:L15-L44)
+- Finance admin -> initiate refund; standard account user denied (confirmed; authorization rule + test - app/Policies/InvoicePolicy.php:L42-L55; tests/Feature/Billing/RefundAuthorizationTest.php:L12-L37)
+- Completeness: complete for invoice view and refund endpoints only; other Billing actions remain unknown (confirmed; authorization rule - routes/api.php:L30-L58)
+
+### 8.7 Audit Obligations
+- Refund requested/completed/failed events record actor ID, invoice UUID, amount, provider reference, and timestamp (confirmed; test - tests/Feature/Billing/RefundAuditTest.php:L18-L61)
+
+### 8.8 High-Risk / Forbidden Workflows
+- Refund creation: money + irreversible external contract; requires Finance Admin policy check and refund regression suite; no additional approval threshold documented (confirmed; authorization rule + test - app/Policies/InvoicePolicy.php:L42-L55; tests/Feature/Billing/RefundTest.php)
+- Direct invoice status assignment outside InvoiceLifecycleService is forbidden (confirmed; spec/ADR - docs/payments.md:L44-L48)
+
+### 8.9 Critical QA / Regression Scenarios
+- Paid invoice update is rejected and original values remain unchanged (confirmed; test - tests/Feature/Billing/InvoiceLifecycleTest.php:L55-L72)
+- Retried Stripe capture reuses the same idempotency key and does not create a second payment (confirmed; test - tests/Feature/Billing/StripeIdempotencyTest.php:L17-L49)
+- Non-finance user cannot refund an invoice (confirmed; test - tests/Feature/Billing/RefundAuthorizationTest.php:L12-L37)
+
+### 8.10 Known Risks & Incident Lessons
+- A historical webhook retry created duplicate payments when idempotency lookup occurred after insert; prevention rule: resolve idempotency before persistence and keep the regression test (confirmed; spec/ADR + test - docs/incidents/2026-01-duplicate-payment.md:L20-L34; tests/Feature/Billing/StripeIdempotencyTest.php)
+
+### 8.11 Domain Skill Candidates
+- `billing-rules-review` - Billing bounded context; protects invoice lifecycle, refund limits/authorization/audit, Stripe idempotency, and related regression scenarios (confirmed; sources in sections 8.4-8.10)
+
+## 9. Research Notes (from stack-researcher)
 - stripe/stripe-php ^13: use idempotency keys on charge creation; verify webhook signatures with the endpoint secret (source: stripe.com/docs/api, stripe.com/docs/webhooks)
 - laravel/sanctum ^4: prefer ability-scoped tokens; rotate on privilege change (source: laravel.com/docs/11.x/sanctum)
 
-## 9. Open Items
+## 10. Open Items
 - Deployment target unknown (user unsure at interview).
+- Whether non-refund Billing actions have a complete authorization matrix remains unknown.
+- README's unsupported `voided` status requires correction or an authoritative workflow update.
 
-## 10. Generation Notes
+## 11. Generation Notes
 - Pre-existing accelerator in target: no
 
-### 10.1 Skills To Generate (with what each will do)
+### 11.1 Skills To Generate (with what each will do)
 
 **Architecture (1):**
-- `billing-modular-monolith-architecture` - guidance for working within this modular monolith's Billing/Accounts/Notifications module boundaries and their layered Domain/Application/Http structure per module (from section 3)
+- `billing-modular-monolith-architecture` - preserves Billing/Accounts/Notifications boundaries and assigns confirmed Billing invariants to the owning layer
 
-**Design & Interaction (3, always generated):**
-- `architecture-implementer` - scaffolds new feature skeletons using `artisan make:*` matching the Billing/Accounts/Notifications module layering above
-- `api-designer` - designs routes/api.php endpoints using Form Requests + API Resources, Sanctum-scoped where relevant (section 3.1 shows no declarative API resource framework, so `api-platform-design` is not generated and `api-designer` covers the full API surface here, not a narrowed subset)
-- `database-designer` - designs the schema itself (tables/columns/keys/indexes) and which migrations to author, consistent with the existing database/migrations structure; defers ORM usage patterns (relationships-as-used-in-code, casts, scopes) to `eloquent-patterns` below rather than duplicating them
+**Design & Interaction (3):**
+- `architecture-implementer` - scaffolds Laravel module skeletons while keeping invoice transitions and refund side effects inside their confirmed services
+- `api-designer` - designs Form Request/API Resource endpoints while enforcing confirmed InvoicePolicy and lifecycle guards
+- `database-designer` - designs tables/constraints/migrations and maps confirmed integrity invariants without duplicating Eloquent usage guidance
 
-**Frontend: skipped - no UI surface detected (section 3.2 verdict: API-only backend, no views/asset build)**
+**Frontend:** skipped - no UI surface detected.
 
-**Process & Workflow (14, always generated, framework-agnostic):**
-`requirements-analyst`, `researcher`, `brainstorming`, `council`, `writing-plans`, `using-git-worktrees`, `systematic-debugger`, `refactorer`, `dependency-manager`, `review-pr`, `finishing-branch`, `documentation-generator`, `skill-creator`, `reflect` - same fixed mechanic as every target, authored against acme-billing's real git remote and docs/ layout where a project-specific convention exists. `systematic-debugger` here is the tool-agnostic root-cause methodology only (no Sentry/tool names) - it cross-references the universal `debugging` skill below rather than duplicating it.
+**Process & Workflow (15):**
+`requirements-analyst`, `researcher`, `brainstorming`, `council`, `writing-plans`, `using-git-worktrees`, `systematic-debugger`, `refactorer`, `dependency-manager`, `review-pr`, `finishing-branch`, `documentation-generator`, `skill-creator`, `reflect`, `memory-bank`. `memory-bank` operates the shared seeded bank through retrieve/capture/supersede/audit modes.
 
 **Universal PHP (7):**
-- `coding` - Laravel 11 + PHP 8.2 conventions, formatted with Laravel Pint's default preset (pint.json)
-- `testing` - Pest 2.x via tests/Pest.php; run through `./vendor/bin/pest`
-- `code-review` - reviews against Larastan/PHPStan level 6 (phpstan.neon) and the module boundaries above
-- `security-review` - Sanctum ability-scoped token checks, `composer audit` gate already wired into CI
-- `performance` - Redis-backed queue path and outbound Guzzle-style HTTP calls as the primary hot paths; names the Redis cache only as a lever and defers to `caching-strategy` below for invalidation-correctness depth
-- `release` - GitHub Actions pipeline (pint -> phpstan -> pest) as the release gate
-- `debugging` - Sentry (sentry-laravel) as the first place to check for production errors; defers to `systematic-debugger` (below) for the root-cause investigative discipline itself
+- `coding` - Laravel 11/PHP 8.2 implementation respecting Billing invariants and Pint
+- `testing` - Pest critical scenarios for lifecycle, refund authorization/audit, and Stripe idempotency
+- `code-review` - maps diffs to affected invariants, permissions, audit obligations, and regression scenarios
+- `security-review` - checks Sanctum plus object-level/account ownership and Finance Admin refund enforcement
+- `performance` - measures Redis queue and outbound HTTP hot paths, deferring cache correctness to `caching-strategy`
+- `release` - GitHub Actions Pint -> PHPStan -> Pest gate plus affected critical scenarios
+- `debugging` - Sentry/runbook locations plus sanitized duplicate-payment prevention rule; methodology stays in `systematic-debugger`
 
-**Framework-Specialty (11, one per confirmed/inferred section 3.1 signal):**
-- `eloquent-patterns` - advanced Eloquent usage (relationships-as-used-in-code, casts, scopes) for app/Models/Invoice.php and related models, once `database-designer` has settled the schema itself
-- `migration-safety` - safe rollout order for the 18 migrations under database/migrations, given the live `invoices`/`accounts` tables
-- `async-jobs` - queued Job/Event/Listener design (app/Jobs/ProcessRefund.php, app/Listeners/) dispatched to the Redis queue connection
-- `event-boundary-review` - keeps app/Listeners/ and InvoiceObserver thin, delegating real work to services
-- `notification-delivery` - multi-channel design for app/Notifications/PaymentFailed.php (mail + database channels)
-- `caching-strategy` - cache-aside correctness for PricingService's Cache::remember() usage, tag-scoped by plan ID; owns invalidation depth that `performance` above only references
-- `file-storage` - signed-URL generation pattern for InvoicePdfService's Storage::disk('s3') usage
-- `auth-scaffolding` - Policy/Gate design for app/Policies/InvoicePolicy.php, distinct from Sanctum token auth
-- `form-validation-design` - custom rule (ValidCurrency) and FormRequest conventions for app/Http/Requests/
-- `console-commands` - CLI command design for app/Console/Commands/ReconcileStripePayouts.php
-- `test-data-factories` - InvoiceFactory/AccountFactory conventions under database/factories/
+**Framework-Specialty (11):**
+`eloquent-patterns`, `migration-safety`, `async-jobs`, `event-boundary-review`, `notification-delivery`, `caching-strategy`, `file-storage`, `auth-scaffolding`, `form-validation-design`, `console-commands`, `test-data-factories`.
 
-**Integrations (7, one per confirmed integration in section 4):**
-- `stripe-payments` - Stripe wired via a StripeClient binding in config/services.php, not just a listed dependency
-- `redis-queue` - Redis queue connection (predis/predis) per config/queue.php
-- `redis-cache` - Redis as the default cache store per config/cache.php
-- `s3-storage` - AWS S3 object storage via league/flysystem-aws-s3-v3, config/filesystems.php's s3 disk
-- `ses-mail` - Symfony Mailer routed over AWS SES per config/mail.php
-- `sanctum-auth` - Laravel Sanctum token authentication per config/sanctum.php
-- `sentry-observability` - Sentry error tracking per sentry/sentry-laravel and config/sentry.php
+**Integrations (7):**
+`stripe-payments`, `redis-queue`, `redis-cache`, `s3-storage`, `ses-mail`, `sanctum-auth`, `sentry-observability`.
 
-### 10.2 Agents & Commands Preview
-- Skill count breakdown: 1 architecture + 3 design + 0 frontend + 14 process + 7 universal + 11 specialty + 7 integrations = **43 skills**.
-- Agents: 43 skills x 1 agent-carrying selected edition (Cursor) = 43 agents.
-- Commands: 43 skills x 1 command-carrying selected edition (Cursor) = 43 commands.
-- Claude and Codex were not selected, so no Claude agents/commands and no Codex skills tree are generated for this target.
+**Domain (1):**
+- `billing-rules-review` - reviews changes against invoice transitions, refund amount/role/audit rules, Stripe idempotency, and the named regression scenarios, while surfacing the unresolved `voided` contradiction
 
-### 10.3 Non-PHP Neighbors (integration contracts only)
+### 11.2 Agents & Commands Preview
+- Skill count: 1 architecture + 3 design + 0 frontend + 15 process + 7 universal + 11 specialty + 7 integrations + 1 domain = **45 skills**.
+- Agents: 45 skills x 1 Claude edition = 45 agents.
+- Commands: 45 skills x 1 Claude edition = 45 commands.
+
+### 11.3 Non-PHP Neighbors
 - none
 
-## 11. Memory Bank Preview
+## 12. Memory Bank Preview
 
-One shared `memory-bank/` will be created at `acme-billing/`'s root. `memory-seed` will seed the following 15 chunks - one per durable `confirmed` fact - and none for the `inferred` architecture-pattern label, the `inferred none` repository-layer finding, or the `unknown` deployment target:
+One shared bank will seed 10 cohesive concepts. It links canonical sources rather than copying specs, matrices, tests, or incident narratives.
 
 | Planned ID | Title | Type | Source |
 | --- | --- | --- | --- |
-| MEM-0001 | Framework: Laravel 11 on PHP 8.2.15 | architecture | composer.json:L11,L14 |
-| MEM-0002 | Module boundaries: Billing, Accounts, Notifications | architecture | app/Modules tree |
-| MEM-0003 | ORM: Eloquent, migrations under database/migrations (18 files) | architecture | app/Models/Invoice.php:L1; database/migrations/ |
-| MEM-0004 | Async: queued Jobs/Events/Listeners over the Redis queue connection | architecture | app/Jobs/ProcessRefund.php; app/Listeners/ |
-| MEM-0005 | Authorization: Policy/Gate layer (InvoicePolicy) distinct from Sanctum auth | architecture | app/Policies/InvoicePolicy.php |
-| MEM-0006 | Payment: Stripe via StripeClient binding | integration | composer.json:L18; config/services.php:L22 |
-| MEM-0007 | Queue: Redis connection (predis/predis) | integration | config/queue.php |
-| MEM-0008 | Cache: Redis default store | integration | config/cache.php |
-| MEM-0009 | Object storage: AWS S3 via league/flysystem-aws-s3-v3 | integration | config/filesystems.php |
-| MEM-0010 | Email: Symfony Mailer over AWS SES | integration | config/mail.php |
-| MEM-0011 | Auth: Laravel Sanctum token authentication | integration | config/sanctum.php |
-| MEM-0012 | Observability: Sentry | integration | sentry/sentry-laravel; config/sentry.php |
-| MEM-0013 | Ops: custom console command ReconcileStripePayouts | operations | app/Console/Commands/ReconcileStripePayouts.php |
-| MEM-0014 | CI/CD: GitHub Actions runs Pint, PHPStan, Pest | operations | .github/workflows/ci.yml |
-| MEM-0015 | Code style: Laravel Pint default preset | convention | pint.json |
+| MEM-0001 | Laravel 11 / PHP 8.2 platform and verification tooling | architecture | composer.json; pint.json; phpstan.neon; tests/Pest.php |
+| MEM-0002 | Billing, Accounts, Notifications module boundaries | architecture | app/Modules/; docs/architecture.md |
+| MEM-0003 | Invoice lifecycle and immutability invariants | domain | app/Enums/InvoiceStatus.php; tests/Feature/Billing/InvoiceLifecycleTest.php |
+| MEM-0004 | Refund amount, authorization, and audit contract | domain | app/Modules/Billing/Domain/Refund.php; app/Policies/InvoicePolicy.php; tests/Feature/Billing/RefundAuditTest.php |
+| MEM-0005 | Stripe idempotency and webhook contract | integration | docs/payments.md; app/Services/StripePaymentService.php; tests/Feature/Billing/StripeIdempotencyTest.php |
+| MEM-0006 | Redis queue/cache and async processing contract | integration | config/queue.php; config/cache.php; app/Jobs/ProcessRefund.php |
+| MEM-0007 | S3 invoice storage and SES delivery contract | integration | config/filesystems.php; app/Services/InvoicePdfService.php; config/mail.php |
+| MEM-0008 | Sanctum authentication and account ownership boundary | constraint | config/sanctum.php; app/Policies/InvoicePolicy.php |
+| MEM-0009 | Sentry observability and duplicate-payment prevention lesson | operations | config/sentry.php; docs/incidents/2026-01-duplicate-payment.md |
+| MEM-0010 | GitHub Actions release gate and Pint convention | operations | .github/workflows/ci.yml; pint.json |
 
-**Chunks to be seeded:** 15
+**Chunks to be seeded:** 10
 
 ## Confidence Summary
-41 confirmed, 3 inferred, 3 unknown
+54 confirmed, 5 inferred, 5 unknown
