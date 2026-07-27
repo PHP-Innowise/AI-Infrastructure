@@ -89,6 +89,24 @@ episode recording/retrieval, stale document removal, and secret rejection.
 The three script and test copies must remain byte-identical. Existing
 memory-bank validator tests must continue to pass.
 
+## Root README Documentation
+
+The root `README.md` must introduce the Context Engine in practical language
+for developers evaluating the repository. The section will explain:
+
+- the problem it solves and why it is more than a folder of notes;
+- which repository documents are indexed;
+- the `index`, `search`, `record`, and `status` workflow;
+- what a completed-task episode contains;
+- the authority boundary between the local index and repository sources;
+- local SQLite storage, Git exclusion, and secret rejection;
+- the successful Bauherrenmappe real-project verification;
+- the deliberate deferral of embeddings, MCP, LangGraph, and a central service.
+
+The section must not claim automatic per-request context injection, hybrid or
+vector search, separate working/semantic/procedural stores, or integrations
+that the implementation does not provide.
+
 ## Deferred Work
 
 - Add local embeddings only if a golden-query evaluation shows FTS5 recall is
