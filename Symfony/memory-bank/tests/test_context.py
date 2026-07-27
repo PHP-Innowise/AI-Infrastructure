@@ -439,6 +439,152 @@ class ContextEngineTest(unittest.TestCase):
         self.assertEqual(0, searched.returncode, searched.stderr)
         self.assertEqual([], json.loads(searched.stdout)["episodes"])
 
+    def test_working_lifecycle_isolated_by_task_id(self) -> None:
+        first = self.run_context(
+            "start",
+            "--task-id",
+            "BAUMAS-133",
+            "--goal",
+            "Invalidate other password sessions.",
+            "--file",
+            "src/GraphQL/Resolver/ChangePasswordResolver.php",
+            "--json",
+        )
+        second = self.run_context(
+            "start",
+            "--task-id",
+            "BAUMAS-134",
+            "--goal",
+            "Add an independent audit check.",
+            "--json",
+        )
+        self.assertEqual(0, first.returncode, first.stderr)
+        self.assertEqual(0, second.returncode, second.stderr)
+
+        updated = self.run_context(
+            "update",
+            "--task-id",
+            "BAUMAS-133",
+            "--progress",
+            "Two-session regression passes.",
+            "--next-step",
+            "Verify remember-me invalidation.",
+            "--file",
+            "tests/Integration/GraphQL/ChangePasswordTest.php",
+            "--json",
+        )
+        self.assertEqual(0, updated.returncode, updated.stderr)
+
+        task = self.run_context("get", "--task-id", "BAUMAS-133", "--json")
+        self.assertEqual(0, task.returncode, task.stderr)
+        self.assertEqual(
+            {
+                "task_id": "BAUMAS-133",
+                "goal": "Invalidate other password sessions.",
+                "progress": "Two-session regression passes.",
+                "next_steps": ["Verify remember-me invalidation."],
+                "files": [
+                    "src/GraphQL/Resolver/ChangePasswordResolver.php",
+                    "tests/Integration/GraphQL/ChangePasswordTest.php",
+                ],
+                "sources": [],
+            },
+            {
+                key: value
+                for key, value in json.loads(task.stdout).items()
+                if key not in {"created_at", "updated_at"}
+            },
+        )
+
+        status = json.loads(self.run_context("status", "--json").stdout)
+        self.assertEqual(2, status["working"])
+
+        cleared = self.run_context("clear", "--task-id", "BAUMAS-133", "--json")
+        self.assertEqual(0, cleared.returncode, cleared.stderr)
+        status = json.loads(self.run_context("status", "--json").stdout)
+        self.assertEqual(1, status["working"])
+        remaining = self.run_context("get", "--task-id", "BAUMAS-134", "--json")
+        self.assertEqual(0, remaining.returncode, remaining.stderr)
+
+    def test_working_update_merges_unique_list_values(self) -> None:
+        self.assertEqual(
+            0,
+            self.run_context(
+                "start",
+                "--task-id",
+                "TASK-1",
+                "--goal",
+                "Keep working state.",
+                "--file",
+                "src/Task.php",
+                "--source",
+                "specs/task.md",
+            ).returncode,
+        )
+
+        updated = self.run_context(
+            "update",
+            "--task-id",
+            "TASK-1",
+            "--next-step",
+            "Run the regression.",
+            "--next-step",
+            "Run the regression.",
+            "--file",
+            "src/Task.php",
+            "--file",
+            "tests/TaskTest.php",
+            "--source",
+            "specs/task.md",
+            "--source",
+            "docs/task.md",
+            "--json",
+        )
+        self.assertEqual(0, updated.returncode, updated.stderr)
+        task = json.loads(updated.stdout)
+        self.assertEqual(["Run the regression."], task["next_steps"])
+        self.assertEqual(["src/Task.php", "tests/TaskTest.php"], task["files"])
+        self.assertEqual(["specs/task.md", "docs/task.md"], task["sources"])
+
+    def test_working_rejects_duplicate_unknown_and_invalid_tasks(self) -> None:
+        self.assertEqual(
+            0,
+            self.run_context(
+                "start", "--task-id", "TASK-1", "--goal", "First task"
+            ).returncode,
+        )
+        duplicate = self.run_context(
+            "start", "--task-id", "TASK-1", "--goal", "Duplicate task"
+        )
+        unknown = self.run_context(
+            "update", "--task-id", "TASK-404", "--progress", "Missing"
+        )
+        unknown_clear = self.run_context("clear", "--task-id", "TASK-404")
+        invalid = self.run_context(
+            "start", "--task-id", "bad task id", "--goal", "Invalid"
+        )
+        empty_update = self.run_context("update", "--task-id", "TASK-1")
+
+        self.assertIn("already exists", duplicate.stderr)
+        self.assertIn("not found", unknown.stderr)
+        self.assertIn("not found", unknown_clear.stderr)
+        self.assertIn("Task ID must use", invalid.stderr)
+        self.assertIn("requires a changed field", empty_update.stderr)
+
+    def test_working_rejects_secret_without_echoing_it(self) -> None:
+        fake_token = "ghp_" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
+        result = self.run_context(
+            "start",
+            "--task-id",
+            "TASK-SECRET",
+            "--goal",
+            f"Rotate {fake_token}",
+        )
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("possible GitHub token", result.stderr)
+        self.assertNotIn("ABCDEFGHIJKLMNOPQRSTUVWXYZ", result.stderr)
+
     def test_status_reports_document_and_episode_counts(self) -> None:
         self.repository.joinpath("specs/status.md").write_text(
             "# Status\n\nStatus context.\n",
