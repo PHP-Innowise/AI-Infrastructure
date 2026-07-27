@@ -206,6 +206,22 @@ class MemoryBankValidatorTest(unittest.TestCase):
 
         self.assertTrue(any("overdue for review" in error for error in errors))
 
+    def test_type_must_be_a_string(self) -> None:
+        self.add_chunk()
+        self.update_chunk_metadata(type=[])
+
+        errors = VALIDATOR.validate_bank(self.bank)
+
+        self.assertTrue(any("type must be one of" in error for error in errors))
+
+    def test_status_must_be_a_string(self) -> None:
+        self.add_chunk()
+        self.update_chunk_metadata(status={"active": True})
+
+        errors = VALIDATOR.validate_bank(self.bank)
+
+        self.assertTrue(any("status must be one of" in error for error in errors))
+
     def test_index_scope_must_match_chunk_metadata(self) -> None:
         self.add_chunk()
         index = self.bank.joinpath("INDEX.md")

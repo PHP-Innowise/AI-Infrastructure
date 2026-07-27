@@ -53,7 +53,7 @@ class MemoryBankValidatorTest(unittest.TestCase):
             "type": "convention",
             "status": "active",
             "scope": ["application"],
-            "tags": ["php", "architecture"],
+            "tags": ["symfony", "architecture"],
             "created": today.isoformat(),
             "last_verified": today.isoformat(),
             "review_after": (today + timedelta(days=365)).isoformat(),
@@ -70,7 +70,7 @@ class MemoryBankValidatorTest(unittest.TestCase):
         self.bank.joinpath("INDEX.md").write_text(
             self.index(
                 [
-                    f"| MEM-0001 | Layering convention | convention | application | php, architecture | active | {today.isoformat()} | chunks/MEM-0001-layering-convention.md |"
+                    f"| MEM-0001 | Layering convention | convention | application | symfony, architecture | active | {today.isoformat()} | chunks/MEM-0001-layering-convention.md |"
                 ]
             ),
             encoding="utf-8",
@@ -108,8 +108,8 @@ class MemoryBankValidatorTest(unittest.TestCase):
         self.bank.joinpath("INDEX.md").write_text(
             self.index(
                 [
-                    f"| MEM-0001 | Layering convention | convention | application | php, architecture | superseded | {today} | chunks/MEM-0001-layering-convention.md |",
-                    f"| MEM-0002 | Updated layering convention | convention | application | php, architecture | active | {today} | chunks/MEM-0002-updated-layering.md |",
+                    f"| MEM-0001 | Layering convention | convention | application | symfony, architecture | superseded | {today} | chunks/MEM-0001-layering-convention.md |",
+                    f"| MEM-0002 | Updated layering convention | convention | application | symfony, architecture | active | {today} | chunks/MEM-0002-updated-layering.md |",
                 ]
             ),
             encoding="utf-8",
@@ -205,6 +205,22 @@ class MemoryBankValidatorTest(unittest.TestCase):
         errors = VALIDATOR.validate_bank(self.bank)
 
         self.assertTrue(any("overdue for review" in error for error in errors))
+
+    def test_type_must_be_a_string(self) -> None:
+        self.add_chunk()
+        self.update_chunk_metadata(type=[])
+
+        errors = VALIDATOR.validate_bank(self.bank)
+
+        self.assertTrue(any("type must be one of" in error for error in errors))
+
+    def test_status_must_be_a_string(self) -> None:
+        self.add_chunk()
+        self.update_chunk_metadata(status={"active": True})
+
+        errors = VALIDATOR.validate_bank(self.bank)
+
+        self.assertTrue(any("status must be one of" in error for error in errors))
 
     def test_index_scope_must_match_chunk_metadata(self) -> None:
         self.add_chunk()

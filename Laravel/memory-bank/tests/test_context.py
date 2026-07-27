@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -32,7 +33,7 @@ class ContextEngineTest(unittest.TestCase):
             capture_output=True,
         )
 
-    def write_memory(self, name: str, status: str, body: str) -> None:
+    def write_memory(self, name: str, status: object, body: str) -> None:
         memory_id = "-".join(name.split("-", 2)[:2])
         today = date.today()
         self.repository.joinpath("AGENTS.md").write_text(
@@ -116,6 +117,79 @@ class ContextEngineTest(unittest.TestCase):
         searched = self.run_context("search", "vermilion", "--json")
         self.assertEqual(0, searched.returncode, searched.stderr)
         self.assertEqual([], json.loads(searched.stdout)["documents"])
+
+    def test_index_skips_unhashable_type_and_status_metadata(self) -> None:
+        self.write_memory(
+            "MEM-0003-invalid-type.md",
+            "active",
+            "# Invalid Type\n\nThe vermilion shortcut is unsafe.",
+        )
+        invalid_type = self.repository / "memory-bank/chunks/MEM-0003-invalid-type.md"
+        invalid_type.write_text(
+            invalid_type.read_text(encoding="utf-8").replace(
+                '"type": "convention"',
+                '"type": []',
+            ),
+            encoding="utf-8",
+        )
+        self.write_memory(
+            "MEM-0004-invalid-status.md",
+            {"active": True},
+            "# Invalid Status\n\nThe cerulean shortcut is unsafe.",
+        )
+
+        indexed = self.run_context("index", "--json")
+        self.assertEqual(0, indexed.returncode, indexed.stderr)
+
+        for term in ("vermilion", "cerulean"):
+            with self.subTest(term=term):
+                searched = self.run_context("search", term, "--json")
+                self.assertEqual(0, searched.returncode, searched.stderr)
+                self.assertEqual([], json.loads(searched.stdout)["documents"])
+
+    def test_old_episode_schema_is_migrated_without_data_loss(self) -> None:
+        database = self.repository / "memory-bank/local/context.db"
+        database.parent.mkdir()
+        connection = sqlite3.connect(database)
+        connection.executescript(
+            """
+            CREATE VIRTUAL TABLE episodes USING fts5(
+                summary,
+                outcome,
+                files UNINDEXED,
+                verification UNINDEXED,
+                sources UNINDEXED,
+                created_at UNINDEXED,
+                tokenize = 'unicode61'
+            );
+            INSERT INTO episodes(
+                rowid, summary, outcome, files, verification, sources, created_at
+            ) VALUES (
+                7,
+                'Legacy task',
+                'Legacy task completed',
+                '["src/LegacyHandler.php"]',
+                '["LegacyTest passed"]',
+                '["specs/legacy.md"]',
+                '2026-07-27T00:00:00+00:00'
+            );
+            """
+        )
+        connection.close()
+
+        searched = self.run_context("search", "LegacyHandler", "--json")
+        self.assertEqual(0, searched.returncode, searched.stderr)
+        episodes = json.loads(searched.stdout)["episodes"]
+        self.assertEqual([7], [episode["id"] for episode in episodes])
+
+        connection = sqlite3.connect(database)
+        schema = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'episodes'"
+        ).fetchone()[0]
+        count = connection.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
+        connection.close()
+        self.assertNotIn("files UNINDEXED", schema)
+        self.assertEqual(1, count)
 
     def test_recorded_episode_is_searchable(self) -> None:
         recorded = self.run_context(

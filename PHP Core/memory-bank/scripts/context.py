@@ -47,33 +47,73 @@ def connect(database: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(database)
     connection.row_factory = sqlite3.Row
     try:
-        connection.executescript(
-            """
-            CREATE VIRTUAL TABLE IF NOT EXISTS documents USING fts5(
-                path UNINDEXED,
-                kind UNINDEXED,
-                title,
-                content,
-                tokenize = 'unicode61'
-            );
-
-            CREATE VIRTUAL TABLE IF NOT EXISTS episodes USING fts5(
-                summary,
-                outcome,
-                files,
-                verification,
-                sources,
-                created_at UNINDEXED,
-                tokenize = 'unicode61'
-            );
-            """
-        )
+        with connection:
+            connection.execute(
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS documents USING fts5(
+                    path UNINDEXED,
+                    kind UNINDEXED,
+                    title,
+                    content,
+                    tokenize = 'unicode61'
+                )
+                """
+            )
+            episode_schema = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE name = 'episodes'"
+            ).fetchone()
+            if episode_schema is None:
+                create_episode_table(connection)
+            elif any(
+                re.search(
+                    rf"\b{column}\s+UNINDEXED\b",
+                    episode_schema["sql"],
+                    flags=re.IGNORECASE,
+                )
+                for column in ("files", "verification", "sources")
+            ):
+                migrate_episode_table(connection)
     except sqlite3.OperationalError as error:
         connection.close()
         if "fts5" in str(error).lower():
             raise ContextError("SQLite FTS5 support is required") from error
         raise
     return connection
+
+
+def create_episode_table(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE VIRTUAL TABLE episodes USING fts5(
+            summary,
+            outcome,
+            files,
+            verification,
+            sources,
+            created_at UNINDEXED,
+            tokenize = 'unicode61'
+        )
+        """
+    )
+
+
+def migrate_episode_table(connection: sqlite3.Connection) -> None:
+    rows = connection.execute(
+        """
+        SELECT rowid, summary, outcome, files, verification, sources, created_at
+        FROM episodes
+        """
+    ).fetchall()
+    connection.execute("DROP TABLE episodes")
+    create_episode_table(connection)
+    connection.executemany(
+        """
+        INSERT INTO episodes(
+            rowid, summary, outcome, files, verification, sources, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
 
 
 def document_title(path: Path, content: str) -> str:

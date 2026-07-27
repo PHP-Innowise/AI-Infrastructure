@@ -108,9 +108,9 @@ def validate_metadata(path: Path, metadata: dict, repository_root: Path) -> None
         raise ValidationError("frontmatter id does not match filename id")
     if not isinstance(metadata["title"], str) or not metadata["title"].strip():
         raise ValidationError("title must be a non-empty string")
-    if metadata["type"] not in ALLOWED_TYPES:
+    if not isinstance(metadata["type"], str) or metadata["type"] not in ALLOWED_TYPES:
         raise ValidationError(f"type must be one of: {', '.join(sorted(ALLOWED_TYPES))}")
-    if metadata["status"] not in ALLOWED_STATUSES:
+    if not isinstance(metadata["status"], str) or metadata["status"] not in ALLOWED_STATUSES:
         raise ValidationError(f"status must be one of: {', '.join(sorted(ALLOWED_STATUSES))}")
 
     require_string_list(metadata, "scope")
