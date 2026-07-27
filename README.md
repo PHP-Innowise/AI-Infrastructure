@@ -1,114 +1,277 @@
 # PHP AI Accelerators
 
-A collection of framework-specific AI coding-agent accelerators for PHP teams. Each top-level folder is a **complete, self-contained accelerator** for one PHP stack — structured commands, single-purpose agents, reusable skills, quality gates, and documentation conventions — usable from **Claude Code**, **Cursor**, and **OpenAI Codex**.
+Набор готовых акселераторов для AI-агентов в PHP-проектах и генератор для
+создания такого акселератора по фактической структуре отдельного проекта.
+Каждая редакция объединяет правила, команды, агентов, skills, проверки
+качества и соглашения по документации. Она не заменяет код, конфигурацию,
+тесты и спецификации проекта.
 
-```
-accelerator-php/
-├── Laravel/                  # Laravel-first accelerator
-├── Symfony/                  # Symfony-first accelerator
-├── PHP Core/                 # Framework-agnostic native PHP accelerator
-└── Infrastructure-Creator/   # PHP accelerator GENERATOR (builds a bespoke accelerator for your own project)
-```
+## Что находится в репозитории
 
-The first three are ready-to-use accelerators. `Infrastructure-Creator/` is a different kind of tool: it *generates* a custom accelerator for whatever specific PHP project you point it at (see [its section below](#infrastructure-creator-generate-an-accelerator-for-your-own-project)).
+~~~text
+AI-Infrastructure/
+├── Laravel/                  # готовая Laravel-редакция
+├── Symfony/                  # готовая Symfony-редакция
+├── PHP Core/                 # готовая редакция для нативного PHP
+└── Infrastructure-Creator/   # генератор под конкретный проект
+~~~
 
-These three used to live on separate branches (`feature/laravel-accelerator`, `feature/symfony-accelerator`, `main`). They are now grouped as sibling folders in one place so the whole department can browse, compare, and pick the right one without switching branches.
+- [Laravel/](Laravel/README.md) — готовая редакция для Laravel: Eloquent,
+  очереди, события, уведомления, Filament и разработка пакетов.
+- [Symfony/](Symfony/README.md) — готовая редакция для Symfony: практические
+  границы Controller → Service → Repository, Doctrine, Messenger, API
+  Platform, voters, Forms и Symfony UX.
+- [PHP Core/](PHP%20Core/README.md) — нейтральная к фреймворку основа для
+  Composer + PSR-проектов, PDO и явных границ приложения.
+- [Infrastructure-Creator/](Infrastructure-Creator/README.md) — не готовая
+  редакция для копирования, а генератор, который исследует целевой проект и
+  создаёт подходящий workflow layer.
 
-## Which One Do I Use?
+Первые три каталога — самостоятельные готовые редакции.
+Infrastructure-Creator/ решает другую задачу: создаёт новую редакцию по
+составу, интеграциям, архитектуре и CI/CD указанного PHP-проекта.
 
-| Folder | Framework | PHP baseline | Skills | Best for |
-| --- | --- | --- | --- | --- |
-| [`Laravel/`](./Laravel/README.md) | Laravel 12 / 13 | 8.2+ (8.3+ for Laravel 13) | 40 | Projects built on Laravel: Eloquent, Artisan, Sanctum, Filament, queues, and the wider Laravel package ecosystem. |
-| [`Symfony/`](./Symfony/README.md) | Symfony 7.4 LTS / 8.1 | 8.2+ (8.4+ for 8.1) | 43 | Projects built on Symfony: Controller -> Service -> Repository, Doctrine, Messenger, API Platform, Voters. |
-| [`PHP Core/`](./PHP%20Core/README.md) | None (framework-agnostic) | 8.2+ | 31 | Plain PSR-based PHP, a framework not covered here, or as the universal reference the other two specialize from. |
+## Как выбрать редакцию
 
-If your project already runs Laravel or Symfony, use that folder directly. Use `PHP Core/` for anything else — vanilla PHP, a microframework, or a framework this repo doesn't have a dedicated edition for yet.
-
-## Using an Accelerator In Your Project
-
-Claude Code, Cursor, and Codex all auto-discover their config (`.claude/`, `.cursor/`, `.agents/` + `.codex/`) starting from the folder your editor/CLI treats as the project root. Since each accelerator's config lives one level down (e.g. `Laravel/.claude/`), pick one of these two approaches:
-
-1. **Open the accelerator folder itself as your workspace root** — e.g. open `Laravel/` directly in Cursor/Claude Code/Codex, with your actual Laravel application checked out alongside or inside it.
-2. **Copy the folder's contents into your project's root** — copy everything inside `Laravel/` (`.claude/`, `.cursor/`, `.agents/`, `.codex/`, `AGENTS.md`, etc.) into the root of your real application repository.
-
-Opening the monorepo root (`accelerator-php/`) itself will not auto-load any edition, since none of the tools look for config nested under `Laravel/`, `Symfony/`, or `PHP Core/`.
-
-## Shared Architecture: Command -> Agent -> Skill
-
-All three accelerators follow the same workflow model, just specialized for a different stack:
-
-```
-User runs: /some-command [prompt]
-              |
-              v
-      Command selects an agent
-              |
-              v
-      Agent executes one skill in isolated context
-              |
-              v
-      Output: result + context summary + next steps
-```
-
-- **Commands** route user intent to the right agent (Claude Code / Cursor only — Codex invokes skills directly by name).
-- **Agents** are thin wrappers that run exactly one skill, then stop, keeping the main conversation clean and the user in control.
-- **Skills** contain the actual workflow: examples, checklists, decision guidance, and output templates.
-- **Hooks** enforce naming, safety, and verification conventions per tool.
-- Every folder keeps its own `tasks/` (temporary, skill-prefixed task docs) and `specs/` (permanent living specifications, indexed by `specs/MANIFEST.md`).
-
-## Multi-Tool Editions (per folder)
-
-Each accelerator folder mirrors the same skills across three tools so they coexist without conflict:
-
-| Tool | Reads | Notes |
+| Редакция | Базовая платформа | Когда выбирать |
 | --- | --- | --- |
-| **Claude Code** | `.claude/` | Original edition: agents, commands, hooks, skills, `settings.json`. |
-| **Cursor** | `.cursor/` | Self-contained mirror: skills, commands, agents, `rules/*.mdc`, `hooks.json`. Keep Cursor's "read `.claude`" setting **off** to avoid double-loading. |
-| **Codex** | `.agents/skills/` + `.codex/` | Skills live in `.agents/skills` (the path Codex discovers); `.codex/` holds `config.toml`, `hooks.json`, and references. No command layer — invoke a skill by name. |
+| [Laravel/](Laravel/README.md) | Laravel 12 / 13, PHP 8.2+ (PHP 8.3+ для Laravel 13) | Проект уже использует Laravel, Eloquent, Artisan, Sanctum, очереди или экосистему Laravel. |
+| [Symfony/](Symfony/README.md) | Symfony 7.4 LTS с PHP 8.2+ или Symfony 8.1 с PHP 8.4+ | Проект использует Symfony, Doctrine, Messenger, API Platform, voters и типичные Symfony-границы. |
+| [PHP Core/](PHP%20Core/README.md) | Нативный PHP 8.2+ | Обычный PSR-проект, микрофреймворк или фреймворк без отдельной редакции. |
 
-Each folder's own `AGENTS.md` is the enforceable policy for that stack; its `README.md` documents the full directory layout, prerequisites, quick-start command table, and verification steps in detail.
+Если проект уже на Laravel или Symfony, берите соответствующий каталог. Для
+остальных случаев подходит PHP Core/: он не навязывает ORM, роутер или
+DI-контейнер.
 
-## What's Different Between Editions
+## Как подключить акселератор к проекту
 
-- **Laravel** adds Laravel-only skills with no Symfony/native-PHP equivalent: `filament`, `eloquent`, `queues-jobs`, `events-notifications`, `auth-scaffolding`, `caching`, `console-scheduler`, `file-storage`, `package-developer`.
-- **Symfony** adds Symfony-only skills: `api-platform-designer`, `doctrine-migration-designer`, `event-subscriber-designer`, `form-validator-designer`, `security-voter-designer`, `messenger-designer`, `console-command-coder`, `fixture-factory-generator`, `architecture-boundary-reviewer`, `repository-reviewer`, `container-reviewer`, `twig-ux-reviewer`.
-- **PHP Core** is deliberately the smallest and most conservative: no framework assumed, so no ORM/router/DI-container skills — just the framework-agnostic essentials (architecture, API design, database design, coding, testing, review, security, performance, dependency management, debugging, release).
+AI-инструменты начинают поиск своих файлов от workspace root. Поэтому есть два
+рабочих способа подключения:
 
-All three editions ship the same `memory-bank/` — an indexed, cross-session, source-verified project-memory store shared by Claude Code, Cursor, and Codex within each folder. The memory categories and examples are adapted per stack (e.g. Symfony's Controller -> Service -> Repository/Messenger wording vs. Laravel's Controller -> Action/Service -> Eloquent model boundaries vs. PHP Core's generic entry-point/service/data-access-gateway boundaries), but the store format, validator, and lifecycle (`active` / `needs-review` / `superseded` / `archived`) are identical, so a chunk from one edition's `memory-bank/README.md` is a familiar read in any other.
+1. Открыть каталог выбранной редакции как workspace root и держать реальное
+   приложение рядом с ним или внутри него.
+2. Скопировать содержимое выбранного каталога — включая .claude/, .cursor/,
+   .agents/, .codex/, AGENTS.md и документацию — в корень реального проекта.
 
-## Local Context Engine
+Открытие корня этого монорепозитория само по себе не активирует вложенную
+редакцию: Claude Code, Cursor и Codex не ищут конфигурацию автоматически в
+Laravel/, Symfony/ или PHP Core/.
 
-Each edition also has a repository-local context engine. It keeps four logical layers in one repository-local, ignored SQLite database: **procedural** policy and skills, **semantic** repository knowledge and active memory, **episodic** changelog and completed-task summaries, and **working** task state. Repository code, configuration, tests, specs, and policy remain the source of truth; search results are bounded retrieval hints that must be verified against those sources.
+## Общая архитектура: Command → Agent → Skill
 
-For non-trivial work, the caller supplies a task ID (ticket, branch, or descriptive slug) and follows `start → update → context → complete`: start the task, add only sanitized progress, retrieve a bounded per-layer packet before decisions, then complete it after verification. Completion atomically turns the working task into a local episode. `index`, `search`, `record`, and `status` remain available for compatible direct use.
+Все три редакции используют одну модель работы, адаптированную под стек:
 
-The database is local and ignored. It rejects likely secrets, and it must never contain raw conversations, prompts, responses, logs, customer data, or credentials. `clear` removes only an active working task; deleting `memory-bank/local/context.db` also discards local working tasks and episodes (the repository index can be rebuilt, but those local records cannot). This is an explicit CLI workflow, not automatic per-request injection, embeddings/vector search, MCP, LangGraph, or a central service.
+~~~text
+Запрос пользователя
+        ↓
+Command выбирает Agent
+        ↓
+Agent выполняет один Skill в изолированном контексте
+        ↓
+Результат, краткий контекст и следующие шаги
+~~~
 
-The workflow was exercised as a black-box run against the real Bauherrenmappe checkout: reporting the procedural, semantic, and episodic layer counts, tracking `BAUMAS-133` through start/update/context/complete, searching the resulting episode, and confirming that checkout's Git status was unchanged.
+- Command направляет намерение пользователя в подходящий workflow.
+- Agent остаётся тонкой оболочкой: запускает один skill и завершает работу,
+  чтобы решение оставалось наблюдаемым и управляемым.
+- Skill содержит workflow: проверки, примеры, критерии решений и формат
+  результата.
+- Hooks и policy-файлы обеспечивают соглашения о безопасности, именовании и
+  проверке результата.
 
-Each folder's `CHANGELOG.md` tracks its own version history independently — the three no longer need to be merged or kept in lockstep now that they aren't sharing a branch.
+В Claude Code и Cursor команда обычно выбирает агента. В Codex нет такого слоя
+slash-команд: skill вызывается по имени или выбирается самим Codex из
+.agents/skills/.
 
-## Infrastructure-Creator: Generate An Accelerator For Your Own Project
+## Поддерживаемые AI-инструменты
 
-The three folders above are pre-built accelerators. [`Infrastructure-Creator/`](./Infrastructure-Creator/README.md) is a **generator**: instead of giving you a generic stack accelerator, it scans *your specific PHP project* - its real framework, dependencies, integrations, architecture, and CI/CD - and writes a bespoke accelerator (its own `AGENTS.md`, skills, agents, commands, hooks, and a seeded `memory-bank/`) directly into that project, for only the AI tool(s) your team uses.
+Каждая редакция зеркалирует workflow для трёх инструментов, чтобы их файлы не
+конфликтовали:
 
-- Use it when your project has a specific layer the generic editions can't anticipate (a particular payment provider, queue, service topology, or internal conventions).
-- Two-phase, load-and-run workflow: `infra-scan <your-project>` produces a reviewable Project Profile; `infra-generate <your-project>` writes the accelerator (or `infra-build <your-project>` does both in one step).
-- It is 100% discovery-driven and fully independent - it does not template from `Laravel/`, `Symfony/`, or `PHP Core/`; every artifact is authored from evidence in your project.
-- Like the others, the generator itself ships for Claude Code, Cursor, and Codex, so you can run it from whichever tool you use. Keep it *outside* the project it generates for (its own workspace or a sibling folder).
+| Инструмент | Читает | Практическое значение |
+| --- | --- | --- |
+| Claude Code | .claude/ | Исходная редакция с agents, commands, hooks, skills и настройками. |
+| Cursor | .cursor/ | Самостоятельное зеркало с skills, commands, agents, rules и hooks; загрузку .claude в Cursor нужно отключить, чтобы не загрузить правила дважды. |
+| Codex | .agents/skills/ и .codex/ | Skills находятся в .agents/skills/, а .codex/ содержит конфигурацию, hooks и справочные материалы; отдельного command layer нет. |
 
-### How To Use It
+AGENTS.md выбранной редакции — исполняемая политика для её стека. Её README
+содержит полный состав каталогов, prerequisites, таблицы команд и проверки.
 
-1. **Setup (once):** keep `Infrastructure-Creator/` outside your real project (its own workspace or a sibling folder), and open it in your AI tool.
-2. **Scan:** `infra-scan ../your-php-app` - reads your `composer.json`, framework, integrations, and CI (read-only; writes nothing to your project). It asks the one required question: which AI tool(s) your team uses.
-3. **Review:** open `Infrastructure-Creator/tasks/TASK-{N}/infra-scan-project-profile.md` and correct anything wrong (usually nothing).
-4. **Generate:** `infra-generate ../your-php-app` - writes `AGENTS.md`, skills, agents, commands, hooks, and `memory-bank/` into your project, for only the tool(s) you selected. It asks before overwriting anything.
-5. **Shortcut:** trust the scan? `infra-build ../your-php-app` does both steps in one, pausing only on ambiguity or a collision.
+## Чем отличаются редакции
 
-See [`Infrastructure-Creator/README.md`](./Infrastructure-Creator/README.md) for the full quick start and directory layout.
+Общий workflow одинаков, но добавляются только возможности реального стека:
 
-## Contributing
+- Laravel добавляет Laravel-специфичные skills для Filament, Eloquent, Jobs,
+  Events/Notifications, auth scaffolding, cache, Artisan scheduler, file
+  storage и Composer/Laravel packages.
+- Symfony добавляет skills для API Platform, Doctrine migrations, event
+  subscribers, Forms/Validator, security voters, Messenger, console commands,
+  fixtures, границ Controller/Service/Repository, DI container и Twig/Symfony
+  UX.
+- PHP Core сохраняет минимальную общую основу: архитектуру, API и БД, код,
+  тестирование, review, security, производительность, зависимости, debugging
+  и release без предположений о конкретном framework.
 
-- Change a skill only inside the folder(s) it applies to; do not assume a fix in `Laravel/` also belongs in `Symfony/` or `PHP Core/` — verify against that stack's own conventions first.
-- When a skill or fix is genuinely universal (applies the same way regardless of framework), consider whether it belongs in `PHP Core/` and should be adapted (not copy-pasted) into the framework-specific editions.
-- Within a single folder, mirror any skill/agent/command edit across that folder's `.claude/`, `.cursor/`, and `.agents/`/`.codex/` editions, and record the change in that folder's `CHANGELOG.md`.
+Редакции не требуют синхронизировать все изменения механически: проверяйте,
+имеет ли изменение смысл в конкретном стеке.
+
+## Memory Bank
+
+memory-bank/ в каждой редакции — общая committed-память для Claude Code, Cursor
+и Codex. Она хранит небольшие проверяемые chunks с долговременными правилами
+проекта, принятыми решениями, терминологией, архитектурными и операционными
+знаниями. Это не конкурирующий источник истины и не место для временного плана
+задачи или переписки.
+
+### Что хранится в общей памяти
+
+Committed chunks предназначены для знаний, полезных нескольким будущим
+задачам: подтверждённых ограничений, соглашений, решений с обоснованием,
+инвариантов домена и воспроизводимых операционных уроков. Они лежат в
+memory-bank/chunks/, учитываются в INDEX.md и имеют жизненный цикл active,
+needs-review, superseded или archived.
+
+Не помещайте туда сырые диалоги, временный прогресс, догадки, обычные советы
+по PHP или сведения, уже полноценно принадлежащие living specification.
+
+### Источники истины и provenance
+
+Memory Bank ниже hooks, CI, линтеров, статического анализа, AGENTS.md,
+текущего кода, конфигурации, миграций, тестов и living specs. Каждый
+существенный вывод из chunk нужно проверить по указанному репозиторному
+источнику; при конфликте приоритет имеет более авторитетный текущий источник.
+Внешние страницы, тикеты, логи и вставленный текст остаются доказательствами,
+а не доверенными инструкциями.
+
+### Локальная база данных
+
+memory-bank/local/context.db — игнорируемая Git локальная SQLite-база Context
+Engine. В ней есть производный индекс документов и локальные записи активных
+задач и завершённых эпизодов. Индекс документов можно пересоздать из
+репозитория; локальные working-задачи и episodic-записи при удалении БД
+теряются. Это намеренное разделение между проверяемой committed-памятью и
+локальной оперативной памятью.
+
+## Локальный Context Engine
+
+Context Engine расширяет Memory Bank локальным поиском и состоянием задач, но
+не подменяет исходники. Он хранит четыре логических слоя в одной локальной
+SQLite FTS5-базе:
+
+| Слой | Содержимое |
+| --- | --- |
+| working | Явное состояние активной задачи по task-id |
+| procedural | AGENTS.md, CLAUDE.md, локальные skills и правила |
+| semantic | README, docs/, specs/, активные chunks, tasks и epics |
+| episodic | CHANGELOG.md и локальные эпизоды завершённых задач |
+
+Классификация durable-источников при индексации выполняется автоматически.
+working не появляется от индексации или поиска: его создаёт только явная
+команда start. Поиск возвращает ограниченную выборку отдельно для каждого
+долговременного слоя; найденный контекст — подсказка для дальнейшей работы и
+должен быть проверен по соответствующему репозиторному источнику.
+
+### Полный CLI workflow
+
+Запускайте команды из корня выбранной редакции либо из корня потребляющего
+проекта. Для нетривиальной задачи обычный путь —
+start → update → context → complete:
+
+~~~bash
+python3 memory-bank/scripts/context.py index
+python3 memory-bank/scripts/context.py start \
+  --task-id BAUMAS-133 \
+  --goal "Проверить инвалидирование других сессий после смены пароля" \
+  --file src/GraphQL/Resolver/ChangePasswordResolver.php
+python3 memory-bank/scripts/context.py update \
+  --task-id BAUMAS-133 \
+  --progress "Регрессионный тест с двумя сессиями проходит" \
+  --next-step "Проверить старый remember-me cookie" \
+  --file tests/Integration/GraphQL/ChangePasswordTest.php
+python3 memory-bank/scripts/context.py context \
+  "PdoSessionHandler password sessions" \
+  --task-id BAUMAS-133
+python3 memory-bank/scripts/context.py complete \
+  --task-id BAUMAS-133 \
+  --outcome "Другие сессии и устаревшие remember-me cookies инвалидируются" \
+  --verification "ChangePasswordTest passed"
+python3 memory-bank/scripts/context.py search BAUMAS-133
+python3 memory-bank/scripts/context.py status
+~~~
+
+task-id задаёт вызывающий агент или пользователь: это может быть номер тикета,
+имя ветки либо понятный slug. Несколько задач с разными ID могут быть активны
+одновременно. get --task-id показывает одну активную задачу, а clear --task-id
+удаляет только её. Совместимый record сохраняет отдельный завершённый эпизод без
+lifecycle active task.
+
+Команды поддерживают --json; поиск также поддерживает --limit и --layer. У
+start, update, record и complete можно повторять --file и --source; update
+принимает повторяемый --next-step, а record и complete — повторяемый
+--verification. complete атомарно переносит working-задачу в episode.
+Конкурентные start и update сериализуются SQLite-транзакцией BEGIN IMMEDIATE.
+
+## Безопасность и ограничения
+
+Context Engine локален, а его база Git-ignored. В неё нельзя записывать raw
+conversations, prompts, responses, logs, credentials, secrets, customer data
+или personal data. CLI отклоняет значения, похожие на известные виды секретов,
+и в ошибке называет только тип находки, не повторяя само найденное значение.
+
+Это явный CLI workflow, а не automatic per-request injection. В реализации нет
+embeddings, vector search, MCP, LangGraph и центрального memory service. Не
+следует описывать его как универсальную автоматическую интеграцию или как
+замену проверке кода и политик.
+
+## Проверка на Bauherrenmappe
+
+Black-box проверка была выполнена для одной локальной копии Bauherrenmappe. Она
+подтвердила конкретно этот сценарий, а не универсальную автоматическую
+интеграцию:
+
+~~~text
+documents=4
+procedural=1
+semantic=3
+episodic documents=0
+completed local episodes=1
+working=0
+Git status unchanged
+temporary external database removed
+~~~
+
+В сценарии задача BAUMAS-133 прошла start, update, context и complete, а
+завершённый эпизод был найден поиском. Временная внешняя БД была удалена после
+проверки, Git-состояние checkout не изменилось.
+
+## Infrastructure Creator
+
+Infrastructure-Creator/ создаёт акселератор для конкретного целевого проекта,
+а не заменяет готовые Laravel, Symfony или PHP Core редакции. Его держат вне
+целевого проекта — в отдельном workspace или соседнем каталоге.
+
+Поток работы: infra-scan → review → infra-generate. infra-scan читает проект и
+создаёт reviewable Project Profile, review позволяет исправить выводы, а
+infra-generate записывает accelerator только для выбранных AI-инструментов.
+Если отдельный review не нужен, infra-build выполняет scan и generate одним
+потоком, останавливаясь при неоднозначности или конфликте.
+
+Генератор исследует фактические composer.json, framework, зависимости,
+интеграции, архитектуру и CI/CD, а не копирует шаблон Laravel, Symfony или PHP
+Core. Полная инструкция находится в
+[Infrastructure-Creator/README.md](Infrastructure-Creator/README.md).
+
+## Как внести изменения
+
+- Меняйте skill только в тех редакциях, где он действительно применим;
+  Laravel-исправление не автоматически относится к Symfony или PHP Core.
+- Универсальное правило сначала оценивайте для PHP Core/, затем адаптируйте его
+  к framework-specific границам, а не копируйте без проверки.
+- Внутри одной редакции зеркальте изменения skills, agents и commands между
+  .claude/, .cursor/ и .agents/.codex/ в объёме поддерживаемых инструментов.
+- Зафиксируйте изменение в CHANGELOG.md соответствующей редакции и выполните
+  её проверку из DOD.md.
+
+Для деталей конкретного стека используйте README выбранной редакции, а для
+долговременной памяти — её
+[memory-bank/README.md](Symfony/memory-bank/README.md) и INDEX.md.
