@@ -595,6 +595,85 @@ class ContextEngineTest(unittest.TestCase):
                 self.assertIn("possible GitHub token", result.stderr)
                 self.assertNotIn("ABCDEFGHIJKLMNOPQRSTUVWXYZ", result.stderr)
 
+    def test_context_packet_retrieves_each_layer_for_working_task(self) -> None:
+        self.repository.joinpath("AGENTS.md").write_text(
+            "# Procedure\n\nPassword session invalidation requires a review.\n",
+            encoding="utf-8",
+        )
+        self.repository.joinpath("README.md").write_text(
+            "# Architecture\n\nPassword session invalidation protects accounts.\n",
+            encoding="utf-8",
+        )
+        self.repository.joinpath("CHANGELOG.md").write_text(
+            "# Changes\n\nPassword session invalidation was released.\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            0,
+            self.run_context(
+                "start",
+                "--task-id",
+                "BAUMAS-133",
+                "--goal",
+                "Invalidate password sessions.",
+            ).returncode,
+        )
+        self.assertEqual(
+            0,
+            self.run_context(
+                "record",
+                "--summary",
+                "Password session invalidation completed.",
+                "--outcome",
+                "Other sessions are invalidated.",
+            ).returncode,
+        )
+        self.assertEqual(0, self.run_context("index", "--json").returncode)
+
+        packet = self.run_context(
+            "context",
+            "password session invalidation",
+            "--task-id",
+            "BAUMAS-133",
+            "--limit",
+            "2",
+            "--json",
+        )
+        self.assertEqual(0, packet.returncode, packet.stderr)
+        payload = json.loads(packet.stdout)
+        self.assertEqual("BAUMAS-133", payload["working"]["task_id"])
+        self.assertLessEqual(len(payload["procedural"]), 2)
+        self.assertLessEqual(len(payload["semantic"]), 2)
+        self.assertLessEqual(len(payload["episodic"]), 2)
+        self.assertTrue(
+            all(item["layer"] == "procedural" for item in payload["procedural"])
+        )
+        self.assertTrue(
+            all(item["layer"] == "semantic" for item in payload["semantic"])
+        )
+        self.assertTrue(
+            all(item["layer"] == "episodic" for item in payload["episodic"])
+        )
+        self.assertEqual(["AGENTS.md"], [item["path"] for item in payload["procedural"]])
+        self.assertEqual(["README.md"], [item["path"] for item in payload["semantic"]])
+        self.assertEqual("CHANGELOG.md", payload["episodic"][0]["path"])
+        self.assertIn("id", payload["episodic"][1])
+
+        unknown = self.run_context(
+            "context", "password", "--task-id", "TASK-404", "--json"
+        )
+        invalid_limit = self.run_context(
+            "context",
+            "password",
+            "--task-id",
+            "BAUMAS-133",
+            "--limit",
+            "0",
+            "--json",
+        )
+        self.assertIn("not found", unknown.stderr)
+        self.assertIn("--limit must be a positive integer", invalid_limit.stderr)
+
     def test_status_reports_document_and_episode_counts(self) -> None:
         self.repository.joinpath("specs/status.md").write_text(
             "# Status\n\nStatus context.\n",

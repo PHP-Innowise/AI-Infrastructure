@@ -295,6 +295,7 @@ def search_episodes(
     return [
         {
             "id": row["id"],
+            "layer": "episodic",
             "summary": row["summary"],
             "outcome": row["outcome"],
             "files": json.loads(row["files"]),
@@ -304,6 +305,24 @@ def search_episodes(
         }
         for row in rows
     ]
+
+
+def build_context_packet(
+    connection: sqlite3.Connection, query: str, task_id: str, limit: int
+) -> dict[str, object]:
+    if limit < 1:
+        raise ContextError("--limit must be a positive integer")
+    return {
+        "query": query,
+        "task_id": task_id,
+        "working": get_working_task(connection, task_id),
+        "procedural": search_documents(connection, query, limit, "procedural"),
+        "semantic": search_documents(connection, query, limit, "semantic"),
+        "episodic": (
+            search_documents(connection, query, limit, "episodic")
+            + search_episodes(connection, query, limit)
+        )[:limit],
+    }
 
 
 def validate_task_id(task_id: str) -> str:
@@ -509,6 +528,12 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--layer", choices=DOCUMENT_LAYERS)
     search.add_argument("--json", action="store_true")
 
+    context = commands.add_parser("context", help="assemble layered task context")
+    context.add_argument("query")
+    context.add_argument("--task-id", required=True)
+    context.add_argument("--limit", type=int, default=3)
+    context.add_argument("--json", action="store_true")
+
     record = commands.add_parser("record", help="store a local completed-task episode")
     record.add_argument("--summary", required=True)
     record.add_argument("--outcome", required=True)
@@ -685,6 +710,26 @@ def main() -> int:
                     for item in episodes:
                         print(f"episode {item['id']}: {item['summary']}")
                         print(f"  {item['outcome']}")
+                return 0
+
+            if arguments.command == "context":
+                result = build_context_packet(
+                    connection, arguments.query, arguments.task_id, arguments.limit
+                )
+                if arguments.json:
+                    print(json.dumps(result, ensure_ascii=False))
+                else:
+                    working = result["working"]
+                    print(f"working: {working['task_id']} — {working['goal']}")
+                    for layer in ("procedural", "semantic", "episodic"):
+                        items = result[layer]
+                        if not items:
+                            continue
+                        print(f"{layer}:")
+                        for item in items:
+                            label = item["path"] if "path" in item else f"episode {item['id']}"
+                            title = item["title"] if "title" in item else item["summary"]
+                            print(f"  {label} — {title}")
                 return 0
 
             raise ContextError(f"Unsupported command: {arguments.command}")
