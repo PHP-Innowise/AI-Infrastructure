@@ -34,6 +34,10 @@ The same accelerator is mirrored for **Claude Code** (`.claude/`), **Cursor** (`
 - MUST execute only the selected skill, then stop.
 - MUST NOT chain to another skill automatically.
 - MUST output a Context Summary and Next Steps.
+- SHOULD record one sanitized local context episode after a completed
+  non-trivial task when `memory-bank/scripts/context.py` exists. Store only the
+  summary, outcome, changed paths, verification, and source references; never
+  raw conversation content.
 - MUST NOT make workflow decisions for the user when a command is supposed to offer alternatives.
 - MUST read relevant Symfony controllers, routes, services, repositories, entities, migrations, forms/DTOs, voters/security config, tests, and specs before modifying behavior.
 - MUST read `memory-bank/README.md` and `memory-bank/INDEX.md` when a memory bank exists, then load only chunks relevant to the task's scope and tags.

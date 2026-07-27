@@ -169,6 +169,28 @@ class ContextEngineTest(unittest.TestCase):
         self.assertEqual(1, payload["episodes"])
         self.assertTrue(payload["database"].endswith("memory-bank/local/context.db"))
 
+    def test_search_rejects_unusable_query_and_limit(self) -> None:
+        no_words = self.run_context("search", "!!!", "--json")
+        self.assertNotEqual(0, no_words.returncode)
+        self.assertIn("Search query must contain a word", no_words.stderr)
+
+        zero_limit = self.run_context("search", "memory", "--limit", "0", "--json")
+        self.assertNotEqual(0, zero_limit.returncode)
+        self.assertIn("--limit must be a positive integer", zero_limit.stderr)
+
+    def test_record_rejects_blank_required_fields(self) -> None:
+        recorded = self.run_context(
+            "record",
+            "--summary",
+            " ",
+            "--outcome",
+            "Completed.",
+            "--json",
+        )
+
+        self.assertNotEqual(0, recorded.returncode)
+        self.assertIn("Episode summary and outcome must not be empty", recorded.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

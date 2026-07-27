@@ -1,6 +1,6 @@
 ---
 name: memory-bank
-description: Manage durable project memory for Symfony development. Use when the user asks to remember project context, initialize or audit a memory bank, retrieve prior decisions or conventions, preserve a verified lesson across sessions, resolve stale/conflicting memory, or prune/supersede memory chunks. Do not use for transient task notes or chat summaries.
+description: Manage durable Symfony project memory and repository-local context. Use to retrieve or preserve verified knowledge, search indexed project/task context, record a sanitized completed-task episode, audit memory, or resolve stale chunks. Do not use for raw chat transcripts or unverified facts.
 phase: utility
 flow-next: null
 flow-alternatives: [documentation-generator, reflect, architect]
@@ -17,8 +17,24 @@ Maintain one canonical, secure, source-backed `memory-bank/` shared by Claude Co
 - **Audit:** detect stale, duplicated, conflicting, orphaned, or unsafe chunks.
 - **Supersede/archive:** preserve traceability while removing stale memory from active retrieval.
 - **Initialize:** create the canonical layout only when it does not exist.
+- **Context index/search/record/status:** manage the ignored local context database.
 
 Execute only the selected mode, then stop. Do not turn every Context Summary into memory automatically.
+
+## Local Context Workflow
+
+1. Run `python3 memory-bank/scripts/context.py index` before repository-context
+   search so changed and deleted sources are reflected.
+2. Search with `python3 memory-bank/scripts/context.py search "<query>"`.
+3. Treat results as retrieval hints and verify material claims against the
+   returned repository paths before using or promoting them.
+4. After a completed non-trivial task, optionally run `record` with only its
+   summary, outcome, changed paths, verification, and source references.
+5. Use `status` to report local document and episode counts.
+
+The SQLite database is ignored and non-authoritative. Never store raw prompts,
+responses, logs, secrets, customer data, or unresolved guesses. A local episode
+must never become durable memory without the normal Capture workflow.
 
 ## Retrieval Workflow
 
@@ -88,4 +104,4 @@ Memory can point to a living spec but must not replace one when architecture, AP
 
 ## Output
 
-Report selected mode, chunks read/created/updated/superseded, authoritative sources verified, index/counter changes, conflicts or sensitive candidates rejected, validation evidence, Context Summary, and Next Steps.
+Report selected mode, local context actions, chunks read/created/updated/superseded, authoritative sources verified, index/counter changes, conflicts or sensitive candidates rejected, validation evidence, Context Summary, and Next Steps.

@@ -25,8 +25,9 @@ memory-bank/
 ├── .memory-counter       # Next numeric chunk identifier
 ├── chunks/               # Committed shared memory
 ├── templates/chunk.md    # Required chunk structure
+├── scripts/context.py    # Local context index and task episodes
 ├── scripts/validate.py   # Dependency-free structural validator
-└── local/                # Ignored personal notes; never shared authority
+└── local/context.db      # Ignored, disposable SQLite FTS5 index
 ```
 
 ## What Belongs Here
@@ -65,6 +66,34 @@ Run:
 ```bash
 python3 memory-bank/scripts/validate.py
 ```
+
+## Local Context Engine
+
+The context engine searches repository knowledge without changing its authority.
+It indexes `AGENTS.md`, living specs, active memory chunks, task documents,
+capability epics, and `CHANGELOG.md` into the ignored
+`memory-bank/local/context.db`.
+
+```bash
+python3 memory-bank/scripts/context.py index
+python3 memory-bank/scripts/context.py search "invoice ownership"
+python3 memory-bank/scripts/context.py status
+python3 memory-bank/scripts/context.py record \
+  --summary "Implemented invoice ownership checks" \
+  --outcome "Cross-tenant access is rejected" \
+  --file app/Policies/InvoicePolicy.php \
+  --verification "InvoicePolicyTest passed" \
+  --source specs/billing.md
+```
+
+Episodes are local, non-authoritative summaries of completed work. Record only
+the summary, outcome, changed paths, verification, and source references; never
+store raw prompts, responses, logs, secrets, or customer data. Search results
+must still be verified against their cited repository sources before use.
+
+The first version deliberately uses FTS5 only. Add local embeddings or
+reranking only when a repeatable retrieval evaluation demonstrates missing
+semantic recall.
 
 ## Lifecycle
 

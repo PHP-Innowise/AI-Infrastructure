@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Local context engine** - added a dependency-free SQLite FTS5 index for
+  policy, specs, active memory, task documents, capability epics, and changelog
+  history, plus gitignored summaries of completed tasks. The shared
+  `memory-bank` skill exposes index, search, record, and status workflows
+  without treating local episodes as authoritative memory.
+
 ## 1.2.1 - 2026-07-18
 
 ### Fixed
