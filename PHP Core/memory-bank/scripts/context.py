@@ -10,6 +10,7 @@ import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from validate import (
     SECRET_PATTERNS,
@@ -25,16 +26,22 @@ class ContextError(Exception):
 
 
 SOURCE_PATTERNS = (
-    ("policy", "AGENTS.md"),
-    ("policy", "CLAUDE.md"),
-    ("overview", "README.md"),
-    ("spec", "specs/**/*.md"),
-    ("spec", "docs/**/*.md"),
-    ("memory", "memory-bank/chunks/*.md"),
-    ("task", "tasks/**/*.md"),
-    ("capability", "Task/Epics/**/*.md"),
-    ("changelog", "CHANGELOG.md"),
+    ("procedural", "policy", "AGENTS.md"),
+    ("procedural", "policy", "CLAUDE.md"),
+    ("procedural", "skill", ".agents/skills/**/*.md"),
+    ("procedural", "skill", ".claude/skills/**/*.md"),
+    ("procedural", "skill", ".cursor/skills/**/*.md"),
+    ("procedural", "skill", ".codex/skills/**/*.md"),
+    ("semantic", "overview", "README.md"),
+    ("semantic", "spec", "specs/**/*.md"),
+    ("semantic", "spec", "docs/**/*.md"),
+    ("semantic", "memory", "memory-bank/chunks/*.md"),
+    ("semantic", "task", "tasks/**/*.md"),
+    ("semantic", "capability", "Task/Epics/**/*.md"),
+    ("episodic", "changelog", "CHANGELOG.md"),
 )
+DOCUMENT_LAYERS = ("procedural", "semantic", "episodic")
+TASK_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
 
 
 def default_root() -> Path:
@@ -51,17 +58,14 @@ def connect(database: Path) -> sqlite3.Connection:
     connection.row_factory = sqlite3.Row
     try:
         connection.execute("BEGIN IMMEDIATE")
-        connection.execute(
-            """
-            CREATE VIRTUAL TABLE IF NOT EXISTS documents USING fts5(
-                path UNINDEXED,
-                kind UNINDEXED,
-                title,
-                content,
-                tokenize = 'unicode61'
-            )
-            """
-        )
+        document_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(documents)")
+        }
+        if document_columns and "layer" not in document_columns:
+            connection.execute("DROP TABLE documents")
+            document_columns = set()
+        if not document_columns:
+            create_document_table(connection)
         episode_schema = connection.execute(
             "SELECT sql FROM sqlite_master WHERE name = 'episodes'"
         ).fetchone()
@@ -76,6 +80,20 @@ def connect(database: Path) -> sqlite3.Connection:
             for column in ("files", "verification", "sources")
         ):
             migrate_episode_table(connection)
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS working_tasks(
+                task_id TEXT PRIMARY KEY,
+                goal TEXT NOT NULL,
+                progress TEXT NOT NULL,
+                next_steps TEXT NOT NULL,
+                files TEXT NOT NULL,
+                sources TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
         connection.commit()
     except Exception as error:
         connection.rollback()
@@ -84,6 +102,21 @@ def connect(database: Path) -> sqlite3.Connection:
             raise ContextError("SQLite FTS5 support is required") from error
         raise
     return connection
+
+
+def create_document_table(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE VIRTUAL TABLE documents USING fts5(
+            path UNINDEXED,
+            layer UNINDEXED,
+            kind UNINDEXED,
+            title,
+            content,
+            tokenize = 'unicode61'
+        )
+        """
+    )
 
 
 def create_episode_table(connection: sqlite3.Connection) -> None:
@@ -138,18 +171,32 @@ def active_memory(path: Path, repository: Path) -> bool:
     return metadata["status"] == "active"
 
 
-def discover_documents(repository: Path) -> list[tuple[str, str, str, str]]:
-    documents: list[tuple[str, str, str, str]] = []
-    for kind, pattern in SOURCE_PATTERNS:
+def discover_documents(repository: Path) -> list[tuple[str, str, str, str, str]]:
+    documents: list[tuple[str, str, str, str, str]] = []
+    skill_keys: set[str] = set()
+    for layer, kind, pattern in SOURCE_PATTERNS:
         for path in sorted(repository.glob(pattern)):
             if not path.is_file() or path.is_symlink():
                 continue
+            if kind == "memory":
+                if not active_memory(path, repository):
+                    continue
+            else:
+                try:
+                    validate_secret_patterns(path)
+                except (OSError, ValidationError):
+                    continue
+            relative_path = path.relative_to(repository).as_posix()
+            if kind == "skill":
+                skill_key = relative_path.split("/skills/", maxsplit=1)[1]
+                if skill_key in skill_keys:
+                    continue
+                skill_keys.add(skill_key)
             content = path.read_text(encoding="utf-8")
-            if kind == "memory" and not active_memory(path, repository):
-                continue
             documents.append(
                 (
-                    path.relative_to(repository).as_posix(),
+                    relative_path,
+                    layer,
                     kind,
                     document_title(path, content),
                     content,
@@ -158,9 +205,9 @@ def discover_documents(repository: Path) -> list[tuple[str, str, str, str]]:
     return documents
 
 
-def index_repository(connection: sqlite3.Connection, repository: Path) -> dict[str, int]:
+def index_repository(connection: sqlite3.Connection, repository: Path) -> dict[str, object]:
     documents = discover_documents(repository)
-    indexed_paths = {path for path, _, _, _ in documents}
+    indexed_paths = {path for path, _, _, _, _ in documents}
 
     with connection:
         existing_paths = {
@@ -170,11 +217,18 @@ def index_repository(connection: sqlite3.Connection, repository: Path) -> dict[s
         stale_paths = existing_paths - indexed_paths
         connection.execute("DELETE FROM documents")
         connection.executemany(
-            "INSERT INTO documents(path, kind, title, content) VALUES (?, ?, ?, ?)",
+            "INSERT INTO documents(path, layer, kind, title, content) VALUES (?, ?, ?, ?, ?)",
             documents,
         )
 
-    return {"documents": len(documents), "removed": len(stale_paths)}
+    return {
+        "documents": len(documents),
+        "removed": len(stale_paths),
+        "layers": {
+            layer: sum(document[1] == layer for document in documents)
+            for layer in DOCUMENT_LAYERS
+        },
+    }
 
 
 def fts_query(query: str) -> str:
@@ -190,20 +244,28 @@ def search_documents(
     connection: sqlite3.Connection,
     query: str,
     limit: int,
+    layer: Optional[str] = None,
 ) -> list[dict[str, object]]:
+    conditions = ["documents MATCH ?"]
+    parameters: list[object] = [fts_query(query)]
+    if layer is not None:
+        conditions.append("layer = ?")
+        parameters.append(layer)
+    parameters.append(limit)
     rows = connection.execute(
-        """
+        f"""
         SELECT
             path,
+            layer,
             kind,
             title,
-            snippet(documents, 3, '[', ']', ' … ', 18) AS snippet
+            snippet(documents, 4, '[', ']', ' … ', 18) AS snippet
         FROM documents
-        WHERE documents MATCH ?
+        WHERE {' AND '.join(conditions)}
         ORDER BY bm25(documents), path
         LIMIT ?
         """,
-        (fts_query(query), limit),
+        parameters,
     ).fetchall()
     return [dict(row) for row in rows]
 
@@ -233,6 +295,7 @@ def search_episodes(
     return [
         {
             "id": row["id"],
+            "layer": "episodic",
             "summary": row["summary"],
             "outcome": row["outcome"],
             "files": json.loads(row["files"]),
@@ -244,7 +307,51 @@ def search_episodes(
     ]
 
 
-def record_episode(
+def build_context_packet(
+    connection: sqlite3.Connection, query: str, task_id: str, limit: int
+) -> dict[str, object]:
+    if limit < 1:
+        raise ContextError("--limit must be a positive integer")
+    return {
+        "query": query,
+        "task_id": task_id,
+        "working": get_working_task(connection, task_id),
+        "procedural": search_documents(connection, query, limit, "procedural"),
+        "semantic": search_documents(connection, query, limit, "semantic"),
+        "episodic": (
+            search_documents(connection, query, limit, "episodic")
+            + search_episodes(connection, query, limit)
+        )[:limit],
+    }
+
+
+def validate_task_id(task_id: str) -> str:
+    normalized = task_id.strip()
+    if TASK_ID_PATTERN.fullmatch(normalized) is None:
+        raise ContextError("Task ID must use letters, digits, '.', '_', '/', or '-'")
+    reject_secrets("working task", [normalized])
+    return normalized
+
+
+def normalize_values(label: str, values: list[str]) -> list[str]:
+    normalized = [value.strip() for value in values]
+    if any(not value for value in normalized):
+        raise ContextError(f"{label} must not be empty")
+    return normalized
+
+
+def merge_unique(existing: list[str], additions: list[str]) -> list[str]:
+    return list(dict.fromkeys((*existing, *additions)))
+
+
+def reject_secrets(record_type: str, values: list[str]) -> None:
+    candidate = "\n".join(values)
+    for label, pattern in SECRET_PATTERNS.items():
+        if pattern.search(candidate):
+            raise ContextError(f"possible {label} detected; {record_type} not stored")
+
+
+def insert_episode(
     connection: sqlite3.Connection,
     summary: str,
     outcome: str,
@@ -256,37 +363,199 @@ def record_episode(
     outcome = outcome.strip()
     if not summary or not outcome:
         raise ContextError("Episode summary and outcome must not be empty")
-    cleaned: list[list[str]] = []
-    for label, values in (
-        ("file", files),
-        ("verification", verification),
-        ("source", sources),
-    ):
-        normalized = [value.strip() for value in values]
-        if any(not value for value in normalized):
-            raise ContextError(f"Episode {label} must not be empty")
-        cleaned.append(normalized)
-    files, verification, sources = cleaned
-    candidate = "\n".join((summary, outcome, *files, *verification, *sources))
-    for label, pattern in SECRET_PATTERNS.items():
-        if pattern.search(candidate):
-            raise ContextError(f"possible {label} detected; episode not stored")
+    files = normalize_values("Episode file", files)
+    verification = normalize_values("Episode verification", verification)
+    sources = normalize_values("Episode source", sources)
+    reject_secrets("episode", [summary, outcome, *files, *verification, *sources])
+    cursor = connection.execute(
+        """
+        INSERT INTO episodes(summary, outcome, files, verification, sources, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            summary,
+            outcome,
+            json.dumps(files, ensure_ascii=False),
+            json.dumps(verification, ensure_ascii=False),
+            json.dumps(sources, ensure_ascii=False),
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def record_episode(
+    connection: sqlite3.Connection,
+    summary: str,
+    outcome: str,
+    files: list[str],
+    verification: list[str],
+    sources: list[str],
+) -> int:
     with connection:
-        cursor = connection.execute(
+        return insert_episode(
+            connection, summary, outcome, files, verification, sources
+        )
+
+
+def get_working_task(
+    connection: sqlite3.Connection, task_id: str
+) -> dict[str, object]:
+    task_id = validate_task_id(task_id)
+    row = connection.execute(
+        """
+        SELECT task_id, goal, progress, next_steps, files, sources, created_at, updated_at
+        FROM working_tasks
+        WHERE task_id = ?
+        """,
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        raise ContextError(f"Working task not found: {task_id}")
+    return {
+        "task_id": row["task_id"],
+        "goal": row["goal"],
+        "progress": row["progress"],
+        "next_steps": json.loads(row["next_steps"]),
+        "files": json.loads(row["files"]),
+        "sources": json.loads(row["sources"]),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def start_working_task(
+    connection: sqlite3.Connection,
+    task_id: str,
+    goal: str,
+    files: list[str],
+    sources: list[str],
+) -> dict[str, object]:
+    task_id = validate_task_id(task_id)
+    goal = goal.strip()
+    if not goal:
+        raise ContextError("Working task goal must not be empty")
+    files = normalize_values("Working task file", files)
+    sources = normalize_values("Working task source", sources)
+    reject_secrets("working task", [task_id, goal, *files, *sources])
+    timestamp = datetime.now(timezone.utc).isoformat()
+    with connection:
+        if connection.execute(
+            "SELECT 1 FROM working_tasks WHERE task_id = ?", (task_id,)
+        ).fetchone() is not None:
+            raise ContextError(f"Working task already exists: {task_id}")
+        connection.execute(
             """
-            INSERT INTO episodes(summary, outcome, files, verification, sources, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO working_tasks(
+                task_id, goal, progress, next_steps, files, sources, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                summary,
-                outcome,
+                task_id,
+                goal,
+                "",
+                json.dumps([], ensure_ascii=False),
                 json.dumps(files, ensure_ascii=False),
-                json.dumps(verification, ensure_ascii=False),
                 json.dumps(sources, ensure_ascii=False),
-                datetime.now(timezone.utc).isoformat(),
+                timestamp,
+                timestamp,
             ),
         )
-    return int(cursor.lastrowid)
+    return get_working_task(connection, task_id)
+
+
+def update_working_task(
+    connection: sqlite3.Connection,
+    task_id: str,
+    progress: Optional[str],
+    next_steps: list[str],
+    files: list[str],
+    sources: list[str],
+) -> dict[str, object]:
+    task_id = validate_task_id(task_id)
+    next_steps = normalize_values("Working task next step", next_steps)
+    files = normalize_values("Working task file", files)
+    sources = normalize_values("Working task source", sources)
+    if progress is None and not (next_steps or files or sources):
+        raise ContextError("Working task update requires a changed field")
+    if progress is not None:
+        progress = progress.strip()
+        if not progress:
+            raise ContextError("Working task progress must not be empty")
+    reject_secrets(
+        "working task",
+        [task_id] + ([progress] if progress is not None else []) + next_steps + files + sources,
+    )
+    with connection:
+        row = connection.execute(
+            "SELECT progress, next_steps, files, sources FROM working_tasks WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            raise ContextError(f"Working task not found: {task_id}")
+        connection.execute(
+            """
+            UPDATE working_tasks
+            SET progress = ?, next_steps = ?, files = ?, sources = ?, updated_at = ?
+            WHERE task_id = ?
+            """,
+            (
+                row["progress"] if progress is None else progress,
+                json.dumps(
+                    merge_unique(json.loads(row["next_steps"]), next_steps),
+                    ensure_ascii=False,
+                ),
+                json.dumps(merge_unique(json.loads(row["files"]), files), ensure_ascii=False),
+                json.dumps(
+                    merge_unique(json.loads(row["sources"]), sources), ensure_ascii=False
+                ),
+                datetime.now(timezone.utc).isoformat(),
+                task_id,
+            ),
+        )
+    return get_working_task(connection, task_id)
+
+
+def clear_working_task(connection: sqlite3.Connection, task_id: str) -> None:
+    task_id = validate_task_id(task_id)
+    with connection:
+        cursor = connection.execute(
+            "DELETE FROM working_tasks WHERE task_id = ?", (task_id,)
+        )
+        if cursor.rowcount != 1:
+            raise ContextError(f"Working task not found: {task_id}")
+
+
+def complete_working_task(
+    connection: sqlite3.Connection,
+    task_id: str,
+    outcome: str,
+    summary: Optional[str],
+    files: list[str],
+    verification: list[str],
+    sources: list[str],
+) -> int:
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        task = get_working_task(connection, task_id)
+        episode_id = insert_episode(
+            connection,
+            task["goal"] if summary is None else summary,
+            outcome,
+            merge_unique(task["files"], files),
+            verification,
+            merge_unique(task["sources"], sources),
+        )
+        cursor = connection.execute(
+            "DELETE FROM working_tasks WHERE task_id = ?", (task["task_id"],)
+        )
+        if cursor.rowcount != 1:
+            raise ContextError(f"Working task not found: {task_id}")
+        connection.commit()
+        return episode_id
+    except Exception:
+        connection.rollback()
+        raise
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -301,7 +570,14 @@ def build_parser() -> argparse.ArgumentParser:
     search = commands.add_parser("search", help="search indexed repository context")
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=8)
+    search.add_argument("--layer", choices=DOCUMENT_LAYERS)
     search.add_argument("--json", action="store_true")
+
+    context = commands.add_parser("context", help="assemble layered task context")
+    context.add_argument("query")
+    context.add_argument("--task-id", required=True)
+    context.add_argument("--limit", type=int, default=3)
+    context.add_argument("--json", action="store_true")
 
     record = commands.add_parser("record", help="store a local completed-task episode")
     record.add_argument("--summary", required=True)
@@ -310,6 +586,38 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--verification", action="append", default=[])
     record.add_argument("--source", action="append", default=[])
     record.add_argument("--json", action="store_true")
+
+    start = commands.add_parser("start", help="store an active task")
+    start.add_argument("--task-id", required=True)
+    start.add_argument("--goal", required=True)
+    start.add_argument("--file", action="append", default=[])
+    start.add_argument("--source", action="append", default=[])
+    start.add_argument("--json", action="store_true")
+
+    update = commands.add_parser("update", help="update an active task")
+    update.add_argument("--task-id", required=True)
+    update.add_argument("--progress")
+    update.add_argument("--next-step", action="append", default=[])
+    update.add_argument("--file", action="append", default=[])
+    update.add_argument("--source", action="append", default=[])
+    update.add_argument("--json", action="store_true")
+
+    get = commands.add_parser("get", help="show an active task")
+    get.add_argument("--task-id", required=True)
+    get.add_argument("--json", action="store_true")
+
+    clear = commands.add_parser("clear", help="clear an active task")
+    clear.add_argument("--task-id", required=True)
+    clear.add_argument("--json", action="store_true")
+
+    complete = commands.add_parser("complete", help="complete an active task")
+    complete.add_argument("--task-id", required=True)
+    complete.add_argument("--outcome", required=True)
+    complete.add_argument("--summary")
+    complete.add_argument("--file", action="append", default=[])
+    complete.add_argument("--verification", action="append", default=[])
+    complete.add_argument("--source", action="append", default=[])
+    complete.add_argument("--json", action="store_true")
 
     status = commands.add_parser("status", help="show local context index counts")
     status.add_argument("--json", action="store_true")
@@ -355,7 +663,76 @@ def main() -> int:
                     print(f"Context episode recorded: {episode_id}.")
                 return 0
 
+            if arguments.command == "start":
+                result = start_working_task(
+                    connection,
+                    arguments.task_id,
+                    arguments.goal,
+                    arguments.file,
+                    arguments.source,
+                )
+                if arguments.json:
+                    print(json.dumps(result, ensure_ascii=False))
+                else:
+                    print(f"Working task started: {result['task_id']}.")
+                return 0
+
+            if arguments.command == "update":
+                result = update_working_task(
+                    connection,
+                    arguments.task_id,
+                    arguments.progress,
+                    arguments.next_step,
+                    arguments.file,
+                    arguments.source,
+                )
+                if arguments.json:
+                    print(json.dumps(result, ensure_ascii=False))
+                else:
+                    print(f"Working task updated: {result['task_id']}.")
+                return 0
+
+            if arguments.command == "get":
+                result = get_working_task(connection, arguments.task_id)
+                if arguments.json:
+                    print(json.dumps(result, ensure_ascii=False))
+                else:
+                    print(f"Working task: {result['task_id']} — {result['goal']}")
+                return 0
+
+            if arguments.command == "clear":
+                task_id = validate_task_id(arguments.task_id)
+                clear_working_task(connection, task_id)
+                result = {"task_id": task_id}
+                if arguments.json:
+                    print(json.dumps(result, ensure_ascii=False))
+                else:
+                    print(f"Working task cleared: {task_id}.")
+                return 0
+
+            if arguments.command == "complete":
+                episode_id = complete_working_task(
+                    connection,
+                    arguments.task_id,
+                    arguments.outcome,
+                    arguments.summary,
+                    arguments.file,
+                    arguments.verification,
+                    arguments.source,
+                )
+                result = {"episode_id": episode_id}
+                if arguments.json:
+                    print(json.dumps(result))
+                else:
+                    print(f"Working task completed as episode: {episode_id}.")
+                return 0
+
             if arguments.command == "status":
+                layers = {layer: 0 for layer in DOCUMENT_LAYERS}
+                for row in connection.execute(
+                    "SELECT layer, COUNT(*) AS count FROM documents GROUP BY layer"
+                ):
+                    layers[row["layer"]] = row["count"]
                 result = {
                     "documents": connection.execute(
                         "SELECT COUNT(*) FROM documents"
@@ -363,6 +740,10 @@ def main() -> int:
                     "episodes": connection.execute(
                         "SELECT COUNT(*) FROM episodes"
                     ).fetchone()[0],
+                    "working": connection.execute(
+                        "SELECT COUNT(*) FROM working_tasks"
+                    ).fetchone()[0],
+                    "layers": layers,
                     "database": str(database),
                 }
                 if arguments.json:
@@ -370,14 +751,18 @@ def main() -> int:
                 else:
                     print(
                         f"Context index: {result['documents']} documents, "
-                        f"{result['episodes']} episodes ({result['database']})."
+                        f"{result['episodes']} episodes, {result['working']} working tasks "
+                        f"({', '.join(f'{layer}: {count}' for layer, count in layers.items())}; "
+                        f"{result['database']})."
                     )
                 return 0
 
             if arguments.command == "search":
                 if arguments.limit < 1:
                     raise ContextError("--limit must be a positive integer")
-                documents = search_documents(connection, arguments.query, arguments.limit)
+                documents = search_documents(
+                    connection, arguments.query, arguments.limit, arguments.layer
+                )
                 episodes = search_episodes(connection, arguments.query, arguments.limit)
                 result = {
                     "query": arguments.query,
@@ -388,11 +773,34 @@ def main() -> int:
                     print(json.dumps(result, ensure_ascii=False))
                 else:
                     for item in documents:
-                        print(f"{item['kind']}: {item['path']} — {item['title']}")
+                        print(
+                            f"{item['layer']} {item['kind']}: "
+                            f"{item['path']} — {item['title']}"
+                        )
                         print(f"  {item['snippet']}")
                     for item in episodes:
                         print(f"episode {item['id']}: {item['summary']}")
                         print(f"  {item['outcome']}")
+                return 0
+
+            if arguments.command == "context":
+                result = build_context_packet(
+                    connection, arguments.query, arguments.task_id, arguments.limit
+                )
+                if arguments.json:
+                    print(json.dumps(result, ensure_ascii=False))
+                else:
+                    working = result["working"]
+                    print(f"working: {working['task_id']} — {working['goal']}")
+                    for layer in ("procedural", "semantic", "episodic"):
+                        items = result[layer]
+                        if not items:
+                            continue
+                        print(f"{layer}:")
+                        for item in items:
+                            label = item["path"] if "path" in item else f"episode {item['id']}"
+                            title = item["title"] if "title" in item else item["summary"]
+                            print(f"  {label} — {title}")
                 return 0
 
             raise ContextError(f"Unsupported command: {arguments.command}")
