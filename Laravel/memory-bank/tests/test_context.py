@@ -9,9 +9,11 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Callable
 from unittest import mock
 
 
@@ -25,6 +27,54 @@ try:
     SPEC.loader.exec_module(CONTEXT)
 finally:
     sys.path.pop(0)
+
+
+class PrefetchedCursor:
+    def __init__(self, row: object) -> None:
+        self.row = row
+
+    def fetchone(self) -> object:
+        return self.row
+
+
+class SynchronizedConnection:
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        select_prefix: str,
+        barrier: threading.Barrier,
+    ) -> None:
+        self.connection = connection
+        self.select_prefix = select_prefix
+        self.barrier = barrier
+
+    def __enter__(self) -> SynchronizedConnection:
+        self.connection.__enter__()
+        return self
+
+    def __exit__(
+        self, exception_type: object, exception: object, traceback: object
+    ) -> object:
+        return self.connection.__exit__(exception_type, exception, traceback)
+
+    def execute(
+        self, statement: str, parameters: tuple[object, ...] = ()
+    ) -> object:
+        cursor = self.connection.execute(statement, parameters)
+        if " ".join(statement.split()).startswith(self.select_prefix):
+            row = cursor.fetchone()
+            try:
+                self.barrier.wait(timeout=1)
+            except threading.BrokenBarrierError:
+                pass
+            return PrefetchedCursor(row)
+        return cursor
+
+    def commit(self) -> None:
+        self.connection.commit()
+
+    def rollback(self) -> None:
+        self.connection.rollback()
 
 
 class ContextEngineTest(unittest.TestCase):
@@ -43,6 +93,38 @@ class ContextEngineTest(unittest.TestCase):
             text=True,
             capture_output=True,
         )
+
+    def run_concurrently(
+        self,
+        select_prefix: str,
+        operation: Callable[[SynchronizedConnection], object],
+    ) -> list[object]:
+        database = self.repository / "memory-bank/local/context.db"
+        ready = threading.Barrier(2)
+        selected = threading.Barrier(2)
+        results: list[object] = [None, None]
+
+        def worker(index: int) -> None:
+            connection = CONTEXT.connect(database)
+            try:
+                ready.wait()
+                synchronized = SynchronizedConnection(
+                    connection, select_prefix, selected
+                )
+                try:
+                    results[index] = operation(synchronized)
+                except Exception as error:
+                    results[index] = error
+            finally:
+                connection.close()
+
+        threads = [threading.Thread(target=worker, args=(index,)) for index in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+            self.assertFalse(thread.is_alive(), "concurrent operation did not finish")
+        return results
 
     def write_memory(self, name: str, status: object, body: str) -> None:
         memory_id = "-".join(name.split("-", 2)[:2])
@@ -186,6 +268,7 @@ class ContextEngineTest(unittest.TestCase):
         documents = json.loads(searched.stdout)["documents"]
         self.assertEqual(1, len(documents))
         self.assertEqual("procedural", documents[0]["layer"])
+        self.assertEqual(".agents/skills/review/SKILL.md", documents[0]["path"])
 
     def test_index_skips_skill_with_secret_without_persisting_it(self) -> None:
         secret = "ghp_" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
@@ -546,6 +629,62 @@ class ContextEngineTest(unittest.TestCase):
         self.assertEqual(["src/Task.php", "tests/TaskTest.php"], task["files"])
         self.assertEqual(["specs/task.md", "docs/task.md"], task["sources"])
 
+    def test_concurrent_working_updates_preserve_both_additions(self) -> None:
+        self.assertEqual(
+            0,
+            self.run_context(
+                "start",
+                "--task-id",
+                "TASK-1",
+                "--goal",
+                "Keep concurrent updates.",
+            ).returncode,
+        )
+
+        additions = iter(("First synchronized step.", "Second synchronized step."))
+        additions_lock = threading.Lock()
+
+        def update(connection: SynchronizedConnection) -> object:
+            with additions_lock:
+                addition = next(additions)
+            return CONTEXT.update_working_task(
+                connection, "TASK-1", None, [addition], [], []
+            )
+
+        results = self.run_concurrently(
+            "SELECT progress, next_steps, files, sources FROM working_tasks",
+            update,
+        )
+        self.assertTrue(
+            all(isinstance(result, dict) for result in results), results
+        )
+
+        task = json.loads(
+            self.run_context("get", "--task-id", "TASK-1", "--json").stdout
+        )
+        self.assertEqual(
+            ["First synchronized step.", "Second synchronized step."],
+            sorted(task["next_steps"]),
+        )
+
+    def test_concurrent_duplicate_starts_return_clean_already_exists_error(self) -> None:
+        def start(connection: SynchronizedConnection) -> object:
+            return CONTEXT.start_working_task(
+                connection, "TASK-1", "Start once.", [], []
+            )
+
+        results = self.run_concurrently(
+            "SELECT 1 FROM working_tasks WHERE task_id =",
+            start,
+        )
+        successes = [result for result in results if isinstance(result, dict)]
+        errors = [result for result in results if isinstance(result, Exception)]
+        self.assertEqual(1, len(successes), results)
+        self.assertEqual(1, len(errors), results)
+        self.assertIsInstance(errors[0], CONTEXT.ContextError)
+        self.assertIn("already exists", str(errors[0]))
+        self.assertFalse(any(isinstance(error, sqlite3.Error) for error in errors))
+
     def test_complete_moves_working_task_to_searchable_episode(self) -> None:
         started = self.run_context(
             "start",
@@ -571,12 +710,16 @@ class ContextEngineTest(unittest.TestCase):
             "tests/Integration/GraphQL/ChangePasswordTest.php",
             "--file",
             "src/GraphQL/Resolver/ChangePasswordResolver.php",
+            "--file",
+            " src/GraphQL/Resolver/ChangePasswordResolver.php ",
             "--verification",
             "ChangePasswordTest passed",
             "--source",
             "docs/passwords.md",
             "--source",
             "specs/passwords.md",
+            "--source",
+            " specs/passwords.md ",
             "--json",
         )
         self.assertEqual(0, completed.returncode, completed.stderr)
@@ -807,6 +950,53 @@ class ContextEngineTest(unittest.TestCase):
         zero_limit = self.run_context("search", "memory", "--limit", "0", "--json")
         self.assertNotEqual(0, zero_limit.returncode)
         self.assertIn("--limit must be a positive integer", zero_limit.stderr)
+
+    def test_search_layer_filters_local_episodes(self) -> None:
+        self.repository.joinpath("AGENTS.md").write_text(
+            "# Procedure\n\nUse the marigold context rule.\n",
+            encoding="utf-8",
+        )
+        self.repository.joinpath("README.md").write_text(
+            "# Domain\n\nThe marigold context rule is documented.\n",
+            encoding="utf-8",
+        )
+        self.repository.joinpath("CHANGELOG.md").write_text(
+            "# Changes\n\nThe marigold context rule shipped.\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(0, self.run_context("index", "--json").returncode)
+        self.assertEqual(
+            0,
+            self.run_context(
+                "record",
+                "--summary",
+                "Marigold context work.",
+                "--outcome",
+                "The marigold context rule is verified.",
+            ).returncode,
+        )
+
+        for layer, path in (
+            ("procedural", "AGENTS.md"),
+            ("semantic", "README.md"),
+            ("episodic", "CHANGELOG.md"),
+        ):
+            with self.subTest(layer=layer):
+                payload = json.loads(
+                    self.run_context(
+                        "search", "marigold", "--layer", layer, "--json"
+                    ).stdout
+                )
+                self.assertEqual([path], [item["path"] for item in payload["documents"]])
+                self.assertEqual(
+                    1 if layer == "episodic" else 0,
+                    len(payload["episodes"]),
+                )
+
+        unfiltered = json.loads(
+            self.run_context("search", "marigold", "--json").stdout
+        )
+        self.assertEqual(1, len(unfiltered["episodes"]))
 
     def test_record_rejects_blank_required_fields(self) -> None:
         recorded = self.run_context(

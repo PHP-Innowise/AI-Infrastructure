@@ -27,7 +27,7 @@ memory-bank/
 ├── templates/chunk.md    # Required chunk structure
 ├── scripts/context.py    # Local context index and task episodes
 ├── scripts/validate.py   # Dependency-free structural validator
-└── local/context.db      # Ignored, disposable SQLite FTS5 index
+└── local/context.db      # Ignored derived index and local task data
 ```
 
 ## What Belongs Here
@@ -80,6 +80,8 @@ Repository code, configuration, tests, specs, and policy remain authoritative.
 The context packet returns a bounded set of retrieval hints per document layer;
 verify material claims against the cited source before using them.
 
+Run these lifecycle commands from the edition root or consuming-project root:
+
 ```bash
 python3 memory-bank/scripts/context.py index
 python3 memory-bank/scripts/context.py start \
@@ -110,8 +112,8 @@ Episodes and working state are local, non-authoritative data. Never store raw
 conversations, prompts, responses, logs, secrets, customer data, or credentials;
 the CLI rejects likely secrets. `clear --task-id …` abandons only that active
 working task. Deleting `memory-bank/local/context.db` also permanently removes
-local working tasks and episodes (the index is rebuildable from repository
-sources, but those local records are not).
+local working tasks and episodes. Only the derived document index is rebuildable
+from repository sources; working tasks and episodes are local data.
 
 ## Lifecycle
 

@@ -439,7 +439,8 @@ def start_working_task(
     sources = normalize_values("Working task source", sources)
     reject_secrets("working task", [task_id, goal, *files, *sources])
     timestamp = datetime.now(timezone.utc).isoformat()
-    with connection:
+    try:
+        connection.execute("BEGIN IMMEDIATE")
         if connection.execute(
             "SELECT 1 FROM working_tasks WHERE task_id = ?", (task_id,)
         ).fetchone() is not None:
@@ -461,6 +462,10 @@ def start_working_task(
                 timestamp,
             ),
         )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
     return get_working_task(connection, task_id)
 
 
@@ -486,7 +491,8 @@ def update_working_task(
         "working task",
         [task_id] + ([progress] if progress is not None else []) + next_steps + files + sources,
     )
-    with connection:
+    try:
+        connection.execute("BEGIN IMMEDIATE")
         row = connection.execute(
             "SELECT progress, next_steps, files, sources FROM working_tasks WHERE task_id = ?",
             (task_id,),
@@ -513,6 +519,10 @@ def update_working_task(
                 task_id,
             ),
         )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
     return get_working_task(connection, task_id)
 
 
@@ -535,6 +545,8 @@ def complete_working_task(
     verification: list[str],
     sources: list[str],
 ) -> int:
+    files = normalize_values("Episode file", files)
+    sources = normalize_values("Episode source", sources)
     try:
         connection.execute("BEGIN IMMEDIATE")
         task = get_working_task(connection, task_id)
@@ -763,7 +775,11 @@ def main() -> int:
                 documents = search_documents(
                     connection, arguments.query, arguments.limit, arguments.layer
                 )
-                episodes = search_episodes(connection, arguments.query, arguments.limit)
+                episodes = (
+                    search_episodes(connection, arguments.query, arguments.limit)
+                    if arguments.layer in (None, "episodic")
+                    else []
+                )
                 result = {
                     "query": arguments.query,
                     "documents": documents,
