@@ -25,6 +25,8 @@ The implementation adds:
 It does not add embeddings, a vector database, an MCP transport, raw transcript
 capture, or a central service.
 
+The CLI supports Python 3.9+ and requires a Python SQLite build with FTS5.
+
 ## Authority And Storage
 
 Git-tracked policy, code, tests, living specs, and active memory chunks remain
@@ -63,9 +65,10 @@ Indexing reads only a bounded set of Markdown sources:
 5. `Task/Epics/**/*.md` as capability and business-rule context;
 6. `CHANGELOG.md` as completed change history.
 
-Re-indexing upserts changed documents and removes stale rows. Non-active memory
-chunks are excluded. Search uses FTS5 token matching and returns durable
-documents before local episodes, preserving the authority hierarchy.
+Re-indexing transactionally rebuilds the bounded document table and preserves
+the separate episode table. Non-active or canonically invalid memory chunks are
+excluded. Search uses FTS5 token matching and returns durable documents before
+local episodes, preserving the authority hierarchy.
 
 ## Error Handling And Security
 

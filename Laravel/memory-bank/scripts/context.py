@@ -8,10 +8,16 @@ import json
 import re
 import sqlite3
 import sys
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
-from validate import SECRET_PATTERNS
+from validate import (
+    SECRET_PATTERNS,
+    ValidationError,
+    parse_frontmatter,
+    validate_metadata,
+    validate_secret_patterns,
+)
 
 
 class ContextError(Exception):
@@ -54,9 +60,9 @@ def connect(database: Path) -> sqlite3.Connection:
             CREATE VIRTUAL TABLE IF NOT EXISTS episodes USING fts5(
                 summary,
                 outcome,
-                files UNINDEXED,
-                verification UNINDEXED,
-                sources UNINDEXED,
+                files,
+                verification,
+                sources,
                 created_at UNINDEXED,
                 tokenize = 'unicode61'
             );
@@ -77,15 +83,14 @@ def document_title(path: Path, content: str) -> str:
     return path.stem.replace("-", " ").replace("_", " ")
 
 
-def active_memory(content: str) -> bool:
-    if not content.startswith("---\n"):
-        return False
+def active_memory(path: Path, repository: Path) -> bool:
     try:
-        raw_metadata, _ = content[4:].split("\n---\n", 1)
-        metadata = json.loads(raw_metadata)
-    except (ValueError, json.JSONDecodeError):
+        metadata = parse_frontmatter(path)
+        validate_metadata(path, metadata, repository)
+        validate_secret_patterns(path)
+    except (OSError, ValidationError):
         return False
-    return isinstance(metadata, dict) and metadata.get("status") == "active"
+    return metadata["status"] == "active"
 
 
 def discover_documents(repository: Path) -> list[tuple[str, str, str, str]]:
@@ -95,7 +100,7 @@ def discover_documents(repository: Path) -> list[tuple[str, str, str, str]]:
             if not path.is_file() or path.is_symlink():
                 continue
             content = path.read_text(encoding="utf-8")
-            if kind == "memory" and not active_memory(content):
+            if kind == "memory" and not active_memory(path, repository):
                 continue
             documents.append(
                 (
@@ -133,7 +138,7 @@ def fts_query(query: str) -> str:
     tokens = re.findall(r"\w+", query, flags=re.UNICODE)
     if not tokens:
         raise ContextError("Search query must contain a word")
-    return " OR ".join(f'"{token.replace(chr(34), chr(34) * 2)}"' for token in tokens)
+    return " OR ".join(f'"{token}"' for token in tokens)
 
 
 def search_documents(
@@ -202,8 +207,21 @@ def record_episode(
     verification: list[str],
     sources: list[str],
 ) -> int:
-    if not summary.strip() or not outcome.strip():
+    summary = summary.strip()
+    outcome = outcome.strip()
+    if not summary or not outcome:
         raise ContextError("Episode summary and outcome must not be empty")
+    cleaned: list[list[str]] = []
+    for label, values in (
+        ("file", files),
+        ("verification", verification),
+        ("source", sources),
+    ):
+        normalized = [value.strip() for value in values]
+        if any(not value for value in normalized):
+            raise ContextError(f"Episode {label} must not be empty")
+        cleaned.append(normalized)
+    files, verification, sources = cleaned
     candidate = "\n".join((summary, outcome, *files, *verification, *sources))
     for label, pattern in SECRET_PATTERNS.items():
         if pattern.search(candidate):
@@ -215,12 +233,12 @@ def record_episode(
             VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
-                summary.strip(),
-                outcome.strip(),
+                summary,
+                outcome,
                 json.dumps(files, ensure_ascii=False),
                 json.dumps(verification, ensure_ascii=False),
                 json.dumps(sources, ensure_ascii=False),
-                datetime.now(UTC).isoformat(),
+                datetime.now(timezone.utc).isoformat(),
             ),
         )
     return int(cursor.lastrowid)
@@ -256,9 +274,13 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     arguments = build_parser().parse_args()
     repository = arguments.root.resolve()
-    database = (arguments.db or default_database(repository)).resolve()
 
     try:
+        if not repository.is_dir():
+            raise ContextError(
+                f"Repository root must be an existing directory: {repository}"
+            )
+        database = (arguments.db or default_database(repository)).resolve()
         connection = connect(database)
         try:
             if arguments.command == "index":

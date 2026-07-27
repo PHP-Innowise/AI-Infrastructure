@@ -6,12 +6,13 @@
 
 **Architecture:** Each accelerator owns an identical Python CLI backed by a gitignored SQLite database. Git-tracked documents remain authoritative; the database is a disposable FTS5 index plus non-authoritative local task episodes.
 
-**Tech Stack:** Python 3 standard library, SQLite FTS5, `unittest`, existing memory-bank validator secret patterns
+**Tech Stack:** Python 3.9+ standard library, SQLite FTS5, `unittest`, existing memory-bank validator metadata and secret checks
 
 ## Global Constraints
 
 - Keep `Laravel/`, `PHP Core/`, and `Symfony/` self-contained.
 - Add no runtime dependency or network service.
+- Support Python 3.9 and newer.
 - Store the database only at `memory-bank/local/context.db` by default.
 - Never store raw conversations or secret-like values.
 - Keep production scripts and their tests byte-identical across all three accelerators.
@@ -64,9 +65,9 @@ Expected: failure because `memory-bank/scripts/context.py` does not exist.
 
 - [ ] **Step 3: Implement indexing and search**
 
-Create the SQLite schema, bounded source discovery, active-memory filtering,
-incremental upserts/deletes, safe FTS5 query construction, JSON output, and
-human-readable output in `context.py`.
+Create the SQLite schema, bounded source discovery, canonically validated
+active-memory filtering, transactional document-index rebuild, safe FTS5 query
+construction, JSON output, and human-readable output in `context.py`.
 
 - [ ] **Step 4: Run the test and verify GREEN**
 

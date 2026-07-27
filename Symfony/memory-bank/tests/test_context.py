@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import date, timedelta
 from pathlib import Path
 
 
@@ -32,8 +33,28 @@ class ContextEngineTest(unittest.TestCase):
         )
 
     def write_memory(self, name: str, status: str, body: str) -> None:
+        memory_id = "-".join(name.split("-", 2)[:2])
+        today = date.today()
+        self.repository.joinpath("AGENTS.md").write_text(
+            "# Policy\n",
+            encoding="utf-8",
+        )
+        metadata = {
+            "id": memory_id,
+            "title": name.removesuffix(".md"),
+            "type": "convention",
+            "status": status,
+            "scope": ["application"],
+            "tags": ["context"],
+            "created": today.isoformat(),
+            "last_verified": today.isoformat(),
+            "review_after": (today + timedelta(days=365)).isoformat(),
+            "sources": ["AGENTS.md"],
+            "supersedes": [],
+            "superseded_by": "MEM-9999" if status == "superseded" else None,
+        }
         self.repository.joinpath("memory-bank/chunks", name).write_text(
-            f'---\n{{"status": "{status}"}}\n---\n\n{body}\n',
+            f"---\n{json.dumps(metadata, indent=2)}\n---\n\n{body}\n",
             encoding="utf-8",
         )
 
@@ -80,6 +101,22 @@ class ContextEngineTest(unittest.TestCase):
         self.assertEqual(0, old.returncode, old.stderr)
         self.assertEqual([], json.loads(old.stdout)["documents"])
 
+    def test_index_skips_parseable_but_invalid_active_memory(self) -> None:
+        self.repository.joinpath(
+            "memory-bank/chunks/MEM-0003-invalid-active.md"
+        ).write_text(
+            '---\n{"status": "active"}\n---\n\n'
+            "# Invalid Active Memory\n\nThe vermilion shortcut is unsafe.\n",
+            encoding="utf-8",
+        )
+
+        indexed = self.run_context("index", "--json")
+        self.assertEqual(0, indexed.returncode, indexed.stderr)
+
+        searched = self.run_context("search", "vermilion", "--json")
+        self.assertEqual(0, searched.returncode, searched.stderr)
+        self.assertEqual([], json.loads(searched.stdout)["documents"])
+
     def test_recorded_episode_is_searchable(self) -> None:
         recorded = self.run_context(
             "record",
@@ -88,11 +125,11 @@ class ContextEngineTest(unittest.TestCase):
             "--outcome",
             "Deployment retries are idempotent.",
             "--file",
-            "src/Deployment/Retry.php",
+            "src/Deployment/CobaltHandler.php",
             "--verification",
             "RetryTest passed",
             "--source",
-            "specs/deployment.md",
+            "specs/indigo-source.md",
             "--json",
         )
         self.assertEqual(0, recorded.returncode, recorded.stderr)
@@ -102,9 +139,17 @@ class ContextEngineTest(unittest.TestCase):
         episodes = json.loads(searched.stdout)["episodes"]
         self.assertEqual(1, len(episodes))
         self.assertEqual("Added the crimson retry boundary.", episodes[0]["summary"])
-        self.assertEqual(["src/Deployment/Retry.php"], episodes[0]["files"])
+        self.assertEqual(["src/Deployment/CobaltHandler.php"], episodes[0]["files"])
         self.assertEqual(["RetryTest passed"], episodes[0]["verification"])
-        self.assertEqual(["specs/deployment.md"], episodes[0]["sources"])
+        self.assertEqual(["specs/indigo-source.md"], episodes[0]["sources"])
+
+        by_file = self.run_context("search", "CobaltHandler", "--json")
+        self.assertEqual(0, by_file.returncode, by_file.stderr)
+        self.assertEqual(1, len(json.loads(by_file.stdout)["episodes"]))
+
+        by_source = self.run_context("search", "indigo", "--json")
+        self.assertEqual(0, by_source.returncode, by_source.stderr)
+        self.assertEqual(1, len(json.loads(by_source.stdout)["episodes"]))
 
     def test_reindex_removes_deleted_document(self) -> None:
         specification = self.repository / "specs" / "temporary.md"
@@ -190,6 +235,34 @@ class ContextEngineTest(unittest.TestCase):
 
         self.assertNotEqual(0, recorded.returncode)
         self.assertIn("Episode summary and outcome must not be empty", recorded.stderr)
+
+    def test_record_rejects_blank_optional_field(self) -> None:
+        recorded = self.run_context(
+            "record",
+            "--summary",
+            "Completed task.",
+            "--outcome",
+            "Task is complete.",
+            "--file",
+            " ",
+            "--json",
+        )
+
+        self.assertNotEqual(0, recorded.returncode)
+        self.assertIn("Episode file must not be empty", recorded.stderr)
+
+    def test_nonexistent_root_is_rejected_without_creating_it(self) -> None:
+        missing = self.repository / "missing"
+
+        status = subprocess.run(
+            [sys.executable, str(SCRIPT), "--root", str(missing), "status", "--json"],
+            text=True,
+            capture_output=True,
+        )
+
+        self.assertNotEqual(0, status.returncode)
+        self.assertIn("Repository root must be an existing directory", status.stderr)
+        self.assertFalse(missing.exists())
 
 
 if __name__ == "__main__":
