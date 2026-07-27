@@ -105,7 +105,7 @@ Memory can point to a living spec but must not replace one when architecture, AP
 - Verify indexed paths and cited local sources exist.
 - Check active chunks for duplicate concepts and contradictory statements.
 - Search the changed memory for secret-like material without printing suspected values.
-- Run `<edition>/DOD.md` and report unavailable tooling as N/A.
+- Run `.cursor/DOD.md` and report unavailable tooling as N/A.
 
 ## Output
 
