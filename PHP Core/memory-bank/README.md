@@ -69,32 +69,49 @@ python3 memory-bank/scripts/validate.py
 
 ## Local Context Engine
 
-The context engine searches repository knowledge without changing its authority.
-It requires Python 3.9+ with SQLite FTS5 support.
-It indexes `AGENTS.md`/`CLAUDE.md`, the root `README.md`, `specs/` and `docs/`,
-active memory chunks, task documents, capability epics, and `CHANGELOG.md` into the ignored
-`memory-bank/local/context.db`.
+The context engine keeps four logical layers in one ignored SQLite FTS5 database:
+procedural policy/skills, semantic repository knowledge/active memory, episodic
+changelog/completed work, and working task state. It requires Python 3.9+ with
+SQLite FTS5 support. It indexes `AGENTS.md`/`CLAUDE.md`, the root `README.md`,
+`specs/` and `docs/`, active memory chunks, task documents, capability epics,
+and `CHANGELOG.md` into `memory-bank/local/context.db`.
+
+Repository code, configuration, tests, specs, and policy remain authoritative.
+The context packet returns a bounded set of retrieval hints per document layer;
+verify material claims against the cited source before using them.
 
 ```bash
 python3 memory-bank/scripts/context.py index
-python3 memory-bank/scripts/context.py search "invoice ownership"
-python3 memory-bank/scripts/context.py status
-python3 memory-bank/scripts/context.py record \
-  --summary "Implemented invoice ownership checks" \
-  --outcome "Cross-tenant access is rejected" \
-  --file src/Policy/InvoicePolicy.php \
-  --verification "InvoicePolicyTest passed" \
-  --source specs/billing.md
+python3 memory-bank/scripts/context.py start \
+  --task-id BAUMAS-133 \
+  --goal "Invalidate other password-change sessions"
+python3 memory-bank/scripts/context.py update \
+  --task-id BAUMAS-133 \
+  --progress "Two-session regression passes" \
+  --next-step "Verify the old remember-me cookie"
+python3 memory-bank/scripts/context.py context \
+  "password session invalidation" \
+  --task-id BAUMAS-133
+python3 memory-bank/scripts/context.py complete \
+  --task-id BAUMAS-133 \
+  --outcome "Other sessions and stale remember-me cookies are invalidated" \
+  --verification "ChangePasswordTest passed"
 ```
 
-Episodes are local, non-authoritative summaries of completed work. Record only
-the summary, outcome, changed paths, verification, and source references; never
-store raw prompts, responses, logs, secrets, or customer data. Search results
-must still be verified against their cited repository sources before use.
+Supply a ticket ID, branch name, or descriptive slug explicitly. For non-trivial
+work, use `start → update → context → complete`: begin before work, add only
+sanitized progress, retrieve context before decisions, and complete only after
+verification. `complete` atomically converts that working task into an episode.
+`search` still searches indexed sources and episodes, and `record` remains
+compatible for a standalone completed-task episode; `status` reports layer,
+episode, and working-task counts.
 
-The first version deliberately uses FTS5 only. Add local embeddings or
-reranking only when a repeatable retrieval evaluation demonstrates missing
-semantic recall.
+Episodes and working state are local, non-authoritative data. Never store raw
+conversations, prompts, responses, logs, secrets, customer data, or credentials;
+the CLI rejects likely secrets. `clear --task-id …` abandons only that active
+working task. Deleting `memory-bank/local/context.db` also permanently removes
+local working tasks and episodes (the index is rebuildable from repository
+sources, but those local records are not).
 
 ## Lifecycle
 

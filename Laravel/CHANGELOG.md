@@ -6,9 +6,12 @@
 
 - **Local context engine** - added a dependency-free SQLite FTS5 index for
   policy, specs, active memory, task documents, capability epics, and changelog
-  history, plus gitignored summaries of completed tasks. The shared
-  `memory-bank` skill exposes index, search, record, and status workflows
-  without treating local episodes as authoritative memory.
+  history, plus gitignored summaries of completed tasks. It classifies
+  procedural, semantic, episodic, and working context in one local database;
+  callers supply task IDs, retrieve bounded per-layer packets, and atomically
+  complete a working task into an episode. The shared `memory-bank` skill keeps
+  index, search, record, and status compatible without treating local episodes
+  as authoritative memory.
 
 ## 1.4.3 - 2026-07-18
 

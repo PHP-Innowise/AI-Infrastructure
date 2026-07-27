@@ -17,24 +17,29 @@ Maintain one canonical, secure, source-backed `memory-bank/` shared by Claude Co
 - **Audit:** detect stale, duplicated, conflicting, orphaned, or unsafe chunks.
 - **Supersede/archive:** preserve traceability while removing stale memory from active retrieval.
 - **Initialize:** create the canonical layout only when it does not exist.
-- **Context index/search/record/status:** manage the ignored local context database.
+- **Local context:** manage the ignored four-layer database and explicit task lifecycle.
 
 Execute only the selected mode, then stop. Do not turn every Context Summary into memory automatically.
 
 ## Local Context Workflow
 
-1. Run `python3 memory-bank/scripts/context.py index` before repository-context
-   search so changed and deleted sources are reflected.
-2. Search with `python3 memory-bank/scripts/context.py search "<query>"`.
-3. Treat results as retrieval hints and verify material claims against the
-   returned repository paths before using or promoting them.
-4. After a completed non-trivial task, optionally run `record` with only its
-   summary, outcome, changed paths, verification, and source references.
-5. Use `status` to report local document and episode counts.
+1. Supply a ticket ID, branch name, or descriptive slug; run `index`, then
+   `start` before non-trivial Laravel work.
+2. Run `context "<query>" --task-id <id>` before material decisions. It returns
+   bounded procedural, semantic, and episodic hints; verify them against current
+   Laravel code, configuration, tests, specs, and policy.
+3. Use `update` only for sanitized progress, next steps, paths, and sources.
+4. After verification, run `complete`; it atomically moves the working task to
+   a local episode. Use `clear` only to abandon a working task.
+5. `search`, `record`, and `status` remain compatible for direct retrieval,
+   standalone episodes, and counts.
 
-The SQLite database is ignored and non-authoritative. Never store raw prompts,
-responses, logs, secrets, customer data, or unresolved guesses. A local episode
-must never become durable memory without the normal Capture workflow.
+One ignored SQLite database holds all four layers, including working state.
+Never store raw conversations, prompts, responses, logs, secrets, customer
+data, or unresolved guesses; the CLI rejects likely secrets. Deleting it
+discards local working tasks and episodes as well as the rebuildable index.
+A local episode must never become durable memory without the normal Capture
+workflow.
 
 ## Retrieval Workflow
 
@@ -100,7 +105,7 @@ Memory can point to a living spec but must not replace one when architecture, AP
 - Verify indexed paths and cited local sources exist.
 - Check active chunks for duplicate concepts and contradictory statements.
 - Search the changed memory for secret-like material without printing suspected values.
-- Run `.claude/DOD.md` and report unavailable tooling as N/A.
+- Run `<edition>/DOD.md` and report unavailable tooling as N/A.
 
 ## Output
 

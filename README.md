@@ -76,6 +76,16 @@ Each folder's own `AGENTS.md` is the enforceable policy for that stack; its `REA
 
 All three editions ship the same `memory-bank/` — an indexed, cross-session, source-verified project-memory store shared by Claude Code, Cursor, and Codex within each folder. The memory categories and examples are adapted per stack (e.g. Symfony's Controller -> Service -> Repository/Messenger wording vs. Laravel's Controller -> Action/Service -> Eloquent model boundaries vs. PHP Core's generic entry-point/service/data-access-gateway boundaries), but the store format, validator, and lifecycle (`active` / `needs-review` / `superseded` / `archived`) are identical, so a chunk from one edition's `memory-bank/README.md` is a familiar read in any other.
 
+## Local Context Engine
+
+Each edition also has a repository-local context engine. It keeps four logical layers in one repository-local, ignored SQLite database: **procedural** policy and skills, **semantic** repository knowledge and active memory, **episodic** changelog and completed-task summaries, and **working** task state. Repository code, configuration, tests, specs, and policy remain the source of truth; search results are bounded retrieval hints that must be verified against those sources.
+
+For non-trivial work, the caller supplies a task ID (ticket, branch, or descriptive slug) and follows `start → update → context → complete`: start the task, add only sanitized progress, retrieve a bounded per-layer packet before decisions, then complete it after verification. Completion atomically turns the working task into a local episode. `index`, `search`, `record`, and `status` remain available for compatible direct use.
+
+The database is local and ignored. It rejects likely secrets, and it must never contain raw conversations, prompts, responses, logs, customer data, or credentials. `clear` removes only an active working task; deleting `memory-bank/local/context.db` also discards local working tasks and episodes (the repository index can be rebuilt, but those local records cannot). This is an explicit CLI workflow, not automatic per-request injection, embeddings/vector search, MCP, LangGraph, or a central service.
+
+The workflow was exercised as a black-box run against the real Bauherrenmappe checkout: reporting the procedural, semantic, and episodic layer counts, tracking `BAUMAS-133` through start/update/context/complete, searching the resulting episode, and confirming that checkout's Git status was unchanged.
+
 Each folder's `CHANGELOG.md` tracks its own version history independently — the three no longer need to be merged or kept in lockstep now that they aren't sharing a branch.
 
 ## Infrastructure-Creator: Generate An Accelerator For Your Own Project
