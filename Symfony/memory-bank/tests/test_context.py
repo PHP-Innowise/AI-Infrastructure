@@ -546,6 +546,102 @@ class ContextEngineTest(unittest.TestCase):
         self.assertEqual(["src/Task.php", "tests/TaskTest.php"], task["files"])
         self.assertEqual(["specs/task.md", "docs/task.md"], task["sources"])
 
+    def test_complete_moves_working_task_to_searchable_episode(self) -> None:
+        started = self.run_context(
+            "start",
+            "--task-id",
+            "BAUMAS-133",
+            "--goal",
+            "BAUMAS-133: Invalidate other password sessions.",
+            "--file",
+            "src/GraphQL/Resolver/ChangePasswordResolver.php",
+            "--source",
+            "specs/passwords.md",
+            "--json",
+        )
+        self.assertEqual(0, started.returncode, started.stderr)
+
+        completed = self.run_context(
+            "complete",
+            "--task-id",
+            "BAUMAS-133",
+            "--outcome",
+            "Other sessions are invalidated.",
+            "--file",
+            "tests/Integration/GraphQL/ChangePasswordTest.php",
+            "--file",
+            "src/GraphQL/Resolver/ChangePasswordResolver.php",
+            "--verification",
+            "ChangePasswordTest passed",
+            "--source",
+            "docs/passwords.md",
+            "--source",
+            "specs/passwords.md",
+            "--json",
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+
+        status = json.loads(self.run_context("status", "--json").stdout)
+        self.assertEqual(0, status["working"])
+        self.assertEqual(1, status["episodes"])
+
+        episode = json.loads(
+            self.run_context("search", "BAUMAS-133", "--json").stdout
+        )["episodes"][0]
+        self.assertEqual(
+            "BAUMAS-133: Invalidate other password sessions.", episode["summary"]
+        )
+        self.assertEqual(
+            [
+                "src/GraphQL/Resolver/ChangePasswordResolver.php",
+                "tests/Integration/GraphQL/ChangePasswordTest.php",
+            ],
+            episode["files"],
+        )
+        self.assertEqual(["ChangePasswordTest passed"], episode["verification"])
+        self.assertEqual(
+            ["specs/passwords.md", "docs/passwords.md"], episode["sources"]
+        )
+
+    def test_complete_rolls_back_episode_when_working_delete_fails(self) -> None:
+        started = self.run_context(
+            "start",
+            "--task-id",
+            "BAUMAS-133",
+            "--goal",
+            "BAUMAS-133: Invalidate other password sessions.",
+            "--json",
+        )
+        self.assertEqual(0, started.returncode, started.stderr)
+
+        database = self.repository / "memory-bank/local/context.db"
+        connection = sqlite3.connect(database)
+        connection.executescript(
+            """
+            CREATE TRIGGER fail_working_delete
+            BEFORE DELETE ON working_tasks
+            BEGIN
+                SELECT RAISE(ABORT, 'simulated complete failure');
+            END;
+            """
+        )
+        connection.close()
+
+        completed = self.run_context(
+            "complete",
+            "--task-id",
+            "BAUMAS-133",
+            "--outcome",
+            "Other sessions are invalidated.",
+            "--json",
+        )
+        self.assertNotEqual(0, completed.returncode)
+        self.assertIn("simulated complete failure", completed.stderr)
+
+        status = json.loads(self.run_context("status", "--json").stdout)
+        self.assertEqual(1, status["working"])
+        self.assertEqual(0, status["episodes"])
+
     def test_working_rejects_duplicate_unknown_and_invalid_tasks(self) -> None:
         self.assertEqual(
             0,

@@ -351,7 +351,7 @@ def reject_secrets(record_type: str, values: list[str]) -> None:
             raise ContextError(f"possible {label} detected; {record_type} not stored")
 
 
-def record_episode(
+def insert_episode(
     connection: sqlite3.Connection,
     summary: str,
     outcome: str,
@@ -367,22 +367,35 @@ def record_episode(
     verification = normalize_values("Episode verification", verification)
     sources = normalize_values("Episode source", sources)
     reject_secrets("episode", [summary, outcome, *files, *verification, *sources])
-    with connection:
-        cursor = connection.execute(
-            """
-            INSERT INTO episodes(summary, outcome, files, verification, sources, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                summary,
-                outcome,
-                json.dumps(files, ensure_ascii=False),
-                json.dumps(verification, ensure_ascii=False),
-                json.dumps(sources, ensure_ascii=False),
-                datetime.now(timezone.utc).isoformat(),
-            ),
-        )
+    cursor = connection.execute(
+        """
+        INSERT INTO episodes(summary, outcome, files, verification, sources, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            summary,
+            outcome,
+            json.dumps(files, ensure_ascii=False),
+            json.dumps(verification, ensure_ascii=False),
+            json.dumps(sources, ensure_ascii=False),
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
     return int(cursor.lastrowid)
+
+
+def record_episode(
+    connection: sqlite3.Connection,
+    summary: str,
+    outcome: str,
+    files: list[str],
+    verification: list[str],
+    sources: list[str],
+) -> int:
+    with connection:
+        return insert_episode(
+            connection, summary, outcome, files, verification, sources
+        )
 
 
 def get_working_task(
@@ -513,6 +526,38 @@ def clear_working_task(connection: sqlite3.Connection, task_id: str) -> None:
             raise ContextError(f"Working task not found: {task_id}")
 
 
+def complete_working_task(
+    connection: sqlite3.Connection,
+    task_id: str,
+    outcome: str,
+    summary: Optional[str],
+    files: list[str],
+    verification: list[str],
+    sources: list[str],
+) -> int:
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        task = get_working_task(connection, task_id)
+        episode_id = insert_episode(
+            connection,
+            task["goal"] if summary is None else summary,
+            outcome,
+            merge_unique(task["files"], files),
+            verification,
+            merge_unique(task["sources"], sources),
+        )
+        cursor = connection.execute(
+            "DELETE FROM working_tasks WHERE task_id = ?", (task["task_id"],)
+        )
+        if cursor.rowcount != 1:
+            raise ContextError(f"Working task not found: {task_id}")
+        connection.commit()
+        return episode_id
+    except Exception:
+        connection.rollback()
+        raise
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=default_root())
@@ -564,6 +609,15 @@ def build_parser() -> argparse.ArgumentParser:
     clear = commands.add_parser("clear", help="clear an active task")
     clear.add_argument("--task-id", required=True)
     clear.add_argument("--json", action="store_true")
+
+    complete = commands.add_parser("complete", help="complete an active task")
+    complete.add_argument("--task-id", required=True)
+    complete.add_argument("--outcome", required=True)
+    complete.add_argument("--summary")
+    complete.add_argument("--file", action="append", default=[])
+    complete.add_argument("--verification", action="append", default=[])
+    complete.add_argument("--source", action="append", default=[])
+    complete.add_argument("--json", action="store_true")
 
     status = commands.add_parser("status", help="show local context index counts")
     status.add_argument("--json", action="store_true")
@@ -654,6 +708,23 @@ def main() -> int:
                     print(json.dumps(result, ensure_ascii=False))
                 else:
                     print(f"Working task cleared: {task_id}.")
+                return 0
+
+            if arguments.command == "complete":
+                episode_id = complete_working_task(
+                    connection,
+                    arguments.task_id,
+                    arguments.outcome,
+                    arguments.summary,
+                    arguments.file,
+                    arguments.verification,
+                    arguments.source,
+                )
+                result = {"episode_id": episode_id}
+                if arguments.json:
+                    print(json.dumps(result))
+                else:
+                    print(f"Working task completed as episode: {episode_id}.")
                 return 0
 
             if arguments.command == "status":
