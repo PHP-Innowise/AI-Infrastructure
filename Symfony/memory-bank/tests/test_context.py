@@ -187,6 +187,25 @@ class ContextEngineTest(unittest.TestCase):
         self.assertEqual(1, len(documents))
         self.assertEqual("procedural", documents[0]["layer"])
 
+    def test_index_skips_skill_with_secret_without_persisting_it(self) -> None:
+        secret = "ghp_" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
+        skill = self.repository / ".agents/skills/review/SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text(
+            f"# Review\n\nCredential: {secret}\n",
+            encoding="utf-8",
+        )
+
+        indexed = self.run_context("index", "--json")
+        self.assertEqual(0, indexed.returncode, indexed.stderr)
+        self.assertEqual(0, json.loads(indexed.stdout)["documents"])
+        self.assertNotIn("ABCDEFGHIJKLMNOPQRSTUVWXYZ", indexed.stderr)
+
+        connection = sqlite3.connect(self.repository / "memory-bank/local/context.db")
+        documents = connection.execute("SELECT path, content FROM documents").fetchall()
+        connection.close()
+        self.assertEqual([], documents)
+
     def test_index_includes_common_project_documentation(self) -> None:
         self.repository.joinpath("CLAUDE.md").write_text(
             "# Policy\n\nFollow the orchid convention.\n",

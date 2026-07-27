@@ -163,6 +163,14 @@ def discover_documents(repository: Path) -> list[tuple[str, str, str, str, str]]
         for path in sorted(repository.glob(pattern)):
             if not path.is_file() or path.is_symlink():
                 continue
+            if kind == "memory":
+                if not active_memory(path, repository):
+                    continue
+            else:
+                try:
+                    validate_secret_patterns(path)
+                except (OSError, ValidationError):
+                    continue
             relative_path = path.relative_to(repository).as_posix()
             if kind == "skill":
                 skill_key = relative_path.split("/skills/", maxsplit=1)[1]
@@ -170,8 +178,6 @@ def discover_documents(repository: Path) -> list[tuple[str, str, str, str, str]]
                     continue
                 skill_keys.add(skill_key)
             content = path.read_text(encoding="utf-8")
-            if kind == "memory" and not active_memory(path, repository):
-                continue
             documents.append(
                 (
                     relative_path,
