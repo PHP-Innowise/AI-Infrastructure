@@ -78,7 +78,7 @@ python3 memory-bank/scripts/context.py context \
   QUERY --task-id ID [--limit N] [--json]
 python3 memory-bank/scripts/context.py complete \
   --task-id ID --outcome TEXT [--summary TEXT] \
-  [--verification TEXT] [--source PATH] [--json]
+  [--file PATH] [--verification TEXT] [--source PATH] [--json]
 python3 memory-bank/scripts/context.py clear --task-id ID [--json]
 python3 memory-bank/scripts/context.py record \
   --summary TEXT --outcome TEXT \
