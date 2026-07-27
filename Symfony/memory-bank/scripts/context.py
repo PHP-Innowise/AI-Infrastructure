@@ -26,7 +26,10 @@ class ContextError(Exception):
 
 SOURCE_PATTERNS = (
     ("policy", "AGENTS.md"),
+    ("policy", "CLAUDE.md"),
+    ("overview", "README.md"),
     ("spec", "specs/**/*.md"),
+    ("spec", "docs/**/*.md"),
     ("memory", "memory-bank/chunks/*.md"),
     ("task", "tasks/**/*.md"),
     ("capability", "Task/Epics/**/*.md"),

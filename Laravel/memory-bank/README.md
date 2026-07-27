@@ -71,8 +71,8 @@ python3 memory-bank/scripts/validate.py
 
 The context engine searches repository knowledge without changing its authority.
 It requires Python 3.9+ with SQLite FTS5 support.
-It indexes `AGENTS.md`, living specs, active memory chunks, task documents,
-capability epics, and `CHANGELOG.md` into the ignored
+It indexes `AGENTS.md`/`CLAUDE.md`, the root `README.md`, `specs/` and `docs/`,
+active memory chunks, task documents, capability epics, and `CHANGELOG.md` into the ignored
 `memory-bank/local/context.db`.
 
 ```bash

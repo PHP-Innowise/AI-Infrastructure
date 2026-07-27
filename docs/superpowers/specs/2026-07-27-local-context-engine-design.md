@@ -58,12 +58,13 @@ python3 memory-bank/scripts/context.py status [--json]
 
 Indexing reads only a bounded set of Markdown sources:
 
-1. `AGENTS.md` as policy;
-2. `specs/**/*.md` as living specifications;
-3. active `memory-bank/chunks/*.md` as verified memory;
-4. `tasks/**/*.md` as task context;
-5. `Task/Epics/**/*.md` as capability and business-rule context;
-6. `CHANGELOG.md` as completed change history.
+1. `AGENTS.md` and `CLAUDE.md` as policy;
+2. root `README.md` as project overview;
+3. `specs/**/*.md` and `docs/**/*.md` as living specifications;
+4. active `memory-bank/chunks/*.md` as verified memory;
+5. `tasks/**/*.md` as task context;
+6. `Task/Epics/**/*.md` as capability and business-rule context;
+7. `CHANGELOG.md` as completed change history.
 
 Re-indexing transactionally rebuilds the bounded document table and preserves
 the separate episode table. Non-active or canonically invalid memory chunks are

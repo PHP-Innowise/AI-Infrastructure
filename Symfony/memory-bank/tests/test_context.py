@@ -118,6 +118,37 @@ class ContextEngineTest(unittest.TestCase):
             [item["path"] for item in payload["documents"]],
         )
 
+    def test_index_includes_common_project_documentation(self) -> None:
+        self.repository.joinpath("CLAUDE.md").write_text(
+            "# Policy\n\nFollow the orchid convention.\n",
+            encoding="utf-8",
+        )
+        self.repository.joinpath("README.md").write_text(
+            "# Project\n\nThe topaz setup uses local services.\n",
+            encoding="utf-8",
+        )
+        self.repository.joinpath("docs/domain").mkdir(parents=True)
+        self.repository.joinpath("docs/domain/rules.md").write_text(
+            "# Domain Rules\n\nThe saffron approval rule is mandatory.\n",
+            encoding="utf-8",
+        )
+
+        indexed = self.run_context("index", "--json")
+        self.assertEqual(0, indexed.returncode, indexed.stderr)
+
+        for term, expected_path in (
+            ("orchid", "CLAUDE.md"),
+            ("topaz", "README.md"),
+            ("saffron", "docs/domain/rules.md"),
+        ):
+            with self.subTest(term=term):
+                searched = self.run_context("search", term, "--json")
+                self.assertEqual(0, searched.returncode, searched.stderr)
+                self.assertEqual(
+                    [expected_path],
+                    [item["path"] for item in json.loads(searched.stdout)["documents"]],
+                )
+
     def test_index_includes_only_active_memory(self) -> None:
         self.write_memory(
             "MEM-0001-current-convention.md",
