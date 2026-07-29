@@ -34,10 +34,13 @@ The same accelerator is mirrored for **Claude Code** (`.claude/`), **Cursor** (`
 - MUST execute only the selected skill, then stop.
 - MUST NOT chain to another skill automatically.
 - MUST output a Context Summary and Next Steps.
-- MUST use a caller-supplied ticket ID, branch name, or descriptive slug for
-  non-trivial local context work when `memory-bank/scripts/context.py` exists.
-- MUST `start` before the work, `context` before material decisions, `update`
-  only with sanitized progress, and `complete` only after verification.
+- MUST use the argument-free `checkpoint` skill when the user asks to capture
+  current progress: derive the task ID from the current Git branch, include all
+  current Git-visible changes, and save a sanitized summary; the skill
+  automatically creates or updates Working Memory.
+- MUST use a caller-supplied task ID only for the manual
+  `start → update → context → complete` lifecycle. `checkpoint` MUST NOT
+  complete the task or create an episode.
 - MUST use the bounded procedural, semantic, and episodic context packet as a
   retrieval hint; Symfony code, configuration, tests, specs, and policy remain
   authoritative.
@@ -124,6 +127,9 @@ The same accelerator is mirrored for **Claude Code** (`.claude/`), **Cursor** (`
   episodic, and working layers. `complete` atomically replaces a working task
   with an episode; `clear` removes only the working task. Deleting the database
   loses local working/episode data, while the repository index can be rebuilt.
+- `checkpoint` is the preferred argument-free progress capture. It stores a
+  sanitized summary and changed paths in Working Memory; explicit `complete`
+  remains required after verification.
 - MUST NEVER capture raw conversations, prompts, responses, logs, credentials,
   customer data, or secret values. The CLI rejects likely secrets.
 - MUST use `memory-bank/` only for durable, reusable project context: verified constraints, conventions, decisions, integration contracts, operational lessons, and stable domain knowledge.

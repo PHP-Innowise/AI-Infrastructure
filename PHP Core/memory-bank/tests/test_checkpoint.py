@@ -85,6 +85,27 @@ class CheckpointIntegrationTest(unittest.TestCase):
                 for option in forbidden:
                     self.assertNotIn(option, command)
 
+    def test_policy_allows_argument_free_checkpoint(self) -> None:
+        policy = REPOSITORY_ROOT.joinpath("AGENTS.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("checkpoint", policy)
+        self.assertIn("current Git branch", policy)
+        self.assertIn("automatically creates or updates", policy)
+
+    def test_readmes_document_checkpoint_without_hiding_completion(self) -> None:
+        memory_readme = REPOSITORY_ROOT.joinpath(
+            "memory-bank/README.md"
+        ).read_text(encoding="utf-8")
+        accelerator_readme = REPOSITORY_ROOT.joinpath("README.md").read_text(
+            encoding="utf-8"
+        )
+
+        for document in (memory_readme, accelerator_readme):
+            self.assertIn("checkpoint", document)
+            self.assertIn("complete", document)
+
 
 if __name__ == "__main__":
     unittest.main()

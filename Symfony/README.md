@@ -214,6 +214,7 @@ Do not install Symfony CLI, bundles, npm packages, or analysis tools without app
 | `verify` | Run the active edition's Definition of Done |
 | `documentation-generator` | Maintain README, ADR, API, worker, and deployment docs |
 | `memory-bank` | Retrieve, capture, audit, supersede, or archive durable project memory |
+| `checkpoint` | Capture all current Git-visible changes as local Working Memory without arguments |
 | `finishing-branch` | Present merge, PR, or cleanup alternatives |
 | `release` | Prepare versioning, changelog, tag, and release notes |
 
@@ -241,6 +242,11 @@ The optional root `memory-bank/` is one canonical shared store for Claude Code, 
 Memory is deliberately below policy, specs, code, configuration, migrations, and tests in the authority hierarchy. Agents read `memory-bank/README.md` and `memory-bank/INDEX.md`, retrieve only relevant active chunks, and verify every material claim before relying on it. Stale chunks are updated, superseded, or archived instead of silently remaining active.
 
 Use the `memory-bank` skill directly in Codex or `/memory-bank` in Claude/Cursor to retrieve, capture, audit, supersede, archive, or initialize memory. Do not use it for transient plans, chat transcripts, generic Symfony advice, command output, or information already owned by a living spec. Secrets, `.env` contents, personal data, production identifiers, raw logs, and customer payloads are prohibited. Non-sensitive personal notes belong in ignored `memory-bank/local/`.
+
+Use `checkpoint` in Codex or `/checkpoint` in Claude/Cursor to capture current
+progress without lifecycle arguments. The branch name becomes the task ID; the
+agent stores a sanitized summary and changed paths. Use explicit `complete`
+only after verification.
 
 Each committed chunk uses `memory-bank/chunks/MEM-NNNN-short-slug.md`, is cataloged in `INDEX.md`, and cites its authoritative sources. The session-start hooks report counts only; they never inject chunk contents into logs or context automatically.
 
