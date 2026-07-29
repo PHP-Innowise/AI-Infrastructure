@@ -340,6 +340,12 @@ def normalize_values(label: str, values: list[str]) -> list[str]:
     return normalized
 
 
+def validate_paths(label: str, values: list[str]) -> list[str]:
+    if any(not value for value in values):
+        raise ContextError(f"{label} must not be empty")
+    return list(values)
+
+
 def merge_unique(existing: list[str], additions: list[str]) -> list[str]:
     return list(dict.fromkeys((*existing, *additions)))
 
@@ -363,7 +369,7 @@ def insert_episode(
     outcome = outcome.strip()
     if not summary or not outcome:
         raise ContextError("Episode summary and outcome must not be empty")
-    files = normalize_values("Episode file", files)
+    files = validate_paths("Episode file", files)
     verification = normalize_values("Episode verification", verification)
     sources = normalize_values("Episode source", sources)
     reject_secrets("episode", [summary, outcome, *files, *verification, *sources])
@@ -435,7 +441,7 @@ def start_working_task(
     goal = goal.strip()
     if not goal:
         raise ContextError("Working task goal must not be empty")
-    files = normalize_values("Working task file", files)
+    files = validate_paths("Working task file", files)
     sources = normalize_values("Working task source", sources)
     reject_secrets("working task", [task_id, goal, *files, *sources])
     timestamp = datetime.now(timezone.utc).isoformat()
@@ -479,7 +485,7 @@ def update_working_task(
 ) -> dict[str, object]:
     task_id = validate_task_id(task_id)
     next_steps = normalize_values("Working task next step", next_steps)
-    files = normalize_values("Working task file", files)
+    files = validate_paths("Working task file", files)
     sources = normalize_values("Working task source", sources)
     if progress is None and not (next_steps or files or sources):
         raise ContextError("Working task update requires a changed field")
@@ -545,7 +551,7 @@ def complete_working_task(
     verification: list[str],
     sources: list[str],
 ) -> int:
-    files = normalize_values("Episode file", files)
+    files = validate_paths("Episode file", files)
     sources = normalize_values("Episode source", sources)
     try:
         connection.execute("BEGIN IMMEDIATE")

@@ -65,7 +65,7 @@ All implementation, review, and planning work must respect root `AGENTS.md`, `sp
 | Implementation | `/git-worktrees`, `/architecture-implementer`, `/coder`, `/coder-frontend`, `/console-command-coder`, `/fixture-factory-generator`, `/refactorer` |
 | Quality | `/architecture-boundary-reviewer`, `/code-reviewer`, `/repository-reviewer`, `/security-reviewer`, `/twig-ux-reviewer`, `/container-reviewer`, `/test-generator`, `/performance-optimization`, `/debugger`, `/verify` |
 | Finalization | `/docs-generator`, `/release`, `/finishing-branch` |
-| Utility | `/memory-bank`, `/reflect`, `/skill-creator`, `/review-pr`, `/browser-verify`, `/dependency-manager` |
+| Utility | `/memory-bank`, `/checkpoint`, `/reflect`, `/skill-creator`, `/review-pr`, `/browser-verify`, `/dependency-manager` |
 
 ## Context Handoff
 

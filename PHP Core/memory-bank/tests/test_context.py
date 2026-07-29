@@ -589,6 +589,24 @@ class ContextEngineTest(unittest.TestCase):
         remaining = self.run_context("get", "--task-id", "BAUMAS-134", "--json")
         self.assertEqual(0, remaining.returncode, remaining.stderr)
 
+    def test_working_start_preserves_exact_file_path(self) -> None:
+        result = self.run_context(
+            "start",
+            "--task-id",
+            "TASK-WHITESPACE",
+            "--goal",
+            "Preserve exact Git paths.",
+            "--file",
+            " leading-and-trailing.txt ",
+            "--json",
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(
+            [" leading-and-trailing.txt "],
+            json.loads(result.stdout)["files"],
+        )
+
     def test_working_update_merges_unique_list_values(self) -> None:
         self.assertEqual(
             0,
@@ -738,6 +756,7 @@ class ContextEngineTest(unittest.TestCase):
             [
                 "src/GraphQL/Resolver/ChangePasswordResolver.php",
                 "tests/Integration/GraphQL/ChangePasswordTest.php",
+                " src/GraphQL/Resolver/ChangePasswordResolver.php ",
             ],
             episode["files"],
         )
@@ -1011,7 +1030,7 @@ class ContextEngineTest(unittest.TestCase):
         self.assertNotEqual(0, recorded.returncode)
         self.assertIn("Episode summary and outcome must not be empty", recorded.stderr)
 
-    def test_record_rejects_blank_optional_field(self) -> None:
+    def test_record_rejects_empty_optional_file(self) -> None:
         recorded = self.run_context(
             "record",
             "--summary",
@@ -1019,7 +1038,7 @@ class ContextEngineTest(unittest.TestCase):
             "--outcome",
             "Task is complete.",
             "--file",
-            " ",
+            "",
             "--json",
         )
 

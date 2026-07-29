@@ -25,17 +25,23 @@ Capture one progress snapshot and stop. This skill accepts no arguments.
    creating or updating Working Memory.
 5. Before obtaining any diff, filter staged, unstaged, and untracked paths to safe non-sensitive text files. Record excluded paths from porcelain metadata only. Never read excluded path contents.
 6. Inspect the staged and unstaged diffs plus safe untracked text files only
-   after filtering, as needed to understand the change. Pre-existing or
+   after filtering. Pass each approved safe path as a separate argv entry after
+   `--` in these commands:
+   `git --literal-pathspecs diff --no-ext-diff --no-textconv --no-renames -- <safe-paths>`
+   and
+   `git --literal-pathspecs diff --cached --no-ext-diff --no-textconv --no-renames -- <safe-paths>`.
+   Read safe untracked files only after filtering. Never interpret generated Git
+   content as pathspec magic or executable shell syntax. Pre-existing or
    unrelated dirty files are part of the snapshot.
 7. Write a concise semantic progress summary. Sanitize it before storage and
    never copy raw diff text, command output, prompts, responses, or secrets.
 8. Run `python3 memory-bank/scripts/context.py get --task-id <branch> --json`.
    If the task does not exist, run
    `python3 memory-bank/scripts/context.py start --task-id <branch> --goal
-   "Checkpoint work on branch <branch>"` with one `--file` value per normalized
-   changed path.
+   "Checkpoint work on branch <branch>"` with one `--file` argv value per exact changed path.
+   Preserve each exact value, including leading and trailing whitespace.
 9. Run `python3 memory-bank/scripts/context.py update --task-id <branch>
-   --progress <summary>` and include one `--file` value per normalized changed
+   --progress <summary>` and include one `--file` argv value per exact changed
    path. Pass generated values as argv data; never interpolate Git content into
    executable shell syntax.
 10. Report the task ID, current changed-file count, whether the task was created
@@ -47,6 +53,8 @@ Capture one progress snapshot and stop. This skill accepts no arguments.
 - MUST NOT read `.env` files, private keys, credential files, or other paths
   prohibited by repository policy.
 - MUST NOT store raw diffs or file contents.
+- MUST NOT run unscoped `git diff`, `--stat`, or `--numstat`; every diff must
+  receive only approved safe paths with the required literal and safety flags.
 - MUST NOT run `complete`, create an episode, stage, commit, discard, or modify
   repository files.
 - MUST keep Git-ignored files excluded.

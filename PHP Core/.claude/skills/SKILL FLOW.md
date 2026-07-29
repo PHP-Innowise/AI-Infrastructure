@@ -51,7 +51,7 @@ This flow keeps native PHP work structured while preserving user control. Agents
 | Implementation | `/git-worktrees`, `/architecture-implementer`, `/coder`, `/coder-frontend`, `/refactorer` |
 | Quality | `/code-reviewer`, `/security-reviewer`, `/test-generator`, `/performance-optimization`, `/debugger`, `/verify` |
 | Finalization | `/docs-generator`, `/release`, `/finishing-branch` |
-| Utility | `/memory-bank`, `/reflect`, `/skill-creator`, `/review-pr`, `/browser-verify`, `/dependency-manager` |
+| Utility | `/memory-bank`, `/checkpoint`, `/reflect`, `/skill-creator`, `/review-pr`, `/browser-verify`, `/dependency-manager` |
 
 ## Context Handoff
 
