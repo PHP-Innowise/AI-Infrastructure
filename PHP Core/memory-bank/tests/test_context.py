@@ -990,7 +990,7 @@ class ContextEngineTest(unittest.TestCase):
         self.assertEqual("BAUMAS-133", payload["working"]["task_id"])
         self.assertLessEqual(len(payload["procedural"]), 2)
         self.assertLessEqual(len(payload["semantic"]), 2)
-        self.assertLessEqual(len(payload["episodic"]), 2)
+        self.assertEqual(1, len(payload["episodic"]))
         self.assertTrue(
             all(item["layer"] == "procedural" for item in payload["procedural"])
         )
@@ -1003,7 +1003,6 @@ class ContextEngineTest(unittest.TestCase):
         self.assertEqual(["AGENTS.md"], [item["path"] for item in payload["procedural"]])
         self.assertEqual(["README.md"], [item["path"] for item in payload["semantic"]])
         self.assertEqual("CHANGELOG.md", payload["episodic"][0]["path"])
-        self.assertIn("id", payload["episodic"][1])
 
         unknown = self.run_context(
             "context", "password", "--task-id", "TASK-404", "--json"
@@ -1017,8 +1016,234 @@ class ContextEngineTest(unittest.TestCase):
             "0",
             "--json",
         )
-        self.assertIn("not found", unknown.stderr)
+        self.assertEqual(0, unknown.returncode, unknown.stderr)
+        unknown_payload = json.loads(unknown.stdout)
+        self.assertIsNone(unknown_payload["working"])
+        self.assertIn("Working task not found: TASK-404", unknown_payload["warnings"])
         self.assertIn("--limit must be a positive integer", invalid_limit.stderr)
+
+    def test_context_builds_request_only_capsule_with_layer_limits(self) -> None:
+        procedural_sources = {
+            "AGENTS.md": "# Policy\n\nThe capsule boundary is mandatory.\n",
+            "CLAUDE.md": "# Claude\n\nThe capsule boundary guides work.\n",
+            ".agents/skills/alpha/SKILL.md": (
+                "# Alpha\n\nThe capsule boundary applies to alpha.\n"
+            ),
+        }
+        for relative_path, content in procedural_sources.items():
+            path = self.repository / relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+
+        semantic_sources = {
+            "README.md": (
+                "# Project\n\nThe capsule boundary describes the project.\n\n"
+                + ("Background material without the search terms. " * 80)
+                + "\nFULL_DOCUMENT_SENTINEL\n"
+            ),
+            "specs/one.md": "# One\n\nThe capsule boundary protects one.\n",
+            "specs/two.md": "# Two\n\nThe capsule boundary protects two.\n",
+            "specs/three.md": "# Three\n\nThe capsule boundary protects three.\n",
+        }
+        for relative_path, content in semantic_sources.items():
+            (self.repository / relative_path).write_text(content, encoding="utf-8")
+
+        self.repository.joinpath("CHANGELOG.md").write_text(
+            "# Changes\n\nThe capsule boundary shipped.\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(0, self.run_context("index", "--json").returncode)
+
+        packet = self.run_context(
+            "context",
+            "capsule boundary",
+            "--limit",
+            "20",
+            "--json",
+        )
+
+        self.assertEqual(0, packet.returncode, packet.stderr)
+        payload = json.loads(packet.stdout)
+        self.assertIsNone(payload["task_id"])
+        self.assertIsNone(payload["working"])
+        self.assertLessEqual(len(payload["procedural"]), 2)
+        self.assertLessEqual(len(payload["semantic"]), 3)
+        self.assertLessEqual(len(payload["episodic"]), 1)
+        self.assertIn("Working task unavailable: task ID was not supplied", payload["warnings"])
+        self.assertNotIn("FULL_DOCUMENT_SENTINEL", packet.stdout)
+
+    def test_context_uses_working_terms_and_deduplicates_paths(self) -> None:
+        self.repository.joinpath("README.md").write_text(
+            "# Cobalt\n\nThe cobalt invariant belongs to the account workflow.\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            0,
+            self.run_context(
+                "start",
+                "--task-id",
+                "BAUMAS-133",
+                "--goal",
+                "Verify the cobalt invariant.",
+            ).returncode,
+        )
+        self.assertEqual(0, self.run_context("index", "--json").returncode)
+
+        packet = self.run_context(
+            "context",
+            "current phase",
+            "--task-id",
+            "BAUMAS-133",
+            "--json",
+        )
+
+        self.assertEqual(0, packet.returncode, packet.stderr)
+        payload = json.loads(packet.stdout)
+        self.assertEqual("BAUMAS-133", payload["task_id"])
+        self.assertEqual("BAUMAS-133", payload["working"]["task_id"])
+        self.assertEqual(
+            ["README.md"],
+            [item["path"] for item in payload["semantic"]],
+        )
+        document = {
+            "path": "README.md",
+            "layer": "semantic",
+            "kind": "overview",
+            "title": "Project",
+            "snippet": "Cobalt invariant.",
+        }
+        episode = {
+            "id": 7,
+            "layer": "episodic",
+            "summary": "Prior work",
+        }
+        self.assertEqual(
+            [document, episode],
+            CONTEXT.deduplicate_context_items(
+                [document, dict(document), episode, dict(episode)]
+            ),
+        )
+
+    def test_context_capsule_stays_within_character_budget(self) -> None:
+        self.repository.joinpath("README.md").write_text(
+            "# Project\n\nCapsule budget knowledge.\n", encoding="utf-8"
+        )
+        long_progress = "verified progress " * 700
+        long_files = [f"src/Feature/File{index:03d}.php" for index in range(200)]
+        self.assertEqual(
+            0,
+            self.run_context(
+                "start", "--task-id", "CAPSULE-1", "--goal",
+                "Keep the capsule budget bounded.",
+                *[argument for file_path in long_files for argument in ("--file", file_path)],
+            ).returncode,
+        )
+        self.assertEqual(0, self.run_context(
+            "update", "--task-id", "CAPSULE-1", "--progress", long_progress
+        ).returncode)
+
+        packet = self.run_context(
+            "context", "capsule budget", "--task-id", "CAPSULE-1", "--json"
+        )
+
+        self.assertEqual(0, packet.returncode, packet.stderr)
+        self.assertLessEqual(
+            len(packet.stdout.rstrip("\n")), CONTEXT.CAPSULE_CHARACTER_LIMIT
+        )
+        payload = json.loads(packet.stdout)
+        self.assertGreater(payload["omitted"]["working_files"], 0)
+        self.assertEqual("Keep the capsule budget bounded.", payload["working"]["goal"])
+
+    def test_capsule_budget_drops_optional_layers_before_working(self) -> None:
+        capsule = {
+            "query": "capsule", "task_id": "CAPSULE-2",
+            "working": {
+                "task_id": "CAPSULE-2", "goal": "Preserve the goal.",
+                "progress": "p" * 300, "next_steps": ["Run verification."],
+                "files": ["src/Required.php"], "sources": [],
+                "created_at": "2026-07-29T00:00:00+00:00",
+                "updated_at": "2026-07-29T00:00:00+00:00",
+            },
+            "procedural": [{
+                "path": "AGENTS.md", "layer": "procedural", "kind": "policy",
+                "title": "Policy", "snippet": "Mandatory capsule policy.",
+            }],
+            "semantic": [{
+                "path": f"specs/{index}.md", "layer": "semantic", "kind": "spec",
+                "title": str(index), "snippet": "s" * 250,
+            } for index in range(3)],
+            "episodic": [{
+                "id": 1, "layer": "episodic", "summary": "Prior work",
+                "outcome": "e" * 300, "files": [], "verification": ["Verified"],
+                "sources": [], "created_at": "2026-07-29T00:00:00+00:00",
+            }],
+            "warnings": [], "omitted": {"working_files": 0},
+        }
+
+        with mock.patch.object(CONTEXT, "CAPSULE_CHARACTER_LIMIT", 1250):
+            compacted = CONTEXT.enforce_capsule_budget(capsule)
+
+        self.assertEqual([], compacted["episodic"])
+        self.assertEqual("Preserve the goal.", compacted["working"]["goal"])
+        self.assertEqual("AGENTS.md", compacted["procedural"][0]["path"])
+        self.assertLessEqual(CONTEXT.capsule_character_count(compacted), 1250)
+
+    def test_capsule_rejects_mandatory_content_larger_than_budget(self) -> None:
+        capsule = {
+            "query": "capsule", "task_id": None, "working": None,
+            "procedural": [{
+                "path": "AGENTS.md", "layer": "procedural", "kind": "policy",
+                "title": "Policy", "snippet": "mandatory " * 100,
+            }],
+            "semantic": [], "episodic": [], "warnings": [],
+            "omitted": {"working_files": 0},
+        }
+
+        with mock.patch.object(CONTEXT, "CAPSULE_CHARACTER_LIMIT", 200):
+            with self.assertRaisesRegex(
+                CONTEXT.ContextError,
+                "mandatory Task Capsule content exceeds 200 characters",
+            ):
+                CONTEXT.enforce_capsule_budget(capsule)
+
+    def test_context_index_failure_returns_working_only_without_stale_sources(
+        self,
+    ) -> None:
+        self.repository.joinpath("README.md").write_text(
+            "# Project\n\nThe celadon source was previously indexed.\n", encoding="utf-8"
+        )
+        self.assertEqual(0, self.run_context("index", "--json").returncode)
+        self.assertEqual(0, self.run_context(
+            "start", "--task-id", "CAPSULE-3", "--goal", "Inspect celadon behavior."
+        ).returncode)
+        self.repository.joinpath("docs").mkdir(exist_ok=True)
+        self.repository.joinpath("docs/broken.md").write_bytes(b"\xff")
+
+        packet = self.run_context(
+            "context", "celadon", "--task-id", "CAPSULE-3", "--json"
+        )
+
+        self.assertEqual(0, packet.returncode, packet.stderr)
+        payload = json.loads(packet.stdout)
+        self.assertEqual("CAPSULE-3", payload["working"]["task_id"])
+        self.assertEqual([], payload["procedural"])
+        self.assertEqual([], payload["semantic"])
+        self.assertEqual([], payload["episodic"])
+        self.assertIn(
+            "Index refresh failed: Source document is not valid UTF-8: docs/broken.md",
+            payload["warnings"],
+        )
+        self.assertNotIn("celadon source", packet.stdout)
+        self.assertNotIn("Traceback", packet.stderr)
+
+    def test_context_rejects_secret_query_without_echoing_it(self) -> None:
+        secret = "ghp_" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
+
+        packet = self.run_context("context", secret, "--json")
+
+        self.assertNotEqual(0, packet.returncode)
+        self.assertIn("possible GitHub token", packet.stderr)
+        self.assertNotIn("ABCDEFGHIJKLMNOPQRSTUVWXYZ", packet.stderr)
 
     def test_status_reports_document_and_episode_counts(self) -> None:
         self.repository.joinpath("specs/status.md").write_text(

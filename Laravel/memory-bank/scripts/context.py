@@ -43,6 +43,13 @@ SOURCE_PATTERNS = (
     ("episodic", "changelog", "CHANGELOG.md"),
 )
 DOCUMENT_LAYERS = ("procedural", "semantic", "episodic")
+CAPSULE_LAYER_LIMITS = {
+    "procedural": 2,
+    "semantic": 3,
+    "episodic": 1,
+}
+CAPSULE_QUERY_TOKEN_LIMIT = 32
+CAPSULE_CHARACTER_LIMIT = 8000
 TASK_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
 
 
@@ -342,22 +349,132 @@ def search_episodes(
     ]
 
 
+def build_capsule_query(
+    query: str, working: Optional[dict[str, object]]
+) -> str:
+    values = [query]
+    if working is not None:
+        values.extend(
+            [
+                str(working["goal"]),
+                str(working["progress"]),
+                *[str(item) for item in working["next_steps"]],
+                *[Path(str(item)).stem for item in working["files"]],
+            ]
+        )
+    tokens: list[str] = []
+    seen_tokens: set[str] = set()
+    for token in re.findall(r"\w+", " ".join(values), flags=re.UNICODE):
+        normalized = token.casefold()
+        if normalized in seen_tokens:
+            continue
+        seen_tokens.add(normalized)
+        tokens.append(token)
+        if len(tokens) == CAPSULE_QUERY_TOKEN_LIMIT:
+            break
+    if not tokens:
+        raise ContextError("Search query must contain a word")
+    return " ".join(tokens)
+
+
+def deduplicate_context_items(
+    items: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    unique: list[dict[str, object]] = []
+    seen: set[tuple[str, object]] = set()
+    for item in items:
+        key = ("path", item["path"]) if "path" in item else ("episode", item["id"])
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+    return unique
+
+
 def build_context_packet(
-    connection: sqlite3.Connection, query: str, task_id: str, limit: int
+    connection: sqlite3.Connection,
+    query: str,
+    task_id: Optional[str],
+    limit: int,
+    include_retrieval: bool = True,
+    warnings: Optional[list[str]] = None,
 ) -> dict[str, object]:
     if limit < 1:
         raise ContextError("--limit must be a positive integer")
-    return {
+    reject_secrets("Task Capsule", [query])
+
+    capsule_warnings = list(warnings or [])
+    working = find_working_task(connection, task_id)
+    if task_id is None:
+        capsule_warnings.append("Working task unavailable: task ID was not supplied")
+    elif working is None:
+        capsule_warnings.append(f"Working task not found: {validate_task_id(task_id)}")
+
+    packet: dict[str, object] = {
         "query": query,
         "task_id": task_id,
-        "working": get_working_task(connection, task_id),
-        "procedural": search_documents(connection, query, limit, "procedural"),
-        "semantic": search_documents(connection, query, limit, "semantic"),
-        "episodic": (
-            search_documents(connection, query, limit, "episodic")
-            + search_episodes(connection, query, limit)
-        )[:limit],
+        "working": working,
+        "procedural": [],
+        "semantic": [],
+        "episodic": [],
+        "warnings": capsule_warnings,
+        "omitted": {"working_files": 0},
     }
+    if not include_retrieval:
+        return packet
+
+    retrieval_query = build_capsule_query(query, working)
+    procedural_limit = min(limit, CAPSULE_LAYER_LIMITS["procedural"])
+    semantic_limit = min(limit, CAPSULE_LAYER_LIMITS["semantic"])
+    episodic_limit = min(limit, CAPSULE_LAYER_LIMITS["episodic"])
+    packet["procedural"] = deduplicate_context_items(
+        search_documents(connection, retrieval_query, procedural_limit, "procedural")
+    )[:procedural_limit]
+    packet["semantic"] = deduplicate_context_items(
+        search_documents(connection, retrieval_query, semantic_limit, "semantic")
+    )[:semantic_limit]
+    packet["episodic"] = deduplicate_context_items(
+        search_documents(connection, retrieval_query, episodic_limit, "episodic")
+        + search_episodes(connection, retrieval_query, episodic_limit)
+    )[:episodic_limit]
+    return packet
+
+
+def serialize_capsule(capsule: dict[str, object]) -> str:
+    return json.dumps(capsule, ensure_ascii=False, separators=(",", ":"))
+
+
+def capsule_character_count(capsule: dict[str, object]) -> int:
+    return len(serialize_capsule(capsule))
+
+
+def enforce_capsule_budget(capsule: dict[str, object]) -> dict[str, object]:
+    compacted = json.loads(serialize_capsule(capsule))
+    omitted = compacted["omitted"]
+    working = compacted["working"]
+
+    while capsule_character_count(compacted) > CAPSULE_CHARACTER_LIMIT:
+        if compacted["episodic"]:
+            compacted["episodic"].pop()
+            continue
+        if compacted["semantic"]:
+            compacted["semantic"].pop()
+            continue
+        if working is not None and len(working["files"]) > 1:
+            working["files"].pop()
+            omitted["working_files"] += 1
+            continue
+        if working is not None and working["progress"]:
+            excess = capsule_character_count(compacted) - CAPSULE_CHARACTER_LIMIT
+            keep = max(0, len(working["progress"]) - excess - 1)
+            working["progress"] = f"{working['progress'][:keep]}…" if keep else ""
+            continue
+        raise ContextError(
+            "mandatory Task Capsule content exceeds "
+            f"{CAPSULE_CHARACTER_LIMIT} characters"
+        )
+
+    return compacted
 
 
 def validate_task_id(task_id: str) -> str:
@@ -439,9 +556,11 @@ def record_episode(
         )
 
 
-def get_working_task(
-    connection: sqlite3.Connection, task_id: str
-) -> dict[str, object]:
+def find_working_task(
+    connection: sqlite3.Connection, task_id: Optional[str]
+) -> Optional[dict[str, object]]:
+    if task_id is None:
+        return None
     task_id = validate_task_id(task_id)
     row = connection.execute(
         """
@@ -452,7 +571,7 @@ def get_working_task(
         (task_id,),
     ).fetchone()
     if row is None:
-        raise ContextError(f"Working task not found: {task_id}")
+        return None
     return {
         "task_id": row["task_id"],
         "goal": row["goal"],
@@ -463,6 +582,15 @@ def get_working_task(
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+
+
+def get_working_task(
+    connection: sqlite3.Connection, task_id: str
+) -> dict[str, object]:
+    task = find_working_task(connection, task_id)
+    if task is None:
+        raise ContextError(f"Working task not found: {validate_task_id(task_id)}")
+    return task
 
 
 def start_working_task(
@@ -628,7 +756,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     context = commands.add_parser("context", help="assemble layered task context")
     context.add_argument("query")
-    context.add_argument("--task-id", required=True)
+    context.add_argument("--task-id")
     context.add_argument("--limit", type=int, default=3)
     context.add_argument("--json", action="store_true")
 
@@ -841,14 +969,32 @@ def main() -> int:
                 return 0
 
             if arguments.command == "context":
+                warnings: list[str] = []
+                include_retrieval = True
+                try:
+                    index_repository(connection, repository)
+                except (ContextError, OSError, sqlite3.Error) as error:
+                    include_retrieval = False
+                    warnings.append(f"Index refresh failed: {error}")
                 result = build_context_packet(
-                    connection, arguments.query, arguments.task_id, arguments.limit
+                    connection,
+                    arguments.query,
+                    arguments.task_id,
+                    arguments.limit,
+                    include_retrieval=include_retrieval,
+                    warnings=warnings,
                 )
+                result = enforce_capsule_budget(result)
                 if arguments.json:
-                    print(json.dumps(result, ensure_ascii=False))
+                    print(serialize_capsule(result))
                 else:
                     working = result["working"]
-                    print(f"working: {working['task_id']} — {working['goal']}")
+                    if working is None:
+                        print("working: unavailable")
+                    else:
+                        print(f"working: {working['task_id']} — {working['goal']}")
+                    for warning in result["warnings"]:
+                        print(f"warning: {warning}")
                     for layer in ("procedural", "semantic", "episodic"):
                         items = result[layer]
                         if not items:
