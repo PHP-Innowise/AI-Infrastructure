@@ -22,7 +22,7 @@ For each selected edition, write `<edition-skills-dir>/SKILL FLOW.md` (literal f
 ## Process
 
 1. **Require the target-project-path argument.** Resolve the selected editions from profile section 1 and their skills dirs.
-2. **Read the skill-forge log** to obtain the EXACT generated skill set, grouped by category (architecture / design & interaction / frontend / process & workflow / universal / specialty / integrations), and each skill's declared `phase`/`flow-next`.
+2. **Read the skill-forge log** to obtain the EXACT generated skill set, grouped by category (architecture / design & interaction / frontend / process & workflow / universal / specialty / integrations / domain), and each skill's declared `phase`/`flow-next`.
 3. **Build the Main Flow** as a diagram that orders the generated skills by phase, wiring each skill to the successor it actually declares - only among generated skills. Drop any edge whose target was not generated.
 4. **Build Shortcuts** - the common jump-in entry points (e.g. straight to the coding or review skill) using only generated skill names.
 5. **Build the Phase Map table** mapping each phase to the generated skills that occupy it.

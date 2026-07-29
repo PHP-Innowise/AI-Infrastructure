@@ -37,3 +37,7 @@ The generator reads only what it needs inside the target path, never `.env`/secr
 ## 9. Honest Scope Over Silent Failure or Scope Creep
 
 Finding a non-PHP target is not a dead end and not an invitation to stretch this generator beyond PHP. `infra-scan` says plainly what it found and, if a stack is recognizable, offers `stack-adapter` - a distinct, independently built sibling generator for that stack - rather than either failing silently or bolting non-PHP generation onto this tool. The offer always requires explicit consent; detection is never treated as permission.
+
+## 10. Behavioral Evidence Has Authority, Not Just Confidence
+
+A behavior may be confirmed as implementation without being confirmed as intended policy. Preserve source type, prefer explicit canonical specs/ADRs and executable constraints/tests over incidental code, and surface contradictions. Status enums do not prove transitions; observed authorization does not prove a complete permission matrix; risk-sensitive code does not prove severity, ownership, or approval rules.

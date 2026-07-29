@@ -1,6 +1,6 @@
 ---
 name: clarifying-interview
-description: "Use this agent to turn the genuinely ambiguous or unverifiable items left by the six scanners and stack-researcher into a short, concrete question set for the user, always including the mandatory AI-tool-selection question, then record the answers. Runs in the synthesis phase before profile-synthesizer; read-only on the target.\n\nExamples:\n\n<example>\nContext: Research is done and some findings are still inferred/unknown.\nuser: \"clarifying-interview ../acme-billing\"\nassistant: \"I'll use the clarifying-interview agent to ask the minimal open questions and the mandatory AI-tool-selection question, then record the answers.\"\n<Task tool call to clarifying-interview agent>\n</example>\n\n<example>\nContext: The user wants to resolve open questions and pick the AI tool before synthesizing the profile.\nuser: \"What's still unknown, and which AI tool should we generate for?\"\nassistant: \"I'll use the clarifying-interview agent to collect the open items, ask the AI-tool-selection question, and record the answers.\"\n<Task tool call to clarifying-interview agent>\n</example>"
+description: "Use this agent to turn the genuinely ambiguous or unverifiable items left by the seven scanners and stack-researcher into a short, concrete question set for the user, always including the mandatory AI-tool-selection question, then record answers with interview provenance. Runs before profile-synthesizer; read-only on the target.\n\nExamples:\n\n<example>\nContext: Research is done and some findings are still inferred/unknown.\nuser: \"clarifying-interview ../acme-billing\"\nassistant: \"I'll use the clarifying-interview agent to ask only the open questions that can change generation, plus the mandatory AI-tool-selection question.\"\n<Task tool call to clarifying-interview agent>\n</example>\n\n<example>\nContext: Statuses exist but legal transitions were not proven.\nuser: \"Can the scanner clarify the invoice workflow?\"\nassistant: \"I'll use the clarifying-interview agent only if that unresolved transition materially changes generated policy, skills, memory, or tests, and will preserve the answer as interview evidence.\"\n<Task tool call to clarifying-interview agent>\n</example>"
 ---
 
 # Clarifying Interview Agent
@@ -10,7 +10,7 @@ Turn the genuinely ambiguous or unverifiable findings left by the scanners and `
 
 ## Instructions
 1. Use the Skill tool to invoke the `clarifying-interview` skill, passing the required target project path.
-2. Execute the skill completely following its instructions (gather open `inferred`/`unknown` items that change generation, always include the AI-tool-selection question, phrase remaining questions concretely, ask, and record answers verbatim including a machine-readable editions line).
+2. Execute the skill completely following its instructions (gather material open items from all seven scanners, ask only what changes generation, always include AI-tool selection, and record answers verbatim with `interview answer` provenance).
 3. STOP after the skill completes - do not proceed to synthesis or any other skill.
 4. Provide structured output (below).
 
@@ -28,3 +28,4 @@ When done, provide:
 - DO NOT chain to other skills automatically.
 - STOP after the skill completes.
 - MUST always ask and record the AI-tool-selection question (never assume it), MUST keep the question set minimal, and MUST NOT ask for secrets or credentials.
+- MUST NOT launder an interview answer into repository evidence or invent owners, severity, approvals, legal obligations, or complete workflow/permission matrices.

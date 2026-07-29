@@ -1,6 +1,6 @@
 # SKILL FLOW - Infrastructure-Creator
 
-How the generator's 21 skills fit together. This describes the generator itself, not what it produces.
+How the generator's 22 skills fit together. This describes the generator itself, not what it produces.
 
 ## Main Flow
 
@@ -21,10 +21,11 @@ How the generator's 21 skills fit together. This describes the generator itself,
     │                                                                    ├─ skill-flow-composer
     ├─ stack-scanner            ┐                                       └─ bootstrap-verifier  (QA gate)
     ├─ architecture-scanner     │ parallel
-    ├─ integration-scanner      │ (six
+    ├─ integration-scanner      │ (seven
     ├─ infra-ops-scanner        │  scanners)
     ├─ security-compliance-scanner
-    └─ conventions-scanner
+    ├─ conventions-scanner
+    └─ domain-behavior-scanner
     → stack-researcher
     → clarifying-interview
     → profile-synthesizer  ──────►  PROFILE  ──────►  (re-validated here)
@@ -32,7 +33,7 @@ How the generator's 21 skills fit together. This describes the generator itself,
 
   === stack-adapter (independent side path, own orchestration) ===
   infra-adapt <target>  OR  infra-scan's offer, on user consent
-    → stack-adapter: research stack → replicate skeleton → re-author 21 skills
+    → stack-adapter: research stack → replicate skeleton → re-author 22 skills
       + reference docs → mirror 3 editions → self-verify
     → reports path to new Infrastructure-Creator-[Stack]/ sibling generator
 ```
@@ -49,7 +50,7 @@ How the generator's 21 skills fit together. This describes the generator itself,
 | Phase | Skills |
 | --- | --- |
 | orchestration | infra-scan, infra-generate, infra-build, stack-adapter |
-| discovery | stack-scanner, architecture-scanner, integration-scanner, infra-ops-scanner, security-compliance-scanner, conventions-scanner |
+| discovery | stack-scanner, architecture-scanner, integration-scanner, infra-ops-scanner, security-compliance-scanner, conventions-scanner, domain-behavior-scanner |
 | research | stack-researcher |
 | synthesis | clarifying-interview, profile-synthesizer |
 | generation | policy-forge, skill-forge, agent-forge, command-forge, hook-forge, memory-seed, skill-flow-composer |

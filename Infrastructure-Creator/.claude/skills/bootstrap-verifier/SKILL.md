@@ -23,12 +23,14 @@ Writes a report to `tasks/TASK-{N}/bootstrap-verifier-report.md`. Does not write
 
 1. **Determine the selected editions** from the profile (section 1) and the generate report.
 2. **Run the validator:** `python3 scripts/validate_generated.py --target <target> --editions <selected>`. It checks:
+   - Every selected edition root exists and every unselected edition root is absent (`.claude`; `.cursor`; `.agents` + `.codex` for Codex).
    - Frontmatter validity across every generated `SKILL.md`, agent, and command.
    - Every `flow-next`/`flow-alternatives`/`related`/`invokes`/`spawns` reference resolves to a skill/agent that exists in that edition.
    - Every generated hook passes `bash -n` and carries the executable bit.
    - The seeded `memory-bank/` passes its own `scripts/validate.py`.
+   - Every selected edition contains the operational `memory-bank` skill and its agent/command wrappers where applicable.
    - No template placeholders (`{skill-name}`, `TODO`, literal `YYYY-MM-DD`, `[target_name]`, `TASK-{N}`, etc.) remain.
-3. **Assert edition scoping:** no unselected edition folder exists; every selected edition is present.
+3. **Confirm edition scoping passed:** treat a missing selected root or present unselected root as generation failure, not a warning.
 4. **Classify failures:**
    - Auto-fixable (e.g. missing executable bit) - fix and re-run the validator.
    - Not safely auto-fixable (e.g. a dangling cross-reference implying a forge under-produced) - escalate to the user; do not paper over it.
@@ -46,6 +48,7 @@ Writes a report to `tasks/TASK-{N}/bootstrap-verifier-report.md`. Does not write
 - Frontmatter: [pass/fail]
 - Cross-references: [pass/fail]
 - Hooks (bash -n + exec bit): [pass/fail]
+- Edition scope (selected present, unselected absent): [pass/fail]
 - Memory bank validate.py: [pass/fail]
 - No placeholders: [pass/fail]
 - Edition scoping: [pass/fail]

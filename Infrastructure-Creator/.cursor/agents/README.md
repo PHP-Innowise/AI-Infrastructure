@@ -1,5 +1,9 @@
 # Cursor Agents
 
-These agents mirror the Claude edition in `.claude/agents/`, one agent per skill, but with **reduced frontmatter**: each file carries only `name` and `description` (the Cursor schema). The `model`, `invokes`, and `phase` keys used by the Claude edition are intentionally dropped; each agent body is otherwise identical to its Claude counterpart.
+One agent wraps each of the 22 skills. Every wrapper mirrors its Claude counterpart's useful body while using Cursor's reduced frontmatter: exactly `name` and `description`; Claude-specific `model`, `invokes`, and `phase` keys are intentionally omitted.
 
-Every agent is a single-purpose executor that runs its one matching skill and stops - except the four orchestrators, `infra-scan`, `infra-generate`, `infra-build`, and `stack-adapter`, which are sanctioned to fan out the other agents/skills to run the full discovery and generation pipeline (or, for `stack-adapter`, the sibling-generator build).
+An agent runs exactly one skill in an isolated context and then stops, except the four sanctioned orchestrators (`infra-scan`, `infra-generate`, `infra-build`, and `stack-adapter`), which may fan out the skills required by their workflows.
+
+Users normally interact through the four commands (`/infra-scan`, `/infra-generate`, `/infra-build`, and `/infra-adapt`). `infra-scan` coordinates seven scanners, including `domain-behavior-scanner`.
+
+Codex has no agent layer; it invokes the mirrored skills in `.agents/skills/` directly.

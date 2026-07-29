@@ -49,6 +49,7 @@ Infrastructure-Creator intentionally has no `memory-bank/` of its own: its job i
 - MUST generate every artifact from what was actually found in the target (`composer.json`, config, PHP source, CI/CD, IaC). MUST NOT invent an integration, framework, or service that has no evidence in the target.
 - MUST cite concrete evidence (file path, and line numbers or a matching excerpt when practical) for every scan finding and every claim carried into a generated artifact.
 - MUST mark any unverifiable or low-confidence finding as `inferred` or `unknown` rather than presenting a guess as fact, and MUST route genuinely ambiguous items through `clarifying-interview`.
+- Behavioral findings MUST also preserve source type (`spec/ADR`, `test`, `database constraint`, `workflow configuration`, `authorization rule`, code/configuration, or `interview answer`) and surface contradictions. Implementation behavior and user testimony MUST NOT be silently promoted to stronger authority.
 - Generated skills/agents/commands MUST conform to the standard `SKILL.md`/agent/command frontmatter and structure documented in each forge skill's own `SKILL.md`.
 - Generated output is tool-selected: `policy-forge`, `skill-forge`, `agent-forge`, `command-forge`, and `hook-forge` produce ONLY the edition(s) the target team selected in `clarifying-interview` - never more editions than selected, never fewer.
 
@@ -56,7 +57,7 @@ Infrastructure-Creator intentionally has no `memory-bank/` of its own: its job i
 
 The general accelerator rule is "an agent executes exactly one skill, then stops; it never auto-chains." Four skills in this folder are a deliberate, narrowly scoped exception, because pipeline orchestration is their entire purpose:
 
-- `infra-scan` MAY fan out to the six scanner skills, `stack-researcher`, `clarifying-interview`, and `profile-synthesizer` in one run. It MAY also hand off to `stack-adapter` when a non-PHP stack is detected and the user opts in.
+- `infra-scan` MAY fan out to the seven scanner skills (including `domain-behavior-scanner`), `stack-researcher`, `clarifying-interview`, and `profile-synthesizer` in one run. It MAY also hand off to `stack-adapter` when a non-PHP stack is detected and the user opts in.
 - `infra-generate` MAY fan out to the six forge skills, then `skill-flow-composer`, then `bootstrap-verifier` in one run.
 - `infra-build` MAY chain `infra-scan` then `infra-generate` in one run, pausing at the profile checkpoint only when a blocking ambiguity or a collision is detected.
 - `stack-adapter` MAY research, replicate, re-author, mirror, and self-verify an entire sibling generator in one run, after explicit user confirmation.
@@ -93,7 +94,7 @@ Fan-out runs in parallel when the AI tool supports concurrent subagents/tool cal
 ## Security
 
 - MUST NOT read, print, edit, or commit `.env` files or secrets in either this folder or the target project.
-- MUST NOT carry secrets, credentials, tokens, or customer data from the target project into any generated file, scan finding, or seeded memory chunk.
+- MUST NOT carry secrets, credentials, tokens, customer data, raw production payloads, logs, or unsanitized incident details from the target project into any generated file, scan finding, or seeded memory chunk.
 - MUST keep personal/local scratch notes, if any, out of version control.
 
 ## Definition Of Done

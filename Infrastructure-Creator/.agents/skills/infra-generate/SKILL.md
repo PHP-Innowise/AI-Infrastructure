@@ -20,7 +20,7 @@ This skill's own run notes live in `tasks/TASK-{N}/infra-generate-report.md`. Ev
 ## Process
 
 1. **Locate the profile.** Require the target project path (must match a profile from `infra-scan`); if more than one `TASK-{N}/` exists for that target, use the most recent unless the user specifies one.
-2. **Re-validate before trusting it.** Re-check the profile's cited evidence against the target's *current* files. If something changed since the scan (a dependency removed, a file moved), flag the drift in `infra-generate-report.md` and ask whether to re-scan or proceed with the stale parts explicitly accepted.
+2. **Re-validate before trusting it.** Re-check cited evidence against current files, including section 8's canonical behavioral sources and section 12's memory concepts. Preserve contradictions and source type. If something changed, flag drift and ask whether to re-scan or explicitly accept stale parts.
 3. **Read the selected editions** from the profile's section 1 (AI Tool Selection). Only these editions will be produced.
 4. **Collision guard.** If the target already has `AGENTS.md` or any selected edition folder, STOP and ask: overwrite, merge (add only what is missing, never touch existing files), or abort. Do not proceed on assumption.
 5. **Fan out the four independent forges.**
@@ -38,7 +38,7 @@ This skill's own run notes live in `tasks/TASK-{N}/infra-generate-report.md`. Ev
 
 **Target:** [target path]
 **Edition(s) generated:** [only the selected ones]
-**Skills generated:** [count] ([list])
+**Skills generated:** [count] ([list, including operational memory-bank and any domain skills])
 
 ## Verification
 [bootstrap-verifier pass/fail summary]
@@ -47,7 +47,7 @@ This skill's own run notes live in `tasks/TASK-{N}/infra-generate-report.md`. Ev
 The target now has its own working `AGENTS.md` + [selected edition folder(s)] + `memory-bank/`. Open [target path] and start with [suggested first generated command].
 
 ## Risks / Follow-Ups
-[Anything bootstrap-verifier flagged, any `unknown` items still unresolved]
+[Anything bootstrap-verifier flagged, unresolved behavioral contradictions/unknowns, memory drift]
 ```
 
 ## Guardrails
