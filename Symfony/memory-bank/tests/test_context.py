@@ -1013,6 +1013,93 @@ class ContextEngineTest(unittest.TestCase):
         )
         self.assertEqual("", json.loads(persisted.stdout)["progress"])
 
+    def test_working_rejects_raw_file_and_source_identifiers_before_persisting(
+        self,
+    ) -> None:
+        raw_source = "User: copied request body"
+        rejected_start = self.run_context(
+            "start",
+            "--task-id",
+            "TASK-RAW-IDENTIFIER-START",
+            "--goal",
+            "Review account behavior.",
+            "--source",
+            raw_source,
+        )
+
+        self.assertNotEqual(0, rejected_start.returncode)
+        self.assertNotIn(raw_source, rejected_start.stdout + rejected_start.stderr)
+        self.assertEqual(
+            0,
+            json.loads(self.run_context("status", "--json").stdout)["working"],
+        )
+
+        self.assertEqual(
+            0,
+            self.run_context(
+                "start",
+                "--task-id",
+                "TASK-RAW-IDENTIFIER-UPDATE",
+                "--goal",
+                "Review account behavior.",
+            ).returncode,
+        )
+        raw_file = "Assistant: copied response"
+        rejected_update = self.run_context(
+            "update",
+            "--task-id",
+            "TASK-RAW-IDENTIFIER-UPDATE",
+            "--file",
+            raw_file,
+        )
+
+        self.assertNotEqual(0, rejected_update.returncode)
+        self.assertNotIn(raw_file, rejected_update.stdout + rejected_update.stderr)
+        persisted = self.run_context(
+            "get",
+            "--task-id",
+            "TASK-RAW-IDENTIFIER-UPDATE",
+            "--json",
+        )
+        self.assertEqual([], json.loads(persisted.stdout)["files"])
+
+    def test_context_revalidates_legacy_working_raw_identifier(self) -> None:
+        self.assertEqual(
+            0,
+            self.run_context(
+                "start",
+                "--task-id",
+                "TASK-RAW-IDENTIFIER-LEGACY",
+                "--goal",
+                "Review account behavior.",
+            ).returncode,
+        )
+        raw_source = "User: copied request body"
+        database = self.repository / "memory-bank/local/context.db"
+        connection = sqlite3.connect(database)
+        connection.execute(
+            "UPDATE working_tasks SET sources = ? WHERE task_id = ?",
+            (json.dumps([raw_source]), "TASK-RAW-IDENTIFIER-LEGACY"),
+        )
+        connection.commit()
+        connection.close()
+
+        packet = self.run_context(
+            "context",
+            "account workflow",
+            "--task-id",
+            "TASK-RAW-IDENTIFIER-LEGACY",
+            "--json",
+        )
+
+        self.assertNotEqual(0, packet.returncode)
+        self.assertIn(
+            "Working task contains private or raw data; "
+            "replace it with a sanitized summary",
+            packet.stderr,
+        )
+        self.assertNotIn(raw_source, packet.stdout + packet.stderr)
+
     def test_working_get_and_clear_reject_secret_task_id_without_echoing_it(self) -> None:
         fake_token = "ghp_" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
 

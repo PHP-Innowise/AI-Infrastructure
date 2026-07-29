@@ -405,7 +405,7 @@ def reject_capsule_privacy(
     candidate = "\n".join((*prose, *(identifiers or [])))
     if (
         any(pattern.search(candidate) for pattern in CAPSULE_PRIVATE_PATTERNS)
-        or CAPSULE_RAW_TEXT_PATTERN.search("\n".join(prose))
+        or CAPSULE_RAW_TEXT_PATTERN.search(candidate)
     ):
         raise ContextError(
             f"{label} contains private or raw data; "
