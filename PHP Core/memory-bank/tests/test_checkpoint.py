@@ -55,6 +55,17 @@ class CheckpointIntegrationTest(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIn(text, skill)
 
+        safe_filter = (
+            "Before obtaining any diff, filter staged, unstaged, and untracked "
+            "paths to safe non-sensitive text files."
+        )
+        excluded_paths = "Record excluded paths from porcelain metadata only."
+        inspection = "Inspect the staged and unstaged diffs plus safe untracked text files only"
+
+        self.assertIn(safe_filter, skill)
+        self.assertIn(excluded_paths, skill)
+        self.assertLess(skill.index(safe_filter), skill.index(inspection))
+
     def test_command_wrappers_accept_no_user_arguments(self) -> None:
         forbidden = (
             "--task-id",

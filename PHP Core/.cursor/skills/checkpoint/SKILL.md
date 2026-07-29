@@ -23,21 +23,22 @@ Capture one progress snapshot and stop. This skill accepts no arguments.
    path, including renamed, copied, and deleted paths.
 4. If there are no current Git changes, report a no-op and stop without
    creating or updating Working Memory.
-5. Inspect the staged and unstaged diffs plus safe untracked text files only as
-   needed to understand the change. Pre-existing or unrelated dirty files are
-   part of the snapshot.
-6. Write a concise semantic progress summary. Sanitize it before storage and
+5. Before obtaining any diff, filter staged, unstaged, and untracked paths to safe non-sensitive text files. Record excluded paths from porcelain metadata only. Never read excluded path contents.
+6. Inspect the staged and unstaged diffs plus safe untracked text files only
+   after filtering, as needed to understand the change. Pre-existing or
+   unrelated dirty files are part of the snapshot.
+7. Write a concise semantic progress summary. Sanitize it before storage and
    never copy raw diff text, command output, prompts, responses, or secrets.
-7. Run `python3 memory-bank/scripts/context.py get --task-id <branch> --json`.
+8. Run `python3 memory-bank/scripts/context.py get --task-id <branch> --json`.
    If the task does not exist, run
    `python3 memory-bank/scripts/context.py start --task-id <branch> --goal
    "Checkpoint work on branch <branch>"` with one `--file` value per normalized
    changed path.
-8. Run `python3 memory-bank/scripts/context.py update --task-id <branch>
+9. Run `python3 memory-bank/scripts/context.py update --task-id <branch>
    --progress <summary>` and include one `--file` value per normalized changed
    path. Pass generated values as argv data; never interpolate Git content into
    executable shell syntax.
-9. Report the task ID, current changed-file count, whether the task was created
+10. Report the task ID, current changed-file count, whether the task was created
    or updated, and the saved summary. Then stop.
 
 ## Safety
