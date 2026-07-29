@@ -15,11 +15,14 @@ A standalone, PHP-only generator that scans a target PHP project and writes a be
 - **Tool-selected output.** `clarifying-interview` captures the AI-tool selection; generation produces only the selected edition(s).
 - **The generator ships tripled.** It runs natively from Claude Code (`.claude/`), Cursor (`.cursor/`), and Codex (`.agents/skills` + `.codex/`).
 - **Workspace boundary + collision guard.** It runs outside the target, takes the target path as a required argument, is read-only in Phase 1, and never overwrites a pre-existing accelerator without an explicit decision.
+- **Self-adapting for non-PHP stacks.** `infra-scan` never silently fails on a non-PHP target: it probes for a recognizable non-PHP stack and, with explicit consent, hands off to `stack-adapter` to build an entirely independent sibling generator for that stack, rather than stretching this PHP-only generator beyond its domain.
+- **Behavioral-contract discovery.** A seventh scanner extracts source-backed domain vocabulary, sources of truth, central entities, invariants, proven transitions, permissions, audit obligations, risk-sensitive workflows, critical regression scenarios, and sanitized incident lessons while preserving source type and contradictions.
+- **Broad, evidence-gated target skill catalog.** `skill-forge` generates eight groups: architecture; design & interaction; conditional frontend; 15 process/workflow skills including operational `memory-bank`; 7 universal PHP skills; framework specialties; confirmed integrations; and evidence-gated bounded-context domain skills.
 
-## Skill Inventory (20)
+## Skill Inventory (22 in every edition)
 
-- Orchestration: `infra-scan`, `infra-generate`, `infra-build`.
-- Discovery: `stack-scanner`, `architecture-scanner`, `integration-scanner`, `infra-ops-scanner`, `security-compliance-scanner`, `conventions-scanner`.
+- Orchestration: `infra-scan`, `infra-generate`, `infra-build`, `stack-adapter`.
+- Discovery: `stack-scanner`, `architecture-scanner`, `integration-scanner`, `infra-ops-scanner`, `security-compliance-scanner`, `conventions-scanner`, `domain-behavior-scanner`.
 - Research: `stack-researcher`.
 - Synthesis: `clarifying-interview`, `profile-synthesizer`.
 - Generation: `policy-forge`, `skill-forge`, `agent-forge`, `command-forge`, `hook-forge`, `memory-seed`, `skill-flow-composer`.
@@ -32,5 +35,5 @@ A standalone, PHP-only generator that scans a target PHP project and writes a be
 
 ## Bundled References
 
-- `skill-forge/references/php-frameworks.md`, `php-architecture-patterns.md`, `php-integration-catalog.md`.
+- `skill-forge/references/php-frameworks.md`, `php-architecture-patterns.md`, `php-integration-catalog.md`, `php-process-skills.md`, `php-specialty-skills.md`, `php-domain-behavior.md`.
 - `profile-synthesizer/references/project-profile-schema.md`.

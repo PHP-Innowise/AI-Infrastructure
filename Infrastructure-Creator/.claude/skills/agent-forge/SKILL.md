@@ -27,7 +27,7 @@ Into the target, for each generated skill `<name>` and each selected agent-carry
 2. **For each generated skill, one agent per selected edition.** Never create an agent for a skill absent from the log.
 3. **Author the Claude agent** at `.claude/agents/<name>-agent.md` with frontmatter keys `name`, `description`, `model`, `invokes`, `phase`:
    - `description` is a QUOTED string that embeds the usage sentence plus one or more `<example>...</example>` blocks (user request -> why this agent fires).
-   - `model`: `opus` for heavy planning/architecture skills (architecture skill, security-review, performance); `sonnet` for the rest.
+   - `model`: `opus` for heavy planning/architecture skills (architecture skill, security-review, performance, and evidence-gated domain-review skills); `sonnet` for the rest.
    - `invokes`: the exact skill name; `phase`: the skill's phase.
 4. **Author the Cursor agent** at `.cursor/agents/<name>-agent.md` with the SAME body but frontmatter REDUCED to only `name` and `description`.
 5. **Write the shared body** for both: `## Role`, `## Instructions` (use the Skill tool to invoke `<skill>`, execute it fully, then STOP - do not chain), `## Output Format` (Context Summary + Next Steps), `## Constraints`.
@@ -55,7 +55,7 @@ command-forge (wrap these agents as commands); hook-forge/memory-seed if not alr
 - MUST author one agent per skill in the skill-forge log; MUST NOT invent an agent for a skill that was not generated.
 - MUST write agents ONLY into selected editions among {Claude, Cursor}; MUST NEVER write an agent into Codex.
 - MUST give the Claude agent full frontmatter (`name`, `description` with embedded `<example>` blocks, `model`, `invokes`, `phase`) and the Cursor agent frontmatter reduced to only `name`, `description`.
-- MUST set `model: opus` for heavy planning/architecture skills and `sonnet` for the rest.
+- MUST set `model: opus` for heavy planning/architecture/domain-review skills and `sonnet` for the rest.
 - MUST make each agent invoke exactly one skill and STOP - no auto-chaining.
 - MUST keep the agent body identical across Claude and Cursor for the same skill.
 

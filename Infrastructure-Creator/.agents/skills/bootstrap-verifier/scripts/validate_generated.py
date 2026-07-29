@@ -11,8 +11,11 @@ Checks:
   - Every generated SKILL.md / agent / command has valid frontmatter.
   - Every flow-next / flow-alternatives / related / invokes / spawns reference
     resolves to a skill/agent that actually exists in the same edition.
+  - Every selected edition root exists and no unselected edition root exists.
   - Every hook script passes `bash -n` and carries the executable bit.
   - The seeded memory-bank passes its own scripts/validate.py.
+  - Every selected edition includes the operational memory-bank skill (and its
+    agent/command wrappers where that edition carries those layers).
   - No template placeholders remain in any generated file.
 
 Exit code 0 = pass, non-zero = failures (printed to stderr).
@@ -41,6 +44,12 @@ EDITION_LAYOUT = {
     "claude": (".claude/skills", ".claude/agents", ".claude/commands"),
     "cursor": (".cursor/skills", ".cursor/agents", ".cursor/commands"),
     "codex": (".agents/skills", None, None),
+}
+
+EDITION_ROOTS = {
+    "claude": (".claude",),
+    "cursor": (".cursor",),
+    "codex": (".agents", ".codex"),
 }
 
 
@@ -96,6 +105,10 @@ def validate_edition(target: Path, edition: str, errors: list) -> None:
     skill_names = collect_skill_names(skills_dir)
     if not skill_names:
         errors.append(f"[{edition}] no skills generated under {skills_rel}")
+    if "memory-bank" not in skill_names:
+        errors.append(
+            f"[{edition}] operational memory-bank skill missing under {skills_rel}"
+        )
 
     for name in skill_names:
         sp = skills_dir / name / "SKILL.md"
@@ -133,6 +146,14 @@ def validate_edition(target: Path, edition: str, errors: list) -> None:
                         f"[{edition}] {af}: invokes '{invokes}' is not a generated skill"
                     )
                 check_placeholders(af, errors)
+            if "memory-bank" in skill_names and not (
+                agents_dir / "memory-bank-agent.md"
+            ).exists():
+                errors.append(
+                    f"[{edition}] memory-bank-agent.md missing for operational memory-bank skill"
+                )
+        else:
+            errors.append(f"[{edition}] selected but agents dir missing: {agents_rel}")
 
     # Commands (editions that carry them).
     if commands_rel:
@@ -150,6 +171,29 @@ def validate_edition(target: Path, edition: str, errors: list) -> None:
                             f"[{edition}] {cf}: spawns '{spawns}' has no matching skill"
                         )
                 check_placeholders(cf, errors)
+            if "memory-bank" in skill_names and not (
+                commands_dir / "memory-bank.md"
+            ).exists():
+                errors.append(
+                    f"[{edition}] memory-bank.md command missing for operational memory-bank skill"
+                )
+        else:
+            errors.append(f"[{edition}] selected but commands dir missing: {commands_rel}")
+
+
+def validate_edition_scope(target: Path, editions: list, errors: list) -> None:
+    selected = set(editions)
+    for edition, roots in EDITION_ROOTS.items():
+        for root_rel in roots:
+            exists = (target / root_rel).exists()
+            if edition in selected and not exists:
+                errors.append(
+                    f"[{edition}] selected but edition root missing: {root_rel}"
+                )
+            elif edition not in selected and exists:
+                errors.append(
+                    f"[{edition}] unselected edition root exists: {root_rel}"
+                )
 
 
 def validate_hooks(target: Path, editions: list, errors: list) -> None:
@@ -218,6 +262,7 @@ def main() -> int:
     if not (target / "AGENTS.md").exists():
         errors.append("target AGENTS.md was not generated")
 
+    validate_edition_scope(target, editions, errors)
     for edition in editions:
         validate_edition(target, edition, errors)
     validate_hooks(target, editions, errors)

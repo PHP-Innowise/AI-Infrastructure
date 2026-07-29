@@ -22,12 +22,20 @@ Infrastructure-Creator intentionally has no `memory-bank/` of its own: its job i
 
 - The target is assumed to be a PHP project (plain PHP or a PHP framework such as Laravel, Symfony, Slim, Laminas, CodeIgniter, or similar). Scanners MUST ground every finding in PHP evidence: `composer.json`/`composer.lock`, `*.php` sources, PHP framework entry points (`public/index.php`, `artisan`, `bin/console`), and PHP tooling config (`phpunit.xml`, `phpstan.neon`, `psalm.xml`, `.php-cs-fixer.dist.php`, `pint.json`, `rector.php`).
 - Non-PHP components that a PHP app talks to (a JS/TS frontend, a managed queue, an external microservice) MUST be captured only as lightweight **integration contracts**, never given deep generated skills.
-- If the target has no PHP evidence at all (`no composer.json`, no `*.php`), `infra-scan` MUST stop and report that the target is out of scope rather than generate a non-PHP accelerator.
+- If the target has no PHP evidence at all (`no composer.json`, no `*.php`), `infra-scan` MUST NOT generate a non-PHP accelerator directly. It MUST probe for a recognizable non-PHP stack and, if found, offer `stack-adapter` (see below); if nothing recognizable is found, it MUST stop and report the target out of scope.
+- This instance of Infrastructure-Creator only ever generates PHP accelerators directly. Building tooling for another stack is never done in place - it is always delegated to `stack-adapter`, which produces a separate, fully independent sibling tool (see "Self-Adaptation" below). Infrastructure-Creator itself never becomes multi-stack.
 
 ## Independence (MANDATORY)
 
 - Infrastructure-Creator is fully self-contained. Generated and authored content MUST NOT reference, copy from, or depend on any other accelerator or sibling folder.
 - All reference material the generator needs (integration catalog, framework detection signals, architecture patterns, the memory-bank validator and chunk template) is bundled inside this folder's own skills.
+
+## Self-Adaptation (MANDATORY, SCOPED)
+
+- `stack-adapter` is the sanctioned exception to "PHP only": when a target is not PHP but is a recognizable stack, it MAY build an entirely separate generator - `Infrastructure-Creator-[Stack]/`, a sibling folder next to this one - with the same architecture, freshly researched and authored for that stack.
+- The sibling generator produced by `stack-adapter` MUST meet the exact same independence bar as this one: zero mentions of PHP, Laravel, Symfony, PHP Core, or "Infrastructure-Creator" anywhere in its own content.
+- `stack-adapter` MUST NOT run without explicit user confirmation - a detected foreign stack is evidence, never consent.
+- This is a deliberate, honest-scope choice: offering to build the right tool for the job, rather than silently failing on a non-PHP target or stretching this generator to cover stacks it was never designed for.
 
 ## Workspace Boundary (MANDATORY)
 
@@ -41,23 +49,25 @@ Infrastructure-Creator intentionally has no `memory-bank/` of its own: its job i
 - MUST generate every artifact from what was actually found in the target (`composer.json`, config, PHP source, CI/CD, IaC). MUST NOT invent an integration, framework, or service that has no evidence in the target.
 - MUST cite concrete evidence (file path, and line numbers or a matching excerpt when practical) for every scan finding and every claim carried into a generated artifact.
 - MUST mark any unverifiable or low-confidence finding as `inferred` or `unknown` rather than presenting a guess as fact, and MUST route genuinely ambiguous items through `clarifying-interview`.
+- Behavioral findings MUST also preserve source type (`spec/ADR`, `test`, `database constraint`, `workflow configuration`, `authorization rule`, code/configuration, or `interview answer`) and surface contradictions. Implementation behavior and user testimony MUST NOT be silently promoted to stronger authority.
 - Generated skills/agents/commands MUST conform to the standard `SKILL.md`/agent/command frontmatter and structure documented in each forge skill's own `SKILL.md`.
 - Generated output is tool-selected: `policy-forge`, `skill-forge`, `agent-forge`, `command-forge`, and `hook-forge` produce ONLY the edition(s) the target team selected in `clarifying-interview` - never more editions than selected, never fewer.
 
 ## Orchestration Exception (MANDATORY, SCOPED)
 
-The general accelerator rule is "an agent executes exactly one skill, then stops; it never auto-chains." Three skills in this folder are a deliberate, narrowly scoped exception, because pipeline orchestration is their entire purpose:
+The general accelerator rule is "an agent executes exactly one skill, then stops; it never auto-chains." Four skills in this folder are a deliberate, narrowly scoped exception, because pipeline orchestration is their entire purpose:
 
-- `infra-scan` MAY fan out to the six scanner skills, `stack-researcher`, `clarifying-interview`, and `profile-synthesizer` in one run.
+- `infra-scan` MAY fan out to the seven scanner skills (including `domain-behavior-scanner`), `stack-researcher`, `clarifying-interview`, and `profile-synthesizer` in one run. It MAY also hand off to `stack-adapter` when a non-PHP stack is detected and the user opts in.
 - `infra-generate` MAY fan out to the six forge skills, then `skill-flow-composer`, then `bootstrap-verifier` in one run.
 - `infra-build` MAY chain `infra-scan` then `infra-generate` in one run, pausing at the profile checkpoint only when a blocking ambiguity or a collision is detected.
+- `stack-adapter` MAY research, replicate, re-author, mirror, and self-verify an entire sibling generator in one run, after explicit user confirmation.
 
 Fan-out runs in parallel when the AI tool supports concurrent subagents/tool calls; otherwise sequentially in one session. Every other skill still follows the standard rule when invoked on its own: execute, stop, report, suggest a next step.
 
 ## Agent Behavior
 
 - MUST output a Context Summary and Next Steps at the end of every skill.
-- MUST NOT make workflow decisions for the user beyond the three sanctioned orchestrators above.
+- MUST NOT make workflow decisions for the user beyond the four sanctioned orchestrators above.
 - MUST read the target's actual `composer.json`/config/PHP source/CI/IaC before making any claim about it.
 - MUST NOT read, print, or write the target's `.env` files, credentials, or anything under a `secrets/`-style path.
 - MUST re-validate a `profile-synthesizer` profile against the target's current files before `infra-generate` consumes it, and MUST flag drift if the target changed since the scan.
@@ -84,7 +94,7 @@ Fan-out runs in parallel when the AI tool supports concurrent subagents/tool cal
 ## Security
 
 - MUST NOT read, print, edit, or commit `.env` files or secrets in either this folder or the target project.
-- MUST NOT carry secrets, credentials, tokens, or customer data from the target project into any generated file, scan finding, or seeded memory chunk.
+- MUST NOT carry secrets, credentials, tokens, customer data, raw production payloads, logs, or unsanitized incident details from the target project into any generated file, scan finding, or seeded memory chunk.
 - MUST keep personal/local scratch notes, if any, out of version control.
 
 ## Definition Of Done

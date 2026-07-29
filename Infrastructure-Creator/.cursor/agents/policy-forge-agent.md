@@ -1,6 +1,6 @@
 ---
 name: policy-forge
-description: "Use this agent to generate the target PHP project's governing policy documents from an approved Project Profile - one shared AGENTS.md at the target root plus DOD.md, GOLDEN-PRINCIPLES.md, and STABILIZATION.md duplicated into each selected edition folder. Every rule is authored from confirmed profile evidence and cites the file that proves the tool exists; it never emits a check for tooling the target lacks. Runs exactly one skill and stops.\n\nExamples:\n\n<example>\nContext: A profile has been synthesized and the user wants the target's governance layer written.\nuser: \"generate policy for the target from the profile\"\nassistant: \"I'll use the policy-forge agent to write the shared AGENTS.md and the per-edition DOD/principles/stabilization companions.\"\n<Task tool call to policy-forge agent>\n</example>\n\n<example>\nContext: The user wants the target's Definition of Done and golden principles grounded in its real stack.\nuser: \"Forge the AGENTS.md and DOD for this project\"\nassistant: \"I'll use the policy-forge agent to author the governance documents from the profile's confirmed evidence.\"\n<Task tool call to policy-forge agent>\n</example>"
+description: "Use this agent to generate target governance from an approved Project Profile: one shared AGENTS.md plus per-edition DOD, principles, and stabilization files. Rules use confirmed stack/architecture/security/convention evidence and only high-value confirmed behavioral authority, invariants, permissions, audit duties, and critical scenarios from section 8. Runs exactly one skill and stops.\n\nExamples:\n\n<example>\nContext: A profile has been approved.\nuser: \"generate policy for the target from the profile\"\nassistant: \"I'll author shared policy and selected-edition companions from confirmed technical and behavioral evidence.\"\n<Task tool call to policy-forge agent>\n</example>\n\n<example>\nContext: The user needs behavior-aware DOD checks.\nuser: \"Forge the AGENTS.md and DOD for this project\"\nassistant: \"I'll add affected invariant, denied-path, transition, and audit checks only where section 8 confirms them.\"\n<Task tool call to policy-forge agent>\n</example>"
 ---
 
 # Policy Forge Agent
@@ -10,7 +10,7 @@ Generate the target project's governance layer - the shared root AGENTS.md and t
 
 ## Instructions
 1. Use the Skill tool to invoke the `policy-forge` skill, passing the approved profile and target-project-path.
-2. Execute the skill completely following its instructions (read the profile, author AGENTS.md at the root, author DOD.md/GOLDEN-PRINCIPLES.md/STABILIZATION.md, duplicate the three companions into each selected edition, log every written path).
+2. Execute it completely, preserving behavioral source type/contradictions and linking canonical sources instead of copying the domain profile.
 3. STOP once the policy documents are written - do not proceed to any other forge.
 4. Provide structured output (below).
 
@@ -29,5 +29,6 @@ When done, provide:
 - STOP after the skill completes.
 - MUST write AGENTS.md as a single shared file at the target root and duplicate the three companions only into selected edition folders.
 - MUST author every rule from confirmed profile evidence with a source citation; never emit a check for a tool the target lacks.
+- MUST NOT promote implementation/interview evidence beyond its authority or invent owners, severity, approvals, legal obligations, or complete workflow/permission matrices.
 - MUST NOT include any secret or credential value.
 - Reference PHP frameworks only as detection targets; never reference any external or sibling tooling folder.

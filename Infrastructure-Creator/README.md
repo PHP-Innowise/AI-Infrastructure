@@ -4,7 +4,7 @@
 
 A generator, not an accelerator. Infrastructure-Creator *builds* a bespoke accelerator for a specific **PHP project** you point it at - by scanning it, researching its actual dependencies, asking you the few things it could not determine on its own, and generating a working `AGENTS.md`, skills, agents, commands, hooks, and a seeded `memory-bank/` straight into that project's root, for only the AI tool(s) your team uses.
 
-It is a standalone, self-contained tool: no bundled reference accelerator, no dependency on any other project. You run it from **Claude Code**, **Cursor**, or **OpenAI Codex** - whichever you already use - because the generator itself ships in all three editions.
+It is a standalone, self-contained tool: no bundled reference accelerator, no dependency on any other project. You run it from **Claude Code**, **Cursor**, or **OpenAI Codex** - whichever you already use - because the complete 22-skill generator ships in all three editions.
 
 ## Why This Exists
 
@@ -16,25 +16,28 @@ Generic PHP boilerplate covers common stacks in the abstract, but real projects 
 2. Have the target project available as a sibling directory (or note its path).
 3. From your AI tool, run the scan against the target:
    - `infra-scan ../my-php-app`
-4. Glance at `tasks/TASK-{N}/infra-scan-project-profile.md`. Fix anything the scan got wrong (there is rarely much - the interview already asked about the ambiguous parts, including which AI tool your team uses).
+4. Read `tasks/TASK-{N}/infra-scan-project-profile.md`. Section 8 shows the evidence-backed behavioral contract, section 11 previews generated skills/agents/commands, and section 12 previews cohesive memory concepts. Fix anything wrong before generation.
 5. Generate:
    - `infra-generate ../my-php-app`
 6. Open the target project. Its new `AGENTS.md`, the AI-tool edition(s) you selected, and `memory-bank/` are ready to use.
 
 In a hurry and you trust the scan? Run the one-shot: `infra-build ../my-php-app` chains scan -> generate and only pauses if it hits a blocking ambiguity or a collision.
 
+**Target isn't PHP?** `infra-scan` will tell you rather than silently failing - see "Non-PHP Targets" below.
+
 ## Two-Phase Workflow
 
 ```text
 infra-scan <path-to-php-project>          (read-only; never writes into the target)
-   -> six PHP scanners (parallel): stack, architecture, integrations, infra/ops,
-      security/compliance, conventions
+   -> seven PHP scanners (parallel): stack, architecture,
+      integrations, infra/ops, security/compliance, conventions, domain behavior
    -> stack-researcher (web research grounded in the real composer dependencies)
    -> clarifying-interview (asks only what evidence could not settle,
       including which AI tool(s) the target team uses)
    -> profile-synthesizer -> tasks/TASK-{N}/infra-scan-project-profile.md
+      (incl. behavioral contract, per-skill descriptions, counts, memory preview)
 
-   <-- REVIEW THE PROFILE (quick glance; edit if anything is wrong) -->
+   <-- REVIEW THE PROFILE (what you read here is what infra-generate will build) -->
 
 infra-generate <path-to-php-project>       (the only step that writes into the target)
    -> re-validates the profile against the target's current files
@@ -44,16 +47,48 @@ infra-generate <path-to-php-project>       (the only step that writes into the t
    -> Target now has its own working AGENTS.md + selected edition(s) + memory-bank/
 ```
 
+## Non-PHP Targets
+
+Infrastructure-Creator only generates PHP accelerators directly - but it does not silently fail on a non-PHP target either. When `infra-scan` finds no PHP evidence, it checks for a *recognizable* non-PHP stack (Flutter/Dart, Node.js, Python, Go, Ruby, Java/Kotlin, .NET, Rust, Swift, or similar, detected from real manifest files like `pubspec.yaml`, `package.json`, `go.mod`, etc.):
+
+- **Recognized:** it offers to build `stack-adapter` - a brand-new, fully independent sibling generator, `Infrastructure-Creator-[Stack]/`, next to this folder. That architecture contains 22 skills, including domain-behavior discovery, across all three editions.
+- **Not recognized at all:** it reports the target out of scope, same as before.
+
+### Quick Guide: Building A Sibling Generator
+
+Your project isn't PHP (Flutter, Node.js, Python, Go, or similar) but you still want the same kind of bespoke, discovery-driven accelerator? Here's the whole path, start to finish:
+
+1. **Point at your project, same as always.** From this folder, in your AI tool: `infra-scan ../my-flutter-app`.
+2. **Let it detect the stack.** No `composer.json`/`*.php` found, so it checks for a recognizable manifest (`pubspec.yaml`, `package.json`, `go.mod`, etc.) instead of just giving up.
+3. **Confirm the offer.** It asks once: *"This uses Flutter/Dart, not PHP - want me to build `Infrastructure-Creator-Flutter`, an independent sibling generator for it?"* Say yes.
+   - Already certain you need this and don't want to go through `infra-scan` first? Skip straight to it: `infra-adapt ../my-flutter-app`.
+4. **Wait for it to build.** `stack-adapter` re-authors all 22 skills, including the new stack's own domain-behavior scanner, then mirrors and verifies the sibling.
+5. **Check the report.** It tells you the new generator's path (e.g. `../Infrastructure-Creator-Flutter/`) and whether self-verification passed. If it flags a problem, don't proceed until that's resolved.
+6. **Switch workspaces.** Open `Infrastructure-Creator-Flutter/` (the new folder) as its own workspace - separate from both this generator and your target project.
+7. **Use it exactly like this one.** From inside the new folder: `infra-scan ../my-flutter-app`, review the profile, then `infra-generate ../my-flutter-app` (or `infra-build` for the one-shot). From this point on, everything works the same as the PHP flow above - just for Flutter.
+
+One confirmation, one wait, then a brand-new generator ready to use for that stack.
+
 ## What Gets Generated
 
 For the selected AI-tool edition(s) only (Claude Code / Cursor / Codex - chosen during `clarifying-interview`):
 
 - `AGENTS.md`, `DOD.md`, `GOLDEN-PRINCIPLES.md`, `STABILIZATION.md` - policy tailored to what was found.
-- A custom PHP skill set - one per detected domain/integration (e.g. a payment-integration skill if a Stripe SDK was found, a queue skill if a Redis/SQS worker was found) plus adapted universal skills (architecture, coding, testing, review, security, performance, release) for the target's actual PHP framework.
+- A full, custom PHP skill set in eight groups - not just a handful of generic skills:
+  - **Architecture** (1) - grounded in the detected pattern (monolith/modular-monolith/microservices/event-driven).
+  - **Design & interaction** (3, always) - `architecture-implementer`, `api-designer`, `database-designer`, shaped to the target's real scaffolding tooling, API shape, and persistence layer.
+  - **Frontend** (0 or 5, only if a rendering/asset layer exists) - `frontend-design`, `coder-frontend`, `wcag-accessibility`, `web-design-guidelines`, `browser-verify`.
+  - **Process & workflow** (15, always, framework-agnostic) - the previous 14 plus operational `memory-bank` for retrieve/capture/supersede/audit after seeding.
+  - **Universal PHP** (7) - `coding`, `testing`, `code-review`, `security-review`, `performance`, `release`, `debugging`, adapted to the target's actual PHP framework/version/tooling.
+  - **Framework-specialty** (evidence-gated, one per confirmed pattern) - e.g. ORM patterns, migration safety, async/queue jobs, event-boundary review, caching strategy, file storage, auth scaffolding, form/validator design, admin panel, console commands, test-data factories - generated only where the scan found real evidence, never speculatively.
+  - **Integrations** (one per detected package/service) - e.g. a payment-integration skill if a Stripe SDK was found, a queue skill if a Redis/SQS worker was found.
+  - **Domain** (0 or more, evidence-gated) - one bounded-context review skill only when multiple confirmed rules create a coherent purpose, e.g. `billing-rules-review`; never one skill per rule/entity/status.
 - Matching agents and commands (commands only for editions with a command layer; Codex invokes skills directly).
 - Hooks (`local-context.sh`, `bash-validator.sh`, `file-naming-validator.sh`, `loop-detection.sh`) tuned to the target's real tooling and destructive-command risks.
-- A seeded `memory-bank/` whose initial chunks are strictly the confirmed findings from the scan, each cited to the real file that proves it.
+- A seeded `memory-bank/` whose chunks represent cohesive durable confirmed concepts, link canonical sources, and are operated through the generated `memory-bank` skill.
 - A `SKILL FLOW.md` built from the skills that were actually generated, not a template.
+
+None of this is a surprise at generation time: the profile you review after `infra-scan` (step 4 of the Quick Start above) already spells out a one-line description of every skill about to be written, the exact agent/command counts for your selected edition(s), and a full preview table of every memory-bank chunk `infra-generate` will seed.
 
 ## Directory Structure
 

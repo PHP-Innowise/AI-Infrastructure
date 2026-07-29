@@ -65,6 +65,7 @@ memory-seed; policy-forge/skill-forge if not already run.
 - MUST ensure every script passes `bash -n` and is `chmod +x`.
 - MUST use ms timeouts for Claude, second timeouts for Cursor, and no matcher/timeout for Codex.
 - MUST NOT print or log any secret or credential value from the target.
+- MUST NOT translate section 8 business invariants, permissions, approvals, or lifecycle rules into brittle shell/text-matching hooks. Behavioral rules belong in policy, skills, tests, review, and memory; hooks enforce only deterministic tool/command/file events.
 
 ## Final Output
 
