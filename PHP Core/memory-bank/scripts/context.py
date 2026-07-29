@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sqlite3
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -171,13 +173,43 @@ def active_memory(path: Path, repository: Path) -> bool:
     return metadata["status"] == "active"
 
 
+def git_ignored_paths(repository: Path, paths: list[str]) -> set[bytes]:
+    if not paths:
+        return set()
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repository), "check-ignore", "--stdin", "-z"],
+            input=b"".join(os.fsencode(path) + b"\0" for path in paths),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return set()
+    if result.returncode not in (0, 1):
+        return set()
+    return set(result.stdout.split(b"\0")) - {b""}
+
+
 def discover_documents(repository: Path) -> list[tuple[str, str, str, str, str]]:
     documents: list[tuple[str, str, str, str, str]] = []
     skill_keys: set[str] = set()
+    candidates: list[tuple[str, str, Path, str]] = []
     for layer, kind, pattern in SOURCE_PATTERNS:
         for path in sorted(repository.glob(pattern)):
             if not path.is_file() or path.is_symlink():
                 continue
+            candidates.append(
+                (layer, kind, path, path.relative_to(repository).as_posix())
+            )
+
+    ignored_paths = git_ignored_paths(
+        repository, [relative_path for _, _, _, relative_path in candidates]
+    )
+    for layer, kind, path, relative_path in candidates:
+        if os.fsencode(relative_path) in ignored_paths:
+            continue
+        try:
             if kind == "memory":
                 if not active_memory(path, repository):
                     continue
@@ -186,22 +218,25 @@ def discover_documents(repository: Path) -> list[tuple[str, str, str, str, str]]
                     validate_secret_patterns(path)
                 except (OSError, ValidationError):
                     continue
-            relative_path = path.relative_to(repository).as_posix()
-            if kind == "skill":
-                skill_key = relative_path.split("/skills/", maxsplit=1)[1]
-                if skill_key in skill_keys:
-                    continue
-                skill_keys.add(skill_key)
             content = path.read_text(encoding="utf-8")
-            documents.append(
-                (
-                    relative_path,
-                    layer,
-                    kind,
-                    document_title(path, content),
-                    content,
-                )
+        except UnicodeDecodeError as error:
+            raise ContextError(
+                f"Source document is not valid UTF-8: {relative_path}"
+            ) from error
+        if kind == "skill":
+            skill_key = relative_path.split("/skills/", maxsplit=1)[1]
+            if skill_key in skill_keys:
+                continue
+            skill_keys.add(skill_key)
+        documents.append(
+            (
+                relative_path,
+                layer,
+                kind,
+                document_title(path, content),
+                content,
             )
+        )
     return documents
 
 
