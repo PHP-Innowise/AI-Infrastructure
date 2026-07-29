@@ -49,6 +49,7 @@ CAPSULE_LAYER_LIMITS = {
     "episodic": 1,
 }
 CAPSULE_QUERY_TOKEN_LIMIT = 32
+CAPSULE_CHARACTER_LIMIT = 8000
 TASK_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
 
 
@@ -437,6 +438,43 @@ def build_context_packet(
         + search_episodes(connection, retrieval_query, episodic_limit)
     )[:episodic_limit]
     return packet
+
+
+def serialize_capsule(capsule: dict[str, object]) -> str:
+    return json.dumps(capsule, ensure_ascii=False, separators=(",", ":"))
+
+
+def capsule_character_count(capsule: dict[str, object]) -> int:
+    return len(serialize_capsule(capsule))
+
+
+def enforce_capsule_budget(capsule: dict[str, object]) -> dict[str, object]:
+    compacted = json.loads(serialize_capsule(capsule))
+    omitted = compacted["omitted"]
+    working = compacted["working"]
+
+    while capsule_character_count(compacted) > CAPSULE_CHARACTER_LIMIT:
+        if compacted["episodic"]:
+            compacted["episodic"].pop()
+            continue
+        if compacted["semantic"]:
+            compacted["semantic"].pop()
+            continue
+        if working is not None and len(working["files"]) > 1:
+            working["files"].pop()
+            omitted["working_files"] += 1
+            continue
+        if working is not None and working["progress"]:
+            excess = capsule_character_count(compacted) - CAPSULE_CHARACTER_LIMIT
+            keep = max(0, len(working["progress"]) - excess - 1)
+            working["progress"] = f"{working['progress'][:keep]}…" if keep else ""
+            continue
+        raise ContextError(
+            "mandatory Task Capsule content exceeds "
+            f"{CAPSULE_CHARACTER_LIMIT} characters"
+        )
+
+    return compacted
 
 
 def validate_task_id(task_id: str) -> str:
@@ -931,14 +969,29 @@ def main() -> int:
                 return 0
 
             if arguments.command == "context":
+                warnings: list[str] = []
+                include_retrieval = True
+                try:
+                    index_repository(connection, repository)
+                except (ContextError, OSError, sqlite3.Error) as error:
+                    include_retrieval = False
+                    warnings.append(f"Index refresh failed: {error}")
                 result = build_context_packet(
-                    connection, arguments.query, arguments.task_id, arguments.limit
+                    connection,
+                    arguments.query,
+                    arguments.task_id,
+                    arguments.limit,
+                    include_retrieval=include_retrieval,
+                    warnings=warnings,
                 )
+                result = enforce_capsule_budget(result)
                 if arguments.json:
-                    print(json.dumps(result, ensure_ascii=False))
+                    print(serialize_capsule(result))
                 else:
                     working = result["working"]
-                    if working is not None:
+                    if working is None:
+                        print("working: unavailable")
+                    else:
                         print(f"working: {working['task_id']} — {working['goal']}")
                     for warning in result["warnings"]:
                         print(f"warning: {warning}")
