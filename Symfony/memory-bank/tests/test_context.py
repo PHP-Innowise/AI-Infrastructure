@@ -990,7 +990,7 @@ class ContextEngineTest(unittest.TestCase):
         self.assertEqual("BAUMAS-133", payload["working"]["task_id"])
         self.assertLessEqual(len(payload["procedural"]), 2)
         self.assertLessEqual(len(payload["semantic"]), 2)
-        self.assertLessEqual(len(payload["episodic"]), 2)
+        self.assertEqual(1, len(payload["episodic"]))
         self.assertTrue(
             all(item["layer"] == "procedural" for item in payload["procedural"])
         )
@@ -1003,7 +1003,6 @@ class ContextEngineTest(unittest.TestCase):
         self.assertEqual(["AGENTS.md"], [item["path"] for item in payload["procedural"]])
         self.assertEqual(["README.md"], [item["path"] for item in payload["semantic"]])
         self.assertEqual("CHANGELOG.md", payload["episodic"][0]["path"])
-        self.assertIn("id", payload["episodic"][1])
 
         unknown = self.run_context(
             "context", "password", "--task-id", "TASK-404", "--json"
@@ -1017,8 +1016,122 @@ class ContextEngineTest(unittest.TestCase):
             "0",
             "--json",
         )
-        self.assertIn("not found", unknown.stderr)
+        self.assertEqual(0, unknown.returncode, unknown.stderr)
+        unknown_payload = json.loads(unknown.stdout)
+        self.assertIsNone(unknown_payload["working"])
+        self.assertIn("Working task not found: TASK-404", unknown_payload["warnings"])
         self.assertIn("--limit must be a positive integer", invalid_limit.stderr)
+
+    def test_context_builds_request_only_capsule_with_layer_limits(self) -> None:
+        procedural_sources = {
+            "AGENTS.md": "# Policy\n\nThe capsule boundary is mandatory.\n",
+            "CLAUDE.md": "# Claude\n\nThe capsule boundary guides work.\n",
+            ".agents/skills/alpha/SKILL.md": (
+                "# Alpha\n\nThe capsule boundary applies to alpha.\n"
+            ),
+        }
+        for relative_path, content in procedural_sources.items():
+            path = self.repository / relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+
+        semantic_sources = {
+            "README.md": (
+                "# Project\n\nThe capsule boundary describes the project.\n\n"
+                + ("Background material without the search terms. " * 80)
+                + "\nFULL_DOCUMENT_SENTINEL\n"
+            ),
+            "specs/one.md": "# One\n\nThe capsule boundary protects one.\n",
+            "specs/two.md": "# Two\n\nThe capsule boundary protects two.\n",
+            "specs/three.md": "# Three\n\nThe capsule boundary protects three.\n",
+        }
+        for relative_path, content in semantic_sources.items():
+            (self.repository / relative_path).write_text(content, encoding="utf-8")
+
+        self.repository.joinpath("CHANGELOG.md").write_text(
+            "# Changes\n\nThe capsule boundary shipped.\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(0, self.run_context("index", "--json").returncode)
+
+        packet = self.run_context(
+            "context",
+            "capsule boundary",
+            "--limit",
+            "20",
+            "--json",
+        )
+
+        self.assertEqual(0, packet.returncode, packet.stderr)
+        payload = json.loads(packet.stdout)
+        self.assertIsNone(payload["task_id"])
+        self.assertIsNone(payload["working"])
+        self.assertLessEqual(len(payload["procedural"]), 2)
+        self.assertLessEqual(len(payload["semantic"]), 3)
+        self.assertLessEqual(len(payload["episodic"]), 1)
+        self.assertIn("Working task unavailable: task ID was not supplied", payload["warnings"])
+        self.assertNotIn("FULL_DOCUMENT_SENTINEL", packet.stdout)
+
+    def test_context_uses_working_terms_and_deduplicates_paths(self) -> None:
+        self.repository.joinpath("README.md").write_text(
+            "# Cobalt\n\nThe cobalt invariant belongs to the account workflow.\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            0,
+            self.run_context(
+                "start",
+                "--task-id",
+                "BAUMAS-133",
+                "--goal",
+                "Verify the cobalt invariant.",
+            ).returncode,
+        )
+        self.assertEqual(0, self.run_context("index", "--json").returncode)
+
+        packet = self.run_context(
+            "context",
+            "current phase",
+            "--task-id",
+            "BAUMAS-133",
+            "--json",
+        )
+
+        self.assertEqual(0, packet.returncode, packet.stderr)
+        payload = json.loads(packet.stdout)
+        self.assertEqual("BAUMAS-133", payload["task_id"])
+        self.assertEqual("BAUMAS-133", payload["working"]["task_id"])
+        self.assertEqual(
+            ["README.md"],
+            [item["path"] for item in payload["semantic"]],
+        )
+        document = {
+            "path": "README.md",
+            "layer": "semantic",
+            "kind": "overview",
+            "title": "Project",
+            "snippet": "Cobalt invariant.",
+        }
+        episode = {
+            "id": 7,
+            "layer": "episodic",
+            "summary": "Prior work",
+        }
+        self.assertEqual(
+            [document, episode],
+            CONTEXT.deduplicate_context_items(
+                [document, dict(document), episode, dict(episode)]
+            ),
+        )
+
+    def test_context_rejects_secret_query_without_echoing_it(self) -> None:
+        secret = "ghp_" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
+
+        packet = self.run_context("context", secret, "--json")
+
+        self.assertNotEqual(0, packet.returncode)
+        self.assertIn("possible GitHub token", packet.stderr)
+        self.assertNotIn("ABCDEFGHIJKLMNOPQRSTUVWXYZ", packet.stderr)
 
     def test_status_reports_document_and_episode_counts(self) -> None:
         self.repository.joinpath("specs/status.md").write_text(
