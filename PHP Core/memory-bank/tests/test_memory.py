@@ -159,14 +159,29 @@ class MemoryIntegrationTest(unittest.TestCase):
         accelerator_readme = REPOSITORY_ROOT.joinpath("README.md").read_text(
             encoding="utf-8"
         )
-        workspace_readme = REPOSITORY_ROOT.parent.joinpath("README.md").read_text(
+        workspace_root = REPOSITORY_ROOT.parent
+        workspace_readme = workspace_root.joinpath("README.md").read_text(
+            encoding="utf-8"
+        )
+        english_readme = workspace_root.joinpath("README_EN.md").read_text(
+            encoding="utf-8"
+        )
+        russian_readme = workspace_root.joinpath("README_RU.md").read_text(
             encoding="utf-8"
         )
 
         self.assertIn("AI command `memory`", memory_readme)
         self.assertIn("Use `memory` in Codex or `/memory`", accelerator_readme)
-        self.assertIn("`memory` без", workspace_readme)
-        for document in (memory_readme, accelerator_readme, workspace_readme):
+        self.assertIn("[English](README_EN.md)", workspace_readme)
+        self.assertIn("[Русский](README_RU.md)", workspace_readme)
+        self.assertIn("`memory` без", russian_readme)
+        self.assertIn("invoke `memory` without", english_readme)
+        for document in (
+            memory_readme,
+            accelerator_readme,
+            english_readme,
+            russian_readme,
+        ):
             self.assertIn("checkpoint", document)
             self.assertIn("complete", document)
 
