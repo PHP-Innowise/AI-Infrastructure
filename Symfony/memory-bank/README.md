@@ -80,7 +80,19 @@ Repository code, configuration, tests, specs, and policy remain authoritative.
 The context packet returns a bounded set of retrieval hints per document layer;
 verify material claims against the cited source before using them.
 
-Run these lifecycle commands from the edition root or consuming-project root:
+For the shortest all-layer refresh, invoke the AI command `memory` with no
+arguments. It checkpoints current Git-visible work when a valid branch is
+available, then rebuilds Procedural, Semantic, and changelog-backed Episodic
+documents from repository sources. It never completes a task or authors
+repository memory.
+
+For routine progress capture, invoke the AI command `checkpoint` with no
+arguments. The active agent derives the task ID from the current Git branch,
+summarizes all current Git-visible changes, and automatically creates or updates
+Working Memory. It does not complete the task.
+
+For the manual flow, run these lifecycle commands from the edition root or
+consuming-project root:
 
 ```bash
 python3 memory-bank/scripts/context.py index
@@ -100,10 +112,12 @@ python3 memory-bank/scripts/context.py complete \
   --verification "ChangePasswordTest passed"
 ```
 
-Supply a ticket ID, branch name, or descriptive slug explicitly. For non-trivial
-work, use `start → update → context → complete`: begin before work, add only
-sanitized progress, retrieve context before decisions, and complete only after
-verification. `complete` atomically converts that working task into an episode.
+Supply a ticket ID, branch name, or descriptive slug explicitly for the manual
+flow. For non-trivial work, use `start → update → context → complete`: begin
+before work, add only sanitized progress, retrieve context before decisions,
+and complete only after verification. `context` and `complete` stay explicit:
+retrieval needs a task/query and completion needs a verified outcome. `complete`
+atomically converts that working task into an episode.
 `search` still searches indexed sources and episodes, and `record` remains
 compatible for a standalone completed-task episode; `status` reports layer,
 episode, and working-task counts.

@@ -40,7 +40,9 @@ This flow keeps native PHP work structured while preserving user control. Agents
 - Use `/dependency-manager` for Composer audits, updates, and vetting new packages.
 - Use `/debugger` when tests fail for unclear reasons or behavior is unexpected.
 - Use `/docs-generator` when setup, deployment, worker/cron, API, or architecture documentation changed.
-- Use `/memory-bank` only to retrieve, capture, audit, supersede, archive, or initialize durable source-backed project memory; keep transient progress in task context.
+- Use `memory-bank` only to retrieve, capture, audit, supersede, archive, or initialize durable source-backed project memory; keep transient progress in task context.
+- Use `memory` for an argument-free refresh of every local context layer; use
+  `checkpoint` when only current Working Memory should be captured.
 
 ## Phase Map
 
@@ -51,7 +53,7 @@ This flow keeps native PHP work structured while preserving user control. Agents
 | Implementation | `/git-worktrees`, `/architecture-implementer`, `/coder`, `/coder-frontend`, `/refactorer` |
 | Quality | `/code-reviewer`, `/security-reviewer`, `/test-generator`, `/performance-optimization`, `/debugger`, `/verify` |
 | Finalization | `/docs-generator`, `/release`, `/finishing-branch` |
-| Utility | `/memory-bank`, `/reflect`, `/skill-creator`, `/review-pr`, `/browser-verify`, `/dependency-manager` |
+| Utility | `memory-bank`, `checkpoint`, `memory`, `reflect`, `skill-creator`, `review-pr`, `browser-verify`, `dependency-manager` |
 
 ## Context Handoff
 

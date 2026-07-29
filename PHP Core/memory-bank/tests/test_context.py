@@ -320,6 +320,94 @@ class ContextEngineTest(unittest.TestCase):
                     [item["path"] for item in json.loads(searched.stdout)["documents"]],
                 )
 
+    def test_index_skips_git_ignored_sources_but_keeps_tracked_sources(self) -> None:
+        subprocess.run(
+            ["git", "init", "--quiet", str(self.repository)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.repository.joinpath(".gitignore").write_text(
+            "docs/*.md\n",
+            encoding="utf-8",
+        )
+        self.repository.joinpath("docs").mkdir()
+        self.repository.joinpath("docs/ignored.md").write_text(
+            "# Ignored\n\nThe heliotrope rule must stay out of the index.\n",
+            encoding="utf-8",
+        )
+        self.repository.joinpath("docs/tracked.md").write_text(
+            "# Tracked\n\nThe periwinkle rule remains searchable.\n",
+            encoding="utf-8",
+        )
+        subprocess.run(
+            ["git", "add", "-f", "--", "docs/tracked.md"],
+            cwd=self.repository,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        indexed = self.run_context("index", "--json")
+        self.assertEqual(0, indexed.returncode, indexed.stderr)
+
+        ignored = self.run_context("search", "heliotrope", "--json")
+        self.assertEqual(0, ignored.returncode, ignored.stderr)
+        self.assertEqual([], json.loads(ignored.stdout)["documents"])
+
+        tracked = self.run_context("search", "periwinkle", "--json")
+        self.assertEqual(0, tracked.returncode, tracked.stderr)
+        self.assertEqual(
+            ["docs/tracked.md"],
+            [item["path"] for item in json.loads(tracked.stdout)["documents"]],
+        )
+
+    def test_index_does_not_read_git_ignored_sources(self) -> None:
+        subprocess.run(
+            ["git", "init", "--quiet", str(self.repository)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.repository.joinpath(".gitignore").write_text(
+            "docs/*.md\n",
+            encoding="utf-8",
+        )
+        self.repository.joinpath("docs").mkdir()
+        self.repository.joinpath("docs/:(glob) malformed\nsource.md").write_bytes(
+            b"\xff"
+        )
+
+        indexed = self.run_context("index", "--json")
+        self.assertEqual(0, indexed.returncode, indexed.stderr)
+        self.assertEqual(0, json.loads(indexed.stdout)["documents"])
+
+    def test_index_reports_invalid_utf8_and_preserves_previous_index(self) -> None:
+        self.repository.joinpath("README.md").write_text(
+            "# Project\n\nThe celadon rule remains searchable.\n",
+            encoding="utf-8",
+        )
+        initial = self.run_context("index", "--json")
+        self.assertEqual(0, initial.returncode, initial.stderr)
+
+        self.repository.joinpath("docs").mkdir()
+        self.repository.joinpath("docs/broken.md").write_bytes(b"\xff")
+        failed = self.run_context("index", "--json")
+
+        self.assertNotEqual(0, failed.returncode)
+        self.assertEqual(
+            "context: Source document is not valid UTF-8: docs/broken.md\n",
+            failed.stderr,
+        )
+        self.assertNotIn("Traceback", failed.stderr)
+
+        searched = self.run_context("search", "celadon", "--json")
+        self.assertEqual(0, searched.returncode, searched.stderr)
+        self.assertEqual(
+            ["README.md"],
+            [item["path"] for item in json.loads(searched.stdout)["documents"]],
+        )
+
     def test_index_includes_only_active_memory(self) -> None:
         self.write_memory(
             "MEM-0001-current-convention.md",
@@ -589,6 +677,24 @@ class ContextEngineTest(unittest.TestCase):
         remaining = self.run_context("get", "--task-id", "BAUMAS-134", "--json")
         self.assertEqual(0, remaining.returncode, remaining.stderr)
 
+    def test_working_start_preserves_exact_file_path(self) -> None:
+        result = self.run_context(
+            "start",
+            "--task-id",
+            "TASK-WHITESPACE",
+            "--goal",
+            "Preserve exact Git paths.",
+            "--file",
+            " leading-and-trailing.txt ",
+            "--json",
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(
+            [" leading-and-trailing.txt "],
+            json.loads(result.stdout)["files"],
+        )
+
     def test_working_update_merges_unique_list_values(self) -> None:
         self.assertEqual(
             0,
@@ -738,6 +844,7 @@ class ContextEngineTest(unittest.TestCase):
             [
                 "src/GraphQL/Resolver/ChangePasswordResolver.php",
                 "tests/Integration/GraphQL/ChangePasswordTest.php",
+                " src/GraphQL/Resolver/ChangePasswordResolver.php ",
             ],
             episode["files"],
         )
@@ -1011,7 +1118,7 @@ class ContextEngineTest(unittest.TestCase):
         self.assertNotEqual(0, recorded.returncode)
         self.assertIn("Episode summary and outcome must not be empty", recorded.stderr)
 
-    def test_record_rejects_blank_optional_field(self) -> None:
+    def test_record_rejects_empty_optional_file(self) -> None:
         recorded = self.run_context(
             "record",
             "--summary",
@@ -1019,7 +1126,7 @@ class ContextEngineTest(unittest.TestCase):
             "--outcome",
             "Task is complete.",
             "--file",
-            " ",
+            "",
             "--json",
         )
 

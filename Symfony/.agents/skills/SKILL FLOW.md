@@ -55,6 +55,8 @@ requirements-analyst
 - Use `systematic-debugger` when tests fail for unclear reasons or behavior is unexpected.
 - Use `documentation-generator` when setup, deployment, worker/cron, API, or architecture documentation changed.
 - Use `memory-bank` only to retrieve, capture, audit, supersede, archive, or initialize durable source-backed project memory; keep transient progress in task context.
+- Use `memory` for an argument-free refresh of every local context layer; use
+  `checkpoint` when only current Working Memory should be captured.
 
 ## Phase Map
 
@@ -65,7 +67,7 @@ requirements-analyst
 | Implementation | `using-git-worktrees`, `architecture-implementer`, `coder`, `coder-frontend`, `console-command-coder`, `fixture-factory-generator`, `refactorer` |
 | Quality | `architecture-boundary-reviewer`, `code-reviewer`, `repository-reviewer`, `security-reviewer`, `twig-ux-reviewer`, `container-reviewer`, `test-generator`, `performance-optimization`, `systematic-debugger`, `verify` |
 | Finalization | `documentation-generator`, `release`, `finishing-branch` |
-| Utility | `memory-bank`, `reflect`, `skill-creator`, `review-pr`, `browser-verify`, `dependency-manager` |
+| Utility | `memory-bank`, `checkpoint`, `memory`, `reflect`, `skill-creator`, `review-pr`, `browser-verify`, `dependency-manager` |
 
 ## Context Handoff
 
