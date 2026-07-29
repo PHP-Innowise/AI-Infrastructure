@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- **Local context engine** - added a dependency-free SQLite FTS5 index for
+  policy, specs, active memory, task documents, capability epics, and changelog
+  history, plus gitignored summaries of completed tasks. It classifies
+  procedural, semantic, episodic, and working context in one local database;
+  callers supply task IDs, retrieve bounded per-layer packets, and atomically
+  complete a working task into an episode. The shared `memory-bank` skill keeps
+  index, search, record, and status compatible without treating local episodes
+  as authoritative memory.
+
 ### Fixed
 
 - **Stale branch-based wording left over from the pre-monorepo layout** - `AGENTS.md` and `README.md` (intro + Symfony Adaptation Notes) still said things like "this branch is dedicated to Symfony" / "feature/symfony-accelerator branch" / "the Laravel branch", which stopped being accurate once the accelerators were merged into sibling `Laravel/` / `Symfony/` / `PHP Core/` folders in one repo. Reworded to point at the sibling `PHP Core/` and `Laravel/` folders instead of branches, consistent with the root `README.md`.

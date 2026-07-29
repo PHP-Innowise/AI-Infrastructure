@@ -30,6 +30,13 @@ This policy is shared across editions. The same accelerator is mirrored for **Cl
 - MUST execute only the selected skill, then stop.
 - MUST NOT chain to another skill automatically.
 - MUST output a Context Summary and Next Steps.
+- MUST use a caller-supplied ticket ID, branch name, or descriptive slug for
+  non-trivial local context work when `memory-bank/scripts/context.py` exists.
+- MUST `start` before the work, `context` before material decisions, `update`
+  only with sanitized progress, and `complete` only after verification.
+- MUST use the bounded procedural, semantic, and episodic context packet as a
+  retrieval hint; native PHP code, configuration, tests, specs, and policy
+  remain authoritative.
 - MUST NOT make workflow decisions for the user when a command is supposed to offer alternatives.
 - MUST read relevant PHP code, autoload config, routes/entry points, database access, tests, and specs before modifying behavior.
 - MUST read `memory-bank/README.md` and `memory-bank/INDEX.md` when a memory bank exists, then load only chunks relevant to the task's scope and tags.
@@ -81,6 +88,12 @@ This policy is shared across editions. The same accelerator is mirrored for **Cl
 
 ## Memory Bank
 
+- Local context is one ignored SQLite database with procedural, semantic,
+  episodic, and working layers. `complete` atomically replaces a working task
+  with an episode; `clear` removes only the working task. Deleting the database
+  loses local working/episode data, while the repository index can be rebuilt.
+- MUST NEVER capture raw conversations, prompts, responses, logs, credentials,
+  customer data, or secret values. The CLI rejects likely secrets.
 - MUST use `memory-bank/` only for durable, reusable project context: verified constraints, conventions, decisions, integration contracts, operational lessons, and stable domain knowledge.
 - MUST keep transient plans, unfinished reasoning, command output, and per-session progress in `tasks/` or the final Context Summary instead of shared memory.
 - MUST read `memory-bank/.memory-counter` before creating a chunk, increment it only after choosing the next unused identifier, and update `memory-bank/INDEX.md` in the same change.
