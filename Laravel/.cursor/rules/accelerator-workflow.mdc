@@ -19,8 +19,8 @@ Execute only the selected skill, then stop. Do not auto-chain. Always end with a
 
 `brainstorm` -> `requirements-analyst` -> `architect` -> `api-designer` -> `writing-plans` -> `architecture-implementer` -> `coder` / `coder-frontend` / `filament` / `eloquent` / `queues-jobs` / `events-notifications` / `auth-scaffolding` / `caching` / `console-scheduler` / `file-storage` / `package-developer` -> `test-generator` -> `code-reviewer` / `security-reviewer` -> `verify` -> `finishing-branch` / `release`
 
-Support skills: `researcher`, `council`, `database-designer`, `dependency-manager`, `refactorer`, `performance-optimization`, `systematic-debugger`, `documentation-generator`, `review-pr`, `reflect`, `memory-bank`.
+Support skills: `researcher`, `council`, `database-designer`, `dependency-manager`, `refactorer`, `performance-optimization`, `systematic-debugger`, `documentation-generator`, `project-brain`, `memory-bank`, `review-pr`, `reflect`.
 
 ## Sources Of Truth
 
-Enforcement (`.cursor/hooks`) > Policy (`AGENTS.md`) > Architecture/runtime truth (`specs/`, code, config, migrations, tests) > Verified memory (`memory-bank/`) > Skills (`.cursor/skills/`) > Examples > Docs. See `.cursor/DOD.md` and `.cursor/GOLDEN-PRINCIPLES.md`.
+Enforcement/policy > canonical architecture/code/config/migrations/tests > shared Project Brain work/control > verified durable memory > skills > examples > docs. Canonical project sources always outrank retrieved context. Use `/project-brain` for governed active work and `/memory-bank` for durable memory or approved promotion application. Session hooks are metadata-only and never index, retrieve, print, or inject records. See root `AGENTS.md`, `.cursor/DOD.md`, and `.cursor/GOLDEN-PRINCIPLES.md`.

@@ -1,11 +1,11 @@
 ---
 name: memory-bank
-description: "Retrieve, capture, audit, supersede, archive, or initialize durable project memory."
+description: "Retrieve, capture, audit, supersede/archive durable memory, or apply a human-approved Project Brain promotion."
 ---
 
 # Memory Bank
 
-Retrieve, capture, audit, supersede, archive, or initialize durable project memory.
+Retrieve, capture, audit, supersede/archive durable memory, or apply a human-approved Project Brain promotion.
 
 ## Input
 

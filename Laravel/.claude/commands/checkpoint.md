@@ -1,13 +1,12 @@
 ---
-phase: utility
-flow-next: null
-flow-alternatives: [memory-bank, verify]
+name: checkpoint
+description: "Capture lightweight working memory or defer to governed Project Brain."
 ---
 
 # Checkpoint
 
-This command accepts no arguments. If `$ARGUMENTS` is not empty, stop and ask
+This command accepts no arguments. If $ARGUMENTS is not empty, stop and ask
 the user to invoke `/checkpoint` without arguments.
 
-Read `.claude/skills/checkpoint/SKILL.md`, execute exactly one Working-Memory
-checkpoint in the current agent, and stop.
+Read `.claude/skills/checkpoint/SKILL.md`, execute exactly one authority-aware
+checkpoint workflow in the current agent, and stop.

@@ -21,7 +21,9 @@ Codex does not use duplicate `.codex/skills`, `.codex/commands`, or `.codex/agen
 3. Invoke a skill by name or describe work that matches its trigger description.
 4. Follow root `AGENTS.md`; run `.codex/DOD.md` before claiming completion.
 
-Use the `memory-bank` skill to retrieve, capture, audit, supersede, archive, or initialize durable project memory in the shared root `memory-bank/`. Codex session hooks report bank counts only; the skill selectively loads relevant chunks and verifies them against current sources.
+Use the discovered `project-brain` skill for governed shared task lifecycle, handoffs, findings/bugs/incidents/decisions, compaction, promotion proposals, and the one public task-aware retrieval command: `python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID`. Governed mode is the default; `--mode lightweight` is an explicit machine-local fallback.
+
+Use `memory-bank` only for durable retrieval/capture/audit/supersession and application of a human-approved promotion. Canonical policy, specs, code, configuration, migrations, and tests outrank all context. Codex intentionally has no `.codex/commands` or `.codex/agents` wrapper for Project Brain. Session hooks report mode, index health/staleness, active binding count, and validation status only; they never index, retrieve, load, or inject records automatically.
 
 ## Architecture
 

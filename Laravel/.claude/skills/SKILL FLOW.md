@@ -52,9 +52,9 @@ This flow keeps Laravel work structured while preserving user control. Agents su
 - Use `/dependency-manager` for Composer audits, updates, and vetting new packages.
 - Use `/debugger` when tests fail for unclear reasons or behavior is unexpected.
 - Use `/docs-generator` when setup, deployment, worker/cron, API, or architecture documentation changed.
-- Use `/memory-bank` only to retrieve, capture, audit, supersede, archive, or initialize durable source-backed project memory; keep transient progress in task context.
-- Use `/memory` for an argument-free refresh of every local context layer; use
-  `/checkpoint` when only current Working Memory should be captured.
+- Use `/project-brain` for governed task lifecycle, handoffs, unified retrieval, all six governed record types, compaction, and promotion proposals. Governed mode is the default; `--mode lightweight` is an explicit local-only fallback.
+- Use `/memory-bank` only for durable retrieval/capture/audit/supersession and human-approved promotion application; active work stays in Project Brain.
+- Use `/checkpoint`, `/memory` for authority-aware progress capture and unified context refresh; governed mode never creates SQLite task authority.
 
 ## Phase Map
 
@@ -65,7 +65,7 @@ This flow keeps Laravel work structured while preserving user control. Agents su
 | Implementation | `/git-worktrees`, `/architecture-implementer`, `/coder`, `/coder-frontend`, `/filament`, `/eloquent`, `/queues-jobs`, `/events-notifications`, `/auth-scaffolding`, `/caching`, `/console-scheduler`, `/file-storage`, `/package-developer`, `/refactorer` |
 | Quality | `/code-reviewer`, `/security-reviewer`, `/test-generator`, `/performance-optimization`, `/debugger`, `/verify` |
 | Finalization | `/docs-generator`, `/release`, `/finishing-branch` |
-| Utility | `/memory-bank`, `/checkpoint`, `/memory`, `/reflect`, `/skill-creator`, `/review-pr`, `/browser-verify`, `/dependency-manager` |
+| Utility | `/project-brain`, `/checkpoint`, `/memory`, `/memory-bank`, `/reflect`, `/skill-creator`, `/review-pr`, `/browser-verify`, `/dependency-manager` |
 
 ## Context Handoff
 
@@ -77,3 +77,4 @@ Every skill should finish with:
 - Risks and assumptions.
 - Recommended next command.
 - Memory chunk IDs used or changed, when applicable.
+- Project Brain task/record revisions, handoff, and retrieval manifest, when applicable.

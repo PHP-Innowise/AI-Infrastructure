@@ -6,7 +6,7 @@ These hooks are registered in `.cursor/hooks.json` (schema `version: 1`). Each i
 
 ### sessionStart: Local Context Scanner
 **Script:** `local-context.sh`
-**Purpose:** Prints project context at session start: git branch, Composer markers, PHP version, configured test/format/static-analysis tools, framework detection, and project structure.
+**Purpose:** Prints project metadata at session start: git branch, Composer/PHP/Laravel/tooling markers, Livewire/Inertia detection, framework/structure, governed or lightweight mode, index health/staleness, active binding count, Project Brain validation status, and Memory Bank validation summary. It never runs indexing or retrieval and never prints/injects record contents.
 **Return:** Always `0` (informational only).
 
 ### beforeShellExecution: Bash Validator

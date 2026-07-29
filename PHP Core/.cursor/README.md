@@ -6,7 +6,7 @@ This directory is the **Cursor-native** copy of the accelerator that lives in `.
 
 | Path | Purpose |
 |---|---|
-| `.cursor/skills/<name>/SKILL.md` | Workflows the agent executes (31 skills). |
+| `.cursor/skills/<name>/SKILL.md` | Native-PHP workflows the agent executes (including `project-brain` and `memory-bank`). |
 | `.cursor/agents/*.md` | Subagents that run one skill in isolation. |
 | `.cursor/commands/*.md` | `/slash` entry points. Invoke as `/name`; context passes via `$ARGUMENTS`. |
 | `.cursor/rules/*.mdc` | Always-on policy + PHP standards (native Cursor rules). |
@@ -34,6 +34,8 @@ When you change one side, mirror the edit on the other (or regenerate `.cursor/`
 
 ## Usage
 
-Type `/` in Cursor chat to see the commands (e.g. `/coder`, `/architect`, `/security-reviewer`, `/memory-bank`), or ask the agent to run a skill by name. Start big/ambiguous work with `/brainstorm` and follow the flow in `.cursor/rules/accelerator-workflow.mdc`.
+Type `/` in Cursor chat to see the commands (e.g. `/coder`, `/architect`, `/security-reviewer`, `/project-brain`, `/memory-bank`), or ask the agent to run a skill by name. Start big/ambiguous work with `/brainstorm` and follow the flow in `.cursor/rules/accelerator-workflow.mdc`.
 
-`/memory-bank` manages the canonical root `memory-bank/` shared by all editions. Keep Cursor's optional Claude-file loading disabled so the native command, agent, skill, and hooks are not duplicated.
+`/project-brain` manages governed shared tasks, handoffs, unified retrieval, all six record types, compaction, and promotion proposals. Governed mode is the default; `--mode lightweight` is explicit and local-only. `/memory-bank` is limited to durable retrieval/capture/audit/supersession and applying human-approved promotions.
+
+The one public task-aware retrieval command is `python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID`. Canonical project sources outrank all retrieved context. Session hooks report metadata only and never index or inject records automatically. Keep Cursor's optional Claude-file loading disabled so native commands, agents, skills, and hooks are not duplicated.

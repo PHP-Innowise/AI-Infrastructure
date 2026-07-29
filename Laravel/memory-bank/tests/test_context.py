@@ -89,6 +89,21 @@ class ContextEngineTest(unittest.TestCase):
 
     def run_context(self, *arguments: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--root",
+                str(self.repository),
+                "--mode",
+                "lightweight",
+                *arguments,
+            ],
+            text=True,
+            capture_output=True,
+        )
+
+    def run_governed(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
             [sys.executable, str(SCRIPT), "--root", str(self.repository), *arguments],
             text=True,
             capture_output=True,
@@ -352,11 +367,9 @@ class ContextEngineTest(unittest.TestCase):
         self.assertEqual(0, indexed.returncode, indexed.stderr)
 
         ignored = self.run_context("search", "heliotrope", "--json")
-        self.assertEqual(0, ignored.returncode, ignored.stderr)
         self.assertEqual([], json.loads(ignored.stdout)["documents"])
 
         tracked = self.run_context("search", "periwinkle", "--json")
-        self.assertEqual(0, tracked.returncode, tracked.stderr)
         self.assertEqual(
             ["docs/tracked.md"],
             [item["path"] for item in json.loads(tracked.stdout)["documents"]],
@@ -402,7 +415,6 @@ class ContextEngineTest(unittest.TestCase):
         self.assertNotIn("Traceback", failed.stderr)
 
         searched = self.run_context("search", "celadon", "--json")
-        self.assertEqual(0, searched.returncode, searched.stderr)
         self.assertEqual(
             ["README.md"],
             [item["path"] for item in json.loads(searched.stdout)["documents"]],

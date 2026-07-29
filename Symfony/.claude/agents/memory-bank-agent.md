@@ -1,6 +1,6 @@
 ---
 name: memory-bank
-description: "Use this agent to retrieve, capture, audit, supersede, archive, or initialize durable project memory. Use when the user asks the agent to remember verified Symfony project context across sessions, inspect prior decisions, or repair stale/conflicting memory. Do not use for transient task notes or ordinary chat summaries."
+description: "Use this agent to retrieve, capture, audit, supersede/archive durable project memory, or apply a human-approved Project Brain promotion. Do not use for active task state, handoffs, promotion proposals, or ordinary chat summaries."
 model: haiku
 invokes: memory-bank
 phase: utility
@@ -16,7 +16,7 @@ Manage secure, indexed, source-backed project memory shared by all supported AI 
 
 1. Use the Skill tool to invoke `memory-bank`.
 2. Execute exactly one requested memory mode completely.
-3. Stop when retrieval, capture, audit, lifecycle change, or initialization is complete.
+3. Stop when retrieval, capture, audit, lifecycle change, or approved promotion application is complete.
 4. Return the structured output below.
 
 ## Output Format
@@ -36,5 +36,6 @@ Manage secure, indexed, source-backed project memory shared by all supported AI 
 
 - ONLY execute the `memory-bank` skill.
 - DO NOT automatically capture every Context Summary.
+- DO NOT manage active Project Brain tasks or approve promotion proposals.
 - DO NOT store sensitive or transient content.
 - DO NOT chain to another skill automatically.

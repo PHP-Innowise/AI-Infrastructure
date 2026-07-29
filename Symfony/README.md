@@ -19,7 +19,8 @@ This repository is not a generated Symfony application. It is an engineering wor
 - Skills define repeatable design, implementation, review, debugging, and delivery practices.
 - Hooks enforce skill-prefixed task/spec names, zero-padded task directories, Git safety, database safety, and workflow constraints.
 - `tasks/` stores temporary task artifacts; `specs/` stores durable architecture knowledge.
-- `memory-bank/` stores small indexed chunks of verified reusable context shared across AI tools.
+- `project-brain/` stores governed shared tasks, handoffs, records, manifests, and promotion proposals.
+- `memory-bank/` stores small indexed chunks of reviewed reusable context shared across AI tools.
 
 ## Supported Baseline
 
@@ -64,6 +65,7 @@ CHANGELOG.md              # Versioned accelerator changes
 tasks/TASK-N/             # Temporary prefixed task artifacts
 specs/                    # Permanent living specifications
 memory-bank/              # Indexed durable cross-session project memory
+project-brain/            # Shared governed task and control records
 examples/                 # Workflow output examples
 ```
 
@@ -157,6 +159,7 @@ Frontend workflows cover semantic HTML, accessible form errors, focus management
 - Symfony Profiler, Web Debug Toolbar, Monolog, Blackfire when available, Doctrine query profiling, explain plans, cache, Messenger throughput, memory, and OPcache.
 - Composer/Flex recipe review, dependency audits, deprecations, upgrades, releases, changelogs, migrations, cache warmup, worker restart/drain, rollback limitations, and living documentation.
 - Indexed cross-session memory with selective retrieval, source verification, review dates, supersession, privacy controls, and deterministic validation.
+- Governed shared tasks, revision-safe handoffs and records, explicit conflicts, retrieval manifests, compaction, and human-reviewed promotion.
 
 ## Prerequisites
 
@@ -213,9 +216,8 @@ Do not install Symfony CLI, bundles, npm packages, or analysis tools without app
 | `code-reviewer` | Review correctness, maintainability, security, and tests |
 | `verify` | Run the active edition's Definition of Done |
 | `documentation-generator` | Maintain README, ADR, API, worker, and deployment docs |
-| `memory-bank` | Retrieve, capture, audit, supersede, or archive durable project memory |
-| `checkpoint` | Capture all current Git-visible changes as local Working Memory without arguments |
-| `memory` | Refresh Working, Procedural, Semantic, and source-backed Episodic context without arguments |
+| `project-brain` | Govern shared tasks, handoffs, unified retrieval, all six record types, compaction, and promotion proposals |
+| `memory-bank` | Retrieve, capture, audit, supersede/archive durable memory, or apply an approved promotion |
 | `finishing-branch` | Present merge, PR, or cleanup alternatives |
 | `release` | Prepare versioning, changelog, tag, and release notes |
 
@@ -236,25 +238,25 @@ Temporary artifacts live in zero-padded `tasks/TASK-N/` directories and must be 
 
 Permanent decisions live in `specs/` and are indexed by `specs/MANIFEST.md`. Update living specs when architecture, API contracts, schema, security, asynchronous behavior, operations, or user workflows change.
 
-## Memory Bank
+## Project Brain And Memory Bank
 
-The optional root `memory-bank/` is one canonical shared store for Claude Code, Cursor, and Codex. It contains small source-backed chunks for durable project constraints, conventions, decisions, domain knowledge, integrations, and operational lessons.
+Use `memory` in Codex or `/memory` in Claude/Cursor for an argument-free, authority-aware refresh: governed mode validates Project Brain and rebuilds the disposable source index without creating a second task record. Use `checkpoint` or `/checkpoint` for progress capture; it defers to revision-checked Project Brain updates in governed mode and writes local Working Memory only when lightweight mode is explicitly configured. Neither command completes a task or applies a promotion.
 
-Memory is deliberately below policy, specs, code, configuration, migrations, and tests in the authority hierarchy. Agents read `memory-bank/README.md` and `memory-bank/INDEX.md`, retrieve only relevant active chunks, and verify every material claim before relying on it. Stale chunks are updated, superseded, or archived instead of silently remaining active.
+Governed Project Brain mode is the default for non-trivial work. `project-brain/` is the shared authority for active tasks, handoffs, findings, bugs, incidents, decisions, events, retrieval manifests, conflicts, and promotion proposals. The ignored SQLite database is only a disposable index plus local binding/cache in this mode.
 
-Use the `memory-bank` skill directly in Codex or `/memory-bank` in Claude/Cursor to retrieve, capture, audit, supersede, archive, or initialize memory. Do not use it for transient plans, chat transcripts, generic Symfony advice, command output, or information already owned by a living spec. Secrets, `.env` contents, personal data, production identifiers, raw logs, and customer payloads are prohibited. Non-sensitive personal notes belong in ignored `memory-bank/local/`.
+Use the one public task-aware retrieval command:
 
-Use `memory` in Codex or `/memory` in Claude/Cursor for one argument-free
-all-layer refresh. It reuses the safe Working checkpoint and rebuilds the
-source index; it does not complete the task, create an episode, or edit
-repository memory.
+```bash
+python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID
+```
 
-Use `checkpoint` in Codex or `/checkpoint` in Claude/Cursor to capture current
-progress without lifecycle arguments. The branch name becomes the task ID; the
-agent stores a sanitized summary and changed paths. Use explicit `complete`
-only after verification.
+Canonical policy, specs, current code, configuration, migrations, and tests always outrank Project Brain, memory, retrieval packets, and local indexes. Retrieval and indexing are explicit; the accelerator does not inject context into prompts automatically. Use `--mode lightweight` only explicitly for machine-local work that does not need shared continuity or governed records.
 
-Each committed chunk uses `memory-bank/chunks/MEM-NNNN-short-slug.md`, is cataloged in `INDEX.md`, and cites its authoritative sources. The session-start hooks report counts only; they never inject chunk contents into logs or context automatically.
+The root `memory-bank/` remains the canonical durable store for reviewed reusable constraints, conventions, decisions, domain knowledge, integrations, and operational lessons. Use `memory-bank` directly in Codex or `/memory-bank` in Claude/Cursor for durable retrieval/capture/audit/supersession and approved promotion application. Use `project-brain` directly in Codex or `/project-brain` in Claude/Cursor for active work and proposals. Codex intentionally has no fake command/agent wrapper.
+
+Agents may propose promotion but cannot self-approve it. Application requires explicit human review and records source and destination revisions. Secrets, transcripts, raw logs, personal/customer data, and unredacted incident payloads are prohibited. Session hooks report only mode, index health/staleness, active binding count, and validation status; they never index, retrieve, print, or inject records.
+
+See the repository-level [user task workflow example](../USER-TASK-WORKFLOW-EXAMPLE.md) for the complete prompt-to-archive flow without duplicating it here.
 
 ## Verification
 

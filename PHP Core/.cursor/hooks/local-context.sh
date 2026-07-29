@@ -7,6 +7,9 @@
 echo "Project Context"
 echo "==============="
 
+# Loop detection is session-scoped; discard counters from earlier sessions.
+find /tmp/cursor-loop-detection -type f -delete 2>/dev/null || true
+
 # Git info
 if git rev-parse --git-dir > /dev/null 2>&1; then
   BRANCH=$(git branch --show-current 2>/dev/null)
@@ -52,21 +55,46 @@ if [ -n "$FRAMEWORK" ]; then
   echo "      For framework-specific conventions, switch to the matching sibling folder (Laravel/, Symfony/)."
 fi
 
-# Report memory metadata only; never print chunk contents from a hook.
+# Report metadata only; never index, retrieve, print, or inject record contents.
+ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+CONTEXT_CLI="$ROOT_DIR/memory-bank/scripts/context.py"
+if command -v python3 >/dev/null 2>&1 && [ -f "$CONTEXT_CLI" ]; then
+  CONTEXT_STATUS=$(python3 "$CONTEXT_CLI" status --json 2>/dev/null || true)
+  STATUS_FIELDS=$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print("{}\t{}\t{}\t{}".format(d.get("mode", "unknown"), d.get("working", "unknown"), d.get("documents", "unknown"), d.get("database", "")))' "$CONTEXT_STATUS" 2>/dev/null || true)
+  if [ -n "$STATUS_FIELDS" ]; then
+    IFS=$'\t' read -r CONTEXT_MODE ACTIVE_BINDINGS INDEX_DOCUMENTS INDEX_DB <<< "$STATUS_FIELDS"
+    INDEX_HEALTH="healthy"
+    INDEX_STALENESS="unknown"
+    if [ ! -f "$INDEX_DB" ]; then
+      INDEX_HEALTH="missing"
+    elif [ "$INDEX_DOCUMENTS" = "0" ]; then
+      INDEX_HEALTH="empty"
+    elif find AGENTS.md README.md CHANGELOG.md specs docs tasks memory-bank/chunks project-brain/dynamic project-brain/control .agents/skills .claude/skills .cursor/skills -type f -name "*.md" -newer "$INDEX_DB" -print -quit 2>/dev/null | grep -q .; then
+      INDEX_STALENESS="stale"
+    else
+      INDEX_STALENESS="current"
+    fi
+    VALIDATION_JSON=$(python3 "$CONTEXT_CLI" validate --json 2>/dev/null || true)
+    VALIDATION_STATUS=$(python3 -c 'import json,sys; print("valid" if json.loads(sys.argv[1]).get("valid") else "invalid")' "$VALIDATION_JSON" 2>/dev/null || echo "unavailable")
+    echo "Context governance: mode=$CONTEXT_MODE, index=$INDEX_HEALTH/$INDEX_STALENESS, active-bindings=$ACTIVE_BINDINGS, brain-validation=$VALIDATION_STATUS."
+  else
+    echo "Context governance: mode/index/bindings/validation unavailable."
+  fi
+fi
+
 if [ -f "memory-bank/README.md" ] && [ -f "memory-bank/INDEX.md" ]; then
-  ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
   if command -v python3 >/dev/null 2>&1 && [ -f "$ROOT_DIR/memory-bank/scripts/validate.py" ]; then
     MEMORY_SUMMARY=$(python3 "$ROOT_DIR/memory-bank/scripts/validate.py" --summary "memory-bank" 2>/dev/null)
-    echo "$MEMORY_SUMMARY Read memory-bank/README.md and INDEX.md before relevant work."
+    echo "$MEMORY_SUMMARY Read memory-bank/README.md and INDEX.md before relevant durable-memory work."
   else
-    echo "Memory bank: available (counts unavailable). Read memory-bank/README.md and INDEX.md before relevant work."
+    echo "Memory bank: available (validation unavailable)."
   fi
 fi
 
 # Project structure
 echo ""
 echo "Structure:"
-for DIR in src app public config bin templates views tests specs tasks memory-bank examples .cursor; do
+for DIR in src app public config bin templates views tests specs tasks memory-bank project-brain examples .cursor; do
   if [ -d "$DIR" ]; then
     COUNT=$(find "$DIR" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
     echo "  $DIR/ ($COUNT files)"

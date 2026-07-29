@@ -14,6 +14,8 @@ When updating a workflow:
 
 Do not create duplicate skills under `.codex/skills`.
 
-Invoke Codex skills by their discovered names, such as `brainstorming`, `systematic-debugger`, `documentation-generator`, `memory-bank`, and `using-git-worktrees`. Claude/Cursor slash-command aliases such as `/brainstorm`, `/debugger`, `/docs-generator`, `/memory-bank`, and `/git-worktrees` are not Codex skill names.
+Invoke Codex skills by their discovered names, such as `brainstorming`, `systematic-debugger`, `documentation-generator`, `project-brain`, `memory-bank`, and `using-git-worktrees`. Claude/Cursor slash-command aliases such as `/brainstorm`, `/debugger`, `/docs-generator`, `/project-brain`, `/memory-bank`, and `/git-worktrees` are not Codex skill names. Do not add fake Codex command or agent wrappers.
 
-The `memory-bank` skill manages the shared root `memory-bank/`. It retrieves only relevant indexed chunks and verifies them against current sources before use; session hooks report memory counts but never load chunk contents automatically.
+The `project-brain` skill owns governed shared task lifecycle, handoffs, the unified `python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID` facade, governed records, compaction, and promotion proposals. Governed mode is the default; `--mode lightweight` is explicitly local-only.
+
+The `memory-bank` skill owns durable retrieval/capture/audit/supersession and application of explicitly human-approved promotions. Session hooks report metadata only—mode, index health/staleness, active binding count, and validation status—and never index, retrieve, load, or inject record contents automatically.

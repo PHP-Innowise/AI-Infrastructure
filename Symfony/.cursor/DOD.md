@@ -14,6 +14,9 @@ Use for documentation, planning, and small non-code tasks.
 - [ ] No `.env`, secrets, credentials, database dumps, or personal local settings were read or modified.
 - [ ] Relevant active memory chunks were verified against current sources; stale chunks were updated or reported.
 - [ ] Memory-bank structure passes `python3 memory-bank/scripts/validate.py` when `memory-bank/` exists.
+- [ ] Governed mode was used by default, or explicit `--mode lightweight` use and its local-only limitation were reported.
+- [ ] Project Brain validation passes when `project-brain/` exists; active/archive links, revisions, handoffs, privacy, fingerprints, and deterministic indexes are coherent.
+- [ ] Any task-aware retrieval used only `python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID`, produced a manifest in governed mode, and cited canonical sources were verified.
 
 ## Standard
 
@@ -30,6 +33,7 @@ All Minimum items, plus:
 - [ ] Changed Symfony configuration/templates/translations are valid when relevant: `php bin/console lint:yaml config`, `php bin/console lint:twig templates`, and `php bin/console lint:xliff translations`.
 - [ ] Doctrine changes include migrations and schema validation when relevant: `php bin/console doctrine:migrations:diff --check-database-platform` or project equivalent, and `php bin/console doctrine:schema:validate --skip-sync`.
 - [ ] New behavior has focused tests covering the happy path and highest-risk failure path.
+- [ ] Project Brain mutations use legal transitions, expected revisions, and the shared mutation lock; no duplicate authoritative task state was introduced.
 - [ ] Controller -> Service -> Repository boundaries are respected.
 - [ ] Pragmatic SOLID review passes: responsibilities are cohesive, dependencies point inward, contracts are narrow/substitutable, and interfaces have a concrete boundary justification.
 - [ ] Input validation and authorization are implemented at the boundary.
@@ -50,6 +54,8 @@ All Standard items, plus:
 - [ ] No unresolved TODO/FIXME/HACK comments remain in changed source files.
 - [ ] Public documentation updated for user-facing changes.
 - [ ] Durable reusable context was added to `memory-bank/` only when source-backed, non-sensitive, indexed, and not already authoritative in a spec.
+- [ ] Promotion proposals were not self-approved; any applied promotion has explicit human review plus source and destination revisions.
+- [ ] Session hooks remain metadata-only and do not index, retrieve, inject, or print Project Brain or Memory Bank records.
 - [ ] Messenger workers, cron jobs, cache, migrations, and rollout impacts are documented when applicable.
 - [ ] Production cache warmup/build succeeds when deployment configuration changed.
 - [ ] New Symfony/PHP deprecations are absent or explicitly triaged when deprecation tooling is configured.

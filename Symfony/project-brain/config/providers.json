@@ -1,0 +1,14 @@
+{
+  "active": "sqlite-fts5",
+  "providers": {
+    "sqlite-fts5": {
+      "enabled": true,
+      "network": false,
+      "embeddings": false
+    },
+    "external": {
+      "enabled": false,
+      "metadata_only": true
+    }
+  }
+}

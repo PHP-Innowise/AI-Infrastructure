@@ -12,6 +12,11 @@ Use for documentation, planning, and small non-code tasks.
 - [ ] Task/spec file naming follows skill-prefix convention.
 - [ ] Context Summary provided with 2-3 sentences and Next Steps.
 - [ ] No `.env`, secrets, credentials, database dumps, or personal local settings were read or modified.
+- [ ] Relevant active memory chunks were verified against current sources; stale chunks were updated or reported.
+- [ ] Memory-bank structure passes `python3 memory-bank/scripts/validate.py` when `memory-bank/` exists.
+- [ ] Governed mode was used by default, or explicit `--mode lightweight` use and its local-only limitation were reported.
+- [ ] Project Brain validation passes when `project-brain/` exists; active/archive links, revisions, handoffs, privacy, fingerprints, and deterministic indexes are coherent.
+- [ ] Any task-aware retrieval used only `python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID`, produced a manifest in governed mode, and cited canonical sources were verified.
 
 ## Standard
 
@@ -25,6 +30,7 @@ All Minimum items, plus:
 - [ ] Formatting passes: `vendor/bin/php-cs-fixer fix --dry-run --diff` or `vendor/bin/phpcs` if configured.
 - [ ] Static analysis passes: `vendor/bin/phpstan analyse` or `vendor/bin/psalm` if configured.
 - [ ] New behavior has focused test coverage, at least the happy path and the highest-risk failure path.
+- [ ] Project Brain mutations use legal transitions, expected revisions, and the shared mutation lock; no duplicate authoritative task state was introduced.
 - [ ] Database changes include versioned migrations (or reviewed SQL) and any needed seed/fixture data.
 - [ ] Input validation and authorization are implemented at the boundary.
 - [ ] No OWASP Top 10 risk was introduced.
@@ -43,6 +49,9 @@ All Standard items, plus:
 - [ ] Living specs updated when architecture, API behavior, database schema, or user-facing workflows changed.
 - [ ] No unresolved TODO/FIXME/HACK comments remain in changed source files.
 - [ ] Public documentation updated for user-facing changes.
+- [ ] Durable reusable context was added to `memory-bank/` only when source-backed, non-sensitive, indexed, and not already authoritative in a spec.
+- [ ] Promotion proposals were not self-approved; any applied promotion has explicit human review plus source and destination revisions.
+- [ ] Session hooks remain metadata-only and do not index, retrieve, inject, or print Project Brain or Memory Bank records.
 - [ ] Cron/worker/queue, cache, and migration impacts are documented when applicable.
 
 ## Command Selection

@@ -2,12 +2,12 @@
 spawns: memory-bank-agent
 phase: utility
 flow-next: null
-flow-alternatives: [docs-generator, reflect, architect]
+flow-alternatives: [project-brain, docs-generator, reflect]
 ---
 
 # Memory Bank
 
-Retrieve, capture, audit, supersede, archive, or initialize durable project memory.
+Retrieve, capture, audit, supersede/archive durable memory, or apply a human-approved Project Brain promotion.
 
 ## Input
 
