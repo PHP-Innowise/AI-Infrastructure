@@ -31,7 +31,7 @@ skill accepts no arguments.
      `working: skipped`, retain an actionable warning, and continue;
    - for a valid branch, execute the referenced checkpoint procedure through
      its report step, then set `working: updated`;
-   - if the Working Memory failure occurs, set `working: failed`, retain the
+   - if the Working Memory procedure fails, set `working: failed`, retain the
      safe error, and continue.
 5. Regardless of the Working result, run
    `python3 memory-bank/scripts/context.py index --json` from the repository

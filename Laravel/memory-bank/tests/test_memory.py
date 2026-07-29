@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 
@@ -17,9 +19,29 @@ COMMAND_PATHS = (
     (".claude/commands/memory.md", ".claude/skills/memory/SKILL.md"),
     (".cursor/commands/memory.md", ".cursor/skills/memory/SKILL.md"),
 )
+VALIDATOR_PATHS = tuple(
+    (f"{tool}/skills/skill-creator/scripts/quick_validate.py", f"{tool}/skills/memory")
+    for tool in (".claude", ".cursor", ".agents")
+)
 
 
 class MemoryIntegrationTest(unittest.TestCase):
+    def test_skill_validators_accept_project_metadata(self) -> None:
+        for validator_path, skill_path in VALIDATOR_PATHS:
+            with self.subTest(validator=validator_path):
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(REPOSITORY_ROOT / validator_path),
+                        str(REPOSITORY_ROOT / skill_path),
+                    ],
+                    capture_output=True,
+                    check=False,
+                    cwd=REPOSITORY_ROOT,
+                    text=True,
+                )
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
     def test_tool_skills_are_byte_identical(self) -> None:
         contents = [
             REPOSITORY_ROOT.joinpath(path).read_bytes()
@@ -45,7 +67,7 @@ class MemoryIntegrationTest(unittest.TestCase):
             "clean tree",
             "detached HEAD",
             "invalid Context Engine task ID",
-            "Working Memory failure",
+            "Working Memory procedure fails",
             "python3 memory-bank/scripts/context.py index --json",
             "working: updated | skipped | failed",
             "procedural: updated | failed",
@@ -60,7 +82,7 @@ class MemoryIntegrationTest(unittest.TestCase):
                 self.assertIn(text, skill)
 
         self.assertLess(
-            skill.index("Working Memory failure"),
+            skill.index("Working Memory procedure fails"),
             skill.index("python3 memory-bank/scripts/context.py index --json"),
         )
 

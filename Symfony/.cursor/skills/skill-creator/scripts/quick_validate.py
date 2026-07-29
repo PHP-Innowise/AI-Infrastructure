@@ -39,7 +39,10 @@ def validate_skill(skill_path):
         return False, f"Invalid YAML in frontmatter: {e}"
 
     # Define allowed properties
-    ALLOWED_PROPERTIES = {'name', 'description', 'license', 'allowed-tools', 'metadata', 'compatibility'}
+    ALLOWED_PROPERTIES = {
+        'name', 'description', 'license', 'allowed-tools', 'metadata',
+        'compatibility', 'phase', 'flow-next', 'flow-alternatives',
+    }
 
     # Check for unexpected properties (excluding nested keys under metadata)
     unexpected_keys = set(frontmatter.keys()) - ALLOWED_PROPERTIES
@@ -54,6 +57,26 @@ def validate_skill(skill_path):
         return False, "Missing 'name' in frontmatter"
     if 'description' not in frontmatter:
         return False, "Missing 'description' in frontmatter"
+
+    if 'phase' in frontmatter:
+        if frontmatter['phase'] not in {'planning', 'execution', 'quality', 'utility'}:
+            return False, "'phase' must be planning, execution, quality, or utility"
+
+    if 'flow-next' in frontmatter:
+        flow_next = frontmatter['flow-next']
+        if flow_next is not None and (
+            not isinstance(flow_next, str)
+            or not re.match(r'^[a-z0-9-]+$', flow_next)
+        ):
+            return False, "'flow-next' must be null or a kebab-case skill name"
+
+    if 'flow-alternatives' in frontmatter:
+        alternatives = frontmatter['flow-alternatives']
+        if not isinstance(alternatives, list) or any(
+            not isinstance(item, str) or not re.match(r'^[a-z0-9-]+$', item)
+            for item in alternatives
+        ):
+            return False, "'flow-alternatives' must be a list of kebab-case skill names"
 
     # Extract name for validation
     name = frontmatter.get('name', '')
