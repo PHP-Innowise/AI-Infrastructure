@@ -326,12 +326,12 @@ invalid task-id, and index failure after a successful Working checkpoint. In
 every scenario local episodes were preserved, sensitive `.env` contents were
 not read, and the original Bauherrenmappe checkout remained unchanged.
 
-A three-scenario Task Capsule pressure test measured 96.6%, 97.2%, and 97.1%
-fewer transferred characters while retaining each required source and keeping
-the original checkout unchanged. The capsule criteria passed, but the exact
-DDEV PHPUnit commands were non-zero because of an invalid PHPUnit 10
-configuration warning and, for Branding, incompatible persisted MFA
-ciphertext; see the
+A three-scenario Task Capsule pressure test measured 96.4%, 97.2%, and 97.2%
+fewer transferred characters while retaining each exact Working file set and
+scenario-specific authoritative source. The original checkout stayed
+unchanged. The capsule criteria passed, but the exact DDEV PHPUnit commands
+were non-zero because of an invalid PHPUnit 10 configuration warning and, for
+Branding, incompatible persisted MFA ciphertext; see the
 [complete evidence report](docs/superpowers/reports/2026-07-29-task-capsule-bauherrenmappe.md).
 
 ## Infrastructure Creator

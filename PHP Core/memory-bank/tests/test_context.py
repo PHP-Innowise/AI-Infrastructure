@@ -81,6 +81,12 @@ class ContextEngineTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="context-engine-test-")
         self.repository = Path(self.temporary.name)
+        subprocess.run(
+            ["git", "init", "--quiet", str(self.repository)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
         self.repository.joinpath("memory-bank/chunks").mkdir(parents=True)
         self.repository.joinpath("specs").mkdir()
 
@@ -381,6 +387,28 @@ class ContextEngineTest(unittest.TestCase):
         indexed = self.run_context("index", "--json")
         self.assertEqual(0, indexed.returncode, indexed.stderr)
         self.assertEqual(0, json.loads(indexed.stdout)["documents"])
+
+    def test_git_ignore_probe_fails_closed_on_unexpected_exit(self) -> None:
+        failed = subprocess.CompletedProcess([], 2, stdout=b"", stderr=b"")
+
+        with mock.patch.object(CONTEXT.subprocess, "run", return_value=failed):
+            with self.assertRaisesRegex(
+                CONTEXT.ContextError,
+                "Git ignore probe failed with exit status 2",
+            ):
+                CONTEXT.git_ignored_paths(self.repository, ["docs/private.md"])
+
+    def test_git_ignore_probe_fails_closed_when_git_is_unavailable(self) -> None:
+        error = OSError("private probe detail")
+
+        with mock.patch.object(CONTEXT.subprocess, "run", side_effect=error):
+            with self.assertRaisesRegex(
+                CONTEXT.ContextError,
+                "^Git ignore probe failed$",
+            ) as raised:
+                CONTEXT.git_ignored_paths(self.repository, ["docs/private.md"])
+
+        self.assertNotIn("private probe detail", str(raised.exception))
 
     def test_index_reports_invalid_utf8_and_preserves_previous_index(self) -> None:
         self.repository.joinpath("README.md").write_text(
@@ -931,6 +959,60 @@ class ContextEngineTest(unittest.TestCase):
         self.assertIn("possible GitHub token", result.stderr)
         self.assertNotIn("ABCDEFGHIJKLMNOPQRSTUVWXYZ", result.stderr)
 
+    def test_working_rejects_private_or_raw_data_before_persisting_it(self) -> None:
+        private = "Customer email: person@example.test"
+        rejected_start = self.run_context(
+            "start",
+            "--task-id",
+            "TASK-PRIVATE-START",
+            "--goal",
+            private,
+        )
+
+        self.assertNotEqual(0, rejected_start.returncode)
+        self.assertIn(
+            "Working task contains private or raw data; "
+            "replace it with a sanitized summary",
+            rejected_start.stderr,
+        )
+        self.assertNotIn(private, rejected_start.stdout + rejected_start.stderr)
+        self.assertEqual(
+            0,
+            json.loads(self.run_context("status", "--json").stdout)["working"],
+        )
+
+        self.assertEqual(
+            0,
+            self.run_context(
+                "start",
+                "--task-id",
+                "TASK-PRIVATE-UPDATE",
+                "--goal",
+                "Review account behavior.",
+            ).returncode,
+        )
+        raw_handoff = "User: copied request\nAssistant: copied response"
+        rejected_update = self.run_context(
+            "update",
+            "--task-id",
+            "TASK-PRIVATE-UPDATE",
+            "--progress",
+            raw_handoff,
+        )
+
+        self.assertNotEqual(0, rejected_update.returncode)
+        self.assertNotIn(
+            raw_handoff,
+            rejected_update.stdout + rejected_update.stderr,
+        )
+        persisted = self.run_context(
+            "get",
+            "--task-id",
+            "TASK-PRIVATE-UPDATE",
+            "--json",
+        )
+        self.assertEqual("", json.loads(persisted.stdout)["progress"])
+
     def test_working_get_and_clear_reject_secret_task_id_without_echoing_it(self) -> None:
         fake_token = "ghp_" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
 
@@ -1124,6 +1206,216 @@ class ContextEngineTest(unittest.TestCase):
             ),
         )
 
+    def test_context_projects_only_normalized_bounded_working_state(self) -> None:
+        files = ["src/Feature/  Odd Name .php"] + [
+            f"src/Feature/File{index}.php" for index in range(1, 10)
+        ]
+        sources = ["specs/Source  Zero.md"] + [
+            f"specs/source-{index}.md" for index in range(1, 6)
+        ]
+        self.assertEqual(
+            0,
+            self.run_context(
+                "start",
+                "--task-id",
+                "CAPSULE-PROJECTION",
+                "--goal",
+                "  Review   account\nworkflow.  ",
+                *[
+                    argument
+                    for file_path in files
+                    for argument in ("--file", file_path)
+                ],
+                *[
+                    argument
+                    for source in sources
+                    for argument in ("--source", source)
+                ],
+            ).returncode,
+        )
+        self.assertEqual(
+            0,
+            self.run_context(
+                "update",
+                "--task-id",
+                "CAPSULE-PROJECTION",
+                "--progress",
+                "Earlier outcome.\nLatest outcome.",
+                "--next-step",
+                "Inspect the implementation.",
+                "--next-step",
+                "Run focused tests.",
+                "--next-step",
+                "Run final verification.",
+            ).returncode,
+        )
+
+        packet = self.run_context(
+            "context",
+            "  Review\nbranding?! safely, now.  ",
+            "--task-id",
+            "CAPSULE-PROJECTION",
+            "--json",
+        )
+
+        self.assertEqual(0, packet.returncode, packet.stderr)
+        payload = json.loads(packet.stdout)
+        self.assertEqual("Review branding safely now", payload["query"])
+        self.assertEqual(
+            {
+                "task_id": "CAPSULE-PROJECTION",
+                "goal": "Review account workflow.",
+                "progress": "Earlier outcome. Latest outcome.",
+                "next_steps": ["Run final verification."],
+                "files": files[:8],
+                "sources": sources[:4],
+            },
+            payload["working"],
+        )
+        self.assertEqual(
+            {
+                "working_files": 2,
+                "working_next_steps": 2,
+                "working_sources": 2,
+                "working_progress_characters": 0,
+            },
+            payload["omitted"],
+        )
+
+    def test_context_revalidates_legacy_working_privacy_data(self) -> None:
+        self.assertEqual(
+            0,
+            self.run_context(
+                "start",
+                "--task-id",
+                "CAPSULE-PRIVACY",
+                "--goal",
+                "Review the account workflow.",
+            ).returncode,
+        )
+        database = self.repository / "memory-bank/local/context.db"
+        unsafe_values = (
+            "Customer email: person@example.test",
+            "Customer phone: +370 600 12345",
+            "User: copied request\nAssistant: copied response",
+            "Customer name: Example Person",
+        )
+
+        for unsafe in unsafe_values:
+            with self.subTest(unsafe=unsafe):
+                connection = sqlite3.connect(database)
+                connection.execute(
+                    "UPDATE working_tasks SET progress = ? WHERE task_id = ?",
+                    (unsafe, "CAPSULE-PRIVACY"),
+                )
+                connection.commit()
+                connection.close()
+
+                packet = self.run_context(
+                    "context",
+                    "account workflow",
+                    "--task-id",
+                    "CAPSULE-PRIVACY",
+                    "--json",
+                )
+
+                self.assertNotEqual(0, packet.returncode)
+                self.assertIn(
+                    "Working task contains private or raw data; "
+                    "replace it with a sanitized summary",
+                    packet.stderr,
+                )
+                self.assertNotIn(unsafe, packet.stdout + packet.stderr)
+
+    def test_get_revalidates_legacy_working_privacy_data_but_clear_recovers(
+        self,
+    ) -> None:
+        self.assertEqual(
+            0,
+            self.run_context(
+                "start",
+                "--task-id",
+                "CAPSULE-LEGACY",
+                "--goal",
+                "Review account behavior.",
+            ).returncode,
+        )
+        private = "Customer email: person@example.test"
+        database = self.repository / "memory-bank/local/context.db"
+        connection = sqlite3.connect(database)
+        connection.execute(
+            "UPDATE working_tasks SET progress = ? WHERE task_id = ?",
+            (private, "CAPSULE-LEGACY"),
+        )
+        connection.commit()
+        connection.close()
+
+        retrieved = self.run_context(
+            "get",
+            "--task-id",
+            "CAPSULE-LEGACY",
+            "--json",
+        )
+
+        self.assertNotEqual(0, retrieved.returncode)
+        self.assertNotIn(private, retrieved.stdout + retrieved.stderr)
+        self.assertEqual(
+            0,
+            self.run_context(
+                "clear",
+                "--task-id",
+                "CAPSULE-LEGACY",
+            ).returncode,
+        )
+
+    def test_context_retrieves_request_matches_before_working_enrichment(
+        self,
+    ) -> None:
+        working_terms = (
+            "account workflow tenant process update review general architecture "
+            "implementation verification feature change state handler service "
+            "model controller database policy"
+        )
+        self.repository.joinpath("specs/request.md").write_text(
+            "# Branding\n\nzirconbranding authoritative behavior.\n"
+            + ("background " * 500),
+            encoding="utf-8",
+        )
+        for index in range(3):
+            self.repository.joinpath(f"specs/generic-{index}.md").write_text(
+                f"# Generic {index}\n\n{working_terms}\n",
+                encoding="utf-8",
+            )
+        for index in range(5):
+            self.repository.joinpath(f"specs/noise-{index}.md").write_text(
+                f"# Noise {index}\n\nUnrelated filler {index}.\n",
+                encoding="utf-8",
+            )
+        self.assertEqual(
+            0,
+            self.run_context(
+                "start",
+                "--task-id",
+                "CAPSULE-REQUEST",
+                "--goal",
+                working_terms,
+            ).returncode,
+        )
+
+        packet = self.run_context(
+            "context",
+            "zirconbranding",
+            "--task-id",
+            "CAPSULE-REQUEST",
+            "--json",
+        )
+
+        self.assertEqual(0, packet.returncode, packet.stderr)
+        self.assertIn(
+            "specs/request.md",
+            [item["path"] for item in json.loads(packet.stdout)["semantic"]],
+        )
+
     def test_context_capsule_stays_within_character_budget(self) -> None:
         self.repository.joinpath("README.md").write_text(
             "# Project\n\nCapsule budget knowledge.\n", encoding="utf-8"
@@ -1187,6 +1479,70 @@ class ContextEngineTest(unittest.TestCase):
         self.assertEqual("Preserve the goal.", compacted["working"]["goal"])
         self.assertEqual("AGENTS.md", compacted["procedural"][0]["path"])
         self.assertLessEqual(CONTEXT.capsule_character_count(compacted), 1250)
+
+    def test_capsule_budget_preserves_latest_progress_suffix(self) -> None:
+        capsule = {
+            "query": "capsule",
+            "task_id": "CAPSULE-LATEST",
+            "working": {
+                "task_id": "CAPSULE-LATEST",
+                "goal": "Preserve the latest outcome.",
+                "progress": ("old progress " * 200) + "LATEST_OUTCOME",
+                "next_steps": ["Run verification."],
+                "files": ["src/Required.php"],
+                "sources": ["specs/required.md"],
+            },
+            "procedural": [],
+            "semantic": [],
+            "episodic": [],
+            "warnings": [],
+            "omitted": {
+                "working_files": 0,
+                "working_next_steps": 0,
+                "working_sources": 0,
+                "working_progress_characters": 0,
+            },
+        }
+
+        with mock.patch.object(CONTEXT, "CAPSULE_CHARACTER_LIMIT", 500):
+            compacted = CONTEXT.enforce_capsule_budget(capsule)
+
+        self.assertTrue(compacted["working"]["progress"].startswith("…"))
+        self.assertTrue(compacted["working"]["progress"].endswith("LATEST_OUTCOME"))
+        self.assertGreater(compacted["omitted"]["working_progress_characters"], 0)
+        self.assertLessEqual(CONTEXT.capsule_character_count(compacted), 500)
+
+    def test_capsule_budget_drops_nonpriority_working_sources(self) -> None:
+        capsule = {
+            "query": "capsule",
+            "task_id": "CAPSULE-SOURCES",
+            "working": {
+                "task_id": "CAPSULE-SOURCES",
+                "goal": "Preserve the priority source.",
+                "progress": "Latest outcome.",
+                "next_steps": ["Run verification."],
+                "files": ["src/Required.php"],
+                "sources": ["specs/required.md", "specs/" + ("x" * 700) + ".md"],
+            },
+            "procedural": [],
+            "semantic": [],
+            "episodic": [],
+            "warnings": [],
+            "omitted": {
+                "working_files": 0,
+                "working_next_steps": 0,
+                "working_sources": 0,
+                "working_progress_characters": 0,
+            },
+        }
+
+        with mock.patch.object(CONTEXT, "CAPSULE_CHARACTER_LIMIT", 500):
+            compacted = CONTEXT.enforce_capsule_budget(capsule)
+
+        self.assertEqual(["specs/required.md"], compacted["working"]["sources"])
+        self.assertEqual(1, compacted["omitted"]["working_sources"])
+        self.assertEqual("Latest outcome.", compacted["working"]["progress"])
+        self.assertLessEqual(CONTEXT.capsule_character_count(compacted), 500)
 
     def test_capsule_rejects_mandatory_content_larger_than_budget(self) -> None:
         capsule = {

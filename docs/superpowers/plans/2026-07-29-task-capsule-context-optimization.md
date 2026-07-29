@@ -1077,6 +1077,8 @@ git -C /home/aliaksei/Desktop/bauherrenmappe \
   > "$BENCH_ROOT/original-status"
 git -C /home/aliaksei/Desktop/bauherrenmappe rev-parse HEAD \
   > "$BENCH_ROOT/original-head"
+git -C /home/aliaksei/Desktop/bauherrenmappe rev-parse --abbrev-ref HEAD \
+  > "$BENCH_ROOT/original-branch"
 git -C /home/aliaksei/Desktop/bauherrenmappe write-tree \
   > "$BENCH_ROOT/original-index"
 ```
@@ -1096,21 +1098,72 @@ fi
 - [ ] **Step 2: Create a disposable real-project clone**
 
 ```bash
+SOURCE_REPOSITORY=/home/aliaksei/Desktop/bauherrenmappe
+BENCH_CLONE="$BENCH_ROOT/bauherrenmappe"
+EXTRA_DOCUMENTS=(
+  docs/superpowers/plans/2026-07-23-password-change-session-invalidation.md
+  docs/superpowers/specs/2026-07-23-password-change-session-invalidation-design.md
+)
+
+for relative_path in "${EXTRA_DOCUMENTS[@]}"; do
+  test -f "$SOURCE_REPOSITORY/$relative_path"
+  test ! -L "$SOURCE_REPOSITORY/$relative_path"
+  test "$(
+    git -C "$SOURCE_REPOSITORY" \
+      ls-files --others --exclude-standard -- "$relative_path"
+  )" = "$relative_path"
+  if git -C "$SOURCE_REPOSITORY" check-ignore --quiet -- "$relative_path"; then
+    printf 'Refusing ignored benchmark document: %s\n' "$relative_path" >&2
+    exit 1
+  else
+    probe_status=$?
+    test "$probe_status" -eq 1 || exit "$probe_status"
+  fi
+done
+
+python3 - "$SOURCE_REPOSITORY" "${EXTRA_DOCUMENTS[@]}" <<'PY'
+import sys
+from pathlib import Path
+
+sys.path.insert(
+    0,
+    "/home/aliaksei/Desktop/AI-Infrastructure/Symfony/memory-bank/scripts",
+)
+from validate import validate_secret_patterns
+
+repository = Path(sys.argv[1])
+for relative_path in sys.argv[2:]:
+    validate_secret_patterns(repository / relative_path)
+PY
+
+(
+  cd "$SOURCE_REPOSITORY"
+  sha256sum -- "${EXTRA_DOCUMENTS[@]}"
+) > "$BENCH_ROOT/untracked-docs.sha256"
+
 git clone --local --no-hardlinks \
-  /home/aliaksei/Desktop/bauherrenmappe \
-  "$BENCH_ROOT/bauherrenmappe"
-git -C "$BENCH_ROOT/bauherrenmappe" switch -c task-capsule-benchmark
-mkdir -p "$BENCH_ROOT/bauherrenmappe/memory-bank/scripts"
+  "$SOURCE_REPOSITORY" \
+  "$BENCH_CLONE"
+git -C "$BENCH_CLONE" switch -c task-capsule-benchmark
+mkdir -p "$BENCH_CLONE/memory-bank/scripts"
 cp Symfony/memory-bank/scripts/context.py \
-  "$BENCH_ROOT/bauherrenmappe/memory-bank/scripts/context.py"
+  "$BENCH_CLONE/memory-bank/scripts/context.py"
 cp Symfony/memory-bank/scripts/validate.py \
-  "$BENCH_ROOT/bauherrenmappe/memory-bank/scripts/validate.py"
-cp -a /home/aliaksei/Desktop/bauherrenmappe/docs \
-  "$BENCH_ROOT/bauherrenmappe/docs"
+  "$BENCH_CLONE/memory-bank/scripts/validate.py"
+
+for relative_path in "${EXTRA_DOCUMENTS[@]}"; do
+  install -D -m 0644 -- \
+    "$SOURCE_REPOSITORY/$relative_path" \
+    "$BENCH_CLONE/$relative_path"
+done
+(
+  cd "$BENCH_CLONE"
+  sha256sum --check "$BENCH_ROOT/untracked-docs.sha256"
+)
 ```
 
-The last copy brings the original checkout's untracked password-session design
-documents into the disposable clone without modifying the source checkout.
+Only the two named, non-ignored, secret-scanned untracked documents enter the
+disposable clone. Their recorded hashes make the copied evidence reproducible.
 
 - [ ] **Step 3: Create the three Working scenarios**
 
@@ -1125,7 +1178,9 @@ python3 "$CONTEXT_SCRIPT" \
   start --task-id CAPSULE-PASSWORD \
   --goal "Verify password session invalidation and stale remember-me cookies" \
   --file src/GraphQL/Resolver/ChangePasswordResolver.php \
-  --file tests/Integration/GraphQL/ChangePasswordTest.php
+  --file tests/Integration/GraphQL/ChangePasswordTest.php \
+  --source docs/superpowers/plans/2026-07-23-password-change-session-invalidation.md \
+  --source docs/superpowers/specs/2026-07-23-password-change-session-invalidation-design.md
 
 python3 "$CONTEXT_SCRIPT" \
   --root "$BENCH_ROOT/bauherrenmappe" --db "$CONTEXT_DB" \
@@ -1133,7 +1188,9 @@ python3 "$CONTEXT_SCRIPT" \
   --goal "Review Mandant senderEmail branding behavior" \
   --file src/Mailer/AdminMailer.php \
   --file src/Entity/Mandant.php \
-  --file tests/Smoke/BrandingTest.php
+  --file tests/Smoke/BrandingTest.php \
+  --source CLAUDE.md \
+  --source README.md
 
 python3 "$CONTEXT_SCRIPT" \
   --root "$BENCH_ROOT/bauherrenmappe" --db "$CONTEXT_DB" \
@@ -1141,7 +1198,8 @@ python3 "$CONTEXT_SCRIPT" \
   --goal "Verify ReplaceDocument confidentiality boundaries" \
   --file src/GraphQL/Operation/Mutation/ReplaceDocument.php \
   --file src/Security/DocumentConfidentiality.php \
-  --file tests/Integration/GraphQL/DocumentConfidentialityTest.php
+  --file tests/Integration/GraphQL/DocumentConfidentialityTest.php \
+  --source CLAUDE.md
 ```
 
 - [ ] **Step 4: Generate capsules and deterministic baseline measurements**
@@ -1182,29 +1240,67 @@ bench = Path(sys.argv[1])
 repository = bench / "bauherrenmappe"
 expected = {
     "password": {
-        "docs/superpowers/specs/2026-07-23-password-change-session-invalidation-design.md",
+        "working_files": [
+            "src/GraphQL/Resolver/ChangePasswordResolver.php",
+            "tests/Integration/GraphQL/ChangePasswordTest.php",
+        ],
+        "working_sources": [
+            "docs/superpowers/plans/2026-07-23-password-change-session-invalidation.md",
+            "docs/superpowers/specs/2026-07-23-password-change-session-invalidation-design.md",
+        ],
+        "authoritative_sources": {
+            "docs/superpowers/plans/2026-07-23-password-change-session-invalidation.md",
+            "docs/superpowers/specs/2026-07-23-password-change-session-invalidation-design.md",
+        },
     },
-    "branding": {"README.md"},
-    "document": {"README.md"},
+    "branding": {
+        "working_files": [
+            "src/Mailer/AdminMailer.php",
+            "src/Entity/Mandant.php",
+            "tests/Smoke/BrandingTest.php",
+        ],
+        "working_sources": ["CLAUDE.md", "README.md"],
+        "authoritative_sources": {"CLAUDE.md", "README.md"},
+    },
+    "document": {
+        "working_files": [
+            "src/GraphQL/Operation/Mutation/ReplaceDocument.php",
+            "src/Security/DocumentConfidentiality.php",
+            "tests/Integration/GraphQL/DocumentConfidentialityTest.php",
+        ],
+        "working_sources": ["CLAUDE.md"],
+        "authoritative_sources": {"CLAUDE.md"},
+    },
 }
 results = {}
 
-for scenario in ("password", "branding", "document"):
+for scenario, scenario_expected in expected.items():
     capsule_path = bench / f"{scenario}.json"
     capsule_text = capsule_path.read_text(encoding="utf-8").rstrip("\n")
     capsule = json.loads(capsule_text)
+    working = capsule["working"]
+    if working["files"] != scenario_expected["working_files"]:
+        raise SystemExit(
+            f"{scenario}: unexpected Working files: {working['files']}"
+        )
+    if working["sources"] != scenario_expected["working_sources"]:
+        raise SystemExit(
+            f"{scenario}: unexpected Working sources: {working['sources']}"
+        )
     selected_paths = {
         item["path"]
         for layer in ("procedural", "semantic", "episodic")
         for item in capsule[layer]
         if "path" in item
     }
-    missing = expected[scenario] - selected_paths
+    missing = scenario_expected["authoritative_sources"] - selected_paths
     if missing:
-        raise SystemExit(f"{scenario}: missing expected sources: {sorted(missing)}")
+        raise SystemExit(
+            f"{scenario}: missing authoritative sources: {sorted(missing)}"
+        )
 
     baseline_parts = [
-        json.dumps(capsule["working"], ensure_ascii=False, separators=(",", ":"))
+        json.dumps(working, ensure_ascii=False, separators=(",", ":"))
     ]
     for path in sorted(selected_paths):
         baseline_parts.append((repository / path).read_text(encoding="utf-8"))
@@ -1219,7 +1315,12 @@ for scenario in ("password", "branding", "document"):
         "baseline_chars": baseline_chars,
         "capsule_chars": capsule_chars,
         "reduction_percent": round(reduction * 100, 1),
-        "sources": sorted(selected_paths),
+        "working_files": working["files"],
+        "working_sources": working["sources"],
+        "authoritative_sources": sorted(
+            scenario_expected["authoritative_sources"]
+        ),
+        "selected_sources": sorted(selected_paths),
     }
 
 (bench / "measurements.json").write_text(
@@ -1231,7 +1332,8 @@ PY
 ```
 
 Expected: all three scenarios report at least `60.0` percent reduction, retain
-their expected sources, and remain below 8,000 characters.
+their exact Working files and sources plus the scenario-specific authoritative
+sources, and remain below 8,000 characters.
 
 - [ ] **Step 5: Run the real project verification tests**
 
@@ -1244,8 +1346,9 @@ ddev exec php bin/phpunit tests/Smoke/BrandingTest.php
 ddev exec php bin/phpunit tests/Integration/GraphQL/DocumentConfidentialityTest.php
 ```
 
-Expected: all three PHPUnit commands PASS. Record each exact command and result
-in the report.
+Record each exact command, exit status, test/assertion totals, and warning or
+error in the report. A non-zero command remains **FAIL**; do not modify the
+Bauherrenmappe checkout to turn an accepted environment failure into a pass.
 
 - [ ] **Step 6: Prove the original checkout is unchanged**
 
@@ -1255,10 +1358,13 @@ git -C /home/aliaksei/Desktop/bauherrenmappe \
   > "$BENCH_ROOT/after-status"
 git -C /home/aliaksei/Desktop/bauherrenmappe rev-parse HEAD \
   > "$BENCH_ROOT/after-head"
+git -C /home/aliaksei/Desktop/bauherrenmappe rev-parse --abbrev-ref HEAD \
+  > "$BENCH_ROOT/after-branch"
 git -C /home/aliaksei/Desktop/bauherrenmappe write-tree \
   > "$BENCH_ROOT/after-index"
 cmp "$BENCH_ROOT/original-status" "$BENCH_ROOT/after-status"
 cmp "$BENCH_ROOT/original-head" "$BENCH_ROOT/after-head"
+cmp "$BENCH_ROOT/original-branch" "$BENCH_ROOT/after-branch"
 cmp "$BENCH_ROOT/original-index" "$BENCH_ROOT/after-index"
 ```
 
@@ -1272,6 +1378,10 @@ else
   printf 'absent\n' > "$BENCH_ROOT/after-db"
 fi
 cmp "$BENCH_ROOT/original-db" "$BENCH_ROOT/after-db"
+(
+  cd /home/aliaksei/Desktop/bauherrenmappe
+  sha256sum --check "$BENCH_ROOT/untracked-docs.sha256"
+)
 ```
 
 Expected: every comparison exits `0`.
@@ -1283,10 +1393,13 @@ Create
 
 - the source checkout path and captured branch/HEAD;
 - one table row per scenario containing `baseline_chars`, `capsule_chars`,
-  `reduction_percent`, and selected source paths from
-  `"$BENCH_ROOT/measurements.json"`;
+  `reduction_percent`, exact Working files and sources, authoritative sources,
+  and all selected source paths from `"$BENCH_ROOT/measurements.json"`;
+- the two named untracked documents, their SHA-256 values, non-ignored status,
+  and successful secret scan;
 - the three exact PHPUnit commands and their pass/fail results;
-- confirmation that status, HEAD, index tree, and local database state matched;
+- confirmation that status, branch, HEAD, index tree, local database state,
+  and the two named document hashes matched;
 - a statement that runtime token counts were unavailable unless a runtime
   actually reported them;
 - no source file contents, secrets, or `.env` data.
@@ -1365,5 +1478,5 @@ git commit -m "docs: record task capsule pressure test"
 - [ ] Hybrid phase boundaries are documented without creating a new command or skill.
 - [ ] All three implementation and test mirrors are byte-identical.
 - [ ] All edition test suites and validators pass.
-- [ ] Three Bauherrenmappe scenarios each reduce transferred text by at least 60% and retain required sources.
-- [ ] Bauherrenmappe PHPUnit verification passes and the original checkout state is unchanged.
+- [ ] Three Bauherrenmappe scenarios each reduce transferred text by at least 60% and retain exact Working files plus scenario-specific authoritative sources.
+- [ ] Bauherrenmappe PHPUnit results are reported as PASS or FAIL from their real exit statuses and the original checkout state is unchanged.

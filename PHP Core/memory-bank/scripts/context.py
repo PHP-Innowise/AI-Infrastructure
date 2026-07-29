@@ -50,6 +50,24 @@ CAPSULE_LAYER_LIMITS = {
 }
 CAPSULE_QUERY_TOKEN_LIMIT = 32
 CAPSULE_CHARACTER_LIMIT = 8000
+CAPSULE_WORKING_FILE_LIMIT = 8
+CAPSULE_WORKING_SOURCE_LIMIT = 4
+CAPSULE_PRIVATE_PATTERNS = (
+    re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE),
+    re.compile(
+        r"(?<!\w)(?:\+\d(?:[\d ().-]{6,}\d)|\(?\d{3}\)?[ .-]\d{3}[ .-]\d{4})(?!\w)"
+    ),
+    re.compile(
+        r"\b(?:(?:customer|patient)\s+(?:name|address|id)|"
+        r"client\s+(?:name|address))\s*[:=]\s*\S+",
+        re.IGNORECASE,
+    ),
+)
+CAPSULE_RAW_TEXT_PATTERN = re.compile(
+    r"^\s*(?:user|assistant|system|developer|tool|prompt|response|reasoning|"
+    r"stdout|stderr|log)\s*:",
+    re.IGNORECASE | re.MULTILINE,
+)
 TASK_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
 
 
@@ -191,10 +209,12 @@ def git_ignored_paths(repository: Path, paths: list[str]) -> set[bytes]:
             stderr=subprocess.DEVNULL,
             check=False,
         )
-    except OSError:
-        return set()
+    except OSError as error:
+        raise ContextError("Git ignore probe failed") from error
     if result.returncode not in (0, 1):
-        return set()
+        raise ContextError(
+            f"Git ignore probe failed with exit status {result.returncode}"
+        )
     return set(result.stdout.split(b"\0")) - {b""}
 
 
@@ -377,6 +397,81 @@ def build_capsule_query(
     return " ".join(tokens)
 
 
+def reject_capsule_privacy(
+    label: str,
+    prose: list[str],
+    identifiers: Optional[list[str]] = None,
+) -> None:
+    candidate = "\n".join((*prose, *(identifiers or [])))
+    if (
+        any(pattern.search(candidate) for pattern in CAPSULE_PRIVATE_PATTERNS)
+        or CAPSULE_RAW_TEXT_PATTERN.search("\n".join(prose))
+    ):
+        raise ContextError(
+            f"{label} contains private or raw data; "
+            "replace it with a sanitized summary"
+        )
+
+
+def project_working_task(
+    working: Optional[dict[str, object]],
+) -> tuple[Optional[dict[str, object]], dict[str, int]]:
+    omitted = {
+        "working_files": 0,
+        "working_next_steps": 0,
+        "working_sources": 0,
+        "working_progress_characters": 0,
+    }
+    if working is None:
+        return None, omitted
+
+    task_id = working.get("task_id")
+    goal = working.get("goal")
+    progress = working.get("progress")
+    next_steps = working.get("next_steps")
+    files = working.get("files")
+    sources = working.get("sources")
+    if (
+        not isinstance(task_id, str)
+        or not isinstance(goal, str)
+        or not isinstance(progress, str)
+        or not isinstance(next_steps, list)
+        or not isinstance(files, list)
+        or not isinstance(sources, list)
+        or any(not isinstance(item, str) or not item.strip() for item in next_steps)
+        or any(not isinstance(item, str) or not item.strip() for item in files)
+        or any(not isinstance(item, str) or not item.strip() for item in sources)
+    ):
+        raise ContextError(
+            "Working task cannot be projected; replace it with a sanitized summary"
+        )
+
+    values = [task_id, goal, progress, *next_steps, *files, *sources]
+    reject_secrets("Task Capsule", values)
+    reject_capsule_privacy(
+        "Working task",
+        [goal, progress, *next_steps],
+        [task_id, *files, *sources],
+    )
+
+    normalized_steps = [" ".join(item.split()) for item in next_steps]
+    omitted["working_files"] = max(
+        0, len(files) - CAPSULE_WORKING_FILE_LIMIT
+    )
+    omitted["working_next_steps"] = max(0, len(normalized_steps) - 1)
+    omitted["working_sources"] = max(
+        0, len(sources) - CAPSULE_WORKING_SOURCE_LIMIT
+    )
+    return {
+        "task_id": validate_task_id(task_id),
+        "goal": " ".join(goal.split()),
+        "progress": " ".join(progress.split()),
+        "next_steps": normalized_steps[-1:],
+        "files": files[:CAPSULE_WORKING_FILE_LIMIT],
+        "sources": sources[:CAPSULE_WORKING_SOURCE_LIMIT],
+    }, omitted
+
+
 def deduplicate_context_items(
     items: list[dict[str, object]],
 ) -> list[dict[str, object]]:
@@ -402,41 +497,60 @@ def build_context_packet(
     if limit < 1:
         raise ContextError("--limit must be a positive integer")
     reject_secrets("Task Capsule", [query])
+    reject_capsule_privacy("Task Capsule request", [query])
 
     capsule_warnings = list(warnings or [])
-    working = find_working_task(connection, task_id)
+    working, omitted = project_working_task(
+        find_working_task(connection, task_id)
+    )
     if task_id is None:
         capsule_warnings.append("Working task unavailable: task ID was not supplied")
     elif working is None:
         capsule_warnings.append(f"Working task not found: {validate_task_id(task_id)}")
 
+    request_query = build_capsule_query(query, None)
     packet: dict[str, object] = {
-        "query": query,
+        "query": request_query,
         "task_id": task_id,
         "working": working,
         "procedural": [],
         "semantic": [],
         "episodic": [],
         "warnings": capsule_warnings,
-        "omitted": {"working_files": 0},
+        "omitted": omitted,
     }
     if not include_retrieval:
         return packet
 
-    retrieval_query = build_capsule_query(query, working)
+    retrieval_query = build_capsule_query(request_query, working)
     procedural_limit = min(limit, CAPSULE_LAYER_LIMITS["procedural"])
     semantic_limit = min(limit, CAPSULE_LAYER_LIMITS["semantic"])
     episodic_limit = min(limit, CAPSULE_LAYER_LIMITS["episodic"])
-    packet["procedural"] = deduplicate_context_items(
-        search_documents(connection, retrieval_query, procedural_limit, "procedural")
-    )[:procedural_limit]
-    packet["semantic"] = deduplicate_context_items(
-        search_documents(connection, retrieval_query, semantic_limit, "semantic")
-    )[:semantic_limit]
-    packet["episodic"] = deduplicate_context_items(
-        search_documents(connection, retrieval_query, episodic_limit, "episodic")
-        + search_episodes(connection, retrieval_query, episodic_limit)
-    )[:episodic_limit]
+    procedural = search_documents(
+        connection, request_query, procedural_limit, "procedural"
+    )
+    semantic = search_documents(
+        connection, request_query, semantic_limit, "semantic"
+    )
+    episodic = search_documents(
+        connection, request_query, episodic_limit, "episodic"
+    ) + search_episodes(connection, request_query, episodic_limit)
+    if retrieval_query != request_query:
+        if len(deduplicate_context_items(procedural)) < procedural_limit:
+            procedural += search_documents(
+                connection, retrieval_query, procedural_limit, "procedural"
+            )
+        if len(deduplicate_context_items(semantic)) < semantic_limit:
+            semantic += search_documents(
+                connection, retrieval_query, semantic_limit, "semantic"
+            )
+        if len(deduplicate_context_items(episodic)) < episodic_limit:
+            episodic += search_documents(
+                connection, retrieval_query, episodic_limit, "episodic"
+            ) + search_episodes(connection, retrieval_query, episodic_limit)
+    packet["procedural"] = deduplicate_context_items(procedural)[:procedural_limit]
+    packet["semantic"] = deduplicate_context_items(semantic)[:semantic_limit]
+    packet["episodic"] = deduplicate_context_items(episodic)[:episodic_limit]
     return packet
 
 
@@ -451,6 +565,13 @@ def capsule_character_count(capsule: dict[str, object]) -> int:
 def enforce_capsule_budget(capsule: dict[str, object]) -> dict[str, object]:
     compacted = json.loads(serialize_capsule(capsule))
     omitted = compacted["omitted"]
+    for key in (
+        "working_files",
+        "working_next_steps",
+        "working_sources",
+        "working_progress_characters",
+    ):
+        omitted.setdefault(key, 0)
     working = compacted["working"]
 
     while capsule_character_count(compacted) > CAPSULE_CHARACTER_LIMIT:
@@ -460,6 +581,10 @@ def enforce_capsule_budget(capsule: dict[str, object]) -> dict[str, object]:
         if compacted["semantic"]:
             compacted["semantic"].pop()
             continue
+        if working is not None and len(working["sources"]) > 1:
+            working["sources"].pop()
+            omitted["working_sources"] += 1
+            continue
         if working is not None and len(working["files"]) > 1:
             working["files"].pop()
             omitted["working_files"] += 1
@@ -467,7 +592,15 @@ def enforce_capsule_budget(capsule: dict[str, object]) -> dict[str, object]:
         if working is not None and working["progress"]:
             excess = capsule_character_count(compacted) - CAPSULE_CHARACTER_LIMIT
             keep = max(0, len(working["progress"]) - excess - 1)
-            working["progress"] = f"{working['progress'][:keep]}…" if keep else ""
+            if keep == 0:
+                raise ContextError(
+                    "mandatory Task Capsule content exceeds "
+                    f"{CAPSULE_CHARACTER_LIMIT} characters"
+                )
+            omitted["working_progress_characters"] += (
+                len(working["progress"]) - keep
+            )
+            working["progress"] = f"…{working['progress'][-keep:]}"
             continue
         raise ContextError(
             "mandatory Task Capsule content exceeds "
@@ -572,7 +705,7 @@ def find_working_task(
     ).fetchone()
     if row is None:
         return None
-    return {
+    task = {
         "task_id": row["task_id"],
         "goal": row["goal"],
         "progress": row["progress"],
@@ -582,6 +715,8 @@ def find_working_task(
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+    project_working_task(task)
+    return task
 
 
 def get_working_task(
@@ -607,6 +742,11 @@ def start_working_task(
     files = validate_paths("Working task file", files)
     sources = normalize_values("Working task source", sources)
     reject_secrets("working task", [task_id, goal, *files, *sources])
+    reject_capsule_privacy(
+        "Working task",
+        [goal],
+        [task_id, *files, *sources],
+    )
     timestamp = datetime.now(timezone.utc).isoformat()
     try:
         connection.execute("BEGIN IMMEDIATE")
@@ -659,6 +799,11 @@ def update_working_task(
     reject_secrets(
         "working task",
         [task_id] + ([progress] if progress is not None else []) + next_steps + files + sources,
+    )
+    reject_capsule_privacy(
+        "Working task",
+        ([progress] if progress is not None else []) + next_steps,
+        [task_id, *files, *sources],
     )
     try:
         connection.execute("BEGIN IMMEDIATE")
