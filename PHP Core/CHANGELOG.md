@@ -4,6 +4,10 @@
 
 ### Added
 
+- Added bounded Task Capsule retrieval and hybrid fresh-context handoffs for
+  complex phase boundaries without adding another memory store or changing
+  `memory`, `checkpoint`, or explicit `complete`.
+
 - **Local context engine** - added a dependency-free SQLite FTS5 index for
   policy, specs, active memory, task documents, capability epics, and changelog
   history, plus gitignored summaries of completed tasks. It classifies

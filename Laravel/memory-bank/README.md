@@ -91,6 +91,21 @@ arguments. The active agent derives the task ID from the current Git branch,
 summarizes all current Git-visible changes, and automatically creates or updates
 Working Memory. It does not complete the task.
 
+### Task Capsule
+
+At the start of a complex request and before a complex phase handoff, the agent
+derives a concise sanitized retrieval query and builds a Task Capsule from
+optional Working Memory and `context` retrieval. The raw request is not copied
+into the packet. The complete packet is capped at 8,000 Unicode characters and
+contains at most two Procedural, three Semantic, and one Episodic result.
+Retrieved entries are short snippets with source paths; the next agent reads a
+full source only when its current step requires it.
+
+Simple tasks stay in the current context. Fresh contexts are reserved for
+research-to-planning, planning-to-implementation,
+implementation-to-independent-verification, and recovery after compaction.
+`memory`, `checkpoint`, and explicit `complete` keep their existing roles.
+
 For the manual flow, run these lifecycle commands from the edition root or
 consuming-project root:
 

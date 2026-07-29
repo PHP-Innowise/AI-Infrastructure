@@ -43,6 +43,22 @@ This policy is shared across editions. The same accelerator is mirrored for **Cl
 - MUST use the bounded procedural, semantic, and episodic context packet as a
   retrieval hint; native PHP code, configuration, tests, specs, and policy
   remain authoritative.
+- MUST build a Task Capsule at the start of a complex request and before a
+  complex phase handoff. The serialized capsule is limited to
+  8,000 Unicode characters, at most two Procedural, three Semantic, and
+  one Episodic result, plus bounded Working state.
+- MUST derive a concise sanitized retrieval query from the current request.
+  MUST NOT copy the raw request or another prompt into the Task Capsule.
+- MUST use a fresh context only at an existing complex boundary:
+  research to planning, planning to implementation,
+  implementation to independent verification, or recovery after runtime
+  compaction. A simple task stays in the current context.
+- MUST pass the Task Capsule and explicit current-step files to the fresh
+  phase agent. MUST NOT pass the parent conversation, raw agent output, raw
+  diffs, logs, prompts, responses, or reasoning.
+- MUST progressively open only a cited source required by the current step.
+  Repository policy, code, configuration, tests, and specifications remain
+  authoritative. Task Capsule creation MUST NOT invoke explicit `complete`.
 - MUST NOT make workflow decisions for the user when a command is supposed to offer alternatives.
 - MUST read relevant PHP code, autoload config, routes/entry points, database access, tests, and specs before modifying behavior.
 - MUST read `memory-bank/README.md` and `memory-bank/INDEX.md` when a memory bank exists, then load only chunks relevant to the task's scope and tags.

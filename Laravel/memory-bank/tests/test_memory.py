@@ -185,6 +185,52 @@ class MemoryIntegrationTest(unittest.TestCase):
             self.assertIn("checkpoint", document)
             self.assertIn("complete", document)
 
+    def test_policy_and_docs_define_hybrid_task_capsules(self) -> None:
+        policy = REPOSITORY_ROOT.joinpath("AGENTS.md").read_text(encoding="utf-8")
+        required_policy = (
+            "Task Capsule",
+            "8,000 Unicode characters",
+            "two Procedural",
+            "three Semantic",
+            "one Episodic",
+            "MUST NOT pass the parent conversation",
+            "start of a complex request",
+            "research to planning",
+            "planning to implementation",
+            "implementation to independent verification",
+            "simple task",
+            "explicit `complete`",
+        )
+        for text in required_policy:
+            with self.subTest(policy=text):
+                self.assertIn(text, policy)
+
+        for tool in (".agents", ".claude", ".cursor"):
+            flow = REPOSITORY_ROOT.joinpath(
+                tool, "skills", "SKILL FLOW.md"
+            ).read_text(encoding="utf-8")
+            with self.subTest(tool=tool):
+                self.assertIn("## Task Capsule Handoff", flow)
+                self.assertIn("work completed", flow)
+                self.assertIn("verification evidence", flow)
+                self.assertIn("unresolved blockers", flow)
+                self.assertIn("must not preload every cited source", flow)
+
+        documents = (
+            REPOSITORY_ROOT / "README.md",
+            REPOSITORY_ROOT / "memory-bank/README.md",
+            REPOSITORY_ROOT.parent / "README_EN.md",
+            REPOSITORY_ROOT.parent / "README_RU.md",
+        )
+        for path in documents:
+            text = path.read_text(encoding="utf-8")
+            with self.subTest(document=path):
+                self.assertIn("Task Capsule", text)
+                self.assertIn("8", text)
+                self.assertIn("Procedural", text)
+                self.assertIn("Semantic", text)
+                self.assertIn("Episodic", text)
+
     def test_skill_flow_discovers_memory(self) -> None:
         expected = {
             ".claude": "`/checkpoint`, `/memory`",

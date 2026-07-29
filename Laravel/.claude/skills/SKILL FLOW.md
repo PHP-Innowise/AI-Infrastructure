@@ -67,13 +67,23 @@ This flow keeps Laravel work structured while preserving user control. Agents su
 | Finalization | `/docs-generator`, `/release`, `/finishing-branch` |
 | Utility | `/memory-bank`, `/checkpoint`, `/memory`, `/reflect`, `/skill-creator`, `/review-pr`, `/browser-verify`, `/dependency-manager` |
 
-## Context Handoff
+## Task Capsule Handoff
 
-Every skill should finish with:
+At a complex phase boundary, the orchestrating agent builds one bounded Task
+Capsule from a concise sanitized retrieval query, optional Working state, and
+layered context. A fresh phase agent receives the capsule and explicit
+current-step files, not the parent conversation.
 
-- What changed or was decided.
-- Files/specs touched.
-- Verification evidence or planned verification.
-- Risks and assumptions.
-- Recommended next command.
-- Memory chunk IDs used or changed, when applicable.
+The returning handoff contains only:
+
+- work completed;
+- decisions made;
+- files changed or examined;
+- verification evidence;
+- the next step;
+- unresolved blockers or questions;
+- cited authoritative sources.
+
+The next agent must not preload every cited source. It opens one only when the
+current step requires more information. Simple tasks remain in the current
+context.
