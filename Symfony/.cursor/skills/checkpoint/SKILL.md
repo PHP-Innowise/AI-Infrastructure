@@ -1,12 +1,14 @@
 ---
 name: checkpoint
-description: Capture all current Git-visible changes as sanitized repository-local Working Memory. Use when the user invokes checkpoint or asks to save current AI work without supplying lifecycle arguments.
+description: Use when the user invokes checkpoint or asks to save current AI work without supplying lifecycle arguments.
 phase: utility
 flow-next: null
 flow-alternatives: [memory-bank, verify]
 ---
 
 # Working-Memory Checkpoint
+
+`checkpoint` is an AI skill/command name, not a shell executable; when invoked, begin directly at Workflow step 1. Never run or search for a `checkpoint` binary.
 
 Capture one progress snapshot and stop. This skill accepts no arguments.
 
