@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -20,27 +21,62 @@ COMMAND_PATHS = (
     (".cursor/commands/memory.md", ".cursor/skills/memory/SKILL.md"),
 )
 VALIDATOR_PATHS = tuple(
-    (f"{tool}/skills/skill-creator/scripts/quick_validate.py", f"{tool}/skills/memory")
+    f"{tool}/skills/skill-creator/scripts/quick_validate.py"
     for tool in (".claude", ".cursor", ".agents")
 )
 
 
 class MemoryIntegrationTest(unittest.TestCase):
+    def run_validator(self, validator_path: str, skill_path: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(REPOSITORY_ROOT / validator_path), str(skill_path)],
+            capture_output=True,
+            check=False,
+            cwd=REPOSITORY_ROOT,
+            text=True,
+        )
+
     def test_skill_validators_accept_project_metadata(self) -> None:
-        for validator_path, skill_path in VALIDATOR_PATHS:
-            with self.subTest(validator=validator_path):
-                result = subprocess.run(
-                    [
-                        sys.executable,
-                        str(REPOSITORY_ROOT / validator_path),
-                        str(REPOSITORY_ROOT / skill_path),
-                    ],
-                    capture_output=True,
-                    check=False,
-                    cwd=REPOSITORY_ROOT,
-                    text=True,
-                )
+        for validator_path in VALIDATOR_PATHS:
+            tool = Path(validator_path).parts[0]
+            for skill_name in ("memory", "checkpoint"):
+                with self.subTest(validator=validator_path, skill=skill_name):
+                    result = self.run_validator(
+                        validator_path,
+                        REPOSITORY_ROOT / tool / "skills" / skill_name,
+                    )
                 self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_skill_validators_reject_malformed_flow_names(self) -> None:
+        for validator_path in VALIDATOR_PATHS:
+            for value in ("-memory", "memory-", "memory--bank"):
+                for field in ("flow-next", "flow-alternatives"):
+                    with self.subTest(
+                        validator=validator_path, field=field, value=value
+                    ):
+                        flow_next = f'"{value}"' if field == "flow-next" else "null"
+                        alternatives = (
+                            f'["{value}"]'
+                            if field == "flow-alternatives"
+                            else '["checkpoint"]'
+                        )
+                        with tempfile.TemporaryDirectory() as directory:
+                            skill_path = Path(directory) / "skill"
+                            skill_path.mkdir()
+                            skill_path.joinpath("SKILL.md").write_text(
+                                "---\n"
+                                "name: memory\n"
+                                "description: Use when testing validator metadata.\n"
+                                "phase: utility\n"
+                                f"flow-next: {flow_next}\n"
+                                f"flow-alternatives: {alternatives}\n"
+                                "---\n",
+                                encoding="utf-8",
+                            )
+                            result = self.run_validator(validator_path, skill_path)
+                        self.assertNotEqual(
+                            0, result.returncode, result.stdout + result.stderr
+                        )
 
     def test_tool_skills_are_byte_identical(self) -> None:
         contents = [

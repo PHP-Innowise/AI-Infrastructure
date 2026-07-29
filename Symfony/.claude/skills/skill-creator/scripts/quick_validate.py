@@ -9,6 +9,15 @@ import re
 import yaml
 from pathlib import Path
 
+
+def is_valid_skill_name(value):
+    return (
+        isinstance(value, str)
+        and len(value) <= 64
+        and re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', value) is not None
+    )
+
+
 def validate_skill(skill_path):
     """Basic validation of a skill"""
     skill_path = Path(skill_path)
@@ -59,21 +68,23 @@ def validate_skill(skill_path):
         return False, "Missing 'description' in frontmatter"
 
     if 'phase' in frontmatter:
-        if frontmatter['phase'] not in {'planning', 'execution', 'quality', 'utility'}:
+        if frontmatter['phase'] not in {
+            'planning', 'execution', 'quality', 'utility'
+        }:
             return False, "'phase' must be planning, execution, quality, or utility"
 
     if 'flow-next' in frontmatter:
         flow_next = frontmatter['flow-next']
         if flow_next is not None and (
             not isinstance(flow_next, str)
-            or not re.match(r'^[a-z0-9-]+$', flow_next)
+            or not is_valid_skill_name(flow_next)
         ):
             return False, "'flow-next' must be null or a kebab-case skill name"
 
     if 'flow-alternatives' in frontmatter:
         alternatives = frontmatter['flow-alternatives']
         if not isinstance(alternatives, list) or any(
-            not isinstance(item, str) or not re.match(r'^[a-z0-9-]+$', item)
+            not is_valid_skill_name(item)
             for item in alternatives
         ):
             return False, "'flow-alternatives' must be a list of kebab-case skill names"
@@ -84,14 +95,10 @@ def validate_skill(skill_path):
         return False, f"Name must be a string, got {type(name).__name__}"
     name = name.strip()
     if name:
-        # Check naming convention (kebab-case: lowercase with hyphens)
-        if not re.match(r'^[a-z0-9-]+$', name):
-            return False, f"Name '{name}' should be kebab-case (lowercase letters, digits, and hyphens only)"
-        if name.startswith('-') or name.endswith('-') or '--' in name:
-            return False, f"Name '{name}' cannot start/end with hyphen or contain consecutive hyphens"
-        # Check name length (max 64 characters per spec)
         if len(name) > 64:
             return False, f"Name is too long ({len(name)} characters). Maximum is 64 characters."
+        if not is_valid_skill_name(name):
+            return False, f"Name '{name}' should be kebab-case"
 
     # Extract and validate description
     description = frontmatter.get('description', '')
