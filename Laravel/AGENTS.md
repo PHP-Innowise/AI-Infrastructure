@@ -34,6 +34,9 @@ This policy is shared across editions. The same accelerator is mirrored for **Cl
   current progress: derive the task ID from the current Git branch, include all
   current Git-visible changes, and save a sanitized summary; the skill
   automatically creates or updates Working Memory.
+- MUST use the argument-free `memory` skill when the user asks to refresh all four local context layers. It executes the checkpoint skill as a referenced procedure for Working Memory, then refreshes source-driven Procedural,
+  Semantic, and Episodic documents. It MUST NOT invoke or chain another skill,
+  and explicit `complete` remains required to create a completed-task episode.
 - MUST use a caller-supplied task ID only for the manual
   `start → update → context → complete` lifecycle. `checkpoint` MUST NOT
   complete the task or create an episode.
@@ -99,6 +102,10 @@ This policy is shared across editions. The same accelerator is mirrored for **Cl
 - `checkpoint` is the preferred argument-free progress capture. It stores a
   sanitized summary and changed paths in Working Memory; explicit `complete`
   remains required after verification.
+- `memory` is the preferred argument-free all-layer refresh. It checkpoints
+  Working Memory when possible and always refreshes the source index;
+  `checkpoint` remains Working-only and explicit `complete` remains the only
+  task-completion flow.
 - MUST NEVER capture raw conversations, prompts, responses, logs, credentials,
   customer data, or secret values. The CLI rejects likely secrets.
 - MUST use `memory-bank/` only for durable, reusable project context: verified constraints, conventions, decisions, integration contracts, operational lessons, and stable domain knowledge.

@@ -126,6 +126,7 @@ Use slash commands (Claude Code / Cursor) to move through the workflow:
 | `/systematic-debugger` (`/debugger`) | Find root cause before fixing bugs |
 | `/memory-bank` | Retrieve, capture, audit, supersede, or archive durable project memory |
 | `checkpoint` | Capture all current Git-visible changes as local Working Memory without arguments |
+| `memory` | Refresh Working, Procedural, Semantic, and source-backed Episodic context without arguments |
 | `/verify` | Run the native PHP Definition of Done |
 | `/review-pr` | Review a GitHub pull request |
 | `/finishing-branch` | Prepare branch completion or PR |
@@ -180,6 +181,11 @@ The optional root `memory-bank/` is one canonical shared store for Claude Code, 
 Memory is deliberately below policy, specs, code, configuration, migrations, and tests in the authority hierarchy. Agents read `memory-bank/README.md` and `memory-bank/INDEX.md`, retrieve only relevant active chunks, and verify every material claim before relying on it. Stale chunks are updated, superseded, or archived instead of silently remaining active.
 
 Use the `memory-bank` skill directly in Codex or `/memory-bank` in Claude/Cursor to retrieve, capture, audit, supersede, archive, or initialize memory. Do not use it for transient plans, chat transcripts, generic PHP advice, command output, or information already owned by a living spec. Secrets, `.env` contents, personal data, production identifiers, raw logs, and customer payloads are prohibited. Non-sensitive personal notes belong in ignored `memory-bank/local/`.
+
+Use `memory` in Codex or `/memory` in Claude/Cursor for one argument-free
+all-layer refresh. It reuses the safe Working checkpoint and rebuilds the
+source index; it does not complete the task, create an episode, or edit
+repository memory.
 
 Use `checkpoint` in Codex or `/checkpoint` in Claude/Cursor to capture current
 progress without lifecycle arguments. The branch name becomes the task ID; the

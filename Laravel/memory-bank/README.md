@@ -80,6 +80,12 @@ Repository code, configuration, tests, specs, and policy remain authoritative.
 The context packet returns a bounded set of retrieval hints per document layer;
 verify material claims against the cited source before using them.
 
+For the shortest all-layer refresh, invoke the AI command `memory` with no
+arguments. It checkpoints current Git-visible work when a valid branch is
+available, then rebuilds Procedural, Semantic, and changelog-backed Episodic
+documents from repository sources. It never completes a task or authors
+repository memory.
+
 For routine progress capture, invoke the AI command `checkpoint` with no
 arguments. The active agent derives the task ID from the current Git branch,
 summarizes all current Git-visible changes, and automatically creates or updates

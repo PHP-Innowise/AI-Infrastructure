@@ -141,6 +141,48 @@ class MemoryIntegrationTest(unittest.TestCase):
                 for option in forbidden:
                     self.assertNotIn(option, command)
 
+    def test_policy_separates_memory_checkpoint_and_completion(self) -> None:
+        policy = REPOSITORY_ROOT.joinpath("AGENTS.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("argument-free `memory` skill", policy)
+        self.assertIn("all four local context layers", policy)
+        self.assertIn("referenced procedure", policy)
+        self.assertIn("MUST NOT invoke or chain", policy)
+        self.assertIn("explicit `complete`", policy)
+
+    def test_readmes_document_the_short_and_explicit_flows(self) -> None:
+        memory_readme = REPOSITORY_ROOT.joinpath(
+            "memory-bank/README.md"
+        ).read_text(encoding="utf-8")
+        accelerator_readme = REPOSITORY_ROOT.joinpath("README.md").read_text(
+            encoding="utf-8"
+        )
+        workspace_readme = REPOSITORY_ROOT.parent.joinpath("README.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("AI command `memory`", memory_readme)
+        self.assertIn("Use `memory` in Codex or `/memory`", accelerator_readme)
+        self.assertIn("`memory` без", workspace_readme)
+        for document in (memory_readme, accelerator_readme, workspace_readme):
+            self.assertIn("checkpoint", document)
+            self.assertIn("complete", document)
+
+    def test_skill_flow_discovers_memory(self) -> None:
+        expected = {
+            ".claude": "`/checkpoint`, `/memory`",
+            ".cursor": "`/checkpoint`, `/memory`",
+            ".agents": "`checkpoint`, `memory`",
+        }
+        for tool, entry in expected.items():
+            with self.subTest(tool=tool):
+                flow = REPOSITORY_ROOT.joinpath(
+                    tool, "skills", "SKILL FLOW.md"
+                ).read_text(encoding="utf-8")
+                self.assertIn(entry, flow)
+
 
 if __name__ == "__main__":
     unittest.main()
