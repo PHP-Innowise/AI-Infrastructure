@@ -34,6 +34,35 @@ The same accelerator is mirrored for **Claude Code** (`.claude/`), **Cursor** (`
 - MUST execute only the selected skill, then stop.
 - MUST NOT chain to another skill automatically.
 - MUST output a Context Summary and Next Steps.
+- MUST use the argument-free `checkpoint` skill when the user asks to capture
+  current progress: derive the task ID from the current Git branch, include all
+  current Git-visible changes, and save a sanitized summary; the skill
+  automatically creates or updates Working Memory.
+- MUST use the argument-free `memory` skill when the user asks to refresh all four local context layers. It executes the checkpoint skill as a referenced procedure for Working Memory, then refreshes source-driven Procedural,
+  Semantic, and Episodic documents. It MUST NOT invoke or chain another skill,
+  and explicit `complete` remains required to create a completed-task episode.
+- MUST use a caller-supplied task ID only for the manual
+  `start → update → context → complete` lifecycle. `checkpoint` MUST NOT
+  complete the task or create an episode.
+- MUST use the bounded procedural, semantic, and episodic context packet as a
+  retrieval hint; Symfony code, configuration, tests, specs, and policy remain
+  authoritative.
+- MUST build a Task Capsule at the start of a complex request and before a
+  complex phase handoff. The serialized capsule is limited to
+  8,000 Unicode characters, at most two Procedural, three Semantic, and
+  one Episodic result, plus bounded Working state.
+- MUST derive a concise sanitized retrieval query from the current request.
+  MUST NOT copy the raw request or another prompt into the Task Capsule.
+- MUST use a fresh context only at an existing complex boundary:
+  research to planning, planning to implementation,
+  implementation to independent verification, or recovery after runtime
+  compaction. A simple task stays in the current context.
+- MUST pass the Task Capsule and explicit current-step files to the fresh
+  phase agent. MUST NOT pass the parent conversation, raw agent output, raw
+  diffs, logs, prompts, responses, or reasoning.
+- MUST progressively open only a cited source required by the current step.
+  Repository policy, code, configuration, tests, and specifications remain
+  authoritative. Task Capsule creation MUST NOT invoke explicit `complete`.
 - MUST NOT make workflow decisions for the user when a command is supposed to offer alternatives.
 - MUST read relevant Symfony controllers, routes, services, repositories, entities, migrations, forms/DTOs, voters/security config, tests, and specs before modifying behavior.
 - MUST read `memory-bank/README.md` and `memory-bank/INDEX.md` when a memory bank exists, then load only chunks relevant to the task's scope and tags.
@@ -113,6 +142,19 @@ The same accelerator is mirrored for **Claude Code** (`.claude/`), **Cursor** (`
 
 ## Memory Bank
 
+- Local context is one ignored SQLite database with procedural, semantic,
+  episodic, and working layers. `complete` atomically replaces a working task
+  with an episode; `clear` removes only the working task. Deleting the database
+  loses local working/episode data, while the repository index can be rebuilt.
+- `checkpoint` is the preferred argument-free progress capture. It stores a
+  sanitized summary and changed paths in Working Memory; explicit `complete`
+  remains required after verification.
+- `memory` is the preferred argument-free all-layer refresh. It checkpoints
+  Working Memory when possible and always refreshes the source index;
+  `checkpoint` remains Working-only and explicit `complete` remains the only
+  task-completion flow.
+- MUST NEVER capture raw conversations, prompts, responses, logs, credentials,
+  customer data, or secret values. The CLI rejects likely secrets.
 - MUST use `memory-bank/` only for durable, reusable project context: verified constraints, conventions, decisions, integration contracts, operational lessons, and stable domain knowledge.
 - MUST keep transient plans, unfinished reasoning, command output, and per-session progress in `tasks/` or the final Context Summary instead of shared memory.
 - MUST read `memory-bank/.memory-counter` before creating a chunk, increment it only after choosing the next unused identifier, and update `memory-bank/INDEX.md` in the same change.

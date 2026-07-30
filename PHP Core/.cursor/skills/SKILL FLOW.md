@@ -41,6 +41,8 @@ This flow keeps native PHP work structured while preserving user control. Agents
 - Use `/debugger` when tests fail for unclear reasons or behavior is unexpected.
 - Use `/docs-generator` when setup, deployment, worker/cron, API, or architecture documentation changed.
 - Use `/memory-bank` only to retrieve, capture, audit, supersede, archive, or initialize durable source-backed project memory; keep transient progress in task context.
+- Use `/memory` for an argument-free refresh of every local context layer; use
+  `/checkpoint` when only current Working Memory should be captured.
 
 ## Phase Map
 
@@ -51,15 +53,25 @@ This flow keeps native PHP work structured while preserving user control. Agents
 | Implementation | `/git-worktrees`, `/architecture-implementer`, `/coder`, `/coder-frontend`, `/refactorer` |
 | Quality | `/code-reviewer`, `/security-reviewer`, `/test-generator`, `/performance-optimization`, `/debugger`, `/verify` |
 | Finalization | `/docs-generator`, `/release`, `/finishing-branch` |
-| Utility | `/memory-bank`, `/reflect`, `/skill-creator`, `/review-pr`, `/browser-verify`, `/dependency-manager` |
+| Utility | `/memory-bank`, `/checkpoint`, `/memory`, `/reflect`, `/skill-creator`, `/review-pr`, `/browser-verify`, `/dependency-manager` |
 
-## Context Handoff
+## Task Capsule Handoff
 
-Every skill should finish with:
+At a complex phase boundary, the orchestrating agent builds one bounded Task
+Capsule from a concise sanitized retrieval query, optional Working state, and
+layered context. A fresh phase agent receives the capsule and explicit
+current-step files, not the parent conversation.
 
-- What changed or was decided.
-- Files/specs touched.
-- Verification evidence or planned verification.
-- Risks and assumptions.
-- Recommended next command.
-- Memory chunk IDs used or changed, when applicable.
+The returning handoff contains only:
+
+- work completed;
+- decisions made;
+- files changed or examined;
+- verification evidence;
+- the next step;
+- unresolved blockers or questions;
+- cited authoritative sources.
+
+The next agent must not preload every cited source. It opens one only when the
+current step requires more information. Simple tasks remain in the current
+context.

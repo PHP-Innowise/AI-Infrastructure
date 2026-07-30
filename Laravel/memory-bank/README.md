@@ -25,8 +25,9 @@ memory-bank/
 ├── .memory-counter       # Next numeric chunk identifier
 ├── chunks/               # Committed shared memory
 ├── templates/chunk.md    # Required chunk structure
+├── scripts/context.py    # Local context index and task episodes
 ├── scripts/validate.py   # Dependency-free structural validator
-└── local/                # Ignored personal notes; never shared authority
+└── local/context.db      # Ignored derived index and local task data
 ```
 
 ## What Belongs Here
@@ -65,6 +66,83 @@ Run:
 ```bash
 python3 memory-bank/scripts/validate.py
 ```
+
+## Local Context Engine
+
+The context engine keeps four logical layers in one ignored SQLite FTS5 database:
+procedural policy/skills, semantic repository knowledge/active memory, episodic
+changelog/completed work, and working task state. It requires Python 3.9+ with
+SQLite FTS5 support. It indexes `AGENTS.md`/`CLAUDE.md`, the root `README.md`,
+`specs/` and `docs/`, active memory chunks, task documents, capability epics,
+and `CHANGELOG.md` into `memory-bank/local/context.db`.
+
+Repository code, configuration, tests, specs, and policy remain authoritative.
+The context packet returns a bounded set of retrieval hints per document layer;
+verify material claims against the cited source before using them.
+
+For the shortest all-layer refresh, invoke the AI command `memory` with no
+arguments. It checkpoints current Git-visible work when a valid branch is
+available, then rebuilds Procedural, Semantic, and changelog-backed Episodic
+documents from repository sources. It never completes a task or authors
+repository memory.
+
+For routine progress capture, invoke the AI command `checkpoint` with no
+arguments. The active agent derives the task ID from the current Git branch,
+summarizes all current Git-visible changes, and automatically creates or updates
+Working Memory. It does not complete the task.
+
+### Task Capsule
+
+At the start of a complex request and before a complex phase handoff, the agent
+derives a concise sanitized retrieval query and builds a Task Capsule from
+optional Working Memory and `context` retrieval. The raw request is not copied
+into the packet. The complete packet is capped at 8,000 Unicode characters and
+contains at most two Procedural, three Semantic, and one Episodic result.
+Retrieved entries are short snippets with source paths; the next agent reads a
+full source only when its current step requires it.
+
+Simple tasks stay in the current context. Fresh contexts are reserved for
+research-to-planning, planning-to-implementation,
+implementation-to-independent-verification, and recovery after compaction.
+`memory`, `checkpoint`, and explicit `complete` keep their existing roles.
+
+For the manual flow, run these lifecycle commands from the edition root or
+consuming-project root:
+
+```bash
+python3 memory-bank/scripts/context.py index
+python3 memory-bank/scripts/context.py start \
+  --task-id BAUMAS-133 \
+  --goal "Invalidate other password-change sessions"
+python3 memory-bank/scripts/context.py update \
+  --task-id BAUMAS-133 \
+  --progress "Two-session regression passes" \
+  --next-step "Verify the old remember-me cookie"
+python3 memory-bank/scripts/context.py context \
+  "password session invalidation" \
+  --task-id BAUMAS-133
+python3 memory-bank/scripts/context.py complete \
+  --task-id BAUMAS-133 \
+  --outcome "Other sessions and stale remember-me cookies are invalidated" \
+  --verification "ChangePasswordTest passed"
+```
+
+Supply a ticket ID, branch name, or descriptive slug explicitly for the manual
+flow. For non-trivial work, use `start → update → context → complete`: begin
+before work, add only sanitized progress, retrieve context before decisions,
+and complete only after verification. `context` and `complete` stay explicit:
+retrieval needs a task/query and completion needs a verified outcome. `complete`
+atomically converts that working task into an episode.
+`search` still searches indexed sources and episodes, and `record` remains
+compatible for a standalone completed-task episode; `status` reports layer,
+episode, and working-task counts.
+
+Episodes and working state are local, non-authoritative data. Never store raw
+conversations, prompts, responses, logs, secrets, customer data, or credentials;
+the CLI rejects likely secrets. `clear --task-id …` abandons only that active
+working task. Deleting `memory-bank/local/context.db` also permanently removes
+local working tasks and episodes. Only the derived document index is rebuildable
+from repository sources; working tasks and episodes are local data.
 
 ## Lifecycle
 

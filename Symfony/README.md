@@ -214,6 +214,8 @@ Do not install Symfony CLI, bundles, npm packages, or analysis tools without app
 | `verify` | Run the active edition's Definition of Done |
 | `documentation-generator` | Maintain README, ADR, API, worker, and deployment docs |
 | `memory-bank` | Retrieve, capture, audit, supersede, or archive durable project memory |
+| `checkpoint` | Capture all current Git-visible changes as local Working Memory without arguments |
+| `memory` | Refresh Working, Procedural, Semantic, and source-backed Episodic context without arguments |
 | `finishing-branch` | Present merge, PR, or cleanup alternatives |
 | `release` | Prepare versioning, changelog, tag, and release notes |
 
@@ -241,6 +243,31 @@ The optional root `memory-bank/` is one canonical shared store for Claude Code, 
 Memory is deliberately below policy, specs, code, configuration, migrations, and tests in the authority hierarchy. Agents read `memory-bank/README.md` and `memory-bank/INDEX.md`, retrieve only relevant active chunks, and verify every material claim before relying on it. Stale chunks are updated, superseded, or archived instead of silently remaining active.
 
 Use the `memory-bank` skill directly in Codex or `/memory-bank` in Claude/Cursor to retrieve, capture, audit, supersede, archive, or initialize memory. Do not use it for transient plans, chat transcripts, generic Symfony advice, command output, or information already owned by a living spec. Secrets, `.env` contents, personal data, production identifiers, raw logs, and customer payloads are prohibited. Non-sensitive personal notes belong in ignored `memory-bank/local/`.
+
+Use `memory` in Codex or `/memory` in Claude/Cursor for one argument-free
+all-layer refresh. It reuses the safe Working checkpoint and rebuilds the
+source index; it does not complete the task, create an episode, or edit
+repository memory.
+
+Use `checkpoint` in Codex or `/checkpoint` in Claude/Cursor to capture current
+progress without lifecycle arguments. The branch name becomes the task ID; the
+agent stores a sanitized summary and changed paths. Use explicit `complete`
+only after verification.
+
+### Task Capsule
+
+At the start of a complex request and before a complex phase handoff, the agent
+derives a concise sanitized retrieval query and builds a Task Capsule from
+optional Working Memory and `context` retrieval. The raw request is not copied
+into the packet. The complete packet is capped at 8,000 Unicode characters and
+contains at most two Procedural, three Semantic, and one Episodic result.
+Retrieved entries are short snippets with source paths; the next agent reads a
+full source only when its current step requires it.
+
+Simple tasks stay in the current context. Fresh contexts are reserved for
+research-to-planning, planning-to-implementation,
+implementation-to-independent-verification, and recovery after compaction.
+`memory`, `checkpoint`, and explicit `complete` keep their existing roles.
 
 Each committed chunk uses `memory-bank/chunks/MEM-NNNN-short-slug.md`, is cataloged in `INDEX.md`, and cites its authoritative sources. The session-start hooks report counts only; they never inject chunk contents into logs or context automatically.
 

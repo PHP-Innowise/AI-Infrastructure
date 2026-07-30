@@ -1,6 +1,6 @@
 ---
 name: memory-bank
-description: Manage durable project memory for Laravel development. Use when the user asks to remember project context, initialize or audit a memory bank, retrieve prior decisions or conventions, preserve a verified lesson across sessions, resolve stale/conflicting memory, or prune/supersede memory chunks. Do not use for transient task notes or chat summaries.
+description: Manage durable Laravel project memory and repository-local context. Use to retrieve or preserve verified knowledge, search indexed project/task context, record a sanitized completed-task episode, audit memory, or resolve stale chunks. Do not use for raw chat transcripts or unverified facts.
 phase: utility
 flow-next: null
 flow-alternatives: [documentation-generator, reflect, architect]
@@ -17,8 +17,29 @@ Maintain one canonical, secure, source-backed `memory-bank/` shared by Claude Co
 - **Audit:** detect stale, duplicated, conflicting, orphaned, or unsafe chunks.
 - **Supersede/archive:** preserve traceability while removing stale memory from active retrieval.
 - **Initialize:** create the canonical layout only when it does not exist.
+- **Local context:** manage the ignored four-layer database and explicit task lifecycle.
 
 Execute only the selected mode, then stop. Do not turn every Context Summary into memory automatically.
+
+## Local Context Workflow
+
+1. Supply a ticket ID, branch name, or descriptive slug; run `index`, then
+   `start` before non-trivial Laravel work.
+2. Run `context "<query>" --task-id <id>` before material decisions. It returns
+   bounded procedural, semantic, and episodic hints; verify them against current
+   Laravel code, configuration, tests, specs, and policy.
+3. Use `update` only for sanitized progress, next steps, paths, and sources.
+4. After verification, run `complete`; it atomically moves the working task to
+   a local episode. Use `clear` only to abandon a working task.
+5. `search`, `record`, and `status` remain compatible for direct retrieval,
+   standalone episodes, and counts.
+
+One ignored SQLite database holds all four layers, including working state.
+Never store raw conversations, prompts, responses, logs, secrets, customer
+data, or unresolved guesses; the CLI rejects likely secrets. Deleting it
+discards local working tasks and episodes as well as the rebuildable index.
+A local episode must never become durable memory without the normal Capture
+workflow.
 
 ## Retrieval Workflow
 
@@ -88,4 +109,4 @@ Memory can point to a living spec but must not replace one when architecture, AP
 
 ## Output
 
-Report selected mode, chunks read/created/updated/superseded, authoritative sources verified, index/counter changes, conflicts or sensitive candidates rejected, validation evidence, Context Summary, and Next Steps.
+Report selected mode, local context actions, chunks read/created/updated/superseded, authoritative sources verified, index/counter changes, conflicts or sensitive candidates rejected, validation evidence, Context Summary, and Next Steps.
