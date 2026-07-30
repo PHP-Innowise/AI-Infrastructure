@@ -14,7 +14,7 @@ An AI-assisted development accelerator for Symfony 7.4 LTS and Symfony 8.1 proje
 ## Key Decisions
 
 - Target Symfony 7.4 LTS and Symfony 8.1 while detecting each consuming project's installed versions.
-- Use `.claude/skills` as canonical authored content, mirror Cursor semantics natively, and expose Codex skills through `.agents/skills` with `.codex` support files.
+- Use `.agents/skills` as the configured canonical source for shared skill parity, mirror Claude and Cursor semantics natively, and keep Codex support files under `.codex`.
 - Enforce Controller -> Service -> Repository pragmatically, without requiring pass-through layers or interfaces without a real boundary.
 
 ## Tech Stack

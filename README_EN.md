@@ -179,7 +179,7 @@ prompt with a stable task ID
     → archive terminal records
 ~~~
 
-See the complete [user task workflow example](USER-TASK-WORKFLOW-EXAMPLE.md)
+See the complete [user task workflow example](docs/examples/USER-TASK-WORKFLOW-EXAMPLE.md)
 for a step-by-step walkthrough.
 
 The public governed retrieval command is:

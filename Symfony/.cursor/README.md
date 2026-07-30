@@ -24,14 +24,14 @@ Cursor can *also* read the `.claude/` folder directly, but only if you enable th
 
 ## Keeping the two copies in sync
 
-`.cursor/` was generated from `.claude/` with these transforms:
+Shared skill behavior is declared canonically in `.agents/skills` for parity checks. Cursor keeps native wrappers under `.cursor/`; those wrappers use these transformations from the equivalent Claude integration:
 - Command frontmatter converted to Cursor's `name` / `description` schema.
 - Agent frontmatter reduced to Cursor-supported keys (dropped `model` / `invokes` / `phase`).
 - Internal `.claude/` path references rewritten to `.cursor/`.
 - Hooks translated to Cursor events: `SessionStart -> sessionStart`, `PreToolUse(Bash) -> beforeShellExecution`, `PreToolUse/PostToolUse(Write|Edit) -> afterFileEdit`. See `.cursor/hooks/README.md`.
 - Tool-integrated workflows such as `skill-creator` use Cursor-native capabilities instead of Claude CLI helpers.
 
-When you change one side, mirror the shared Symfony behavior on the other while preserving these native integration differences.
+When shared behavior changes, update `.agents/skills` first, then mirror the supported behavior into `.claude/skills` and `.cursor/skills` while preserving these native integration differences.
 
 ## Usage
 

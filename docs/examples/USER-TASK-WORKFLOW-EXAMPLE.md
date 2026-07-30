@@ -2,6 +2,9 @@
 
 This example shows what happens when a user starts and completes a task with the combined Project Brain, Local Context Engine, and Memory Bank.
 
+For configuration and behavioral differences between the default governed mode
+and the local-only fallback, see [Context Modes](../CONTEXT-MODES.md).
+
 ## Roles in This Example
 
 ### Project Brain — What Is Happening Now

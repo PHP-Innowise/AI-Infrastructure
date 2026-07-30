@@ -238,7 +238,7 @@ The root `memory-bank/` remains the canonical durable store for reviewed reusabl
 
 Agents may propose promotion but cannot self-approve it. Application requires explicit human review and records source and destination revisions. Secrets, transcripts, raw logs, personal/customer data, and unredacted incident payloads are prohibited. Session hooks report only mode, index health/staleness, active binding count, and validation status; they never index, retrieve, print, or inject records.
 
-See the repository-level [user task workflow example](../USER-TASK-WORKFLOW-EXAMPLE.md) for the complete prompt-to-archive flow without duplicating it here.
+See the repository-level [user task workflow example](../docs/examples/USER-TASK-WORKFLOW-EXAMPLE.md) for the complete prompt-to-archive flow without duplicating it here.
 
 ## Verification
 

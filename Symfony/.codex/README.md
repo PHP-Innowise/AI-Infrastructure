@@ -33,4 +33,4 @@ The baseline supports Symfony 7.4 LTS on PHP 8.2+ and Symfony 8.1 on PHP 8.4+, w
 
 ## Synchronization
 
-`.claude/skills` is the canonical authored content. Mirror shared Symfony workflow changes into `.cursor/skills` and `.agents/skills`, adapting paths, frontmatter, and tool-integrated mechanics such as `skill-creator` to each platform. Keep `.codex` support files aligned with the root policy and Codex's supported configuration model.
+`.agents/skills` is the configured canonical source for shared skill parity. Mirror supported Symfony workflow changes into `.claude/skills` and `.cursor/skills`, adapting paths, frontmatter, and tool-integrated mechanics such as `skill-creator` to each platform. Keep `.codex` support files aligned with the root policy and Codex's supported configuration model.

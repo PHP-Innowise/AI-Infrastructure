@@ -1,6 +1,6 @@
 # Laravel Accelerator - Cursor Edition
 
-This directory is the **Cursor-native** copy of the accelerator that lives in `.cursor/`. It gives Cursor users the same skills, agents, commands, hooks, and policy without depending on Cursor's opt-in "read third-party (`.cursor`) files" setting.
+This directory is the **Cursor-native** copy of the accelerator that lives in `.cursor/`. It gives Cursor users the same skills, agents, commands, hooks, and policy without depending on Cursor's optional Claude-file loading.
 
 ## Layout
 
@@ -17,20 +17,20 @@ Root `AGENTS.md` is the shared policy and is read automatically by Cursor.
 
 ## IMPORTANT: Avoid double-loading
 
-Cursor can *also* read the `.cursor/` folder directly, but only if you enable the setting **Cursor Settings -> Rules & Memories -> "Include `.cursor` files"** (off by default).
+Cursor can *also* read the `.claude/` folder when optional Claude-file loading is enabled.
 
 - **Recommended:** keep that setting **OFF** and let this `.cursor/` copy be the single source of truth. Then nothing loads twice.
-- If you turn it **ON** while both folders exist, skills/agents will appear **twice** and the hooks will **fire twice** (Cursor runs both `.cursor/settings.json` and `.cursor/hooks.json`). Pick one source per component.
+- If you turn it **ON** while both folders exist, skills and agents may appear twice and equivalent hooks may run twice. Pick one integration source per component.
 
 ## Keeping the two copies in sync
 
-`.cursor/` was generated from `.claude/` with these transforms:
+Shared skill behavior is declared canonically in `.agents/skills` for parity checks. Cursor keeps native wrappers under `.cursor/`; those wrappers use these transformations from the equivalent Claude integration:
 - Command frontmatter converted to Cursor's `name` / `description` schema.
 - Agent frontmatter reduced to Cursor-supported keys (dropped `model` / `invokes` / `phase`).
 - Internal `.claude/` path references rewritten to `.cursor/`.
 - Hooks translated to Cursor events: `SessionStart -> sessionStart`, `PreToolUse(Bash) -> beforeShellExecution`, `PreToolUse/PostToolUse(Write|Edit) -> afterFileEdit`. See `.cursor/hooks/README.md`.
 
-When you change one side, mirror the edit on the other (or regenerate `.cursor/` from `.cursor/`).
+When shared behavior changes, update `.agents/skills` first, then mirror the supported behavior into `.claude/skills` and `.cursor/skills` while preserving native wrappers and hook models.
 
 ## Usage
 

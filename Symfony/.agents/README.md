@@ -2,12 +2,12 @@
 
 Codex discovers repository skills from `.agents/skills/<name>/SKILL.md`.
 
-These skills are the Codex-native mirror of the canonical Symfony workflows in `.claude/skills`. Shared workflow contracts stay aligned, while tool-specific mechanics such as `skill-creator` use Codex-native capabilities. Supporting Codex configuration, hooks, and engineering references live in `.codex`; enforceable shared policy lives in root `AGENTS.md`.
+These skills are the configured canonical source for shared Symfony skill parity. Their supported behavior is mirrored into `.claude/skills` and `.cursor/skills`, while tool-specific mechanics such as `skill-creator` remain native to each integration. Supporting Codex configuration, hooks, and engineering references live in `.codex`; enforceable shared policy lives in root `AGENTS.md`.
 
 When updating a workflow:
 
-1. Change the canonical Claude skill.
-2. Mirror its behavior into `.cursor/skills` and `.agents/skills`.
+1. Change the canonical skill in `.agents/skills`.
+2. Mirror its supported behavior into `.claude/skills` and `.cursor/skills`.
 3. Rewrite tool-specific paths and mechanics without changing the shared Symfony workflow contract.
 4. Compare inventories and validate internal references.
 5. Run the active edition's Definition of Done.
