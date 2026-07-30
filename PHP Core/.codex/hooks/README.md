@@ -8,7 +8,7 @@ Project-scoped hooks load only when the project is **trusted**.
 
 | Event | Script | Purpose | Exit codes |
 |---|---|---|---|
-| `SessionStart` | `local-context.sh` | Print project context (git, Composer, PHP version, tooling, structure). | always `0` |
+| `SessionStart` | `local-context.sh` | Print metadata-only mode, index health/staleness, active binding count, and validation summaries; never index, retrieve, print, or inject records. | always `0` |
 | `PreToolUse` | `bash-validator.sh` | Block destructive shell commands (force-push, hard reset, DB drops/truncates, destructive migration resets, secret-writing Composer config, `--no-verify`). | `0` allow / `2` block |
 | `PreToolUse` | `file-naming-validator.sh` | Flag `.md` files in `tasks/`/`specs/` that break the skill-prefix naming convention. | `0` / `1` warn |
 | `PostToolUse` | `loop-detection.sh` | Track edit count per file to detect doom loops. | `0` / `1` warn / `2` block |

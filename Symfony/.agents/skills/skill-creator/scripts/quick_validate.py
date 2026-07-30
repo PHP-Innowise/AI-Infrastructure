@@ -6,8 +6,41 @@ Quick validation script for skills - minimal version
 import sys
 import os
 import re
-import yaml
+import ast
 from pathlib import Path
+
+try:
+    import yaml
+except ImportError:  # Keep project skill validation usable without PyYAML.
+    yaml = None
+
+
+def parse_frontmatter(frontmatter_text):
+    if yaml is not None:
+        return yaml.safe_load(frontmatter_text)
+
+    parsed = {}
+    for line in frontmatter_text.splitlines():
+        if not line or line[0].isspace() or ':' not in line:
+            continue
+        key, raw_value = line.split(':', 1)
+        value = raw_value.strip()
+        if not value:
+            parsed[key] = {}
+        elif value in {'null', '~'}:
+            parsed[key] = None
+        elif value.startswith('[') and value.endswith(']'):
+            items = value[1:-1].strip()
+            parsed[key] = (
+                []
+                if not items
+                else [item.strip().strip("\"'") for item in items.split(',')]
+            )
+        elif value[0:1] in {'"', "'"}:
+            parsed[key] = ast.literal_eval(value)
+        else:
+            parsed[key] = value
+    return parsed
 
 
 def is_valid_skill_name(value):
@@ -41,10 +74,10 @@ def validate_skill(skill_path):
 
     # Parse YAML frontmatter
     try:
-        frontmatter = yaml.safe_load(frontmatter_text)
+        frontmatter = parse_frontmatter(frontmatter_text)
         if not isinstance(frontmatter, dict):
             return False, "Frontmatter must be a YAML dictionary"
-    except yaml.YAMLError as e:
+    except Exception as e:
         return False, f"Invalid YAML in frontmatter: {e}"
 
     # Define allowed properties

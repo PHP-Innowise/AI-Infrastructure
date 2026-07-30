@@ -6,7 +6,7 @@ This directory is the **Cursor-native** copy of the accelerator that lives in `.
 
 | Path | Purpose |
 |---|---|
-| `.cursor/skills/<name>/SKILL.md` | Symfony workflows the agent executes (43 skills). |
+| `.cursor/skills/<name>/SKILL.md` | Symfony workflows the agent executes (including `project-brain` and `memory-bank`). |
 | `.cursor/agents/*.md` | Subagents that run one skill in isolation. |
 | `.cursor/commands/*.md` | `/slash` entry points. Invoke as `/name`; context passes via `$ARGUMENTS`. |
 | `.cursor/rules/*.mdc` | Always-on policy + PHP standards (native Cursor rules). |
@@ -24,19 +24,21 @@ Cursor can *also* read the `.claude/` folder directly, but only if you enable th
 
 ## Keeping the two copies in sync
 
-`.cursor/` was generated from `.claude/` with these transforms:
+Shared skill behavior is declared canonically in `.agents/skills` for parity checks. Cursor keeps native wrappers under `.cursor/`; those wrappers use these transformations from the equivalent Claude integration:
 - Command frontmatter converted to Cursor's `name` / `description` schema.
 - Agent frontmatter reduced to Cursor-supported keys (dropped `model` / `invokes` / `phase`).
 - Internal `.claude/` path references rewritten to `.cursor/`.
 - Hooks translated to Cursor events: `SessionStart -> sessionStart`, `PreToolUse(Bash) -> beforeShellExecution`, `PreToolUse/PostToolUse(Write|Edit) -> afterFileEdit`. See `.cursor/hooks/README.md`.
 - Tool-integrated workflows such as `skill-creator` use Cursor-native capabilities instead of Claude CLI helpers.
 
-When you change one side, mirror the shared Symfony behavior on the other while preserving these native integration differences.
+When shared behavior changes, update `.agents/skills` first, then mirror the supported behavior into `.claude/skills` and `.cursor/skills` while preserving these native integration differences.
 
 ## Usage
 
-Type `/` in Cursor chat to see the commands (e.g. `/coder`, `/architect`, `/security-reviewer`, `/memory-bank`), or ask the agent to run a skill by name. Start big/ambiguous work with `/brainstorm` and follow the flow in `.cursor/rules/accelerator-workflow.mdc`.
+Type `/` in Cursor chat to see the commands (e.g. `/coder`, `/architect`, `/security-reviewer`, `/project-brain`, `/memory-bank`), or ask the agent to run a skill by name. Start big/ambiguous work with `/brainstorm` and follow the flow in `.cursor/rules/accelerator-workflow.mdc`.
 
-`/memory-bank` manages the canonical root `memory-bank/` shared by all editions. Keep Cursor's optional Claude-file loading disabled so the native command, agent, skill, and hooks are not duplicated.
+`/project-brain` manages governed shared tasks, handoffs, unified retrieval, records, compaction, and promotion proposals. Governed mode is the default; `--mode lightweight` is explicit and local-only. `/memory-bank` is limited to durable retrieval/capture/audit/supersession and applying human-approved promotions.
+
+The one public task-aware retrieval command is `python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID`. Canonical project sources outrank all retrieved context. Session hooks report metadata only and never index or inject records automatically. Keep Cursor's optional Claude-file loading disabled so native commands, agents, skills, and hooks are not duplicated.
 
 The baseline supports Symfony 7.4 LTS on PHP 8.2+ and Symfony 8.1 on PHP 8.4+. Always follow the consuming project's declared versions and installed components.

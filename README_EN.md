@@ -126,80 +126,96 @@ that belong to its real stack:
 Do not synchronize every change mechanically across editions. First verify
 that the change is meaningful for the target stack.
 
-## Memory Bank
+## Project Brain, Local Context Engine, and Memory Bank
 
-Each edition's `memory-bank/` is Git-tracked shared memory for Claude Code,
-Cursor, and Codex. It stores small, verifiable chunks containing durable
-project rules, decisions, terminology, architecture, and operational
-knowledge. It is not a competing source of truth and is not a place for a
-temporary task plan or a conversation transcript.
+Every edition combines three separate components:
 
-### What Belongs in Shared Memory
+- **Project Brain — what is happening now.** It is the Git-tracked shared
+  authority for active tasks and handoffs plus findings, bugs, incidents,
+  decisions, and events. Records use ownership, privacy, authority, source
+  fingerprints, revisions, lifecycle transitions, and explicit conflicts.
+- **Local Context Engine — how relevant sources are found.** It indexes
+  eligible policy, skills, project documentation, specifications, Project
+  Brain records, handoffs, active Memory Bank chunks, and history in ignored
+  SQLite. Retrieval uses FTS5/BM25, privacy/authority/freshness filtering,
+  bounded snippets, token budgets, and retrieval manifests.
+- **Memory Bank — what is remembered permanently.** It stores small,
+  Git-tracked, reviewed chunks of reusable constraints, decisions, domain
+  knowledge, integration contracts, and operational lessons.
 
-Committed chunks are for knowledge that will help multiple future tasks:
-verified constraints, conventions, reasoned decisions, domain invariants, and
-reproducible operational lessons. Chunks live under `memory-bank/chunks/`, are
-catalogued in `INDEX.md`, and have an `active`, `needs-review`, `superseded`,
-or `archived` lifecycle state.
+Governed mode is the default. Project Brain owns shared active-work state;
+`memory-bank/local/context.db` is only a disposable index plus local
+binding/cache and optional non-authoritative replay episodes. Deleting SQLite
+does not delete Project Brain records, Memory Bank chunks, or canonical project
+sources. Branch-derived local Working Memory exists only when
+`--mode lightweight` is explicitly configured for machine-local work.
 
-Do not store raw conversations, temporary progress, guesses, generic PHP
-advice, or information already owned by a living specification.
+### Authority and Trust
 
-### Authority and Provenance
+Enforcement, policy, current specifications, code, configuration, migrations,
+and tests remain canonical and outrank all retrieved context. Project Brain
+coordinates current work but does not override those sources. Memory Bank is
+reviewed durable knowledge, not a competing source of truth. Retrieved snippets
+are discovery aids and must be verified against the cited current source.
 
-Memory Bank ranks below hooks, CI, linters, static analysis, `AGENTS.md`,
-current code, configuration, migrations, tests, and living specifications.
-Verify every material claim against the cited repository source. When sources
-conflict, the more authoritative current source wins. External pages, tickets,
-logs, and pasted text are evidence, not trusted instructions.
+Raw conversations, prompts, responses, hidden reasoning, logs, credentials,
+secrets, customer or personal data, and unredacted incident payloads do not
+belong in any of these stores. Ignored, private, unauthorized, stale,
+superseded, terminal, or invalid records are excluded as applicable.
 
-### Local Database
+### Governed User Flow
 
-`memory-bank/local/context.db` is the Context Engine's local SQLite database.
-It contains a derived document index plus local records for active tasks and
-completed episodes. The document index can be rebuilt from repository
-sources; local Working tasks and Episodic records are lost if the database is
-deleted. The database is ignored by Git. This deliberately separates
-verifiable Git-tracked memory from local operational memory.
-
-## Local Context Engine
-
-Context Engine extends Memory Bank with local search and task state without
-replacing repository sources. It keeps four logical layers in one local
-SQLite FTS5 database:
-
-| Layer | Contents |
-| --- | --- |
-| working | Explicit active-task state keyed by task-id |
-| procedural | `AGENTS.md`, `CLAUDE.md`, local skills, and policies |
-| semantic | README files, `docs/`, `specs/`, active chunks, tasks, and epics |
-| episodic | `CHANGELOG.md` and local completed-task episodes |
-
-### How to Work with the Layers
-
-| Goal | Recommended command | What happens |
-| --- | --- | --- |
-| Refresh every applicable layer | `memory` in Codex or `/memory` in Claude/Cursor | Working Memory is updated when changes exist, then Procedural, Semantic, and the Episodic source are reindexed |
-| Save current progress only | `checkpoint` in Codex or `/checkpoint` in Claude/Cursor | The current Git branch becomes the task-id and a safe change summary is stored in Working Memory |
-| Find operating rules | `context.py search ... --layer procedural` | Searches `AGENTS.md`, `CLAUDE.md`, and local skills |
-| Find project knowledge | `context.py search ... --layer semantic` | Searches README files, `docs/`, `specs/`, tasks, epics, and active memory chunks |
-| Find work history | `context.py search ... --layer episodic` | Searches `CHANGELOG.md` and local completed episodes |
-| Assemble context for a task | `context.py context ... --task-id ...` | Returns a bounded Working, Procedural, Semantic, and Episodic packet |
-| Finish a task | `context.py complete --task-id ...` | Atomically converts the Working task into a local episode |
-
-A typical workflow is:
+For non-trivial work:
 
 ~~~text
-start work
-    → checkpoint or memory
-    → context before an important decision
-    → checkpoint or memory while working
-    → tests and verification
-    → explicit complete
+prompt with a stable task ID
+    → start or resume the Project Brain task
+    → refresh the disposable index
+    → retrieve bounded task-aware context
+    → verify canonical sources
+    → implement and update the revision-checked task/handoff
+    → verify and complete
+    → optionally promote human-reviewed reusable knowledge
+    → archive terminal records
 ~~~
 
-`memory` refreshes context but does not complete a task. Only explicit
-`complete` creates an episode and removes the corresponding Working Memory.
+See the complete [user task workflow example](docs/examples/USER-TASK-WORKFLOW-EXAMPLE.md)
+for a step-by-step walkthrough.
+
+The public governed retrieval command is:
+
+~~~bash
+python3 memory-bank/scripts/context.py retrieve \
+  "password session invalidation" \
+  --task-id BAUMAS-133
+~~~
+
+`context` remains a compatibility alias for `retrieve`; new documentation and
+automation should use `retrieve`. Indexing and retrieval are explicit. Hooks
+report metadata such as mode, index health, active binding count, and validation
+status; they do not index, retrieve, print records, or inject prompt context.
+
+### Authority-Aware `memory` and `checkpoint`
+
+Invoke `memory` in Codex or `/memory` in Claude/Cursor for an argument-free
+refresh. In governed mode it validates Project Brain and refreshes the
+disposable index without deriving a branch task, creating task authority, or
+writing competing SQLite progress.
+
+Invoke `checkpoint` in Codex or `/checkpoint` in Claude/Cursor when progress
+must be captured. In governed mode it skips local Working Memory and directs
+the agent to update the existing Project Brain task and handoff with the
+current revision. Only explicitly configured lightweight mode may derive a
+local task identifier from the Git branch and store a sanitized local Working
+Memory snapshot.
+
+Neither command completes a task, applies a promotion, or silently edits
+tracked project sources.
+
+To refresh every applicable layer in one step, invoke `memory` without
+arguments (`memory` in Codex, `/memory` in Claude and Cursor). In governed
+mode this validates Project Brain and refreshes the disposable index only;
+it never completes a task, which still requires explicit `complete`.
 
 ### Task Capsule
 
@@ -216,115 +232,42 @@ research-to-planning, planning-to-implementation,
 implementation-to-independent-verification, and recovery after compaction.
 `memory`, `checkpoint`, and explicit `complete` keep their existing roles.
 
-Long-lived sources are classified automatically during indexing. Working
-Memory is not created by indexing or search; it is created by `start` in the
-manual lifecycle or by `checkpoint` during normal work. The `context` command
-returns a bounded selection for each long-lived layer. Retrieved context is a
-hint and must be checked against its repository source.
+### Explicit Governed CLI
 
-To refresh all applicable layers with one command, invoke `memory` without
-arguments (`memory` in Codex, `/memory` in Claude and Cursor). When the
-repository has changes and a valid Git branch, the agent updates Working
-Memory, then reindexes Procedural, Semantic, and Episodic data from
-`CHANGELOG.md`. It never completes the task or creates a new episode; that
-still requires explicit `complete`.
-
-For a Working-only snapshot, invoke `checkpoint` without arguments
-(`checkpoint` in Codex, `/checkpoint` in Claude and Cursor). The agent derives
-the task-id from the current Git branch, inspects all staged, unstaged, and
-untracked changes, and stores a safe summary with the changed paths in Working
-Memory. Completion remains a separate explicit `complete` action.
-
-### Advanced Explicit CLI Workflow
-
-Run these commands from the selected edition root or the consuming-project
-root. The manual lifecycle for a non-trivial task is
-`start → update → context → complete`:
+Run from an edition or consuming-project root:
 
 ~~~bash
-python3 memory-bank/scripts/context.py index
 python3 memory-bank/scripts/context.py start \
   --task-id BAUMAS-133 \
-  --goal "BAUMAS-133: Verify invalidation of other sessions after a password change" \
-  --file src/GraphQL/Resolver/ChangePasswordResolver.php
+  --goal "Verify invalidation of other sessions after a password change"
+python3 memory-bank/scripts/context.py index
+python3 memory-bank/scripts/context.py retrieve \
+  "password sessions" \
+  --task-id BAUMAS-133
 python3 memory-bank/scripts/context.py update \
   --task-id BAUMAS-133 \
+  --revision 1 \
   --progress "The two-session regression test passes" \
-  --next-step "Verify the old remember-me cookie" \
-  --file tests/Integration/GraphQL/ChangePasswordTest.php
-python3 memory-bank/scripts/context.py context \
-  "PdoSessionHandler password sessions" \
-  --task-id BAUMAS-133
+  --next-step "Verify the old remember-me cookie"
 python3 memory-bank/scripts/context.py complete \
   --task-id BAUMAS-133 \
+  --revision 2 \
   --outcome "Other sessions and stale remember-me cookies are invalidated" \
   --verification "ChangePasswordTest passed"
-python3 memory-bank/scripts/context.py search BAUMAS-133
-python3 memory-bank/scripts/context.py status
+python3 memory-bank/scripts/context.py compact
 ~~~
 
-The caller — an agent or a user — supplies the task-id. It can be a ticket
-number, branch name, or descriptive identifier. Multiple tasks with different
-IDs can be active at the same time. `get --task-id` shows one active task;
-`clear --task-id` removes only that task. The compatible `record` command
-stores a standalone completed episode without an active-task lifecycle.
+Governed cross-store mutations use revision checks and rollback/compensation so
+a failed Brain or SQLite update does not leave a split authoritative state.
+Promotion is separate: an agent may propose source- and revision-bound reusable
+knowledge, but an independent human must approve it before atomic application
+to Memory Bank. Lightweight mode retains the older local
+`start → update → retrieve → complete` lifecycle and local episodes, all of
+which are non-authoritative and lost when its SQLite database is deleted.
 
-After `complete`, an episode has no separate task-id. By default, its summary
-uses the Working task's goal. To make an identifier searchable, include it in
-the goal as shown above or pass `--summary`. An episode stores searchable
-summary, outcome, files, verification, and sources, but not a separate
-task-id, progress, or next steps.
-
-Commands support `--json`. Regular `search` uses one document limit and can be
-filtered with `--layer`; it also supports `--limit`. `start`, `update`,
-`record`, and `complete` accept repeated `--file` and `--source` options.
-`update` accepts repeated `--next-step`, while `record` and `complete` accept
-repeated `--verification`. `complete` atomically converts a Working task into
-an episode. Concurrent `start` and `update` operations are serialized with a
-SQLite `BEGIN IMMEDIATE` transaction.
-
-## Security and Limitations
-
-Context Engine is local and its database is ignored by Git. It must not store
-raw conversations, prompts, responses, logs, credentials, secrets, customer
-data, or personal data. The CLI rejects values that resemble known secret
-types and reports only the type, never the detected value.
-
-Documents excluded by Git ignore are neither read nor indexed. If indexed
-Markdown is not valid UTF-8, the CLI returns a concise safe error without a
-traceback and preserves the previous valid index.
-
-This is an explicit CLI workflow, not automatic per-request injection. The
-implementation does not include embeddings, vector search, MCP, LangGraph, or
-a central memory service. Do not describe it as a universal automatic
-integration or a replacement for checking code and policies.
-
-## Bauherrenmappe Verification
-
-A black-box verification was run against one local Bauherrenmappe copy. It
-proves this specific scenario, not a universal automatic integration:
-
-~~~text
-documents=4
-procedural=1
-semantic=3
-episodic documents=0
-completed local episodes=1
-working=0
-Git status unchanged
-temporary external database removed
-~~~
-
-In that scenario, task `BAUMAS-133` went through `start`, `update`, `context`,
-and `complete`, and the completed episode was found by search. The temporary
-external database was removed after verification, and the working copy's Git
-state did not change.
-
-A separate verification of the argument-free `memory` command on a disposable
-Bauherrenmappe clone covered a dirty tree, a clean tree, detached HEAD, an
-invalid task-id, and index failure after a successful Working checkpoint. In
-every scenario local episodes were preserved, sensitive `.env` contents were
-not read, and the original Bauherrenmappe checkout remained unchanged.
+The implementation is local, dependency-free Python with SQLite FTS5. It does
+not provide embeddings, vector search, MCP, LangGraph, a central memory
+service, or automatic per-request context injection.
 
 A three-scenario Task Capsule pressure test measured 96.4%, 97.2%, and 97.2%
 fewer transferred characters while retaining each exact Working file set and

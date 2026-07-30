@@ -4,10 +4,23 @@
 
 ### Added
 
+- **Combined Project Brain + Local Context Engine architecture** - added
+  governed tasks, findings, bugs, incidents, decisions, and events; revision-safe
+  handoffs; ownership and conflict metadata; cross-store rollback/compensation;
+  compaction; and source/revision-bound promotion proposals with independent
+  human review before atomic Memory Bank application.
+- **Bounded governed retrieval** - added a dependency-free SQLite FTS5/BM25
+  index with privacy, ownership, authority, lifecycle, and source-freshness
+  filtering, bounded snippets and token budgets, conflict retention, and
+  retrieval manifests that contain metadata rather than source bodies, prompts,
+  responses, or hidden reasoning.
+- **Authority-aware unified memory workflow** - added `memory` and `checkpoint`
+  across Claude, Cursor, and Codex discovery. Source indexing excludes
+  Git-ignored files and fails safely on invalid UTF-8 without replacing the
+  previous valid index.
 - Added bounded Task Capsule retrieval and hybrid fresh-context handoffs for
   complex phase boundaries without adding another memory store or changing
   `memory`, `checkpoint`, or explicit `complete`.
-
 - **Local context engine** - added a dependency-free SQLite FTS5 index for
   policy, specs, active memory, task documents, capability epics, and changelog
   history, plus gitignored summaries of completed tasks. It classifies
@@ -16,6 +29,27 @@
   complete a working task into an episode. The shared `memory-bank` skill keeps
   index, search, record, and status compatible without treating local episodes
   as authoritative memory.
+
+### Changed
+
+- **Governed context is now the default** - policy and edition documentation
+  define Project Brain as shared active-work authority and SQLite as a
+  disposable index plus local binding/cache. They preserve explicit
+  `--mode lightweight` for non-authoritative local Working Memory, expose
+  `python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID` for
+  task-aware retrieval, and state that canonical project sources outrank all
+  context.
+- **`memory` and `checkpoint` now honor authority** - in governed mode,
+  `memory` validates Brain and refreshes the index without creating task
+  authority, while `checkpoint` skips local Working Memory and directs a
+  revision-checked Brain/handoff update. Branch-derived checkpoints remain
+  available only in explicitly configured lightweight mode.
+- **Memory Bank ownership narrowed** - the `memory-bank` skill now handles only
+  durable retrieval/capture/audit/supersession and application of explicitly
+  human-approved promotions; active work and proposals remain in Project Brain.
+- **Session hooks remain metadata-only** - startup reporting is limited to mode,
+  index health/staleness, active binding count, and validation status, with no
+  automatic indexing, retrieval, record printing, or prompt injection.
 
 ## 1.4.3 - 2026-07-18
 

@@ -1,4 +1,4 @@
-# Accelerator Core PHP
+# Laravel AI Accelerator
 
 > **For enforceable agent policy rules, see [AGENTS.md](AGENTS.md).**
 
@@ -15,6 +15,7 @@ Accelerator Core PHP is not a generated Laravel application. It is a team workfl
 - Skills define reliable workflows, examples, checklists, and output formats.
 - Hooks and policy files enforce naming, safety, and verification conventions.
 - `tasks/` stores temporary task documents; `specs/` stores living project specifications.
+- `project-brain/` stores governed shared tasks, handoffs, records, manifests, and promotion proposals.
 - `memory-bank/` stores small indexed chunks of verified reusable context shared across AI tools.
 
 ## Multi-Tool Editions
@@ -52,6 +53,7 @@ Task/                    # Product/domain planning material and design reference
 tasks/                   # Temporary task documentation
 specs/                   # Permanent living specifications
 memory-bank/             # Indexed durable cross-session project memory
+project-brain/           # Shared governed task and control records
 examples/                # Workflow output examples
 ```
 
@@ -167,9 +169,8 @@ Use slash commands to move through the workflow:
 | `/performance-optimization` | Diagnose and fix performance problems (N+1 queries, caching) |
 | `/dependency-manager` | Audit and manage Composer/Laravel packages |
 | `/debugger` | Find root cause before fixing bugs |
-| `/memory-bank` | Retrieve, capture, audit, supersede, or archive durable project memory |
-| `checkpoint` | Capture all current Git-visible changes as local Working Memory without arguments |
-| `memory` | Refresh Working, Procedural, Semantic, and source-backed Episodic context without arguments |
+| `/project-brain` | Govern shared tasks, handoffs, unified retrieval, all six record types, compaction, and promotion proposals |
+| `/memory-bank` | Retrieve, capture, audit, supersede/archive durable memory, or apply an approved promotion |
 | `/verify` | Run the Laravel Definition of Done |
 | `/review-pr` | Review a GitHub pull request |
 | `/finishing-branch` | Prepare branch completion or PR |
@@ -219,23 +220,19 @@ Use Laravel conventions before inventing abstractions:
 
 Avoid copying patterns from other ecosystems unless they solve a clear Laravel problem.
 
-## Memory Bank
+## Project Brain And Memory Bank
 
-The optional root `memory-bank/` is one canonical shared store for Claude Code, Cursor, and Codex. It contains small source-backed chunks for durable project constraints, conventions, decisions, domain knowledge, integrations, and operational lessons.
+Use `memory` in Codex or `/memory` in Claude/Cursor for an argument-free, authority-aware refresh: governed mode validates Project Brain and rebuilds the disposable source index without creating a second task record. Use `checkpoint` or `/checkpoint` for progress capture; it defers to revision-checked Project Brain updates in governed mode and writes local Working Memory only when lightweight mode is explicitly configured. Neither command completes a task or applies a promotion.
 
-Memory is deliberately below policy, specs, code, configuration, migrations, and tests in the authority hierarchy. Agents read `memory-bank/README.md` and `memory-bank/INDEX.md`, retrieve only relevant active chunks, and verify every material claim before relying on it. Stale chunks are updated, superseded, or archived instead of silently remaining active.
+Governed Project Brain mode is the default for non-trivial work. `project-brain/` is the shared authority for active tasks, handoffs, findings, bugs, incidents, decisions, events, retrieval manifests, conflicts, and promotion proposals. The ignored SQLite database is only a disposable index plus local binding/cache in this mode.
 
-Use the `memory-bank` skill directly in Codex or `/memory-bank` in Claude/Cursor to retrieve, capture, audit, supersede, archive, or initialize memory. Do not use it for transient plans, chat transcripts, generic Laravel advice, command output, or information already owned by a living spec. Secrets, `.env` contents, personal data, production identifiers, raw logs, and customer payloads are prohibited. Non-sensitive personal notes belong in ignored `memory-bank/local/`.
+Use the one public task-aware retrieval command:
 
-Use `memory` in Codex or `/memory` in Claude/Cursor for one argument-free
-all-layer refresh. It reuses the safe Working checkpoint and rebuilds the
-source index; it does not complete the task, create an episode, or edit
-repository memory.
+```bash
+python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID
+```
 
-Use `checkpoint` in Codex or `/checkpoint` in Claude/Cursor to capture current
-progress without lifecycle arguments. The branch name becomes the task ID; the
-agent stores a sanitized summary and changed paths. Use explicit `complete`
-only after verification.
+Canonical policy, specs, current code, configuration, migrations, and tests always outrank Project Brain, memory, retrieval packets, and local indexes. Retrieval and indexing are explicit; the accelerator does not inject context into prompts automatically. Use `--mode lightweight` only explicitly for machine-local work that does not need shared continuity or governed records.
 
 ### Task Capsule
 

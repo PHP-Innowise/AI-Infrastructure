@@ -1,0 +1,18 @@
+{
+  "allowed_authority": [
+    "observed",
+    "verified"
+  ],
+  "allowed_privacy": [
+    "public",
+    "team"
+  ],
+  "canonical_edition": ".agents",
+  "framework": "php-core",
+  "mode": "governed",
+  "owners": [
+    "*"
+  ],
+  "provider": "sqlite-fts5",
+  "telemetry_enabled": false
+}

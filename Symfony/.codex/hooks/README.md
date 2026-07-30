@@ -8,7 +8,7 @@ Project-scoped hooks load only when the project is **trusted**.
 
 | Event | Script | Purpose | Exit codes |
 |---|---|---|---|
-| `SessionStart` | `local-context.sh` | Print project context and memory-bank counts without printing memory contents. | always `0` |
+| `SessionStart` | `local-context.sh` | Print metadata-only mode, index health/staleness, active binding count, and validation summaries; never index, retrieve, print, or inject records. | always `0` |
 | `PreToolUse` | `bash-validator.sh` | Block destructive shell commands (force-push, hard reset, database/schema drops, unsafe down migrations, purging fixtures, failed-message bulk removal, destructive SQL, and secret-writing Composer config). | `0` allow / `2` block |
 | `PreToolUse` | `file-naming-validator.sh` | Block `.md` files that break skill-prefix, task-directory, or memory-chunk naming conventions. | `0` allow / `2` block |
 | `PostToolUse` | `loop-detection.sh` | Track per-session edit count per file; counters reset on `SessionStart`. | `0` / `1` warn / `2` block |

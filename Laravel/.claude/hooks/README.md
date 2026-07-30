@@ -4,7 +4,7 @@
 
 ### SessionStart: Local Context Scanner
 **Script:** `local-context.sh`
-**Purpose:** Outputs project context at session start: git branch, Composer markers, PHP/Laravel version (via `artisan --version`), configured test/format/static-analysis tools, Livewire/Inertia detection, and project structure.
+**Purpose:** Outputs project metadata at session start: git branch, Composer/PHP/Laravel/tooling markers, Livewire/Inertia detection, structure, governed or lightweight mode, index health/staleness, active binding count, Project Brain validation status, and Memory Bank validation summary. It never runs indexing or retrieval and never prints/injects record contents.
 **Return:** Always 0 (informational only)
 
 ### PreToolUse (Write|Edit): File Naming Validator
