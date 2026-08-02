@@ -197,6 +197,30 @@ python3 -m unittest discover memory-bank/tests
 Run these from each affected accelerator. `parity` must fail on drift from
 canonical `.agents/skills`; do not hide or normalize a real mismatch.
 
+`parity` reports every drifted path in one run, and `--json` returns the same
+list on the failure path. A file only one mirror carries, or one missing from a
+mirror, counts as drift too.
+
+Two things are exempt, both declared explicitly in
+`memory-bank/scripts/context_retrieval.py`:
+
+- `SKILL FLOW.md`, the per-edition orchestration catalog.
+- Skills listed in `EDITION_OWNED_SKILLS`, whose body documents the host tool
+  rather than a workflow this repository owns. `skill-creator` is there because
+  it drives each product's own CLI (`codex exec`, `cursor-agent --print`,
+  `claude -p`) with different environment variables and a different extension
+  model per tool - Cursor builds command and agent wrappers, Codex is forbidden
+  from creating them. Byte-parity would require telling a Codex user to run
+  `cursor-agent`.
+
+Everything else must be byte-identical across mirrors. When a shared skill needs
+to name an edition directory, phrase it neutrally - "the active edition's
+`DOD.md`" - rather than substituting `.claude`/`.cursor`/`.codex` per mirror.
+Per-mirror substitution is what turned this gate permanently red, after which it
+stopped being run at all. Adding an entry to `EDITION_OWNED_SKILLS` is a
+documented exemption and needs the same justification in review; it is not a way
+to silence drift you do not want to fix.
+
 ## Tests, Examples, and Documentation
 
 - Add tests for behavior, not just file presence. Cover the highest-risk

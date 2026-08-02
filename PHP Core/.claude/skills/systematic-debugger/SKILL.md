@@ -54,7 +54,7 @@ Reach for the least invasive tool that answers the question:
 - **Reproduce in a test:** encode the failing scenario as a PHPUnit/Pest test (see Phase 4) so the bug cannot silently return.
 - **Bisect:** `git bisect` when a regression appeared but the cause is unclear.
 
-Xdebug's profiler answers "why is it slow"; for deeper performance work, hand off to `/performance-optimization`.
+Xdebug's profiler answers "why is it slow"; for deeper performance work, hand off to `performance-optimization`.
 
 ## The Four Phases
 
@@ -169,9 +169,9 @@ If you catch yourself thinking:
 
 After debugging is complete and fix is verified, STOP and present these options:
 
-**Next by flow:** [[/test-generator]] `[context]` - Generate/update tests to prevent regression. See [[moc-execution]] for phase context.
+**Next by flow:** [[test-generator]] `[context]` - Generate/update tests to prevent regression. See [[moc-execution]] for phase context.
 
 **Alternatives:**
-- [[/docs-generator]] `[context]` - Update documentation after the fix.
-- [[/code-reviewer]] `[context]` - Review the fix for quality issues.
-- [[/finishing-branch]] `[context]` - Complete branch if fix was the last blocker.
+- [[documentation-generator]] `[context]` - Update documentation after the fix.
+- [[code-reviewer]] `[context]` - Review the fix for quality issues.
+- [[finishing-branch]] `[context]` - Complete branch if fix was the last blocker.

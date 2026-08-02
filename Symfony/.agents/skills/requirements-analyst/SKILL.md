@@ -150,7 +150,7 @@ Any additional ad-hoc files (summaries, notes, reports) MUST also follow this ru
 
 2. **Create task directory:** `tasks/TASK-{N}/` (e.g., `tasks/TASK-001/`)
 
-3. **Write requirements:** `tasks/TASK-{N}requirements-analyst-requirements.md`
+3. **Write requirements:** `tasks/TASK-{N}/requirements-analyst-requirements.md`
    - Use the Requirements Document Template from Step 5 as the structure
    - Include all gathered requirements, task breakdown, and gap analysis
 

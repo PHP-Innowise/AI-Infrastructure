@@ -15,7 +15,7 @@ Improve code structure without changing what it does. The safety contract of ref
 
 ## Scope Boundary
 
-If a change alters observable behavior — new feature, bug fix, different output — that is `/coder`, not this skill. The moment you need to change what the code *does*, stop refactoring, ship the behavior change via `/coder`, then refactor separately. Keep the two in separate commits so review and rollback stay clean.
+If a change alters observable behavior — new feature, bug fix, different output — that is `coder`, not this skill. The moment you need to change what the code *does*, stop refactoring, ship the behavior change via `coder`, then refactor separately. Keep the two in separate commits so review and rollback stay clean.
 
 ## The Safety Rule
 
@@ -23,7 +23,7 @@ If a change alters observable behavior — new feature, bug fix, different outpu
 NO REFACTOR WITHOUT A CHARACTERIZATION SAFETY NET
 ```
 
-Before changing structure, ensure tests cover the behavior you are about to move. If coverage is missing, add characterization tests first (or hand off to `/test-generator`), then refactor.
+Before changing structure, ensure tests cover the behavior you are about to move. If coverage is missing, add characterization tests first (or hand off to `test-generator`), then refactor.
 
 ## Workflow
 
@@ -75,7 +75,7 @@ For risky, large-scale change, do not rewrite in place. Build the new implementa
 
 ## Boundaries
 
-- Do not change behavior; if you discover a bug, note it and hand off to `/coder` or `/debugger` rather than silently "fixing" it inside a refactor.
+- Do not change behavior; if you discover a bug, note it and hand off to `coder` or `systematic-debugger` rather than silently "fixing" it inside a refactor.
 - Do not change public signatures/contracts unless the task explicitly scopes an API change.
 - Keep refactor commits separate from behavior-change commits so review and rollback stay clean.
 
@@ -89,4 +89,4 @@ composer lint
 
 ## Final Output
 
-Return what was refactored, the safety net used, the before/after test result, any bugs found (not fixed here), Context Summary, and next step (`/verify`, `/code-reviewer`, or `/test-generator`).
+Return what was refactored, the safety net used, the before/after test result, any bugs found (not fixed here), Context Summary, and next step (`verify`, `code-reviewer`, or `test-generator`).

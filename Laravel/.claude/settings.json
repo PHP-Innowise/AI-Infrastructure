@@ -68,7 +68,7 @@
           {
             "type": "command",
             "command": ".claude/hooks/local-context.sh",
-            "timeout": 10000
+            "timeout": 10
           }
         ]
       }
@@ -79,7 +79,7 @@
           {
             "type": "command",
             "command": ".claude/hooks/working-memory-read.sh",
-            "timeout": 8000
+            "timeout": 8
           }
         ]
       }
@@ -90,7 +90,7 @@
           {
             "type": "command",
             "command": ".claude/hooks/working-memory-write.sh",
-            "timeout": 8000
+            "timeout": 8
           }
         ]
       }
@@ -101,8 +101,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo '$TOOL_INPUT' | .claude/hooks/file-naming-validator.sh",
-            "timeout": 5000
+            "command": ".claude/hooks/file-naming-validator.sh",
+            "timeout": 5
           }
         ]
       },
@@ -111,8 +111,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo '$TOOL_INPUT' | .claude/hooks/bash-validator.sh",
-            "timeout": 5000
+            "command": ".claude/hooks/bash-validator.sh",
+            "timeout": 5
           }
         ]
       }
@@ -123,8 +123,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo '$TOOL_INPUT' | .claude/hooks/loop-detection.sh",
-            "timeout": 5000
+            "command": ".claude/hooks/loop-detection.sh",
+            "timeout": 5
           }
         ]
       }
@@ -135,7 +135,7 @@
           {
             "type": "command",
             "command": "osascript -e 'display notification \"Claude needs your attention\" with title \"Claude Code\"' 2>/dev/null || notify-send 'Claude Code' 'Claude needs your attention' 2>/dev/null || echo 'Claude Code notification'",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       }

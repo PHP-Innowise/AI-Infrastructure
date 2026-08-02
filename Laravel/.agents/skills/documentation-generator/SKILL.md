@@ -16,7 +16,7 @@ Document Laravel implementation details in a way that helps future maintainers r
 ## Documentation Targets
 
 - `README.md` for setup, local development, test commands, deployment notes, and troubleshooting.
-- `specs/docs-generator-implementation.md` for living implementation details.
+- `specsdocumentation-generator-implementation.md` for living implementation details.
 - ADRs for durable architecture decisions.
 - API docs for public or cross-team endpoints.
 - Changelog entries for release-visible changes.
@@ -47,7 +47,7 @@ php artisan test
 
 ## Living Specification Updates
 
-Read `specs/MANIFEST.md` first. Update or create `specs/docs-generator-implementation.md` when build process, deployment, tooling, worker/cron behavior, or development workflow changes.
+Read `specs/MANIFEST.md` first. Update or create `specsdocumentation-generator-implementation.md` when build process, deployment, tooling, worker/cron behavior, or development workflow changes.
 
 Use task-prefixed sections:
 
@@ -114,4 +114,4 @@ Return:
 - Key operational details.
 - Verification performed.
 - Context Summary.
-- Next by flow: `/release`, `/finishing-branch`, or `/verify`.
+- Next by flow: `release`, `finishing-branch`, or `verify`.

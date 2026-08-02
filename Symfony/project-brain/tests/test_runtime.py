@@ -342,17 +342,82 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
         self.assertEqual(0, alias.returncode, alias.stderr)
         self.assertEqual("TASK-RETRIEVE", json.loads(alias.stdout)["task_id"])
 
+    def write_skill(self, edition: str, name: str, body: str) -> None:
+        path = self.repository / edition / "skills" / name / "SKILL.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"# {name}\n\n{body}\n", encoding="utf-8")
+
     def test_skill_mirror_drift_fails_instead_of_hiding_parity_error(self) -> None:
-        for edition, body in ((".agents", "canonical"), (".claude", "drifted")):
-            path = self.repository / edition / "skills" / "review" / "SKILL.md"
-            path.parent.mkdir(parents=True)
-            path.write_text(f"# Review\n\n{body}\n", encoding="utf-8")
+        self.write_skill(".agents", "review", "canonical")
+        self.write_skill(".claude", "review", "drifted")
         indexed = self.run_cli("index", "--json")
         self.assertEqual(0, indexed.returncode, indexed.stderr)
         self.assertEqual(1, len(json.loads(indexed.stdout)["parity_drift"]))
-        parity = self.run_cli("parity", "--json")
+
+        parity = self.run_cli("parity")
         self.assertNotEqual(0, parity.returncode)
         self.assertIn("mirror parity drift", parity.stderr)
+
+    def test_parity_json_reports_every_drifted_path_on_the_failure_path(self) -> None:
+        """--json used to be unreachable when drift existed, and only the first
+        drifted path was ever named - so a repair took one run per file."""
+        for name in ("alpha", "beta", "gamma"):
+            self.write_skill(".agents", name, "canonical")
+            self.write_skill(".claude", name, "drifted")
+
+        parity = self.run_cli("parity", "--json")
+
+        self.assertEqual(1, parity.returncode)
+        self.assertTrue(parity.stdout.strip(), "--json produced no output on failure")
+        result = json.loads(parity.stdout)
+        self.assertFalse(result["valid"])
+        self.assertEqual(
+            ["alpha/SKILL.md", "beta/SKILL.md", "gamma/SKILL.md"],
+            sorted(item["logical_path"] for item in result["drift"]),
+        )
+
+        text = self.run_cli("parity")
+        for name in ("alpha", "beta", "gamma"):
+            self.assertIn(f"{name}/SKILL.md", text.stderr)
+
+    def test_parity_catches_a_file_that_only_one_mirror_carries(self) -> None:
+        """A copy absent from canonical is drift; skipping it let a stray file
+        sit in one mirror indefinitely without parity ever mentioning it."""
+        self.write_skill(".agents", "shared", "canonical")
+        self.write_skill(".claude", "shared", "canonical")
+        self.write_skill(".cursor", "shared", "canonical")
+        self.write_skill(".claude", "stray", "only in claude")
+
+        parity = self.run_cli("parity", "--json")
+
+        self.assertEqual(1, parity.returncode)
+        drift = {item["logical_path"]: item for item in json.loads(parity.stdout)["drift"]}
+        self.assertIn("stray/SKILL.md", drift)
+        self.assertEqual("absent from canonical", drift["stray/SKILL.md"]["reason"])
+        self.assertNotIn("shared/SKILL.md", drift)
+
+    def test_parity_catches_a_canonical_file_missing_from_a_mirror(self) -> None:
+        self.write_skill(".agents", "shared", "canonical")
+        self.write_skill(".claude", "shared", "canonical")
+        self.write_skill(".cursor", "other", "unrelated")
+
+        parity = self.run_cli("parity", "--json")
+
+        self.assertEqual(1, parity.returncode)
+        drift = {item["logical_path"]: item for item in json.loads(parity.stdout)["drift"]}
+        self.assertIn("shared/SKILL.md", drift)
+        self.assertIn(".cursor", drift["shared/SKILL.md"]["missing"])
+
+    def test_parity_passes_and_stays_quiet_when_mirrors_match(self) -> None:
+        for edition in (".agents", ".claude", ".cursor"):
+            self.write_skill(edition, "review", "identical")
+
+        parity = self.run_cli("parity", "--json")
+
+        self.assertEqual(0, parity.returncode, parity.stderr)
+        result = json.loads(parity.stdout)
+        self.assertTrue(result["valid"])
+        self.assertEqual([], result["drift"])
 
     def test_compaction_moves_terminal_record_and_validates_archive(self) -> None:
         task = brain.create_task(
@@ -1961,6 +2026,186 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         )
         self.assertEqual(2, len(task["files"]))
         self.assertIn("beyond the per-flush limit", task["progress"])
+
+
+class ExportBundleTest(RuntimeHarness):
+    """Export is the one operation that moves content off this installation."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.destination = Path(self.temporary.name) / "outbound"
+
+    def chunk(self, identifier: str, slug: str, status: str, *, tags=None, body="Durable text.") -> Path:
+        path = self.repository / "memory-bank/chunks" / f"{identifier}-{slug}.md"
+        metadata = {
+            "id": identifier,
+            "title": f"Chunk {identifier}",
+            "type": "convention",
+            "status": status,
+            "scope": ["accelerator"],
+            "tags": tags or [],
+            "created": "2026-01-01",
+            "last_verified": "2026-01-02",
+            "review_after": "2027-01-02",
+            "sources": ["specs/authority.md"],
+            "supersedes": [],
+            "superseded_by": None,
+        }
+        path.write_text(
+            "---\n" + json.dumps(metadata, indent=2) + "\n---\n\n# Chunk\n\n" + body + "\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def export(self, **kwargs) -> dict:
+        return context_cli.export_bundle(self.repository, self.destination, **kwargs)
+
+    def manifest(self) -> dict:
+        return json.loads((self.destination / "MANIFEST.json").read_text(encoding="utf-8"))
+
+    def test_private_and_restricted_records_never_leave_the_installation(self) -> None:
+        brain.create_record(
+            self.repository, "finding", "F-PUBLIC", "Shareable finding.",
+            [], ["specs/authority.md"], owner="alice", privacy="public",
+        )
+        brain.create_record(
+            self.repository, "finding", "F-TEAM", "Team finding.",
+            [], ["specs/authority.md"], owner="alice", privacy="team",
+        )
+        brain.create_record(
+            self.repository, "finding", "F-PRIVATE", "Private finding.",
+            [], ["specs/authority.md"], owner="alice", privacy="private",
+        )
+        brain.create_record(
+            self.repository, "finding", "F-RESTRICTED", "Restricted finding.",
+            [], ["specs/authority.md"], owner="alice", privacy="restricted",
+        )
+
+        result = self.export()
+
+        self.assertEqual(2, result["brain_records"])
+        exported = {item["external_id"] for item in self.manifest()["included"]
+                    if item["kind"] == "brain-record"}
+        self.assertEqual({"F-PUBLIC", "F-TEAM"}, exported)
+
+        # The bundle must not merely omit them - it must say what it omitted.
+        reasons = {item["reason"] for item in self.manifest()["excluded"]}
+        self.assertEqual(2, len(self.manifest()["excluded"]))
+        self.assertTrue(all("allowed_privacy" in reason for reason in reasons))
+
+        written = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in self.destination.rglob("*.md")
+        )
+        self.assertNotIn("Private finding.", written)
+        self.assertNotIn("Restricted finding.", written)
+
+    def test_superseded_chunks_are_excluded_until_asked_for(self) -> None:
+        self.chunk("MEM-0100", "active-one", "active")
+        self.chunk("MEM-0101", "superseded-one", "superseded")
+
+        default = self.export()
+        self.assertEqual(1, default["memory_chunks"])
+        self.assertEqual(1, default["excluded"])
+
+        widened = self.export(include_superseded=True, force=True)
+        self.assertEqual(2, widened["memory_chunks"])
+        self.assertEqual(0, widened["excluded"])
+
+    def test_auto_promoted_chunks_are_counted_and_flagged(self) -> None:
+        self.chunk("MEM-0200", "reviewed", "active")
+        self.chunk("MEM-0201", "unreviewed", "active", tags=["auto-promoted"])
+
+        result = self.export()
+
+        self.assertEqual(1, result["auto_promoted_chunks"])
+        flagged = {
+            item["id"]: item["auto_promoted"]
+            for item in self.manifest()["included"]
+            if item["kind"] == "memory-chunk"
+        }
+        self.assertEqual({"MEM-0200": False, "MEM-0201": True}, flagged)
+
+    def test_a_secret_aborts_the_whole_bundle_without_echoing_it(self) -> None:
+        self.chunk("MEM-0300", "clean", "active")
+        self.chunk(
+            "MEM-0301", "leaky", "active",
+            body="Deploy with AKIAIOSFODNN7EXAMPLE for now.",
+        )
+
+        with self.assertRaises(context_cli.ContextError) as caught:
+            self.export()
+
+        message = str(caught.exception)
+        self.assertIn("MEM-0301", message)
+        self.assertNotIn("AKIAIOSFODNN7EXAMPLE", message)
+        # Fail closed: nothing at all is written, not even the clean chunk.
+        self.assertFalse(self.destination.exists(), "aborted export left a partial bundle")
+
+        # And the abort is not a one-off: removing the secret exports both.
+        self.chunk("MEM-0301", "leaky", "active", body="Deploy with the rotated key.")
+        self.assertEqual(2, self.export()["memory_chunks"])
+
+    def test_a_non_empty_destination_is_refused_without_force(self) -> None:
+        self.chunk("MEM-0400", "one", "active")
+        self.export()
+
+        with self.assertRaises(context_cli.ContextError) as caught:
+            self.export()
+        self.assertIn("not empty", str(caught.exception))
+
+        self.assertEqual(1, self.export(force=True)["memory_chunks"])
+
+    def test_bundle_states_its_provenance_and_promotion_mode(self) -> None:
+        self.chunk("MEM-0500", "one", "active")
+        self.export()
+        manifest = self.manifest()
+
+        self.assertEqual(context_cli.EXPORT_SCHEMA_VERSION, manifest["schema_version"])
+        self.assertEqual("governed", manifest["source"]["mode"])
+        self.assertIn("automatic_promotion", manifest["source"])
+        self.assertEqual(["public", "team"], manifest["filters"]["allowed_privacy"])
+
+        readme = (self.destination / "README.md").read_text(encoding="utf-8")
+        self.assertIn("not authoritative", readme)
+        self.assertIn("auto-promoted", readme)
+        self.assertIn("authorized owner", readme)
+
+
+class ShippedRuntimeConfigTest(unittest.TestCase):
+    """Assert the config this edition actually ships, not a fixture's rewrite.
+
+    Every other automation test calls ``enable_automation``, which overwrites
+    ``runtime.json`` with the flags that test needs. That leaves the shipped
+    defaults - the only ones a user ever gets - covered by nothing. A flipped
+    default is a behavioral change to every installation, so it fails here
+    rather than being discovered in a consuming project.
+    """
+
+    SHIPPED = EDITION / "project-brain" / "config" / "runtime.json"
+
+    def setUp(self) -> None:
+        self.config = json.loads(self.SHIPPED.read_text(encoding="utf-8"))
+
+    def test_memory_is_automatic_by_default(self) -> None:
+        for flag in ("automatic_promotion", "automatic_completion", "automatic_compaction"):
+            with self.subTest(flag=flag):
+                self.assertIs(
+                    True,
+                    self.config.get(flag),
+                    f"{flag} is documented as enabled by default; "
+                    "changing it is a breaking change and must be released as one",
+                )
+
+    def test_mode_and_provider_are_the_documented_defaults(self) -> None:
+        self.assertEqual("governed", self.config.get("mode"))
+        self.assertEqual("sqlite-fts5", self.config.get("provider"))
+
+    def test_telemetry_stays_disabled(self) -> None:
+        self.assertIs(False, self.config.get("telemetry_enabled"))
+
+    def test_private_records_are_not_retrievable_by_default(self) -> None:
+        self.assertNotIn("private", self.config.get("allowed_privacy", []))
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ flow-alternatives: [systematic-debugger, code-reviewer]
 
 ## Workflow
 
-1. Read `.codex/DOD.md`.
+1. Read the active edition's `DOD.md`.
 2. Inspect changed files.
 3. Select the correct DoD tier.
 4. Run configured project commands first.

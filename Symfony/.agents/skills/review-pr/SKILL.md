@@ -112,7 +112,7 @@ Present the review in this format:
 
 After presenting findings, STOP and ask the user what they want to do next:
 
-**Option A: Fix issues locally with the debugger**
+**Option A: Fix issues locally with the systematic-debugger**
 Use `systematic-debugger` to investigate and fix the bugs found in the review. This is the right choice when the PR is yours or you're a collaborator who can push fixes.
 
 **Option B: Post comments to the PR on GitHub**

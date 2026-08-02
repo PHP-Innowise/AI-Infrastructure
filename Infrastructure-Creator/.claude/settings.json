@@ -21,7 +21,7 @@
     "SessionStart": [
       {
         "hooks": [
-          { "type": "command", "command": ".claude/hooks/local-context.sh", "timeout": 10000 }
+          { "type": "command", "command": ".claude/hooks/local-context.sh", "timeout": 10 }
         ]
       }
     ],
@@ -29,13 +29,13 @@
       {
         "matcher": "Write|Edit",
         "hooks": [
-          { "type": "command", "command": "echo '$TOOL_INPUT' | .claude/hooks/file-naming-validator.sh", "timeout": 5000 }
+          { "type": "command", "command": ".claude/hooks/file-naming-validator.sh", "timeout": 5 }
         ]
       },
       {
         "matcher": "Bash",
         "hooks": [
-          { "type": "command", "command": "echo '$TOOL_INPUT' | .claude/hooks/bash-validator.sh", "timeout": 5000 }
+          { "type": "command", "command": ".claude/hooks/bash-validator.sh", "timeout": 5 }
         ]
       }
     ],
@@ -43,7 +43,7 @@
       {
         "matcher": "Edit",
         "hooks": [
-          { "type": "command", "command": "echo '$TOOL_INPUT' | .claude/hooks/loop-detection.sh", "timeout": 5000 }
+          { "type": "command", "command": ".claude/hooks/loop-detection.sh", "timeout": 5 }
         ]
       }
     ]

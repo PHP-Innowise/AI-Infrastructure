@@ -37,7 +37,7 @@ Convene the perspectives that matter for the decision (default set below). Add o
 ## Process
 
 1. **Frame the decision.** State the question, the constraints, and what "good" looks like. If the question is vague, ask one clarifying question first.
-2. **Enumerate options.** List 2-4 concrete options (not strawmen). If research is needed to make an option concrete, recommend `/researcher` first.
+2. **Enumerate options.** List 2-4 concrete options (not strawmen). If research is needed to make an option concrete, recommend `researcher` first.
 3. **Round of statements.** For each member, write a short position: their preferred option and the single strongest reason.
 4. **Cross-examination.** Record the sharpest objection each option faces and any objection that cannot be mitigated.
 5. **Synthesis.** Identify consensus, genuine disagreement, and the deciding factors.
@@ -86,9 +86,9 @@ Convene the perspectives that matter for the decision (default set below). Add o
 ## Guardrails
 
 - Members must give real arguments, not caricatures; the weakest-looking option still gets its best case.
-- Do not invent facts about the codebase; read relevant files or defer to `/researcher`.
+- Do not invent facts about the codebase; read relevant files or defer to `researcher`.
 - Keep it decision-focused; this skill advises, it does not implement.
 
 ## Final Output
 
-Return the council decision document (path if written), the recommendation, key trade-offs, Context Summary, and next step (`/architect`, `/writing-plans`, `/researcher`, or `/architecture-implementer`).
+Return the council decision document (path if written), the recommendation, key trade-offs, Context Summary, and next step (`architect`, `writing-plans`, `researcher`, or `architecture-implementer`).

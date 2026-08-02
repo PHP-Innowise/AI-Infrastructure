@@ -47,4 +47,19 @@ case "$cmd" in
   *"DROP TABLE"*|*"DROP DATABASE"*|*"drop table"*|*"drop database"*) block "destructive SQL (DROP) needs explicit user consent" ;;
 esac
 
+# Irreversible GitHub operations. This generator only ever reads a target
+# project, so nothing it does legitimately requires destroying a remote
+# repository, issue, or release.
+case "$cmd" in
+  *"gh repo delete"*|*"gh repo archive"*) block "destroying or archiving a GitHub repository needs explicit user consent" ;;
+  *"gh issue delete"*|*"gh release delete"*) block "deleting GitHub issues or releases needs explicit user consent" ;;
+esac
+case "$cmd" in
+  *"gh api"*)
+    case "$cmd" in
+      *DELETE*|*delete*) block "gh api DELETE needs explicit user consent" ;;
+    esac
+    ;;
+esac
+
 exit 0

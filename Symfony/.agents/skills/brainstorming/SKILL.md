@@ -115,7 +115,7 @@ If this is a new project (no existing codebase), ask about tech stack. Keep it s
 
 3. **Create task directory:** `tasks/TASK-{N}/` (if not already created)
 
-4. **Write design:** `tasks/TASK-{N}brainstorming-design.md`
+4. **Write design:** `tasks/TASK-{N}/brainstorming-design.md`
    - Use the Design Document Template as the structure
    - Include all design decisions, architecture, data model, API design, and open questions
 

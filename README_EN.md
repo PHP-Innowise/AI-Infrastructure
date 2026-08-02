@@ -99,7 +99,7 @@ conflict:
 | Tool | Reads | Practical meaning |
 | --- | --- | --- |
 | Claude Code | `.claude/` | The source edition with agents, commands, hooks, skills, and settings. |
-| Cursor | `.cursor/` | A self-contained mirror with skills, commands, agents, rules, and hooks. Disable optional Claude-file loading in Cursor to avoid loading policies twice. |
+| Cursor | `.cursor/` | A self-contained mirror with skills, commands, agents, rules, and hooks. Disable optional Claude-file loading in Cursor to avoid loading policies twice. One capability differs: Cursor cannot add context to a prompt, so no Task Capsule is delivered automatically there and retrieval stays explicit. |
 | Codex | `.agents/skills/` and `.codex/` | Skills live in `.agents/skills/`; `.codex/` contains configuration, hooks, and references. There is no separate command layer. |
 
 The selected edition's `AGENTS.md` is executable policy for that stack. Its
@@ -175,7 +175,8 @@ prompt with a stable task ID
     → verify canonical sources
     → implement and update the revision-checked task/handoff
     → verify and complete
-    → optionally promote human-reviewed reusable knowledge
+    → reusable knowledge is promoted automatically
+      (with automatic_promotion off, promote it manually after review)
     → archive terminal records
 ~~~
 
@@ -257,11 +258,31 @@ python3 memory-bank/scripts/context.py complete \
 python3 memory-bank/scripts/context.py compact
 ~~~
 
+To hand accumulated context to another person or to a team repository, write a
+bundle:
+
+~~~bash
+python3 memory-bank/scripts/context.py export --destination ../context-bundle
+~~~
+
+Export is read-only. The bundle carries Project Brain records whose privacy is
+allowed (`restricted` and `private` never leave) and active Memory Bank chunks.
+`MANIFEST.json` lists what was included **and what was excluded with the
+reason**, flags chunks tagged `auto-promoted`, and records the source commit. A
+secret-pattern match aborts the whole export before any file is written. There
+is no `import`: a bundle is a handoff artifact, not a second installation.
+
 Governed cross-store mutations use revision checks and rollback/compensation so
 a failed Brain or SQLite update does not leave a split authoritative state.
-Promotion is separate: an agent may propose source- and revision-bound reusable
-knowledge, but an independent human must approve it before atomic application
-to Memory Bank. Lightweight mode retains the older local
+Promotion into Memory Bank is automatic by default: the turn-end hook promotes
+resolved findings and bugs, closed incidents, and accepted decisions without
+asking, and never claims a review that did not happen — `reviewer` stays null,
+`review_mode` is `automatic`, and the chunk is tagged `auto-promoted`. Durable
+memory is therefore accumulated, not curated: treat a retrieved chunk as a
+pointer to its cited source, not as a vetted fact. Set `automatic_promotion` to
+`false` in `project-brain/config/runtime.json` for the reviewed sequence, where
+an agent proposes source- and revision-bound knowledge and an independent human
+approves it before atomic application. Lightweight mode retains the older local
 `start → update → retrieve → complete` lifecycle and local episodes, all of
 which are non-authoritative and lost when its SQLite database is deleted.
 

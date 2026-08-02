@@ -138,4 +138,4 @@ Never break a running deploy. Split risky schema changes into phases using Larav
 
 ## Final Output
 
-Return the schema (migration code), key/index/constraint decisions, Eloquent relationship/access-pattern notes, rollout/backfill risks, Context Summary, and next step (`/architecture-implementer`, `/coder`, or `/writing-plans`).
+Return the schema (migration code), key/index/constraint decisions, Eloquent relationship/access-pattern notes, rollout/backfill risks, Context Summary, and next step (`architecture-implementer`, `coder`, or `writing-plans`).

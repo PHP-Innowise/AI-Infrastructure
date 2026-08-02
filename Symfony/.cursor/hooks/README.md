@@ -9,11 +9,6 @@ These hooks are registered in `.cursor/hooks.json` (schema `version: 1`). Each i
 **Purpose:** Prints project metadata at session start: git branch, Composer/PHP/tooling markers, framework/structure, governed or lightweight mode, index health/staleness, active binding count, Project Brain validation status, and Memory Bank validation summary. It never runs indexing or retrieval and never prints/injects record contents.
 **Return:** Always `0` (informational only).
 
-### beforeSubmitPrompt: Working-Memory Read
-**Script:** `working-memory-read.sh`
-**Purpose:** Runs `context.py refresh`, re-indexing procedural, semantic, and episodic memory in one incremental pass and reporting each layer as `updated` or `failed`. With a task — from `CONTEXT_TASK_ID` or the current branch — the same process also assembles a bounded Task Capsule with `--ephemeral`, keeping the per-request manifest in ignored local state rather than shared Git history.
-**Return:** Always `0` (context tooling must never block a prompt).
-**Budget:** `CONTEXT_HOOK_BUDGET` seconds, default 5.
 
 ### stop: Working-Memory Write
 **Script:** `working-memory-write.sh`
@@ -44,6 +39,8 @@ These hooks are registered in `.cursor/hooks.json` (schema `version: 1`). Each i
 | Claude Code (`.claude/settings.json`) | Cursor (`.cursor/hooks.json`) |
 |---|---|
 | `SessionStart` | `sessionStart` |
+| `UserPromptSubmit` | **No equivalent** - see below |
+| `Stop` | `stop` |
 | `PreToolUse` matcher `Bash` | `beforeShellExecution` |
 | `PreToolUse` matcher `Write\|Edit` | `afterFileEdit` (post-edit; reports a blocking violation that must be corrected) |
 | `PostToolUse` matcher `Edit` | `afterFileEdit` |
@@ -56,13 +53,22 @@ Notes:
 
 ## References
 
-- Cursor Hooks: https://docs.cursor.com/agent/hooks
+- Cursor Hooks: https://cursor.com/docs/hooks
 
-## Wiring
+## Why there is no Task Capsule on Cursor
 
-`working-memory-read.sh` and `working-memory-write.sh` are present here and
-resolve their own edition directory, but they are wired to events only in
-`.claude/settings.json`. The equivalent event names for this tool were not
-verified, and wiring an unverified event name is worse than leaving the script
-unwired. Add the entries once the names are confirmed for the installed
-version.
+The read half of automatic memory is not available on this tool, and no
+workaround in this repository can supply it. Cursor's nearest event,
+`beforeSubmitPrompt`, returns `{"continue": true|false, "user_message": "..."}`:
+it can allow or block a submission, but it cannot add context to the prompt.
+Emitting a capsule from it would produce output the client discards.
+
+`working-memory-read.sh` is therefore absent from `.cursor/hooks/` rather than
+present and unwired - a script that can never run is worse than no script,
+because it reads as an installation fault. The write half is unaffected:
+`stop` runs at turn end and needs no prompt access, so continuity is recorded
+on Cursor exactly as it is elsewhere. What is lost is retrieval into the
+prompt, not the record of what happened.
+
+Explicit retrieval still works on Cursor: run `context.py retrieve` (or the
+`memory` command) when a task needs prior context.

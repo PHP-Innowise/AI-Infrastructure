@@ -28,7 +28,7 @@ Specify:
 4. Define routing, transport, serializer, retry strategy, delay/backoff, retryable versus unrecoverable exceptions, failure transport, and redelivery limits.
 5. Define idempotency/deduplication storage and concurrency behavior. Assume at-least-once delivery unless the transport proves otherwise.
 6. Avoid dispatch-before-commit races. Use the project's transaction middleware, post-commit pattern, or outbox when consistency requires it.
-7. Specify worker time/memory limits, signals, deployment restart/drain, monitoring, alerting, failed-message inspection, replay, and retention.
+7. Specify worker timememory limits, signals, deployment restart/drain, monitoring, alerting, failed-message inspection, replay, and retention.
 
 Compare message/handler/service responsibilities with [Symfony clean-code patterns](../../../examples/symfony-clean-code-patterns.md). Keep transport concerns outside the use case and make at-least-once delivery behavior explicit.
 

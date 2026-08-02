@@ -2,7 +2,7 @@
 name: writing-plans
 description: Create implementation plans for Symfony layered architecture work after requirements, brainstorming, architecture, API design, or database design.
 phase: planning
-flow-next: git-worktrees
+flow-next: using-git-worktrees
 flow-alternatives: [coder, architecture-implementer]
 ---
 

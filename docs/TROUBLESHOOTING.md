@@ -470,8 +470,12 @@ blocked, or a hook times out.
 3. Run `bash -n <hook-script>`.
 4. Confirm executable bits.
 5. Compare the actual sanitized payload keys with the hook's extraction logic.
-6. Check timeout units: Cursor uses seconds; Claude settings use milliseconds.
-7. Check return-code semantics in the edition hook README.
+6. Check timeout units: Cursor and Claude both use seconds. A value such as
+   `5000` is a millisecond leftover and is not a valid Claude timeout.
+7. Check that Claude hook commands are bare script paths. An
+   `echo '$TOOL_INPUT' | <script>` wrapper passes the literal variable name
+   instead of the payload, and the hook then exits 0 on every call.
+8. Check return-code semantics in the edition hook README.
 
 ### Recover
 

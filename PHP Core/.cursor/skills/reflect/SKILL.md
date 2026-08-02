@@ -66,9 +66,9 @@ Choose where the rule belongs:
 | Scope | File | When |
 |-------|------|------|
 | Global policy | `AGENTS.md` | Applies to all agents and skills |
-| Code style | `.cursor/GOLDEN-PRINCIPLES.md` | Naming, native PHP/PSR conventions, error handling, tests |
-| Specific skill | `.cursor/skills/{name}/SKILL.md` | Only relevant to one skill's workflow |
-| Process | `.cursor/STABILIZATION.md` | Add as example cycle for future reference |
+| Code style | the active edition's `GOLDEN-PRINCIPLES.md` | Naming, native PHP/PSR conventions, error handling, tests |
+| Specific skill | the active edition's `skills/{name}/SKILL.md` | Only relevant to one skill's workflow |
+| Process | the active edition's `STABILIZATION.md` | Add as example cycle for future reference |
 
 If enforcement is automatable, also identify which hook to create/update.
 
@@ -101,5 +101,5 @@ After reflection is complete, STOP and present these options:
 
 **Suggested follow-ups:**
 - Test the new rule by re-running the scenario that triggered it.
-- `/verify` — Run DoD checklist if changes affect enforcement.
-- `/skill-creator` — If a new hook or skill modification is needed.
+- `verify` — Run DoD checklist if changes affect enforcement.
+- `skill-creator` — If a new hook or skill modification is needed.

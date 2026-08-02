@@ -18,9 +18,18 @@ Engine is a disposable lexical index and local binding/cache.
   indexes. Conflicts are retained explicitly.
 - Terminal records are moved, never deleted. Active and archived records are
   held to the same validation contract.
-- Durable-memory promotion is propose → independent human review → apply. The
-  source type, path, ID, and revision are rechecked at apply time; partial
-  writes, including promotion status, roll back.
+- Durable-memory promotion has two modes, and the record always states which
+  one produced it. Automatic promotion is the default: the turn-end hook
+  promotes eligible knowledge unattended, and the runtime never dresses it up
+  as reviewed — `reviewer` stays null, `review_mode` is `automatic`, the
+  outcome is `approved-without-review`, the chunk is tagged `auto-promoted`,
+  and `promote-review` refuses to sign such a promotion after the fact.
+  Reviewed promotion is propose → independent human review → apply, and is
+  reached by setting `automatic_promotion` to `false`. Eligibility is identical
+  in both modes: only resolved findings and bugs, closed incidents, and
+  accepted decisions — never tasks, whose checkpoint progress is not reusable
+  knowledge. The source type, path, ID, and revision are rechecked at apply
+  time in both modes; partial writes, including promotion status, roll back.
 - Telemetry is disabled and metadata-only. Prompts, responses, source bodies,
   tool payloads, secrets, customer data, and raw logs are prohibited.
 

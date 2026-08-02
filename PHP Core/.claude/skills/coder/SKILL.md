@@ -19,9 +19,9 @@ This skill targets native PHP (Composer + PSR). If the project is built on a fra
 
 `coder` owns **behavior-changing** work — new features, bug fixes, and the incidental cleanup that comes with them. Use a sibling skill when the task is narrower:
 
-- **`/refactorer`** — pure behavior-preserving change (extract, dedupe, improve types, PHP upgrade) under a characterization test net. If observable behavior must stay identical, that is refactorer, not coder.
-- **`/architecture-implementer`** — lay down the structural skeleton (directories, namespaces, interfaces, DI wiring) for an approved architecture before feature logic exists. If there is no structure yet from `/architect`, scaffold there first, then return here to fill in behavior.
-- **`/coder-frontend`** — server-rendered templates, HTML, CSS, and progressive-enhancement JS.
+- **`refactorer`** — pure behavior-preserving change (extract, dedupe, improve types, PHP upgrade) under a characterization test net. If observable behavior must stay identical, that is refactorer, not coder.
+- **`architecture-implementer`** — lay down the structural skeleton (directories, namespaces, interfaces, DI wiring) for an approved architecture before feature logic exists. If there is no structure yet from `architect`, scaffold there first, then return here to fill in behavior.
+- **`coder-frontend`** — server-rendered templates, HTML, CSS, and progressive-enhancement JS.
 
 ## Project Structure
 
@@ -276,7 +276,7 @@ final class PdoUserRepository implements UserRepository
 }
 ```
 
-Enforce uniqueness in the schema (`UNIQUE(email)`), not just in application code — concurrent requests can both pass an application-level "does this email exist?" check. See `/architect` for concurrency, idempotency, and locking guidance the code must respect.
+Enforce uniqueness in the schema (`UNIQUE(email)`), not just in application code — concurrent requests can both pass an application-level "does this email exist?" check. See `architect` for concurrency, idempotency, and locking guidance the code must respect.
 
 ## Modern PHP Best Practices
 
@@ -357,4 +357,4 @@ Include:
 - Tests/checks run.
 - Any security or migration notes.
 - Context Summary.
-- Next by flow: `/code-reviewer`, `/test-generator`, or `/verify`.
+- Next by flow: `code-reviewer`, `test-generator`, or `verify`.

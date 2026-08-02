@@ -175,10 +175,10 @@ This file preserves the analysis context so the conversation can be cleared befo
 
 After requirements document is written to file, STOP and present these options:
 
-**Next by flow:** /brainstorm `[TASK-{N} context]` - Refine requirements into a concrete design through collaborative dialogue.
+**Next by flow:** brainstorming `[TASK-{N} context]` - Refine requirements into a concrete design through collaborative dialogue.
 
 **Pass to next skill:** Include the task number in your context summary (e.g., "TASK-001: User authentication requirements analyzed")
 
 **Alternatives:**
-- /architect `[TASK-{N} context]` - Skip brainstorming if requirements are clear and jump to architecture decisions.
-- /writing-plans `[TASK-{N} context]` - Create implementation plan directly if design is already established.
+- architect `[TASK-{N} context]` - Skip brainstorming if requirements are clear and jump to architecture decisions.
+- writing-plans `[TASK-{N} context]` - Create implementation plan directly if design is already established.

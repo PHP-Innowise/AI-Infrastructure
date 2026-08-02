@@ -27,7 +27,7 @@ For each selected edition, into the target write the four hook scripts under tha
 4. **Author `file-naming-validator.sh`** to enforce the target's naming policy (task/spec prefixes, zero-padded task dirs) as stated in the generated policy.
 5. **Author `loop-detection.sh`** to detect repeated identical tool calls/edits and warn.
 6. **Wire per edition** (identical scripts, different config):
-   - **Claude** -> `.claude/settings.json`: `SessionStart` (local-context), `PreToolUse` (bash-validator + loop-detection), `PostToolUse` (file-naming-validator), each with a `matcher`, millisecond `timeout`, and command form `echo '$TOOL_INPUT' | <script>`.
+   - **Claude** -> `.claude/settings.json`: `SessionStart` (local-context), `PreToolUse` (file-naming-validator on `Write|Edit`, bash-validator on `Bash`), `PostToolUse` (loop-detection on `Edit`), each with a `matcher` and a `timeout` in **seconds**. The command form is the bare script path (`.claude/hooks/<script>.sh`): Claude Code pipes the tool-input JSON to the hook on stdin, so an `echo '$TOOL_INPUT' | <script>` wrapper feeds the hook the literal string `$TOOL_INPUT` instead of the payload and silently disables it.
    - **Cursor** -> `.cursor/hooks.json`: `version: 1`, camelCase events `sessionStart`/`beforeShellExecution`/`afterFileEdit`, timeouts in **seconds**.
    - **Codex** -> `.codex/hooks.json`: Claude-style event names, NO `matcher`/`timeout` fields, plus `.codex/config.toml` containing `[features]` with `hooks = true`.
 7. **Log** every hook, its wiring per edition, and the section 4/5/6 evidence that authorized each danger rule.
@@ -41,7 +41,7 @@ For each selected edition, into the target write the four hook scripts under tha
 **Hooks per edition:** local-context.sh, bash-validator.sh, file-naming-validator.sh, loop-detection.sh
 
 ## Wiring
-- claude: .claude/settings.json (ms timeouts, matchers)
+- claude: .claude/settings.json (second timeouts, matchers, bare script paths)
 - cursor: .cursor/hooks.json (version 1, second timeouts)
 - codex: .codex/hooks.json + .codex/config.toml ([features] hooks=true)
 
@@ -63,7 +63,9 @@ memory-seed; policy-forge/skill-forge if not already run.
 - MUST generate hooks ONLY for the selected editions, each wired through its own mechanism (settings.json / hooks.json / hooks.json+config.toml).
 - MUST block a destructive command ONLY when the profile confirms that tool is present (no `terraform destroy`/`kubectl delete`/migration-reset rules without section 5/2 evidence).
 - MUST ensure every script passes `bash -n` and is `chmod +x`.
-- MUST use ms timeouts for Claude, second timeouts for Cursor, and no matcher/timeout for Codex.
+- MUST use second timeouts for Claude and Cursor, and no matcher/timeout for Codex.
+- MUST wire Claude hooks as bare script paths, never as `echo '$TOOL_INPUT' | <script>`; the payload arrives on stdin.
+- MUST pass every blocked-pattern regex to `grep` after `--`, and MUST decode the tool-input JSON (jq/php/python3) rather than scraping it with `sed`: a pattern such as `--no-verify` is otherwise read as a grep option, and a `"[^"]*"` scrape truncates any command containing escaped quotes. Both failures exit 0 and silently allow the command.
 - MUST NOT print or log any secret or credential value from the target.
 - MUST NOT translate section 8 business invariants, permissions, approvals, or lifecycle rules into brittle shell/text-matching hooks. Behavioral rules belong in policy, skills, tests, review, and memory; hooks enforce only deterministic tool/command/file events.
 

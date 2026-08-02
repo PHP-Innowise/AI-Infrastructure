@@ -2,6 +2,34 @@
 
 All notable changes to Infrastructure-Creator are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/); versions are for this generator tool, not for anything it generates.
 
+## Unreleased
+
+### Fixed
+
+- **The generator's own `bash-validator.sh` allowed irreversible GitHub
+  operations.** It blocked broad `rm -rf`, force-push, hard reset, `--no-verify`,
+  `.env` access, and SQL `DROP`, but not `gh repo delete`, `gh repo archive`,
+  `gh issue delete`, `gh release delete`, or `gh api ... DELETE` - all of which
+  the three PHP editions block. This generator only ever reads a target project,
+  so none of them has a legitimate use here. Added them as `case` rules,
+  matching the script's existing style; its shell-glob matching never had the
+  `grep --` defect the PHP editions did, so the rest is unchanged.
+- **`hook-forge` specified broken Claude wiring, so every generated accelerator
+  inherited dead hooks.** Step 6 told the generator to emit
+  `echo '$TOOL_INPUT' | <script>` with millisecond timeouts, and assigned
+  loop-detection to `PreToolUse` and file-naming-validator to `PostToolUse` -
+  the reverse of this generator's own `.claude/settings.json`. Claude Code
+  delivers the payload on stdin, so the `echo` form passes the literal string
+  `$TOOL_INPUT` and the hook exits 0 on every call; `bootstrap-verifier` only
+  checks `bash -n` and the executable bit, so it reported success anyway.
+  Corrected the wiring spec (bare script path, second timeouts, correct
+  event/matcher pairs) and added guardrails requiring `grep -Eqi --` and JSON
+  decoding rather than `sed` scraping in every generated `bash-validator.sh`.
+- **This generator's own hooks were wired the same broken way.** Applied the
+  same fix to `.claude/settings.json`: bare script paths, timeouts in seconds.
+  Its `bash-validator.sh` matches with shell `case` globs rather than `grep`,
+  so the script itself was unaffected and is unchanged.
+
 ## [1.3.5] - 2026-07-27
 
 ### Added

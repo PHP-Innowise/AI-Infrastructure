@@ -60,7 +60,7 @@ php artisan about              # installed Laravel version, environment, and key
 
 ## Vetting A New Package
 
-Before adding a dependency (coordinate with `/researcher` for deeper comparisons):
+Before adding a dependency (coordinate with `researcher` for deeper comparisons):
 
 - Actively maintained and compatible with the project's PHP and Laravel versions (check the package's `composer.json` constraints)?
 - License compatible with the project?
@@ -79,4 +79,4 @@ This skill covers *consuming* Composer packages. If the actual deliverable is a 
 
 ## Final Output
 
-Return audit/outdated results, actions taken (updates, constraint changes, autoload optimization), residual advisories/risks, verification run, Context Summary, and next step (`/verify`, `/security-reviewer`, or `/researcher`).
+Return audit/outdated results, actions taken (updates, constraint changes, autoload optimization), residual advisories/risks, verification run, Context Summary, and next step (`verify`, `security-reviewer`, or `researcher`).

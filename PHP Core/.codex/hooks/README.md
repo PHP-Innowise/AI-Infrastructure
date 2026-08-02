@@ -32,9 +32,18 @@ No `matcher` is set on any group: each script self-filters on its input (command
 
 ## Wiring
 
-`working-memory-read.sh` and `working-memory-write.sh` are present here and
-resolve their own edition directory, but they are wired to events only in
-`.claude/settings.json`. The equivalent event names for this tool were not
-verified, and wiring an unverified event name is worse than leaving the script
-unwired. Add the entries once the names are confirmed for the installed
-version.
+`working-memory-read.sh` and `working-memory-write.sh` are wired here to
+`UserPromptSubmit` and `Stop`, the same events they use under Claude Code.
+Both names are listed in the Codex configuration reference (see above), which
+is what makes the wiring safe: an unverified event name silently produces a
+hook that never runs.
+
+The read hook carries `additionalContextLimit: 4000`. A Task Capsule is capped
+at 8,000 Unicode characters, which exceeds the 2,500-token default and would
+otherwise be truncated mid-capsule. Lower it if your Codex version accounts
+tokens differently than this estimate.
+
+Codex tool identifiers and payload keys may still differ from Claude Code. Both
+scripts fail open (`exit 0`) when a key is missing, so a payload mismatch
+degrades to "no capsule this turn" rather than a broken turn. If the capsule
+never appears, check the payload keys before assuming the wiring is wrong.

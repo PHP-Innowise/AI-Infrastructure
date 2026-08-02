@@ -22,6 +22,12 @@
         "command": ".cursor/hooks/loop-detection.sh",
         "timeout": 5
       }
+    ],
+    "stop": [
+      {
+        "command": ".cursor/hooks/working-memory-write.sh",
+        "timeout": 8
+      }
     ]
   }
 }

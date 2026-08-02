@@ -104,4 +104,4 @@ Never break a running deploy. Split risky schema changes into phases:
 
 ## Final Output
 
-Return the schema (DDL or migration), key/index/constraint decisions, access-pattern notes, rollout/backfill risks, Context Summary, and next step (`/architecture-implementer`, `/coder`, or `/writing-plans`).
+Return the schema (DDL or migration), key/index/constraint decisions, access-pattern notes, rollout/backfill risks, Context Summary, and next step (`architecture-implementer`, `coder`, or `writing-plans`).

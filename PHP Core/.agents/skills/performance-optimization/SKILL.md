@@ -3,7 +3,7 @@ name: performance-optimization
 description: Diagnose and fix performance problems in native PHP applications with a measure-first workflow. Use for slow endpoints/scripts, high latency, high memory, N+1 queries, and throughput tuning. Triggers on "slow", "performance", "optimize", "latency", "memory", "profiling", "bottleneck".
 phase: execution
 flow-next: verify
-flow-alternatives: [debugger, code-reviewer, test-generator]
+flow-alternatives: [systematic-debugger, code-reviewer, test-generator]
 related: [systematic-debugger, code-reviewer, architect, database-designer]
 ---
 
@@ -119,4 +119,4 @@ Address the biggest levers first (usually in this order):
 
 ## Final Output
 
-Return the baseline, profiling findings, changes with before/after numbers, regression guard, Context Summary, and next step (`/verify`, `/code-reviewer`, or `/debugger`).
+Return the baseline, profiling findings, changes with before/after numbers, regression guard, Context Summary, and next step (`verify`, `code-reviewer`, or `systematic-debugger`).

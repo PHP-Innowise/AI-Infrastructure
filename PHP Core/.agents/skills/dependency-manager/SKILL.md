@@ -48,7 +48,7 @@ composer why-not <package> <version>  # what blocks an upgrade
 
 ## Vetting A New Package
 
-Before adding a dependency (coordinate with `/researcher` for deeper comparisons):
+Before adding a dependency (coordinate with `researcher` for deeper comparisons):
 
 - Actively maintained and compatible with the project's PHP version?
 - License compatible with the project?
@@ -65,4 +65,4 @@ Before adding a dependency (coordinate with `/researcher` for deeper comparisons
 
 ## Final Output
 
-Return audit/outdated results, actions taken (updates, constraint changes, autoload optimization), residual advisories/risks, verification run, Context Summary, and next step (`/verify`, `/security-reviewer`, or `/researcher`).
+Return audit/outdated results, actions taken (updates, constraint changes, autoload optimization), residual advisories/risks, verification run, Context Summary, and next step (`verify`, `security-reviewer`, or `researcher`).

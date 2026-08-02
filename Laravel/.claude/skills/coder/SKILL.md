@@ -19,16 +19,16 @@ Targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (c
 
 `coder` owns **behavior-changing** work — new features, bug fixes, and the incidental cleanup that comes with them. Use a sibling skill when the task is narrower:
 
-- **`/refactorer`** — pure behavior-preserving change (extract, dedupe, improve types, Laravel/PHP version upgrade) under a characterization test net. If observable behavior must stay identical, that is refactorer, not coder.
-- **`/architecture-implementer`** — lay down the structural skeleton (models, policies, Form Requests, Resources, Service Provider bindings) for an approved architecture before feature logic exists. If there is no structure yet from `/architect`, scaffold there first, then return here to fill in behavior.
-- **`/coder-frontend`** — server-rendered templates (Blade), HTML, CSS, and progressive-enhancement JS.
-- **`/eloquent`** — deep model-layer behavior beyond basic CRUD: polymorphic relationships, custom accessor/cast classes, query scopes, model events/Observers, mass-assignment protection, large-dataset iteration.
-- **`/queues-jobs`** — a queued Job needs job middleware, batching/chaining, uniqueness, or Horizon configuration beyond a simple `dispatch()`.
-- **`/events-notifications`** — new Events/Listeners/Observers or Notifications/Mailables across mail/database/broadcast/Slack channels.
-- **`/auth-scaffolding`** — web/session auth starter kits (Breeze/Jetstream/Fortify), multi-guard setup, or a Policy/Gate layer being introduced from scratch.
-- **`/caching`** — introducing or fixing an application-data caching layer (stampede prevention, tagging, invalidation-on-write).
-- **`/console-scheduler`** — a new Artisan console command or scheduled/recurring task.
-- **`/file-storage`** — a feature that stores, serves, or accepts user-uploaded files (disk config, secure uploads, signed URLs).
+- **`refactorer`** — pure behavior-preserving change (extract, dedupe, improve types, Laravel/PHP version upgrade) under a characterization test net. If observable behavior must stay identical, that is refactorer, not coder.
+- **`architecture-implementer`** — lay down the structural skeleton (models, policies, Form Requests, Resources, Service Provider bindings) for an approved architecture before feature logic exists. If there is no structure yet from `architect`, scaffold there first, then return here to fill in behavior.
+- **`coder-frontend`** — server-rendered templates (Blade), HTML, CSS, and progressive-enhancement JS.
+- **`eloquent`** — deep model-layer behavior beyond basic CRUD: polymorphic relationships, custom accessor/cast classes, query scopes, model events/Observers, mass-assignment protection, large-dataset iteration.
+- **`queues-jobs`** — a queued Job needs job middleware, batching/chaining, uniqueness, or Horizon configuration beyond a simple `dispatch()`.
+- **`events-notifications`** — new Events/Listeners/Observers or Notifications/Mailables across mail/database/broadcast/Slack channels.
+- **`auth-scaffolding`** — web/session auth starter kits (Breeze/Jetstream/Fortify), multi-guard setup, or a Policy/Gate layer being introduced from scratch.
+- **`caching`** — introducing or fixing an application-data caching layer (stampede prevention, tagging, invalidation-on-write).
+- **`console-scheduler`** — a new Artisan console command or scheduled/recurring task.
+- **`file-storage`** — a feature that stores, serves, or accepts user-uploaded files (disk config, secure uploads, signed URLs).
 
 ## Project Structure
 
@@ -293,7 +293,7 @@ final class CreateUser
 }
 ```
 
-Enforce uniqueness in the schema (`unique()` in the migration), not just in the Form Request — concurrent requests can both pass an application-level "does this email exist?" check. See `/architect` for concurrency, idempotency, and locking guidance the code must respect.
+Enforce uniqueness in the schema (`unique()` in the migration), not just in the Form Request — concurrent requests can both pass an application-level "does this email exist?" check. See `architect` for concurrency, idempotency, and locking guidance the code must respect.
 
 ## Modern PHP Best Practices
 
@@ -387,4 +387,4 @@ Include:
 - Tests/checks run.
 - Any security or migration notes.
 - Context Summary.
-- Next by flow: `/code-reviewer`, `/test-generator`, or `/verify`.
+- Next by flow: `code-reviewer`, `test-generator`, or `verify`.

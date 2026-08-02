@@ -677,6 +677,51 @@ chunk currently uses the runtime's fixed promoted-memory defaults; use the
 normal Memory Bank capture workflow when a proposal requires more nuanced
 categorization or an update/supersession decision.
 
+### `export`
+
+```bash
+python3 memory-bank/scripts/context.py export \
+  --destination ../context-bundle \
+  [--include-archive] \
+  [--include-superseded] \
+  [--force] \
+  [--json]
+```
+
+Writes a point-in-time, privacy-filtered copy of this installation's Project
+Brain records and Memory Bank chunks into a directory, for handing accumulated
+context to another person or repository. It reads only; nothing in the
+installation changes.
+
+What is included:
+
+- Project Brain records whose `privacy` is in the configured `allowed_privacy`
+  (`public` and `team` by default). `restricted` and `private` records never
+  leave. Add `--include-archive` for archived records.
+- Memory Bank chunks with status `active` or `needs-review`. Add
+  `--include-superseded` for the rest.
+
+The bundle contains `MANIFEST.json` and `README.md` alongside the copied
+files. The manifest lists every included item with its ID, type, revision, and
+cited sources, **and every excluded item with the reason it was excluded** - a
+bundle that quietly dropped records would read as a complete one. It also
+records the source commit and whether that installation had
+`automatic_promotion` enabled, and flags each chunk that was promoted
+automatically and therefore never human-reviewed.
+
+Two fail-closed behaviors:
+
+- A destination that already contains files is refused unless `--force`.
+- If any selected record or chunk matches a secret pattern, the entire export
+  aborts before writing anything. The offending path is named; its content is
+  not echoed. Remove the secret from the record and re-run.
+
+A bundle is a handoff artifact, not a second installation. Project Brain
+records carry the originating `owner` and `authorized_owners`, so a recipient
+cannot mutate a copied record under their own identity - they should read the
+bundle as history and open their own records for active work. There is no
+`import` command; adopting a bundle is a deliberate, manual act.
+
 ## AI Skills: Memory, Checkpoint, Project Brain, and Memory Bank
 
 These names describe AI workflows, not additional shell executables:

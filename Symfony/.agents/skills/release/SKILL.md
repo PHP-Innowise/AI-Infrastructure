@@ -63,9 +63,10 @@ git diff --stat <last-tag>..HEAD
 git diff --name-only <last-tag>..HEAD
 ```
 
-**Categorize commits** using the bundled script:
+**Categorize commits** using the bundled script, where `EDITION` is the
+accelerator directory in use (`.claude`, `.cursor`, or `.agents`):
 ```bash
-python3 .agents/skills/release/scripts/categorize_commits.py /tmp/commits.txt
+python3 "$EDITION/skills/release/scripts/categorize_commits.py" /tmp/commits.txt
 ```
 
 The script categorizes commits into:

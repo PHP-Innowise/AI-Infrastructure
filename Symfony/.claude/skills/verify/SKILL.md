@@ -3,14 +3,14 @@ name: verify
 description: Run the Symfony Definition of Done and report pass/fail/N/A evidence before completion, PR, or merge.
 phase: quality
 flow-next: finishing-branch
-flow-alternatives: [debugger, code-reviewer]
+flow-alternatives: [systematic-debugger, code-reviewer]
 ---
 
 # Symfony Verify
 
 ## Workflow
 
-1. Read `.claude/DOD.md`.
+1. Read the active edition's `DOD.md`.
 2. Inspect changed files.
 3. Select the correct DoD tier.
 4. Run configured project commands first.

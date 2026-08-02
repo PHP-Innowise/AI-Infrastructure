@@ -211,4 +211,4 @@ Update `specs/api-designer-spec.md` when API behavior is added or changed. Also 
 
 ## Final Output
 
-Return API routes, request/response contracts, validation/authorization notes, test plan, Context Summary, and next step (`/frontend-design`, `/writing-plans`, `/architecture-implementer`, or `/coder`).
+Return API routes, request/response contracts, validation/authorization notes, test plan, Context Summary, and next step (`frontend-design`, `writing-plans`, `architecture-implementer`, or `coder`).

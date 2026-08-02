@@ -78,7 +78,7 @@
           {
             "type": "command",
             "command": ".claude/hooks/working-memory-read.sh",
-            "timeout": 8000
+            "timeout": 8
           }
         ]
       }
@@ -89,7 +89,7 @@
           {
             "type": "command",
             "command": ".claude/hooks/working-memory-write.sh",
-            "timeout": 8000
+            "timeout": 8
           }
         ]
       }

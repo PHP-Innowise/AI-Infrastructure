@@ -106,7 +106,7 @@ If this is a new project (no existing codebase), ask about tech stack. Keep it s
 ### Task Numbering Logic
 
 1. **Check if task number provided:**
-   - If coming from `/requirements-analyst`, use the task number from context (e.g., "TASK-001")
+   - If coming from `requirements-analyst`, use the task number from context (e.g., "TASK-001")
    - If no task number: run task counter logic (same as requirements-analyst)
 
 2. **Task counter logic (if no task number provided):**
@@ -138,10 +138,10 @@ This file preserves the design context so the conversation can be cleared before
 
 After design document is written to file, STOP and present these options:
 
-**Next by flow:** /writing-plans `[TASK-{N} context]` - Create detailed implementation tasks from the design.
+**Next by flow:** writing-plans `[TASK-{N} context]` - Create detailed implementation tasks from the design.
 
 **Pass to next skill:** Include the task number in your context summary (e.g., "TASK-001: User notifications design completed")
 
 **Alternatives:**
-- /architect `[TASK-{N} context]` - Review architecture implications before creating the plan.
-- /api-designer `[TASK-{N} context]` - Design REST APIs if the feature involves API work.
+- architect `[TASK-{N} context]` - Review architecture implications before creating the plan.
+- api-designer `[TASK-{N} context]` - Design REST APIs if the feature involves API work.

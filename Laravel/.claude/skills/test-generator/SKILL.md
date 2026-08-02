@@ -3,7 +3,7 @@ name: test-generator
 description: Generate Pest or PHPUnit tests for Laravel applications. Use for feature tests (routes), Form Request validation tests, Policy authorization tests, Eloquent model/factory tests, and coverage gaps.
 phase: execution
 flow-next: documentation-generator
-flow-alternatives: [debugger, coder]
+flow-alternatives: [systematic-debugger, coder]
 related: [coder, code-reviewer, verify]
 ---
 
@@ -228,14 +228,14 @@ it('lets a user sign in', function (): void {
 });
 ```
 
-This is distinct from the `browser-verify` skill: Pest browser tests are automated, repeatable regression tests, written once and run in CI forever alongside the rest of the suite. `browser-verify` is a manual/agent-driven, one-off exploratory check of a specific change in a running app, and is not committed to the test suite. Add coverage here for lasting regression protection; use `/browser-verify` to sanity-check a change during development.
+This is distinct from the `browser-verify` skill: Pest browser tests are automated, repeatable regression tests, written once and run in CI forever alongside the rest of the suite. `browser-verify` is a manual/agent-driven, one-off exploratory check of a specific change in a running app, and is not committed to the test suite. Add coverage here for lasting regression protection; use `browser-verify` to sanity-check a change during development.
 
 ## Failure Loop
 
 1. Read the full failure.
 2. Fix the root cause.
 3. Re-run the focused failing test.
-4. Stop after three failed fix attempts and escalate to `/debugger`.
+4. Stop after three failed fix attempts and escalate to `systematic-debugger`.
 
 ## Validation Map
 

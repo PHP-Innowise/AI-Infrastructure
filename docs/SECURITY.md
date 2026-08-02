@@ -201,18 +201,57 @@ Before enabling any adapter or telemetry:
 Changing `"enabled"` is not sufficient evidence that these requirements are
 met.
 
-## Human Review and Promotion
+## Promotion and Review
 
-Project Brain promotion is a controlled sequence:
+Durable memory is populated automatically by default. `automatic_promotion` is
+enabled in the shipped `project-brain/config/runtime.json`, and the turn-end
+hook promotes eligible knowledge into the Memory Bank without asking. Do not
+read the Memory Bank as a human-curated collection unless you turned that flag
+off.
+
+What the runtime guarantees instead is that an automatic promotion is never
+disguised as a reviewed one:
+
+- `reviewer` is null - no name is invented;
+- `review_mode` is `automatic`;
+- the outcome is `approved-without-review`;
+- the chunk carries the `auto-promoted` tag;
+- `promote-review` refuses to sign an automatic promotion after the fact, so
+  an unreviewed chunk cannot be laundered into a reviewed one.
+
+Eligibility is narrow and identical in both modes: resolved findings and bugs,
+closed incidents, and accepted decisions. Tasks are never promoted - checkpoint
+progress is not reusable knowledge. A source already promoted is not promoted
+twice.
+
+Reviewed promotion remains available and is reached by setting
+`automatic_promotion` to `false`. It is the controlled sequence:
 
 ```text
 propose -> independent human review -> apply
 ```
 
-An agent may create a proposal but must not approve its own proposal, invent a
-reviewer, or apply it without recorded human approval. Application rechecks
-source type, path, ID, revision, privacy, conflicts, and destination. Supported
-runtime operations apply atomically and roll back partial writes.
+In that mode an agent may create a proposal but must not approve its own
+proposal, invent a reviewer, or apply it without recorded human approval.
+
+In both modes, application rechecks source type, path, ID, revision, privacy,
+conflicts, and destination. Supported runtime operations apply atomically and
+roll back partial writes.
+
+### What this costs
+
+Automatic promotion trades curation for continuity. Choose it knowingly:
+
+- durable memory accumulates without anyone reading it first, so a wrong but
+  well-formed conclusion can persist and be retrieved later;
+- retrieved chunks are discovery aids, never authority - the `auto-promoted`
+  tag marks exactly the chunks whose cited source you should open before
+  acting on them;
+- the privacy, authority, and freshness filters still apply, so the automation
+  widens what is remembered, not what may be remembered.
+
+Set `automatic_promotion` to `false` where an unreviewed durable claim is
+unacceptable.
 
 Promotion is not a way to bypass canonical sources. Do not promote transient
 progress, raw evidence, unresolved conflicts, private/restricted data, generic

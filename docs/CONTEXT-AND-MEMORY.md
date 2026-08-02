@@ -637,10 +637,10 @@ the check that would have caught a wrong or unreusable claim before it became
 durable. Set `automatic_promotion` to `false` to return to reviewed promotion.
 
 Proposal records bind each source Brain record's exact UUID, type, path, and
-revision. An independent human reviewer must approve; the proposer cannot
-review their own proposal. Apply rechecks every source binding, so a changed
-source revision invalidates the reviewed proposal rather than silently
-promoting changed content.
+revision. In the reviewed mode an independent human reviewer must approve, and
+the proposer cannot review their own proposal. Apply rechecks every source
+binding in both modes, so a changed source revision invalidates the proposal
+rather than silently promoting changed content.
 
 Application allocates a Memory Bank ID, writes a chunk, updates the index and
 counter, validates the bank, and updates the proposal. These writes are

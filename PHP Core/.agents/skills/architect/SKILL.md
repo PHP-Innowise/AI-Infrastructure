@@ -183,4 +183,4 @@ Return:
 - Files/specs updated.
 - Security and scalability considerations.
 - Context Summary.
-- Next by flow: `/api-designer`, `/architecture-implementer`, or `/writing-plans`.
+- Next by flow: `api-designer`, `architecture-implementer`, or `writing-plans`.

@@ -3,7 +3,7 @@ name: test-generator
 description: Generate PHPUnit or Pest tests for native PHP applications. Use for unit tests, integration tests, HTTP handler tests, input-validation and authorization tests, data-access tests, and coverage gaps.
 phase: execution
 flow-next: documentation-generator
-flow-alternatives: [debugger, coder]
+flow-alternatives: [systematic-debugger, coder]
 related: [coder, code-reviewer, verify]
 ---
 
@@ -160,7 +160,7 @@ composer test
 1. Read the full failure.
 2. Fix the root cause.
 3. Re-run the focused failing test.
-4. Stop after three failed fix attempts and escalate to `/debugger`.
+4. Stop after three failed fix attempts and escalate to `systematic-debugger`.
 
 ## Validation Map
 

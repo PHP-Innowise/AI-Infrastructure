@@ -42,6 +42,16 @@ TARGET_BUDGET = 8000
 HARD_BUDGET = 12000
 MAX_SNIPPET_CHARS = 1200
 SKILL_EDITIONS = (".agents", ".claude", ".cursor", ".codex")
+# Skills whose body documents the host tool itself rather than a workflow this
+# repository owns. `skill-creator` instructs the agent to drive its own product
+# CLI - `codex exec`, `cursor-agent --print`, `claude -p` - with different
+# environment variables and a different extension model per tool (Cursor builds
+# command/agent wrappers; Codex is forbidden from creating them). Byte-parity
+# would mean telling a Codex user to run `cursor-agent`, so these are compared
+# per edition by review, not by the mirror check. This is the same category as
+# `SKILL FLOW.md`, and the list is deliberately explicit: an entry here is a
+# documented exemption, not a way to silence real drift.
+EDITION_OWNED_SKILLS = frozenset({"skill-creator"})
 MANIFEST_SCOPES = ("governed", "local")
 STOPWORD_DOCUMENT_RATIO = 0.5
 MIN_TOKEN_COVERAGE = 2
@@ -259,41 +269,67 @@ def skill_mirror_drift(repository: Path, canonical_edition: str) -> list[dict[st
         for path in sorted(root.glob("**/*.md")):
             if path.is_file() and not path.is_symlink():
                 key = path.relative_to(root).as_posix()
-                # Edition orchestration catalogs are wrappers, not mirrored
-                # skill implementations. Their wording is intentionally owned
-                # by each tool edition and is outside runtime parity.
-                if key == "SKILL FLOW.md":
+                if key == "SKILL FLOW.md" or key.split("/")[0] in EDITION_OWNED_SKILLS:
                     continue
                 logical.setdefault(key, {})[edition] = path
+    present_editions = [
+        edition for edition in SKILL_EDITIONS if (repository / edition / "skills").is_dir()
+    ]
     drift: list[dict[str, object]] = []
     for key, copies in sorted(logical.items()):
         if canonical_edition not in copies:
-            continue
-        canonical = copies[canonical_edition].read_bytes()
-        drifted = [
-            edition for edition, path in copies.items()
-            if edition != canonical_edition and path.read_bytes() != canonical
-        ]
-        if drifted:
+            # A file only a mirror carries is drift too. Skipping it here is why
+            # an accidental extra copy could sit in .claude indefinitely without
+            # parity ever mentioning it.
             drift.append(
                 {
                     "logical_path": key,
                     "canonical": canonical_edition,
-                    "mismatched": sorted(drifted),
+                    "mismatched": sorted(copies),
+                    "reason": "absent from canonical",
                 }
             )
+            continue
+        canonical = copies[canonical_edition].read_bytes()
+        mismatched = sorted(
+            edition for edition, path in copies.items()
+            if edition != canonical_edition and path.read_bytes() != canonical
+        )
+        missing = sorted(set(present_editions) - set(copies))
+        if mismatched or missing:
+            entry: dict[str, object] = {
+                "logical_path": key,
+                "canonical": canonical_edition,
+                "mismatched": sorted(set(mismatched) | set(missing)),
+                "reason": "content differs" if mismatched else "missing from mirror",
+            }
+            if missing:
+                entry["missing"] = missing
+            drift.append(entry)
     return drift
+
+
+def format_skill_mirror_drift(drift: list[dict[str, object]]) -> str:
+    """Render every drifted path, not just the first one.
+
+    Reporting one entry per run meant a repository with twenty drifted files
+    could only be repaired twenty runs later, which is how a parity gate stops
+    being run at all.
+    """
+    lines = [f"Skill mirror parity drift ({len(drift)} path(s)):"]
+    for item in drift:
+        lines.append(
+            f"  {item['logical_path']}: canonical {item['canonical']}, "
+            f"{item.get('reason', 'content differs')} in "
+            f"{', '.join(item['mismatched'])}"
+        )
+    return "\n".join(lines)
 
 
 def assert_skill_mirror_parity(repository: Path, canonical_edition: str) -> None:
     drift = skill_mirror_drift(repository, canonical_edition)
     if drift:
-        first = drift[0]
-        raise RetrievalError(
-            f"Skill mirror parity drift for {first['logical_path']}: "
-            f"canonical {first['canonical']}, mismatched "
-            f"{', '.join(first['mismatched'])}"
-        )
+        raise RetrievalError(format_skill_mirror_drift(drift))
 
 
 def _legacy_metadata(path: str, kind: str, content: str) -> tuple[object, ...]:

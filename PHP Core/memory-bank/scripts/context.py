@@ -47,6 +47,8 @@ from context_retrieval import (
     SourceState,
     informative_tokens,
     assert_skill_mirror_parity,
+    format_skill_mirror_drift,
+    skill_mirror_drift,
     ensure_metadata_tables,
     index_documents,
     codebase_map_drift,
@@ -1815,6 +1817,211 @@ def flush_turn_deltas(
     return {**result, "files_omitted": omitted, "provisioned": provisioned}
 
 
+EXPORT_SCHEMA_VERSION = 1
+EXPORTABLE_CHUNK_STATUSES = ("active", "needs-review")
+
+EXPORT_README = """# Context Bundle
+
+A point-in-time, privacy-filtered copy of one installation's Project Brain
+records and Memory Bank chunks. `MANIFEST.json` is the index: it lists every
+item included, and every item excluded together with the reason.
+
+This is a handoff artifact, not a second source of truth.
+
+- **Records here are not authoritative.** Each one cites the sources it was
+  derived from. Open the cited source before acting on a claim.
+- **Chunks tagged `auto-promoted` were never read by a human.** Automatic
+  promotion is the shipped default; see the origin repository's
+  `docs/SECURITY.md`.
+- **You are not an authorized owner.** Every Project Brain record carries the
+  originating owner in `owner`/`authorized_owners`. A record copied into your
+  installation cannot be mutated by you until it is re-created under your own
+  identity. Treat this bundle as read-only history and start your own records
+  for active work.
+- **Revisions are frozen.** `revision` reflects the source installation at
+  export time. It says nothing about what happened there afterwards.
+"""
+
+
+def _export_relative_path(repository: Path, path: Path) -> str:
+    try:
+        return path.relative_to(repository).as_posix()
+    except ValueError:
+        return path.name
+
+
+def export_bundle(
+    repository: Path,
+    destination: Path,
+    *,
+    include_archive: bool = False,
+    include_superseded: bool = False,
+    force: bool = False,
+) -> dict:
+    """Write a privacy-filtered bundle of Brain records and Memory Bank chunks.
+
+    Export moves content out of the installation that produced it, so it is
+    fail-closed on both ends: a destination that already holds files is refused
+    without ``force``, and a single secret match anywhere in the selected set
+    aborts the whole bundle rather than writing a partial one. The manifest
+    records every exclusion with its reason - a bundle that silently dropped
+    records would read as "this is everything".
+    """
+    if destination.exists() and any(destination.iterdir()) and not force:
+        raise ContextError(
+            f"Export destination is not empty: {destination}. "
+            "Use --force to overwrite its contents."
+        )
+
+    config = load_config(repository)
+    allowed_privacy = set(config.get("allowed_privacy", ("public", "team")))
+
+    included: list[dict] = []
+    excluded: list[dict] = []
+    payload: list[tuple[Path, str]] = []
+
+    for path, record, body in iter_records(repository, include_archive=include_archive):
+        relative = _export_relative_path(repository, path)
+        privacy = record.get("privacy")
+        if privacy not in allowed_privacy:
+            excluded.append(
+                {
+                    "path": relative,
+                    "id": record.get("id"),
+                    "reason": f"privacy '{privacy}' is not in allowed_privacy",
+                }
+            )
+            continue
+        included.append(
+            {
+                "kind": "brain-record",
+                "path": relative,
+                "id": record.get("id"),
+                "external_id": record.get("external_id"),
+                "type": record.get("type"),
+                "status": record.get("status"),
+                "privacy": privacy,
+                "authority": record.get("authority"),
+                "owner": record.get("owner"),
+                "revision": record.get("revision"),
+                "sources": record.get("sources", []),
+            }
+        )
+        payload.append((path, relative))
+
+    chunks_root = repository / "memory-bank" / "chunks"
+    if chunks_root.is_dir():
+        for path in sorted(chunks_root.glob("*.md")):
+            if path.is_symlink():
+                continue
+            relative = _export_relative_path(repository, path)
+            try:
+                metadata = parse_frontmatter(path)
+            except ValidationError as error:
+                excluded.append(
+                    {"path": relative, "id": None, "reason": f"unreadable chunk: {error}"}
+                )
+                continue
+            status = metadata.get("status")
+            if not include_superseded and status not in EXPORTABLE_CHUNK_STATUSES:
+                excluded.append(
+                    {
+                        "path": relative,
+                        "id": metadata.get("id"),
+                        "reason": f"status '{status}' is not exported without --include-superseded",
+                    }
+                )
+                continue
+            included.append(
+                {
+                    "kind": "memory-chunk",
+                    "path": relative,
+                    "id": metadata.get("id"),
+                    "title": metadata.get("title"),
+                    "type": metadata.get("type"),
+                    "status": status,
+                    "tags": metadata.get("tags", []),
+                    "last_verified": metadata.get("last_verified"),
+                    "sources": metadata.get("sources", []),
+                    "auto_promoted": "auto-promoted" in (metadata.get("tags") or []),
+                }
+            )
+            payload.append((path, relative))
+
+    # Fail closed before anything is written. A bundle leaves the machine, so a
+    # single match aborts the export; the offending path is named, its content
+    # is not.
+    for path, relative in payload:
+        try:
+            validate_secret_patterns(path)
+        except ValidationError as error:
+            raise ContextError(
+                f"Export aborted: {relative} matches a secret pattern ({error}). "
+                "Remove the secret from the record before exporting."
+            ) from error
+
+    destination.mkdir(parents=True, exist_ok=True)
+    for path, relative in payload:
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(path.read_bytes())
+
+    manifest = {
+        "schema_version": EXPORT_SCHEMA_VERSION,
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "source": {
+            "framework": config.get("framework"),
+            "mode": config.get("mode"),
+            "commit": _export_source_commit(repository),
+            "automatic_promotion": config.get("automatic_promotion"),
+        },
+        "filters": {
+            "allowed_privacy": sorted(allowed_privacy),
+            "include_archive": include_archive,
+            "include_superseded": include_superseded,
+            "exported_chunk_statuses": (
+                "all" if include_superseded else list(EXPORTABLE_CHUNK_STATUSES)
+            ),
+        },
+        "counts": {
+            "brain_records": sum(1 for item in included if item["kind"] == "brain-record"),
+            "memory_chunks": sum(1 for item in included if item["kind"] == "memory-chunk"),
+            "excluded": len(excluded),
+        },
+        "included": included,
+        "excluded": excluded,
+    }
+    (destination / "MANIFEST.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    (destination / "README.md").write_text(EXPORT_README, encoding="utf-8")
+
+    return {
+        "destination": str(destination),
+        "brain_records": manifest["counts"]["brain_records"],
+        "memory_chunks": manifest["counts"]["memory_chunks"],
+        "excluded": len(excluded),
+        "auto_promoted_chunks": sum(
+            1 for item in included if item.get("auto_promoted")
+        ),
+    }
+
+
+def _export_source_commit(repository: Path) -> Optional[str]:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if completed.returncode != 0:
+        return None
+    return completed.stdout.strip() or None
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=default_root())
@@ -2023,6 +2230,28 @@ def build_parser() -> argparse.ArgumentParser:
     apply = commands.add_parser("promote-apply", help="apply an approved promotion")
     apply.add_argument("--promotion-id", required=True)
     apply.add_argument("--json", action="store_true")
+
+    export = commands.add_parser(
+        "export",
+        help="write a privacy-filtered bundle of Brain records and Memory Bank chunks",
+    )
+    export.add_argument("--destination", type=Path, required=True)
+    export.add_argument(
+        "--include-archive",
+        action="store_true",
+        help="also export archived Brain records",
+    )
+    export.add_argument(
+        "--include-superseded",
+        action="store_true",
+        help="also export superseded and archived Memory Bank chunks",
+    )
+    export.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite a destination that already contains files",
+    )
+    export.add_argument("--json", action="store_true")
     return parser
 
 
@@ -2600,13 +2829,24 @@ def main() -> int:
 
             if arguments.command == "parity":
                 canonical = str(load_config(repository)["canonical_edition"])
-                assert_skill_mirror_parity(repository, canonical)
-                result = {"valid": True, "canonical_edition": canonical}
+                # Report through the result path rather than an exception, so
+                # --json produces a machine-readable drift list on failure too.
+                # Raising first made the --json branch unreachable, and a caller
+                # that could only see the first drifted path had to re-run once
+                # per file to finish a repair.
+                drift = skill_mirror_drift(repository, canonical)
+                result = {
+                    "valid": not drift,
+                    "canonical_edition": canonical,
+                    "drift": drift,
+                }
                 if arguments.json:
-                    print(json.dumps(result))
+                    print(json.dumps(result, ensure_ascii=False))
+                elif drift:
+                    print(format_skill_mirror_drift(drift), file=sys.stderr)
                 else:
                     print(f"Skill mirror parity passed ({canonical} canonical).")
-                return 0
+                return 0 if not drift else 1
 
             if arguments.command == "compact":
                 result = compact(repository)
@@ -2614,6 +2854,34 @@ def main() -> int:
                     print(json.dumps(result))
                 else:
                     print(f"Project Brain compacted: {result['moved']} record(s) archived.")
+                return 0
+
+            if arguments.command == "export":
+                result = export_bundle(
+                    repository,
+                    arguments.destination.resolve(),
+                    include_archive=arguments.include_archive,
+                    include_superseded=arguments.include_superseded,
+                    force=arguments.force,
+                )
+                if arguments.json:
+                    print(json.dumps(result, ensure_ascii=False))
+                else:
+                    print(
+                        f"Exported {result['brain_records']} Brain record(s) and "
+                        f"{result['memory_chunks']} Memory Bank chunk(s) to "
+                        f"{result['destination']}."
+                    )
+                    if result["excluded"]:
+                        print(
+                            f"  {result['excluded']} item(s) excluded; see MANIFEST.json "
+                            "for each reason."
+                        )
+                    if result["auto_promoted_chunks"]:
+                        print(
+                            f"  {result['auto_promoted_chunks']} chunk(s) were promoted "
+                            "automatically and never human-reviewed."
+                        )
                 return 0
 
             if arguments.command == "promote-propose":

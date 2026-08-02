@@ -3,7 +3,7 @@ name: browser-verify
 description: Visually verify Laravel web UI changes in a running app. Use for Blade pages, Livewire components, and Inertia.js SPA pages that need browser evidence.
 phase: execution
 flow-next: verify
-flow-alternatives: [coder-frontend, debugger]
+flow-alternatives: [coder-frontend, systematic-debugger]
 related: [coder-frontend, frontend-design, wcag-accessibility]
 ---
 

@@ -3,7 +3,7 @@ name: performance-optimization
 description: "Diagnose and fix Symfony performance problems with a measure-first workflow: Symfony Profiler/Blackfire, Doctrine N+1/query tuning, cache, Twig, Messenger, memory, OPcache."
 phase: execution
 flow-next: verify
-flow-alternatives: [code-reviewer, debugger, test-generator]
+flow-alternatives: [code-reviewer, systematic-debugger, test-generator]
 ---
 
 # Symfony Performance Optimization
@@ -60,8 +60,8 @@ Form one hypothesis at a time and connect it to measured evidence.
 
 ## Messenger, External I/O, And Long Processes
 
-- Keep handlers thin and services idempotent; tune worker count/prefetch/time/memory limits from measured throughput and downstream capacity.
-- Investigate retry storms, poison messages, failure transport growth, serialization size, and database connection/memory retention.
+- Keep handlers thin and services idempotent; tune worker count/prefetch/timememory limits from measured throughput and downstream capacity.
+- Investigate retry storms, poison messages, failure transport growth, serialization size, and database connectionmemory retention.
 - Batch safely and restart workers during deployments when code/container state changes.
 - Set outbound HTTP connect/total timeouts, bounded retries with jitter, circuit/concurrency limits, and response-size constraints.
 - Move work async only when latency/retry/isolation benefits justify queue complexity and consistency implications.

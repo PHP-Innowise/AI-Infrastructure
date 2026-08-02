@@ -63,9 +63,10 @@ git diff --stat <last-tag>..HEAD
 git diff --name-only <last-tag>..HEAD
 ```
 
-**Categorize commits** using the bundled script:
+**Categorize commits** using the bundled script, where `EDITION` is the
+accelerator directory in use (`.claude`, `.cursor`, or `.agents`):
 ```bash
-python3 .cursor/skills/release/scripts/categorize_commits.py /tmp/commits.txt
+python3 "$EDITION/skills/release/scripts/categorize_commits.py" /tmp/commits.txt
 ```
 
 The script categorizes commits into:
@@ -249,7 +250,7 @@ Display the release summary:
 
 After release creation is complete:
 
-**Next by flow:** [[/finishing-branch]] `[release summary]` - Complete the branch and prepare for merge/PR. See [[moc-finalization]] for phase context.
+**Next by flow:** [[finishing-branch]] `[release summary]` - Complete the branch and prepare for merge/PR. See [[moc-finalization]] for phase context.
 
 **Alternatives:**
 - No further action needed - Release is complete and published.

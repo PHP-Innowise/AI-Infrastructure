@@ -19,8 +19,8 @@ Targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (c
 
 `events-notifications` owns **how** to implement Events/Listeners/Notifications/Mailables well. It does not own two adjacent decisions:
 
-- **Whether** something should be event-driven at all — that call belongs to `architect`. Its pattern table already recommends "Notification class (queued) rather than manual `Mail::` calls scattered around" for async notifications, and its "When Not To Add A Layer" section warns against dispatching an Event for one synchronous listener with no other subscriber. If that decision hasn't been made yet, go to `/architect` first.
-- **Generic job/queue mechanics** — queue middleware (`WithoutOverlapping`, rate limiting), batching, chaining, and retry/backoff tuning apply identically to queued Listeners and queued Notifications as they do to plain Jobs. That mechanics layer belongs to the sibling `queues-jobs` skill; here, only `ShouldQueue` usage is covered as the on/off switch for a Listener or Notification. Cross-reference `/queues-jobs` rather than duplicating middleware/backoff details.
+- **Whether** something should be event-driven at all — that call belongs to `architect`. Its pattern table already recommends "Notification class (queued) rather than manual `Mail::` calls scattered around" for async notifications, and its "When Not To Add A Layer" section warns against dispatching an Event for one synchronous listener with no other subscriber. If that decision hasn't been made yet, go to `architect` first.
+- **Generic job/queue mechanics** — queue middleware (`WithoutOverlapping`, rate limiting), batching, chaining, and retry/backoff tuning apply identically to queued Listeners and queued Notifications as they do to plain Jobs. That mechanics layer belongs to the sibling `queues-jobs` skill; here, only `ShouldQueue` usage is covered as the on/off switch for a Listener or Notification. Cross-reference `queues-jobs` rather than duplicating middleware/backoff details.
 
 Also distinct from **model lifecycle events** (`creating`, `created`, `updating`, `deleting`, etc.) and Eloquent Observers, which are covered by the `eloquent` skill. This skill focuses on custom **domain Events** (e.g. `OrderShipped`, `InvitationAccepted`) dispatched explicitly from Actions/controllers — see "Domain Events vs Model Events" below for where the line sits and why it matters.
 
@@ -105,7 +105,7 @@ final class NotifyWarehouseOfShipment implements ShouldQueue
 }
 ```
 
-Keep a Listener synchronous only when it's cheap, in-process, and must complete before the request returns (e.g. updating an in-memory/request-scoped cache, or a strict invariant that must hold before the response is sent). Queued Listener middleware, uniqueness (`ShouldBeUnique`), batching, and backoff tuning are generic queue mechanics — see `/queues-jobs`.
+Keep a Listener synchronous only when it's cheap, in-process, and must complete before the request returns (e.g. updating an in-memory/request-scoped cache, or a strict invariant that must hold before the response is sent). Queued Listener middleware, uniqueness (`ShouldBeUnique`), batching, and backoff tuning are generic queue mechanics — see `queues-jobs`.
 
 ## Notifications
 
@@ -215,7 +215,7 @@ An Event implementing `ShouldBroadcast` (or a Notification's `broadcast` channel
 
 ## Testing
 
-Fake the dispatch mechanism, then separately unit-test the logic the fake bypassed — faking only proves something was dispatched/sent, not that its side effects are correct (the same caveat used in `/queues-jobs` for Job/Queue fakes):
+Fake the dispatch mechanism, then separately unit-test the logic the fake bypassed — faking only proves something was dispatched/sent, not that its side effects are correct (the same caveat used in `queues-jobs` for Job/Queue fakes):
 
 ```php
 it('dispatches OrderShipped when an order ships', function (): void {

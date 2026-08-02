@@ -79,6 +79,34 @@ The same safety goals are adapted to each client's event schema:
 | Shell safety | `PreToolUse` for Bash | `beforeShellExecution` | `PreToolUse` |
 | File naming | `PreToolUse` for Write/Edit | `afterFileEdit` | `PreToolUse` |
 | Edit-loop detection | `PostToolUse` for Edit | `afterFileEdit` | `PostToolUse` |
+| Task Capsule into the prompt | `UserPromptSubmit` | not available | `UserPromptSubmit` |
+| Turn checkpoint at turn end | `Stop` | `stop` | `Stop` |
+
+## Automatic Memory Support by Tool
+
+Automatic memory has two halves, and one of them depends on a client
+capability that is not universal.
+
+| | Claude Code | Codex | Cursor |
+| --- | --- | --- | --- |
+| Capsule retrieved into each prompt | yes | yes | **no** |
+| Turn change set buffered and flushed | yes | yes | yes |
+| Explicit `context.py retrieve` / `memory` | yes | yes | yes |
+
+Cursor cannot receive the capsule. Its nearest event, `beforeSubmitPrompt`,
+returns `{"continue": true|false, "user_message": "..."}` - it can allow or
+block a submission but cannot add context to the prompt, so a hook that
+printed a capsule would produce output the client discards. This is a client
+capability limit, not an installation fault, and `working-memory-read.sh` is
+therefore not shipped in `.cursor/hooks/`.
+
+What Cursor keeps is the record: `stop` runs at turn end without prompt
+access, so continuity is written exactly as on the other two clients. Retrieval
+on Cursor is explicit - run `context.py retrieve` or the `memory` command when
+a task needs prior context.
+
+Treat the editions as equivalent in policy, skills, and enforcement, and as
+differing only in this row.
 
 The installed scripts:
 
@@ -92,9 +120,14 @@ print record bodies, or inject records into prompts. Indexing and retrieval
 remain explicit.
 
 Hook return conventions are `0` to continue, `1` for a non-blocking warning
-where supported, and `2` to block. Cursor timeouts in `hooks.json` are seconds;
-Claude Code's settings use milliseconds. Preserve the native values and
-schemas when synchronizing hooks.
+where supported, and `2` to block. Timeouts are seconds in both Cursor's
+`hooks.json` and Claude Code's `settings.json`; Codex hooks carry no timeout
+field. Preserve the native values and schemas when synchronizing hooks.
+
+Claude Code delivers the tool-input JSON to a hook on stdin, so a hook command
+is the bare script path. Wrapping it as `echo '$TOOL_INPUT' | <script>` feeds
+the hook the literal string `$TOOL_INPUT`, which every validator treats as an
+empty payload and passes.
 
 ## Claude Code Activation
 

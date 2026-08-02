@@ -4,6 +4,20 @@
 
 ### Added
 
+- **`context.py export`** - writes a point-in-time, privacy-filtered bundle of
+  Project Brain records and Memory Bank chunks to a directory, so accumulated
+  context can be handed to another person or repository. Read-only. Records
+  whose privacy is outside `allowed_privacy` never leave, and `MANIFEST.json`
+  lists every included item with its ID/type/revision/sources **and every
+  excluded item with its reason** - a bundle that quietly dropped records would
+  read as a complete one. It also records the source commit, whether that
+  installation had `automatic_promotion` on, and which chunks carry
+  `auto-promoted` and were therefore never human-reviewed. Fail-closed twice: a
+  non-empty destination is refused without `--force`, and one secret-pattern
+  match aborts the whole export before any file is written, naming the path
+  without echoing the content. There is deliberately no `import`: a bundle is a
+  handoff artifact, and adopting one stays a manual act.
+
 - **Automatic compaction** - `automatic_compaction` and
   `compaction_threshold` (default 5) let the turn-end hook archive terminal
   records in batches rather than one at a time. Within a turn the order is
@@ -86,8 +100,8 @@
   `Stop` write hook that buffers each turn's change set and flushes it to the
   authoritative task on a boundary. Reads and writes are split because a
   request has nothing to record yet and the end of a turn does. Both hooks are
-  fail-open and time-bounded. Durable memory is unchanged: promotion still
-  requires independent human review.
+  fail-open and time-bounded. Durable memory is populated automatically on the
+  same boundary; see the automatic-promotion entry above.
 - **Incremental indexing** - `index --incremental` reuses rows whose source
   modification time and size are unchanged, so a no-change refresh performs
   reads only. Secret scanning dominated a full pass, and mirrored skill copies
@@ -159,6 +173,81 @@
 
 ### Fixed
 
+- **`parity` was permanently red, so it had stopped being a gate.** Shared
+  skills named their own edition directory - `.codex/DOD.md` in `.agents`,
+  `.claude/DOD.md` in `.claude` - and used two vocabularies for the same target
+  (`debugger` the command vs `systematic-debugger` the skill). Every mirror
+  therefore differed by construction and `parity` failed on a clean checkout.
+  Rephrased the shared text neutrally, as `AGENTS.md` already does with "the
+  active edition's `DOD.md`", and unified flow references on skill names - the
+  only vocabulary that resolves in `.agents`, which has no command layer.
+  Mirrors are now byte-identical and the gate is green from a clean checkout.
+- **`parity` could only report one drifted path, and `--json` was unreachable
+  when drift existed.** `assert_skill_mirror_parity` raised on `drift[0]` before
+  a result was built, so repairing N files took N runs and no machine-readable
+  output was available on the failure path. It now reports every path, `--json`
+  returns the full list with a per-path reason, and text output goes to stderr
+  with exit 1. Added coverage for the failure path, which had none.
+- **`parity` ignored a file only one mirror carried.** The comparison skipped any
+  logical path missing from canonical, so a stray copy in `.claude` could sit
+  there indefinitely. Absent-from-canonical and missing-from-mirror are both
+  drift now.
+- **`skill-creator` cannot be mirrored and is now an explicit exemption.** Its
+  body drives each product's own CLI (`codex exec`, `cursor-agent --print`,
+  `claude -p`) with different environment variables and a different extension
+  model - Cursor builds command and agent wrappers, Codex is forbidden from
+  creating them. Byte-parity would mean telling a Codex user to run
+  `cursor-agent`. It joins `SKILL FLOW.md` in a named, documented exemption list
+  rather than being deleted on one side or silently tolerated.
+- **Three canonical skills carried `sed` damage that the mirrors did not.**
+  `.agents/skills/brainstorming/SKILL.md` and
+  `.agents/skills/requirements-analyst/SKILL.md` wrote
+  `tasks/TASK-{N}brainstorming-design.md` - a path-separating slash eaten by a
+  bulk substitution - and `.agents/skills/review-pr/SKILL.md` described running
+  "the systematic systematic-debugger". Repaired in canonical; syncing mirrors
+  from canonical would have propagated all three.
+- **Automatic memory was wired only for Claude Code.** `working-memory-read.sh`
+  and `working-memory-write.sh` shipped in all three edition mirrors but were
+  referenced only by `.claude/settings.json`, on the stated grounds that the
+  other clients' event names were unverified. They are verified now. Codex
+  lists `UserPromptSubmit` and `Stop` in its configuration reference, so both
+  halves are wired in `.codex/hooks.json`, with `additionalContextLimit: 4000`
+  on the read hook because an 8,000-character capsule exceeds the 2,500-token
+  default. Cursor's `stop` is wired to the write half.
+- **Cursor cannot receive a Task Capsule, and the documentation claimed it
+  could.** Cursor's `beforeSubmitPrompt` returns
+  `{"continue": ..., "user_message": ...}`: it allows or blocks a submission but
+  cannot add context to a prompt, so a capsule printed from it is discarded.
+  `.cursor/hooks/README.md` nevertheless listed `beforeSubmitPrompt:
+  Working-Memory Read` as an active hook. Removed that section, deleted the
+  unusable `.cursor/hooks/working-memory-read.sh` rather than leaving a script
+  that can never run, and published a capability matrix in
+  `docs/TOOL-INTEGRATIONS.md`. The write half is unaffected, so continuity is
+  still recorded on Cursor; only retrieval into the prompt is unavailable there,
+  and explicit `retrieve` still works.
+- **Documentation described reviewed promotion as an invariant while the
+  shipped default was automatic.** `project-brain/config/runtime.json` has
+  shipped with `automatic_promotion: true`, but `PROTOCOL.md`, `docs/SECURITY.md`,
+  and both READMEs stated that an independent human must approve every durable
+  memory. The code was never dishonest - an automatic promotion records
+  `reviewer: null`, `review_mode: automatic`, `approved-without-review`, tags the
+  chunk `auto-promoted`, and `promote-review` refuses to sign one after the fact
+  - so the defect was in the prose. Automatic promotion is now documented as the
+  first-class default, with its cost stated plainly: durable memory is
+  accumulated rather than curated, and a retrieved chunk is a pointer to its
+  cited source, not a vetted fact. Reviewed promotion remains available behind
+  `automatic_promotion: false`.
+- **The shipped runtime config was covered by no test.** Every automation test
+  calls `enable_automation()`, which overwrites `runtime.json` with the flags
+  that test needs, leaving the defaults users actually get untested. Added
+  `ShippedRuntimeConfigTest`, which reads the real file and fails if the
+  automation flags, mode, provider, telemetry setting, or private-record
+  exclusion change without being released as the behavioral change they are.
+- **Two hook timeouts were still in milliseconds.** This edition's
+  `bash-validator.sh` and hook wiring were already correct, but
+  `.claude/settings.json` kept `8000` on the `UserPromptSubmit` and `Stop` hooks
+  where the field is seconds - the two entries missed when the rest of the file
+  was converted. Set both to `8`.
 - **Stale branch-based wording left over from the pre-monorepo layout** - `AGENTS.md` and `README.md` (intro + Symfony Adaptation Notes) still said things like "this branch is dedicated to Symfony" / "feature/symfony-accelerator branch" / "the Laravel branch", which stopped being accurate once the accelerators were merged into sibling `Laravel/` / `Symfony/` / `PHP Core/` folders in one repo. Reworded to point at the sibling `PHP Core/` and `Laravel/` folders instead of branches, consistent with the root `README.md`.
 
 ### Fixed
