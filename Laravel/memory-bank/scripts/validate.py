@@ -37,6 +37,14 @@ REQUIRED_KEYS = {
     "supersedes",
     "superseded_by",
 }
+# Temporal validity. Optional, because requiring it would invalidate every
+# chunk written before it existed. `superseded_by` says what replaced a chunk;
+# `valid_to` says when it stopped being true. Automatically written memory
+# needs the second: a wrong fact earns a boundary instead of being erased.
+OPTIONAL_KEYS = {
+    "valid_from",
+    "valid_to",
+}
 SECRET_PATTERNS = {
     "private key": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
     "GitHub token": re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
@@ -92,7 +100,7 @@ def require_date(metadata: dict, key: str) -> date:
 
 def validate_metadata(path: Path, metadata: dict, repository_root: Path) -> None:
     missing = REQUIRED_KEYS - metadata.keys()
-    extra = metadata.keys() - REQUIRED_KEYS
+    extra = metadata.keys() - REQUIRED_KEYS - OPTIONAL_KEYS
     if missing:
         raise ValidationError(f"missing metadata keys: {', '.join(sorted(missing))}")
     if extra:
@@ -128,6 +136,20 @@ def validate_metadata(path: Path, metadata: dict, repository_root: Path) -> None
         raise ValidationError("review_after must not be earlier than last_verified")
     if metadata["status"] == "active" and review_after < date.today():
         raise ValidationError("active chunk is overdue for review")
+
+    valid_from = require_date(metadata, "valid_from") if "valid_from" in metadata else None
+    valid_to = None
+    if metadata.get("valid_to") is not None:
+        valid_to = require_date(metadata, "valid_to")
+    # valid_from may precede `created`: knowledge is often true well before
+    # anyone writes it down.
+    if valid_to is not None:
+        if valid_from is not None and valid_to < valid_from:
+            raise ValidationError("valid_to must not be earlier than valid_from")
+        # Matches the review_after rule above: knowledge that has stopped being
+        # true may not keep calling itself active.
+        if metadata["status"] == "active" and valid_to < date.today():
+            raise ValidationError("active chunk is past its valid_to date")
 
     replacement = metadata["superseded_by"]
     if replacement is not None and (
@@ -187,18 +209,27 @@ def summarize_bank(bank_root: Path) -> str:
     total = 0
     active = 0
     needs_review = 0
+    expired = 0
     if chunks_dir.is_dir():
         for path in sorted(chunks_dir.iterdir()):
             if path.is_symlink() or not path.is_file() or FILENAME_PATTERN.fullmatch(path.name) is None:
                 continue
             total += 1
             try:
-                status = parse_frontmatter(path).get("status")
+                metadata = parse_frontmatter(path)
+                status = metadata.get("status")
+                if isinstance(metadata.get("valid_to"), str):
+                    try:
+                        if date.fromisoformat(metadata["valid_to"]) < date.today():
+                            expired += 1
+                    except ValueError:
+                        pass
             except (OSError, ValidationError):
                 continue
             active += status == "active"
             needs_review += status == "needs-review"
-    return f"Memory bank: {total} chunks ({active} active, {needs_review} needs review)."
+    summary = f"Memory bank: {total} chunks ({active} active, {needs_review} needs review"
+    return summary + (f", {expired} past valid_to)." if expired else ").")
 
 
 def validate_bank(bank_root: Path) -> list[str]:

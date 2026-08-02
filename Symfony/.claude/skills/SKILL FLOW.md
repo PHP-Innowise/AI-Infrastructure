@@ -62,7 +62,7 @@ All implementation, review, and planning work must respect root `AGENTS.md`, `sp
 
 | Phase | Commands |
 | --- | --- |
-| Understanding | `/requirements-analyst`, `/researcher`, `/brainstorm` |
+| Understanding | `/requirements-analyst`, `/codebase-mapper`, `/researcher`, `/brainstorm` |
 | Planning | `/council`, `/architect`, `/database-designer`, `/doctrine-migration-designer`, `/api-designer`, `/api-platform-designer`, `/frontend-design`, `/writing-plans`, `/security-voter-designer`, `/form-validator-designer`, `/messenger-designer`, `/event-subscriber-designer` |
 | Implementation | `/git-worktrees`, `/architecture-implementer`, `/coder`, `/coder-frontend`, `/console-command-coder`, `/fixture-factory-generator`, `/refactorer` |
 | Quality | `/architecture-boundary-reviewer`, `/code-reviewer`, `/repository-reviewer`, `/security-reviewer`, `/twig-ux-reviewer`, `/container-reviewer`, `/test-generator`, `/performance-optimization`, `/debugger`, `/verify` |

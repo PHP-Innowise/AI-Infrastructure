@@ -9,6 +9,18 @@ These hooks are registered in `.cursor/hooks.json` (schema `version: 1`). Each i
 **Purpose:** Prints project metadata at session start: git branch, Composer/PHP/Laravel/tooling markers, Livewire/Inertia detection, framework/structure, governed or lightweight mode, index health/staleness, active binding count, Project Brain validation status, and Memory Bank validation summary. It never runs indexing or retrieval and never prints/injects record contents.
 **Return:** Always `0` (informational only).
 
+### beforeSubmitPrompt: Working-Memory Read
+**Script:** `working-memory-read.sh`
+**Purpose:** Runs `context.py refresh`, re-indexing procedural, semantic, and episodic memory in one incremental pass and reporting each layer as `updated` or `failed`. With a task — from `CONTEXT_TASK_ID` or the current branch — the same process also assembles a bounded Task Capsule with `--ephemeral`, keeping the per-request manifest in ignored local state rather than shared Git history.
+**Return:** Always `0` (context tooling must never block a prompt).
+**Budget:** `CONTEXT_HOOK_BUDGET` seconds, default 5.
+
+### stop: Working-Memory Write
+**Script:** `working-memory-write.sh`
+**Purpose:** Buffers this turn's change set and flushes it to the authoritative task on a boundary. Reads Git porcelain metadata only; sensitive-looking paths and the runtime's own churn are excluded. The first flush provisions the task if it does not exist, so no manual `start` is required; an existing task is never overwritten.
+**Return:** Always `0` (a failed checkpoint must never surface as a turn error).
+**Flush boundary:** `CONTEXT_FLUSH_AFTER` turns, default 5.
+
 ### beforeShellExecution: Bash Validator
 **Script:** `bash-validator.sh`
 **Purpose:** Blocks destructive shell commands: force-push, hard reset, database drops/truncates, destructive migration resets/rollbacks, secret-writing Composer config, and `--no-verify`.
@@ -45,3 +57,12 @@ Notes:
 ## References
 
 - Cursor Hooks: https://docs.cursor.com/agent/hooks
+
+## Wiring
+
+`working-memory-read.sh` and `working-memory-write.sh` are present here and
+resolve their own edition directory, but they are wired to events only in
+`.claude/settings.json`. The equivalent event names for this tool were not
+verified, and wiring an unverified event name is worse than leaving the script
+unwired. Add the entries once the names are confirmed for the installed
+version.

@@ -24,6 +24,10 @@ UUID4_PATTERN = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
 RECORD_TYPES = ("task", "finding", "bug", "incident", "decision", "event")
+# Where a task sits in the delivery loop, using the same vocabulary the skills
+# declare in their own frontmatter. Progress says what was touched; the phase
+# says which step it stopped on, which is what a reader needs to resume.
+TASK_PHASES = ("understanding", "planning", "execution", "finalization")
 PRIVACY = ("public", "team", "restricted", "private")
 AUTHORITIES = ("inferred", "observed", "verified")
 LIFECYCLES: dict[str, dict[str, Any]] = {
@@ -129,6 +133,11 @@ def load_config(repository: Path) -> dict[str, Any]:
         "owners": ["*"],
         "telemetry_enabled": False,
         "provider": "sqlite-fts5",
+        "automatic_promotion": False,
+        "automatic_completion": False,
+        "automatic_compaction": False,
+        "compaction_threshold": 5,
+        "codebase_map_max_drift": 25,
     }
     if not path.is_file():
         return defaults
@@ -449,11 +458,18 @@ def validate_record(record: dict[str, Any], *, archived: bool = False) -> None:
         "superseded_by", "goal", "progress", "next_steps", "files", "sources",
     }
     missing = required - record.keys()
-    extra = record.keys() - required
+    # `phase` is optional: adding it to the required set would invalidate every
+    # record written before it existed.
+    extra = record.keys() - required - {"phase"}
     if missing:
         raise BrainError(f"record missing keys: {', '.join(sorted(missing))}")
     if extra:
         raise BrainError(f"record has unexpected keys: {', '.join(sorted(extra))}")
+    if "phase" in record:
+        if record["type"] != "task":
+            raise BrainError("only a task may declare a phase")
+        if record["phase"] not in TASK_PHASES:
+            raise BrainError(f"phase must be one of: {', '.join(TASK_PHASES)}")
     if record["schema_version"] != SCHEMA_VERSION:
         raise BrainError("unsupported schema_version")
     if not is_uuid4(record["id"]):
@@ -532,11 +548,13 @@ def validate_handoff(record: dict[str, Any], task: Optional[dict[str, Any]] = No
         "next_actions", "files", "sources", "status",
     }
     missing = required - record.keys()
-    extra = record.keys() - required
+    extra = record.keys() - required - {"phase"}
     if missing:
         raise BrainError(f"handoff missing keys: {', '.join(sorted(missing))}")
     if extra:
         raise BrainError(f"handoff has unexpected keys: {', '.join(sorted(extra))}")
+    if "phase" in record and record["phase"] not in TASK_PHASES:
+        raise BrainError(f"phase must be one of: {', '.join(TASK_PHASES)}")
     if not is_uuid4(record["id"]) or not is_uuid4(record["task_id"]):
         raise BrainError("handoff and task IDs must be UUIDv4")
     if record["type"] != "handoff" or record["status"] not in {"active", "closed"}:
@@ -641,13 +659,16 @@ def _handoff_for(task: dict[str, Any], existing: Optional[dict[str, Any]] = None
         "files": task["files"],
         "sources": task["sources"],
         "status": "closed" if task["status"] in TERMINAL_STATES else "active",
+        **({"phase": task["phase"]} if "phase" in task else {}),
     }
 
 
 def _handoff_body(handoff: dict[str, Any]) -> str:
     actions = "\n".join(f"- {item}" for item in handoff["next_actions"]) or "- None"
+    phase = handoff.get("phase")
     return (
         f"# Handoff for {handoff['task_id']}\n\n"
+        f"## Phase\n{phase or 'Not declared.'}\n\n"
         f"## Objective\n{handoff['objective']}\n\n"
         f"## Current State\n{handoff['current_state'] or 'Not started.'}\n\n"
         f"## Next Actions\n{actions}\n"
@@ -783,6 +804,7 @@ def update_record(
     actor: str,
     conflicts: Optional[list[str]] = None,
     transition_to: Optional[str] = None,
+    phase: Optional[str] = None,
     reason: str = "Task updated",
 ) -> dict[str, Any]:
     with mutation_lock(repository):
@@ -816,6 +838,12 @@ def update_record(
                 }
             )
             record["status"] = transition_to
+        if phase is not None:
+            if record["type"] != "task":
+                raise BrainError("only a task may declare a phase")
+            if phase not in TASK_PHASES:
+                raise BrainError(f"phase must be one of: {', '.join(TASK_PHASES)}")
+            record["phase"] = phase
         if progress is not None:
             record["progress"] = progress
         record["next_steps"] = list(dict.fromkeys([*record["next_steps"], *next_steps]))
@@ -1084,6 +1112,47 @@ def validate_repository(repository: Path) -> list[str]:
     return errors
 
 
+def promoted_source_rewrites(
+    repository: Path, renames: dict[str, str]
+) -> list[tuple[Path, str]]:
+    """Plan the Memory Bank edits that keep promoted citations resolvable.
+
+    A chunk cites its source record by path. Archiving a promoted record
+    without repointing the citation leaves a dangling reference that fails
+    Memory Bank validation, which in turn blocks every later promotion. The
+    rewrite is planned separately from applying it so compaction can snapshot
+    the affected chunks and roll them back with the moves.
+    """
+    rewrites: list[tuple[Path, str]] = []
+    chunks = repository / "memory-bank" / "chunks"
+    if not renames or not chunks.is_dir():
+        return rewrites
+    for path in sorted(chunks.glob("*.md")):
+        try:
+            metadata, body = parse_markdown_record(path)
+        except BrainError:
+            continue
+        sources = metadata.get("sources")
+        if not isinstance(sources, list):
+            continue
+        updated: list[Any] = []
+        touched = False
+        for source in sources:
+            if not isinstance(source, str):
+                updated.append(source)
+                continue
+            head, separator, fragment = source.partition("#")
+            if head in renames:
+                updated.append(renames[head] + separator + fragment)
+                touched = True
+            else:
+                updated.append(source)
+        if touched:
+            metadata["sources"] = updated
+            rewrites.append((path, render_markdown_record(metadata, body)))
+    return rewrites
+
+
 def compact(repository: Path) -> dict[str, int]:
     with mutation_lock(repository):
         errors = validate_repository(repository)
@@ -1108,13 +1177,24 @@ def compact(repository: Path) -> dict[str, int]:
                         f"Archive destination already exists: {archived_handoff}"
                     )
                 moves.append((handoff, archived_handoff))
+        renames = {
+            source.relative_to(repository).as_posix(): destination.relative_to(
+                repository
+            ).as_posix()
+            for source, destination in moves
+        }
+        rewrites = promoted_source_rewrites(repository, renames)
         snapshot = snapshot_files(
-            [path for move in moves for path in move] + list(index_paths(repository))
+            [path for move in moves for path in move]
+            + list(index_paths(repository))
+            + [path for path, _ in rewrites]
         )
         try:
             for source, destination in moves:
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(str(source), str(destination))
+            for path, content in rewrites:
+                atomic_write(path, content)
             rebuild_indexes(repository)
             post_errors = validate_repository(repository)
             if post_errors:
@@ -1122,6 +1202,14 @@ def compact(repository: Path) -> dict[str, int]:
                     "Archive validation failed after compaction: "
                     + "; ".join(post_errors)
                 )
+            bank = repository / "memory-bank"
+            if bank.is_dir():
+                bank_errors = validate_bank(bank)
+                if bank_errors:
+                    raise BrainError(
+                        "Memory Bank validation failed after compaction: "
+                        + "; ".join(bank_errors)
+                    )
         except Exception:
             restore_files(snapshot)
             raise
@@ -1133,9 +1221,19 @@ def compact(repository: Path) -> dict[str, int]:
 
 PROMOTION_KEYS = {
     "schema_version", "id", "status", "revision", "proposer", "reviewer",
-    "reviewed_at", "created_at", "updated_at", "source_records", "title",
-    "content", "destination_memory_id", "destination_revision", "conflicts",
-    "outcome",
+    "review_mode", "reviewed_at", "created_at", "updated_at", "source_records",
+    "title", "content", "destination_memory_id", "destination_revision",
+    "conflicts", "outcome",
+}
+REVIEW_MODES = ("human", "automatic")
+# Only a resolved consequence is durable. Tasks are excluded on purpose: their
+# progress is checkpoint bookkeeping, not reusable knowledge, and events record
+# that something happened rather than what to do about it.
+PROMOTABLE_STATES = {
+    "finding": {"resolved"},
+    "bug": {"resolved"},
+    "incident": {"closed"},
+    "decision": {"accepted"},
 }
 
 
@@ -1151,8 +1249,18 @@ def validate_promotion_record(
         raise BrainError("promotion UUID must match filename")
     if promotion["status"] not in {"proposed", "reviewed", "rejected", "applied"}:
         raise BrainError("invalid promotion status")
-    if promotion["status"] in {"reviewed", "applied"} and not promotion["reviewer"]:
+    if promotion["review_mode"] not in REVIEW_MODES:
+        raise BrainError("invalid promotion review mode")
+    if (
+        promotion["status"] in {"reviewed", "applied"}
+        and not promotion["reviewer"]
+        and promotion["review_mode"] != "automatic"
+    ):
         raise BrainError("reviewed promotion requires reviewer")
+    if promotion["review_mode"] == "automatic" and promotion["reviewer"]:
+        # An automatic promotion must not name a reviewer: the record has to
+        # state plainly that no human approved it.
+        raise BrainError("automatic promotion must not claim a reviewer")
     for source in promotion["source_records"]:
         if (
             not isinstance(source, dict)
@@ -1174,7 +1282,10 @@ def create_promotion(
     content: str,
     *,
     proposer: str,
+    review_mode: str = "human",
 ) -> dict[str, Any]:
+    if review_mode not in REVIEW_MODES:
+        raise BrainError("Promotion review mode must be human or automatic")
     if not source_ids:
         raise BrainError("Promotion requires at least one source record")
     sources = []
@@ -1191,7 +1302,8 @@ def create_promotion(
     timestamp = utc_now()
     proposal = {
         "schema_version": 1, "id": new_uuid(), "status": "proposed", "revision": 1,
-        "proposer": proposer, "reviewer": None, "reviewed_at": None, "created_at": timestamp,
+        "proposer": proposer, "reviewer": None, "review_mode": review_mode,
+        "reviewed_at": None, "created_at": timestamp,
         "updated_at": timestamp, "source_records": sources, "title": title, "content": content,
         "destination_memory_id": None, "destination_revision": None, "conflicts": [],
         "outcome": None,
@@ -1214,6 +1326,11 @@ def review_promotion(repository: Path, promotion_id: str, reviewer: str, approve
         )
         if proposal.get("status") != "proposed":
             raise BrainError("Only proposed promotions may be reviewed")
+        if proposal.get("review_mode") == "automatic":
+            raise BrainError(
+                "Automatic promotions are not human-reviewable; "
+                "a human review would misrepresent how they were approved"
+            )
         if reviewer == proposal.get("proposer"):
             raise BrainError("Promotion reviewer must be independent from proposer")
         proposal["status"] = "reviewed" if approve else "rejected"
@@ -1224,6 +1341,268 @@ def review_promotion(repository: Path, promotion_id: str, reviewer: str, approve
         proposal["outcome"] = "approved" if approve else "rejected"
         atomic_json(path, proposal)
         return proposal
+
+
+def auto_review_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
+    """Advance an automatic promotion to `reviewed` without naming a reviewer.
+
+    This is not a stand-in for the human gate; it is the absence of one, made
+    explicit. `reviewer` stays null so the record cannot be mistaken later for
+    something a person approved.
+    """
+    path = brain_root(repository) / "control" / "promotions" / f"{promotion_id}.json"
+    with mutation_lock(repository):
+        try:
+            proposal = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise BrainError(f"Promotion not found or invalid: {promotion_id}") from error
+        validate_promotion_record(repository, proposal, expected_id=promotion_id)
+        if proposal.get("review_mode") != "automatic":
+            raise BrainError("Only automatic promotions may be auto-reviewed")
+        if proposal.get("status") != "proposed":
+            raise BrainError("Only proposed promotions may be reviewed")
+        proposal["status"] = "reviewed"
+        proposal["reviewed_at"] = utc_now()
+        proposal["updated_at"] = utc_now()
+        proposal["revision"] += 1
+        proposal["outcome"] = "approved-without-review"
+        validate_promotion_record(repository, proposal, expected_id=promotion_id)
+        atomic_json(path, proposal)
+        return proposal
+
+
+def iter_promotions(repository: Path) -> Iterator[tuple[str, dict[str, Any]]]:
+    directory = brain_root(repository) / "control" / "promotions"
+    if not directory.is_dir():
+        return
+    for path in sorted(directory.glob("*.json")):
+        try:
+            yield path.stem, json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+
+
+def promoted_source_ids(repository: Path) -> set[str]:
+    """Return sources that must not be proposed again.
+
+    An applied promotion is done, and one awaiting human review is legitimately
+    in flight. An automatic promotion that stalled before applying is neither:
+    it is retried in place rather than blocking its source for good.
+    """
+    promoted: set[str] = set()
+    for _, proposal in iter_promotions(repository):
+        if proposal.get("status") == "rejected":
+            continue
+        if (
+            proposal.get("status") != "applied"
+            and proposal.get("review_mode") == "automatic"
+        ):
+            continue
+        for source in proposal.get("source_records", []):
+            if isinstance(source, dict) and isinstance(source.get("id"), str):
+                promoted.add(source["id"])
+    return promoted
+
+
+def stalled_automatic_promotions(repository: Path) -> list[tuple[str, dict[str, Any]]]:
+    """Return automatic promotions that were created but never applied."""
+    return [
+        (promotion_id, proposal)
+        for promotion_id, proposal in iter_promotions(repository)
+        if proposal.get("review_mode") == "automatic"
+        and proposal.get("status") in {"proposed", "reviewed"}
+    ]
+
+
+def promotion_content(record: dict[str, Any]) -> Optional[str]:
+    """Build durable content from a record, or None when it says nothing.
+
+    A record's rendered body is mostly lifecycle scaffolding — goal, progress,
+    next steps, files — and for a decision the goal merely repeats the title.
+    Promoting that verbatim fills durable memory with stubs that restate their
+    own heading, so the reusable part is assembled explicitly and a record
+    without one is not promoted at all.
+    """
+    title = str(record["title"]).strip()
+    progress = " ".join(str(record.get("progress") or "").split())
+    if not progress:
+        return None
+    if progress.rstrip(".").casefold() == title.rstrip(".").casefold():
+        return None
+    sections = [progress]
+    sources = [
+        source
+        for source in record.get("sources", [])
+        if isinstance(source, str) and source.strip()
+    ]
+    if sources:
+        sections.append("## Sources\n" + "\n".join(f"- {source}" for source in sources))
+    return "\n\n".join(sections)
+
+
+def promotable_records(
+    repository: Path, config: dict[str, Any]
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Return promotable records, and the ones a rule held back.
+
+    Eligibility is deliberately narrow. Tasks never qualify: auto-checkpoint
+    progress describes what happened in a session, not a consequence worth
+    carrying into another one. Only `verified` authority qualifies, because an
+    automatic pipeline has no reviewer to catch an unverified claim.
+
+    A record of a promotable type that a rule rejected is reported rather than
+    dropped in silence. Editing a cited source is enough to hold a decision
+    back forever, and an unexplained absence from durable memory is impossible
+    to notice.
+    """
+    already = promoted_source_ids(repository)
+    candidates: list[dict[str, Any]] = []
+    blocked: list[dict[str, str]] = []
+    # Archived records stay promotable. A resolved finding is both promotable
+    # and archivable, so compaction can move it before a capped promotion run
+    # reaches it; scanning only active records would lose it permanently.
+    for path, record, body in iter_records(repository, include_archive=True):
+        try:
+            validate_record(record)
+        except BrainError:
+            continue
+        if record["id"] in already:
+            continue
+        if record["status"] not in PROMOTABLE_STATES.get(record["type"], set()):
+            continue
+        reason: Optional[str] = None
+        if record["authority"] != "verified":
+            reason = f"authority is {record['authority']}, not verified"
+        elif record["privacy"] not in config["allowed_privacy"]:
+            reason = f"privacy {record['privacy']} is not allowed for retrieval"
+        elif not sources_are_fresh(repository, record):
+            stale = [
+                item["path"]
+                for item in record["source_fingerprints"]
+                if not sources_are_fresh(
+                    repository, {"sources": [item["path"]], "source_fingerprints": [item]}
+                )
+            ]
+            reason = "cited source changed since the record was written: " + ", ".join(
+                stale or record["sources"]
+            )
+        content = promotion_content(record)
+        if reason is None and content is None:
+            reason = "record carries no content beyond its own title"
+        if reason is not None:
+            blocked.append({"record_id": record["id"], "reason": reason})
+            continue
+        candidates.append({"record": record, "content": content})
+    return candidates, blocked
+
+
+def auto_promote(repository: Path, *, owner: str, limit: int = 5) -> dict[str, Any]:
+    """Promote resolved, verified knowledge into durable memory without review.
+
+    Every applied chunk is tagged `auto-promoted` and its promotion names no
+    reviewer, so the absence of human approval stays visible in both stores.
+    """
+    config = load_config(repository)
+    if not config.get("automatic_promotion"):
+        return {
+            "enabled": False, "promoted": [], "failed": [],
+            "blocked": [], "skipped": 0,
+        }
+    promoted: list[dict[str, Any]] = []
+    failed: list[dict[str, str]] = []
+
+    # Retry a promotion that stalled after its record was created, in place.
+    # Creating a second one would leave the first orphaned forever.
+    for promotion_id, proposal in stalled_automatic_promotions(repository):
+        source = proposal["source_records"][0]
+        try:
+            if proposal["status"] == "proposed":
+                auto_review_promotion(repository, promotion_id)
+            applied = apply_promotion(repository, promotion_id)
+        except BrainError as error:
+            failed.append({"record_id": source["id"], "reason": str(error)})
+            continue
+        promoted.append(
+            {
+                "record_id": source["id"],
+                "type": source["type"],
+                "memory_id": applied["destination_memory_id"],
+            }
+        )
+
+    candidates, blocked = promotable_records(repository, config)
+    for candidate in candidates[:limit]:
+        record = candidate["record"]
+        try:
+            proposal = create_promotion(
+                repository,
+                [record["id"]],
+                record["title"],
+                candidate["content"],
+                proposer=owner,
+                review_mode="automatic",
+            )
+            auto_review_promotion(repository, proposal["id"])
+            applied = apply_promotion(repository, proposal["id"])
+        except BrainError as error:
+            # One unpromotable record must not stop the rest, but a systematic
+            # failure — an absent Memory Bank, say — has to stay visible rather
+            # than looking like "nothing was worth promoting".
+            failed.append({"record_id": record["id"], "reason": str(error)})
+            continue
+        promoted.append(
+            {
+                "record_id": record["id"],
+                "type": record["type"],
+                "memory_id": applied["destination_memory_id"],
+            }
+        )
+    return {
+        "enabled": True,
+        "promoted": promoted,
+        "failed": failed,
+        "blocked": blocked,
+        "skipped": max(0, len(candidates) - limit),
+    }
+
+
+def archivable_records(repository: Path) -> int:
+    """Count active records that compaction would move."""
+    total = 0
+    for _, record, _ in iter_records(repository):
+        if (
+            record["status"] in LIFECYCLES[record["type"]]["terminal"]
+            or record.get("superseded_by") is not None
+        ):
+            total += 1
+    return total
+
+
+def auto_compact(repository: Path, *, owner: str = "local") -> dict[str, Any]:
+    """Archive terminal records once enough of them have accumulated.
+
+    Compaction moves Git-tracked files and rebuilds indexes, so it runs in
+    batches rather than on every turn: archiving one record at a time would
+    churn history for no benefit. A failure is reported rather than raised, so
+    a checkpoint that already landed is not reported as a failed turn.
+    """
+    config = load_config(repository)
+    if not config.get("automatic_compaction"):
+        return {"enabled": False, "moved": 0, "pending": 0, "error": None}
+    threshold = config.get("compaction_threshold", 5)
+    if not isinstance(threshold, int) or threshold < 1:
+        return {
+            "enabled": True, "moved": 0, "pending": 0,
+            "error": "compaction_threshold must be a positive integer",
+        }
+    pending = archivable_records(repository)
+    if pending < threshold:
+        return {"enabled": True, "moved": 0, "pending": pending, "error": None}
+    try:
+        moved = compact(repository)["moved"]
+    except BrainError as error:
+        return {"enabled": True, "moved": 0, "pending": pending, "error": str(error)}
+    return {"enabled": True, "moved": moved, "pending": 0, "error": None}
 
 
 def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
@@ -1239,7 +1618,10 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
         validate_promotion_record(
             repository, proposal, expected_id=promotion_id
         )
-        if proposal.get("status") != "reviewed" or not proposal.get("reviewer"):
+        automatic = proposal.get("review_mode") == "automatic"
+        if proposal.get("status") != "reviewed" or (
+            not proposal.get("reviewer") and not automatic
+        ):
             raise BrainError("Promotion requires an approved human review before apply")
         for source in proposal["source_records"]:
             current_path, current, _ = find_record(
@@ -1265,18 +1647,29 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
         if destination.exists():
             raise BrainError(f"Promotion destination already exists: {destination}")
         today = datetime.now(timezone.utc).date()
+        # Tag the chunk so the bank itself shows which knowledge no human
+        # approved; a reader must not have to open the promotion to find out.
+        tags = ["project-brain", "promoted"] + (["auto-promoted"] if automatic else [])
         metadata = {
             "id": memory_id, "title": proposal["title"], "type": "decision", "status": "active",
-            "scope": ["application"], "tags": ["project-brain", "promoted"],
+            "scope": ["application"], "tags": tags,
             "created": today.isoformat(), "last_verified": today.isoformat(),
             "review_after": (today + timedelta(days=365)).isoformat(),
             "sources": [item["path"] for item in proposal["source_records"]],
             "supersedes": [], "superseded_by": None,
+            # Open-ended validity: the knowledge holds from today until a
+            # successor closes it with a valid_to, rather than being deleted.
+            "valid_from": today.isoformat(), "valid_to": None,
         }
-        chunk = render_markdown_record(metadata, f"# {proposal['title']}\n\n{proposal['content']}")
+        heading = f"# {proposal['title']}"
+        content = proposal["content"].strip()
+        chunk = render_markdown_record(
+            metadata,
+            content if content.startswith(heading) else f"{heading}\n\n{content}",
+        )
         row = (
             f"| {memory_id} | {proposal['title']} | decision | application | "
-            f"project-brain, promoted | active | {today.isoformat()} | "
+            f"{', '.join(tags)} | active | {today.isoformat()} | "
             f"chunks/{destination.name} |\n"
         )
         snapshot = snapshot_files(

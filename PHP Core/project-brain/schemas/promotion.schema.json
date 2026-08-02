@@ -4,9 +4,9 @@
   "additionalProperties": false,
   "required": [
     "schema_version", "id", "status", "revision", "proposer", "reviewer",
-    "reviewed_at", "created_at", "updated_at", "source_records", "title",
-    "content", "destination_memory_id", "destination_revision", "conflicts",
-    "outcome"
+    "review_mode", "reviewed_at", "created_at", "updated_at", "source_records",
+    "title", "content", "destination_memory_id", "destination_revision",
+    "conflicts", "outcome"
   ],
   "properties": {
     "schema_version": {"const": 1},
@@ -15,6 +15,7 @@
     "revision": {"type": "integer", "minimum": 1},
     "proposer": {"type": "string", "minLength": 1},
     "reviewer": {"type": ["string", "null"]},
+    "review_mode": {"enum": ["human", "automatic"]},
     "reviewed_at": {"type": ["string", "null"], "format": "date-time"},
     "created_at": {"type": "string", "format": "date-time"},
     "updated_at": {"type": "string", "format": "date-time"},

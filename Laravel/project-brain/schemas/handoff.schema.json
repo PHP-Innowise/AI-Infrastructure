@@ -1,28 +1,112 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "type": "object",
   "additionalProperties": false,
-  "required": [
-    "schema_version", "id", "type", "task_id", "task_revision", "revision",
-    "owner", "privacy", "created_at", "updated_at", "objective",
-    "current_state", "next_actions", "files", "sources", "status"
-  ],
   "properties": {
-    "schema_version": {"const": 1},
-    "id": {"type": "string", "format": "uuid"},
-    "type": {"const": "handoff"},
-    "task_id": {"type": "string", "format": "uuid"},
-    "task_revision": {"type": "integer", "minimum": 1},
-    "revision": {"type": "integer", "minimum": 1},
-    "owner": {"type": "string", "minLength": 1},
-    "privacy": {"enum": ["public", "team", "restricted", "private"]},
-    "created_at": {"type": "string", "format": "date-time"},
-    "updated_at": {"type": "string", "format": "date-time"},
-    "objective": {"type": "string", "minLength": 1},
-    "current_state": {"type": "string"},
-    "next_actions": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
-    "files": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
-    "sources": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
-    "status": {"enum": ["active", "closed"]}
-  }
+    "created_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "current_state": {
+      "type": "string"
+    },
+    "files": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "next_actions": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "objective": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "owner": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "phase": {
+      "enum": [
+        "understanding",
+        "planning",
+        "execution",
+        "finalization"
+      ]
+    },
+    "privacy": {
+      "enum": [
+        "public",
+        "team",
+        "restricted",
+        "private"
+      ]
+    },
+    "revision": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "sources": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "status": {
+      "enum": [
+        "active",
+        "closed"
+      ]
+    },
+    "task_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "task_revision": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "type": {
+      "const": "handoff"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "id",
+    "type",
+    "task_id",
+    "task_revision",
+    "revision",
+    "owner",
+    "privacy",
+    "created_at",
+    "updated_at",
+    "objective",
+    "current_state",
+    "next_actions",
+    "files",
+    "sources",
+    "status"
+  ],
+  "type": "object"
 }

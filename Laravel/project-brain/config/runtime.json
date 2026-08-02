@@ -7,7 +7,12 @@
     "public",
     "team"
   ],
+  "automatic_compaction": true,
+  "automatic_completion": true,
+  "automatic_promotion": true,
   "canonical_edition": ".agents",
+  "codebase_map_max_drift": 25,
+  "compaction_threshold": 5,
   "framework": "laravel",
   "mode": "governed",
   "owners": [

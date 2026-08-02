@@ -16,7 +16,12 @@ from typing import Optional
 
 from brain_runtime import (
     BrainError,
+    LIFECYCLES,
+    TASK_PHASES,
+    auto_compact,
+    auto_promote,
     cancel_task,
+    iter_records,
     close_task,
     compact,
     configured_mode,
@@ -37,11 +42,20 @@ from brain_runtime import (
     validate_repository,
 )
 from context_retrieval import (
+    DocumentRow,
     RetrievalError,
+    SourceState,
+    informative_tokens,
     assert_skill_mirror_parity,
     ensure_metadata_tables,
     index_documents,
+    codebase_map_drift,
+    is_relevant,
+    query_tokens,
+    required_coverage,
     retrieve,
+    reusable_source_state,
+    token_coverage,
 )
 from validate import (
     SECRET_PATTERNS,
@@ -66,6 +80,7 @@ SOURCE_PATTERNS = (
     ("semantic", "overview", "README.md"),
     ("semantic", "spec", "specs/**/*.md"),
     ("semantic", "spec", "docs/**/*.md"),
+    ("semantic", "codebase", "codebase/*.md"),
     ("semantic", "memory", "memory-bank/chunks/*.md"),
     ("semantic", "task", "tasks/**/*.md"),
     ("semantic", "capability", "Task/Epics/**/*.md"),
@@ -98,6 +113,29 @@ CAPSULE_RAW_TEXT_PATTERN = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 TASK_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
+# Porter wraps unicode61 so "rounding" matches "round" and "review" matches
+# "reviewer". Without stemming the correct skill is simply missed: a security
+# question did not retrieve the security skill because its title says
+# "Reviewer". Non-English tokens pass through the stemmer unchanged.
+TOKENIZER = "porter unicode61"
+# A skill's identity lives in its declared description, not in its body prose,
+# which reads much alike across skills. Indexing that separately lets ranking
+# weight what a document is *about* over what it happens to mention.
+DESCRIPTION_PATTERN = re.compile(r"^description:\s*(.+)$", re.MULTILINE)
+SUMMARY_CHARACTERS = 400
+AUTO_REVISION = "auto"
+DEFAULT_TURN_FLUSH_AFTER = 5
+DEFAULT_TURN_FILE_LIMIT = 20
+TURN_PATH_DENYLIST = re.compile(
+    r"(^|/)(\.env(\..+)?|secrets?|id_[a-z0-9]+|[^/]+\.(pem|key|p12|pfx|jks|keystore))$",
+    re.IGNORECASE,
+)
+TURN_RUNTIME_DIRECTORIES = ("dynamic", "control", "indexes", "archive", "local")
+BRANCH_PREFIXES = (
+    "feature/", "feat/", "fix/", "bugfix/", "hotfix/", "chore/", "release/",
+    "refactor/", "docs/", "test/", "merge/",
+)
+TICKET_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9]*-\d+")
 
 
 def default_root() -> Path:
@@ -117,8 +155,21 @@ def connect(database: Path) -> sqlite3.Connection:
         document_columns = {
             row["name"] for row in connection.execute("PRAGMA table_info(documents)")
         }
-        if document_columns and "layer" not in document_columns:
+        document_schema = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'documents'"
+        ).fetchone()
+        stale_tokenizer = document_schema is not None and TOKENIZER not in (
+            document_schema["sql"] or ""
+        )
+        if document_columns and (
+            "layer" not in document_columns
+            or "summary" not in document_columns
+            or stale_tokenizer
+        ):
+            # The index is derived from repository sources, so a tokenizer
+            # change is a rebuild rather than a migration.
             connection.execute("DROP TABLE documents")
+            connection.execute("DROP TABLE IF EXISTS document_source_state")
             document_columns = set()
         if not document_columns:
             create_document_table(connection)
@@ -127,7 +178,7 @@ def connect(database: Path) -> sqlite3.Connection:
         ).fetchone()
         if episode_schema is None:
             create_episode_table(connection)
-        elif any(
+        elif TOKENIZER not in (episode_schema["sql"] or "") or any(
             re.search(
                 rf"\b{column}\s+UNINDEXED\b",
                 episode_schema["sql"],
@@ -150,6 +201,16 @@ def connect(database: Path) -> sqlite3.Connection:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS turn_deltas(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                files TEXT NOT NULL
+            )
+            """
+        )
         ensure_metadata_tables(connection)
         connection.commit()
     except Exception as error:
@@ -163,14 +224,15 @@ def connect(database: Path) -> sqlite3.Connection:
 
 def create_document_table(connection: sqlite3.Connection) -> None:
     connection.execute(
-        """
+        f"""
         CREATE VIRTUAL TABLE documents USING fts5(
             path UNINDEXED,
             layer UNINDEXED,
             kind UNINDEXED,
             title,
+            summary,
             content,
-            tokenize = 'unicode61'
+            tokenize = '{TOKENIZER}'
         )
         """
     )
@@ -178,7 +240,7 @@ def create_document_table(connection: sqlite3.Connection) -> None:
 
 def create_episode_table(connection: sqlite3.Connection) -> None:
     connection.execute(
-        """
+        f"""
         CREATE VIRTUAL TABLE episodes USING fts5(
             summary,
             outcome,
@@ -186,7 +248,7 @@ def create_episode_table(connection: sqlite3.Connection) -> None:
             verification,
             sources,
             created_at UNINDEXED,
-            tokenize = 'unicode61'
+            tokenize = '{TOKENIZER}'
         )
         """
     )
@@ -209,6 +271,21 @@ def migrate_episode_table(connection: sqlite3.Connection) -> None:
         """,
         rows,
     )
+
+
+def document_summary(content: str) -> str:
+    """Return what a document declares itself to be about.
+
+    Prefers a frontmatter `description`, and otherwise the opening prose, so a
+    document without one still contributes something more specific than its
+    whole body.
+    """
+    described = DESCRIPTION_PATTERN.search(content)
+    if described:
+        return " ".join(described.group(1).split())[:SUMMARY_CHARACTERS]
+    body = re.sub(r"^---.*?^---", "", content, flags=re.S | re.M)
+    lead = [line for line in body.splitlines() if line.strip() and not line.startswith("#")]
+    return " ".join(" ".join(lead).split())[:SUMMARY_CHARACTERS]
 
 
 def document_title(path: Path, content: str) -> str:
@@ -249,9 +326,23 @@ def git_ignored_paths(repository: Path, paths: list[str]) -> set[bytes]:
     return set(result.stdout.split(b"\0")) - {b""}
 
 
-def discover_documents(repository: Path) -> list[tuple[str, str, str, str, str]]:
-    documents: list[tuple[str, str, str, str, str]] = []
+def discover_documents(
+    repository: Path, reusable: Optional[SourceState] = None
+) -> tuple[list[DocumentRow], SourceState, SourceState]:
+    """Return changed documents, the retained cache subset, and the new cache.
+
+    ``reusable`` maps already-indexed paths to the (mtime_ns, size) recorded by
+    the last successful index. A candidate whose stat still matches is neither
+    read nor re-validated, which is what makes per-request indexing affordable:
+    secret scanning dominates a full pass. A modification that somehow reuses
+    its predecessor's stat is still not served as truth — governed retrieval
+    re-hashes every candidate and excludes the mismatch as stale.
+    """
+    documents: list[DocumentRow] = []
+    retained: SourceState = {}
+    state: SourceState = {}
     skill_keys: set[str] = set()
+    claimed: set[str] = set()
     candidates: list[tuple[str, str, Path, str]] = []
     for layer, kind, pattern in SOURCE_PATTERNS:
         for path in sorted(repository.glob(pattern)):
@@ -261,11 +352,39 @@ def discover_documents(repository: Path) -> list[tuple[str, str, str, str, str]]
                 (layer, kind, path, path.relative_to(repository).as_posix())
             )
 
+    cache = reusable or {}
     ignored_paths = git_ignored_paths(
         repository, [relative_path for _, _, _, relative_path in candidates]
     )
     for layer, kind, path, relative_path in candidates:
         if os.fsencode(relative_path) in ignored_paths:
+            continue
+        if relative_path in claimed:
+            # Two patterns can match one file, and the earlier one owns its
+            # layer and kind. Without this the document is inserted twice and
+            # the metadata primary key aborts the whole refresh.
+            continue
+        claimed.add(relative_path)
+        skill_key = (
+            relative_path.split("/skills/", maxsplit=1)[1] if kind == "skill" else None
+        )
+        if skill_key is not None and skill_key in skill_keys:
+            # A mirrored copy of an already-indexed skill. Only a copy that
+            # passes validation claims the key, so a later copy can never win
+            # it and never needs to be read or scanned.
+            continue
+        try:
+            status = path.stat()
+        except OSError:
+            continue
+        current = (status.st_mtime_ns, status.st_size)
+        if cache.get(relative_path) == current:
+            # Unchanged since the last successful index, so it already passed
+            # secret and active-memory validation; keep the existing row.
+            if skill_key is not None:
+                skill_keys.add(skill_key)
+            retained[relative_path] = current
+            state[relative_path] = current
             continue
         try:
             if kind == "memory":
@@ -281,10 +400,7 @@ def discover_documents(repository: Path) -> list[tuple[str, str, str, str, str]]
             raise ContextError(
                 f"Source document is not valid UTF-8: {relative_path}"
             ) from error
-        if kind == "skill":
-            skill_key = relative_path.split("/skills/", maxsplit=1)[1]
-            if skill_key in skill_keys:
-                continue
+        if skill_key is not None:
             skill_keys.add(skill_key)
         documents.append(
             (
@@ -292,15 +408,35 @@ def discover_documents(repository: Path) -> list[tuple[str, str, str, str, str]]
                 layer,
                 kind,
                 document_title(path, content),
+                document_summary(content),
                 content,
             )
         )
-    return documents
+        # Stat was taken before the read, so a write that races this pass is
+        # detected next time instead of being cached away.
+        state[relative_path] = current
+    return documents, retained, state
 
 
-def index_repository(connection: sqlite3.Connection, repository: Path) -> dict[str, object]:
-    documents = discover_documents(repository)
-    return index_documents(connection, repository, documents)
+def index_repository(
+    connection: sqlite3.Connection, repository: Path, *, incremental: bool = False
+) -> dict[str, object]:
+    if incremental:
+        reusable, fingerprints = reusable_source_state(connection, repository)
+        documents, retained, state = discover_documents(repository, reusable)
+        try:
+            return index_documents(
+                connection,
+                repository,
+                documents,
+                retained=retained,
+                source_state=state,
+                fingerprints=fingerprints,
+            )
+        except RetrievalError:
+            pass  # The cache disagreed with the index; fall through and rebuild.
+    documents, _, state = discover_documents(repository)
+    return index_documents(connection, repository, documents, source_state=state)
 
 
 def fts_query(query: str) -> str:
@@ -317,13 +453,31 @@ def search_documents(
     query: str,
     limit: int,
     layer: Optional[str] = None,
+    relevant_only: bool = False,
 ) -> list[dict[str, object]]:
+    """Search the index.
+
+    ``relevant_only`` drops corpus-common terms and requires a document to
+    contain more than one query term. Capsule assembly uses it, because a
+    document that shares a single common word with the request is noise
+    presented as context. Explicit `search` stays broad by design.
+    """
+    coverage: dict[str, int] = {}
+    distinctive: set[str] = set()
+    minimum = 0
+    if relevant_only:
+        tokens = informative_tokens(connection, query_tokens(query))
+        coverage, distinctive = token_coverage(connection, tokens)
+        minimum = required_coverage(tokens)
+        match = " OR ".join(f'"{token}"' for token in tokens)
+    else:
+        match = fts_query(query)
     conditions = ["documents MATCH ?"]
-    parameters: list[object] = [fts_query(query)]
+    parameters: list[object] = [match]
     if layer is not None:
         conditions.append("layer = ?")
         parameters.append(layer)
-    parameters.append(limit)
+    parameters.append(limit if not relevant_only else limit * 10)
     rows = connection.execute(
         f"""
         SELECT
@@ -331,7 +485,7 @@ def search_documents(
             layer,
             kind,
             title,
-            snippet(documents, 4, '[', ']', ' … ', 18) AS snippet
+            snippet(documents, 5, '[', ']', ' … ', 18) AS snippet
         FROM documents
         WHERE {' AND '.join(conditions)}
         ORDER BY bm25(documents), path
@@ -339,7 +493,12 @@ def search_documents(
         """,
         parameters,
     ).fetchall()
-    return [dict(row) for row in rows]
+    selected = [
+        row
+        for row in rows
+        if is_relevant(row["path"], coverage, distinctive, minimum)
+    ] if relevant_only else rows
+    return [dict(row) for row in selected[:limit]]
 
 
 def search_episodes(
@@ -537,26 +696,32 @@ def build_context_packet(
     semantic_limit = min(limit, CAPSULE_LAYER_LIMITS["semantic"])
     episodic_limit = min(limit, CAPSULE_LAYER_LIMITS["episodic"])
     procedural = search_documents(
-        connection, request_query, procedural_limit, "procedural"
+        connection, request_query, procedural_limit, "procedural",
+        relevant_only=True,
     )
     semantic = search_documents(
-        connection, request_query, semantic_limit, "semantic"
+        connection, request_query, semantic_limit, "semantic",
+        relevant_only=True,
     )
     episodic = search_documents(
-        connection, request_query, episodic_limit, "episodic"
+        connection, request_query, episodic_limit, "episodic",
+        relevant_only=True,
     ) + search_episodes(connection, request_query, episodic_limit)
     if retrieval_query != request_query:
         if len(deduplicate_context_items(procedural)) < procedural_limit:
             procedural += search_documents(
-                connection, retrieval_query, procedural_limit, "procedural"
+                connection, retrieval_query, procedural_limit, "procedural",
+                relevant_only=True,
             )
         if len(deduplicate_context_items(semantic)) < semantic_limit:
             semantic += search_documents(
-                connection, retrieval_query, semantic_limit, "semantic"
+                connection, retrieval_query, semantic_limit, "semantic",
+                relevant_only=True,
             )
         if len(deduplicate_context_items(episodic)) < episodic_limit:
             episodic += search_documents(
-                connection, retrieval_query, episodic_limit, "episodic"
+                connection, retrieval_query, episodic_limit, "episodic",
+                relevant_only=True,
             ) + search_episodes(connection, retrieval_query, episodic_limit)
     packet["procedural"] = deduplicate_context_items(procedural)[:procedural_limit]
     packet["semantic"] = deduplicate_context_items(semantic)[:semantic_limit]
@@ -1004,6 +1169,7 @@ def compensate_governed_binding(
 def governed_task_view(record: dict[str, object]) -> dict[str, object]:
     return {
         "task_id": record["external_id"],
+        "phase": record.get("phase"),
         "task_uuid": record["id"],
         "revision": record["revision"],
         "status": record["status"],
@@ -1016,6 +1182,637 @@ def governed_task_view(record: dict[str, object]) -> dict[str, object]:
         "updated_at": record["updated_at"],
         "authority": "project-brain",
     }
+
+
+def codebase_map_status(
+    connection: sqlite3.Connection, repository: Path
+) -> list[dict[str, object]]:
+    """Report how far each codebase map has drifted from the code it describes.
+
+    Retrieval excludes a drifted map, but silently: an operator who never sees
+    the number cannot know the map needs regenerating.
+    """
+    try:
+        rows = connection.execute(
+            "SELECT path FROM documents WHERE kind = 'codebase' ORDER BY path"
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    status: list[dict[str, object]] = []
+    for row in rows:
+        path = repository / row["path"]
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        drift = codebase_map_drift(repository, content)
+        status.append({"path": row["path"], "commits_behind": drift})
+    return status
+
+
+def refresh_layers(
+    connection: sqlite3.Connection, repository: Path
+) -> tuple[dict[str, str], dict[str, object], list[str]]:
+    """Re-index every memory layer and report each one separately.
+
+    Procedural (policy and skills), semantic (overview, specs, docs, active
+    Memory Bank chunks, task documents, eligible Brain records), and episodic
+    (changelog) all come from one indexing pass, so they succeed or fail
+    together. They are still reported per layer: a caller that is told only
+    "refresh failed" cannot tell which part of its context went stale.
+    """
+    try:
+        result = index_repository(connection, repository, incremental=True)
+    except (ContextError, RetrievalError, OSError, sqlite3.Error) as error:
+        return (
+            {layer: "failed" for layer in DOCUMENT_LAYERS},
+            {},
+            [f"Index refresh failed: {error}"],
+        )
+    return {layer: "updated" for layer in DOCUMENT_LAYERS}, result, []
+
+
+def assemble_capsule(
+    connection: sqlite3.Connection,
+    repository: Path,
+    *,
+    mode: str,
+    query: str,
+    task_id: Optional[str],
+    limit: int,
+    ephemeral: bool,
+    refresh_index: bool = True,
+) -> dict[str, object]:
+    """Build the layered capsule for one request.
+
+    ``refresh_index`` exists so a caller that already refreshed does not index
+    twice; retrieval reads the index rather than the sources, so the refresh
+    has to happen somewhere before this runs.
+    """
+    warnings: list[str] = []
+    if refresh_index:
+        _, _, warnings = refresh_layers(connection, repository)
+    if mode == "lightweight":
+        result = build_context_packet(
+            connection,
+            query,
+            task_id,
+            limit,
+            include_retrieval=not warnings,
+            warnings=warnings,
+        )
+        # Character budget applies only here: retrieve() below runs its own
+        # token budget (TARGET_BUDGET/HARD_BUDGET) and its payload legitimately
+        # exceeds CAPSULE_CHARACTER_LIMIT.
+        return enforce_capsule_budget(result)
+    if task_id is None:
+        raise ContextError("Governed retrieval requires --task-id")
+    # The governed path bypasses build_context_packet, so apply the same query
+    # guards build_context_packet would have applied.
+    reject_secrets("Task Capsule", [query])
+    reject_capsule_privacy("Task Capsule request", [query])
+    binding = governed_binding(connection, task_id)
+    result = retrieve(
+        connection,
+        repository,
+        query,
+        binding["task_uuid"],
+        limit=limit,
+        manifest_scope="local" if ephemeral else "governed",
+    )
+    result["episodic"] = (
+        search_documents(connection, query, limit, "episodic", relevant_only=True)
+        + search_episodes(connection, query, limit)
+    )[:limit]
+    # The print tail dereferences result["warnings"]; retrieve() has no such key.
+    result["warnings"] = warnings
+    return result
+
+
+def print_capsule(capsule: dict[str, object]) -> None:
+    working = capsule["working"]
+    if working is None:
+        print("working: unavailable")
+    else:
+        print(f"working: {working['task_id']} — {working['goal']}")
+    for warning in capsule["warnings"]:
+        print(f"warning: {warning}")
+    for layer in DOCUMENT_LAYERS:
+        items = capsule[layer]
+        if not items:
+            continue
+        print(f"{layer}:")
+        for item in items:
+            label = item["path"] if "path" in item else f"episode {item['id']}"
+            title = item["title"] if "title" in item else item["summary"]
+            print(f"  {label} — {title}")
+
+
+def revision_argument(value: str) -> object:
+    """Accept an explicit revision or 'auto' for a locked read-modify-write."""
+    if value == AUTO_REVISION:
+        return AUTO_REVISION
+    try:
+        revision = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            f"Revision must be a positive integer or '{AUTO_REVISION}'"
+        ) from error
+    if revision < 1:
+        raise argparse.ArgumentTypeError(
+            f"Revision must be a positive integer or '{AUTO_REVISION}'"
+        )
+    return revision
+
+
+def resolve_revision(
+    repository: Path, identifier: str, requested: object
+) -> Optional[int]:
+    """Resolve 'auto' against the record on disk.
+
+    Call this inside the caller's ``mutation_lock`` so the read and the write
+    it feeds form one compare-and-swap. Automated writers cannot know the
+    revision in advance, and passing no revision at all would skip the check
+    entirely rather than perform it.
+    """
+    if requested != AUTO_REVISION:
+        return requested  # type: ignore[return-value]
+    return int(get_record(repository, identifier)["revision"])
+
+
+def apply_governed_update(
+    connection: sqlite3.Connection,
+    repository: Path,
+    binding: sqlite3.Row,
+    *,
+    expected_revision: object,
+    progress: Optional[str],
+    next_steps: list[str],
+    files: list[str],
+    sources: list[str],
+    owner: str,
+    phase: Optional[str] = None,
+) -> dict[str, object]:
+    """Update the authoritative Brain task and its local compatibility binding."""
+    with mutation_lock(repository):
+        revision = resolve_revision(
+            repository, binding["task_uuid"], expected_revision
+        )
+        snapshot = snapshot_record_state(repository, binding["task_uuid"])
+        try:
+            task = update_task(
+                repository,
+                binding["task_uuid"],
+                expected_revision=revision,
+                progress=progress,
+                next_steps=next_steps,
+                files=files,
+                sources=sources,
+                actor=owner,
+                phase=phase,
+            )
+            refresh_governed_binding(
+                connection,
+                binding["external_id"],
+                int(task["revision"]),
+            )
+        except Exception:
+            restore_record_state(repository, snapshot)
+            compensate_governed_binding(
+                connection,
+                binding["external_id"],
+                revision=int(binding["revision"]),
+            )
+            raise
+    return governed_task_view(task)
+
+
+def git_output(repository: Path, arguments: list[str], label: str) -> bytes:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repository), *arguments],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError as error:
+        raise ContextError(f"{label} failed") from error
+    if result.returncode != 0:
+        raise ContextError(f"{label} failed with exit status {result.returncode}")
+    return result.stdout
+
+
+def derive_goal(task_id: str) -> str:
+    """Build a task goal from a branch name.
+
+    A task goal cannot be edited after creation, so an automatically created
+    one states its own provenance instead of pretending someone wrote it.
+    """
+    label = task_id
+    for prefix in BRANCH_PREFIXES:
+        if label.lower().startswith(prefix):
+            label = label[len(prefix):]
+            break
+    # A ticket identifier spells its own hyphen, so protect it before treating
+    # the remaining hyphens as word separators: BAUMAS-133 is a name, not two.
+    tickets = TICKET_PATTERN.findall(label)
+    for index, ticket in enumerate(tickets):
+        label = label.replace(ticket, f"\x00{index}\x00", 1)
+    label = " ".join(part for part in re.split(r"[-_/]+", label) if part)
+    for index, ticket in enumerate(tickets):
+        label = label.replace(f"\x00{index}\x00", ticket)
+    label = f"{label[:1].upper()}{label[1:]}" if label.strip() else task_id
+    return f"{label} (auto-provisioned from {task_id})"
+
+
+def create_governed_task(
+    connection: sqlite3.Connection,
+    repository: Path,
+    task_id: str,
+    goal: str,
+    files: list[str],
+    sources: list[str],
+    owner: str,
+) -> dict[str, object]:
+    """Create the Brain task and its local binding, or leave neither behind."""
+    with mutation_lock(repository):
+        task = create_task(repository, task_id, goal, files, sources, owner=owner)
+        try:
+            bind_governed_task(
+                connection, task_id, str(task["id"]), int(task["revision"])
+            )
+        except Exception:
+            try:
+                compensate_governed_binding(connection, task_id, revision=None)
+            finally:
+                rollback_created_record(repository, str(task["id"]))
+            raise
+    return task
+
+
+def ensure_working_task(
+    connection: sqlite3.Connection,
+    repository: Path,
+    task_id: str,
+    mode: str,
+    owner: str,
+) -> bool:
+    """Create the working task the first time a turn has something to record.
+
+    Automated continuity is worthless if it buffers into a task nobody created.
+    Provisioning happens at flush time rather than at session start, so merely
+    visiting a branch does not mint a record; only accumulated real work does.
+
+    Returns whether a task was created.
+    """
+    goal = derive_goal(task_id)
+    reject_secrets("working task", [task_id, goal])
+    reject_capsule_privacy("Working task", [goal], [task_id])
+    if mode == "lightweight":
+        if find_working_task(connection, task_id) is not None:
+            return False
+        start_working_task(connection, task_id, goal, [], [])
+        return True
+    try:
+        governed_binding(connection, task_id)
+        return False
+    except ContextError:
+        create_governed_task(connection, repository, task_id, goal, [], [], owner)
+        return True
+
+
+def complete_governed_task(
+    connection: sqlite3.Connection,
+    repository: Path,
+    binding: sqlite3.Row,
+    *,
+    outcome: str,
+    summary: Optional[str],
+    files: list[str],
+    verification: list[str],
+    sources: list[str],
+    expected_revision: object,
+    owner: str,
+) -> dict[str, object]:
+    """Close the Brain task, record the episode, and drop the local binding."""
+    task = get_task(repository, binding["task_uuid"])
+    with mutation_lock(repository):
+        snapshot = snapshot_record_state(repository, binding["task_uuid"])
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            episode_id = insert_episode(
+                connection,
+                str(task["goal"]) if summary is None else summary,
+                outcome,
+                merge_unique(list(task["files"]), files),
+                verification,
+                merge_unique(list(task["sources"]), sources),
+            )
+            deleted = connection.execute(
+                "DELETE FROM working_tasks WHERE task_id = ?",
+                (binding["external_id"],),
+            )
+            if deleted.rowcount != 1:
+                raise ContextError(
+                    f"Working task not found: {binding['external_id']}"
+                )
+            connection.execute(
+                "DELETE FROM task_bindings WHERE external_id = ?",
+                (binding["external_id"],),
+            )
+            completed = close_task(
+                repository,
+                binding["task_uuid"],
+                outcome,
+                verification,
+                expected_revision=resolve_revision(
+                    repository, binding["task_uuid"], expected_revision
+                ),
+                actor=owner,
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            restore_record_state(repository, snapshot)
+            raise
+    return {
+        "episode_id": episode_id,
+        "task_uuid": completed["id"],
+        "revision": completed["revision"],
+        "status": completed["status"],
+    }
+
+
+def default_branch(repository: Path) -> Optional[str]:
+    """Resolve the branch a merge would land in."""
+    configured = os.environ.get("CONTEXT_DEFAULT_BRANCH")
+    if configured:
+        return configured.strip() or None
+    try:
+        head = os.fsdecode(
+            git_output(
+                repository,
+                ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+                "Git default-branch probe",
+            )
+        ).strip()
+    except ContextError:
+        head = ""
+    if head:
+        return head
+    for candidate in ("main", "master"):
+        try:
+            git_output(
+                repository,
+                ["rev-parse", "--verify", "--quiet", f"refs/heads/{candidate}"],
+                "Git branch probe",
+            )
+        except ContextError:
+            continue
+        return candidate
+    return None
+
+
+def branch_is_merged(repository: Path, branch: str, target: str) -> bool:
+    """Report whether `branch` has landed in `target`.
+
+    Ancestry alone is not enough. A branch created a moment ago and never
+    committed to is also an ancestor of its target, so requiring only that
+    would complete a task the instant it was provisioned. The target must also
+    have moved ahead of the branch, which is what a merge does.
+
+    Merging the target *into* a branch does not make the branch an ancestor, so
+    a long-running branch that merely keeps itself current stays open.
+
+    A fast-forward merge leaves the two refs identical and is therefore
+    indistinguishable from a branch that never diverged; it is not detected.
+    Leaving a task open costs a stale record, while closing one wrongly ends
+    its lifecycle and archives it.
+    """
+    for reference in (f"refs/heads/{branch}", branch):
+        try:
+            git_output(
+                repository,
+                ["rev-parse", "--verify", "--quiet", reference],
+                "Git branch probe",
+            )
+        except ContextError:
+            continue
+        try:
+            git_output(
+                repository,
+                ["merge-base", "--is-ancestor", reference, target],
+                "Git merge probe",
+            )
+        except ContextError:
+            return False
+        ahead = os.fsdecode(
+            git_output(
+                repository,
+                ["rev-list", "--count", f"{reference}..{target}"],
+                "Git divergence probe",
+            )
+        ).strip()
+        return ahead.isdigit() and int(ahead) > 0
+    # A deleted branch cannot be told apart from an abandoned one, so it is
+    # never treated as merged.
+    return False
+
+
+def close_merged_tasks(
+    connection: sqlite3.Connection, repository: Path, owner: str
+) -> list[dict[str, object]]:
+    """Complete governed tasks whose branch has landed in the default branch.
+
+    The scan covers every active task rather than the current one: a merge is
+    observed after the branch is left, not while it is being worked on.
+    """
+    config = load_config(repository)
+    if not config.get("automatic_completion"):
+        return []
+    target = default_branch(repository)
+    if target is None:
+        return []
+    closed: list[dict[str, object]] = []
+    for _, record, _ in iter_records(repository):
+        if record["type"] != "task" or record["status"] in LIFECYCLES["task"]["terminal"]:
+            continue
+        branch = str(record["external_id"])
+        # A branch is its own ancestor, so the default branch would close
+        # itself the moment a task were provisioned on it.
+        if branch == target or branch == target.split("/")[-1]:
+            continue
+        if not branch_is_merged(repository, branch, target):
+            continue
+        # State the fact that was actually verified — the merge — rather than
+        # a claim about the work being correct, which nothing here checked.
+        outcome = (
+            f"Branch {branch} merged into {target}. "
+            f"Last recorded progress: {record['progress'] or 'none recorded'}"
+        )
+        verification = [f"{branch} is an ancestor of {target}"]
+        try:
+            binding = governed_binding(connection, branch)
+        except ContextError:
+            # Bound on another machine: close the shared record without
+            # inventing a local episode for work this machine did not do.
+            with mutation_lock(repository):
+                completed = close_task(
+                    repository,
+                    str(record["id"]),
+                    outcome,
+                    verification,
+                    expected_revision=record["revision"],
+                    actor=owner,
+                )
+            closed.append(
+                {"task_id": branch, "task_uuid": completed["id"], "episode_id": None}
+            )
+            continue
+        result = complete_governed_task(
+            connection,
+            repository,
+            binding,
+            outcome=outcome,
+            summary=None,
+            files=[],
+            verification=verification,
+            sources=[],
+            expected_revision=AUTO_REVISION,
+            owner=owner,
+        )
+        closed.append(
+            {
+                "task_id": branch,
+                "task_uuid": result["task_uuid"],
+                "episode_id": result["episode_id"],
+            }
+        )
+    return closed
+
+
+def changed_paths(repository: Path) -> tuple[list[str], list[str]]:
+    """Return sanitized changed paths from Git porcelain metadata alone.
+
+    Working-tree contents are never read here. A path list is everything the
+    short-term buffer needs, and reading the files would bypass the secret and
+    privacy gates that the indexer applies to sources it does read.
+
+    Paths the runtime writes itself are dropped rather than reported: a task
+    recording its own record, handoff, and index churn as user work would grow
+    without ever describing anything the user changed.
+    """
+    prefix = os.fsdecode(
+        git_output(repository, ["rev-parse", "--show-prefix"], "Git prefix probe")
+    ).strip()
+    runtime_owned = re.compile(
+        rf"^{re.escape(prefix)}project-brain/"
+        rf"({'|'.join(TURN_RUNTIME_DIRECTORIES)})/"
+    )
+    fields = git_output(
+        repository,
+        [
+            "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", ".",
+        ],
+        "Git status probe",
+    ).split(b"\0")
+    paths: list[str] = []
+    position = 0
+    while position < len(fields):
+        entry = fields[position]
+        position += 1
+        if len(entry) < 4:
+            continue
+        if entry[:1] in b"RC":
+            # Rename and copy entries carry their origin in the next field.
+            position += 1
+        path = os.fsdecode(entry[3:])
+        if not runtime_owned.match(path):
+            paths.append(path)
+    excluded = sorted({item for item in paths if TURN_PATH_DENYLIST.search(item)})
+    allowed = [item for item in dict.fromkeys(paths) if item not in set(excluded)]
+    return allowed, excluded
+
+
+def append_turn_delta(
+    connection: sqlite3.Connection, task_id: str, files: list[str]
+) -> int:
+    with connection:
+        cursor = connection.execute(
+            "INSERT INTO turn_deltas(task_id, created_at, files) VALUES (?, ?, ?)",
+            (
+                task_id,
+                datetime.now(timezone.utc).isoformat(),
+                json.dumps(files, ensure_ascii=False),
+            ),
+        )
+    return int(cursor.lastrowid)
+
+
+def pending_turn_deltas(
+    connection: sqlite3.Connection, task_id: str
+) -> list[sqlite3.Row]:
+    return connection.execute(
+        "SELECT id, created_at, files FROM turn_deltas WHERE task_id = ? ORDER BY id",
+        (task_id,),
+    ).fetchall()
+
+
+def flush_turn_deltas(
+    connection: sqlite3.Connection,
+    repository: Path,
+    task_id: str,
+    mode: str,
+    owner: str,
+    file_limit: int = DEFAULT_TURN_FILE_LIMIT,
+) -> Optional[dict[str, object]]:
+    """Consolidate buffered turns into one authoritative working-memory write.
+
+    Buffering exists so that per-turn continuity does not cost one governed
+    revision and one rewritten handoff per turn. Deltas are removed only after
+    the authoritative write lands, so an interrupted flush replays rather than
+    loses the buffer.
+
+    ``file_limit`` bounds how many paths one flush contributes. Task files are
+    merge-only, so an unbounded automated writer would grow the record and its
+    handoff indefinitely. The count that did not fit is reported, never dropped
+    silently.
+    """
+    pending = pending_turn_deltas(connection, task_id)
+    if not pending:
+        return None
+    files: list[str] = []
+    for row in pending:
+        files = merge_unique(files, json.loads(row["files"]))
+    omitted = max(0, len(files) - file_limit)
+    progress = (
+        f"Auto-checkpoint: {len(pending)} turn(s) since {pending[0]['created_at']}, "
+        f"{len(files)} file(s) touched."
+    )
+    if omitted:
+        progress += f" {omitted} path(s) beyond the per-flush limit are not listed."
+    files = files[:file_limit]
+    provisioned = ensure_working_task(connection, repository, task_id, mode, owner)
+    if mode == "lightweight":
+        result = update_working_task(connection, task_id, progress, [], files, [])
+    else:
+        result = apply_governed_update(
+            connection,
+            repository,
+            governed_binding(connection, task_id),
+            expected_revision=AUTO_REVISION,
+            progress=progress,
+            next_steps=[],
+            files=files,
+            sources=[],
+            owner=owner,
+        )
+    with connection:
+        connection.executemany(
+            "DELETE FROM turn_deltas WHERE id = ?",
+            [(row["id"],) for row in pending],
+        )
+    return {**result, "files_omitted": omitted, "provisioned": provisioned}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1031,6 +1828,11 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     index = commands.add_parser("index", help="refresh the local document index")
+    index.add_argument(
+        "--incremental",
+        action="store_true",
+        help="reuse rows whose source stat is unchanged instead of rebuilding",
+    )
     index.add_argument("--json", action="store_true")
 
     search = commands.add_parser("search", help="search indexed repository context")
@@ -1053,6 +1855,60 @@ def build_parser() -> argparse.ArgumentParser:
     retrieve_command.add_argument("--limit", type=int, default=3)
     retrieve_command.add_argument("--json", action="store_true")
 
+    for retrieval_parser in (context, retrieve_command):
+        retrieval_parser.add_argument(
+            "--ephemeral",
+            action="store_true",
+            help=(
+                "write the governed retrieval manifest to ignored local state; "
+                "use for automated retrieval that would otherwise flood shared "
+                "history (no effect in lightweight mode, which writes none)"
+            ),
+        )
+
+    refresh = commands.add_parser(
+        "refresh",
+        help="refresh every indexed memory layer and report each one",
+    )
+    refresh.add_argument(
+        "--query",
+        help="also assemble a Task Capsule for this request (requires --task-id)",
+    )
+    refresh.add_argument("--task-id")
+    refresh.add_argument("--limit", type=int, default=3)
+    refresh.add_argument(
+        "--ephemeral",
+        action="store_true",
+        help="write the capsule's retrieval manifest to ignored local state",
+    )
+    refresh.add_argument(
+        "--validate",
+        action="store_true",
+        help="also report Project Brain validation (reads every record)",
+    )
+    refresh.add_argument("--json", action="store_true")
+
+    turn = commands.add_parser(
+        "turn", help="buffer a per-turn working-memory delta and flush on a boundary"
+    )
+    turn.add_argument("--task-id", required=True)
+    turn.add_argument(
+        "--flush", action="store_true", help="flush regardless of the threshold"
+    )
+    turn.add_argument(
+        "--flush-after",
+        type=int,
+        default=DEFAULT_TURN_FLUSH_AFTER,
+        help="buffered turns to accumulate before one authoritative write",
+    )
+    turn.add_argument(
+        "--max-files",
+        type=int,
+        default=DEFAULT_TURN_FILE_LIMIT,
+        help="paths one flush may add to the task; the remainder is reported",
+    )
+    turn.add_argument("--json", action="store_true")
+
     record = commands.add_parser("record", help="store a local completed-task episode")
     record.add_argument("--summary", required=True)
     record.add_argument("--outcome", required=True)
@@ -1074,7 +1930,8 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--next-step", action="append", default=[])
     update.add_argument("--file", action="append", default=[])
     update.add_argument("--source", action="append", default=[])
-    update.add_argument("--revision", type=int)
+    update.add_argument("--phase", choices=TASK_PHASES)
+    update.add_argument("--revision", type=revision_argument)
     update.add_argument("--json", action="store_true")
 
     get = commands.add_parser("get", help="show an active task")
@@ -1092,7 +1949,7 @@ def build_parser() -> argparse.ArgumentParser:
     complete.add_argument("--file", action="append", default=[])
     complete.add_argument("--verification", action="append", default=[])
     complete.add_argument("--source", action="append", default=[])
-    complete.add_argument("--revision", type=int)
+    complete.add_argument("--revision", type=revision_argument)
     complete.add_argument("--json", action="store_true")
 
     create_brain = commands.add_parser(
@@ -1120,12 +1977,13 @@ def build_parser() -> argparse.ArgumentParser:
         "brain-update", help="CAS-update a governed dynamic Brain record"
     )
     update_brain.add_argument("--record-id", required=True)
-    update_brain.add_argument("--revision", type=int, required=True)
+    update_brain.add_argument("--revision", type=revision_argument, required=True)
     update_brain.add_argument("--progress")
     update_brain.add_argument("--next-step", action="append", default=[])
     update_brain.add_argument("--file", action="append", default=[])
     update_brain.add_argument("--source", action="append", default=[])
     update_brain.add_argument("--conflict", action="append", default=[])
+    update_brain.add_argument("--phase", choices=TASK_PHASES)
     update_brain.add_argument("--transition")
     update_brain.add_argument("--reason", default="Record updated")
     update_brain.add_argument("--json", action="store_true")
@@ -1183,13 +2041,15 @@ def main() -> int:
         connection = connect(database)
         try:
             if arguments.command == "index":
-                result = index_repository(connection, repository)
+                result = index_repository(
+                    connection, repository, incremental=arguments.incremental
+                )
                 if arguments.json:
                     print(json.dumps(result, ensure_ascii=False))
                 else:
                     print(
                         f"Context index: {result['documents']} documents "
-                        f"({result['removed']} removed)."
+                        f"({result['removed']} removed, {result['reused']} reused)."
                     )
                 return 0
 
@@ -1226,28 +2086,11 @@ def main() -> int:
                     files = validate_paths("Working task file", arguments.file)
                     sources = normalize_values("Working task source", arguments.source)
                     reject_secrets("working task", [task_id, goal, *files, *sources])
-                    with mutation_lock(repository):
-                        task = create_task(
-                            repository, task_id, goal, files, sources, owner=owner
+                    result = governed_task_view(
+                        create_governed_task(
+                            connection, repository, task_id, goal, files, sources, owner
                         )
-                        try:
-                            bind_governed_task(
-                                connection,
-                                task_id,
-                                str(task["id"]),
-                                int(task["revision"]),
-                            )
-                        except Exception:
-                            try:
-                                compensate_governed_binding(
-                                    connection, task_id, revision=None
-                                )
-                            finally:
-                                rollback_created_record(
-                                    repository, str(task["id"])
-                                )
-                            raise
-                    result = governed_task_view(task)
+                    )
                 if arguments.json:
                     print(json.dumps(result, ensure_ascii=False))
                 else:
@@ -1268,7 +2111,10 @@ def main() -> int:
                     binding = governed_binding(connection, arguments.task_id)
                     progress = arguments.progress
                     if progress is None and not (
-                        arguments.next_step or arguments.file or arguments.source
+                        arguments.next_step
+                        or arguments.file
+                        or arguments.source
+                        or arguments.phase
                     ):
                         raise ContextError("Working task update requires a changed field")
                     if progress is not None and not progress.strip():
@@ -1282,35 +2128,18 @@ def main() -> int:
                         "working task",
                         ([progress] if progress else []) + next_steps + files + sources,
                     )
-                    with mutation_lock(repository):
-                        snapshot = snapshot_record_state(
-                            repository, binding["task_uuid"]
-                        )
-                        try:
-                            task = update_task(
-                                repository,
-                                binding["task_uuid"],
-                                expected_revision=arguments.revision,
-                                progress=progress.strip() if progress else None,
-                                next_steps=next_steps,
-                                files=files,
-                                sources=sources,
-                                actor=owner,
-                            )
-                            refresh_governed_binding(
-                                connection,
-                                binding["external_id"],
-                                int(task["revision"]),
-                            )
-                        except Exception:
-                            restore_record_state(repository, snapshot)
-                            compensate_governed_binding(
-                                connection,
-                                binding["external_id"],
-                                revision=int(binding["revision"]),
-                            )
-                            raise
-                    result = governed_task_view(task)
+                    result = apply_governed_update(
+                        connection,
+                        repository,
+                        binding,
+                        expected_revision=arguments.revision,
+                        progress=progress.strip() if progress else None,
+                        next_steps=next_steps,
+                        files=files,
+                        sources=sources,
+                        owner=owner,
+                        phase=arguments.phase,
+                    )
                 if arguments.json:
                     print(json.dumps(result, ensure_ascii=False))
                 else:
@@ -1376,62 +2205,21 @@ def main() -> int:
                     )
                     result = {"episode_id": episode_id}
                 else:
-                    binding = governed_binding(connection, arguments.task_id)
-                    task = get_task(repository, binding["task_uuid"])
-                    files = validate_paths("Episode file", arguments.file)
-                    verification = normalize_values(
-                        "Episode verification", arguments.verification
+                    result = complete_governed_task(
+                        connection,
+                        repository,
+                        governed_binding(connection, arguments.task_id),
+                        outcome=arguments.outcome,
+                        summary=arguments.summary,
+                        files=validate_paths("Episode file", arguments.file),
+                        verification=normalize_values(
+                            "Episode verification", arguments.verification
+                        ),
+                        sources=normalize_values("Episode source", arguments.source),
+                        expected_revision=arguments.revision,
+                        owner=owner,
                     )
-                    sources = normalize_values("Episode source", arguments.source)
-                    with mutation_lock(repository):
-                        snapshot = snapshot_record_state(
-                            repository, binding["task_uuid"]
-                        )
-                        try:
-                            connection.execute("BEGIN IMMEDIATE")
-                            episode_id = insert_episode(
-                                connection,
-                                (
-                                    str(task["goal"])
-                                    if arguments.summary is None
-                                    else arguments.summary
-                                ),
-                                arguments.outcome,
-                                merge_unique(list(task["files"]), files),
-                                verification,
-                                merge_unique(list(task["sources"]), sources),
-                            )
-                            deleted = connection.execute(
-                                "DELETE FROM working_tasks WHERE task_id = ?",
-                                (binding["external_id"],),
-                            )
-                            if deleted.rowcount != 1:
-                                raise ContextError(
-                                    f"Working task not found: {binding['external_id']}"
-                                )
-                            connection.execute(
-                                "DELETE FROM task_bindings WHERE external_id = ?",
-                                (binding["external_id"],),
-                            )
-                            completed_task = close_task(
-                                repository,
-                                binding["task_uuid"],
-                                arguments.outcome,
-                                verification,
-                                expected_revision=arguments.revision,
-                                actor=owner,
-                            )
-                            connection.commit()
-                        except Exception:
-                            connection.rollback()
-                            restore_record_state(repository, snapshot)
-                            raise
-                    result = {
-                        "episode_id": episode_id,
-                        "task_uuid": completed_task["id"],
-                        "revision": completed_task["revision"],
-                        "status": completed_task["status"],
-                    }
+                    episode_id = result["episode_id"]
                 if arguments.json:
                     print(json.dumps(result))
                 else:
@@ -1491,6 +2279,7 @@ def main() -> int:
                     and not sources
                     and not conflicts
                     and arguments.transition is None
+                    and arguments.phase is None
                 ):
                     raise ContextError("Brain record update requires a changed field")
                 reject_secrets(
@@ -1501,19 +2290,23 @@ def main() -> int:
                     + sources
                     + conflicts,
                 )
-                result = update_record(
-                    repository,
-                    arguments.record_id,
-                    expected_revision=arguments.revision,
-                    progress=progress,
-                    next_steps=next_steps,
-                    files=files,
-                    sources=sources,
-                    actor=owner,
-                    conflicts=conflicts,
-                    transition_to=arguments.transition,
-                    reason=arguments.reason,
-                )
+                with mutation_lock(repository):
+                    result = update_record(
+                        repository,
+                        arguments.record_id,
+                        expected_revision=resolve_revision(
+                            repository, arguments.record_id, arguments.revision
+                        ),
+                        progress=progress,
+                        next_steps=next_steps,
+                        files=files,
+                        sources=sources,
+                        actor=owner,
+                        conflicts=conflicts,
+                        transition_to=arguments.transition,
+                        phase=arguments.phase,
+                        reason=arguments.reason,
+                    )
                 if arguments.json:
                     print(json.dumps(result, ensure_ascii=False))
                 else:
@@ -1599,69 +2392,198 @@ def main() -> int:
                 return 0
 
             if arguments.command in {"context", "retrieve"}:
-                if mode == "lightweight":
-                    warnings: list[str] = []
-                    include_retrieval = True
-                    try:
-                        index_repository(connection, repository)
-                    except (ContextError, OSError, sqlite3.Error) as error:
-                        include_retrieval = False
-                        warnings.append(f"Index refresh failed: {error}")
-                    result = build_context_packet(
-                        connection,
-                        arguments.query,
-                        arguments.task_id,
-                        arguments.limit,
-                        include_retrieval=include_retrieval,
-                        warnings=warnings,
-                    )
-                    # Character budget applies only here: retrieve() below runs
-                    # its own token budget (TARGET_BUDGET/HARD_BUDGET) and its
-                    # payload legitimately exceeds CAPSULE_CHARACTER_LIMIT.
-                    result = enforce_capsule_budget(result)
-                else:
-                    if arguments.task_id is None:
-                        raise ContextError("Governed retrieval requires --task-id")
-                    # The governed path bypasses build_context_packet, so apply the
-                    # same query guards build_context_packet would have applied.
-                    reject_secrets("Task Capsule", [arguments.query])
-                    reject_capsule_privacy("Task Capsule request", [arguments.query])
-                    binding = governed_binding(connection, arguments.task_id)
-                    result = retrieve(
-                        connection,
-                        repository,
-                        arguments.query,
-                        binding["task_uuid"],
-                        limit=arguments.limit,
-                    )
-                    result["episodic"] = (
-                        search_documents(
-                            connection, arguments.query, arguments.limit, "episodic"
-                        )
-                        + search_episodes(connection, arguments.query, arguments.limit)
-                    )[: arguments.limit]
-                    # The print tail auto-merges to PR #6's version, which
-                    # dereferences result["warnings"]; retrieve() has no such key.
-                    result.setdefault("warnings", [])
+                result = assemble_capsule(
+                    connection,
+                    repository,
+                    mode=mode,
+                    query=arguments.query,
+                    task_id=arguments.task_id,
+                    limit=arguments.limit,
+                    ephemeral=arguments.ephemeral,
+                )
                 if arguments.json:
                     print(serialize_capsule(result))
                 else:
-                    working = result["working"]
-                    if working is None:
-                        print("working: unavailable")
-                    else:
-                        print(f"working: {working['task_id']} — {working['goal']}")
-                    for warning in result["warnings"]:
+                    print_capsule(result)
+                return 0
+
+            if arguments.command == "refresh":
+                if arguments.limit < 1:
+                    raise ContextError("--limit must be a positive integer")
+                if arguments.query is not None and arguments.task_id is None:
+                    raise ContextError("--query requires --task-id")
+                layers, index_result, warnings = refresh_layers(
+                    connection, repository
+                )
+                capsule = None
+                if arguments.query is not None:
+                    try:
+                        capsule = assemble_capsule(
+                            connection,
+                            repository,
+                            mode=mode,
+                            query=arguments.query,
+                            task_id=arguments.task_id,
+                            limit=arguments.limit,
+                            ephemeral=arguments.ephemeral,
+                            refresh_index=False,
+                        )
+                    except (ContextError, BrainError, RetrievalError) as error:
+                        # A capsule needs an active task; the layer refresh
+                        # above stands on its own and is already done.
+                        warnings.append(f"Capsule unavailable: {error}")
+                codebase = codebase_map_status(connection, repository)
+                result = {
+                    "mode": mode,
+                    **layers,
+                    "codebase": codebase,
+                    "documents": index_result.get(
+                        "documents",
+                        connection.execute(
+                            "SELECT COUNT(*) FROM documents"
+                        ).fetchone()[0],
+                    ),
+                    "reused": index_result.get("reused", 0),
+                    "counts": index_result.get("layers", {}),
+                    "parity_drift": index_result.get("parity_drift", []),
+                    "warnings": warnings,
+                    "capsule": capsule,
+                }
+                if arguments.validate:
+                    errors = validate_repository(repository)
+                    result["brain_validation"] = "valid" if not errors else "invalid"
+                    warnings.extend(errors)
+                if arguments.json:
+                    print(json.dumps(result, ensure_ascii=False))
+                else:
+                    counts = result["counts"]
+                    for layer in DOCUMENT_LAYERS:
+                        suffix = (
+                            f" ({counts[layer]} documents)" if layer in counts else ""
+                        )
+                        print(f"{layer}: {result[layer]}{suffix}")
+                    for item in codebase:
+                        behind = item["commits_behind"]
+                        print(
+                            "codebase map: %s — %s"
+                            % (
+                                item["path"],
+                                "unverifiable"
+                                if behind is None
+                                else f"{behind} commit(s) behind",
+                            )
+                        )
+                    if "brain_validation" in result:
+                        print(f"brain-validation: {result['brain_validation']}")
+                    for warning in warnings:
                         print(f"warning: {warning}")
-                    for layer in ("procedural", "semantic", "episodic"):
-                        items = result[layer]
-                        if not items:
-                            continue
-                        print(f"{layer}:")
-                        for item in items:
-                            label = item["path"] if "path" in item else f"episode {item['id']}"
-                            title = item["title"] if "title" in item else item["summary"]
-                            print(f"  {label} — {title}")
+                    if capsule is not None:
+                        print_capsule(capsule)
+                return 0 if all(
+                    layers[layer] == "updated" for layer in DOCUMENT_LAYERS
+                ) else 1
+
+            if arguments.command == "turn":
+                if arguments.flush_after < 1:
+                    raise ContextError("--flush-after must be a positive integer")
+                if arguments.max_files < 1:
+                    raise ContextError("--max-files must be a positive integer")
+                task_id = validate_task_id(arguments.task_id)
+                files, path_excluded = changed_paths(repository)
+                delta_id = (
+                    append_turn_delta(connection, task_id, files) if files else None
+                )
+                buffered = len(pending_turn_deltas(connection, task_id))
+                flushed = None
+                if buffered and (arguments.flush or buffered >= arguments.flush_after):
+                    flushed = flush_turn_deltas(
+                        connection,
+                        repository,
+                        task_id,
+                        mode,
+                        owner,
+                        file_limit=arguments.max_files,
+                    )
+                # A merge is observed after the branch is left, so this scans
+                # every active task rather than only the current one.
+                closed: list[dict[str, object]] = []
+                if mode != "lightweight":
+                    try:
+                        closed = close_merged_tasks(connection, repository, owner)
+                    except (BrainError, OSError) as error:
+                        raise ContextError(
+                            f"Automatic completion failed: {error}"
+                        ) from error
+                # Durable memory is promoted on the same boundary as the
+                # working-memory flush, so the whole pipeline runs unattended.
+                promotion = {
+                    "enabled": False, "promoted": [], "failed": [],
+                    "blocked": [], "skipped": 0,
+                }
+                if mode != "lightweight":
+                    try:
+                        promotion = auto_promote(repository, owner=owner)
+                    except (BrainError, OSError) as error:
+                        raise ContextError(
+                            f"Automatic promotion failed: {error}"
+                        ) from error
+                # Archiving runs last: a record must be promoted before it is
+                # moved, and compaction batches so Git history is not churned
+                # one terminal record at a time.
+                compaction = {"enabled": False, "moved": 0, "pending": 0, "error": None}
+                if mode != "lightweight":
+                    compaction = auto_compact(repository, owner=owner)
+                result = {
+                    "task_id": task_id,
+                    "delta_id": delta_id,
+                    "files": len(files),
+                    "excluded": path_excluded,
+                    "pending": 0 if flushed else buffered,
+                    "flushed": flushed is not None,
+                    "revision": flushed.get("revision") if flushed else None,
+                    "files_omitted": flushed.get("files_omitted") if flushed else 0,
+                    "provisioned": bool(flushed and flushed.get("provisioned")),
+                    "closed": closed,
+                    "promoted": promotion["promoted"],
+                    "promotion_failed": promotion["failed"],
+                    "promotion_blocked": promotion["blocked"],
+                    "promotion_skipped": promotion["skipped"],
+                    "archived": compaction["moved"],
+                    "archivable_pending": compaction["pending"],
+                }
+                if arguments.json:
+                    print(json.dumps(result, ensure_ascii=False))
+                elif flushed:
+                    print(
+                        f"Turn buffer flushed to {task_id}: "
+                        f"{result['files']} file(s) in this turn."
+                    )
+                else:
+                    print(
+                        f"Turn buffered for {task_id}: {result['pending']} pending, "
+                        f"{result['files']} file(s) in this turn."
+                    )
+                if not arguments.json:
+                    for item in closed:
+                        print(f"task completed on merge: {item['task_id']}")
+                    for item in promotion["promoted"]:
+                        print(
+                            f"promoted without review: {item['type']} -> "
+                            f"{item['memory_id']}"
+                        )
+                    for item in promotion["failed"]:
+                        print(f"promotion failed: {item['reason']}")
+                    for item in promotion["blocked"]:
+                        print(f"promotion blocked: {item['reason']}")
+                    if compaction["moved"]:
+                        print(f"archived: {compaction['moved']} terminal record(s)")
+                    if compaction["error"]:
+                        print(f"compaction failed: {compaction['error']}")
+                    if promotion["skipped"]:
+                        print(
+                            f"promotion deferred: {promotion['skipped']} more "
+                            "eligible record(s) this run"
+                        )
                 return 0
 
             if arguments.command == "validate":

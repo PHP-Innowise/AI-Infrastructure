@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import subprocess
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -41,6 +42,25 @@ TARGET_BUDGET = 8000
 HARD_BUDGET = 12000
 MAX_SNIPPET_CHARS = 1200
 SKILL_EDITIONS = (".agents", ".claude", ".cursor", ".codex")
+MANIFEST_SCOPES = ("governed", "local")
+STOPWORD_DOCUMENT_RATIO = 0.5
+MIN_TOKEN_COVERAGE = 2
+DISTINCTIVE_DOCUMENT_RATIO = 0.1
+MAPPED_COMMIT_PATTERN = re.compile(r"^mapped_commit:\s*([0-9a-fA-F]{7,40})\s*$", re.M)
+MAPPED_SCOPE_PATTERN = re.compile(r"^mapped_scope:\s*(\S+)\s*$", re.M)
+CODEBASE_MAP_MAX_DRIFT = 25
+LOCAL_MANIFEST_RETENTION = 200
+DELETE_CHUNK = 500
+INDEX_CONFIG_KEY = "config-fingerprint"
+INDEX_SKILL_KEY = "skill-tree-fingerprint"
+INDEX_PARITY_KEY = "skill-parity-drift"
+
+# Column weights for bm25(): path, layer, kind, title, summary, content.
+# What a document declares itself to be about outranks what its body mentions.
+BM25_WEIGHTS = (1.0, 1.0, 1.0, 2.0, 8.0, 1.0)
+
+DocumentRow = tuple[str, str, str, str, str, str]
+SourceState = dict[str, tuple[int, int]]
 
 
 class RetrievalError(Exception):
@@ -85,6 +105,23 @@ def ensure_metadata_tables(connection: sqlite3.Connection) -> None:
         )
         """
     )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS document_source_state(
+            path TEXT PRIMARY KEY,
+            mtime_ns INTEGER NOT NULL,
+            size INTEGER NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS index_state(
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """
+    )
 
 
 def category_for(kind: str) -> str:
@@ -101,6 +138,116 @@ def category_for(kind: str) -> str:
 
 def _content_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def codebase_map_drift(repository: Path, content: str) -> Optional[int]:
+    """Count commits landed on the mapped scope since a map was written.
+
+    A codebase map describes code rather than itself, so its own bytes staying
+    unchanged proves nothing: the content hash that keeps every other document
+    honest cannot detect that the code moved on underneath it.
+
+    Returns `None` when drift cannot be established — no recorded commit, or a
+    commit this clone does not have. That is reported rather than treated as
+    fresh, because an unverifiable map is exactly the one not to trust.
+    """
+    recorded = MAPPED_COMMIT_PATTERN.search(content)
+    if recorded is None:
+        return None
+    arguments = [
+        "git", "-C", str(repository), "rev-list", "--count",
+        f"{recorded.group(1)}..HEAD",
+    ]
+    scope = MAPPED_SCOPE_PATTERN.search(content)
+    if scope is not None:
+        # After `--` the value is a pathspec, so a scope taken from the file
+        # cannot turn into an option.
+        arguments += ["--", scope.group(1)]
+    try:
+        result = subprocess.run(
+            arguments,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    counted = result.stdout.decode("utf-8", "replace").strip()
+    return int(counted) if counted.isdigit() else None
+
+
+def load_index_state(connection: sqlite3.Connection) -> dict[str, str]:
+    ensure_metadata_tables(connection)
+    return {
+        row[0]: row[1]
+        for row in connection.execute("SELECT key, value FROM index_state")
+    }
+
+
+def store_index_state(connection: sqlite3.Connection, state: dict[str, str]) -> None:
+    """Persist index fingerprints inside the caller's transaction."""
+    connection.executemany(
+        "INSERT INTO index_state(key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        sorted(state.items()),
+    )
+
+
+def config_fingerprint(repository: Path) -> str:
+    path = brain_root(repository) / "config" / "runtime.json"
+    try:
+        return _content_hash(path.read_text(encoding="utf-8"))
+    except OSError:
+        return "absent"
+
+
+def skill_tree_fingerprint(repository: Path) -> str:
+    """Fingerprint every mirrored skill file from stat metadata alone.
+
+    Parity compares all editions, but only the first discovered copy of a skill
+    reaches the index, so the per-document stat cache cannot notice a drifting
+    mirror. This fingerprint can, without reading any file.
+    """
+    digest = hashlib.sha256()
+    for edition in SKILL_EDITIONS:
+        root = repository / edition / "skills"
+        if not root.is_dir():
+            continue
+        for path in sorted(root.glob("**/*.md")):
+            if not path.is_file() or path.is_symlink():
+                continue
+            status = path.stat()
+            digest.update(
+                f"{edition}\0{path.relative_to(root).as_posix()}\0"
+                f"{status.st_mtime_ns}\0{status.st_size}\n".encode("utf-8")
+            )
+    return digest.hexdigest()
+
+
+def reusable_source_state(
+    connection: sqlite3.Connection, repository: Path
+) -> tuple[SourceState, dict[str, str]]:
+    """Return the retainable stat cache plus the fingerprints that gate it."""
+    ensure_metadata_tables(connection)
+    fingerprints = {
+        INDEX_CONFIG_KEY: config_fingerprint(repository),
+        INDEX_SKILL_KEY: skill_tree_fingerprint(repository),
+    }
+    stored = load_index_state(connection)
+    if stored.get(INDEX_CONFIG_KEY) != fingerprints[INDEX_CONFIG_KEY]:
+        # Runtime configuration decides eligibility for every indexed record,
+        # so a configuration change invalidates the whole cache.
+        return {}, fingerprints
+    indexed = {row[0] for row in connection.execute("SELECT path FROM documents")}
+    return {
+        row[0]: (int(row[1]), int(row[2]))
+        for row in connection.execute(
+            "SELECT path, mtime_ns, size FROM document_source_state"
+        )
+        if row[0] in indexed
+    }, fingerprints
 
 
 def skill_mirror_drift(repository: Path, canonical_edition: str) -> list[dict[str, object]]:
@@ -175,7 +322,15 @@ def _brain_documents(
             continue
         eligible_tasks[record["id"]] = record
         title = record["title"]
-        documents.append((relative, "semantic", f"brain-{record['type']}", title, body))
+        # A record's title and goal are its declared subject; the body carries
+        # progress and evidence that describe the work rather than the topic.
+        documents.append(
+            (
+                relative, "semantic", f"brain-{record['type']}", title,
+                " ".join(filter(None, (title, str(record.get("goal") or "")))),
+                body,
+            )
+        )
         metadata_rows.append(
             (
                 relative, "dynamic", record["privacy"], record["owner"], record["authority"],
@@ -198,7 +353,11 @@ def _brain_documents(
                 excluded.append({"path": relative, "reason": "task-filter-or-invalid"})
                 continue
             documents.append(
-                (relative, "semantic", "brain-handoff", f"Handoff {task['external_id']}", body)
+                (
+                    relative, "semantic", "brain-handoff",
+                    f"Handoff {task['external_id']}",
+                    f"Handoff {task['external_id']}", body,
+                )
             )
             metadata_rows.append(
                 (
@@ -213,29 +372,113 @@ def _brain_documents(
     return documents, metadata_rows, excluded
 
 
+def _layer_counts(connection: sqlite3.Connection) -> tuple[int, dict[str, int]]:
+    layers = {layer: 0 for layer in ("procedural", "semantic", "episodic")}
+    for row in connection.execute(
+        "SELECT layer, COUNT(*) AS count FROM documents GROUP BY layer"
+    ):
+        layers[row[0]] = row[1]
+    total = connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+    return total, layers
+
+
+def _drop_indexed_paths(connection: sqlite3.Connection, paths: list[str]) -> None:
+    """Drop FTS and metadata rows in chunks that stay inside SQLite's limits."""
+    for start in range(0, len(paths), DELETE_CHUNK):
+        chunk = paths[start : start + DELETE_CHUNK]
+        placeholders = ", ".join("?" for _ in chunk)
+        connection.execute(
+            f"DELETE FROM documents WHERE path IN ({placeholders})", chunk
+        )
+        connection.execute(
+            f"DELETE FROM document_metadata WHERE path IN ({placeholders})", chunk
+        )
+
+
 def index_documents(
     connection: sqlite3.Connection,
     repository: Path,
-    legacy_documents: list[tuple[str, str, str, str, str]],
+    legacy_documents: list[DocumentRow],
+    *,
+    retained: Optional[SourceState] = None,
+    source_state: Optional[SourceState] = None,
+    fingerprints: Optional[dict[str, str]] = None,
 ) -> dict[str, object]:
+    """Replace the index, reusing rows the caller proved unchanged.
+
+    ``retained`` holds repository documents whose stat still matches the last
+    successful index; their rows survive untouched and ``legacy_documents``
+    then carries only the new or changed ones. ``None`` rebuilds everything.
+
+    Project Brain records are always rebuilt: their eligibility depends on
+    configuration, lifecycle, and cross-record conflict state rather than on
+    the record file alone.
+    """
     config = load_config(repository)
-    parity_drift = skill_mirror_drift(repository, str(config["canonical_edition"]))
+    stored = load_index_state(connection)
+    if (
+        fingerprints is not None
+        and stored.get(INDEX_SKILL_KEY) == fingerprints[INDEX_SKILL_KEY]
+        and INDEX_PARITY_KEY in stored
+    ):
+        parity_drift = json.loads(stored[INDEX_PARITY_KEY])
+    else:
+        parity_drift = skill_mirror_drift(repository, str(config["canonical_edition"]))
     brain_documents, brain_metadata, excluded = _brain_documents(repository, config)
     documents = [*legacy_documents, *brain_documents]
     metadata = [
         _legacy_metadata(path, kind, content)
-        for path, _, kind, _, content in legacy_documents
+        for path, _, kind, _, _, content in legacy_documents
     ] + brain_metadata
-    indexed_paths = {item[0] for item in documents}
+    state = source_state or {}
     ensure_metadata_tables(connection)
-    with connection:
-        existing = {
-            row[0] for row in connection.execute("SELECT path FROM documents").fetchall()
+    existing = {
+        row[0] for row in connection.execute("SELECT path FROM documents").fetchall()
+    }
+    keep = set(retained or {})
+    missing = keep - existing
+    if missing:
+        raise RetrievalError(
+            f"Index cache is inconsistent for {len(missing)} path(s); "
+            "a full refresh is required"
+        )
+    cached_rows = connection.execute(
+        "SELECT COUNT(*) FROM document_source_state"
+    ).fetchone()[0]
+    if (
+        retained is not None
+        and not documents
+        and existing == keep
+        and cached_rows == len(keep)
+        and fingerprints is not None
+        and INDEX_PARITY_KEY in stored
+        and all(stored.get(key) == value for key, value in fingerprints.items())
+    ):
+        # Nothing observable changed, so a per-request refresh costs reads only.
+        total, layers = _layer_counts(connection)
+        return {
+            "documents": total,
+            "removed": 0,
+            "reused": len(keep),
+            "incremental": True,
+            "layers": layers,
+            "brain": 0,
+            "excluded": excluded,
+            "canonical_edition": config["canonical_edition"],
+            "parity_drift": parity_drift,
         }
-        connection.execute("DELETE FROM documents")
-        connection.execute("DELETE FROM document_metadata")
+    with connection:
+        if not keep:
+            # Nothing to reuse, so drop the tables outright rather than paying
+            # for a per-path delete of every row.
+            connection.execute("DELETE FROM documents")
+            connection.execute("DELETE FROM document_metadata")
+        else:
+            _drop_indexed_paths(connection, sorted(existing - keep))
+        connection.execute("DELETE FROM document_source_state")
         connection.executemany(
-            "INSERT INTO documents(path, layer, kind, title, content) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO documents(path, layer, kind, title, summary, content) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
             documents,
         )
         connection.executemany(
@@ -247,13 +490,26 @@ def index_documents(
             """,
             metadata,
         )
-    layers = ("procedural", "semantic", "episodic")
+        connection.executemany(
+            "INSERT INTO document_source_state(path, mtime_ns, size) VALUES (?, ?, ?)",
+            [(path, value[0], value[1]) for path, value in sorted(state.items())],
+        )
+        store_index_state(
+            connection,
+            {
+                INDEX_CONFIG_KEY: config_fingerprint(repository),
+                INDEX_SKILL_KEY: skill_tree_fingerprint(repository),
+                **(fingerprints or {}),
+                INDEX_PARITY_KEY: json.dumps(parity_drift, sort_keys=True),
+            },
+        )
+        total, layers = _layer_counts(connection)
     return {
-        "documents": len(documents),
-        "removed": len(existing - indexed_paths),
-        "layers": {
-            layer: sum(document[1] == layer for document in documents) for layer in layers
-        },
+        "documents": total,
+        "removed": len(existing - (keep | {item[0] for item in documents})),
+        "reused": len(keep),
+        "incremental": retained is not None,
+        "layers": layers,
         "brain": len(brain_documents),
         "excluded": excluded,
         "canonical_edition": config["canonical_edition"],
@@ -261,11 +517,108 @@ def index_documents(
     }
 
 
-def fts_query(query: str) -> str:
-    tokens = re.findall(r"\w+", query, flags=re.UNICODE)
+def query_tokens(query: str) -> list[str]:
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for token in re.findall(r"\w+", query, flags=re.UNICODE):
+        folded = token.casefold()
+        if folded in seen:
+            continue
+        seen.add(folded)
+        tokens.append(token)
     if not tokens:
         raise RetrievalError("Search query must contain a word")
-    return " OR ".join(f'"{token}"' for token in tokens)
+    return tokens
+
+
+def fts_query(query: str) -> str:
+    return " OR ".join(f'"{token}"' for token in query_tokens(query))
+
+
+def _document_frequency(connection: sqlite3.Connection, token: str) -> Optional[int]:
+    try:
+        return connection.execute(
+            "SELECT COUNT(*) FROM documents WHERE documents MATCH ?", (f'"{token}"',)
+        ).fetchone()[0]
+    except sqlite3.OperationalError:
+        return None
+
+
+def informative_tokens(
+    connection: sqlite3.Connection, tokens: list[str]
+) -> list[str]:
+    """Drop tokens too common in this corpus to carry signal.
+
+    A term matched by most documents contributes nothing but noise: a question
+    phrased "how is X specified for Y" otherwise matches every document
+    containing "is" or "for". Commonness is measured against the index rather
+    than a fixed stopword list, so it adapts to whatever languages and jargon
+    the repository actually documents itself in.
+    """
+    total = connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+    if not total:
+        return tokens
+    frequencies = [
+        (token, _document_frequency(connection, token)) for token in tokens
+    ]
+    matched = [(token, count) for token, count in frequencies if count]
+    informative = [
+        token for token, count in matched if count <= total * STOPWORD_DOCUMENT_RATIO
+    ]
+    # Never discard every term: a query built only from common words must still
+    # return its best matches rather than nothing at all.
+    return informative or [token for token, _ in matched] or tokens
+
+
+def token_coverage(
+    connection: sqlite3.Connection, tokens: list[str]
+) -> tuple[dict[str, int], set[str]]:
+    """Count distinct query terms per document, and note distinctive matches.
+
+    Counting terms equally punishes exactly the wrong document. A focused note
+    that contains only the one term that matters scores 1, while a document
+    sharing two unremarkable words scores 2 — so the answer loses to the noise.
+    A term rare in this corpus is treated as evidence on its own.
+    """
+    total = connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0] or 1
+    coverage: dict[str, int] = {}
+    distinctive: set[str] = set()
+    for token in tokens:
+        try:
+            rows = connection.execute(
+                "SELECT path FROM documents WHERE documents MATCH ?", (f'"{token}"',)
+            ).fetchall()
+        except sqlite3.OperationalError:
+            continue
+        rare = len(rows) <= total * DISTINCTIVE_DOCUMENT_RATIO
+        for row in rows:
+            coverage[row[0]] = coverage.get(row[0], 0) + 1
+            if rare:
+                distinctive.add(row[0])
+    return coverage, distinctive
+
+
+def is_relevant(
+    path: str, coverage: dict[str, int], distinctive: set[str], minimum: int
+) -> bool:
+    """A document qualifies on distinctive evidence or on breadth of match.
+
+    Admitting a distinctive single match lets some noise back in on queries no
+    document covers. That is the cheaper error: a spurious result wastes a
+    slot, while a hidden one denies the agent an answer the project already
+    holds.
+    """
+    return path in distinctive or coverage.get(path, 0) >= minimum
+
+
+def required_coverage(tokens: list[str]) -> int:
+    """How many distinct terms a document must contain to count as relevant.
+
+    One shared word is not evidence of relevance. Demanding two, once the query
+    offers two, is what separates a document about the subject from one that
+    merely mentions a word from it.
+    """
+    return MIN_TOKEN_COVERAGE if len(tokens) >= MIN_TOKEN_COVERAGE else 1
 
 
 def _estimate_tokens(value: str) -> int:
@@ -276,25 +629,30 @@ def _candidates(
     connection: sqlite3.Connection, query: str, limit: int = 100
 ) -> list[dict[str, Any]]:
     ensure_metadata_tables(connection)
+    tokens = informative_tokens(connection, query_tokens(query))
+    coverage, distinctive = token_coverage(connection, tokens)
+    minimum = required_coverage(tokens)
     rows = connection.execute(
         """
         SELECT
             d.path, d.layer, d.kind, d.title,
-            snippet(documents, 4, '[', ']', ' … ', 32) AS snippet,
+            snippet(documents, 5, '[', ']', ' … ', 32) AS snippet,
             m.category, m.privacy, m.owner, m.authority, m.lifecycle,
             m.source_hash, m.record_id, m.conflicts,
             m.source_fingerprints,
-            bm25(documents) AS score
+            bm25(documents, ?, ?, ?, ?, ?, ?) AS score
         FROM documents AS d
         JOIN document_metadata AS m ON m.path = d.path
         WHERE documents MATCH ?
         ORDER BY score, d.path
         LIMIT ?
         """,
-        (fts_query(query), limit),
+        (*BM25_WEIGHTS, " OR ".join(f'"{token}"' for token in tokens), limit),
     ).fetchall()
     result = []
     for row in rows:
+        if not is_relevant(row["path"], coverage, distinctive, minimum):
+            continue
         item = dict(row)
         item["snippet"] = str(item["snippet"])[:MAX_SNIPPET_CHARS]
         item["conflicts"] = json.loads(item["conflicts"])
@@ -368,14 +726,24 @@ def _runtime_filter(
                 or candidate["lifecycle"] in LIFECYCLES[record_type]["terminal"]
             ):
                 reason = "lifecycle"
+        content: Optional[str] = None
         if reason is None:
             path = repository / candidate["path"]
             try:
-                fresh = path.is_file() and _content_hash(path.read_text(encoding="utf-8")) == candidate["source_hash"]
+                content = path.read_text(encoding="utf-8") if path.is_file() else None
             except OSError:
-                fresh = False
-            if not fresh:
+                content = None
+            if content is None or _content_hash(content) != candidate["source_hash"]:
                 reason = "stale"
+        if reason is None and candidate["kind"] == "codebase" and content is not None:
+            # A map that no longer describes the code is worse than no map:
+            # an agent acts on it instead of reading the source.
+            drift = codebase_map_drift(repository, content)
+            limit = config.get("codebase_map_max_drift", CODEBASE_MAP_MAX_DRIFT)
+            if drift is None:
+                reason = "map-unverifiable"
+            elif drift > limit:
+                reason = "map-drift"
         if (
             reason is None
             and candidate["kind"].startswith("brain-")
@@ -446,6 +814,19 @@ def _apply_budgets(
     return selected, excluded, usage, escalation
 
 
+def _prune_local_manifests(directory: Path) -> None:
+    """Bound ignored local manifests; the governed store has its own policy."""
+    manifests = [path for path in directory.glob("*.json") if path.is_file()]
+    if len(manifests) <= LOCAL_MANIFEST_RETENTION:
+        return
+    manifests.sort(key=lambda path: (path.stat().st_mtime_ns, path.name))
+    for path in manifests[: len(manifests) - LOCAL_MANIFEST_RETENTION]:
+        try:
+            path.unlink()
+        except OSError:
+            continue
+
+
 def retrieve(
     connection: sqlite3.Connection,
     repository: Path,
@@ -454,9 +835,14 @@ def retrieve(
     *,
     limit: int,
     provider: Optional[str] = None,
+    manifest_scope: str = "governed",
 ) -> dict[str, Any]:
     if limit < 1:
         raise RetrievalError("--limit must be a positive integer")
+    if manifest_scope not in MANIFEST_SCOPES:
+        raise RetrievalError(
+            f"Manifest scope must be one of {', '.join(MANIFEST_SCOPES)}"
+        )
     task = get_task(repository, task_identifier)
     config = load_config(repository)
     candidates = _candidates(connection, query, max(20, limit * 10))
@@ -527,14 +913,22 @@ def retrieve(
         "provider": provider or config["provider"],
         "escalation_reason": escalation_reason,
     }
-    manifest_path = (
-        brain_root(repository) / "control" / "retrieval-manifests" / f"{manifest_id}.json"
-    )
+    if manifest_scope == "governed":
+        manifest_directory = brain_root(repository) / "control" / "retrieval-manifests"
+    else:
+        manifest_directory = repository / "memory-bank" / "local" / "retrieval-manifests"
+    manifest_path = manifest_directory / f"{manifest_id}.json"
     validate_schema_file(
         repository, "retrieval-manifest.schema.json", manifest
     )
-    with mutation_lock(repository):
+    if manifest_scope == "governed":
+        with mutation_lock(repository):
+            atomic_json(manifest_path, manifest)
+    else:
+        # Ignored local provenance for automated retrieval: the same validated
+        # record, kept out of shared history and out of the runtime lock.
         atomic_json(manifest_path, manifest)
+        _prune_local_manifests(manifest_directory)
     groups = {category: [] for category in BUDGETS}
     for item in selected:
         public = {
@@ -566,4 +960,5 @@ def retrieve(
         "selected": selected,
         "token_estimates": usage,
         "manifest": manifest_path.relative_to(repository).as_posix(),
+        "manifest_scope": manifest_scope,
     }

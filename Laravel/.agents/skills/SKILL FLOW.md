@@ -60,7 +60,7 @@ This flow keeps Laravel work structured while preserving user control. Agents su
 
 | Phase | Commands |
 | --- | --- |
-| Understanding | `/requirements-analyst`, `/researcher`, `/brainstorm` |
+| Understanding | `/requirements-analyst`, `/codebase-mapper`, `/researcher`, `/brainstorm` |
 | Planning | `/council`, `/architect`, `/database-designer`, `/api-designer`, `/frontend-design`, `/writing-plans` |
 | Implementation | `/git-worktrees`, `/architecture-implementer`, `/coder`, `/coder-frontend`, `/filament`, `/eloquent`, `/queues-jobs`, `/events-notifications`, `/auth-scaffolding`, `/caching`, `/console-scheduler`, `/file-storage`, `/package-developer`, `/refactorer` |
 | Quality | `/code-reviewer`, `/security-reviewer`, `/test-generator`, `/performance-optimization`, `/debugger`, `/verify` |

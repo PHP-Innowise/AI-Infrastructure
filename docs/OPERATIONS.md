@@ -192,10 +192,40 @@ relationships use Project Brain UUIDs, not external aliases.
 
 ## CLI Reference
 
+### `refresh`
+
+```bash
+python3 memory-bank/scripts/context.py refresh \
+  [--query TEXT --task-id ID] \
+  [--limit N] \
+  [--ephemeral] \
+  [--validate] \
+  [--json]
+```
+
+Refreshes procedural, semantic, and episodic memory in one incremental pass and
+reports each layer as `updated` or `failed`. All three come from the same
+indexing pass and therefore succeed or fail together, but they are reported
+separately: a caller told only that "refresh failed" cannot tell which part of
+its context went stale.
+
+With `--query` and `--task-id` it also assembles the Task Capsule in the same
+process, skipping the second index pass that a separate `retrieve` would run.
+A capsule failure is reported as a warning and does not undo the layer refresh.
+
+Exit status is `1` when any layer failed, so an automated caller can tell a
+stale refresh from a working one. `--validate` additionally reports Project
+Brain validation, which reads every record and is not free as records
+accumulate.
+
+This is the command the request hook runs. Side effects: writes only the
+selected SQLite database, plus an ignored local manifest when `--ephemeral`
+accompanies a capsule.
+
 ### `index`
 
 ```bash
-python3 memory-bank/scripts/context.py index [--json]
+python3 memory-bank/scripts/context.py index [--incremental] [--json]
 ```
 
 Rebuilds the disposable FTS5 document index from eligible policy, skills,
@@ -204,6 +234,13 @@ capability epics, changelog, active Brain records, and handoffs. It filters
 Git-ignored candidates before reading them, rejects likely secrets, deduplicates
 mirrored skills, and replaces the previous document/metadata index in one
 SQLite transaction.
+
+`--incremental` reuses every row whose source modification time and size are
+unchanged, so only new or modified documents are re-read and re-scanned and a
+no-change refresh performs reads only. Project Brain records are always
+rebuilt, because their eligibility depends on configuration, lifecycle, and
+cross-record state rather than on the record file alone. Without the flag this
+is a full rebuild.
 
 Side effects: writes only the selected SQLite database. It does not create a
 task, retrieve context, or inject context into a prompt. Invalid UTF-8 aborts
@@ -234,16 +271,27 @@ Side effects: SQLite initialization only.
 python3 memory-bank/scripts/context.py retrieve QUERY \
   --task-id ID \
   [--limit N] \
+  [--ephemeral] \
   [--json]
 
 python3 memory-bank/scripts/context.py context QUERY \
   --task-id ID \
   [--limit N] \
+  [--ephemeral] \
   [--json]
 ```
 
 `retrieve` is the public task-aware interface; `context` is a compatibility
 alias. The default per-query limit is `3`.
+
+Both refresh the index incrementally before reading it, because retrieval reads
+the index rather than the sources and a stale index silently narrows the
+result. A refresh failure degrades to a warning instead of failing the request.
+
+`--ephemeral` writes the retrieval manifest to the ignored
+`memory-bank/local/retrieval-manifests/` instead of shared Git history, capped
+at the most recent 200. Automated retrieval must use it: one manifest per
+request would otherwise add thousands of tracked files.
 
 In governed mode, the task ID must resolve through a local binding to a Brain
 task. Retrieval applies privacy, configured owner, authority, lifecycle,
@@ -321,6 +369,50 @@ uses a repository-wide lock and compensating snapshots across Brain and SQLite.
 Operational policy requires `--revision` in governed mode even though the
 compatibility parser does not mark it required. It is ignored by lightweight
 updates, where SQLite owns the working task.
+
+`--revision auto` resolves the current revision inside the runtime mutation
+lock, making the read and the write it feeds one compare-and-swap. It exists
+for automated writers that cannot know the revision in advance. An operator who
+knows the revision should still pass it: only an explicit value detects that
+the record moved between reading it and deciding to write.
+
+### `turn`
+
+```bash
+python3 memory-bank/scripts/context.py [--owner OWNER] turn \
+  --task-id ID \
+  [--flush] \
+  [--flush-after N] \
+  [--max-files N] \
+  [--json]
+```
+
+Buffers one turn's change set and flushes a consolidated update to the
+authoritative task on a boundary. Buffering is what keeps per-turn continuity
+affordable: without it, every turn would cost one governed revision and one
+rewritten handoff. The default boundary is every `5` turns; `--flush` forces
+one.
+
+Change sets come from Git porcelain metadata alone. Working-tree contents are
+never read, paths that look sensitive are excluded and reported, and the
+runtime's own record, handoff, and index churn is dropped rather than recorded
+as user work. A flush contributes at most `--max-files` paths (default `20`)
+and reports the count it omitted.
+
+With `automatic_promotion` enabled, a flush also runs automatic promotion; see
+[Promotion to Durable Memory](CONTEXT-AND-MEMORY.md#promotion-to-durable-memory)
+for what qualifies.
+
+The first flush provisions the task when it does not exist, deriving a goal
+from the branch name and recording that provenance in the goal itself. Buffered
+turns alone provision nothing, so visiting a branch mints no record. An
+existing task is never overwritten: a goal written by an operator survives.
+
+Buffered turns are deleted only after the authoritative write lands, so an
+interrupted flush replays rather than loses the buffer.
+
+This is the command the turn-end hook runs. Side effects: the ignored SQLite
+buffer, plus one task update per flush.
 
 ### `get`
 
@@ -446,6 +538,10 @@ is in `authorized_owners`, validates type-specific lifecycle transitions,
 refreshes source fingerprints, appends transition history when transitioning,
 and rebuilds indexes. At least one field or transition is required. The default
 reason is `Record updated`.
+
+`--revision auto` resolves the current revision inside the runtime mutation
+lock, so an automated writer still performs a real compare-and-swap rather than
+omitting the check.
 
 Events are content-immutable: they may only transition from `recorded` to
 `superseded`. The parser accepts any transition string; the runtime validates
@@ -586,9 +682,12 @@ categorization or an update/supersession decision.
 These names describe AI workflows, not additional shell executables:
 
 - `memory` takes no arguments. In governed mode it validates Project Brain,
-  refreshes the disposable index, reports status, and stops. In explicitly
-  configured lightweight mode it may perform the checkpoint procedure before
-  indexing. It never completes tasks, applies promotions, or invents state.
+  runs `refresh`, reports each memory layer as that command returned it, and
+  stops. In explicitly configured lightweight mode it may perform the
+  checkpoint procedure first. It uses the same `refresh` the request hook runs,
+  so the skill and the hook cannot drift apart, and it never passes `--query`:
+  `memory` reports layer health rather than retrieving. It never completes
+  tasks, applies promotions, or invents state.
 - `checkpoint` takes no arguments and never completes work. In governed mode it
   skips local working-state mutation and directs the caller to a governed
   revisioned update. Only in explicitly configured lightweight mode may it
@@ -599,10 +698,30 @@ These names describe AI workflows, not additional shell executables:
 - `memory-bank` retrieves, captures, audits, supersedes, archives, or applies
   independently approved durable memory. It does not own active task progress.
 
-Skills execute only when selected. Hooks are informational and metadata-only:
-they may report branch, index, binding, and validation status, but they do not
-automatically index sources, retrieve records, read record bodies, or inject
-context into prompts.
+Skills execute only when selected.
+
+Session-start hooks stay informational and metadata-only: they report branch,
+index, binding, and validation status without indexing, retrieving, or printing
+record bodies. The request and turn-end hooks do more, and only what their
+halves require:
+
+- the request hook runs `refresh` and injects a bounded capsule; it writes no
+  task state, because at prompt time nothing has happened yet to record;
+- the turn-end hook runs `turn`, which buffers the change set and flushes a
+  consolidated task update on a boundary.
+
+With `automatic_promotion` enabled in `runtime.json`, the turn-end hook also
+promotes eligible resolved, verified knowledge into durable memory without
+review; such promotions name no reviewer and their chunks are tagged
+`auto-promoted`. With `automatic_completion` enabled, it also completes tasks
+whose branch has merged into the default branch, writing an episode and closing
+the handoff; the outcome states the merge and nothing about correctness.
+With `automatic_compaction` it archives terminal records once
+`compaction_threshold` of them accumulate, repointing any promoted Memory Bank
+chunk at the record's new archive path as it goes.
+
+See [Context and Memory](CONTEXT-AND-MEMORY.md#hooks-and-explicit-actions) for
+the reasoning behind the read/write split.
 
 ## Failure and Recovery
 

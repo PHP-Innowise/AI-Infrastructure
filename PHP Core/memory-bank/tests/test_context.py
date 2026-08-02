@@ -548,7 +548,9 @@ class ContextEngineTest(unittest.TestCase):
             row[1] for row in connection.execute("PRAGMA table_info(documents)").fetchall()
         ]
         connection.close()
-        self.assertEqual(["path", "layer", "kind", "title", "content"], columns)
+        self.assertEqual(
+            ["path", "layer", "kind", "title", "summary", "content"], columns
+        )
 
     def test_failed_episode_migration_rolls_back(self) -> None:
         database = self.create_old_episode_database()

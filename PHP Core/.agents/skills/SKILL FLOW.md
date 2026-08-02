@@ -48,7 +48,7 @@ This flow keeps native PHP work structured while preserving user control. Agents
 
 | Phase | Commands |
 | --- | --- |
-| Understanding | `/requirements-analyst`, `/researcher`, `/brainstorm` |
+| Understanding | `/requirements-analyst`, `/codebase-mapper`, `/researcher`, `/brainstorm` |
 | Planning | `/council`, `/architect`, `/database-designer`, `/api-designer`, `/frontend-design`, `/writing-plans` |
 | Implementation | `/git-worktrees`, `/architecture-implementer`, `/coder`, `/coder-frontend`, `/refactorer` |
 | Quality | `/code-reviewer`, `/security-reviewer`, `/test-generator`, `/performance-optimization`, `/debugger`, `/verify` |

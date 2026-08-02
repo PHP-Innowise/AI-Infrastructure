@@ -10,6 +10,7 @@ Task directories may contain:
 - `requirements-analyst-requirements.md` - Requirements analysis (from /requirements-analyst)
 - `brainstorming-design.md` - Design decisions (from /brainstorm)
 - `writing-plans-plan.md` - Implementation plan (from /writing-plans)
+- `test-generator-validation.md` - Requirement-to-test coverage map (from /test-generator)
 
 ## Task Numbering
 

@@ -296,6 +296,13 @@ same version. `brain-update` requires a revision in the parser. Governed task
 operators must always supply it; omission means the runtime does not perform
 the intended compare-and-swap check.
 
+`--revision auto` resolves the current revision inside the runtime mutation
+lock, so the read and the write it feeds form one compare-and-swap. It exists
+for automated writers, which cannot know the revision in advance and would
+otherwise have to omit the check entirely. An operator who knows the revision
+should still pass it: only an explicit value can detect that the record moved
+between reading it and deciding to write.
+
 ## Indexing
 
 The indexer discovers eligible files from fixed repository patterns, including:
@@ -325,19 +332,69 @@ not modify canonical source files or transform indexed content into truth.
 
 Important boundaries:
 
+- the index stems with `porter unicode61`, so "review" reaches a document that
+  only says "reviewer"; without stemming the correct skill is simply missed;
+- two patterns may match one file; the earlier one owns its layer and kind, and
+  the file is indexed once;
 - the fixed patterns do not index arbitrary application source code;
 - `search` queries the existing index and does not refresh it;
 - parity drift is reported by `index`, but only `parity` makes drift fatal;
-- indexing is explicit—hooks do not trigger it automatically.
+- `retrieve` and the request hook refresh the index; `index` remains the
+  explicit full rebuild.
+
+`index --incremental` reuses every row whose source modification time and size
+are unchanged, so only new or modified documents are re-read and re-scanned.
+Project Brain records are always rebuilt, because their eligibility depends on
+configuration, lifecycle, and cross-record conflict state rather than on the
+record file alone. A change that somehow reproduced its predecessor's stat is
+not served as truth: retrieval re-hashes every candidate and excludes the
+mismatch as stale.
 
 ## Search and Governed Retrieval
 
+Capsule assembly filters for relevance before ranking. Terms matched by more
+than half the corpus are dropped as noise — measured against the index rather
+than a stopword list, so it adapts to the languages a repository documents
+itself in. A document then qualifies either by containing two distinct query
+terms, or by containing one term rare enough in this corpus to be evidence on
+its own.
+
+That second route matters more than it looks. Counting terms equally punishes
+exactly the wrong document: a focused note containing only the rare term that
+matters scores one, while filler sharing two unremarkable words scores two and
+takes the slot. Admitting a distinctive single match lets some noise back in on
+queries no document covers, which is the cheaper error — a spurious result
+wastes a slot, a hidden one denies an answer the project already holds.
+
+Ranking weights what a document declares itself to be about. Each document is
+indexed with a `summary` — a frontmatter `description` where one exists, the
+opening prose otherwise — weighted well above the body, because skill bodies
+are procedural prose that reads much alike while the description states the
+topic.
+
+This is lexical retrieval, and its limit is real: it cannot distinguish a
+document *about* a subject from one that merely contains a generic word from
+the question. A query whose subject no document covers will still surface the
+least-bad lexical match rather than nothing.
+
+Local latent-semantic embeddings were built and measured against that gap, and
+they did not close it. On a corpus this size the latent space encodes prose
+style rather than topic: "what is the airspeed velocity of a swallow" scored
+0.76 against the skill corpus while "design the database schema for invoices"
+scored 0.48, so no similarity floor separates a relevant query from an absurd
+one. Indexing declared descriptions instead of bodies improved ranking but not
+separability. Closing the gap needs a trained embedding model, which would cost
+this runtime its standard-library-only, network-free contract — a trade to make
+deliberately, not as a side effect of tuning retrieval.
+
 `search` is broad lexical discovery across the existing index and local
-episodes. It supports a procedural, semantic, or episodic layer filter. It does
+episodes. It stays unfiltered by design. It supports a procedural, semantic, or episodic layer filter. It does
 not require a task and does not create a manifest.
 
 `retrieve` is task-aware. In governed mode it:
 
+0. refreshes the index incrementally, degrading to a warning rather than an
+   error, because governed retrieval reads the index and not the sources;
 1. resolves the supplied external task ID through the local binding;
 2. loads the authoritative Brain task;
 3. uses FTS5/BM25 to identify candidates;
@@ -382,11 +439,27 @@ Confidence is a number from `0` to `1`. The schema validates it, but the current
 retrieval code does not threshold or rank by confidence. Do not promise that a
 low-confidence record will be filtered automatically.
 
-Freshness has two checks:
+Freshness has three checks:
 
 - the indexed document's current hash must match the hash stored when indexed;
 - for Brain records and handoffs, cited source paths must still match the
-  stored source fingerprints.
+  stored source fingerprints;
+- for a codebase map under `codebase/`, the commits landed on its
+  `mapped_scope` since its `mapped_commit` must stay within
+  `codebase_map_max_drift`.
+
+The third check exists because a codebase map describes code rather than
+itself. Its own bytes staying unchanged proves nothing: the content hash that
+keeps every other document honest cannot tell that the code moved on
+underneath it. A map that no longer describes the code is worse than no map,
+because an agent acts on it instead of reading the source. A map that records
+no commit is excluded as `map-unverifiable` rather than assumed current, and
+`refresh` reports how far each map has drifted so the silence of an exclusion
+is not the only signal.
+
+Indexing a map is not indexing application source. The fixed patterns still do
+not read arbitrary code; they read a document *about* it, which a skill writes
+and the runtime only governs.
 
 Freshness proves that bytes have not changed since fingerprinting. It does not
 prove that the claim is semantically correct, complete, or still applicable.
@@ -414,6 +487,22 @@ workflow rather than inventing unsupported flags.
 Memory Bank has its own chunk-level `supersedes` and `superseded_by` lifecycle.
 Do not assume Brain supersession automatically updates durable memory.
 
+A chunk may also carry a validity period, `valid_from` and `valid_to`. The two
+answer different questions and neither replaces the other: `superseded_by` says
+*what* took a chunk's place, `valid_to` says *when* it stopped being true. Both
+are optional, so chunks written before periods existed stay valid.
+
+`valid_from` may precede `created` — knowledge is often true well before anyone
+writes it down. A closed period pairs with a status: `superseded` when a
+successor took over, which the bank requires a link for, and `archived` when
+the knowledge simply ceased and nothing replaced it. The boolean model could
+not express that second case at all.
+
+An active chunk may not sit past its `valid_to`, the same rule `review_after`
+already applies. Closing a period therefore removes the chunk from retrieval
+without deleting it: automatically written memory earns a boundary rather than
+an erasure, and what was believed during that period stays readable.
+
 ## Budgets and Snippets
 
 Governed retrieval estimates tokens as roughly one token per four characters.
@@ -430,8 +519,14 @@ normal category/target budgets, never the hard ceiling.
 
 ## Retrieval Manifests
 
-Every successful governed retrieval writes
-`project-brain/control/retrieval-manifests/<uuid>.json`.
+Every successful governed retrieval writes a manifest. By default it lands in
+the Git-tracked `project-brain/control/retrieval-manifests/<uuid>.json`.
+
+`--ephemeral` writes the same validated record to
+`memory-bank/local/retrieval-manifests/<uuid>.json` instead. Automated
+retrieval must use it: one manifest per request would otherwise add thousands
+of files to shared history. Local manifests are ignored, are capped at the most
+recent 200, and are provenance for the local machine only.
 
 A manifest binds:
 
@@ -448,8 +543,9 @@ the selected snippets or full source bodies, and it cannot replay the exact
 prompt seen by an agent. It deliberately excludes prompts, responses, hidden
 reasoning, and tool payloads.
 
-Manifests are Git-trackable and validated, but the current compactor does not
-archive or prune them. Retention requires an explicit repository policy.
+Governed manifests are Git-trackable and validated, but the current compactor
+does not archive or prune them. Retention for those requires an explicit
+repository policy. Only the local `--ephemeral` store prunes itself.
 
 ## Handoffs
 
@@ -460,6 +556,16 @@ active/closed status.
 The runtime creates it with the task, refreshes it on supported task updates,
 closes it on completion/cancellation, and archives it with its terminal task
 during compaction.
+
+A task may declare a `phase` — `understanding`, `planning`, `execution`, or
+`finalization` — using the same vocabulary the skills declare in their own
+frontmatter. Progress says what was touched; the phase says which step of the
+loop the work stopped on, which is what a reader needs in order to resume. The
+handoff carries it.
+
+`phase` is optional, and deliberately so: requiring it would invalidate every
+record written before it existed. An automatically provisioned task declares
+none, because nothing observed its phase. Only a task may carry one.
 
 A good handoff:
 
@@ -476,11 +582,59 @@ automatically reconstruct.
 
 ## Promotion to Durable Memory
 
-Promotion is a governed three-stage process:
+Promotion has two modes, and a promotion record always states which one it used.
+
+The reviewed mode is the three-stage process:
 
 ```text
 propose -> independent human review -> apply
 ```
+
+The automatic mode, enabled by `automatic_promotion` in `runtime.json`, runs
+unattended on the same boundary as the working-memory flush:
+
+```text
+propose -> apply
+```
+
+There is no reviewer in the automatic mode, and the runtime refuses to pretend
+otherwise. `reviewer` stays null, `review_mode` is `automatic`, the outcome is
+recorded as `approved-without-review`, and the resulting chunk carries an
+`auto-promoted` tag so the Memory Bank itself shows which knowledge no human
+approved. `promote-review` rejects an automatic promotion outright rather than
+letting a human signature be attached after the fact.
+
+Eligibility is deliberately narrow, because nothing downstream will catch a bad
+promotion:
+
+- only `finding: resolved`, `bug: resolved`, `incident: closed`, and
+  `decision: accepted`;
+- only `verified` authority, since there is no reviewer to question an
+  unverified claim;
+- only privacy the runtime already allows, and only with fresh source
+  fingerprints;
+- never a task. Auto-checkpoint progress describes what happened in a session,
+  not a consequence worth carrying into another one.
+
+A record must also carry content beyond its own title. A record's rendered
+body is mostly lifecycle scaffolding, and for a decision the goal merely
+repeats the title, so the promoted chunk is assembled from the record's
+progress note and cited sources rather than copied verbatim. Durable memory is
+therefore only as good as what was written into the record: the pipeline
+carries knowledge, it does not synthesize it.
+
+A source already bound to a non-rejected promotion is never promoted again, so
+repeated runs do not fill the bank with duplicates. At most five records are
+promoted per run and the remainder is reported, not dropped.
+
+Every rule that holds a record back reports its reason. Editing a cited source
+is enough to block a decision forever, and an unexplained absence from durable
+memory is impossible to notice otherwise.
+
+Automatic promotion writes durable, Git-tracked memory with no human in the
+loop. That is the trade it makes: continuity without attention, at the cost of
+the check that would have caught a wrong or unreusable claim before it became
+durable. Set `automatic_promotion` to `false` to return to reviewed promotion.
 
 Proposal records bind each source Brain record's exact UUID, type, path, and
 revision. An independent human reviewer must approve; the proposer cannot
@@ -517,6 +671,11 @@ moves/indexes on failure.
 
 Compaction is archival, not deletion. Archived records remain subject to the
 same strict schema and relationship checks and can serve as promotion sources.
+
+Because a Memory Bank chunk cites its source record by path, compaction
+repoints any chunk citing a record it moves, atomically with the move and its
+rollback. Without that, archiving a promoted record would leave a dangling
+citation, fail Memory Bank validation, and block every later promotion.
 
 The current compactor does not process:
 
@@ -641,10 +800,106 @@ Session-start hooks can report metadata such as:
 - validation status;
 - Memory Bank availability.
 
-They do not automatically index sources, retrieve context, print record bodies,
-or inject context into prompts. Indexing, retrieval, checkpointing, governed
-updates, completion, compaction, and promotion all require explicit selected
-skills or CLI calls.
+Session-start hooks print no record bodies and inject no context.
+
+Two further hooks automate working memory when the edition enables them:
+
+```text
+UserPromptSubmit -> working-memory-read.sh   (read: refresh + Task Capsule)
+Stop             -> working-memory-write.sh  (write: buffer + bounded flush)
+```
+
+The split is deliberate. At prompt time nothing has happened yet, so there is
+no delta to record; a request is the right moment to *read*. The delta exists
+at the end of a turn, which is the right moment to *write*.
+
+The read hook runs `refresh`, which re-indexes procedural, semantic, and
+episodic memory in one incremental pass and reports each layer as `updated` or
+`failed`:
+
+```text
+Procedural  AGENTS.md, CLAUDE.md, mirrored edition skills
+Semantic    README, docs, specs, active Memory Bank chunks, task documents,
+            capability epics, eligible Brain records and handoffs
+Episodic    CHANGELOG.md, plus local episodes at query time
+```
+
+Working memory is deliberately not in that list. It is not refreshed from
+sources; it is written by the turn hook, and in governed mode Project Brain
+remains its only authority.
+
+The three layers come from one indexing pass and therefore succeed or fail
+together, but they are reported separately so a stale layer is visible rather
+than silently narrowing the result. When the hook also has a task — from
+`CONTEXT_TASK_ID` or the current branch — the same process assembles a bounded
+capsule with `--ephemeral`, avoiding the second index pass a separate
+`retrieve` would run. A capsule failure is a warning; the layer refresh stands.
+
+The capsule is retrieved context, not authority: the ordinary hierarchy still
+applies, and a capsule entry never outranks the source it summarizes.
+
+The write hook reads Git porcelain metadata only. Working-tree contents never
+reach the buffer, paths that look sensitive are excluded and reported, and the
+runtime's own record, handoff, and index churn is dropped rather than recorded
+as user work. Turns accumulate in ignored local state and flush together, so
+continuity costs one governed revision per `--flush-after` turns instead of one
+per turn. A flush contributes at most `--max-files` paths, and reports the
+remainder rather than dropping it silently.
+
+The first flush provisions the task if it does not exist. Automated continuity
+is worthless if it buffers into a task nobody created, and requiring an
+operator to run `start` first would mean the automated path only works after a
+manual step. Provisioning happens at flush time, not at session start, so
+visiting a branch mints nothing; only accumulated work does.
+
+An automatically created task states its own provenance, because a goal cannot
+be edited after creation:
+
+```text
+feature/add-caching  ->  Add caching (auto-provisioned from feature/add-caching)
+```
+
+Ticket identifiers survive intact: `BAUMAS-133` is a name, not two hyphenated
+words. A task that already exists is never overwritten, so an operator who ran
+`start` with a real goal keeps it. Set `CONTEXT_TASK_ID` to bind work to
+something other than the branch.
+
+Provisioning writes a Git-tracked record. On a long-lived branch that is the
+point; on many short branches it accumulates tasks that `compact` archives only
+once they reach a terminal status.
+
+Both hooks are fail-open and time-bounded: context tooling never blocks a
+prompt or turns a checkpoint failure into a turn error.
+
+With `automatic_completion` enabled, the turn hook also completes tasks whose
+branch has landed in the default branch, recording an episode as it goes. The
+scan covers every active task rather than the current one, because a merge is
+observed after the branch is left, not while it is being worked on. Detection
+is `git merge-base --is-ancestor`, so merging the default branch *into* a
+long-running branch never looks like completion, and a branch is skipped when
+it is the default branch itself, which is trivially its own ancestor. A deleted
+branch is never treated as merged: deletion cannot be told apart from
+abandonment.
+
+The outcome claims only what was actually checked:
+
+```text
+Branch feature/reports merged into main. Last recorded progress: <checkpoint>
+Verification: feature/reports is an ancestor of main
+```
+
+Nothing here verified that the work is correct, so the record does not say so.
+
+With `automatic_promotion` enabled, the turn hook also promotes eligible
+resolved knowledge into durable memory on the same boundary, and with
+`automatic_compaction` it archives terminal records once `compaction_threshold`
+of them have accumulated. Compaction runs in batches rather than every turn:
+archiving one record at a time would churn Git history for no benefit.
+
+The order within a turn is fixed — complete, promote, then archive — because a
+record must be promoted before it is moved. Archived records stay promotable
+anyway, so a promotion run that hits its per-run cap does not lose the
+remainder to the archive.
 
 This distinction matters: a healthy status line means the tools are available;
 it does not mean an agent has loaded, verified, or acted on the relevant
