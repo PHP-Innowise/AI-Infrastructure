@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  tests:
+    name: "tests (${{ matrix.suite }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - "Laravel/memory-bank/tests"
+          - "Laravel/project-brain/tests"
+          - "Symfony/memory-bank/tests"
+          - "Symfony/project-brain/tests"
+          - "PHP Core/memory-bank/tests"
+          - "PHP Core/project-brain/tests"
+          - "Infrastructure-Creator/tests"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Run unit tests
+        working-directory: ${{ matrix.suite }}
+        run: python3 -m unittest discover
+
+  parity:
+    name: "parity (${{ matrix.edition }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        edition:
+          - "Laravel"
+          - "Symfony"
+          - "PHP Core"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Mirror parity
+        working-directory: ${{ matrix.edition }}
+        run: python3 memory-bank/scripts/context.py parity
+      - name: Cross-edition core parity
+        working-directory: ${{ matrix.edition }}
+        run: python3 memory-bank/scripts/context.py parity --cross-edition
+
+  mirrors:
+    name: mirrors
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Verify tool mirrors against canon
+        run: python3 scripts/build_mirrors.py --check
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Bash syntax check (bash -n)
+        run: git ls-files -z -- '*.sh' | xargs -0 -r -n1 bash -n
+      - name: ShellCheck (severity gate error)
+        run: |
+          shellcheck --version
+          git ls-files -z -- '*.sh' | xargs -0 -r shellcheck -S error
+      - name: Validate JSON
+        run: |
+          git ls-files -z -- '*.json' | while IFS= read -r -d '' f; do
+            python3 -m json.tool "$f" > /dev/null || { echo "Invalid JSON: $f" >&2; exit 1; }
+          done
+      - name: Startup context budget
+        run: python3 scripts/context_budget.py --check
+
+  changelog:
+    name: core-changelog
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The gate diffs against the merge base with the PR base branch;
+          # a shallow checkout has no such history to resolve it from.
+          fetch-depth: 0
+      - name: Shared-core changes require a root CHANGELOG entry
+        run: bash scripts/check_core_changelog.sh "origin/${{ github.base_ref }}"
+
+  links:
+    name: links
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Check relative markdown links
+        run: python3 scripts/check_links.py
