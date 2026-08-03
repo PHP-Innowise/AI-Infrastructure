@@ -1,9 +1,6 @@
 ---
 name: codebase-mapper
 description: "Use this agent to map an existing native PHP codebase into `codebase/` documents that later requests read instead of the source.\n\nExamples:\n\n<example>\nContext: The user joins an unfamiliar project.\nuser: \"Help me get oriented in this codebase\"\nassistant: \"I'll use the codebase-mapper agent to map the project.\"\n<Task tool call to codebase-mapper agent>\n</example>\n\n<example>\nContext: Retrieval reported the map is behind the code.\nuser: \"The codebase map is 40 commits stale\"\nassistant: \"I'll use the codebase-mapper agent to regenerate it.\"\n<Task tool call to codebase-mapper agent>\n</example>"
-model: sonnet
-invokes: codebase-mapper
-phase: understanding
 ---
 
 # Codebase Mapper Agent

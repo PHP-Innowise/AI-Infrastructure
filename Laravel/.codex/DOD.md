@@ -33,7 +33,7 @@ All Minimum items, plus:
 - [ ] Input validation is via a Form Request (or explicit validator) and authorization via a Policy/Gate.
 - [ ] No N+1 queries introduced (`with()`/`load()` used for relationships accessed in loops).
 - [ ] No OWASP Top 10 risk was introduced.
-- [ ] Code was self-reviewed against `.claude/GOLDEN-PRINCIPLES.md`.
+- [ ] Code was self-reviewed against `.codex/GOLDEN-PRINCIPLES.md`.
 
 ## Full
 
@@ -75,7 +75,7 @@ npm run build
 npm run lint
 ```
 
-Otherwise verify markup manually: valid HTML5, semantic structure, and the accessibility rules in `.claude/skills/wcag-accessibility/`.
+Otherwise verify markup manually: valid HTML5, semantic structure, and the accessibility rules in `.agents/skills/wcag-accessibility/`.
 
 ## Failure Handling
 
