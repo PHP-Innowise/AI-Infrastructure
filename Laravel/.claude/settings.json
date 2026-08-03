@@ -134,7 +134,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "osascript -e 'display notification \"Claude needs your attention\" with title \"Claude Code\"' 2>/dev/null || notify-send 'Claude Code' 'Claude needs your attention' 2>/dev/null || echo 'Claude Code notification'",
+            "command": "case \"$(uname -s)\" in Darwin) osascript -e 'display notification \"Claude needs your attention\" with title \"Claude Code\"' 2>/dev/null || echo 'Claude Code notification';; Linux) notify-send 'Claude Code' 'Claude needs your attention' 2>/dev/null || echo 'Claude Code notification';; *) echo 'Claude Code notification';; esac",
             "timeout": 5
           }
         ]

@@ -34,4 +34,8 @@ else
     --task-id "$TASK_ID" --flush-after "$FLUSH_AFTER" > /dev/null 2>&1
 fi
 
+# Capsule delivery: this client receives the Task Capsule at prompt time
+# through working-memory-read.sh, so the turn checkpoint above is all that
+# runs here.
+
 exit 0

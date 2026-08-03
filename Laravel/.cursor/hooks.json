@@ -4,7 +4,7 @@
     "sessionStart": [
       {
         "command": ".cursor/hooks/local-context.sh",
-        "timeout": 10
+        "timeout": 15
       }
     ],
     "beforeShellExecution": [
@@ -26,7 +26,7 @@
     "stop": [
       {
         "command": ".cursor/hooks/working-memory-write.sh",
-        "timeout": 8
+        "timeout": 15
       }
     ]
   }

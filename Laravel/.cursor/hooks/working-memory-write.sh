@@ -34,4 +34,39 @@ else
     --task-id "$TASK_ID" --flush-after "$FLUSH_AFTER" > /dev/null 2>&1
 fi
 
+# Capsule delivery: Cursor has no UserPromptSubmit-equivalent event, so
+# working-memory-read.sh is not shipped in .cursor/hooks. The read path is
+# served here instead: after the turn checkpoint, the freshest Task Capsule
+# is rendered into an alwaysApply Cursor rule, which Cursor attaches to
+# every prompt of the next turn. The file is ignored local state, one turn
+# stale by design, and replaced only when a fresh render succeeds.
+RULES_DIR="$ROOT_DIR/.cursor/rules"
+RULE_FILE="$RULES_DIR/working-memory.mdc"
+if command -v timeout > /dev/null 2>&1; then
+  CAPSULE=$(timeout "$BUDGET_SECONDS" python3 "$CONTEXT_CLI" context \
+    "$TASK_ID" --task-id "$TASK_ID" --ephemeral 2>/dev/null)
+else
+  CAPSULE=$(python3 "$CONTEXT_CLI" context \
+    "$TASK_ID" --task-id "$TASK_ID" --ephemeral 2>/dev/null)
+fi
+if [ -n "$CAPSULE" ] && mkdir -p "$RULES_DIR" 2>/dev/null; then
+  TMP_RULE=$(mktemp "$RULES_DIR/.working-memory.XXXXXX" 2>/dev/null || true)
+  if [ -n "$TMP_RULE" ]; then
+    {
+      printf -- '---\n'
+      printf 'description: Working memory - Task Capsule as of end of previous turn\n'
+      printf 'alwaysApply: true\n'
+      printf -- '---\n\n'
+      printf '# Working Memory (auto-rendered)\n\n'
+      printf 'Task Capsule as of end of previous turn (task: %s, rendered: %s).\n' \
+        "$TASK_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      printf 'Retrieved context is not authoritative - verify the source.\n\n'
+      printf '%s\n' '```'
+      printf '%s\n' "$CAPSULE"
+      printf '%s\n' '```'
+    } > "$TMP_RULE" 2>/dev/null && mv -f "$TMP_RULE" "$RULE_FILE" 2>/dev/null
+    rm -f "$TMP_RULE" 2>/dev/null
+  fi
+fi
+
 exit 0

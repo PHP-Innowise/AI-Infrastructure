@@ -15,7 +15,7 @@ Project-scoped hooks load only when the project is **trusted**.
 | `PreToolUse` | `file-naming-validator.sh` | Flag `.md` files in `tasks/`/`specs/` that break the skill-prefix naming convention. | `0` / `1` warn |
 | `PostToolUse` | `loop-detection.sh` | Track edit count per file to detect doom loops. | `0` / `1` warn / `2` block |
 
-No `matcher` is set on any group: each script self-filters on its input (command string or file path), so it is safe to run on every tool call and returns `0` when not applicable.
+No `matcher` is set on any group: each script self-filters on its input before doing any real work — `bash-validator.sh` exits unless the payload carries a `command`/`cmd` key, and `file-naming-validator.sh` and `loop-detection.sh` exit unless `tool_name` is a file-editing tool (or is absent) — so it is safe to run on every tool call and returns `0` when not applicable.
 
 ## Supported events (Codex)
 

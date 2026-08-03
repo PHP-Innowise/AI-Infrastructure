@@ -6,6 +6,16 @@
 
 INPUT=$(cat)
 
+# Cheap self-filter before any process is forked: Codex and Cursor register
+# this hook without a tool matcher, so it runs for every tool call. A real
+# "command"/"cmd" JSON key always appears unescaped on the wire, while the
+# same text inside a string value arrives as \"command\" and does not match,
+# so payloads that cannot carry a shell command exit here for free.
+case "$INPUT" in
+  *'"command"'*|*'"cmd"'*) ;;
+  *) exit 0 ;;
+esac
+
 # Decode JSON instead of scraping quoted strings; nested shell commands contain escaped quotes.
 extract_command() {
   if command -v jq >/dev/null 2>&1; then
@@ -30,6 +40,11 @@ print("\n".join(found), end="")'
     return 1
   fi
 }
+
+if ! command -v jq >/dev/null 2>&1 && ! command -v php >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
+  echo "bash-validator: no JSON extractor available (jq/php/python3), validation skipped" >&2
+  exit 0
+fi
 
 COMMAND=$(printf '%s' "$INPUT" | extract_command 2>/dev/null) || exit 0
 
@@ -71,13 +86,27 @@ if printf '%s\n' "$COMMAND" | grep -Eqi -- 'doctrine:fixtures:load'; then
   fi
 fi
 
+# One combined grep decides pass/block instead of one grep fork per pattern;
+# every alternative keeps its own group so "^" anchors keep their standalone
+# meaning. The per-pattern loop runs only after a match, to name the pattern
+# in the block message.
+BLOCKED_REGEX=""
 for PATTERN in "${BLOCKED_PATTERNS[@]}"; do
-  if printf '%s\n' "$COMMAND" | grep -Eqi -- "$PATTERN"; then
-    echo "BLOCKED: Destructive command detected: matches pattern '$PATTERN'" >&2
-    echo "   Command: $COMMAND" >&2
-    echo "   This operation is blocked. See AGENTS.md." >&2
-    exit 2
-  fi
+  BLOCKED_REGEX="${BLOCKED_REGEX:+$BLOCKED_REGEX|}($PATTERN)"
 done
+
+if printf '%s\n' "$COMMAND" | grep -Eqi -- "$BLOCKED_REGEX"; then
+  MATCHED="one of the blocked patterns"
+  for PATTERN in "${BLOCKED_PATTERNS[@]}"; do
+    if printf '%s\n' "$COMMAND" | grep -Eqi -- "$PATTERN"; then
+      MATCHED=$PATTERN
+      break
+    fi
+  done
+  echo "BLOCKED: Destructive command detected: matches pattern '$MATCHED'" >&2
+  echo "   Command: $COMMAND" >&2
+  echo "   This operation is blocked. See AGENTS.md." >&2
+  exit 2
+fi
 
 exit 0

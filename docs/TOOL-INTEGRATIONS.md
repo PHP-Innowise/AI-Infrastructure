@@ -79,7 +79,7 @@ The same safety goals are adapted to each client's event schema:
 | Shell safety | `PreToolUse` for Bash | `beforeShellExecution` | `PreToolUse` |
 | File naming | `PreToolUse` for Write/Edit | `afterFileEdit` | `PreToolUse` |
 | Edit-loop detection | `PostToolUse` for Edit | `afterFileEdit` | `PostToolUse` |
-| Task Capsule into the prompt | `UserPromptSubmit` | not available | `UserPromptSubmit` |
+| Task Capsule into the prompt | `UserPromptSubmit` | `stop`/`sessionStart` render an `alwaysApply` rule | `UserPromptSubmit` |
 | Turn checkpoint at turn end | `Stop` | `stop` | `Stop` |
 
 ## Automatic Memory Support by Tool
@@ -89,24 +89,37 @@ capability that is not universal.
 
 | | Claude Code | Codex | Cursor |
 | --- | --- | --- | --- |
-| Capsule retrieved into each prompt | yes | yes | **no** |
+| Capsule retrieved into each prompt | yes (fresh) | yes (fresh) | **yes, one turn stale** (rendered `alwaysApply` rule) |
 | Turn change set buffered and flushed | yes | yes | yes |
 | Explicit `context.py retrieve` / `memory` | yes | yes | yes |
 
-Cursor cannot receive the capsule. Its nearest event, `beforeSubmitPrompt`,
-returns `{"continue": true|false, "user_message": "..."}` - it can allow or
-block a submission but cannot add context to the prompt, so a hook that
-printed a capsule would produce output the client discards. This is a client
-capability limit, not an installation fault, and `working-memory-read.sh` is
-therefore not shipped in `.cursor/hooks/`.
+Cursor cannot receive the capsule at prompt time. Its nearest event,
+`beforeSubmitPrompt`, returns `{"continue": true|false, "user_message": "..."}`
+- it can allow or block a submission but cannot add context to the prompt, so
+a hook that printed a capsule would produce output the client discards. This
+is a client capability limit, not an installation fault, and
+`working-memory-read.sh` is therefore not shipped in `.cursor/hooks/`.
 
-What Cursor keeps is the record: `stop` runs at turn end without prompt
-access, so continuity is written exactly as on the other two clients. Retrieval
-on Cursor is explicit - run `context.py retrieve` or the `memory` command when
-a task needs prior context.
+The read path on Cursor is served through a rule file instead: the Cursor
+mirrors of `working-memory-write.sh` (after the turn checkpoint) and
+`local-context.sh` (at session start, so a fresh session or a branch switch
+never serves the previous session's capsule) render the freshest capsule into
+`.cursor/rules/working-memory.mdc` - an `alwaysApply` rule Cursor attaches to
+every prompt. The file states its own staleness ("as of end of previous
+turn"), is replaced atomically and only when a fresh render succeeds, and is
+ignored local state (each edition's `.gitignore` lists it). This is a
+declared MIRROR_RULES transformation of the canonical hooks (the
+`_WM_DELIVERY_*` constants in `memory-bank/scripts/context_retrieval.py`),
+not drift: `scripts/build_mirrors.py --check` verifies it.
+
+Continuity is unaffected: `stop` runs at turn end without prompt access, so
+the record is written exactly as on the other two clients. Retrieval on
+Cursor can also be explicit - run `context.py retrieve` or the `memory`
+command when a task needs prior context sharper than the rendered rule.
 
 Treat the editions as equivalent in policy, skills, and enforcement, and as
-differing only in this row.
+differing only in capsule freshness: Claude Code and Codex retrieve
+per-prompt, Cursor reads the rule rendered at the previous turn boundary.
 
 The installed scripts:
 
@@ -115,9 +128,11 @@ The installed scripts:
 - warn about invalid task/spec Markdown names;
 - detect repeated-edit loops.
 
-Session hooks are metadata-only. They do not index sources, retrieve context,
-print record bodies, or inject records into prompts. Indexing and retrieval
-remain explicit.
+Session hooks are metadata-only on Claude Code and Codex: they do not index
+sources, retrieve context, print record bodies, or inject records into
+prompts. The one documented exception is Cursor's `sessionStart`, which
+additionally re-renders `.cursor/rules/working-memory.mdc` (see above) -
+silently, to the file only, never into the session banner.
 
 Hook return conventions are `0` to continue, `1` for a non-blocking warning
 where supported, and `2` to block. Timeouts are seconds in both Cursor's

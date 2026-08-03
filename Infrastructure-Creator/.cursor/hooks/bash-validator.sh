@@ -10,10 +10,49 @@ set -uo pipefail
 
 input="$(cat 2>/dev/null || true)"
 
-# Extract the command field without requiring jq (best-effort).
-cmd="$(printf '%s' "$input" | sed -n 's/.*"command"[[:space:]]*:[[:space:]]*"\(.*\)".*/\1/p' | head -1)"
+# Cheap self-filter before any process is forked: Codex and Cursor register
+# this hook without a tool matcher, so it runs for every tool call. A real
+# "command"/"cmd" JSON key always appears unescaped on the wire, while the
+# same text inside a string value arrives as \"command\" and does not match,
+# so payloads that cannot carry a shell command exit here for free.
+case "$input" in
+  *'"command"'*|*'"cmd"'*) ;;
+  *) exit 0 ;;
+esac
+
+# Decode JSON instead of scraping quoted strings; nested shell commands contain escaped quotes.
+extract_command() {
+  if command -v jq >/dev/null 2>&1; then
+    jq -r '[.. | objects | .command?, .cmd? | select(type == "string" and length > 0)] | join("\n")'
+  elif command -v php >/dev/null 2>&1; then
+    php -r '$v=json_decode(stream_get_contents(STDIN), true); $found=[]; $find=function($v) use (&$find, &$found) { if (!is_array($v)) return; foreach (["command", "cmd"] as $k) if (isset($v[$k]) && is_string($v[$k]) && $v[$k] !== "") $found[]=$v[$k]; foreach ($v as $child) $find($child); }; $find($v); echo implode("\n", $found);'
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import json,sys
+found=[]
+def find(v):
+    if isinstance(v, dict):
+        for key in ("command", "cmd"):
+            if isinstance(v.get(key), str) and v[key]: found.append(v[key])
+        for child in v.values():
+            find(child)
+    elif isinstance(v, list):
+        for child in v:
+            find(child)
+find(json.load(sys.stdin))
+print("\n".join(found), end="")'
+  else
+    return 1
+  fi
+}
+
+if ! command -v jq >/dev/null 2>&1 && ! command -v php >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
+  echo "[bash-validator] no JSON extractor available (jq/php/python3), validation skipped" >&2
+  exit 0
+fi
+
+cmd="$(printf '%s' "$input" | extract_command 2>/dev/null)" || exit 0
 if [ -z "$cmd" ]; then
-  cmd="$input"
+  exit 0
 fi
 
 block() {

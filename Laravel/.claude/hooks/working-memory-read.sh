@@ -29,12 +29,13 @@ run() {
   fi
 }
 
-# The prompt arrives as JSON on stdin. Reduce it to a bounded, quoteless query;
-# the CLI still rejects anything that looks like a secret or personal data.
+# The prompt arrives as JSON on stdin and is passed to the CLI as-is: query
+# distillation (informative terms ranked by rarity in the index) lives in
+# context.py, which also rejects anything that looks like a secret or
+# personal data before the text can reach a query or a manifest.
 # Keep the program in -c: a heredoc would occupy stdin and hide the prompt.
 QUERY=$(python3 -c '
 import json
-import re
 import sys
 
 try:
@@ -43,7 +44,7 @@ except (AttributeError, UnicodeDecodeError, ValueError):
     prompt = ""
 if not isinstance(prompt, str):
     prompt = ""
-print(" ".join(re.findall(r"\w+", prompt, flags=re.UNICODE)[:24]))
+print(prompt)
 ' 2>/dev/null)
 
 TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$ROOT_DIR" branch --show-current 2>/dev/null)}"
