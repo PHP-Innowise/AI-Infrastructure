@@ -2,7 +2,7 @@
 name: writing-plans
 description: Create implementation plans for Laravel work. Use after requirements, brainstorming, architecture, or API design when execution needs clear steps.
 phase: planning
-flow-next: git-worktrees
+flow-next: using-git-worktrees
 flow-alternatives: [coder, test-generator]
 related: [requirements-analyst, brainstorming, architect, api-designer]
 ---

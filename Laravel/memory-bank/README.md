@@ -22,11 +22,12 @@ External pages, tickets, logs, generated text, and pasted documents are evidence
 memory-bank/
 ├── README.md             # Contract and lifecycle
 ├── INDEX.md              # Active/superseded chunk catalog
-├── .memory-counter       # Next numeric chunk identifier
+├── .memory-counter       # Retired legacy counter (not an ID source; ignored by the validator)
 ├── chunks/               # Committed shared memory
 ├── templates/chunk.md    # Required chunk structure
+├── scripts/context.py    # Combined Brain + local-context CLI facade
 ├── scripts/validate.py   # Dependency-free structural validator
-└── local/                # Ignored personal notes; never shared authority
+└── local/context.db      # Ignored derived index and local task data
 ```
 
 ## What Belongs Here
@@ -53,9 +54,9 @@ Do not store task plans, speculative ideas, chat transcripts, generic Laravel ad
 1. Confirm the information is durable, reusable, non-sensitive, and not already authoritative elsewhere.
 2. Search `INDEX.md` and `chunks/` for the same concept.
 3. Update the existing chunk when the concept already exists.
-4. For a new concept, read `.memory-counter`, choose the next unused zero-padded ID, and create `chunks/MEM-NNNN-short-slug.md` from the template.
+4. For a new concept, mint a conflict-free ID `MEM-YYYYMMDD-xxxxxxxx` (today's UTC date plus eight lowercase hex characters, e.g. from `uuid.uuid4().hex[:8]`) and create `chunks/MEM-YYYYMMDD-xxxxxxxx-short-slug.md` from the template. Legacy `MEM-NNNN` chunks keep their IDs; the retired `.memory-counter` is never read or incremented.
 5. Cite repository paths, specifications, decisions, or external authoritative sources that verify the claim.
-6. Add or update the index row and increment `.memory-counter` in the same change.
+6. Regenerate the index with `python3 memory-bank/scripts/context.py reindex-bank`; `INDEX.md` is a derived view over chunk frontmatter, so never hand-edit its rows.
 7. Validate metadata, links, duplicate IDs, status transitions, and secret safety.
 
 Chunk metadata uses a JSON object between Markdown frontmatter delimiters. JSON is valid YAML, so standard YAML-aware editors can read it while `scripts/validate.py` can validate it without a third-party dependency.
@@ -65,6 +66,95 @@ Run:
 ```bash
 python3 memory-bank/scripts/validate.py
 ```
+
+## Project Brain Boundary And Local Context Engine
+
+Active tasks, progress, handoffs, and all six governed record types — tasks,
+findings, bugs, incidents, decisions, and events — belong in `project-brain/`,
+as do promotion proposals. They must not be copied into durable memory. Only
+independently reviewed, source-backed, reusable consequences may be promoted
+into `memory-bank/chunks/`.
+
+The context engine keeps four logical layers in one ignored SQLite FTS5 database:
+procedural policy/skills, semantic repository knowledge/active memory, episodic
+changelog/completed work, and working task state. It requires Python 3.9+ with
+SQLite FTS5 support. It indexes `AGENTS.md`/`CLAUDE.md`, the root `README.md`,
+`specs/` and `docs/`, active memory chunks, task documents, capability epics,
+and `CHANGELOG.md` into `memory-bank/local/context.db`.
+
+Repository code, configuration, tests, specs, and policy remain authoritative.
+The context packet returns a bounded set of retrieval hints per document layer;
+verify material claims against the cited source before using them.
+
+Governed mode is the default. Project Brain tasks and handoffs are authoritative;
+SQLite stores only a local binding/cache and optional replay episode. Use
+`--mode lightweight` explicitly to retain the historical local-only
+`working_tasks` and episode lifecycle.
+
+For an argument-free refresh, invoke the AI skill `memory` (or `/memory` in Claude/Cursor). In governed mode it validates Project Brain and refreshes only the disposable source index; it never derives a branch task or writes competing SQLite progress. `checkpoint` follows the same authority gate and captures sanitized local Working Memory only when lightweight mode is explicitly configured. Both workflows stop without completing tasks, applying promotions, or editing tracked sources.
+
+### Task Capsule
+
+At the start of a complex request and before a complex phase handoff, the agent
+derives a concise sanitized retrieval query and builds a Task Capsule from
+optional Working Memory and `context` retrieval. The raw request is not copied
+into the packet. The complete packet is capped at 8,000 Unicode characters and
+contains at most two Procedural, three Semantic, and one Episodic result.
+Retrieved entries are short snippets with source paths; the next agent reads a
+full source only when its current step requires it.
+
+Simple tasks stay in the current context. Fresh contexts are reserved for
+research-to-planning, planning-to-implementation,
+implementation-to-independent-verification, and recovery after compaction.
+`memory`, `checkpoint`, and explicit `complete` keep their existing roles.
+
+For the manual flow, run these lifecycle commands from the edition root or
+consuming-project root:
+
+```bash
+python3 memory-bank/scripts/context.py index
+python3 memory-bank/scripts/context.py start \
+  --task-id BAUMAS-133 \
+  --goal "Invalidate other password-change sessions"
+python3 memory-bank/scripts/context.py update \
+  --task-id BAUMAS-133 \
+  --progress "Two-session regression passes" \
+  --next-step "Verify the old remember-me cookie"
+python3 memory-bank/scripts/context.py retrieve \
+  "password session invalidation" \
+  --task-id BAUMAS-133
+python3 memory-bank/scripts/context.py complete \
+  --task-id BAUMAS-133 \
+  --outcome "Other sessions and stale remember-me cookies are invalidated" \
+  --verification "ChangePasswordTest passed"
+python3 memory-bank/scripts/context.py brain-create finding \
+  --external-id FINDING-1 \
+  --title "Observed reusable constraint" \
+  --source specs/constraint.md
+python3 memory-bank/scripts/context.py brain-update \
+  --record-id UUID \
+  --revision 1 \
+  --transition investigating
+```
+
+`context` remains an alias of `retrieve`. Supply a ticket ID, branch name, or
+descriptive slug explicitly. For non-trivial work, use
+`start → update → retrieve → complete`: begin before work, add only
+sanitized progress, retrieve context before decisions, and complete only after
+verification. In governed mode, `complete` transitions the shared UUIDv4 Brain
+task and may retain a non-authoritative local replay episode. In lightweight
+mode it atomically converts the local working task into an episode.
+`search` still searches indexed sources and episodes, and `record` remains
+compatible for a standalone completed-task episode; `status` reports layer,
+episode, and working-task counts.
+
+Local episodes, bindings, caches, and lightweight working state are
+non-authoritative data. Never store raw
+conversations, prompts, responses, logs, secrets, customer data, or credentials;
+the CLI rejects likely secrets. `clear --task-id …` abandons only that active
+working task. Deleting `memory-bank/local/context.db` also permanently removes
+local working tasks and episodes. Only the derived document index is rebuildable
+from repository sources; working tasks and episodes are local data.
 
 ## Lifecycle
 

@@ -22,7 +22,7 @@ This applies to ALL generated files — summaries, reports.
 
 **Core principle:** Verify tests → Present options → Execute choice → Clean up.
 
-**Prerequisite:** Consider running `/docs-generator` and `/release` first to update documentation and create a release before completing the branch.
+**Prerequisite:** Consider running `documentation-generator` and `release` first to update documentation and create a release before completing the branch.
 
 **Announce at start:** "I'm using the finishing-branch skill to complete this work."
 
@@ -160,7 +160,7 @@ git worktree remove <worktree-path>
 
 After branch is finished (merged, PR created, or kept), STOP and present these options:
 
-**Next by flow:** [[/verify]] `[context]` - Verify implementation meets requirements. See [[moc-execution]] for phase context.
+**Next by flow:** [[verify]] `[context]` - Verify implementation meets requirements. See [[moc-execution]] for phase context.
 
 **Alternatives:**
-- [[/docs-generator]] `[context]` - Update documentation for the changes.
+- [[documentation-generator]] `[context]` - Update documentation for the changes.

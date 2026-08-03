@@ -4,7 +4,7 @@ description: One-shot convenience orchestrator that chains infra-scan then infra
 phase: orchestration
 flow-next: null
 flow-alternatives: [infra-scan, infra-generate]
-related: [infra-scan, infra-generate, profile-synthesizer, bootstrap-verifier]
+related: [infra-scan, infra-generate, infra-update, profile-synthesizer, bootstrap-verifier]
 ---
 
 # Infra Build
@@ -28,7 +28,8 @@ No new file naming of its own. It relies on `infra-scan` (which writes `tasks/TA
    - Otherwise, surface a one-line summary of the profile and proceed.
 4. **Run `infra-generate`** against the same target.
    - If the collision guard trips (target already has an accelerator), STOP and ask overwrite/merge/abort - never auto-decide.
-5. **Verify** via `infra-generate`'s built-in `bootstrap-verifier` step; do not report success on failure.
+   - The one-shot changes nothing about the upgrade contract: `infra-generate` still stamps the target's `AGENTS.md` and writes `.infra-manifest.json` before verification, so a target built via `infra-build` is upgradeable with `infra-update` like any other.
+5. **Verify** via `infra-generate`'s built-in `bootstrap-verifier` step (which includes the manifest checks); do not report success on failure.
 6. **Report** the combined result in `tasks/TASK-{N}/infra-build-report.md`.
 
 ## Output Template
@@ -42,7 +43,7 @@ No new file naming of its own. It relies on `infra-scan` (which writes `tasks/TA
 **Verification:** [pass/fail summary]
 
 ## Next
-Open [target path]; start with [suggested first generated command].
+Open [target path]; start with [suggested first generated command]. `.infra-manifest.json` was written - future generator releases apply with `infra-update`.
 ```
 
 ## Guardrails

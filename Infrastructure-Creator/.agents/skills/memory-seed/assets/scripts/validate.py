@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
-"""Validate a project memory bank without external packages.
-
-This validator is bundled by Infrastructure-Creator's memory-seed skill and is
-copied verbatim into every generated target's memory-bank/scripts/. It is
-dependency-free (standard library only) and stack-agnostic.
-
-Usage:
-    python3 validate.py [--summary] [--bank PATH]
-
-Exit code 0 = valid, non-zero = one or more errors (printed to stderr).
-"""
+"""Validate the canonical repository memory bank without external packages."""
 
 from __future__ import annotations
 
@@ -20,9 +10,9 @@ import sys
 from datetime import date
 from pathlib import Path
 
+
 ID_PATTERN = re.compile(r"^MEM-(\d{4,})$")
 FILENAME_PATTERN = re.compile(r"^(MEM-\d{4,})-[a-z0-9]+(?:-[a-z0-9]+)*\.md$")
-
 ALLOWED_TYPES = {
     "architecture",
     "constraint",
@@ -47,7 +37,14 @@ REQUIRED_KEYS = {
     "supersedes",
     "superseded_by",
 }
-
+# Temporal validity. Optional, because requiring it would invalidate every
+# chunk written before it existed. `superseded_by` says what replaced a chunk;
+# `valid_to` says when it stopped being true. Automatically written memory
+# needs the second: a wrong fact earns a boundary instead of being erased.
+OPTIONAL_KEYS = {
+    "valid_from",
+    "valid_to",
+}
 SECRET_PATTERNS = {
     "private key": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
     "GitHub token": re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
@@ -63,279 +60,321 @@ SECRET_PATTERNS = {
 
 
 class ValidationError(Exception):
-    pass
+    """A memory-bank contract violation."""
 
 
-def parse_frontmatter(text: str) -> dict:
+def parse_frontmatter(path: Path) -> dict:
+    text = path.read_text(encoding="utf-8")
     if not text.startswith("---\n"):
-        raise ValidationError("file must start with '---' frontmatter")
-    end = text.find("\n---\n", 4)
-    if end == -1:
-        raise ValidationError("frontmatter is not closed with '---'")
-    block = text[4:end]
+        raise ValidationError("missing opening frontmatter delimiter")
     try:
-        data = json.loads(block)
-    except json.JSONDecodeError as exc:
-        raise ValidationError(f"frontmatter is not valid JSON: {exc}")
-    if not isinstance(data, dict):
-        raise ValidationError("frontmatter must be a JSON object")
-    return data
+        raw_metadata, _ = text[4:].split("\n---\n", 1)
+    except ValueError as error:
+        raise ValidationError("missing closing frontmatter delimiter") from error
+    try:
+        metadata = json.loads(raw_metadata)
+    except json.JSONDecodeError as error:
+        raise ValidationError(f"frontmatter is not valid JSON-compatible YAML: {error}") from error
+    if not isinstance(metadata, dict):
+        raise ValidationError("frontmatter must be an object")
+    return metadata
 
 
-def _parse_date(value: str, field: str) -> date:
+def require_string_list(metadata: dict, key: str, *, allow_empty: bool = False) -> None:
+    value = metadata.get(key)
+    if not isinstance(value, list) or any(not isinstance(item, str) or not item for item in value):
+        raise ValidationError(f"{key} must be a list of non-empty strings")
+    if not allow_empty and not value:
+        raise ValidationError(f"{key} must not be empty")
+
+
+def require_date(metadata: dict, key: str) -> date:
+    value = metadata.get(key)
+    if not isinstance(value, str):
+        raise ValidationError(f"{key} must be an ISO date string")
     try:
         return date.fromisoformat(value)
-    except (ValueError, TypeError):
-        raise ValidationError(f"{field} must be an ISO date (YYYY-MM-DD)")
+    except ValueError as error:
+        raise ValidationError(f"{key} must use YYYY-MM-DD") from error
 
 
-def _is_nonempty_str_list(value) -> bool:
-    return (
-        isinstance(value, list)
-        and len(value) > 0
-        and all(isinstance(x, str) and x.strip() for x in value)
-    )
-
-
-def validate_metadata(meta: dict, filename: str, bank_root: Path, errors: list) -> None:
-    def err(msg: str) -> None:
-        errors.append(f"{filename}: {msg}")
-
-    keys = set(meta.keys())
-    missing = REQUIRED_KEYS - keys
-    unexpected = keys - REQUIRED_KEYS
+def validate_metadata(path: Path, metadata: dict, repository_root: Path) -> None:
+    missing = REQUIRED_KEYS - metadata.keys()
+    extra = metadata.keys() - REQUIRED_KEYS - OPTIONAL_KEYS
     if missing:
-        err(f"missing metadata keys: {sorted(missing)}")
-    if unexpected:
-        err(f"unexpected metadata keys: {sorted(unexpected)}")
-    if missing:
-        return
+        raise ValidationError(f"missing metadata keys: {', '.join(sorted(missing))}")
+    if extra:
+        raise ValidationError(f"unexpected metadata keys: {', '.join(sorted(extra))}")
 
-    fn_match = FILENAME_PATTERN.match(filename)
-    if not fn_match:
-        err("filename must match MEM-NNNN-short-slug.md")
-    id_match = ID_PATTERN.match(str(meta["id"]))
-    if not id_match:
-        err("id must match ^MEM-\\d{4,}$")
-    if fn_match and id_match and fn_match.group(1) != meta["id"]:
-        err("filename id must match frontmatter id")
+    filename_match = FILENAME_PATTERN.fullmatch(path.name)
+    if filename_match is None:
+        raise ValidationError("filename must be MEM-0001-short-slug.md")
+    memory_id = metadata["id"]
+    if not isinstance(memory_id, str) or ID_PATTERN.fullmatch(memory_id) is None:
+        raise ValidationError("id must use MEM-0001 format")
+    if filename_match.group(1) != memory_id:
+        raise ValidationError("frontmatter id does not match filename id")
+    if not isinstance(metadata["title"], str) or not metadata["title"].strip():
+        raise ValidationError("title must be a non-empty string")
+    if not isinstance(metadata["type"], str) or metadata["type"] not in ALLOWED_TYPES:
+        raise ValidationError(f"type must be one of: {', '.join(sorted(ALLOWED_TYPES))}")
+    if not isinstance(metadata["status"], str) or metadata["status"] not in ALLOWED_STATUSES:
+        raise ValidationError(f"status must be one of: {', '.join(sorted(ALLOWED_STATUSES))}")
 
-    if not (isinstance(meta["title"], str) and meta["title"].strip()):
-        err("title must be a non-empty string")
-    if meta["type"] not in ALLOWED_TYPES:
-        err(f"type must be one of {sorted(ALLOWED_TYPES)}")
-    if meta["status"] not in ALLOWED_STATUSES:
-        err(f"status must be one of {sorted(ALLOWED_STATUSES)}")
-    for field in ("scope", "tags", "sources"):
-        if not _is_nonempty_str_list(meta[field]):
-            err(f"{field} must be a non-empty list of strings")
-    if not isinstance(meta["supersedes"], list) or not all(
-        isinstance(x, str) for x in meta["supersedes"]
+    require_string_list(metadata, "scope")
+    require_string_list(metadata, "tags")
+    require_string_list(metadata, "sources")
+    require_string_list(metadata, "supersedes", allow_empty=True)
+    created = require_date(metadata, "created")
+    last_verified = require_date(metadata, "last_verified")
+    review_after = require_date(metadata, "review_after")
+    if created > last_verified:
+        raise ValidationError("created must not be later than last_verified")
+    if last_verified > date.today():
+        raise ValidationError("last_verified must not be in the future")
+    if review_after < last_verified:
+        raise ValidationError("review_after must not be earlier than last_verified")
+    if metadata["status"] == "active" and review_after < date.today():
+        raise ValidationError("active chunk is overdue for review")
+
+    valid_from = require_date(metadata, "valid_from") if "valid_from" in metadata else None
+    valid_to = None
+    if metadata.get("valid_to") is not None:
+        valid_to = require_date(metadata, "valid_to")
+    # valid_from may precede `created`: knowledge is often true well before
+    # anyone writes it down.
+    if valid_to is not None:
+        if valid_from is not None and valid_to < valid_from:
+            raise ValidationError("valid_to must not be earlier than valid_from")
+        # Matches the review_after rule above: knowledge that has stopped being
+        # true may not keep calling itself active.
+        if metadata["status"] == "active" and valid_to < date.today():
+            raise ValidationError("active chunk is past its valid_to date")
+
+    replacement = metadata["superseded_by"]
+    if replacement is not None and (
+        not isinstance(replacement, str) or ID_PATTERN.fullmatch(replacement) is None
     ):
-        err("supersedes must be a list of memory IDs")
+        raise ValidationError("superseded_by must be null or a memory ID")
+    if metadata["status"] == "superseded" and replacement is None:
+        raise ValidationError("superseded chunks require superseded_by")
+    if metadata["status"] != "superseded" and replacement is not None:
+        raise ValidationError("only superseded chunks may set superseded_by")
 
-    try:
-        created = _parse_date(meta["created"], "created")
-        last_verified = _parse_date(meta["last_verified"], "last_verified")
-        review_after = _parse_date(meta["review_after"], "review_after")
-        today = date.today()
-        if created > last_verified:
-            err("created must be on or before last_verified")
-        if last_verified > today:
-            err("last_verified must not be in the future")
-        if review_after < last_verified:
-            err("review_after must be on or after last_verified")
-        if meta["status"] == "active" and review_after < today:
-            err("active chunk is overdue for review")
-    except ValidationError as exc:
-        err(str(exc))
-
-    superseded_by = meta["superseded_by"]
-    if superseded_by is not None and not ID_PATTERN.match(str(superseded_by)):
-        err("superseded_by must be null or a valid memory ID")
-    if meta["status"] == "superseded" and not superseded_by:
-        err("superseded status requires superseded_by")
-    if meta["status"] != "superseded" and superseded_by:
-        err("only superseded chunks may set superseded_by")
-
-    if isinstance(meta["sources"], list):
-        for src in meta["sources"]:
-            if not isinstance(src, str):
-                continue
-            if src.startswith("http://") or src.startswith("https://"):
-                continue
-            clean = src.split("#", 1)[0]
-            try:
-                resolved = (bank_root.parent / clean).resolve()
-                repo_root = bank_root.parent.resolve()
-                if repo_root not in resolved.parents and resolved != repo_root:
-                    err(f"source path escapes the repository: {src}")
-                elif not resolved.exists():
-                    err(f"source path does not exist: {src}")
-            except (OSError, ValueError):
-                err(f"source path could not be resolved: {src}")
+    for source in metadata["sources"]:
+        if source.startswith(("https://", "http://")):
+            continue
+        source_path = source.split("#", 1)[0]
+        resolved_source = (repository_root / source_path).resolve()
+        try:
+            resolved_source.relative_to(repository_root.resolve())
+        except ValueError as error:
+            raise ValidationError(f"source path escapes the repository: {source_path}") from error
+        if not resolved_source.exists():
+            raise ValidationError(f"source path does not exist: {source_path}")
 
 
-def validate_secret_patterns(text: str, filename: str, errors: list) -> None:
-    for label, pattern in SECRET_PATTERNS.items():
-        if pattern.search(text):
-            errors.append(
-                f"{filename}: possible {label} detected; value intentionally not printed"
-            )
-
-
-def parse_index(index_text: str) -> dict:
-    rows = {}
-    for line in index_text.splitlines():
+def parse_index(path: Path) -> dict[str, dict[str, str]]:
+    rows: dict[str, dict[str, str]] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
         if not line.startswith("| MEM-"):
             continue
-        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
         if len(cells) != 8:
-            raise ValidationError(f"invalid index row (expected 8 cells): {line}")
-        file_cell = cells[7].strip("[]").split("](", 1)[-1].rstrip(")")
-        rows[cells[0]] = {
-            "id": cells[0],
-            "title": cells[1],
-            "type": cells[2],
-            "scope": cells[3],
-            "tags": cells[4],
-            "status": cells[5],
-            "last_verified": cells[6],
-            "file": file_cell,
+            raise ValidationError(f"invalid index row: {line}")
+        memory_id, title, memory_type, scope, tags, status, verified, file_path = cells
+        if memory_id in rows:
+            raise ValidationError(f"duplicate index ID: {memory_id}")
+        rows[memory_id] = {
+            "title": title,
+            "type": memory_type,
+            "scope": scope,
+            "tags": tags,
+            "status": status,
+            "last_verified": verified,
+            "file": file_path.strip("[]").split("](", 1)[-1].rstrip(")"),
         }
     return rows
 
 
-def validate_bank(bank: Path, errors: list) -> dict:
-    counts = {"chunks": 0, "active": 0, "superseded": 0}
-    for required in ("README.md", "INDEX.md", ".memory-counter"):
-        if not (bank / required).exists():
-            errors.append(f"missing required file: memory-bank/{required}")
-    if errors:
-        return counts
+def validate_secret_patterns(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+    for label, pattern in SECRET_PATTERNS.items():
+        if pattern.search(text):
+            raise ValidationError(f"possible {label} detected; value intentionally not printed")
 
-    counter_raw = (bank / ".memory-counter").read_text(encoding="utf-8").strip()
-    if not counter_raw.isdigit() or int(counter_raw) <= 0:
-        errors.append(".memory-counter must be a positive integer")
-        counter = None
-    else:
-        counter = int(counter_raw)
 
-    chunks_dir = bank / "chunks"
-    chunk_meta = {}
-    max_id = 0
-    if chunks_dir.exists():
-        for entry in sorted(chunks_dir.iterdir()):
-            if entry.is_symlink() or not entry.is_file() or entry.suffix != ".md":
-                errors.append(f"unexpected chunk entry: {entry.name}")
+def summarize_bank(bank_root: Path) -> str:
+    chunks_dir = bank_root / "chunks"
+    total = 0
+    active = 0
+    needs_review = 0
+    expired = 0
+    if chunks_dir.is_dir():
+        for path in sorted(chunks_dir.iterdir()):
+            if path.is_symlink() or not path.is_file() or FILENAME_PATTERN.fullmatch(path.name) is None:
                 continue
-            if not FILENAME_PATTERN.match(entry.name):
-                errors.append(f"unexpected chunk entry: {entry.name}")
-                continue
-            text = entry.read_text(encoding="utf-8")
-            validate_secret_patterns(text, entry.name, errors)
+            total += 1
             try:
-                meta = parse_frontmatter(text)
-            except ValidationError as exc:
-                errors.append(f"{entry.name}: {exc}")
+                metadata = parse_frontmatter(path)
+                status = metadata.get("status")
+                if isinstance(metadata.get("valid_to"), str):
+                    try:
+                        if date.fromisoformat(metadata["valid_to"]) < date.today():
+                            expired += 1
+                    except ValueError:
+                        pass
+            except (OSError, ValidationError):
                 continue
-            validate_metadata(meta, entry.name, bank, errors)
-            cid = meta.get("id")
-            if cid in chunk_meta:
-                errors.append(f"duplicate chunk id: {cid}")
-            chunk_meta[cid] = meta
-            counts["chunks"] += 1
-            if meta.get("status") == "active":
-                counts["active"] += 1
-            elif meta.get("status") == "superseded":
-                counts["superseded"] += 1
-            m = ID_PATTERN.match(str(cid))
-            if m:
-                max_id = max(max_id, int(m.group(1)))
+            active += status == "active"
+            needs_review += status == "needs-review"
+    summary = f"Memory bank: {total} chunks ({active} active, {needs_review} needs review"
+    return summary + (f", {expired} past valid_to)." if expired else ").")
 
-    if counter is not None and counter <= max_id:
-        errors.append("counter must be greater than every allocated ID")
 
-    index_rows = parse_index((bank / "INDEX.md").read_text(encoding="utf-8"))
-    for cid, meta in chunk_meta.items():
-        if cid not in index_rows:
-            errors.append(f"chunk is missing from INDEX.md: {cid}")
+def validate_bank(bank_root: Path) -> list[str]:
+    errors: list[str] = []
+    repository_root = bank_root.parent
+    index_path = bank_root / "INDEX.md"
+    counter_path = bank_root / ".memory-counter"
+    chunks_dir = bank_root / "chunks"
+    for required in (bank_root / "README.md", index_path, counter_path):
+        if not required.is_file():
+            errors.append(f"{required}: required file is missing")
+    if errors:
+        return errors
+
+    try:
+        counter = int(counter_path.read_text(encoding="utf-8").strip())
+        if counter < 1:
+            raise ValueError
+    except ValueError:
+        errors.append(f"{counter_path}: counter must be a positive integer")
+        counter = 0
+
+    try:
+        index = parse_index(index_path)
+    except ValidationError as error:
+        errors.append(f"{index_path}: {error}")
+        index = {}
+
+    chunk_paths: list[Path] = []
+    if chunks_dir.is_dir():
+        for entry in sorted(chunks_dir.iterdir()):
+            if entry.is_symlink() or not entry.is_file() or FILENAME_PATTERN.fullmatch(entry.name) is None:
+                errors.append(
+                    f"{entry}: unexpected chunk entry; expected a direct MEM-0001-short-slug.md file"
+                )
+                continue
+            chunk_paths.append(entry)
+
+    chunks: dict[str, tuple[Path, dict]] = {}
+    for path in chunk_paths:
+        try:
+            metadata = parse_frontmatter(path)
+            validate_metadata(path, metadata, repository_root)
+            validate_secret_patterns(path)
+            memory_id = metadata["id"]
+            if memory_id in chunks:
+                raise ValidationError(f"duplicate chunk ID: {memory_id}")
+            chunks[memory_id] = (path, metadata)
+        except (OSError, ValidationError) as error:
+            errors.append(f"{path}: {error}")
+
+    allocated = [int(match.group(1)) for memory_id in chunks if (match := ID_PATTERN.fullmatch(memory_id))]
+    if allocated and counter <= max(allocated):
+        errors.append(f"{counter_path}: counter must be greater than every allocated ID")
+
+    for memory_id, (path, metadata) in chunks.items():
+        row = index.get(memory_id)
+        if row is None:
+            errors.append(f"{path}: chunk is missing from INDEX.md")
             continue
-        row = index_rows[cid]
-        expected_file = f"chunks/{cid}-" if cid else ""
-        if not row["file"].startswith("chunks/"):
-            errors.append(f"INDEX file column for {cid} must point under chunks/")
-        for field in ("title", "type", "status", "last_verified"):
-            if row[field] != str(meta.get(field)):
-                errors.append(f"INDEX {field} mismatch for {cid}")
-        if row["scope"] != ", ".join(meta.get("scope", [])):
-            errors.append(f"INDEX scope mismatch for {cid}")
-        if row["tags"] != ", ".join(meta.get("tags", [])):
-            errors.append(f"INDEX tags mismatch for {cid}")
-    for cid in index_rows:
-        if cid not in chunk_meta:
-            errors.append(f"INDEX.md points to a missing chunk: {cid}")
+        expected_file = str(path.relative_to(bank_root))
+        if row["file"] != expected_file:
+            errors.append(f"{index_path}: {memory_id} file must be {expected_file}")
+        for index_key, metadata_key in (
+            ("title", "title"),
+            ("type", "type"),
+            ("status", "status"),
+            ("last_verified", "last_verified"),
+        ):
+            if row[index_key] != str(metadata[metadata_key]):
+                errors.append(f"{index_path}: {memory_id} {index_key} differs from chunk metadata")
+        for index_key, metadata_key in (("scope", "scope"), ("tags", "tags")):
+            expected = ", ".join(metadata[metadata_key])
+            if row[index_key] != expected:
+                errors.append(f"{index_path}: {memory_id} {index_key} differs from chunk metadata")
 
-    # Supersession graph integrity.
-    for cid, meta in chunk_meta.items():
-        for target in meta.get("supersedes", []):
-            if target == cid:
-                errors.append(f"{cid}: chunk cannot supersede itself")
-            elif target not in chunk_meta:
-                errors.append(f"{cid}: supersedes unknown chunk {target}")
-            else:
-                tgt = chunk_meta[target]
-                if tgt.get("status") != "superseded" or tgt.get("superseded_by") != cid:
-                    errors.append(
-                        f"{cid}: supersession target {target} must be superseded and point back"
-                    )
-        sb = meta.get("superseded_by")
-        if sb and sb not in chunk_meta:
-            errors.append(f"{cid}: superseded_by references unknown chunk {sb}")
+    for memory_id, row in index.items():
+        if memory_id not in chunks:
+            errors.append(f"{index_path}: {memory_id} points to a missing chunk ({row['file']})")
 
-    # Cycle detection over superseded_by chains.
-    for start in chunk_meta:
-        seen = set()
-        cur = start
-        while cur:
-            if cur in seen:
-                errors.append(f"supersession cycle detected involving {start}")
+    for memory_id, (_, metadata) in chunks.items():
+        if memory_id in metadata["supersedes"] or metadata["superseded_by"] == memory_id:
+            errors.append(f"{memory_id}: chunk cannot supersede itself")
+        referenced = [*metadata["supersedes"]]
+        if metadata["superseded_by"] is not None:
+            referenced.append(metadata["superseded_by"])
+        for referenced_id in referenced:
+            if referenced_id not in chunks:
+                errors.append(f"{memory_id}: replacement link points to missing {referenced_id}")
+
+        for superseded_id in metadata["supersedes"]:
+            if superseded_id not in chunks:
+                continue
+            superseded_metadata = chunks[superseded_id][1]
+            if superseded_metadata["status"] != "superseded":
+                errors.append(f"{memory_id}: {superseded_id} must have superseded status")
+            if superseded_metadata["superseded_by"] != memory_id:
+                errors.append(f"{memory_id}: {superseded_id} must point back with superseded_by")
+
+        replacement_id = metadata["superseded_by"]
+        if replacement_id in chunks and memory_id not in chunks[replacement_id][1]["supersedes"]:
+            errors.append(f"{memory_id}: {replacement_id} must include this ID in supersedes")
+
+    for start_id in chunks:
+        visited: set[str] = set()
+        current_id: str | None = start_id
+        while current_id in chunks:
+            if current_id in visited:
+                errors.append(f"{start_id}: supersession cycle detected")
                 break
-            seen.add(cur)
-            cur = chunk_meta.get(cur, {}).get("superseded_by")
+            visited.add(current_id)
+            current_id = chunks[current_id][1]["superseded_by"]
 
-    return counts
+    return errors
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Validate a project memory bank.")
-    parser.add_argument("--summary", action="store_true", help="print counts only")
-    parser.add_argument("--bank", default="memory-bank", help="path to the memory bank")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "bank",
+        nargs="?",
+        type=Path,
+        default=Path(__file__).resolve().parents[1],
+        help="Memory-bank directory (default: directory containing this script)",
+    )
+    parser.add_argument(
+        "--summary",
+        action="store_true",
+        help="print status counts from chunk frontmatter without printing chunk contents",
+    )
     args = parser.parse_args()
-
-    bank = Path(args.bank)
-    if not bank.exists():
-        print(f"memory bank not found: {bank}", file=sys.stderr)
-        return 2
-
-    errors: list = []
-    counts = validate_bank(bank, errors)
-
+    bank_root = args.bank.resolve()
     if args.summary:
-        print(
-            f"chunks={counts['chunks']} active={counts['active']} "
-            f"superseded={counts['superseded']} errors={len(errors)}"
-        )
+        print(summarize_bank(bank_root))
+        return 0
 
+    errors = validate_bank(bank_root)
     if errors:
-        for e in errors:
-            print(f"ERROR: {e}", file=sys.stderr)
+        print(f"Memory bank validation failed ({len(errors)} error(s)):", file=sys.stderr)
+        for error in errors:
+            print(f"- {error}", file=sys.stderr)
         return 1
-
-    if not args.summary:
-        print("memory bank OK")
+    print("Memory bank validation passed.")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

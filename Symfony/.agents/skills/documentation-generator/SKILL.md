@@ -62,7 +62,7 @@ Document applicable concerns:
 - Show authentication placeholders without plausible secrets.
 - Include expected status/exit behavior and the most important failure/recovery command.
 - Explain destructive or irreversible commands before showing them; do not normalize unsafe flags.
-- For workers/cron, include process ownership, concurrency, time/memory limits, signals, retries, failure inspection, and deployment restart behavior.
+- For workers/cron, include process ownership, concurrency, timememory limits, signals, retries, failure inspection, and deployment restart behavior.
 
 ## Quality Rules
 

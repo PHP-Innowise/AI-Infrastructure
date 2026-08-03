@@ -28,7 +28,7 @@ Create only what the architecture requires:
 
 ## Rules
 
-- Do not implement full business behavior unless the task asks for it; leave clear method contracts for `/coder`.
+- Do not implement full business behavior unless the task asks for it; leave clear method contracts for `coder`.
 - Do not place Doctrine queries in controllers or services.
 - Do not make services return Symfony `Response` objects.
 - Do not create interfaces for every class by default.
@@ -57,5 +57,5 @@ Include:
 - Skeletons created.
 - Controller/service/repository map.
 - DI/autowiring notes.
-- Remaining business logic for `/coder`.
+- Remaining business logic for `coder`.
 - Verification evidence.

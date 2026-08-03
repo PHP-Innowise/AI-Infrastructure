@@ -11,17 +11,22 @@
   "review_after": "YYYY-MM-DD",
   "sources": ["path/to/authoritative-source"],
   "supersedes": [],
-  "superseded_by": null
+  "superseded_by": null,
+  "valid_from": "YYYY-MM-DD",
+  "valid_to": null
 }
 ---
 
-# Title
+# Replace With The Memory Title
 
 ## Durable Context
-One or two paragraphs of the durable fact this chunk records. State it plainly and cite the source that proves it.
+
+State the smallest reusable fact, constraint, decision, or lesson. Do not copy an entire specification or task transcript.
 
 ## Consequences
-What this implies for how work is done in this project.
+
+Explain what future work should do differently because of this memory and where it applies.
 
 ## Verification
-How to re-confirm this is still true (the command, file, or check to run).
+
+Record how the cited sources establish the claim and what change should trigger review.

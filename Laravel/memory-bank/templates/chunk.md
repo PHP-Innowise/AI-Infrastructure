@@ -1,6 +1,6 @@
 ---
 {
-  "id": "MEM-0000",
+  "id": "MEM-YYYYMMDD-xxxxxxxx",
   "title": "Replace with one durable concept",
   "type": "convention",
   "status": "needs-review",
@@ -11,7 +11,9 @@
   "review_after": "YYYY-MM-DD",
   "sources": ["path/to/authoritative-source"],
   "supersedes": [],
-  "superseded_by": null
+  "superseded_by": null,
+  "valid_from": "YYYY-MM-DD",
+  "valid_to": null
 }
 ---
 

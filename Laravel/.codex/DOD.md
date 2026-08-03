@@ -10,6 +10,11 @@ Use for documentation, planning, and small non-code tasks.
 - [ ] Task/spec file naming follows skill-prefix convention.
 - [ ] Context Summary provided with 2-3 sentences and Next Steps.
 - [ ] No `.env`, secrets, credentials, database dumps, or personal local settings were read or modified.
+- [ ] Relevant active memory chunks were verified against current sources; stale chunks were updated or reported.
+- [ ] Memory-bank structure passes `python3 memory-bank/scripts/validate.py` when `memory-bank/` exists.
+- [ ] Governed mode was used by default, or explicit `--mode lightweight` use and its local-only limitation were reported.
+- [ ] Project Brain validation passes when `project-brain/` exists; active/archive links, revisions, handoffs, privacy, fingerprints, and deterministic indexes are coherent.
+- [ ] Any task-aware retrieval used only `python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID`, produced a manifest in governed mode, and cited canonical sources were verified.
 
 ## Standard
 
@@ -23,11 +28,12 @@ All Minimum items, plus:
 - [ ] Formatting passes: `vendor/bin/pint --test`.
 - [ ] Static analysis passes: `vendor/bin/phpstan analyse` (Larastan) or `vendor/bin/psalm` if configured.
 - [ ] New behavior has focused test coverage, at least the happy path and the highest-risk failure path.
+- [ ] Project Brain mutations use legal transitions, expected revisions, and the shared mutation lock; no duplicate authoritative task state was introduced.
 - [ ] Database changes include a migration (and factory/seeder updates where relevant).
 - [ ] Input validation is via a Form Request (or explicit validator) and authorization via a Policy/Gate.
 - [ ] No N+1 queries introduced (`with()`/`load()` used for relationships accessed in loops).
 - [ ] No OWASP Top 10 risk was introduced.
-- [ ] Code was self-reviewed against `.claude/GOLDEN-PRINCIPLES.md`.
+- [ ] Code was self-reviewed against `.codex/GOLDEN-PRINCIPLES.md`.
 
 ## Full
 
@@ -42,6 +48,9 @@ All Standard items, plus:
 - [ ] Living specs updated when architecture, API behavior, database schema, or user-facing workflows changed.
 - [ ] No unresolved TODO/FIXME/HACK comments remain in changed source files.
 - [ ] Public documentation updated for user-facing changes.
+- [ ] Durable reusable context was added to `memory-bank/` only when source-backed, non-sensitive, indexed, and not already authoritative in a spec.
+- [ ] Promotion proposals were not self-approved; any applied promotion has explicit human review plus source and destination revisions.
+- [ ] Session hooks remain metadata-only and do not index, retrieve, inject, or print Project Brain or Memory Bank records.
 - [ ] Queue/job, cache, scheduled-command (`app/Console/Kernel.php` or `routes/console.php`), and migration impacts are documented when applicable.
 - [ ] If this release includes a major Laravel version bump or changes queued job payload shapes, queues are drained/compatible before deploying (mixed-version job payloads across a Laravel major upgrade can fail).
 
@@ -66,7 +75,7 @@ npm run build
 npm run lint
 ```
 
-Otherwise verify markup manually: valid HTML5, semantic structure, and the accessibility rules in `.claude/skills/wcag-accessibility/`.
+Otherwise verify markup manually: valid HTML5, semantic structure, and the accessibility rules in `.agents/skills/wcag-accessibility/`.
 
 ## Failure Handling
 

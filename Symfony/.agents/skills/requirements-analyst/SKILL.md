@@ -1,6 +1,6 @@
 ---
 name: requirements-analyst
-description: Analyze requirements from Confluence pages, decompose into actionable tasks, and validate completeness. Use when user asks to analyze requirements, break down features, create tasks from specs, parse Confluence docs, or validate requirements. Triggers on "analyze requirements", "break down feature", "create tasks from", "parse confluence", "requirements from", "decompose into tasks".
+description: Analyze requirements from Confluence pages, decompose into actionable tasks, and validate completeness. Triggers on "analyze requirements", "break down feature", "create tasks from", "parse confluence", "requirements from", "decompose into tasks", "validate requirements".
 phase: understanding
 flow-next: brainstorming
 flow-alternatives: [architect, writing-plans]
@@ -150,7 +150,7 @@ Any additional ad-hoc files (summaries, notes, reports) MUST also follow this ru
 
 2. **Create task directory:** `tasks/TASK-{N}/` (e.g., `tasks/TASK-001/`)
 
-3. **Write requirements:** `tasks/TASK-{N}requirements-analyst-requirements.md`
+3. **Write requirements:** `tasks/TASK-{N}/requirements-analyst-requirements.md`
    - Use the Requirements Document Template from Step 5 as the structure
    - Include all gathered requirements, task breakdown, and gap analysis
 

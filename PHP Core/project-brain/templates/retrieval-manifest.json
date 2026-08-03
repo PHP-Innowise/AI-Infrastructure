@@ -1,0 +1,37 @@
+{
+  "created_at": "RFC3339",
+  "escalation_reason": null,
+  "excluded": [],
+  "filters": {
+    "active_only": true,
+    "authority": [
+      "observed",
+      "verified"
+    ],
+    "freshness": true,
+    "owners": [
+      "*"
+    ],
+    "privacy": [
+      "public",
+      "team"
+    ]
+  },
+  "id": "UUIDV4",
+  "provider": "sqlite-fts5",
+  "query": "Query",
+  "schema_version": 1,
+  "selected": [],
+  "task_id": "UUIDV4",
+  "task_revision": 1,
+  "token_estimates": {
+    "durable": 0,
+    "dynamic": 0,
+    "evidence": 0,
+    "handoff": 0,
+    "hard": 12000,
+    "policy": 0,
+    "target": 8000,
+    "total": 0
+  }
+}

@@ -17,7 +17,7 @@ Targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (c
 
 ## Scope Boundary
 
-`api-designer` owns **token-based API authentication** decisions (Sanctum vs Passport vs stateless JWT) and already has a decision table for that trade-off — go there for a mobile/SPA/third-party API client. `auth-scaffolding` owns **web/session-based authentication**: which starter kit to scaffold from, how guards are configured, and the Policy/Gate layer that both API and web contexts share. If a project needs both (a Blade admin area plus a public JSON API), scaffold web auth here and layer Sanctum in via `/api-designer` — the two are complementary, not alternatives.
+`api-designer` owns **token-based API authentication** decisions (Sanctum vs Passport vs stateless JWT) and already has a decision table for that trade-off — go there for a mobile/SPA/third-party API client. `auth-scaffolding` owns **web/session-based authentication**: which starter kit to scaffold from, how guards are configured, and the Policy/Gate layer that both API and web contexts share. If a project needs both (a Blade admin area plus a public JSON API), scaffold web auth here and layer Sanctum in via `api-designer` — the two are complementary, not alternatives.
 
 ## Starter Kit Decision
 

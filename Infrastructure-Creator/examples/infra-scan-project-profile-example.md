@@ -6,7 +6,7 @@
 - Target path: ../acme-billing
 - Scanned: 2026-02-10
 - Task: tasks/TASK-001/
-- Generator version: 1.0.0
+- Generator version: 1.4.0
 
 ## 1. AI Tool Selection (MANDATORY)
 - Selected editions: [claude]
@@ -154,8 +154,8 @@
 
 **Frontend:** skipped - no UI surface detected.
 
-**Process & Workflow (15):**
-`requirements-analyst`, `researcher`, `brainstorming`, `council`, `writing-plans`, `using-git-worktrees`, `systematic-debugger`, `refactorer`, `dependency-manager`, `review-pr`, `finishing-branch`, `documentation-generator`, `skill-creator`, `reflect`, `memory-bank`. `memory-bank` operates the shared seeded bank through retrieve/capture/supersede/audit modes.
+**Process & Workflow (18):**
+`requirements-analyst`, `researcher`, `brainstorming`, `council`, `writing-plans`, `using-git-worktrees`, `systematic-debugger`, `refactorer`, `dependency-manager`, `review-pr`, `finishing-branch`, `documentation-generator`, `skill-creator`, `reflect`, `memory-bank`, `project-brain`, `checkpoint`, `memory`. The memory quartet (the last four) operates the shared seeded layer: `memory-bank` through retrieve/capture/supersede/audit modes, `project-brain` through the governed control plane, `checkpoint`/`memory` as manual companions to the automatic working-memory hooks.
 
 **Universal PHP (7):**
 - `coding` - Laravel 11/PHP 8.2 implementation respecting Billing invariants and Pint
@@ -176,16 +176,16 @@
 - `billing-rules-review` - reviews changes against invoice transitions, refund amount/role/audit rules, Stripe idempotency, and the named regression scenarios, while surfacing the unresolved `voided` contradiction
 
 ### 11.2 Agents & Commands Preview
-- Skill count: 1 architecture + 3 design + 0 frontend + 15 process + 7 universal + 11 specialty + 7 integrations + 1 domain = **45 skills**.
-- Agents: 45 skills x 1 Claude edition = 45 agents.
-- Commands: 45 skills x 1 Claude edition = 45 commands.
+- Skill count: 1 architecture + 3 design + 0 frontend + 18 process + 7 universal + 11 specialty + 7 integrations + 1 domain = **48 skills**.
+- Agents: 48 skills x 1 Claude edition = 48 agents.
+- Commands: 48 skills x 1 Claude edition = 48 commands.
 
 ### 11.3 Non-PHP Neighbors
 - none
 
 ## 12. Memory Bank Preview
 
-One shared bank will seed 10 cohesive concepts. It links canonical sources rather than copying specs, matrices, tests, or incident narratives.
+One shared memory layer will be created at the target root: `memory-bank/` with the context-brain runtime under `memory-bank/scripts/`, and the governed `project-brain/` skeleton (`runtime.json` framework slug: `laravel`). The bank will seed 10 cohesive concepts. It links canonical sources rather than copying specs, matrices, tests, or incident narratives.
 
 | Planned ID | Title | Type | Source |
 | --- | --- | --- | --- |

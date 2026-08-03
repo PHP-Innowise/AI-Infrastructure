@@ -1,0 +1,29 @@
+{
+  "_comment": "Ceilings for the startup context budget, checked by scripts/context_budget.py --check (CI job lint). Policy: ceiling = observed value + ~5% headroom, so CI catches regressions without flagging noise. After a deliberate slimming, tighten to the new observed values + ~5%; raise a ceiling only together with the change that justifies the growth. Current values: python3 scripts/context_budget.py.",
+  "editions": {
+    "Laravel": {
+      "agents_md_bytes": 13289,
+      "frontmatter_bytes": 19312,
+      "description_bytes": 11161,
+      "skills": 47
+    },
+    "Symfony": {
+      "agents_md_bytes": 16482,
+      "frontmatter_bytes": 15500,
+      "description_bytes": 8865,
+      "skills": 50
+    },
+    "PHP Core": {
+      "agents_md_bytes": 12796,
+      "frontmatter_bytes": 14788,
+      "description_bytes": 8649,
+      "skills": 37
+    },
+    "Infrastructure-Creator": {
+      "agents_md_bytes": 12272,
+      "frontmatter_bytes": 18078,
+      "description_bytes": 11990,
+      "skills": 25
+    }
+  }
+}

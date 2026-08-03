@@ -17,7 +17,7 @@ Targets Laravel (PHP 8.2+, 8.3+ required for Laravel 13). Supports Laravel 12 (c
 
 ## Scope Boundary
 
-If a change alters observable behavior — new feature, bug fix, different output — that is `/coder`, not this skill. The moment you need to change what the code *does*, stop refactoring, ship the behavior change via `/coder`, then refactor separately. Keep the two in separate commits so review and rollback stay clean.
+If a change alters observable behavior — new feature, bug fix, different output — that is `coder`, not this skill. The moment you need to change what the code *does*, stop refactoring, ship the behavior change via `coder`, then refactor separately. Keep the two in separate commits so review and rollback stay clean.
 
 ## The Safety Rule
 
@@ -25,7 +25,7 @@ If a change alters observable behavior — new feature, bug fix, different outpu
 NO REFACTOR WITHOUT A CHARACTERIZATION SAFETY NET
 ```
 
-Before changing structure, ensure tests cover the behavior you are about to move. If coverage is missing, add characterization tests first (or hand off to `/test-generator`), then refactor.
+Before changing structure, ensure tests cover the behavior you are about to move. If coverage is missing, add characterization tests first (or hand off to `test-generator`), then refactor.
 
 ## Workflow
 
@@ -47,7 +47,7 @@ Before changing structure, ensure tests cover the behavior you are about to move
 
 ## Laravel-Specific Refactor Targets
 
-- **Fat controllers → Actions/Services.** When a controller method does more than parse input, authorize, delegate, and respond, extract the workflow into an Action or Service class (see `/architect` for when to use which) — this is a pure extraction if behavior is preserved.
+- **Fat controllers → Actions/Services.** When a controller method does more than parse input, authorize, delegate, and respond, extract the workflow into an Action or Service class (see `architect` for when to use which) — this is a pure extraction if behavior is preserved.
 - **Raw queries → Eloquent.** Replace hand-written SQL/`DB::select()` calls with Eloquent query builder or model relationships where it doesn't sacrifice necessary performance; verify the generated SQL is equivalent (check with `DB::listen()` or `->toSql()`) before and after.
 - **Manual array shaping → API Resources.** Replace ad hoc `return response()->json([...])` shaping with a proper `JsonResource` when the same shape is duplicated across controllers.
 - **Duplicated validation → Form Requests.** Consolidate repeated inline `$request->validate([...])` rule arrays into a shared Form Request.
@@ -85,7 +85,7 @@ For risky, large-scale change, do not rewrite in place. Build the new implementa
 
 ## Boundaries
 
-- Do not change behavior; if you discover a bug, note it and hand off to `/coder` or `/debugger` rather than silently "fixing" it inside a refactor.
+- Do not change behavior; if you discover a bug, note it and hand off to `coder` or `systematic-debugger` rather than silently "fixing" it inside a refactor.
 - Do not change public signatures/contracts unless the task explicitly scopes an API change.
 - Keep refactor commits separate from behavior-change commits so review and rollback stay clean.
 
@@ -99,4 +99,4 @@ vendor/bin/pint --test
 
 ## Final Output
 
-Return what was refactored, the safety net used, the before/after test result, any bugs found (not fixed here), Context Summary, and next step (`/verify`, `/code-reviewer`, or `/test-generator`).
+Return what was refactored, the safety net used, the before/after test result, any bugs found (not fixed here), Context Summary, and next step (`verify`, `code-reviewer`, or `test-generator`).

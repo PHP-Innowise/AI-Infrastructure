@@ -19,10 +19,10 @@ Read relevant routes/controllers, services, repositories, entities, migrations, 
 
 `coder` owns new features, bug fixes, and incidental cleanup needed for that work.
 
-- Use `/refactorer` for pure behavior-preserving cleanup.
-- Use `/architecture-implementer` to scaffold approved structure before feature logic exists.
-- Use `/database-designer` when Doctrine entity/schema/index/constraint decisions are not obvious.
-- Use `/coder-frontend` for Twig, Symfony UX, Stimulus, CSS, and progressive frontend behavior.
+- Use `refactorer` for pure behavior-preserving cleanup.
+- Use `architecture-implementer` to scaffold approved structure before feature logic exists.
+- Use `database-designer` when Doctrine entity/schema/index/constraint decisions are not obvious.
+- Use `coder-frontend` for Twig, Symfony UX, Stimulus, CSS, and progressive frontend behavior.
 
 ## Layer Rules
 

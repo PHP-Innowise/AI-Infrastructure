@@ -3,7 +3,7 @@ name: test-generator
 description: Generate Pest or PHPUnit tests for Laravel applications. Use for feature tests (routes), Form Request validation tests, Policy authorization tests, Eloquent model/factory tests, and coverage gaps.
 phase: execution
 flow-next: documentation-generator
-flow-alternatives: [debugger, coder]
+flow-alternatives: [systematic-debugger, coder]
 related: [coder, code-reviewer, verify]
 ---
 
@@ -228,14 +228,46 @@ it('lets a user sign in', function (): void {
 });
 ```
 
-This is distinct from the `browser-verify` skill: Pest browser tests are automated, repeatable regression tests, written once and run in CI forever alongside the rest of the suite. `browser-verify` is a manual/agent-driven, one-off exploratory check of a specific change in a running app, and is not committed to the test suite. Add coverage here for lasting regression protection; use `/browser-verify` to sanity-check a change during development.
+This is distinct from the `browser-verify` skill: Pest browser tests are automated, repeatable regression tests, written once and run in CI forever alongside the rest of the suite. `browser-verify` is a manual/agent-driven, one-off exploratory check of a specific change in a running app, and is not committed to the test suite. Add coverage here for lasting regression protection; use `browser-verify` to sanity-check a change during development.
 
 ## Failure Loop
 
 1. Read the full failure.
 2. Fix the root cause.
 3. Re-run the focused failing test.
-4. Stop after three failed fix attempts and escalate to `/debugger`.
+4. Stop after three failed fix attempts and escalate to `systematic-debugger`.
+
+## Validation Map
+
+Write `tasks/TASK-NNN/test-generator-validation.md` whenever tests are created
+or updated for a governed task. A pass/fail run says the suite is green; it
+does not say which requirement is actually held up by a test. The map is what
+makes an uncovered requirement visible instead of merely absent.
+
+```markdown
+---
+description: Which invoice-total requirements are held by which tests.
+---
+
+# Validation Map
+
+| Requirement | Source | Test | State |
+| --- | --- | --- | --- |
+| Net total sums `amount * quantity` | `specs/invoice-totals.md` | `tests/InvoiceTotalTest.php::testSumsLines` | covered |
+| VAT rounds half-up at the minor unit | `specs/invoice-totals.md` | `tests/VatRateTest.php::testRoundsHalfUpAtMinorUnit` | covered |
+| Gross is exposed over HTTP | `specs/invoice-totals.md` | — | uncovered |
+```
+
+Rules:
+
+- One row per requirement, not per test. A requirement with no test is a row
+  reading `uncovered`, never an omitted row.
+- Cite the requirement's source, so a reader can check the claim against the
+  specification rather than against this table.
+- Name the test to the method, so the row can be verified by running it.
+- `partial` is a valid state, and must say in the row what is not covered.
+- The map records coverage, not correctness. A covered requirement whose test
+  is wrong still reads `covered`; that is what review is for.
 
 ## Final Output
 

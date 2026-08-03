@@ -1,6 +1,6 @@
 ---
 name: architecture-implementer
-description: Scaffold and wire an approved architecture into Laravel. Use to turn an architect decision or spec into models, controllers, policies, Form Requests, API Resources, migrations, and Service Provider bindings, ready for feature code. Bridges /architect and /coder.
+description: Scaffold and wire an approved architecture into Laravel. Use to turn an architect decision or spec into models, controllers, policies, Form Requests, API Resources, migrations, and Service Provider bindings, ready for feature code. Bridges architect and /coder.
 phase: execution
 flow-next: coder
 flow-alternatives: [test-generator, code-reviewer, verify]
@@ -11,19 +11,19 @@ related: [architect, coder, api-designer, test-generator, eloquent]
 
 ## Overview
 
-Take an approved architecture (from `/architect`, a spec in `specs/`, or a `/council` decision) and lay down the structural skeleton in Laravel: models, controllers, policies, Form Requests, API Resources, migrations, and Service Provider bindings, generated via `artisan make:*` where possible. Leave feature logic thin and clearly marked as TODO for `/coder`.
+Take an approved architecture (from `architect`, a spec in `specs/`, or a `council` decision) and lay down the structural skeleton in Laravel: models, controllers, policies, Form Requests, API Resources, migrations, and Service Provider bindings, generated via `artisan make:*` where possible. Leave feature logic thin and clearly marked as TODO for `coder`.
 
 This skill builds the frame, not the whole house. It should produce a scaffolded, autoloadable, testable skeleton with seams in the right places, using Laravel's own generators to keep boilerplate idiomatic.
 
 ## Scope Boundary
 
-This skill stops at the **skeleton**: models, empty/thin controller methods, Form Request shells, policy method stubs, Resource classes, migrations, and Service Provider bindings with TODO markers. The moment real feature logic goes inside a method (validation rules, policy conditions, Action bodies), that is `/coder`. Upstream, the architectural *decision* itself belongs to `/architect` (or `/council`) — if no approved decision exists, do that first. In short: `/architect` decides → `architecture-implementer` scaffolds → `/coder` fills in behavior.
+This skill stops at the **skeleton**: models, empty/thin controller methods, Form Request shells, policy method stubs, Resource classes, migrations, and Service Provider bindings with TODO markers. The moment real feature logic goes inside a method (validation rules, policy conditions, Action bodies), that is `coder`. Upstream, the architectural *decision* itself belongs to `architect` (or `council`) — if no approved decision exists, do that first. In short: `architect` decides → `architecture-implementer` scaffolds → `coder` fills in behavior.
 
 ## Preconditions
 
 Before scaffolding, confirm:
 
-- An architecture decision exists (read `specs/architect-architecture.md` or the provided decision). If not, recommend `/architect` first.
+- An architecture decision exists (read `specs/architect-architecture.md` or the provided decision). If not, recommend `architect` first.
 - The target models, relationships, authorization needs, and API surface are decided.
 - The project's Laravel version (`composer.json` `laravel/framework` constraint or `php artisan --version`) and any conventions already in place (e.g. Actions vs Services directory).
 
@@ -45,7 +45,7 @@ Before scaffolding, confirm:
 - Follow Laravel's dependency direction: routes -> controllers -> Actions/Services -> Eloquent models; Service Providers bind interfaces for external integrations. Controllers should not contain business logic.
 - Every new PHP file starts with `declare(strict_types=1);` and full type declarations.
 - Prefer `artisan make:*` generators over hand-writing boilerplate — they produce the idiomatic base class/namespace/imports automatically.
-- Do not implement business rules, validation rules, or policy conditions here; mark them clearly for `/coder`.
+- Do not implement business rules, validation rules, or policy conditions here; mark them clearly for `coder`.
 - Keep the skeleton verifiable: migrations should run (`php artisan migrate`), models/routes should resolve, and `php artisan route:list` should show the new routes.
 - Do not add layers the architecture did not call for (e.g. don't add a Service if only an Action was decided).
 
@@ -138,7 +138,7 @@ vendor/bin/phpstan analyse      # if configured; confirms wiring types line up
 
 ## Handoff Map
 
-Produce a table so `/coder` knows exactly what to fill in:
+Produce a table so `coder` knows exactly what to fill in:
 
 ```markdown
 | File | Responsibility | Status |
@@ -150,4 +150,4 @@ Produce a table so `/coder` knows exactly what to fill in:
 
 ## Final Output
 
-Return the created structure, models/policies/resources/migrations added, Service Provider bindings, the handoff map of TODOs, verification run, Context Summary, and next step (`/coder` to implement, then `/test-generator`).
+Return the created structure, models/policies/resources/migrations added, Service Provider bindings, the handoff map of TODOs, verification run, Context Summary, and next step (`coder` to implement, then `test-generator`).

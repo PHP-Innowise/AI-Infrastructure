@@ -1,9 +1,30 @@
 # Changelog
 
+Shared-core history - the Python memory/context core
+(`memory-bank/scripts`, `memory-bank/tests`, `project-brain/`), the
+tool hooks, and the mirror machinery common to the Laravel, Symfony
+and PHP Core editions - is recorded once in the root
+[`CHANGELOG.md`](../CHANGELOG.md). This file records only
+Symfony-specific changes. The edition's release version is the
+`VERSION` file beside this changelog; the SessionStart hook prints
+it at the top of every session.
+
 ## Unreleased
 
 ### Fixed
 
+- **Three canonical skills carried `sed` damage that the mirrors did not.**
+  `.agents/skills/brainstorming/SKILL.md` and
+  `.agents/skills/requirements-analyst/SKILL.md` wrote
+  `tasks/TASK-{N}brainstorming-design.md` - a path-separating slash eaten by a
+  bulk substitution - and `.agents/skills/review-pr/SKILL.md` described running
+  "the systematic systematic-debugger". Repaired in canonical; syncing mirrors
+  from canonical would have propagated all three.
+- **Two hook timeouts were still in milliseconds.** This edition's
+  `bash-validator.sh` and hook wiring were already correct, but
+  `.claude/settings.json` kept `8000` on the `UserPromptSubmit` and `Stop` hooks
+  where the field is seconds - the two entries missed when the rest of the file
+  was converted. Set both to `8`.
 - **Stale branch-based wording left over from the pre-monorepo layout** - `AGENTS.md` and `README.md` (intro + Symfony Adaptation Notes) still said things like "this branch is dedicated to Symfony" / "feature/symfony-accelerator branch" / "the Laravel branch", which stopped being accurate once the accelerators were merged into sibling `Laravel/` / `Symfony/` / `PHP Core/` folders in one repo. Reworded to point at the sibling `PHP Core/` and `Laravel/` folders instead of branches, consistent with the root `README.md`.
 
 ## 1.3.1 - 2026-07-18

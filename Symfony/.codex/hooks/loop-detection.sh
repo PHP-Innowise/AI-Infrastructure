@@ -8,6 +8,16 @@
 
 INPUT=$(cat)
 
+# Only file-editing tools may advance the loop counter. Codex registers this
+# hook without a tool matcher, so read-only payloads that carry a file_path
+# (for example Read) must not count as edits. An empty tool_name means the
+# host does not send one (Cursor afterFileEdit); fail open in that case.
+TOOL_NAME=$(echo "$INPUT" | sed -n 's/.*"tool_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+if [ -n "$TOOL_NAME" ] \
+  && ! printf '%s\n' "$TOOL_NAME" | grep -Eqi '(^|[.:/])(write|edit|multiedit|multi_edit|notebookedit|notebook_edit|apply_patch)$'; then
+  exit 0
+fi
+
 # Extract file path from JSON input (POSIX-compatible, no grep -P).
 # Codex payloads may use "file_path" or "path"; try both.
 FILE_PATH=$(echo "$INPUT" | sed -n 's/.*"file_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
@@ -19,8 +29,11 @@ if [ -z "$FILE_PATH" ]; then
   exit 0
 fi
 
-# Use a temp directory for tracking edit counts
-TRACK_DIR="/tmp/codex-loop-detection"
+# Use a per-repository temp directory for tracking edit counts, namespaced by a
+# stable hash of the repo root so parallel projects do not share counters.
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+REPO_KEY=$(printf '%s' "$REPO_ROOT" | cksum | cut -d' ' -f1)
+TRACK_DIR="/tmp/codex-loop-detection-$REPO_KEY"
 mkdir -p "$TRACK_DIR"
 
 # Create a safe filename from the path (portable: md5sum on Linux, md5 on macOS)

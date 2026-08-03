@@ -3,7 +3,7 @@ name: browser-verify
 description: Visually verify native PHP web UI changes in a running app. Use for server-rendered pages, forms, and progressive-enhancement workflows that need browser evidence.
 phase: execution
 flow-next: verify
-flow-alternatives: [coder-frontend, debugger]
+flow-alternatives: [coder-frontend, systematic-debugger]
 related: [coder-frontend, frontend-design, wcag-accessibility]
 ---
 

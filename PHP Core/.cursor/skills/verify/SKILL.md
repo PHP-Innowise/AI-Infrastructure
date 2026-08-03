@@ -3,7 +3,7 @@ name: verify
 description: Run the native PHP Definition of Done and report pass/fail status. Use before claiming completion, creating a PR, or merging.
 phase: execution
 flow-next: finishing-branch
-flow-alternatives: [coder, debugger, test-generator]
+flow-alternatives: [coder, systematic-debugger, test-generator]
 related: [code-reviewer, test-generator]
 ---
 
@@ -11,7 +11,7 @@ related: [code-reviewer, test-generator]
 
 ## Overview
 
-Run `.cursor/DOD.md` and produce a clear pass/fail report. Do not install missing tools. Report missing tooling as `N/A - tooling not configured`. Prefer the project's Composer scripts when they exist.
+Run the active edition's `DOD.md` and produce a clear pass/fail report. Do not install missing tools. Report missing tooling as `N/A - tooling not configured`. Prefer the project's Composer scripts when they exist.
 
 ## Step 1: Determine Tier
 
@@ -69,6 +69,20 @@ Also verify:
 - No unresolved TODO/FIXME/HACK in changed source files.
 - Migration, worker/queue, and cache impacts are documented.
 
+## Step 3: Promote Verified Brain Records
+
+Verification is the only step that re-checks a claim against reality, so recording that outcome is part of the verification itself: a fact that passed but stays `observed` never qualifies for automatic promotion, and the pass would leave no trace in governed memory.
+
+For every Project Brain record (finding, bug, incident, decision) whose claim this run actually confirmed, promote its authority BEFORE transitioning the record to a terminal status (`resolved`, `closed`, `accepted`):
+
+```bash
+python3 memory-bank/scripts/context.py brain-update \
+  --record-id <id> --revision auto \
+  --authority verified --reason "Verified: <check that confirmed it>"
+```
+
+Only the `observed -> verified` transition is accepted; the terminal transition follows in a separate `brain-update --transition <terminal-status>`. Skip records this run did not confirm — an unverified claim must stay `observed`.
+
 ## Report Template
 
 ```markdown
@@ -94,7 +108,7 @@ Also verify:
 [2-3 sentences]
 
 ### Next Steps
-- `/finishing-branch` if ready.
+- `finishing-branch` if ready.
 ```
 
 ## Failure Handling
@@ -104,7 +118,7 @@ If any required check fails:
 - Mark result as FAIL.
 - Include the exact command.
 - Include the shortest useful failure summary.
-- Recommend `/coder` for clear fixes or `/debugger` for unclear failures.
+- Recommend `coder` for clear fixes or `systematic-debugger` for unclear failures.
 
 ## Final Output
 

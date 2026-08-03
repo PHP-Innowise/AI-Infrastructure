@@ -1,6 +1,6 @@
 ---
 name: requirements-analyst
-description: Analyze requirements from Confluence pages, decompose into actionable tasks, and validate completeness. Use when user asks to analyze requirements, break down features, create tasks from specs, parse Confluence docs, or validate requirements. Triggers on "analyze requirements", "break down feature", "create tasks from", "parse confluence", "requirements from", "decompose into tasks".
+description: Analyze requirements from Confluence pages, decompose into actionable tasks, and validate completeness. Triggers on "analyze requirements", "break down feature", "create tasks from", "parse confluence", "requirements from", "decompose into tasks", "validate requirements".
 phase: understanding
 flow-next: brainstorming
 flow-alternatives: [architect, writing-plans]
@@ -175,10 +175,10 @@ This file preserves the analysis context so the conversation can be cleared befo
 
 After requirements document is written to file, STOP and present these options:
 
-**Next by flow:** [[/brainstorm]] `[TASK-{N} context]` - Refine requirements into a concrete design through collaborative dialogue. See [[moc-understanding]] for phase context.
+**Next by flow:** [[brainstorming]] `[TASK-{N} context]` - Refine requirements into a concrete design through collaborative dialogue. See [[moc-understanding]] for phase context.
 
 **Pass to next skill:** Include the task number in your context summary (e.g., "TASK-001: User authentication requirements analyzed")
 
 **Alternatives:**
-- [[/architect]] `[TASK-{N} context]` - Skip brainstorming if requirements are clear and jump to architecture decisions.
-- [[/writing-plans]] `[TASK-{N} context]` - Create implementation plan directly if design is already established.
+- [[architect]] `[TASK-{N} context]` - Skip brainstorming if requirements are clear and jump to architecture decisions.
+- [[writing-plans]] `[TASK-{N} context]` - Create implementation plan directly if design is already established.

@@ -33,6 +33,8 @@ User runs: /requirements-analyst [prompt]
     └─────────────────────┘
 ```
 
+`/project-brain` follows the same command -> `project-brain-agent` -> `project-brain` skill route. Codex discovers the skill directly and intentionally has no command/agent wrapper.
+
 ## Key Principles
 
 ### 1. Isolation
@@ -143,6 +145,8 @@ When done, provide:
 ### Utility
 | Agent | Skill | Next by Flow |
 |-------|-------|--------------|
+| `project-brain-agent` | project-brain | (standalone) |
+| `memory-bank-agent` | memory-bank | (standalone) |
 | `reflect-agent` | reflect | (standalone) |
 | `skill-creator-agent` | skill-creator | (standalone) |
 | `dependency-manager-agent` | dependency-manager | verify |

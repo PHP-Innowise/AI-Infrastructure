@@ -54,7 +54,9 @@ requirements-analyst
 - Use `dependency-manager` for Composer audits, Symfony bundle vetting, Symfony Flex recipe impact, and dependency updates.
 - Use `systematic-debugger` when tests fail for unclear reasons or behavior is unexpected.
 - Use `documentation-generator` when setup, deployment, worker/cron, API, or architecture documentation changed.
-- Use `memory-bank` only to retrieve, capture, audit, supersede, archive, or initialize durable source-backed project memory; keep transient progress in task context.
+- Use `project-brain` for governed task lifecycle, handoffs, unified retrieval, findings/bugs/incidents/decisions, compaction, and promotion proposals. Governed mode is the default; `--mode lightweight` is an explicit local-only fallback.
+- Use `memory-bank` only for durable retrieval/capture/audit/supersession and human-approved promotion application; active work stays in Project Brain.
+- Use `checkpoint`, `memory` for authority-aware progress capture and unified context refresh; governed mode never creates SQLite task authority.
 
 ## Phase Map
 
@@ -65,16 +67,30 @@ requirements-analyst
 | Implementation | `using-git-worktrees`, `architecture-implementer`, `coder`, `coder-frontend`, `console-command-coder`, `fixture-factory-generator`, `refactorer` |
 | Quality | `architecture-boundary-reviewer`, `code-reviewer`, `repository-reviewer`, `security-reviewer`, `twig-ux-reviewer`, `container-reviewer`, `test-generator`, `performance-optimization`, `systematic-debugger`, `verify` |
 | Finalization | `documentation-generator`, `release`, `finishing-branch` |
-| Utility | `memory-bank`, `reflect`, `skill-creator`, `review-pr`, `browser-verify`, `dependency-manager` |
+| Utility | `project-brain`, `checkpoint`, `memory`, `memory-bank`, `reflect`, `skill-creator`, `review-pr`, `browser-verify`, `dependency-manager` |
 
-## Context Handoff
+## Task Capsule Handoff
 
-Every skill must finish with:
+At a complex phase boundary, the orchestrating agent builds one bounded Task
+Capsule from a concise sanitized retrieval query, optional Working state, and
+layered context. A fresh phase agent receives the capsule and explicit
+current-step files, not the parent conversation.
 
-- What changed or was decided.
-- Controller/service/repository placement when implementation is involved.
-- Files/specs touched.
-- Verification evidence or planned verification.
-- Risks and assumptions.
-- Memory chunk IDs used or changed, when applicable.
-- Recommended next skill.
+The returning handoff contains only:
+
+- work completed;
+- decisions made;
+- files changed or examined;
+- controller/service/repository placement when implementation is involved;
+- verification evidence;
+- risks and assumptions;
+- the next step or recommended next skill;
+- unresolved blockers or questions;
+- memory chunk IDs used or changed, when applicable;
+- Project Brain task/record revisions, handoff, and retrieval manifest, when
+  applicable;
+- cited authoritative sources.
+
+The next agent must not preload every cited source. It opens one only when the
+current step requires more information. Simple tasks remain in the current
+context.

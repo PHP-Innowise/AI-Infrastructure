@@ -1,5 +1,43 @@
 # Changelog
 
+Shared-core history - the Python memory/context core
+(`memory-bank/scripts`, `memory-bank/tests`, `project-brain/`), the
+tool hooks, and the mirror machinery common to the Laravel, Symfony
+and PHP Core editions - is recorded once in the root
+[`CHANGELOG.md`](../CHANGELOG.md). This file records only
+Laravel-specific changes. The edition's release version is the
+`VERSION` file beside this changelog; the SessionStart hook prints
+it at the top of every session.
+
+## Unreleased
+
+### Fixed
+
+- **`bash-validator.sh` never blocked anything, and the wiring never reached
+  it.** Two independent defects, both silent. The hook scraped the command out
+  of the tool-input JSON with `sed` on `"[^"]*"`, so any command containing an
+  escaped quote (`php -r "echo 1;" && git push --force`) was truncated past the
+  destructive half and passed. Patterns were then handed to `grep -Eqi
+  "$PATTERN"` without `--`, so the leading-dash pattern `--no-verify` was parsed
+  as a grep option: `git commit --no-verify` printed `grep: unrecognized option`
+  to the transcript and exited 0 on every single command. Separately,
+  `.claude/settings.json` wired all three PreToolUse/PostToolUse hooks as
+  `echo '$TOOL_INPUT' | <script>`, which feeds the hook the literal string
+  `$TOOL_INPUT` rather than the payload Claude Code already delivers on stdin,
+  and used millisecond `timeout` values (`5000`/`8000`/`10000`) where the field
+  is seconds. Adopted the Symfony edition's JSON-decoding extractor
+  (jq -> php -> python3), `grep -Eqi --`, and stderr reporting; the wiring is now
+  a bare script path with second timeouts. Verified by running both versions
+  against the same payloads: `git commit --no-verify` now exits 2 instead of 0.
+- **Artisan danger patterns matched prose and read-only searches.** With the
+  extractor fixed, the unanchored `migrate.*(:|--)?(fresh|reset|refresh|rollback)`
+  would have blocked `grep -rn migrate:refresh docs/` and
+  `git commit -m "migrate to the new refresh flow"` - a false positive on
+  ordinary work is what gets an enforcement layer switched off. Anchored every
+  artisan rule to an actual `artisan` invocation, so `php artisan migrate:fresh`,
+  `ddev artisan migrate:rollback`, and `artisan db:wipe` still block while prose
+  and searches pass.
+
 ## 1.4.3 - 2026-07-18
 
 ### Fixed

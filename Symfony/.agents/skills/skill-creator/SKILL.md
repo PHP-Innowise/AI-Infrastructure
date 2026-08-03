@@ -1,6 +1,6 @@
 ---
 name: skill-creator
-description: Create, modify, validate, and evaluate repository skills for Codex. Use when adding specialized workflows, improving existing skills, tightening trigger descriptions, reorganizing resources, running automated positive/negative trigger evaluations, optimizing descriptions, or benchmarking with-skill versus baseline output quality.
+description: Create, modify, validate, and evaluate repository skills for Codex. Use when adding specialized workflows, improving existing skills, tightening or optimizing trigger descriptions, reorganizing resources, running automated positive/negative trigger evaluations, or benchmarking with-skill versus baseline output quality.
 phase: understanding
 ---
 

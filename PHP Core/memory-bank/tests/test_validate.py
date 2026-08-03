@@ -53,7 +53,7 @@ class MemoryBankValidatorTest(unittest.TestCase):
             "type": "convention",
             "status": "active",
             "scope": ["application"],
-            "tags": ["php", "architecture"],
+            "tags": ["symfony", "architecture"],
             "created": today.isoformat(),
             "last_verified": today.isoformat(),
             "review_after": (today + timedelta(days=365)).isoformat(),
@@ -70,7 +70,7 @@ class MemoryBankValidatorTest(unittest.TestCase):
         self.bank.joinpath("INDEX.md").write_text(
             self.index(
                 [
-                    f"| MEM-0001 | Layering convention | convention | application | php, architecture | active | {today.isoformat()} | chunks/MEM-0001-layering-convention.md |"
+                    f"| MEM-0001 | Layering convention | convention | application | symfony, architecture | active | {today.isoformat()} | chunks/MEM-0001-layering-convention.md |"
                 ]
             ),
             encoding="utf-8",
@@ -108,8 +108,8 @@ class MemoryBankValidatorTest(unittest.TestCase):
         self.bank.joinpath("INDEX.md").write_text(
             self.index(
                 [
-                    f"| MEM-0001 | Layering convention | convention | application | php, architecture | superseded | {today} | chunks/MEM-0001-layering-convention.md |",
-                    f"| MEM-0002 | Updated layering convention | convention | application | php, architecture | active | {today} | chunks/MEM-0002-updated-layering.md |",
+                    f"| MEM-0001 | Layering convention | convention | application | symfony, architecture | superseded | {today} | chunks/MEM-0001-layering-convention.md |",
+                    f"| MEM-0002 | Updated layering convention | convention | application | symfony, architecture | active | {today} | chunks/MEM-0002-updated-layering.md |",
                 ]
             ),
             encoding="utf-8",
@@ -177,13 +177,82 @@ class MemoryBankValidatorTest(unittest.TestCase):
         self.assertTrue(any("possible OpenAI-style token" in error for error in errors))
         self.assertFalse(any("ABCDEFGHIJKLMNOPQRSTUVWXYZ" in error for error in errors))
 
-    def test_counter_must_advance_past_allocated_ids(self) -> None:
+    def test_legacy_memory_counter_is_ignored(self) -> None:
+        # `.memory-counter` is a retired legacy artifact: IDs are date+UUID
+        # based now, so a stale value (here: not past the allocated MEM-0001)
+        # is not an error...
         self.add_chunk()
         self.bank.joinpath(".memory-counter").write_text("1\n", encoding="utf-8")
+        self.assertEqual([], VALIDATOR.validate_bank(self.bank))
+
+        # ...and the file is no longer required at all.
+        self.bank.joinpath(".memory-counter").unlink()
+        self.assertEqual([], VALIDATOR.validate_bank(self.bank))
+
+    def test_mixed_legacy_and_date_based_ids_are_valid(self) -> None:
+        self.add_chunk()
+        today = date.today()
+        memory_id = "MEM-20260101-1a2b3c4d"
+        metadata = {
+            "id": memory_id,
+            "title": "Promotion outcome",
+            "type": "decision",
+            "status": "active",
+            "scope": ["application"],
+            "tags": ["project-brain", "promoted"],
+            "created": today.isoformat(),
+            "last_verified": today.isoformat(),
+            "review_after": (today + timedelta(days=365)).isoformat(),
+            "sources": ["AGENTS.md"],
+            "supersedes": [],
+            "superseded_by": None,
+        }
+        self.bank.joinpath(f"chunks/{memory_id}-promotion-outcome.md").write_text(
+            f"---\n{json.dumps(metadata, indent=2)}\n---\n\n"
+            "# Promotion Outcome\n\nVerified reusable context.\n",
+            encoding="utf-8",
+        )
+        self.bank.joinpath("INDEX.md").write_text(
+            self.index(
+                [
+                    f"| MEM-0001 | Layering convention | convention | application | symfony, architecture | active | {today.isoformat()} | chunks/MEM-0001-layering-convention.md |",
+                    f"| {memory_id} | Promotion outcome | decision | application | project-brain, promoted | active | {today.isoformat()} | chunks/{memory_id}-promotion-outcome.md |",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        self.assertEqual([], VALIDATOR.validate_bank(self.bank))
+
+    def test_date_based_id_must_match_its_filename(self) -> None:
+        self.add_chunk()
+        today = date.today()
+        metadata = {
+            "id": "MEM-20260101-1a2b3c4d",
+            "title": "Promotion outcome",
+            "type": "decision",
+            "status": "active",
+            "scope": ["application"],
+            "tags": ["promoted"],
+            "created": today.isoformat(),
+            "last_verified": today.isoformat(),
+            "review_after": (today + timedelta(days=365)).isoformat(),
+            "sources": ["AGENTS.md"],
+            "supersedes": [],
+            "superseded_by": None,
+        }
+        self.bank.joinpath(
+            "chunks/MEM-20260101-ffffffff-promotion-outcome.md"
+        ).write_text(
+            f"---\n{json.dumps(metadata, indent=2)}\n---\n\n# Promotion Outcome\n",
+            encoding="utf-8",
+        )
 
         errors = VALIDATOR.validate_bank(self.bank)
 
-        self.assertTrue(any("counter must be greater" in error for error in errors))
+        self.assertTrue(
+            any("does not match filename id" in error for error in errors)
+        )
 
     def test_local_source_must_stay_inside_repository(self) -> None:
         self.add_chunk()
@@ -205,6 +274,22 @@ class MemoryBankValidatorTest(unittest.TestCase):
         errors = VALIDATOR.validate_bank(self.bank)
 
         self.assertTrue(any("overdue for review" in error for error in errors))
+
+    def test_type_must_be_a_string(self) -> None:
+        self.add_chunk()
+        self.update_chunk_metadata(type=[])
+
+        errors = VALIDATOR.validate_bank(self.bank)
+
+        self.assertTrue(any("type must be one of" in error for error in errors))
+
+    def test_status_must_be_a_string(self) -> None:
+        self.add_chunk()
+        self.update_chunk_metadata(status={"active": True})
+
+        errors = VALIDATOR.validate_bank(self.bank)
+
+        self.assertTrue(any("status must be one of" in error for error in errors))
 
     def test_index_scope_must_match_chunk_metadata(self) -> None:
         self.add_chunk()

@@ -6,8 +6,50 @@ Quick validation script for skills - minimal version
 import sys
 import os
 import re
-import yaml
+import ast
 from pathlib import Path
+
+try:
+    import yaml
+except ImportError:  # Keep project skill validation usable without PyYAML.
+    yaml = None
+
+
+def parse_frontmatter(frontmatter_text):
+    if yaml is not None:
+        return yaml.safe_load(frontmatter_text)
+
+    parsed = {}
+    for line in frontmatter_text.splitlines():
+        if not line or line[0].isspace() or ':' not in line:
+            continue
+        key, raw_value = line.split(':', 1)
+        value = raw_value.strip()
+        if not value:
+            parsed[key] = {}
+        elif value in {'null', '~'}:
+            parsed[key] = None
+        elif value.startswith('[') and value.endswith(']'):
+            items = value[1:-1].strip()
+            parsed[key] = (
+                []
+                if not items
+                else [item.strip().strip("\"'") for item in items.split(',')]
+            )
+        elif value[0:1] in {'"', "'"}:
+            parsed[key] = ast.literal_eval(value)
+        else:
+            parsed[key] = value
+    return parsed
+
+
+def is_valid_skill_name(value):
+    return (
+        isinstance(value, str)
+        and len(value) <= 64
+        and re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', value) is not None
+    )
+
 
 def validate_skill(skill_path):
     """Basic validation of a skill"""
@@ -32,14 +74,17 @@ def validate_skill(skill_path):
 
     # Parse YAML frontmatter
     try:
-        frontmatter = yaml.safe_load(frontmatter_text)
+        frontmatter = parse_frontmatter(frontmatter_text)
         if not isinstance(frontmatter, dict):
             return False, "Frontmatter must be a YAML dictionary"
-    except yaml.YAMLError as e:
+    except Exception as e:
         return False, f"Invalid YAML in frontmatter: {e}"
 
     # Define allowed properties
-    ALLOWED_PROPERTIES = {'name', 'description', 'license', 'allowed-tools', 'metadata', 'compatibility'}
+    ALLOWED_PROPERTIES = {
+        'name', 'description', 'license', 'allowed-tools', 'metadata',
+        'compatibility', 'phase', 'flow-next', 'flow-alternatives',
+    }
 
     # Check for unexpected properties (excluding nested keys under metadata)
     unexpected_keys = set(frontmatter.keys()) - ALLOWED_PROPERTIES
@@ -55,20 +100,38 @@ def validate_skill(skill_path):
     if 'description' not in frontmatter:
         return False, "Missing 'description' in frontmatter"
 
+    if 'phase' in frontmatter:
+        if frontmatter['phase'] not in {
+            'planning', 'execution', 'quality', 'utility'
+        }:
+            return False, "'phase' must be planning, execution, quality, or utility"
+
+    if 'flow-next' in frontmatter:
+        flow_next = frontmatter['flow-next']
+        if flow_next is not None and (
+            not isinstance(flow_next, str)
+            or not is_valid_skill_name(flow_next)
+        ):
+            return False, "'flow-next' must be null or a kebab-case skill name"
+
+    if 'flow-alternatives' in frontmatter:
+        alternatives = frontmatter['flow-alternatives']
+        if not isinstance(alternatives, list) or any(
+            not is_valid_skill_name(item)
+            for item in alternatives
+        ):
+            return False, "'flow-alternatives' must be a list of kebab-case skill names"
+
     # Extract name for validation
     name = frontmatter.get('name', '')
     if not isinstance(name, str):
         return False, f"Name must be a string, got {type(name).__name__}"
     name = name.strip()
     if name:
-        # Check naming convention (kebab-case: lowercase with hyphens)
-        if not re.match(r'^[a-z0-9-]+$', name):
-            return False, f"Name '{name}' should be kebab-case (lowercase letters, digits, and hyphens only)"
-        if name.startswith('-') or name.endswith('-') or '--' in name:
-            return False, f"Name '{name}' cannot start/end with hyphen or contain consecutive hyphens"
-        # Check name length (max 64 characters per spec)
         if len(name) > 64:
             return False, f"Name is too long ({len(name)} characters). Maximum is 64 characters."
+        if not is_valid_skill_name(name):
+            return False, f"Name '{name}' should be kebab-case"
 
     # Extract and validate description
     description = frontmatter.get('description', '')

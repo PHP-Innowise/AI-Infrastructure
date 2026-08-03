@@ -11,9 +11,9 @@ related: [coder, test-generator, verify, security-reviewer]
 
 ## Review Stance
 
-Prioritize defects, regressions, security issues, missing tests, and operational risks. Do not spend review budget on stylistic preferences unless they affect correctness or maintainability. Leave deep security audits to `/security-reviewer`, but flag obvious risks here.
+Prioritize defects, regressions, security issues, missing tests, and operational risks. Do not spend review budget on stylistic preferences unless they affect correctness or maintainability. Leave deep security audits to `security-reviewer`, but flag obvious risks here.
 
-**Scope boundary:** this skill reviews **local changes** (working tree / branch diff) for **broad** quality. Use `/security-reviewer` for a dedicated OWASP-depth security-only pass, and `/review-pr` when the target is a **remote GitHub pull request** (fetched and commented on via the `gh` CLI).
+**Scope boundary:** this skill reviews **local changes** (working tree / branch diff) for **broad** quality. Use `security-reviewer` for a dedicated OWASP-depth security-only pass, and `review-pr` when the target is a **remote GitHub pull request** (fetched and commented on via the `gh` CLI).
 
 ## Native PHP Review Checklist
 
@@ -68,7 +68,7 @@ Prioritize defects, regressions, security issues, missing tests, and operational
 - **Severity-label every finding** (High/Medium/Low/Nit) so the author knows what blocks merge vs. what is optional.
 - **Be specific and actionable:** cite `file:line`, explain the risk, and suggest the fix. Avoid vague "this could be better".
 - **Separate must-fix from preference:** prefix optional style comments with "Nit:" and do not block on them.
-- **Explain the why:** tie feedback to a concrete failure mode, a principle in `.cursor/GOLDEN-PRINCIPLES.md`, or a rule in `AGENTS.md`.
+- **Explain the why:** tie feedback to a concrete failure mode, a principle in the active edition's `GOLDEN-PRINCIPLES.md`, or a rule in `AGENTS.md`.
 - **Respect scope:** review the diff and what it touches; do not demand unrelated refactors (note them separately as follow-ups).
 - **Acknowledge good decisions**, and ask questions instead of asserting when intent is unclear.
 - **Right-size the review:** if the change is too large to review well, say so and suggest splitting.

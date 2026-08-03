@@ -68,15 +68,15 @@ Any file created by this skill MUST be prefixed with `researcher-`:
 - Not verified: [...]
 
 ## Sources
-- [Title](url) - accessed [date]
+- [Title] ([URL]) - accessed [date]
 ```
 
 ## Guardrails
 
 - Cite sources; do not present recollection as fact. Note version and access date.
 - Distinguish verified findings from assumptions.
-- Do not install packages or modify code; this skill produces knowledge, not changes. Hand off to `/coder`, `/dependency-manager`, or `/architecture-implementer`.
+- Do not install packages or modify code; this skill produces knowledge, not changes. Hand off to `coder`, `dependency-manager`, or `architecture-implementer`.
 
 ## Final Output
 
-Return the findings document (path if written), the recommendation, key risks, Context Summary, and next step (`/council`, `/architect`, `/brainstorm`, or `/writing-plans`).
+Return the findings document (path if written), the recommendation, key risks, Context Summary, and next step (`council`, `architect`, `brainstorming`, or `writing-plans`).

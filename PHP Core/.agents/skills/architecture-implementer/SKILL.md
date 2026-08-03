@@ -1,6 +1,6 @@
 ---
 name: architecture-implementer
-description: Scaffold and wire an approved architecture into native PHP. Use to turn an architect decision or spec into module skeletons, interfaces, DI wiring, PSR-4 structure, and boundaries, ready for feature code. Bridges /architect and /coder.
+description: Scaffold and wire an approved architecture into native PHP. Use to turn an architect decision or spec into module skeletons, interfaces, DI wiring, PSR-4 structure, and boundaries, ready for feature code. Bridges architect and /coder.
 phase: execution
 flow-next: coder
 flow-alternatives: [test-generator, code-reviewer, verify]
@@ -11,19 +11,19 @@ related: [architect, coder, api-designer, test-generator]
 
 ## Overview
 
-Take an approved architecture (from `/architect`, a spec in `specs/`, or a `/council` decision) and lay down the structural skeleton in native PHP: directories, namespaces, interfaces, base classes, DI wiring, and boundaries. Leave feature logic thin and clearly marked as TODO for `/coder`.
+Take an approved architecture (from `architect`, a spec in `specs/`, or a `council` decision) and lay down the structural skeleton in native PHP: directories, namespaces, interfaces, base classes, DI wiring, and boundaries. Leave feature logic thin and clearly marked as TODO for `coder`.
 
 This skill builds the frame, not the whole house. It should produce a compiling, autoloadable, testable skeleton with seams in the right places.
 
 ## Scope Boundary
 
-This skill stops at the **skeleton**: interfaces, empty/thin classes, DI wiring, namespaces, and TODO markers. The moment real feature logic goes inside a method, that is `/coder`. Upstream, the architectural *decision* itself belongs to `/architect` (or `/council`) — if no approved decision exists, do that first. In short: `/architect` decides → `architecture-implementer` scaffolds → `/coder` fills in behavior.
+This skill stops at the **skeleton**: interfaces, empty/thin classes, DI wiring, namespaces, and TODO markers. The moment real feature logic goes inside a method, that is `coder`. Upstream, the architectural *decision* itself belongs to `architect` (or `council`) — if no approved decision exists, do that first. In short: `architect` decides → `architecture-implementer` scaffolds → `coder` fills in behavior.
 
 ## Preconditions
 
 Before scaffolding, confirm:
 
-- An architecture decision exists (read `specs/architect-architecture.md` or the provided decision). If not, recommend `/architect` first.
+- An architecture decision exists (read `specs/architect-architecture.md` or the provided decision). If not, recommend `architect` first.
 - The target module boundaries, dependency direction, and persistence approach are decided.
 - The project's PHP version and PSR-4 autoload mapping (from `composer.json`).
 
@@ -40,7 +40,7 @@ Before scaffolding, confirm:
 
 - Follow dependency direction: entry -> application -> domain; infrastructure implements inner interfaces. No inner layer imports infrastructure.
 - Every new file starts with `declare(strict_types=1);` and full type declarations.
-- Do not implement business rules here; mark them clearly for `/coder`.
+- Do not implement business rules here; mark them clearly for `coder`.
 - Keep the skeleton verifiable: it must autoload and pass `php -l`, and ideally a trivial "wiring resolves" test.
 - Do not add layers the architecture did not call for.
 
@@ -102,7 +102,7 @@ composer analyse   # if configured; confirms wiring types line up
 
 ## Handoff Map
 
-Produce a table so `/coder` knows exactly what to fill in:
+Produce a table so `coder` knows exactly what to fill in:
 
 ```markdown
 | File | Responsibility | Status |
@@ -113,4 +113,4 @@ Produce a table so `/coder` knows exactly what to fill in:
 
 ## Final Output
 
-Return the created structure, interfaces and wiring added, the handoff map of TODOs, verification run, Context Summary, and next step (`/coder` to implement, then `/test-generator`).
+Return the created structure, interfaces and wiring added, the handoff map of TODOs, verification run, Context Summary, and next step (`coder` to implement, then `test-generator`).

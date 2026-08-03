@@ -1,6 +1,6 @@
 ---
 name: skill-flow-composer
-description: Build the target PHP project's own SKILL FLOW.md from the exact set of skills skill-forge actually generated - a Main Flow diagram, Shortcuts, a Phase Map table, and a Context Handoff section - assembled dynamically from the real generated set, never a template. Cross-references only point at generated skills. Takes a required target-project-path argument. Use after skill-forge (and ideally the other forges) have run. Triggers on "compose the skill flow", "build SKILL FLOW.md", "generate the target's flow map".
+description: Build the target PHP project's own SKILL FLOW.md from the exact set of skills skill-forge actually generated - a Main Flow diagram, Shortcuts, a Phase Map table, and a Context Handoff section - never a template. Cross-references only point at generated skills. Takes a required target-project-path argument. Use after skill-forge (and ideally the other forges) have run. Triggers on "compose the skill flow", "build SKILL FLOW.md", "generate the target's flow map".
 phase: generation
 flow-next: bootstrap-verifier
 flow-alternatives: [policy-forge, hook-forge, memory-seed]

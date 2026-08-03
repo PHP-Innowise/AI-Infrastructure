@@ -11,8 +11,21 @@ from datetime import date
 from pathlib import Path
 
 
-ID_PATTERN = re.compile(r"^MEM-(\d{4,})$")
-FILENAME_PATTERN = re.compile(r"^(MEM-\d{4,})-[a-z0-9]+(?:-[a-z0-9]+)*\.md$")
+# Chunk identifiers come in two accepted formats:
+# - MEM-YYYYMMDD-xxxxxxxx (current): the allocation date plus eight hex
+#   characters of the source Brain record's UUID. Needing no shared counter,
+#   concurrent promotions on different machines or branches cannot collide.
+# - MEM-0001 (legacy): sequential numbers once allocated from
+#   `.memory-counter`. Existing chunks keep these IDs forever; nothing
+#   renames them.
+# The date-based alternative comes first so a filename match captures the
+# whole date-based ID instead of stopping at its digit prefix.
+# `.memory-counter` files may still exist on disk, but they are legacy, are
+# no longer an ID source, and the validator deliberately ignores them.
+ID_PATTERN = re.compile(r"^MEM-(?:\d{8}-[0-9a-f]{8}|\d{4,})$")
+FILENAME_PATTERN = re.compile(
+    r"^(MEM-(?:\d{8}-[0-9a-f]{8}|\d{4,}))-[a-z0-9]+(?:-[a-z0-9]+)*\.md$"
+)
 ALLOWED_TYPES = {
     "architecture",
     "constraint",
@@ -36,6 +49,14 @@ REQUIRED_KEYS = {
     "sources",
     "supersedes",
     "superseded_by",
+}
+# Temporal validity. Optional, because requiring it would invalidate every
+# chunk written before it existed. `superseded_by` says what replaced a chunk;
+# `valid_to` says when it stopped being true. Automatically written memory
+# needs the second: a wrong fact earns a boundary instead of being erased.
+OPTIONAL_KEYS = {
+    "valid_from",
+    "valid_to",
 }
 SECRET_PATTERNS = {
     "private key": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
@@ -92,7 +113,7 @@ def require_date(metadata: dict, key: str) -> date:
 
 def validate_metadata(path: Path, metadata: dict, repository_root: Path) -> None:
     missing = REQUIRED_KEYS - metadata.keys()
-    extra = metadata.keys() - REQUIRED_KEYS
+    extra = metadata.keys() - REQUIRED_KEYS - OPTIONAL_KEYS
     if missing:
         raise ValidationError(f"missing metadata keys: {', '.join(sorted(missing))}")
     if extra:
@@ -100,17 +121,22 @@ def validate_metadata(path: Path, metadata: dict, repository_root: Path) -> None
 
     filename_match = FILENAME_PATTERN.fullmatch(path.name)
     if filename_match is None:
-        raise ValidationError("filename must be MEM-0001-short-slug.md")
+        raise ValidationError(
+            "filename must be MEM-YYYYMMDD-xxxxxxxx-short-slug.md "
+            "(or legacy MEM-0001-short-slug.md)"
+        )
     memory_id = metadata["id"]
     if not isinstance(memory_id, str) or ID_PATTERN.fullmatch(memory_id) is None:
-        raise ValidationError("id must use MEM-0001 format")
+        raise ValidationError(
+            "id must use MEM-YYYYMMDD-xxxxxxxx (or legacy MEM-0001) format"
+        )
     if filename_match.group(1) != memory_id:
         raise ValidationError("frontmatter id does not match filename id")
     if not isinstance(metadata["title"], str) or not metadata["title"].strip():
         raise ValidationError("title must be a non-empty string")
-    if metadata["type"] not in ALLOWED_TYPES:
+    if not isinstance(metadata["type"], str) or metadata["type"] not in ALLOWED_TYPES:
         raise ValidationError(f"type must be one of: {', '.join(sorted(ALLOWED_TYPES))}")
-    if metadata["status"] not in ALLOWED_STATUSES:
+    if not isinstance(metadata["status"], str) or metadata["status"] not in ALLOWED_STATUSES:
         raise ValidationError(f"status must be one of: {', '.join(sorted(ALLOWED_STATUSES))}")
 
     require_string_list(metadata, "scope")
@@ -128,6 +154,20 @@ def validate_metadata(path: Path, metadata: dict, repository_root: Path) -> None
         raise ValidationError("review_after must not be earlier than last_verified")
     if metadata["status"] == "active" and review_after < date.today():
         raise ValidationError("active chunk is overdue for review")
+
+    valid_from = require_date(metadata, "valid_from") if "valid_from" in metadata else None
+    valid_to = None
+    if metadata.get("valid_to") is not None:
+        valid_to = require_date(metadata, "valid_to")
+    # valid_from may precede `created`: knowledge is often true well before
+    # anyone writes it down.
+    if valid_to is not None:
+        if valid_from is not None and valid_to < valid_from:
+            raise ValidationError("valid_to must not be earlier than valid_from")
+        # Matches the review_after rule above: knowledge that has stopped being
+        # true may not keep calling itself active.
+        if metadata["status"] == "active" and valid_to < date.today():
+            raise ValidationError("active chunk is past its valid_to date")
 
     replacement = metadata["superseded_by"]
     if replacement is not None and (
@@ -187,39 +227,42 @@ def summarize_bank(bank_root: Path) -> str:
     total = 0
     active = 0
     needs_review = 0
+    expired = 0
     if chunks_dir.is_dir():
         for path in sorted(chunks_dir.iterdir()):
             if path.is_symlink() or not path.is_file() or FILENAME_PATTERN.fullmatch(path.name) is None:
                 continue
             total += 1
             try:
-                status = parse_frontmatter(path).get("status")
+                metadata = parse_frontmatter(path)
+                status = metadata.get("status")
+                if isinstance(metadata.get("valid_to"), str):
+                    try:
+                        if date.fromisoformat(metadata["valid_to"]) < date.today():
+                            expired += 1
+                    except ValueError:
+                        pass
             except (OSError, ValidationError):
                 continue
             active += status == "active"
             needs_review += status == "needs-review"
-    return f"Memory bank: {total} chunks ({active} active, {needs_review} needs review)."
+    summary = f"Memory bank: {total} chunks ({active} active, {needs_review} needs review"
+    return summary + (f", {expired} past valid_to)." if expired else ").")
 
 
 def validate_bank(bank_root: Path) -> list[str]:
     errors: list[str] = []
     repository_root = bank_root.parent
     index_path = bank_root / "INDEX.md"
-    counter_path = bank_root / ".memory-counter"
     chunks_dir = bank_root / "chunks"
-    for required in (bank_root / "README.md", index_path, counter_path):
+    # `.memory-counter` is intentionally absent from the required files and
+    # from every check below: identifiers are date+UUID based now, so the
+    # counter is a retired legacy artifact that may or may not exist on disk.
+    for required in (bank_root / "README.md", index_path):
         if not required.is_file():
             errors.append(f"{required}: required file is missing")
     if errors:
         return errors
-
-    try:
-        counter = int(counter_path.read_text(encoding="utf-8").strip())
-        if counter < 1:
-            raise ValueError
-    except ValueError:
-        errors.append(f"{counter_path}: counter must be a positive integer")
-        counter = 0
 
     try:
         index = parse_index(index_path)
@@ -249,10 +292,6 @@ def validate_bank(bank_root: Path) -> list[str]:
             chunks[memory_id] = (path, metadata)
         except (OSError, ValidationError) as error:
             errors.append(f"{path}: {error}")
-
-    allocated = [int(match.group(1)) for memory_id in chunks if (match := ID_PATTERN.fullmatch(memory_id))]
-    if allocated and counter <= max(allocated):
-        errors.append(f"{counter_path}: counter must be greater than every allocated ID")
 
     for memory_id, (path, metadata) in chunks.items():
         row = index.get(memory_id)

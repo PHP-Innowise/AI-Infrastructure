@@ -1,6 +1,6 @@
 ---
 name: review-pr
-description: Review a GitHub pull request using gh CLI, analyze the diff for bugs, security issues, and code quality problems, then let the user choose next action - either run the systematic systematic-debugger to fix issues locally or post review comments directly to the PR on GitHub. Use this skill whenever the user wants to review a PR, check a pull request, audit PR changes, or analyze a GitHub PR. Triggers on "review PR", "check PR", "review pull request", "PR review", "look at this PR", "audit PR", gh pr references, or GitHub PR URLs.
+description: Review a GitHub pull request using gh CLI, analyze the diff for bugs, security issues, and code quality problems, then let the user choose next action - run systematic-debugger to fix issues locally or post review comments to the PR on GitHub. Triggers on "review PR", "check PR", "review pull request", "PR review", "look at this PR", "audit PR", "analyze PR", gh pr references, or GitHub PR URLs.
 phase: execution
 flow-next: systematic-debugger
 flow-alternatives: [coder, code-reviewer, finishing-branch]
@@ -112,7 +112,7 @@ Present the review in this format:
 
 After presenting findings, STOP and ask the user what they want to do next:
 
-**Option A: Fix issues locally with the debugger**
+**Option A: Fix issues locally with the systematic-debugger**
 Use `systematic-debugger` to investigate and fix the bugs found in the review. This is the right choice when the PR is yours or you're a collaborator who can push fixes.
 
 **Option B: Post comments to the PR on GitHub**

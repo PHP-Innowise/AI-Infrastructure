@@ -3,7 +3,7 @@ name: security-reviewer
 description: Audit native PHP changes for security risk against the OWASP Top 10. Use before merging security-sensitive changes (auth, input handling, SQL, file uploads, sessions, secrets) or on request. Triggers on "security review", "is this safe", "vulnerability", "OWASP", "audit security".
 phase: execution
 flow-next: verify
-flow-alternatives: [coder, code-reviewer, debugger]
+flow-alternatives: [coder, code-reviewer, systematic-debugger]
 related: [code-reviewer, coder, dependency-manager, architect]
 ---
 
@@ -13,7 +13,7 @@ related: [code-reviewer, coder, dependency-manager, architect]
 
 Find security defects before attackers do. Focus on exploitable risk in the change under review and the code paths it touches. Report findings by severity with a concrete fix, not vague warnings.
 
-This complements `/code-reviewer` (which flags obvious risks) with a dedicated, deeper pass.
+This complements `code-reviewer` (which flags obvious risks) with a dedicated, deeper pass.
 
 ## Generated File Naming Convention (MANDATORY)
 
@@ -122,4 +122,4 @@ If nothing is found, state so and note the residual risk and what was not covere
 
 ## Final Output
 
-Return findings by severity with fixes, `composer audit` result, an overall verdict, Context Summary, and next step (`/coder` to fix, then `/verify`).
+Return findings by severity with fixes, `composer audit` result, an overall verdict, Context Summary, and next step (`coder` to fix, then `verify`).
