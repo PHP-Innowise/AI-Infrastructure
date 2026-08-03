@@ -28,6 +28,57 @@ edition's own files remain in that edition's changelog.
 
 ### 2026-08-02 shared-core maintenance round (seven phases)
 
+- **Enforcement hooks hardened and tested** - the hardened hook generation
+  (jq/php/python3 JSON extraction instead of greedy `sed`, block messages on
+  stderr before `exit 2`, dynamic skill-prefix discovery) now ships in every
+  edition including Infrastructure-Creator's `bash-validator`; loop-detection
+  counters are namespaced by a repository hash and reset on SessionStart, so
+  parallel checkouts stop sharing counters and a file can no longer stay
+  blocked forever; a validator that finds no JSON extractor says so on stderr
+  instead of passing silently; the hook layer gained its first regression
+  suites (`memory-bank/tests/test_hooks.py` per edition plus
+  `Infrastructure-Creator/tests/test_hooks.py`).
+- **Authority lifecycle unblocks automatic promotion** - `update_record`
+  accepts the single legal authority transition `observed -> verified`
+  (CAS-guarded, recorded in the transitions ledger), `brain-update
+  --authority` exposes it, and the `verify` skill promotes confirmed records
+  before their terminal transition - so records created as observations can
+  actually reach `promotable_records` instead of staying blocked forever.
+- **Turn maintenance moved to the flush boundary** - `close_merged_tasks`,
+  `auto_promote` and `auto_compact` run only when the working-memory buffer
+  actually flushes, not on every Stop under the 5-second hook budget;
+  merged-branch detection is batched into a fixed number of
+  `git for-each-ref` calls and the default branch is cached in `index_state`
+  with self-healing re-detection.
+- **Auto-checkpoints stopped overwriting human progress** - the turn flush
+  writes to a dedicated `auto_checkpoint` field; handoffs and capsules show
+  the manually recorded `progress` first with the automatic delta as a
+  supplement.
+- **Turn outcomes became visible** - `context.py turn` persists a compact
+  report (flush results, closed-on-merge, promotions with blocking reasons,
+  excluded paths, compaction errors) to
+  `memory-bank/local/last-turn-report.json`, and the next capsule renders a
+  "Last turn" section from it within the existing character budget.
+- **Mirrors are generated, parity covers everything** -
+  `scripts/build_mirrors.py` regenerates the `.claude`/`.cursor`/`.codex`
+  mirrors from the canonical trees according to `MIRROR_RULES` declared in
+  `context_retrieval.py` (`mirror_rules.py` for Infrastructure-Creator);
+  parity checks hooks, `hooks.json`, commands, agents, the DOD family and
+  `*.py` inside skills through the same rules, and `parity --cross-edition`
+  verifies the shared core stays byte-identical across the three editions
+  (graceful skip outside the monorepo).
+- **CI and repository checks** - `.github/workflows/ci.yml` runs every
+  edition's unittest suites, full and cross-edition parity,
+  `build_mirrors --check`, `bash -n` plus shellcheck at error severity, JSON
+  validation, the relative-link checker (`scripts/check_links.py`; all
+  previously broken links fixed at the source) and the startup-budget check;
+  `docs/CI.md` documents the exact local equivalents of every step.
+- **Startup token budget is measured** - `scripts/context_budget.py` reports
+  `AGENTS.md` and skill-frontmatter weight per edition, and `--check`
+  compares against ceilings pinned in `scripts/token_budget.json` (current
+  values plus five percent), so context growth surfaces as a CI regression;
+  redundant prose was trimmed from `Symfony/AGENTS.md` and seventeen skill
+  descriptions without dropping a single trigger term.
 - **Retrieval** - query terms are distilled from the entire prompt (the most
   informative terms ranked against the index) instead of the first 24 words,
   and ranking now modulates BM25 with declared record confidence (linear)
