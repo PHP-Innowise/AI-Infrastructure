@@ -8,6 +8,7 @@ import json
 import re
 import sqlite3
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -23,6 +24,7 @@ from brain_runtime import (
     new_uuid,
     parse_markdown_record,
     record_is_eligible,
+    render_current_state,
     sources_are_fresh,
     utc_now,
     validate_handoff,
@@ -52,6 +54,404 @@ SKILL_EDITIONS = (".agents", ".claude", ".cursor", ".codex")
 # `SKILL FLOW.md`, and the list is deliberately explicit: an entry here is a
 # documented exemption, not a way to silence real drift.
 EDITION_OWNED_SKILLS = frozenset({"skill-creator"})
+
+# ---------------------------------------------------------------------------
+# Mirror rewrite map - the single source of truth for how this edition's
+# per-tool mirrors (.agents / .claude / .cursor / .codex) are derived from
+# their canonical copies. `scripts/build_mirrors.py` at the monorepo root
+# imports MIRROR_RULES from this file and can verify (--check) or regenerate
+# (--write) every mirror. The map travels with the edition, so a copied
+# edition keeps its own mirroring contract.
+#
+# Schema (per class):
+#   name              stable identifier for reporting
+#   canonical         edition-relative directory holding the source of truth
+#   only              optional explicit list of relative paths (whitelist);
+#                     without it the whole canonical tree is mirrored
+#   mirrors           {mirror_dir: spec}; spec fields:
+#                       transform     "copy" (default), "cursor-command",
+#                                     or "cursor-agent"
+#                       replacements  ordered [old, new] literal substitutions
+#                                     applied to the file text
+#                       skip          per-mirror relative paths that are NOT
+#                                     mirrored (mirror-owned or absent)
+#                       description_overrides / quote_description
+#                                     parameters for "cursor-command"
+#   skip              relative paths (or "dir/" prefixes) excluded from the
+#                     class for every mirror - each entry is a documented
+#                     exemption, not a way to silence real drift
+#   skip_by_framework additional skips keyed by the `framework` value in
+#                     project-brain/config/runtime.json, so the map itself
+#                     stays byte-identical across editions
+#
+# Transforms:
+#   copy            byte-identical copy after `replacements`
+#   cursor-command  Claude command -> Cursor command: the orchestration
+#                   frontmatter (spawns/phase/flow-*) is replaced by
+#                   `name:` (file stem) + `description:` (first body
+#                   paragraph unless overridden); commands that already
+#                   carry `name:`/`description:` keep their frontmatter;
+#                   `replacements` then apply to the body
+#   cursor-agent    Claude agent -> Cursor agent: the Claude-specific
+#                   `model:`, `invokes:` and `phase:` frontmatter keys are
+#                   dropped (Cursor keeps exactly `name` + `description`);
+#                   the body is copied verbatim
+# ---------------------------------------------------------------------------
+
+# loop-detection.sh path extraction: Claude always sends "file_path"; Cursor
+# and Codex payloads may use "file_path" or "path", so their mirrors gain a
+# fallback extraction.
+_HOOK_PATH_EXTRACT = (
+    "# Extract file path from JSON input (POSIX-compatible, no grep -P)\n"
+    "FILE_PATH=$(echo \"$INPUT\" | sed -n "
+    "'s/.*\"file_path\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p'"
+    " | head -1)\n"
+)
+_HOOK_PATH_EXTRACT_CURSOR = (
+    "# Extract file path from JSON input (POSIX-compatible, no grep -P).\n"
+    "# Cursor payloads may use \"file_path\" or \"path\"; try both.\n"
+    "FILE_PATH=$(echo \"$INPUT\" | sed -n "
+    "'s/.*\"file_path\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p'"
+    " | head -1)\n"
+    "if [ -z \"$FILE_PATH\" ]; then\n"
+    "  FILE_PATH=$(echo \"$INPUT\" | sed -n "
+    "'s/.*\"path\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p'"
+    " | head -1)\nfi\n"
+)
+_HOOK_PATH_EXTRACT_CODEX = (
+    "# Extract file path from JSON input (POSIX-compatible, no grep -P).\n"
+    "# Codex payloads may use \"file_path\" or \"path\"; try both.\n"
+    "FILE_PATH=$(echo \"$INPUT\" | sed -n "
+    "'s/.*\"file_path\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p'"
+    " | head -1)\n"
+    "if [ -z \"$FILE_PATH\" ]; then\n"
+    "  FILE_PATH=$(echo \"$INPUT\" | sed -n "
+    "'s/.*\"path\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p'"
+    " | head -1)\nfi\n"
+)
+
+# Working-memory delivery: Claude and Codex receive the Task Capsule at
+# prompt time through working-memory-read.sh (UserPromptSubmit); Cursor has
+# no equivalent event, so its mirrors of the Stop and sessionStart hooks
+# render the freshest capsule into .cursor/rules/working-memory.mdc - an
+# alwaysApply rule Cursor attaches to every prompt. The rendered file is one
+# turn stale by design, says so in its header, and lives in ignored local
+# state (the edition .gitignore lists it). The canonical hooks carry the
+# short marker comments below; the Cursor mirror swaps in the render steps.
+# The render is silent on stdout, degrades to a no-op on any failure, and
+# replaces the previous rule only when a fresh render succeeds.
+_WM_DELIVERY_STOP = r'''# Capsule delivery: this client receives the Task Capsule at prompt time
+# through working-memory-read.sh, so the turn checkpoint above is all that
+# runs here.
+'''
+_WM_DELIVERY_STOP_CURSOR = r'''# Capsule delivery: Cursor has no UserPromptSubmit-equivalent event, so
+# working-memory-read.sh is not shipped in .cursor/hooks. The read path is
+# served here instead: after the turn checkpoint, the freshest Task Capsule
+# is rendered into an alwaysApply Cursor rule, which Cursor attaches to
+# every prompt of the next turn. The file is ignored local state, one turn
+# stale by design, and replaced only when a fresh render succeeds.
+RULES_DIR="$ROOT_DIR/.cursor/rules"
+RULE_FILE="$RULES_DIR/working-memory.mdc"
+if command -v timeout > /dev/null 2>&1; then
+  CAPSULE=$(timeout "$BUDGET_SECONDS" python3 "$CONTEXT_CLI" context \
+    "$TASK_ID" --task-id "$TASK_ID" --ephemeral 2>/dev/null)
+else
+  CAPSULE=$(python3 "$CONTEXT_CLI" context \
+    "$TASK_ID" --task-id "$TASK_ID" --ephemeral 2>/dev/null)
+fi
+if [ -n "$CAPSULE" ] && mkdir -p "$RULES_DIR" 2>/dev/null; then
+  TMP_RULE=$(mktemp "$RULES_DIR/.working-memory.XXXXXX" 2>/dev/null || true)
+  if [ -n "$TMP_RULE" ]; then
+    {
+      printf -- '---\n'
+      printf 'description: Working memory - Task Capsule as of end of previous turn\n'
+      printf 'alwaysApply: true\n'
+      printf -- '---\n\n'
+      printf '# Working Memory (auto-rendered)\n\n'
+      printf 'Task Capsule as of end of previous turn (task: %s, rendered: %s).\n' \
+        "$TASK_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      printf 'Retrieved context is not authoritative - verify the source.\n\n'
+      printf '%s\n' '```'
+      printf '%s\n' "$CAPSULE"
+      printf '%s\n' '```'
+    } > "$TMP_RULE" 2>/dev/null && mv -f "$TMP_RULE" "$RULE_FILE" 2>/dev/null
+    rm -f "$TMP_RULE" 2>/dev/null
+  fi
+fi
+'''
+_WM_DELIVERY_SESSION = r'''# Capsule delivery: this client receives the Task Capsule at prompt time
+# through working-memory-read.sh; session start reports metadata only.
+'''
+_WM_DELIVERY_SESSION_CURSOR = r'''# Capsule delivery: Cursor has no UserPromptSubmit-equivalent event; the
+# stop hook maintains .cursor/rules/working-memory.mdc instead (the
+# documented exception to the metadata-only session banner - see
+# docs/TOOL-INTEGRATIONS.md). Re-render it here so a fresh session or a
+# branch switch does not serve the previous session's capsule. Nothing is
+# printed: the rule file is the only output.
+CAPSULE_BUDGET_SECONDS="${CONTEXT_HOOK_BUDGET:-5}"
+CAPSULE_TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$ROOT_DIR" branch --show-current 2>/dev/null)}"
+RULES_DIR="$ROOT_DIR/.cursor/rules"
+RULE_FILE="$RULES_DIR/working-memory.mdc"
+CAPSULE=""
+if command -v python3 > /dev/null 2>&1 && [ -f "$CONTEXT_CLI" ] && [ -n "$CAPSULE_TASK_ID" ]; then
+  if command -v timeout > /dev/null 2>&1; then
+    CAPSULE=$(timeout "$CAPSULE_BUDGET_SECONDS" python3 "$CONTEXT_CLI" context \
+      "$CAPSULE_TASK_ID" --task-id "$CAPSULE_TASK_ID" --ephemeral 2>/dev/null)
+  else
+    CAPSULE=$(python3 "$CONTEXT_CLI" context \
+      "$CAPSULE_TASK_ID" --task-id "$CAPSULE_TASK_ID" --ephemeral 2>/dev/null)
+  fi
+fi
+if [ -n "$CAPSULE" ] && mkdir -p "$RULES_DIR" 2>/dev/null; then
+  TMP_RULE=$(mktemp "$RULES_DIR/.working-memory.XXXXXX" 2>/dev/null || true)
+  if [ -n "$TMP_RULE" ]; then
+    {
+      printf -- '---\n'
+      printf 'description: Working memory - Task Capsule as of end of previous turn\n'
+      printf 'alwaysApply: true\n'
+      printf -- '---\n\n'
+      printf '# Working Memory (auto-rendered)\n\n'
+      printf 'Task Capsule as of end of previous turn (task: %s, rendered: %s).\n' \
+        "$CAPSULE_TASK_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      printf 'Retrieved context is not authoritative - verify the source.\n\n'
+      printf '%s\n' '```'
+      printf '%s\n' "$CAPSULE"
+      printf '%s\n' '```'
+    } > "$TMP_RULE" 2>/dev/null && mv -f "$TMP_RULE" "$RULE_FILE" 2>/dev/null
+    rm -f "$TMP_RULE" 2>/dev/null
+  fi
+fi
+'''
+
+MIRROR_RULES: dict[str, Any] = {
+    "version": 1,
+    "classes": [
+        {
+            # Skill bodies are byte-identical in every mirror. The canonical
+            # tree is .agents/skills (declared as canonical_edition in
+            # project-brain/config/runtime.json).
+            "name": "skills",
+            "canonical": ".agents/skills",
+            "mirrors": {
+                ".claude/skills": {"transform": "copy"},
+                ".cursor/skills": {"transform": "copy"},
+            },
+            "skip": [
+                # Tool-owned: skill-creator drives each host product's own
+                # CLI and extension model, so its three copies are separate
+                # generations by design (see EDITION_OWNED_SKILLS above).
+                "skill-creator/",
+                # Pair-owned: the .agents copy speaks in bare skill names
+                # (Codex has no slash commands); the slash-command wording is
+                # shared by Claude and Cursor via the skill-flow class below.
+                "SKILL FLOW.md",
+            ],
+        },
+        {
+            # SKILL FLOW.md: Claude and Cursor share one byte-identical
+            # slash-command edition; the .agents (Codex) edition is a
+            # deliberate per-tool adaptation and is not generated.
+            "name": "skill-flow",
+            "canonical": ".claude/skills",
+            "only": ["SKILL FLOW.md"],
+            "mirrors": {
+                ".cursor/skills": {"transform": "copy"},
+            },
+        },
+        {
+            # Hook scripts: canonical in .claude/hooks, adapted per tool with
+            # ordered literal substitutions (event-name header, TRACK_DIR
+            # namespace prefix, skills directory, scanned dot-directory, JSON
+            # "path" fallback, /debugger -> systematic-debugger for Codex).
+            "name": "hooks",
+            "canonical": ".claude/hooks",
+            "mirrors": {
+                ".cursor/hooks": {
+                    "transform": "copy",
+                    "replacements": [
+                        [
+                            "# Claude hook event: PreToolUse (Write|Edit).",
+                            "# Cursor hook event: afterFileEdit.",
+                        ],
+                        [
+                            "# Hook type: PostToolUse:Edit",
+                            "# Cursor hook event: afterFileEdit.",
+                        ],
+                        [_HOOK_PATH_EXTRACT, _HOOK_PATH_EXTRACT_CURSOR],
+                        [
+                            "/tmp/claude-loop-detection-",
+                            "/tmp/cursor-loop-detection-",
+                        ],
+                        [
+                            "SKILLS_DIR=\"$ROOT_DIR/.claude/skills\"",
+                            "SKILLS_DIR=\"$ROOT_DIR/.cursor/skills\"",
+                        ],
+                        [" .claude; do", " .cursor; do"],
+                        # Cursor's read path: the Stop and sessionStart
+                        # mirrors render the capsule into the alwaysApply
+                        # rule .cursor/rules/working-memory.mdc (see the
+                        # _WM_DELIVERY_* constants above).
+                        [_WM_DELIVERY_STOP, _WM_DELIVERY_STOP_CURSOR],
+                        [_WM_DELIVERY_SESSION, _WM_DELIVERY_SESSION_CURSOR],
+                    ],
+                    # Cursor has no UserPromptSubmit-equivalent hook event, so
+                    # the read half of automatic memory is deliberately absent
+                    # from the Cursor mirror.
+                    "skip": ["working-memory-read.sh"],
+                },
+                ".codex/hooks": {
+                    "transform": "copy",
+                    "replacements": [
+                        [
+                            "# Claude hook event: PreToolUse (Write|Edit).",
+                            "# Codex hook event: PreToolUse "
+                            "(self-filters to file-edit payloads).",
+                        ],
+                        [
+                            "# Hook type: PostToolUse:Edit",
+                            "# Codex hook event: PostToolUse "
+                            "(self-filters to file-edit payloads).",
+                        ],
+                        [_HOOK_PATH_EXTRACT, _HOOK_PATH_EXTRACT_CODEX],
+                        [
+                            "/tmp/claude-loop-detection-",
+                            "/tmp/codex-loop-detection-",
+                        ],
+                        [
+                            "SKILLS_DIR=\"$ROOT_DIR/.claude/skills\"",
+                            "SKILLS_DIR=\"$ROOT_DIR/.agents/skills\"",
+                        ],
+                        [" .claude; do", " .agents .codex; do"],
+                        [
+                            "- /debugger to investigate the root cause",
+                            "- systematic-debugger to investigate the root cause",
+                        ],
+                        [
+                            "consider using /debugger.",
+                            "consider using systematic-debugger.",
+                        ],
+                    ],
+                },
+            },
+            # Each tool documents its own registration model (settings.json vs
+            # hooks.json vs config.toml), so every hooks README is mirror-owned.
+            "skip": ["README.md"],
+        },
+        {
+            # Slash commands: Claude's orchestration frontmatter is reduced to
+            # Cursor's `name` + `description`; bodies are shared except for the
+            # skills path and the backticked `$ARGUMENTS` guard wording.
+            "name": "commands",
+            "canonical": ".claude/commands",
+            "mirrors": {
+                ".cursor/commands": {
+                    "transform": "cursor-command",
+                    "replacements": [
+                        [".claude/skills/", ".cursor/skills/"],
+                        [
+                            "If $ARGUMENTS is not empty",
+                            "If `$ARGUMENTS` is not empty",
+                        ],
+                    ],
+                },
+            },
+            "skip": [
+                # Mirror-owned: the Cursor command invokes the codebase-mapper
+                # skill inline instead of spawning a Task sub-agent.
+                "codebase-mapper.md",
+            ],
+            "skip_by_framework": {
+                # Tool-owned (skill-creator family): the Symfony Cursor copy
+                # was rewritten to speak about Cursor skills, not Claude skills.
+                "symfony": ["skill-creator.md"],
+            },
+        },
+        {
+            # Agent wrappers: Cursor mirrors every Claude agent with reduced
+            # frontmatter (exactly `name` + `description`); bodies are shared.
+            "name": "agents",
+            "canonical": ".claude/agents",
+            "mirrors": {
+                ".cursor/agents": {"transform": "cursor-agent"},
+            },
+            "skip": [
+                # Mirror-owned: the Cursor copies intentionally condense the
+                # Output Format section into a single instruction line.
+                "memory-bank-agent.md",
+                "project-brain-agent.md",
+            ],
+            "skip_by_framework": {
+                # Tool-owned (skill-creator family): the Symfony Cursor copy
+                # was rewritten to speak about Cursor capabilities.
+                "symfony": ["skill-creator-agent.md"],
+            },
+        },
+        {
+            # Governance documents: shared verbatim except for self-references
+            # to the host tool's own directory tree.
+            "name": "governance-docs",
+            "canonical": ".claude",
+            "only": ["DOD.md", "GOLDEN-PRINCIPLES.md", "STABILIZATION.md"],
+            "mirrors": {
+                ".cursor": {
+                    "transform": "copy",
+                    "replacements": [[".claude/", ".cursor/"]],
+                },
+                ".codex": {
+                    "transform": "copy",
+                    "replacements": [
+                        [".claude/skills/", ".agents/skills/"],
+                        [".claude/", ".codex/"],
+                    ],
+                },
+            },
+        },
+    ],
+}
+
+# ---------------------------------------------------------------------------
+# Cross-edition core - the Python runtime, its tests, the Brain schemas and
+# the protocol are byte-identical across the PHP editions of the monorepo
+# (Laravel, Symfony, "PHP Core") and MUST stay that way: a fix that lands in
+# one edition and not the others silently forks the engine. `context.py
+# parity --cross-edition` walks this manifest against every sibling edition
+# it can find next to this one; a standalone (copied-out) edition has no
+# siblings and skips the check.
+# ---------------------------------------------------------------------------
+
+CROSS_EDITION_SIBLINGS = ("Laravel", "Symfony", "PHP Core")
+
+# Glob patterns, relative to an edition root, of files that must be
+# byte-identical in every sibling edition. Composition verified by direct
+# md5 comparison of the editions before the manifest was frozen.
+CROSS_EDITION_CORE_MANIFEST = (
+    "memory-bank/scripts/*.py",
+    "memory-bank/tests/*.py",
+    "project-brain/scripts/*.py",
+    "project-brain/schemas/**/*",
+    "project-brain/PROTOCOL.md",
+    "project-brain/tests/*.py",
+)
+
+# Legitimate cross-edition differences, each with its justification. Entries
+# ending in "/" match a whole subtree. None of these currently intersect the
+# manifest above; they are recorded so a future manifest extension cannot
+# accidentally turn known-deliberate divergence into reported drift.
+CROSS_EDITION_ALLOWED_DRIFT = {
+    # Each edition's README introduces its own framework and stack.
+    "README.md": "edition-specific introduction",
+    # Durable memory is edition content, not runtime: MEM-0001 in particular
+    # ships three deliberate per-edition versions of the sync playbook.
+    "memory-bank/README.md": "edition-specific durable-memory docs",
+    "memory-bank/chunks/": "durable memory is edition content (MEM-0001)",
+    # Skills speak the edition's framework language: verify/SKILL.md encodes
+    # the edition's own verification pipeline, and framework skills
+    # (eloquent, doctrine-migration-designer, ...) exist in one edition only.
+    ".agents/skills/": "skills are edition-specific (verify, framework skills)",
+    ".claude/skills/": "mirror of .agents/skills - same edition-specific content",
+    ".cursor/skills/": "mirror of .agents/skills - same edition-specific content",
+}
+
 MANIFEST_SCOPES = ("governed", "local")
 STOPWORD_DOCUMENT_RATIO = 0.5
 MIN_TOKEN_COVERAGE = 2
@@ -64,10 +464,28 @@ DELETE_CHUNK = 500
 INDEX_CONFIG_KEY = "config-fingerprint"
 INDEX_SKILL_KEY = "skill-tree-fingerprint"
 INDEX_PARITY_KEY = "skill-parity-drift"
+# A fresh value is stamped whenever index_documents rewrites the tables, so
+# anything derived from index content (the token-frequency cache below) can
+# tell at a glance whether it still describes the current index.
+INDEX_GENERATION_KEY = "index-generation"
+TOKEN_FREQUENCY_KEY = "token-frequency-cache"
+TOKEN_FREQUENCY_LIMIT = 4096
 
 # Column weights for bm25(): path, layer, kind, title, summary, content.
 # What a document declares itself to be about outranks what its body mentions.
 BM25_WEIGHTS = (1.0, 1.0, 1.0, 2.0, 8.0, 1.0)
+
+# Ranking multipliers applied over BM25 relevance in governed retrieval.
+# BM25 knows lexical fit only; provenance quality and age are metadata the
+# index already stores, so a candidate's relevance is scaled — never zeroed —
+# by how trustworthy and how current its record claims to be.
+RECENCY_HALF_LIFE_DAYS = 30.0
+# Floors keep the multipliers from ever hiding a lexical match outright: an
+# old observed record still ranks, it just yields to a fresh verified one.
+RECENCY_WEIGHT_FLOOR = 0.5
+CONFIDENCE_WEIGHT_FLOOR = 0.7
+AUTHORITY_WEIGHTS = {"verified": 1.0, "observed": 0.85}
+AUTHORITY_WEIGHT_DEFAULT = 0.85
 
 DocumentRow = tuple[str, str, str, str, str, str]
 SourceState = dict[str, tuple[int, int]]
@@ -90,7 +508,9 @@ def ensure_metadata_tables(connection: sqlite3.Connection) -> None:
             source_hash TEXT NOT NULL,
             record_id TEXT,
             conflicts TEXT NOT NULL,
-            source_fingerprints TEXT NOT NULL DEFAULT '[]'
+            source_fingerprints TEXT NOT NULL DEFAULT '[]',
+            updated_at TEXT NOT NULL DEFAULT '',
+            confidence REAL NOT NULL DEFAULT 1.0
         )
         """
     )
@@ -104,6 +524,19 @@ def ensure_metadata_tables(connection: sqlite3.Connection) -> None:
             ALTER TABLE document_metadata
             ADD COLUMN source_fingerprints TEXT NOT NULL DEFAULT '[]'
             """
+        )
+    # Ranking provenance added later than the table: an old row simply has no
+    # recorded freshness ('' — never decayed) and full confidence, which is
+    # exactly what it asserted before the columns existed.
+    if "updated_at" not in metadata_columns:
+        connection.execute(
+            "ALTER TABLE document_metadata "
+            "ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''"
+        )
+    if "confidence" not in metadata_columns:
+        connection.execute(
+            "ALTER TABLE document_metadata "
+            "ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0"
         )
     connection.execute(
         """
@@ -213,38 +646,70 @@ def config_fingerprint(repository: Path) -> str:
         return "absent"
 
 
-def skill_tree_fingerprint(repository: Path) -> str:
+SkillStat = tuple[str, str, int, int]
+
+
+def skill_tree_fingerprint(
+    repository: Path, skill_stats: Optional[Iterable[SkillStat]] = None
+) -> str:
     """Fingerprint every mirrored skill file from stat metadata alone.
 
     Parity compares all editions, but only the first discovered copy of a skill
     reaches the index, so the per-document stat cache cannot notice a drifting
     mirror. This fingerprint can, without reading any file.
+
+    ``skill_stats`` — (edition, path-under-skills, mtime_ns, size) tuples — lets
+    a caller that already walked the skill trees (document discovery stats the
+    same files) reuse that work instead of statting every mirror a second time.
+    Entries are canonically sorted so both computations produce one digest.
     """
-    digest = hashlib.sha256()
-    for edition in SKILL_EDITIONS:
-        root = repository / edition / "skills"
-        if not root.is_dir():
-            continue
-        for path in sorted(root.glob("**/*.md")):
-            if not path.is_file() or path.is_symlink():
+    if skill_stats is None:
+        entries: list[SkillStat] = []
+        for edition in SKILL_EDITIONS:
+            root = repository / edition / "skills"
+            if not root.is_dir():
                 continue
-            status = path.stat()
-            digest.update(
-                f"{edition}\0{path.relative_to(root).as_posix()}\0"
-                f"{status.st_mtime_ns}\0{status.st_size}\n".encode("utf-8")
-            )
+            for path in sorted(root.glob("**/*.md")):
+                if not path.is_file() or path.is_symlink():
+                    continue
+                status = path.stat()
+                entries.append(
+                    (
+                        edition,
+                        path.relative_to(root).as_posix(),
+                        status.st_mtime_ns,
+                        status.st_size,
+                    )
+                )
+    else:
+        entries = list(skill_stats)
+    digest = hashlib.sha256()
+    for edition, relative, mtime_ns, size in sorted(entries):
+        digest.update(
+            f"{edition}\0{relative}\0{mtime_ns}\0{size}\n".encode("utf-8")
+        )
     return digest.hexdigest()
 
 
+def index_fingerprints(
+    repository: Path, skill_stats: Optional[Iterable[SkillStat]] = None
+) -> dict[str, str]:
+    """The fingerprints that decide whether cached index state is current."""
+    return {
+        INDEX_CONFIG_KEY: config_fingerprint(repository),
+        INDEX_SKILL_KEY: skill_tree_fingerprint(repository, skill_stats),
+    }
+
+
 def reusable_source_state(
-    connection: sqlite3.Connection, repository: Path
+    connection: sqlite3.Connection,
+    repository: Path,
+    fingerprints: Optional[dict[str, str]] = None,
 ) -> tuple[SourceState, dict[str, str]]:
     """Return the retainable stat cache plus the fingerprints that gate it."""
     ensure_metadata_tables(connection)
-    fingerprints = {
-        INDEX_CONFIG_KEY: config_fingerprint(repository),
-        INDEX_SKILL_KEY: skill_tree_fingerprint(repository),
-    }
+    if fingerprints is None:
+        fingerprints = index_fingerprints(repository)
     stored = load_index_state(connection)
     if stored.get(INDEX_CONFIG_KEY) != fingerprints[INDEX_CONFIG_KEY]:
         # Runtime configuration decides eligibility for every indexed record,
@@ -332,10 +797,286 @@ def assert_skill_mirror_parity(repository: Path, canonical_edition: str) -> None
         raise RetrievalError(format_skill_mirror_drift(drift))
 
 
+# ---------------------------------------------------------------------------
+# Full mirror parity - executes MIRROR_RULES over this edition, covering
+# every mirrored class (skills including non-markdown files, hooks, commands,
+# agents, governance documents). The transform implementations deliberately
+# match `scripts/build_mirrors.py` at the monorepo root (the regenerator);
+# this copy exists so a standalone edition can verify its own mirrors without
+# the monorepo. `skill_mirror_drift` above stays the light check on the
+# SessionStart/indexing hot path; this one backs `context.py parity` for
+# CLI and CI use.
+# ---------------------------------------------------------------------------
+
+_MIRROR_IGNORED_NAMES = frozenset({"__pycache__", ".DS_Store"})
+_MIRROR_IGNORED_SUFFIXES = (".pyc",)
+_MIRROR_FRONTMATTER_DROP = re.compile(r"^(model|invokes|phase):")
+
+
+def _mirror_split_frontmatter(text: str) -> tuple[Optional[str], str]:
+    if text.startswith("---\n"):
+        end = text.find("\n---\n", 4)
+        if end != -1:
+            return text[4 : end + 1], text[end + 5 :]
+    return None, text
+
+
+def _mirror_apply_replacements(text: str, spec: dict[str, Any]) -> str:
+    for old, new in spec.get("replacements", []):
+        text = text.replace(old, new)
+    return text
+
+
+def _mirror_transform_copy(rel: str, text: str, spec: dict[str, Any]) -> str:
+    return _mirror_apply_replacements(text, spec)
+
+
+def _mirror_transform_cursor_command(rel: str, text: str, spec: dict[str, Any]) -> str:
+    frontmatter, body = _mirror_split_frontmatter(text)
+    body = _mirror_apply_replacements(body, spec)
+    if frontmatter is None:
+        return body
+    if re.search(r"^name:", frontmatter, re.M):
+        # Already Cursor-compatible (name/description); keep it as-is.
+        return f"---\n{frontmatter}---\n{body}"
+    name = rel.rsplit("/", 1)[-1]
+    stem = name[:-3] if name.endswith(".md") else name
+    overrides = spec.get("description_overrides", {})
+    if name in overrides:
+        description = overrides[name]
+    else:
+        lines = [
+            line.strip()
+            for line in body.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        if not lines:
+            raise RetrievalError(f"{rel}: cannot derive a command description")
+        description = lines[0]
+    if spec.get("quote_description", True):
+        description = f'"{description}"'
+    return f"---\nname: {stem}\ndescription: {description}\n---\n{body}"
+
+
+def _mirror_transform_cursor_agent(rel: str, text: str, spec: dict[str, Any]) -> str:
+    frontmatter, body = _mirror_split_frontmatter(text)
+    body = _mirror_apply_replacements(body, spec)
+    if frontmatter is None:
+        return body
+    kept = [
+        line
+        for line in frontmatter.splitlines()
+        if not _MIRROR_FRONTMATTER_DROP.match(line)
+    ]
+    joined = "".join(f"{line}\n" for line in kept)
+    return f"---\n{joined}---\n{body}"
+
+
+_MIRROR_TRANSFORMS = {
+    "copy": _mirror_transform_copy,
+    "cursor-command": _mirror_transform_cursor_command,
+    "cursor-agent": _mirror_transform_cursor_agent,
+}
+
+
+def _mirror_is_ignored(rel_parts: tuple[str, ...]) -> bool:
+    if any(part in _MIRROR_IGNORED_NAMES for part in rel_parts):
+        return True
+    return rel_parts[-1].endswith(_MIRROR_IGNORED_SUFFIXES)
+
+
+def _mirror_is_skipped(rel: str, skips: list[str]) -> bool:
+    for entry in skips:
+        if entry.endswith("/"):
+            if rel.startswith(entry):
+                return True
+        elif rel == entry:
+            return True
+    return False
+
+
+def _mirror_class_skips(
+    cls: dict[str, Any], mirror_spec: dict[str, Any], framework: str
+) -> list[str]:
+    skips = list(cls.get("skip", [])) + list(mirror_spec.get("skip", []))
+    if framework:
+        skips += cls.get("skip_by_framework", {}).get(framework, [])
+    return skips
+
+
+def _mirror_iter_canonical(canonical: Path, only: Optional[list[str]]):
+    if only is not None:
+        for rel in only:
+            path = canonical / rel
+            if path.is_file():
+                yield rel, path
+        return
+    for path in sorted(canonical.rglob("*")):
+        if not path.is_file() or path.is_symlink():
+            continue
+        rel_parts = path.relative_to(canonical).parts
+        if _mirror_is_ignored(rel_parts):
+            continue
+        yield "/".join(rel_parts), path
+
+
+def full_mirror_drift(repository: Path) -> list[dict[str, str]]:
+    """Report every mirrored file whose bytes break the MIRROR_RULES contract.
+
+    A class whose canonical directory is absent is skipped rather than
+    reported, and so is an absent mirror directory as a whole: an edition
+    copied into a host project may legitimately carry only part of the tree
+    (for example only the Claude side), which is the same present-trees-only
+    rule the light skills checker applies. Once a mirror directory exists,
+    every derived file in it must match, and a mirror file with no canonical
+    source is drift too.
+    """
+    framework = str(load_config(repository).get("framework") or "")
+    drift: list[dict[str, str]] = []
+    for cls in MIRROR_RULES["classes"]:
+        canonical = repository / cls["canonical"]
+        if not canonical.is_dir():
+            continue
+        for mirror_rel, mirror_spec in cls["mirrors"].items():
+            mirror = repository / mirror_rel
+            if not mirror.is_dir():
+                continue
+            transform = _MIRROR_TRANSFORMS[mirror_spec.get("transform", "copy")]
+            skips = _mirror_class_skips(cls, mirror_spec, framework)
+            expected: set[str] = set()
+            for rel, path in _mirror_iter_canonical(canonical, cls.get("only")):
+                if _mirror_is_skipped(rel, skips):
+                    continue
+                expected.add(rel)
+                raw = path.read_bytes()
+                try:
+                    text = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    if mirror_spec.get("transform", "copy") != "copy" or mirror_spec.get(
+                        "replacements"
+                    ):
+                        raise RetrievalError(
+                            f"{cls['canonical']}/{rel}: binary file in a "
+                            "transformed mirror class"
+                        )
+                    derived = raw
+                else:
+                    derived = transform(rel, text, mirror_spec).encode("utf-8")
+                target = mirror / rel
+                actual = target.read_bytes() if target.is_file() else None
+                if actual == derived:
+                    continue
+                drift.append(
+                    {
+                        "path": f"{mirror_rel}/{rel}",
+                        "class": cls["name"],
+                        "reason": (
+                            "missing from mirror"
+                            if actual is None
+                            else f"differs from canon ({cls['canonical']}/{rel})"
+                        ),
+                    }
+                )
+            if cls.get("only") is None:
+                # Reverse pass: a file only the mirror carries is drift too.
+                for path in sorted(mirror.rglob("*")):
+                    if not path.is_file() or path.is_symlink():
+                        continue
+                    rel_parts = path.relative_to(mirror).parts
+                    if _mirror_is_ignored(rel_parts):
+                        continue
+                    rel = "/".join(rel_parts)
+                    if rel in expected or _mirror_is_skipped(rel, skips):
+                        continue
+                    drift.append(
+                        {
+                            "path": f"{mirror_rel}/{rel}",
+                            "class": cls["name"],
+                            "reason": f"no source in {cls['canonical']}",
+                        }
+                    )
+    return drift
+
+
+def format_full_mirror_drift(drift: list[dict[str, str]]) -> str:
+    lines = [f"Mirror parity drift ({len(drift)} file(s)):"]
+    for item in drift:
+        lines.append(f"  [{item['class']}] {item['path']}: {item['reason']}")
+    return "\n".join(lines)
+
+
+def monorepo_root(repository: Path) -> Optional[Path]:
+    """The parent directory, when it carries at least two PHP editions."""
+    parent = repository.resolve().parent
+    present = [name for name in CROSS_EDITION_SIBLINGS if (parent / name).is_dir()]
+    return parent if len(present) >= 2 else None
+
+
+def _cross_edition_allowed(rel: str) -> Optional[str]:
+    for entry, reason in CROSS_EDITION_ALLOWED_DRIFT.items():
+        if rel == entry or (entry.endswith("/") and rel.startswith(entry)):
+            return reason
+    return None
+
+
+def cross_edition_drift(repository: Path) -> Optional[list[dict[str, object]]]:
+    """Compare the cross-edition core byte-for-byte across monorepo siblings.
+
+    Returns ``None`` outside a monorepo (a standalone, copied-out edition has
+    nothing to compare against), else a - possibly empty - drift list.
+    """
+    root = monorepo_root(repository)
+    if root is None:
+        return None
+    editions = [name for name in CROSS_EDITION_SIBLINGS if (root / name).is_dir()]
+    digests: dict[str, dict[str, str]] = {}
+    for name in editions:
+        base = root / name
+        for pattern in CROSS_EDITION_CORE_MANIFEST:
+            for path in sorted(base.glob(pattern)):
+                if not path.is_file() or path.is_symlink():
+                    continue
+                rel_parts = path.relative_to(base).parts
+                if _mirror_is_ignored(rel_parts):
+                    continue
+                rel = "/".join(rel_parts)
+                if _cross_edition_allowed(rel):
+                    continue
+                digests.setdefault(rel, {})[name] = hashlib.sha256(
+                    path.read_bytes()
+                ).hexdigest()
+    drift: list[dict[str, object]] = []
+    for rel, copies in sorted(digests.items()):
+        missing = sorted(set(editions) - set(copies))
+        if missing:
+            drift.append({"path": rel, "reason": "missing", "editions": missing})
+        if len(set(copies.values())) > 1:
+            drift.append(
+                {
+                    "path": rel,
+                    "reason": "content differs",
+                    "editions": sorted(copies),
+                }
+            )
+    return drift
+
+
+def format_cross_edition_drift(drift: list[dict[str, object]]) -> str:
+    lines = [f"Cross-edition core drift ({len(drift)} finding(s)):"]
+    for item in drift:
+        lines.append(
+            f"  {item['path']}: {item['reason']} "
+            f"({', '.join(str(name) for name in item['editions'])})"
+        )
+    return "\n".join(lines)
+
+
 def _legacy_metadata(path: str, kind: str, content: str) -> tuple[object, ...]:
+    # Repository documents carry no provenance timestamp or confidence of
+    # their own: '' means "never decayed" and 1.0 keeps them rank-neutral.
     return (
         path, category_for(kind), "public", "*", "verified", "active",
-        _content_hash(content), None, "[]", "[]",
+        _content_hash(content), None, "[]", "[]", "", 1.0,
     )
 
 
@@ -375,6 +1116,8 @@ def _brain_documents(
                 record["id"],
                 json.dumps(record["conflicts"], sort_keys=True),
                 json.dumps(record["source_fingerprints"], sort_keys=True),
+                str(record.get("updated_at") or ""),
+                float(record.get("confidence", 1.0)),
             )
         )
     handoffs = brain_root(repository) / "control" / "handoffs"
@@ -403,6 +1146,8 @@ def _brain_documents(
                     handoff["id"],
                     "[]",
                     json.dumps(task["source_fingerprints"], sort_keys=True),
+                    str(handoff.get("updated_at") or ""),
+                    float(task.get("confidence", 1.0)),
                 )
             )
     return documents, metadata_rows, excluded
@@ -459,6 +1204,10 @@ def index_documents(
     ):
         parity_drift = json.loads(stored[INDEX_PARITY_KEY])
     else:
+        # Deliberately the light, skills-only check: indexing sits on the
+        # SessionStart/prompt hot path (working-memory-read.sh -> refresh),
+        # and it is fingerprint-cached above. The full MIRROR_RULES check
+        # (full_mirror_drift) runs from `context.py parity` for CLI/CI.
         parity_drift = skill_mirror_drift(repository, str(config["canonical_edition"]))
     brain_documents, brain_metadata, excluded = _brain_documents(repository, config)
     documents = [*legacy_documents, *brain_documents]
@@ -521,8 +1270,8 @@ def index_documents(
             """
             INSERT INTO document_metadata(
                 path, category, privacy, owner, authority, lifecycle, source_hash,
-                record_id, conflicts, source_fingerprints
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                record_id, conflicts, source_fingerprints, updated_at, confidence
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             metadata,
         )
@@ -533,10 +1282,13 @@ def index_documents(
         store_index_state(
             connection,
             {
-                INDEX_CONFIG_KEY: config_fingerprint(repository),
-                INDEX_SKILL_KEY: skill_tree_fingerprint(repository),
-                **(fingerprints or {}),
+                # A caller that walked the sources already computed these; only
+                # a full rebuild without one re-derives them from disk.
+                **(fingerprints or index_fingerprints(repository)),
                 INDEX_PARITY_KEY: json.dumps(parity_drift, sort_keys=True),
+                # The index content changed, so every cache derived from it
+                # (token frequencies) is invalid from this point on.
+                INDEX_GENERATION_KEY: new_uuid(),
             },
         )
         total, layers = _layer_counts(connection)
@@ -580,6 +1332,70 @@ def _document_frequency(connection: sqlite3.Connection, token: str) -> Optional[
         return None
 
 
+def token_document_frequencies(
+    connection: sqlite3.Connection, tokens: Iterable[str]
+) -> dict[str, Optional[int]]:
+    """Document frequency per token, cached against the current index.
+
+    Stop-word filtering and prompt distillation both need one COUNT query per
+    token, on every prompt, and the answers only change when the index is
+    rewritten. The cache lives in ``index_state`` keyed by the index
+    generation, so a rebuilt index invalidates every stored frequency at once
+    while an unchanged index answers from a single row. FTS matching is
+    case-insensitive, so frequencies are cached under the casefolded token.
+    """
+    ensure_metadata_tables(connection)
+    state = load_index_state(connection)
+    generation = state.get(INDEX_GENERATION_KEY, "")
+    cached: dict[str, int] = {}
+    try:
+        stored = json.loads(state.get(TOKEN_FREQUENCY_KEY, ""))
+    except (TypeError, ValueError):
+        stored = None
+    if isinstance(stored, dict) and stored.get("generation") == generation:
+        frequencies = stored.get("frequencies")
+        if isinstance(frequencies, dict):
+            cached = {
+                key: value
+                for key, value in frequencies.items()
+                if isinstance(key, str) and isinstance(value, int)
+            }
+    result: dict[str, Optional[int]] = {}
+    learned = False
+    for token in tokens:
+        folded = token.casefold()
+        if folded in cached:
+            result[token] = cached[folded]
+            continue
+        count = _document_frequency(connection, token)
+        result[token] = count
+        if count is not None:
+            cached[folded] = count
+            learned = True
+    if learned:
+        if len(cached) > TOKEN_FREQUENCY_LIMIT:
+            # Novel prompts would grow the cache without bound; restarting
+            # from this query's tokens is cheaper than per-token recency.
+            cached = {
+                token.casefold(): count
+                for token, count in result.items()
+                if count is not None
+            }
+        payload = json.dumps(
+            {"generation": generation, "frequencies": cached}, sort_keys=True
+        )
+        try:
+            # Persisting the cache is an optimisation, never an obligation: a
+            # caller mid-transaction or a read-only database keeps its answer
+            # and simply recomputes next time.
+            if not connection.in_transaction:
+                with connection:
+                    store_index_state(connection, {TOKEN_FREQUENCY_KEY: payload})
+        except sqlite3.Error:
+            pass
+    return result
+
+
 def informative_tokens(
     connection: sqlite3.Connection, tokens: list[str]
 ) -> list[str]:
@@ -594,10 +1410,10 @@ def informative_tokens(
     total = connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
     if not total:
         return tokens
-    frequencies = [
-        (token, _document_frequency(connection, token)) for token in tokens
+    frequencies = token_document_frequencies(connection, tokens)
+    matched = [
+        (token, frequencies[token]) for token in tokens if frequencies[token]
     ]
-    matched = [(token, count) for token, count in frequencies if count]
     informative = [
         token for token, count in matched if count <= total * STOPWORD_DOCUMENT_RATIO
     ]
@@ -661,6 +1477,43 @@ def _estimate_tokens(value: str) -> int:
     return max(1, (len(value) + 3) // 4)
 
 
+def ranking_weight(
+    authority: object, confidence: object, updated_at: object
+) -> float:
+    """How much of its BM25 relevance a candidate keeps.
+
+    Verified evidence outranks observed at equal lexical fit, declared
+    confidence scales linearly, and freshness decays with a half-life over the
+    record's ``updated_at``. Every factor is floored: metadata modulates
+    ranking, it never erases a lexical match. A document without a timestamp
+    (repository files) keeps full freshness — its currency is already policed
+    by the source-hash staleness check, not by age.
+    """
+    weight = AUTHORITY_WEIGHTS.get(str(authority), AUTHORITY_WEIGHT_DEFAULT)
+    try:
+        declared = float(confidence)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        declared = 1.0
+    declared = min(1.0, max(0.0, declared))
+    weight *= CONFIDENCE_WEIGHT_FLOOR + (1.0 - CONFIDENCE_WEIGHT_FLOOR) * declared
+    timestamp = str(updated_at or "")
+    if timestamp:
+        try:
+            written = datetime.fromisoformat(timestamp)
+        except ValueError:
+            written = None
+        if written is not None:
+            if written.tzinfo is None:
+                written = written.replace(tzinfo=timezone.utc)
+            age_days = max(
+                0.0,
+                (datetime.now(timezone.utc) - written).total_seconds() / 86400.0,
+            )
+            decay = 0.5 ** (age_days / RECENCY_HALF_LIFE_DAYS)
+            weight *= RECENCY_WEIGHT_FLOOR + (1.0 - RECENCY_WEIGHT_FLOOR) * decay
+    return weight
+
+
 def _candidates(
     connection: sqlite3.Connection, query: str, limit: int = 100
 ) -> list[dict[str, Any]]:
@@ -675,7 +1528,7 @@ def _candidates(
             snippet(documents, 5, '[', ']', ' … ', 32) AS snippet,
             m.category, m.privacy, m.owner, m.authority, m.lifecycle,
             m.source_hash, m.record_id, m.conflicts,
-            m.source_fingerprints,
+            m.source_fingerprints, m.updated_at, m.confidence,
             bm25(documents, ?, ?, ?, ?, ?, ?) AS score
         FROM documents AS d
         JOIN document_metadata AS m ON m.path = d.path
@@ -694,7 +1547,16 @@ def _candidates(
         item["conflicts"] = json.loads(item["conflicts"])
         item["source_fingerprints"] = json.loads(item["source_fingerprints"])
         item["estimated_tokens"] = _estimate_tokens(item["title"] + item["snippet"])
+        # bm25() reports better matches as more negative, so relevance is its
+        # negation; provenance quality and freshness then scale it.
+        relevance = max(0.0, -float(item["score"]))
+        item["adjusted_score"] = relevance * ranking_weight(
+            item["authority"], item["confidence"], item["updated_at"]
+        )
         result.append(item)
+    # Re-rank the BM25 window: the raw score breaks adjusted ties so the
+    # ordering stays deterministic even when every weight is neutral.
+    result.sort(key=lambda item: (-item["adjusted_score"], item["score"], item["path"]))
     return result
 
 
@@ -711,7 +1573,7 @@ def _conflict_candidates(
             substr(d.content, 1, ?) AS snippet,
             m.category, m.privacy, m.owner, m.authority, m.lifecycle,
             m.source_hash, m.record_id, m.conflicts,
-            m.source_fingerprints,
+            m.source_fingerprints, m.updated_at, m.confidence,
             0.0 AS score
         FROM documents AS d
         JOIN document_metadata AS m ON m.path = d.path
@@ -985,7 +1847,12 @@ def retrieve(
         "task_uuid": task["id"],
         "task_revision": task["revision"],
         "working": {
-            "task_id": task["external_id"], "goal": task["goal"], "progress": task["progress"],
+            "task_id": task["external_id"], "goal": task["goal"],
+            # Manual progress first, the automatic checkpoint as a labelled
+            # supplement; a task without a checkpoint renders as it always did.
+            "progress": render_current_state(
+                task["progress"], task.get("auto_checkpoint")
+            ),
             "next_steps": task["next_steps"], "files": task["files"], "sources": task["sources"],
             "created_at": task["created_at"], "updated_at": task["updated_at"],
         },

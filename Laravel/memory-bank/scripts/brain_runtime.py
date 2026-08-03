@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
-from validate import validate_bank
+from validate import FILENAME_PATTERN as BANK_FILENAME_PATTERN, validate_bank
 
 
 SCHEMA_VERSION = 1
@@ -30,6 +30,13 @@ RECORD_TYPES = ("task", "finding", "bug", "incident", "decision", "event")
 TASK_PHASES = ("understanding", "planning", "execution", "finalization")
 PRIVACY = ("public", "team", "restricted", "private")
 AUTHORITIES = ("inferred", "observed", "verified")
+# Authority may only harden, along a single edge: an `observed` claim that a
+# verification re-checked becomes `verified`. Nothing downgrades and `inferred`
+# never skips ahead, because automatic promotion trusts `verified` to mean a
+# verification actually happened. Authority values never collide with any
+# lifecycle status below, which is what lets both kinds of transition share
+# one append-only ledger and stay distinguishable forever.
+AUTHORITY_TRANSITIONS: dict[str, set[str]] = {"observed": {"verified"}}
 LIFECYCLES: dict[str, dict[str, Any]] = {
     "task": {
         "initial": "active",
@@ -458,9 +465,9 @@ def validate_record(record: dict[str, Any], *, archived: bool = False) -> None:
         "superseded_by", "goal", "progress", "next_steps", "files", "sources",
     }
     missing = required - record.keys()
-    # `phase` is optional: adding it to the required set would invalidate every
-    # record written before it existed.
-    extra = record.keys() - required - {"phase"}
+    # `phase` and `auto_checkpoint` are optional: adding either to the required
+    # set would invalidate every record written before it existed.
+    extra = record.keys() - required - {"phase", "auto_checkpoint"}
     if missing:
         raise BrainError(f"record missing keys: {', '.join(sorted(missing))}")
     if extra:
@@ -470,6 +477,14 @@ def validate_record(record: dict[str, Any], *, archived: bool = False) -> None:
             raise BrainError("only a task may declare a phase")
         if record["phase"] not in TASK_PHASES:
             raise BrainError(f"phase must be one of: {', '.join(TASK_PHASES)}")
+    if "auto_checkpoint" in record:
+        # The automatic turn flush writes here so it never overwrites the
+        # operator's own `progress`. An empty value carries no information and
+        # therefore may not exist: the writer either has a checkpoint to report
+        # or leaves the key absent.
+        if record["type"] != "task":
+            raise BrainError("only a task may record an auto checkpoint")
+        _require_string(record, "auto_checkpoint")
     if record["schema_version"] != SCHEMA_VERSION:
         raise BrainError("unsupported schema_version")
     if not is_uuid4(record["id"]):
@@ -519,6 +534,16 @@ def validate_record(record: dict[str, Any], *, archived: bool = False) -> None:
                     f"first {record['type']} transition must create "
                     f"{lifecycle['initial']} state"
                 )
+        elif current_from in AUTHORITIES and current_to in AUTHORITIES:
+            # An authority transition shares the ledger but not the status
+            # chain: it must follow the one-way authority graph and leaves
+            # `previous` untouched, so the surrounding lifecycle history
+            # still has to line up end to end.
+            if current_to not in AUTHORITY_TRANSITIONS.get(current_from, set()):
+                raise BrainError(
+                    f"illegal authority transition: {current_from} -> {current_to}"
+                )
+            continue
         elif current_from != previous or current_to not in transitions.get(current_from, set()):
             raise BrainError(f"illegal lifecycle transition: {current_from} -> {current_to}")
         previous = current_to
@@ -640,6 +665,26 @@ def _record_body(record: dict[str, Any]) -> str:
     )
 
 
+def render_current_state(
+    progress: Optional[str], auto_checkpoint: Optional[str]
+) -> str:
+    """Combine manual progress with the automatic turn checkpoint for display.
+
+    Manual progress always leads: it is the operator's own account and
+    automation must never displace it. The checkpoint follows under an explicit
+    ``Since checkpoint:`` label so a reader can tell testimony from telemetry.
+    Without manual progress the checkpoint stands alone — its own
+    ``Auto-checkpoint:`` prefix already states its provenance, so it is not
+    dressed up as handwritten progress. Without a checkpoint the rendering is
+    byte-identical to what it was before the field existed.
+    """
+    progress = progress or ""
+    auto_checkpoint = auto_checkpoint or ""
+    if progress and auto_checkpoint:
+        return f"{progress}\nSince checkpoint: {auto_checkpoint}"
+    return progress or auto_checkpoint
+
+
 def _handoff_for(task: dict[str, Any], existing: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     timestamp = utc_now()
     return {
@@ -654,7 +699,9 @@ def _handoff_for(task: dict[str, Any], existing: Optional[dict[str, Any]] = None
         "created_at": existing["created_at"] if existing else timestamp,
         "updated_at": timestamp,
         "objective": task["goal"],
-        "current_state": task["progress"],
+        "current_state": render_current_state(
+            task["progress"], task.get("auto_checkpoint")
+        ),
         "next_actions": task["next_steps"],
         "files": task["files"],
         "sources": task["sources"],
@@ -805,8 +852,26 @@ def update_record(
     conflicts: Optional[list[str]] = None,
     transition_to: Optional[str] = None,
     phase: Optional[str] = None,
+    authority: Optional[str] = None,
+    auto_checkpoint: Optional[str] = None,
     reason: str = "Task updated",
 ) -> dict[str, Any]:
+    """Mutate a record under the caller's compare-and-swap revision.
+
+    ``authority`` promotes the record's evidence level. Only the
+    ``observed`` -> ``verified`` edge is legal — verification is the one act
+    that hardens a claim, and nothing may downgrade or fabricate that step —
+    so any other requested pair is refused before the record changes. The
+    promotion is appended to the same append-only ``transitions`` ledger as a
+    lifecycle change (actor, reason, from/to authority), ahead of any status
+    transition requested by the same call, and runs under the same
+    ``expected_revision`` compare-and-swap as every other field.
+
+    ``auto_checkpoint`` is the automated turn flush's own field. Replacing it
+    is the point — each flush supersedes the previous checkpoint — while
+    ``progress`` stays reserved for the operator's narrative, so an automated
+    caller passes ``progress=None`` and its checkpoint here.
+    """
     with mutation_lock(repository):
         path, record, _ = find_record(repository, identifier)
         validate_record(record)
@@ -819,8 +884,24 @@ def update_record(
             raise BrainError(f"Owner is not authorized to mutate record: {actor}")
         if record["type"] == "event" and (
             progress is not None or next_steps or files or sources
+            or authority is not None
         ):
             raise BrainError("Events are immutable; only lifecycle supersession is allowed")
+        if auto_checkpoint is not None and record["type"] != "task":
+            raise BrainError("only a task may record an auto checkpoint")
+        if authority is not None:
+            if authority not in AUTHORITY_TRANSITIONS.get(record["authority"], set()):
+                raise BrainError(
+                    f"Illegal authority transition: {record['authority']} -> "
+                    f"{authority}; only observed -> verified is allowed"
+                )
+            record["transitions"].append(
+                {
+                    "from": record["authority"], "to": authority, "at": utc_now(),
+                    "actor": actor, "reason": reason,
+                }
+            )
+            record["authority"] = authority
         if transition_to is not None:
             allowed = LIFECYCLES[record["type"]]["transitions"].get(
                 record["status"], set()
@@ -846,6 +927,8 @@ def update_record(
             record["phase"] = phase
         if progress is not None:
             record["progress"] = progress
+        if auto_checkpoint is not None:
+            record["auto_checkpoint"] = auto_checkpoint
         record["next_steps"] = list(dict.fromkeys([*record["next_steps"], *next_steps]))
         record["files"] = list(dict.fromkeys([*record["files"], *files]))
         record["sources"] = list(dict.fromkeys([*record["sources"], *sources]))
@@ -1605,11 +1688,114 @@ def auto_compact(repository: Path, *, owner: str = "local") -> dict[str, Any]:
     return {"enabled": True, "moved": moved, "pending": 0, "error": None}
 
 
+# INDEX.md is a derived view over chunk frontmatter, regenerated in full by
+# `render_bank_index` rather than appended to. The preamble below is used only
+# when the index is missing or unrecognizable; an existing preamble (anything
+# above the table header) is preserved verbatim, so per-edition prose survives
+# reindexing.
+BANK_INDEX_PREAMBLE = (
+    "# Memory Index\n\n"
+    "Read [README.md](README.md) before using this index. Load only active "
+    "chunks relevant to the current task, then verify them against their "
+    "cited sources.\n\n"
+)
+BANK_INDEX_HEADER = (
+    "| ID | Title | Type | Scope | Tags | Status | Last Verified | File |\n"
+    "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+)
+
+
+def _bank_index_sort_key(memory_id: str) -> tuple[int, str, str]:
+    """Stable index order: numeric legacy IDs first, then date-based IDs.
+
+    Legacy `MEM-0001` identifiers sort numerically (so `MEM-10000` follows
+    `MEM-9999`); date-based `MEM-YYYYMMDD-xxxxxxxx` identifiers sort
+    lexicographically, which is chronological up to the UUID fragment.
+    """
+    legacy = re.fullmatch(r"MEM-(\d{4,})", memory_id)
+    if legacy:
+        return (0, f"{int(legacy.group(1)):020d}", memory_id)
+    return (1, memory_id, memory_id)
+
+
+def render_bank_index(bank: Path) -> tuple[str, int]:
+    """Render INDEX.md deterministically from chunk frontmatter.
+
+    Returns the full index text and the number of chunk rows. Because every
+    row is derived from a chunk file, merging two branches that each promoted
+    knowledge reduces to a union of chunk files followed by one reindex —
+    there is no hand-maintained table left to conflict on.
+    """
+    chunks_dir = bank / "chunks"
+    rows: dict[str, str] = {}
+    if chunks_dir.is_dir():
+        for path in sorted(chunks_dir.iterdir()):
+            if (
+                path.is_symlink()
+                or not path.is_file()
+                or BANK_FILENAME_PATTERN.fullmatch(path.name) is None
+            ):
+                continue
+            metadata, _ = parse_markdown_record(path)
+            memory_id = metadata.get("id")
+            if not isinstance(memory_id, str) or not memory_id:
+                raise BrainError(f"{path}: chunk frontmatter has no id")
+            if memory_id in rows:
+                raise BrainError(f"Duplicate Memory Bank chunk ID: {memory_id}")
+            try:
+                rows[memory_id] = (
+                    f"| {memory_id} | {metadata['title']} | {metadata['type']} | "
+                    f"{', '.join(metadata['scope'])} | {', '.join(metadata['tags'])} | "
+                    f"{metadata['status']} | {metadata['last_verified']} | "
+                    f"chunks/{path.name} |\n"
+                )
+            except (KeyError, TypeError) as error:
+                raise BrainError(
+                    f"{path}: chunk frontmatter is incomplete for indexing"
+                ) from error
+    preamble = BANK_INDEX_PREAMBLE
+    index_path = bank / "INDEX.md"
+    if index_path.is_file():
+        head, header, _ = index_path.read_text(encoding="utf-8").partition(
+            "| ID | Title |"
+        )
+        if header:
+            preamble = head
+    body = "".join(
+        rows[memory_id] for memory_id in sorted(rows, key=_bank_index_sort_key)
+    )
+    return preamble + BANK_INDEX_HEADER + body, len(rows)
+
+
+def reindex_bank(repository: Path) -> dict[str, Any]:
+    """Regenerate memory-bank/INDEX.md from chunk frontmatter.
+
+    Idempotent: rerunning against unchanged chunks rewrites nothing, and a
+    deleted index is reconstructed in full. This replaces every manual
+    "update INDEX.md and increment .memory-counter" step; the retired
+    `.memory-counter` file is neither read nor written.
+    """
+    bank = repository / "memory-bank"
+    index_path = bank / "INDEX.md"
+    with mutation_lock(repository):
+        rendered, chunks = render_bank_index(bank)
+        previous = (
+            index_path.read_text(encoding="utf-8") if index_path.is_file() else None
+        )
+        changed = previous != rendered
+        if changed:
+            atomic_write(index_path, rendered)
+    return {
+        "index": "memory-bank/INDEX.md",
+        "chunks": chunks,
+        "changed": changed,
+    }
+
+
 def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
     promotion_path = brain_root(repository) / "control" / "promotions" / f"{promotion_id}.json"
     bank = repository / "memory-bank"
     index_path = bank / "INDEX.md"
-    counter_path = bank / ".memory-counter"
     with mutation_lock(repository):
         try:
             proposal = json.loads(promotion_path.read_text(encoding="utf-8"))
@@ -1635,18 +1821,21 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
                 or current["revision"] != source["revision"]
             ):
                 raise BrainError(f"Promotion source revision changed: {source['id']}")
-        try:
-            counter = int(counter_path.read_text(encoding="utf-8").strip())
-            old_index = index_path.read_text(encoding="utf-8")
-            old_counter = counter_path.read_text(encoding="utf-8")
-        except (OSError, ValueError) as error:
-            raise BrainError("Memory Bank counter or index is unavailable") from error
-        memory_id = f"MEM-{counter:04d}"
+        today = datetime.now(timezone.utc).date()
+        # Conflict-free identifier: the promotion date plus eight hex
+        # characters of the source record's UUID. Two machines or branches
+        # promoting concurrently cannot collide the way the retired shared
+        # `.memory-counter` file did, so a later merge is a plain union of
+        # chunk files. The legacy counter file may remain on disk; it is
+        # neither read nor written here.
+        source_uuid = proposal["source_records"][0]["id"]
+        memory_id = (
+            f"MEM-{today.strftime('%Y%m%d')}-{source_uuid.replace('-', '')[:8]}"
+        )
         slug = re.sub(r"[^a-z0-9]+", "-", proposal["title"].lower()).strip("-") or "promoted"
         destination = bank / "chunks" / f"{memory_id}-{slug}.md"
         if destination.exists():
             raise BrainError(f"Promotion destination already exists: {destination}")
-        today = datetime.now(timezone.utc).date()
         # Tag the chunk so the bank itself shows which knowledge no human
         # approved; a reader must not have to open the promotion to find out.
         tags = ["project-brain", "promoted"] + (["auto-promoted"] if automatic else [])
@@ -1667,18 +1856,13 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
             metadata,
             content if content.startswith(heading) else f"{heading}\n\n{content}",
         )
-        row = (
-            f"| {memory_id} | {proposal['title']} | decision | application | "
-            f"{', '.join(tags)} | active | {today.isoformat()} | "
-            f"chunks/{destination.name} |\n"
-        )
-        snapshot = snapshot_files(
-            [destination, index_path, counter_path, promotion_path]
-        )
+        snapshot = snapshot_files([destination, index_path, promotion_path])
         try:
             atomic_write(destination, chunk)
-            atomic_write(index_path, old_index.rstrip() + "\n" + row)
-            atomic_write(counter_path, f"{counter + 1}\n")
+            # The index is derived state: regenerate it from chunk
+            # frontmatter instead of appending a row, so the same rendering
+            # path serves promotions, manual capture, and post-merge repair.
+            atomic_write(index_path, render_bank_index(bank)[0])
             validation_errors = validate_bank(bank)
             if validation_errors:
                 raise BrainError(

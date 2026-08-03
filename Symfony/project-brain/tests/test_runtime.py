@@ -14,6 +14,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -86,6 +87,12 @@ class RuntimeHarness(unittest.TestCase):
         ), contextlib.redirect_stderr(stderr):
             code = context_cli.main()
         return code, stdout.getvalue(), stderr.getvalue()
+
+    @staticmethod
+    def expected_memory_id(source_uuid: str) -> str:
+        """Conflict-free chunk ID: promotion date + source-record UUID hex."""
+        today = datetime.now(timezone.utc).date()
+        return f"MEM-{today.strftime('%Y%m%d')}-{source_uuid.replace('-', '')[:8]}"
 
     def start(self, task_id: str = "TASK-1") -> dict:
         result = self.run_cli(
@@ -506,15 +513,108 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
         )
         applied = brain.apply_promotion(self.repository, proposal["id"])
         self.assertEqual("applied", applied["status"])
-        self.assertEqual("MEM-0001", applied["destination_memory_id"])
+        memory_id = self.expected_memory_id(task["id"])
+        self.assertEqual(memory_id, applied["destination_memory_id"])
         self.assertTrue(
             self.repository.joinpath(
-                "memory-bank/chunks/MEM-0001-cobalt-authority.md"
+                f"memory-bank/chunks/{memory_id}-cobalt-authority.md"
             ).is_file()
         )
-        self.assertEqual(
-            "2", self.repository.joinpath("memory-bank/.memory-counter").read_text().strip()
+        self.assertIn(
+            f"| {memory_id} |",
+            self.repository.joinpath("memory-bank/INDEX.md").read_text(
+                encoding="utf-8"
+            ),
         )
+        # The retired legacy counter is neither read nor advanced.
+        self.assertEqual(
+            "1", self.repository.joinpath("memory-bank/.memory-counter").read_text().strip()
+        )
+
+    def test_promotions_from_different_records_allocate_distinct_ids(self) -> None:
+        applied = []
+        records = []
+        for suffix, title in (("A", "First lesson"), ("B", "Second lesson")):
+            record = brain.create_record(
+                self.repository,
+                "finding",
+                f"FINDING-{suffix}",
+                f"Reusable finding {suffix}",
+                [],
+                ["specs/authority.md"],
+                owner="alice",
+            )
+            records.append(record)
+            proposal = brain.create_promotion(
+                self.repository,
+                [record["id"]],
+                title,
+                "Reusable consequence.",
+                proposer="alice",
+            )
+            brain.review_promotion(
+                self.repository, proposal["id"], "human", approve=True
+            )
+            applied.append(brain.apply_promotion(self.repository, proposal["id"]))
+        memory_ids = [item["destination_memory_id"] for item in applied]
+        # No shared counter: each ID derives from its own source-record UUID.
+        self.assertEqual(2, len(set(memory_ids)))
+        for record, memory_id in zip(records, memory_ids):
+            self.assertEqual(self.expected_memory_id(record["id"]), memory_id)
+        index_text = self.repository.joinpath("memory-bank/INDEX.md").read_text(
+            encoding="utf-8"
+        )
+        for memory_id in memory_ids:
+            self.assertIn(f"| {memory_id} |", index_text)
+        self.assertEqual([], brain.validate_bank(self.repository / "memory-bank"))
+
+    def test_reindex_bank_is_idempotent_and_restores_a_deleted_index(self) -> None:
+        record = brain.create_record(
+            self.repository,
+            "finding",
+            "FINDING-REINDEX",
+            "Reindex finding",
+            [],
+            ["specs/authority.md"],
+            owner="alice",
+        )
+        proposal = brain.create_promotion(
+            self.repository,
+            [record["id"]],
+            "Reindex lesson",
+            "Reusable consequence.",
+            proposer="alice",
+        )
+        brain.review_promotion(
+            self.repository, proposal["id"], "human", approve=True
+        )
+        memory_id = brain.apply_promotion(self.repository, proposal["id"])[
+            "destination_memory_id"
+        ]
+        index_path = self.repository / "memory-bank/INDEX.md"
+
+        rerun = json.loads(self.run_cli("reindex-bank", "--json").stdout)
+        self.assertFalse(rerun["changed"])
+        after_promotion = index_path.read_text(encoding="utf-8")
+
+        index_path.unlink()
+        restored = json.loads(self.run_cli("reindex-bank", "--json").stdout)
+        self.assertTrue(restored["changed"])
+        self.assertEqual(1, restored["chunks"])
+        restored_text = index_path.read_text(encoding="utf-8")
+        self.assertIn(f"| {memory_id} |", restored_text)
+        # The restored table matches what the promotion had rendered; only
+        # the preamble may differ (it falls back to the canonical wording).
+        self.assertEqual(
+            after_promotion.partition("| ID | Title |")[2],
+            restored_text.partition("| ID | Title |")[2],
+        )
+        self.assertEqual([], brain.validate_bank(self.repository / "memory-bank"))
+
+        # Regenerating the restored index changes nothing further.
+        second = json.loads(self.run_cli("reindex-bank", "--json").stdout)
+        self.assertFalse(second["changed"])
+        self.assertEqual(restored_text, index_path.read_text(encoding="utf-8"))
 
     def test_promotion_binds_generic_source_type_path_and_revision(self) -> None:
         finding = brain.create_record(
@@ -542,7 +642,10 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
             self.repository, proposal["id"], "human", approve=True
         )
         applied = brain.apply_promotion(self.repository, proposal["id"])
-        chunk = self.repository / "memory-bank/chunks/MEM-0001-reusable-finding.md"
+        chunk = self.repository / (
+            "memory-bank/chunks/"
+            f"{self.expected_memory_id(finding['id'])}-reusable-finding.md"
+        )
         metadata, _ = brain.parse_markdown_record(chunk)
         self.assertEqual([source["path"]], metadata["sources"])
         self.assertEqual("applied", applied["status"])
@@ -626,7 +729,8 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
             self.assertEqual(content, path.read_bytes())
         self.assertFalse(
             self.repository.joinpath(
-                "memory-bank/chunks/MEM-0001-rollback-promotion.md"
+                "memory-bank/chunks/"
+                f"{self.expected_memory_id(finding['id'])}-rollback-promotion.md"
             ).exists()
         )
 
@@ -654,11 +758,15 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
         promotion_path = self.repository.joinpath(
             "project-brain/control/promotions", f"{proposal['id']}.json"
         )
-        destination = bank / "chunks/MEM-0001-write-boundary.md"
+        destination = bank / (
+            f"chunks/{self.expected_memory_id(finding['id'])}-write-boundary.md"
+        )
+        # The legacy .memory-counter is no longer written, so the write
+        # boundaries are the chunk itself and the regenerated index; the
+        # counter stays byte-identical throughout (asserted below).
         for failed_path in (
             destination,
             bank / "INDEX.md",
-            bank / ".memory-counter",
         ):
             with self.subTest(path=failed_path.name):
                 before = {
@@ -934,6 +1042,229 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
         self.assertIn("prompt", telemetry["prohibited_fields"])
 
 
+class AuthorityLifecycleTest(RuntimeHarness):
+    """The observed -> verified authority edge that unlocks auto-promotion."""
+
+    def observed_finding(self, external_id: str = "FIND-AUTH") -> dict:
+        return brain.create_record(
+            self.repository,
+            "finding",
+            external_id,
+            "Cobalt guard closes the request gap",
+            [],
+            ["specs/authority.md"],
+            owner="alice",
+        )
+
+    def enable_automatic_promotion(self) -> None:
+        config = self.repository / "project-brain/config/runtime.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(
+            json.dumps({"mode": "governed", "automatic_promotion": True}),
+            encoding="utf-8",
+        )
+
+    def test_verified_then_terminal_record_reaches_auto_promotion(self) -> None:
+        self.enable_automatic_promotion()
+        record = self.observed_finding()
+        self.assertEqual("observed", record["authority"])
+
+        verified = brain.update_record(
+            self.repository,
+            record["id"],
+            expected_revision=1,
+            progress="Cobalt guard confirmed against the authority spec.",
+            next_steps=[],
+            files=[],
+            sources=[],
+            actor="alice",
+            authority="verified",
+            reason="Verified: authority spec re-checked",
+        )
+        self.assertEqual("verified", verified["authority"])
+        ledger = verified["transitions"][-1]
+        self.assertEqual("observed", ledger["from"])
+        self.assertEqual("verified", ledger["to"])
+        self.assertEqual("alice", ledger["actor"])
+        self.assertEqual("Verified: authority spec re-checked", ledger["reason"])
+        # The widened ledger must survive a disk round-trip and revalidation.
+        self.assertEqual("verified", brain.get_record(self.repository, record["id"])["authority"])
+
+        brain.update_record(
+            self.repository,
+            record["id"],
+            expected_revision=2,
+            progress=None,
+            next_steps=[],
+            files=[],
+            sources=[],
+            actor="alice",
+            transition_to="resolved",
+            reason="Resolved after verification",
+        )
+        candidates, blocked = brain.promotable_records(
+            self.repository, brain.load_config(self.repository)
+        )
+        self.assertEqual([record["id"]], [item["record"]["id"] for item in candidates])
+        self.assertEqual([], blocked)
+
+        promoted = brain.auto_promote(self.repository, owner="alice")
+        self.assertEqual(
+            [record["id"]], [item["record_id"] for item in promoted["promoted"]]
+        )
+        self.assertEqual([], promoted["failed"])
+        chunk = next((self.repository / "memory-bank/chunks").glob("MEM-*.md"))
+        self.assertIn("auto-promoted", chunk.read_text(encoding="utf-8"))
+
+    def test_terminal_record_without_verification_stays_blocked(self) -> None:
+        record = self.observed_finding("FIND-UNVERIFIED")
+        brain.update_record(
+            self.repository,
+            record["id"],
+            expected_revision=1,
+            progress="Resolved without any verification pass.",
+            next_steps=[],
+            files=[],
+            sources=[],
+            actor="alice",
+            transition_to="resolved",
+            reason="Resolved",
+        )
+        candidates, blocked = brain.promotable_records(
+            self.repository, brain.load_config(self.repository)
+        )
+        self.assertEqual([], candidates)
+        self.assertEqual(
+            ["authority is observed, not verified"],
+            [item["reason"] for item in blocked],
+        )
+
+    def test_reverse_and_arbitrary_authority_transitions_are_rejected(self) -> None:
+        scenarios = (
+            ("verified", "observed"),   # nothing downgrades
+            ("verified", "inferred"),   # nothing downgrades
+            ("observed", "inferred"),   # nothing downgrades
+            ("inferred", "verified"),   # inference never skips verification
+            ("observed", "observed"),   # a no-op claims a promotion that never ran
+        )
+        for index, (initial, requested) in enumerate(scenarios):
+            with self.subTest(initial=initial, requested=requested):
+                record = brain.create_record(
+                    self.repository,
+                    "finding",
+                    f"FIND-EDGE-{index}",
+                    f"Edge case {index}",
+                    [],
+                    ["specs/authority.md"],
+                    owner="alice",
+                    authority=initial,
+                )
+                with self.assertRaisesRegex(
+                    brain.BrainError,
+                    f"Illegal authority transition: {initial} -> {requested}",
+                ):
+                    brain.update_record(
+                        self.repository,
+                        record["id"],
+                        expected_revision=1,
+                        progress=None,
+                        next_steps=[],
+                        files=[],
+                        sources=[],
+                        actor="alice",
+                        authority=requested,
+                        reason="Attempted",
+                    )
+                unchanged = brain.get_record(self.repository, record["id"])
+                self.assertEqual(initial, unchanged["authority"])
+                self.assertEqual(1, unchanged["revision"])
+
+    def test_authority_promotion_runs_under_the_same_compare_and_swap(self) -> None:
+        record = self.observed_finding("FIND-CAS")
+        with self.assertRaisesRegex(brain.BrainError, "Stale finding revision"):
+            brain.update_record(
+                self.repository,
+                record["id"],
+                expected_revision=7,
+                progress=None,
+                next_steps=[],
+                files=[],
+                sources=[],
+                actor="alice",
+                authority="verified",
+                reason="Stale writer",
+            )
+        self.assertEqual(
+            "observed", brain.get_record(self.repository, record["id"])["authority"]
+        )
+
+    def test_event_authority_is_immutable(self) -> None:
+        record = brain.create_record(
+            self.repository,
+            "event",
+            "EVENT-AUTH",
+            "Deploy happened",
+            [],
+            ["specs/authority.md"],
+            owner="alice",
+        )
+        with self.assertRaisesRegex(brain.BrainError, "Events are immutable"):
+            brain.update_record(
+                self.repository,
+                record["id"],
+                expected_revision=1,
+                progress=None,
+                next_steps=[],
+                files=[],
+                sources=[],
+                actor="alice",
+                authority="verified",
+                reason="Attempted",
+            )
+
+    def test_tampered_authority_ledger_is_rejected_by_the_validator(self) -> None:
+        record = self.observed_finding("FIND-TAMPER")
+        path = self.repository / "project-brain/dynamic/findings" / f"{record['id']}.md"
+        metadata, body = brain.parse_markdown_record(path)
+        metadata["authority"] = "observed"
+        metadata["transitions"].append(
+            {
+                "from": "verified", "to": "observed", "at": brain.utc_now(),
+                "actor": "mallory", "reason": "Quietly downgraded",
+            }
+        )
+        path.write_text(brain.render_markdown_record(metadata, body), encoding="utf-8")
+        with self.assertRaisesRegex(
+            brain.BrainError, "illegal authority transition: verified -> observed"
+        ):
+            brain.get_record(self.repository, record["id"])
+
+    def test_cli_brain_update_promotes_authority_and_reports_refusals(self) -> None:
+        record = json.loads(
+            self.run_cli(
+                "brain-create", "finding", "--external-id", "FIND-CLI",
+                "--title", "CLI finding", "--source", "specs/authority.md",
+                "--json",
+            ).stdout
+        )
+        promoted = self.run_cli(
+            "brain-update", "--record-id", record["id"], "--revision", "auto",
+            "--authority", "verified",
+            "--reason", "Verified: covered by the CLI contract test", "--json",
+        )
+        self.assertEqual(0, promoted.returncode, promoted.stderr)
+        self.assertEqual("verified", json.loads(promoted.stdout)["authority"])
+
+        refused = self.run_cli(
+            "brain-update", "--record-id", record["id"], "--revision", "auto",
+            "--authority", "observed", "--reason", "Downgrade", "--json",
+        )
+        self.assertNotEqual(0, refused.returncode)
+        self.assertIn(
+            "Illegal authority transition: verified -> observed", refused.stderr
+        )
+
+
 class AutomaticWorkingMemoryTest(RuntimeHarness):
     """Cover the automated read and write paths the memory hooks depend on."""
 
@@ -1145,6 +1476,91 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         self.assertIn("specs/cobalt-rule.md", selected)
         # Filler shares only "is"/"for"/"written"; that is not relevance.
         self.assertEqual([], [path for path in selected if "filler-" in path])
+
+    def test_a_fresh_record_outranks_a_stale_one_at_equal_lexical_fit(self) -> None:
+        # BM25 alone cannot tell these records apart: identical title, goal,
+        # and body. Recency decay over updated_at must break the tie in favor
+        # of the record that was touched last.
+        self.start("TASK-RANK-FRESH")
+        with mock.patch.object(
+            brain, "utc_now", return_value="2026-01-01T00:00:00+00:00"
+        ):
+            stale = brain.create_record(
+                self.repository, "finding", "RANK-OLD1",
+                "Amaranth ranking subject", [], [],
+                owner="alice", authority="verified",
+            )
+        fresh = brain.create_record(
+            self.repository, "finding", "RANK-NEW1",
+            "Amaranth ranking subject", [], [],
+            owner="alice", authority="verified",
+        )
+        self.run_cli("refresh")
+
+        selected, _ = self.selected_paths(
+            "amaranth ranking subject", "TASK-RANK-FRESH"
+        )
+        fresh_path = f"project-brain/dynamic/findings/{fresh['id']}.md"
+        stale_path = f"project-brain/dynamic/findings/{stale['id']}.md"
+        self.assertIn(fresh_path, selected)
+        self.assertIn(stale_path, selected)
+        self.assertLess(selected.index(fresh_path), selected.index(stale_path))
+
+    def test_a_verified_record_outranks_an_observed_one_at_equal_lexical_fit(
+        self,
+    ) -> None:
+        self.start("TASK-RANK-AUTH")
+        observed = brain.create_record(
+            self.repository, "finding", "RANK-OBS1",
+            "Byzantium ranking subject", [], [],
+            owner="alice", authority="observed",
+        )
+        verified = brain.create_record(
+            self.repository, "finding", "RANK-VER1",
+            "Byzantium ranking subject", [], [],
+            owner="alice", authority="verified",
+        )
+        self.run_cli("refresh")
+
+        selected, _ = self.selected_paths(
+            "byzantium ranking subject", "TASK-RANK-AUTH"
+        )
+        verified_path = f"project-brain/dynamic/findings/{verified['id']}.md"
+        observed_path = f"project-brain/dynamic/findings/{observed['id']}.md"
+        self.assertIn(verified_path, selected)
+        self.assertIn(observed_path, selected)
+        self.assertLess(
+            selected.index(verified_path), selected.index(observed_path)
+        )
+
+    def test_refresh_distills_a_raw_prompt_so_the_tail_subject_survives(
+        self,
+    ) -> None:
+        # The hook passes the prompt as-is; the CLI must not decide relevance
+        # by position the way the old first-24-words extraction did.
+        self.start("TASK-DISTILL")
+        self.repository.joinpath("specs/currency.md").write_text(
+            "# Currency\n\nAmounts are stored in integer zorkmids.\n",
+            encoding="utf-8",
+        )
+        preamble = " ".join(f"zzfiller{index}" for index in range(30))
+        result = self.run_cli(
+            "refresh", "--query",
+            f"{preamble} how does this project represent zorkmids",
+            "--task-id", "TASK-DISTILL", "--ephemeral", "--json",
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertIsNotNone(report["capsule"], report["warnings"])
+        query = report["capsule"]["query"]
+        self.assertIn("zorkmids", query)
+        self.assertNotIn("zzfiller0", query)
+        self.assertIn(
+            "specs/currency.md",
+            [item["path"] for item in report["capsule"]["selected"]],
+        )
+        for phase in ("stat", "index", "retrieval"):
+            self.assertIn(phase, report["phases"])
 
     def test_overlapping_source_patterns_index_a_file_once(self) -> None:
         self.repository.joinpath("docs").mkdir()
@@ -1401,7 +1817,10 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
             self.run_cli("get", "--task-id", "TASK-TURN", "--json").stdout
         )
         self.assertEqual(2, task["revision"])
-        self.assertIn("Auto-checkpoint: 3 turn(s)", task["progress"])
+        # The consolidated summary is telemetry, so it lands in its own field
+        # and leaves the operator's progress untouched.
+        self.assertIn("Auto-checkpoint: 3 turn(s)", task["auto_checkpoint"])
+        self.assertEqual("", task["progress"])
         self.assertIn("app.txt", task["files"])
 
     def test_turn_provisions_the_task_on_first_flush(self) -> None:
@@ -1638,6 +2057,162 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         self.repository.joinpath("other.txt").write_text("more\n", encoding="utf-8")
         result = self.run_cli("turn", "--task-id", "main", "--flush", "--json")
         self.assertEqual([], json.loads(result.stdout)["closed"])
+
+    def test_maintenance_waits_for_the_flush_boundary(self) -> None:
+        # The Stop hook drives `turn` under a hard timeout on every turn, so
+        # the expensive scans may run only where the flush already writes; an
+        # ordinary turn stays at one status probe plus a buffer insert.
+        self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
+        promotion = {
+            "enabled": False, "promoted": [], "failed": [],
+            "blocked": [], "skipped": 0,
+        }
+        compaction = {"enabled": False, "moved": 0, "pending": 0, "error": None}
+        with mock.patch.object(
+            context_cli, "close_merged_tasks", return_value=[]
+        ) as close, mock.patch.object(
+            context_cli, "auto_promote", return_value=promotion
+        ) as promote, mock.patch.object(
+            context_cli, "auto_compact", return_value=compaction
+        ) as compact:
+            code, stdout, stderr = self.run_main(
+                "turn", "--task-id", "feature/gated", "--flush-after", "3",
+                "--json",
+            )
+            self.assertEqual(0, code, stderr)
+            self.assertFalse(json.loads(stdout)["flushed"])
+            close.assert_not_called()
+            promote.assert_not_called()
+            compact.assert_not_called()
+
+            code, stdout, stderr = self.run_main(
+                "turn", "--task-id", "feature/gated", "--flush", "--json"
+            )
+            self.assertEqual(0, code, stderr)
+            self.assertTrue(json.loads(stdout)["flushed"])
+            close.assert_called_once()
+            promote.assert_called_once()
+            compact.assert_called_once()
+
+    def test_a_buffered_turn_defers_completion_until_the_flush(self) -> None:
+        self.enable_automation(automatic_completion=True)
+        self.commit_main()
+        self.git("checkout", "-q", "-b", "feature/deferred")
+        self.repository.joinpath("work.txt").write_text("work\n", encoding="utf-8")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "work")
+        self.repository.joinpath("pending.txt").write_text("x\n", encoding="utf-8")
+        self.run_cli("turn", "--task-id", "feature/deferred", "--flush", "--json")
+        self.git("checkout", "-q", "main")
+        self.git("merge", "-q", "--no-ff", "feature/deferred", "-m", "merge")
+
+        self.repository.joinpath("after.txt").write_text("more\n", encoding="utf-8")
+        buffered = self.run_cli(
+            "turn", "--task-id", "main", "--flush-after", "5", "--json"
+        )
+        payload = json.loads(buffered.stdout)
+        self.assertFalse(payload["flushed"])
+        # The merge is already observable, but a buffered turn does not pay
+        # for the scan; the task stays open until the boundary.
+        self.assertEqual([], payload["closed"])
+        self.assertEqual(
+            "active",
+            json.loads(
+                self.run_cli("get", "--task-id", "feature/deferred", "--json").stdout
+            )["status"],
+        )
+
+        flushed = self.run_cli("turn", "--task-id", "main", "--flush", "--json")
+        payload = json.loads(flushed.stdout)
+        self.assertTrue(payload["flushed"])
+        self.assertEqual(
+            ["feature/deferred"], [item["task_id"] for item in payload["closed"]]
+        )
+
+    def test_batched_merge_scan_closes_only_the_merged_branch(self) -> None:
+        # One reference listing now serves every task; the per-branch verdicts
+        # must not change: merged closes, unmerged stays open.
+        self.enable_automation(automatic_completion=True)
+        self.commit_main()
+        for branch in ("feature/one", "feature/two"):
+            self.git("checkout", "-q", "-b", branch, "main")
+            name = branch.split("/", 1)[1]
+            self.repository.joinpath(f"{name}.txt").write_text(
+                "work\n", encoding="utf-8"
+            )
+            # Stage only the work file: `add -A` would also track the runtime
+            # database a later turn keeps writing, blocking the checkout back.
+            self.git("add", f"{name}.txt")
+            self.git("commit", "-qm", branch)
+            self.repository.joinpath(f"pending-{name}.txt").write_text(
+                "x\n", encoding="utf-8"
+            )
+            self.run_cli("turn", "--task-id", branch, "--flush", "--json")
+        self.git("checkout", "-q", "main")
+        self.git("merge", "-q", "--no-ff", "feature/one", "-m", "merge one")
+
+        self.repository.joinpath("after.txt").write_text("more\n", encoding="utf-8")
+        result = self.run_cli("turn", "--task-id", "main", "--flush", "--json")
+        closed = json.loads(result.stdout)["closed"]
+        self.assertEqual(["feature/one"], [item["task_id"] for item in closed])
+        self.assertEqual(
+            "active",
+            json.loads(
+                self.run_cli("get", "--task-id", "feature/two", "--json").stdout
+            )["status"],
+        )
+
+    def test_default_branch_cache_survives_calls_and_resets_on_rename(self) -> None:
+        self.commit_main()
+        connection = context_cli.connect(
+            context_cli.default_database(self.repository)
+        )
+        try:
+            self.assertEqual(
+                "main",
+                context_cli.cached_default_branch(connection, self.repository),
+            )
+            self.assertEqual(
+                "main",
+                retrieval.load_index_state(connection)[
+                    context_cli.DEFAULT_BRANCH_STATE_KEY
+                ],
+            )
+            # A cached target is reused without paying for detection again.
+            with mock.patch.object(
+                context_cli, "default_branch",
+                side_effect=AssertionError("re-detected a cached branch"),
+            ):
+                for _ in range(2):
+                    self.assertEqual(
+                        "main",
+                        context_cli.cached_default_branch(
+                            connection, self.repository
+                        ),
+                    )
+            # A renamed branch fails the probe and is re-detected and stored.
+            self.git("branch", "-M", "master")
+            self.assertEqual(
+                "master",
+                context_cli.cached_default_branch(connection, self.repository),
+            )
+            self.assertEqual(
+                "master",
+                retrieval.load_index_state(connection)[
+                    context_cli.DEFAULT_BRANCH_STATE_KEY
+                ],
+            )
+            # A name detection cannot find drops the stale entry outright.
+            self.git("branch", "-M", "trunk")
+            self.assertIsNone(
+                context_cli.cached_default_branch(connection, self.repository)
+            )
+            self.assertNotIn(
+                context_cli.DEFAULT_BRANCH_STATE_KEY,
+                retrieval.load_index_state(connection),
+            )
+        finally:
+            connection.close()
 
     def accepted_decision(self, external_id: str = "DEC-1") -> str:
         record = json.loads(
@@ -2025,7 +2600,483 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
             self.run_cli("get", "--task-id", "TASK-LIMIT", "--json").stdout
         )
         self.assertEqual(2, len(task["files"]))
-        self.assertIn("beyond the per-flush limit", task["progress"])
+        self.assertIn("beyond the per-flush limit", task["auto_checkpoint"])
+
+
+class LastTurnReportTest(RuntimeHarness):
+    """The silenced Stop-hook turn reports through the next request's capsule.
+
+    The Stop hook discards `turn` stdout, so a blocked promotion, an excluded
+    path, or a failed compaction printed there reached nobody. The turn now
+    also writes `memory-bank/local/last-turn-report.json`, and the next
+    refresh folds a fresh report into the Task Capsule as a 'Last turn'
+    section. The file is advisory: stale, missing, or malformed content must
+    never change what refresh returns beyond omitting the section.
+    """
+
+    def enable_automatic_promotion(self) -> None:
+        config = self.repository / "project-brain/config/runtime.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(
+            json.dumps({"mode": "governed", "automatic_promotion": True}),
+            encoding="utf-8",
+        )
+
+    def resolve_observed_finding(self, external_id: str = "FIND-HELD") -> None:
+        """A terminal `observed` record: promotable type, blocked by authority."""
+        record = json.loads(
+            self.run_cli(
+                "brain-create", "finding", "--external-id", external_id,
+                "--title", "Observed but never verified",
+                "--source", "specs/authority.md",
+                "--authority", "observed", "--json",
+            ).stdout
+        )
+        self.run_cli(
+            "brain-update", "--record-id", record["id"], "--revision", "auto",
+            "--transition", "resolved", "--reason", "Resolved", "--json",
+        )
+
+    def report_path(self) -> Path:
+        return self.repository / "memory-bank/local/last-turn-report.json"
+
+    def flush_turn(self, task_id: str = "feature/held") -> dict:
+        result = self.run_cli("turn", "--task-id", task_id, "--flush", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        return json.loads(result.stdout)
+
+    def refresh_capsule(
+        self, task_id: str = "feature/held"
+    ) -> tuple[dict, str]:
+        """One refresh in both shapes: the JSON capsule and the hook's text."""
+        text = self.run_cli(
+            "refresh", "--query", "cobalt authority", "--task-id", task_id,
+            "--ephemeral",
+        )
+        self.assertEqual(0, text.returncode, text.stderr)
+        result = self.run_cli(
+            "refresh", "--query", "cobalt authority", "--task-id", task_id,
+            "--ephemeral", "--json",
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        return json.loads(result.stdout)["capsule"], text.stdout
+
+    def test_blocked_promotion_reaches_the_next_refresh_capsule(self) -> None:
+        self.enable_automatic_promotion()
+        self.resolve_observed_finding()
+        self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
+        self.flush_turn()
+
+        report = json.loads(self.report_path().read_text(encoding="utf-8"))
+        self.assertEqual(
+            ["authority is observed, not verified"],
+            [item["reason"] for item in report["promotion_blocked"]],
+        )
+
+        capsule, text = self.refresh_capsule()
+        # The blocked reason is the point of the section: it must be quoted.
+        self.assertIn(
+            "promotion blocked: authority is observed, not verified",
+            capsule["last_turn"],
+        )
+        self.assertIn("Last turn: promotion blocked:", text)
+
+    def test_excluded_paths_and_flush_reach_the_section(self) -> None:
+        self.repository.joinpath(".env.local").write_text(
+            "TOKEN=1\n", encoding="utf-8"
+        )
+        self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
+        self.flush_turn("feature/paths")
+
+        capsule, text = self.refresh_capsule("feature/paths")
+        self.assertIn("excluded paths: .env.local", capsule["last_turn"])
+        self.assertIn("buffer flushed", capsule["last_turn"])
+        self.assertIn("Last turn: ", text)
+
+    def test_a_quiet_buffering_turn_replaces_the_report_and_says_nothing(
+        self,
+    ) -> None:
+        self.enable_automatic_promotion()
+        self.resolve_observed_finding()
+        self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
+        self.flush_turn()
+
+        # The next turn only buffers; its report supersedes the flush report,
+        # so a reason already surfaced once is not repeated forever.
+        result = self.run_cli(
+            "turn", "--task-id", "feature/held", "--flush-after", "9", "--json"
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertFalse(json.loads(result.stdout)["flushed"])
+
+        capsule, text = self.refresh_capsule()
+        self.assertIsNone(capsule["last_turn"])
+        self.assertNotIn("Last turn:", text)
+
+    def test_a_stale_report_is_ignored(self) -> None:
+        self.enable_automatic_promotion()
+        self.resolve_observed_finding()
+        self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
+        self.flush_turn()
+
+        report = json.loads(self.report_path().read_text(encoding="utf-8"))
+        report["timestamp"] = "2026-01-01T00:00:00+00:00"
+        self.report_path().write_text(json.dumps(report), encoding="utf-8")
+
+        capsule, text = self.refresh_capsule()
+        self.assertIsNone(capsule["last_turn"])
+        self.assertNotIn("Last turn:", text)
+
+    def test_a_missing_or_malformed_report_never_breaks_refresh(self) -> None:
+        self.start("TASK-NO-REPORT")
+        self.assertFalse(self.report_path().is_file())
+        capsule, text = self.refresh_capsule("TASK-NO-REPORT")
+        self.assertIsNone(capsule["last_turn"])
+        self.assertNotIn("Last turn:", text)
+
+        self.report_path().parent.mkdir(parents=True, exist_ok=True)
+        self.report_path().write_text("{not json", encoding="utf-8")
+        capsule, _ = self.refresh_capsule("TASK-NO-REPORT")
+        self.assertIsNone(capsule["last_turn"])
+
+        # A report whose timestamp cannot be trusted is treated as absent.
+        self.report_path().write_text(
+            json.dumps({"timestamp": "soon", "flushed": True}), encoding="utf-8"
+        )
+        capsule, _ = self.refresh_capsule("TASK-NO-REPORT")
+        self.assertIsNone(capsule["last_turn"])
+
+    def test_an_unwritable_report_degrades_silently(self) -> None:
+        self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
+        with mock.patch.object(
+            context_cli, "atomic_json", side_effect=PermissionError("denied")
+        ):
+            code, stdout, stderr = self.run_main(
+                "turn", "--task-id", "feature/degrade", "--flush", "--json"
+            )
+        # The checkpoint landed; telemetry that could not be written must not
+        # turn it into a failed turn.
+        self.assertEqual(0, code, stderr)
+        self.assertTrue(json.loads(stdout)["flushed"])
+        self.assertFalse(self.report_path().is_file())
+
+
+class MultiMachineContinuityTest(RuntimeHarness):
+    """Continuity when the ignored binding database does not travel with Git.
+
+    The governed record is authoritative in Git, but the compatibility
+    commands resolve it through a machine-local SQLite binding. A second
+    machine or fresh clone therefore holds the task without the binding, and
+    recreating it is rejected as a duplicate. The flush must reconnect to the
+    existing record instead of failing invisibly every turn, and an operator
+    must be able to repair the pointer explicitly with `rebind`.
+    """
+
+    def report_path(self) -> Path:
+        return self.repository / "memory-bank/local/last-turn-report.json"
+
+    def simulate_second_machine(self) -> None:
+        # Git-tracked Brain files stay; the ignored local database does not.
+        (self.repository / "memory-bank/local/context.db").unlink()
+
+    def test_flush_on_a_second_machine_lands_in_the_existing_task(self) -> None:
+        task = self.start("feature/second-machine")
+        self.simulate_second_machine()
+        self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
+
+        result = self.run_cli(
+            "turn", "--task-id", "feature/second-machine", "--flush", "--json"
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["flushed"])
+        # Reconnected, not re-minted: no new record, no provisioning claim.
+        self.assertFalse(payload["provisioned"])
+        self.assertEqual(task["task_uuid"], payload["rebound"])
+        self.assertEqual(
+            1,
+            len(list((self.repository / "project-brain/dynamic/tasks").glob("*.md"))),
+        )
+
+        record = json.loads(
+            self.run_cli(
+                "get", "--task-id", "feature/second-machine", "--json"
+            ).stdout
+        )
+        self.assertEqual(task["task_uuid"], record["task_uuid"])
+        self.assertIn("app.txt", record["files"])
+
+        # The silenced Stop hook cannot show the reconnection, so the report
+        # carries it and the next refresh folds it into the capsule.
+        report = json.loads(self.report_path().read_text(encoding="utf-8"))
+        self.assertEqual(task["task_uuid"], report["rebound"])
+        text = self.run_cli(
+            "refresh", "--query", "cobalt authority",
+            "--task-id", "feature/second-machine", "--ephemeral",
+        )
+        self.assertEqual(0, text.returncode, text.stderr)
+        self.assertIn("binding restored to the existing task", text.stdout)
+
+    def test_an_ordinary_flush_reports_no_rebinding(self) -> None:
+        self.start("feature/plain")
+        self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
+        result = self.run_cli("turn", "--task-id", "feature/plain", "--flush", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIsNone(json.loads(result.stdout)["rebound"])
+        self.assertIsNone(
+            json.loads(self.report_path().read_text(encoding="utf-8"))["rebound"]
+        )
+
+    def test_rebind_restores_the_binding_for_an_explicit_record(self) -> None:
+        task = self.start("TASK-REBIND")
+        self.simulate_second_machine()
+        # Without the binding the compatibility read cannot resolve the task.
+        self.assertNotEqual(
+            0, self.run_cli("get", "--task-id", "TASK-REBIND").returncode
+        )
+
+        result = self.run_cli(
+            "rebind", "--task-id", "TASK-REBIND",
+            "--record", task["task_uuid"], "--json",
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["already_bound"])
+        self.assertEqual(task["task_uuid"], payload["task_uuid"])
+
+        restored = json.loads(
+            self.run_cli("get", "--task-id", "TASK-REBIND", "--json").stdout
+        )
+        self.assertEqual(task["task_uuid"], restored["task_uuid"])
+        # A pointer repair consumes no revision: the record never moved.
+        self.assertEqual(task["revision"], restored["revision"])
+
+    def test_rebind_resolves_the_record_by_task_id_alone(self) -> None:
+        task = self.start("TASK-BY-ID")
+        self.simulate_second_machine()
+        result = self.run_cli("rebind", "--task-id", "TASK-BY-ID", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(task["task_uuid"], json.loads(result.stdout)["task_uuid"])
+
+    def test_rebind_reports_an_intact_binding_instead_of_recreating_it(
+        self,
+    ) -> None:
+        task = self.start("TASK-IDEMPOTENT")
+        result = self.run_cli("rebind", "--task-id", "TASK-IDEMPOTENT", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["already_bound"])
+        self.assertEqual(task["task_uuid"], payload["task_uuid"])
+
+    def test_rebind_refuses_a_missing_record(self) -> None:
+        result = self.run_cli("rebind", "--task-id", "feature/ghost")
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("not found", result.stderr)
+
+    def test_rebind_refuses_a_non_task_record(self) -> None:
+        record = json.loads(
+            self.run_cli(
+                "brain-create", "finding", "--external-id", "FIND-BIND",
+                "--title", "Not a task", "--source", "specs/authority.md",
+                "--json",
+            ).stdout
+        )
+        result = self.run_cli(
+            "rebind", "--task-id", "FIND-BIND", "--record", record["id"]
+        )
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("requires a task record", result.stderr)
+
+    def test_rebind_refuses_to_repoint_one_task_at_another(self) -> None:
+        task = self.start("TASK-A")
+        self.simulate_second_machine()
+        result = self.run_cli(
+            "rebind", "--task-id", "TASK-B", "--record", task["task_uuid"]
+        )
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("belongs to task id", result.stderr)
+
+    def test_rebind_requires_governed_mode(self) -> None:
+        result = self.run_cli("--mode", "lightweight", "rebind", "--task-id", "T-1")
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("requires governed mode", result.stderr)
+
+    def test_a_terminal_task_is_refused_and_the_failed_turn_is_reported(
+        self,
+    ) -> None:
+        task = self.start("feature/finished")
+        complete = self.run_cli(
+            "complete", "--task-id", "feature/finished", "--revision", "1",
+            "--outcome", "Done.", "--verification", "tests", "--json",
+        )
+        self.assertEqual(0, complete.returncode, complete.stderr)
+
+        # Rebinding to a completed record would let flushes mutate history.
+        result = self.run_cli("rebind", "--task-id", "feature/finished")
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("completed", result.stderr)
+
+        # The automated flush hits the same wall — and because the Stop hook
+        # discards its output, the failure must reach the report instead.
+        self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
+        turn = self.run_cli(
+            "turn", "--task-id", "feature/finished", "--flush", "--json"
+        )
+        self.assertNotEqual(0, turn.returncode)
+        report = json.loads(self.report_path().read_text(encoding="utf-8"))
+        self.assertIn(task["task_uuid"], report["error"])
+        self.assertIn("completed", report["error"])
+        self.assertFalse(report["flushed"])
+        # The raw branch argv stays out of the failure report by design.
+        self.assertNotIn("task_id", report)
+
+        other = self.start("TASK-WITNESS")
+        self.assertTrue(other["task_uuid"])
+        text = self.run_cli(
+            "refresh", "--query", "cobalt authority",
+            "--task-id", "TASK-WITNESS", "--ephemeral",
+        )
+        self.assertEqual(0, text.returncode, text.stderr)
+        self.assertIn("Last turn: turn failed:", text.stdout)
+
+
+class AutoCheckpointFieldTest(RuntimeHarness):
+    """The automatic flush reports in its own field, never over the operator's.
+
+    ``progress`` is the operator's narrative — the checkpoint skill writes it
+    and the handoff quotes it. The turn flush used to overwrite it wholesale,
+    so ten quiet turns erased the one account of the work a successor could
+    not reconstruct. The flush now lands in ``auto_checkpoint`` and every
+    rendering shows the manual narrative first with the checkpoint as a
+    labelled supplement.
+    """
+
+    def handoff_state(self) -> str:
+        path = next(
+            (self.repository / "project-brain/control/handoffs").glob("*.md")
+        )
+        metadata, _ = brain.parse_markdown_record(path)
+        return metadata["current_state"]
+
+    def test_manual_progress_survives_ten_automatic_flushes(self) -> None:
+        self.start("TASK-CKPT")
+        result = self.run_cli(
+            "update", "--task-id", "TASK-CKPT", "--revision", "auto",
+            "--progress", "Manual narrative from the checkpoint skill.", "--json",
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+
+        for turn in range(10):
+            self.repository.joinpath("app.txt").write_text(
+                f"work {turn}\n", encoding="utf-8"
+            )
+            flushed = self.run_cli(
+                "turn", "--task-id", "TASK-CKPT", "--flush", "--json"
+            )
+            self.assertEqual(0, flushed.returncode, flushed.stderr)
+            self.assertTrue(json.loads(flushed.stdout)["flushed"])
+
+        task = json.loads(
+            self.run_cli("get", "--task-id", "TASK-CKPT", "--json").stdout
+        )
+        self.assertEqual(
+            "Manual narrative from the checkpoint skill.", task["progress"]
+        )
+        self.assertIn("Auto-checkpoint: 1 turn(s)", task["auto_checkpoint"])
+        # The record carrying the new field still satisfies schema and validator.
+        self.assertEqual(0, self.run_cli("validate").returncode)
+
+    def test_handoff_and_capsule_lead_with_manual_progress(self) -> None:
+        self.start("TASK-CKPT-RENDER")
+        self.run_cli(
+            "update", "--task-id", "TASK-CKPT-RENDER", "--revision", "auto",
+            "--progress", "Manual narrative.", "--json",
+        )
+        self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
+        result = self.run_cli(
+            "turn", "--task-id", "TASK-CKPT-RENDER", "--flush", "--json"
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+
+        state = self.handoff_state()
+        self.assertTrue(state.startswith("Manual narrative."), state)
+        self.assertIn("\nSince checkpoint: Auto-checkpoint: 1 turn(s)", state)
+
+        capsule = json.loads(
+            self.run_cli(
+                "retrieve", "cobalt", "--task-id", "TASK-CKPT-RENDER", "--json"
+            ).stdout
+        )
+        working_progress = capsule["working"]["progress"]
+        self.assertTrue(
+            working_progress.startswith("Manual narrative."), working_progress
+        )
+        self.assertIn("Since checkpoint: Auto-checkpoint:", working_progress)
+
+    def test_a_checkpoint_alone_does_not_pose_as_manual_progress(self) -> None:
+        self.start("TASK-CKPT-ONLY")
+        self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
+        result = self.run_cli(
+            "turn", "--task-id", "TASK-CKPT-ONLY", "--flush", "--json"
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+
+        task = json.loads(
+            self.run_cli("get", "--task-id", "TASK-CKPT-ONLY", "--json").stdout
+        )
+        self.assertEqual("", task["progress"])
+        state = self.handoff_state()
+        # Without manual progress the checkpoint stands under its own
+        # `Auto-checkpoint:` label instead of wearing the operator's words.
+        self.assertTrue(state.startswith("Auto-checkpoint: 1 turn(s)"), state)
+        self.assertNotIn("Since checkpoint:", state)
+
+    def test_a_record_without_a_checkpoint_renders_as_before(self) -> None:
+        self.start("TASK-NO-CKPT")
+        self.run_cli(
+            "update", "--task-id", "TASK-NO-CKPT", "--revision", "auto",
+            "--progress", "Manual only.", "--json",
+        )
+
+        record = json.loads(
+            next(
+                (self.repository / "project-brain/dynamic/tasks").glob("*.md")
+            ).read_text(encoding="utf-8").split("---")[1]
+        )
+        self.assertNotIn("auto_checkpoint", record)
+        self.assertEqual("Manual only.", self.handoff_state())
+        self.assertEqual(0, self.run_cli("validate").returncode)
+
+    def test_only_a_task_may_record_an_auto_checkpoint(self) -> None:
+        record = json.loads(
+            self.run_cli(
+                "brain-create", "finding", "--external-id", "FIND-CKPT",
+                "--title", "Not a task", "--source", "specs/authority.md", "--json",
+            ).stdout
+        )
+        with self.assertRaises(brain.BrainError):
+            brain.update_record(
+                self.repository,
+                record["id"],
+                expected_revision=1,
+                progress=None,
+                next_steps=[],
+                files=[],
+                sources=[],
+                actor=record["owner"],
+                auto_checkpoint="Auto-checkpoint: forged onto a finding",
+            )
+
+        # A forged field written straight to disk is caught on the next read.
+        path = next(
+            (self.repository / "project-brain/dynamic/findings").glob("*.md")
+        )
+        metadata, body = brain.parse_markdown_record(path)
+        metadata["auto_checkpoint"] = "Auto-checkpoint: forged"
+        path.write_text(
+            brain.render_markdown_record(metadata, body), encoding="utf-8"
+        )
+        self.assertEqual(1, self.run_cli("validate").returncode)
 
 
 class ExportBundleTest(RuntimeHarness):

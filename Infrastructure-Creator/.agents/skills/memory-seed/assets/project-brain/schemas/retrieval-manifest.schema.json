@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "created_at", "query", "task_id",
+    "task_revision", "filters", "selected", "excluded", "token_estimates",
+    "provider", "escalation_reason"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "id": {"type": "string", "format": "uuid"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "query": {"type": "string", "minLength": 1},
+    "task_id": {"type": "string", "format": "uuid"},
+    "task_revision": {"type": "integer", "minimum": 1},
+    "filters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["privacy", "owners", "authority", "freshness", "active_only"],
+      "properties": {
+        "privacy": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "owners": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "authority": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "freshness": {"type": "boolean"},
+        "active_only": {"type": "boolean"}
+      }
+    },
+    "selected": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "category", "estimated_tokens", "source_hash"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "category": {"enum": ["policy", "handoff", "durable", "dynamic", "evidence"]},
+          "estimated_tokens": {"type": "integer", "minimum": 1},
+          "source_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
+      }
+    },
+    "excluded": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "reason"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "reason": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "token_estimates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy", "handoff", "durable", "dynamic", "evidence", "total", "target", "hard"],
+      "properties": {
+        "policy": {"type": "integer", "minimum": 0},
+        "handoff": {"type": "integer", "minimum": 0},
+        "durable": {"type": "integer", "minimum": 0},
+        "dynamic": {"type": "integer", "minimum": 0},
+        "evidence": {"type": "integer", "minimum": 0},
+        "total": {"type": "integer", "minimum": 0, "maximum": 12000},
+        "target": {"const": 8000},
+        "hard": {"const": 12000}
+      }
+    },
+    "provider": {"type": "string", "minLength": 1},
+    "escalation_reason": {"type": ["string", "null"]}
+  }
+}

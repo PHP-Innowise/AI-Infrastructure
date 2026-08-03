@@ -11,7 +11,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 from unittest import mock
@@ -340,6 +340,71 @@ class ContextEngineTest(unittest.TestCase):
                     [expected_path],
                     [item["path"] for item in json.loads(searched.stdout)["documents"]],
                 )
+
+    def test_task_epics_specifications_are_not_indexed(self) -> None:
+        # Task/ holds client product specifications: foreign prose that
+        # competed with the repository's own documents in BM25 ranking.
+        self.repository.joinpath("Task/Epics").mkdir(parents=True)
+        self.repository.joinpath("Task/Epics/Epic-01.md").write_text(
+            "# Epic 01\n\nThe athlete training platform vermilion feature.\n",
+            encoding="utf-8",
+        )
+        self.repository.joinpath("specs/kept.md").write_text(
+            "# Kept\n\nThe chartreuse rule is ours.\n", encoding="utf-8"
+        )
+
+        indexed = self.run_context("index", "--json")
+        self.assertEqual(0, indexed.returncode, indexed.stderr)
+
+        connection = sqlite3.connect(self.repository / "memory-bank/local/context.db")
+        task_rows = connection.execute(
+            "SELECT COUNT(*) FROM documents WHERE path LIKE 'Task/%'"
+        ).fetchone()[0]
+        connection.close()
+        self.assertEqual(0, task_rows)
+        searched = self.run_context("search", "vermilion", "--json")
+        self.assertEqual([], json.loads(searched.stdout)["documents"])
+
+    def test_distill_capsule_query_prefers_rare_terms_from_the_prompt_tail(
+        self,
+    ) -> None:
+        # The old hook kept the first 24 words, so a long prompt whose subject
+        # arrives at the end retrieved on its preamble. Rarity in the index
+        # must decide now: unknown junk and corpus-common words drop out.
+        for index in range(3):
+            self.repository.joinpath(f"specs/common-{index}.md").write_text(
+                f"# Common {index}\n\nThe shared procedure notes, part {index}.\n",
+                encoding="utf-8",
+            )
+        self.repository.joinpath("specs/currency.md").write_text(
+            "# Currency\n\nAmounts are stored in integer zorkmids.\n",
+            encoding="utf-8",
+        )
+        connection = CONTEXT.connect(self.repository / "memory-bank/local/context.db")
+        try:
+            CONTEXT.index_repository(connection, self.repository)
+            preamble = " ".join(f"zzjunk{index}" for index in range(30))
+            distilled = CONTEXT.distill_capsule_query(
+                connection, f"{preamble} the procedure for zorkmids"
+            )
+        finally:
+            connection.close()
+        self.assertIn("zorkmids", distilled.split())
+        self.assertNotIn("zzjunk0", distilled.split())
+        # "procedure" appears in three of five documents: corpus-common noise.
+        self.assertNotIn("procedure", distilled.split())
+
+    def test_refresh_reports_phase_durations(self) -> None:
+        self.repository.joinpath("specs/timing.md").write_text(
+            "# Timing\n\nThe cerulean measurement rule.\n", encoding="utf-8"
+        )
+        result = self.run_context("refresh", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        phases = json.loads(result.stdout)["phases"]
+        for phase in ("stat", "index", "retrieval"):
+            self.assertIn(phase, phases)
+            self.assertIsInstance(phases[phase], (int, float))
+            self.assertGreaterEqual(phases[phase], 0.0)
 
     def test_index_skips_git_ignored_sources_but_keeps_tracked_sources(self) -> None:
         subprocess.run(
@@ -695,6 +760,7 @@ class ContextEngineTest(unittest.TestCase):
                 "task_id": "BAUMAS-133",
                 "goal": "Invalidate other password sessions.",
                 "progress": "Two-session regression passes.",
+                "auto_checkpoint": "",
                 "next_steps": ["Verify remember-me invalidation."],
                 "files": [
                     "src/GraphQL/Resolver/ChangePasswordResolver.php",
@@ -800,7 +866,8 @@ class ContextEngineTest(unittest.TestCase):
             )
 
         results = self.run_concurrently(
-            "SELECT progress, next_steps, files, sources FROM working_tasks",
+            "SELECT progress, auto_checkpoint, next_steps, files, sources"
+            " FROM working_tasks",
             update,
         )
         self.assertTrue(
@@ -1379,6 +1446,7 @@ class ContextEngineTest(unittest.TestCase):
                 "working_next_steps": 2,
                 "working_sources": 2,
                 "working_progress_characters": 0,
+                "last_turn_characters": 0,
             },
             payload["omitted"],
         )
@@ -1663,6 +1731,159 @@ class ContextEngineTest(unittest.TestCase):
             ):
                 CONTEXT.enforce_capsule_budget(capsule)
 
+    def test_capsule_budget_drops_last_turn_before_retrieved_layers(self) -> None:
+        # The previous turn's report is derived telemetry the next turn will
+        # rewrite, so it must yield before any retrieved knowledge does.
+        section = "promotion blocked: authority is observed, not verified"
+        capsule = {
+            "query": "capsule", "task_id": "CAPSULE-TURN",
+            "working": {
+                "task_id": "CAPSULE-TURN", "goal": "Preserve the goal.",
+                "progress": "Latest outcome.", "next_steps": ["Run verification."],
+                "files": ["src/Required.php"], "sources": ["specs/required.md"],
+            },
+            "procedural": [],
+            "semantic": [{
+                "path": "specs/kept.md", "layer": "semantic", "kind": "spec",
+                "title": "Kept", "snippet": "Retrieved knowledge stays.",
+            }],
+            "episodic": [{
+                "id": 1, "layer": "episodic", "summary": "Prior work",
+                "outcome": "Kept as well.", "files": [],
+                "verification": ["Verified"], "sources": [],
+                "created_at": "2026-07-29T00:00:00+00:00",
+            }],
+            "warnings": [],
+            "omitted": {
+                "working_files": 0,
+                "working_next_steps": 0,
+                "working_sources": 0,
+                "working_progress_characters": 0,
+                "last_turn_characters": 0,
+            },
+            "last_turn": section,
+        }
+        limit = CONTEXT.capsule_character_count(capsule) - 10
+
+        with mock.patch.object(CONTEXT, "CAPSULE_CHARACTER_LIMIT", limit):
+            compacted = CONTEXT.enforce_capsule_budget(capsule)
+
+        self.assertIsNone(compacted["last_turn"])
+        self.assertEqual(len(section), compacted["omitted"]["last_turn_characters"])
+        self.assertEqual(1, len(compacted["episodic"]))
+        self.assertEqual(1, len(compacted["semantic"]))
+        self.assertLessEqual(CONTEXT.capsule_character_count(compacted), limit)
+
+    def write_last_turn_report(self, **overrides: object) -> None:
+        report = {
+            "schema_version": 1,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "task_id": "CAPSULE-TURN",
+            "flushed": True,
+            "files": 2,
+            "files_omitted": 0,
+            "pending": 0,
+            "provisioned": False,
+            "closed_on_merge": [],
+            "promoted": [],
+            "promotion_failed": [],
+            "promotion_blocked": [
+                {
+                    "record_id": "0" * 8,
+                    "reason": "authority is observed, not verified",
+                }
+            ],
+            "promotion_skipped": 0,
+            "excluded_paths": [],
+            "archived": 0,
+            "compaction_errors": [],
+            **overrides,
+        }
+        path = CONTEXT.last_turn_report_path(self.repository)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(report), encoding="utf-8")
+
+    def test_capsule_with_last_turn_report_stays_within_budget(self) -> None:
+        self.write_last_turn_report()
+        self.assertEqual(0, self.run_context(
+            "start", "--task-id", "TURN-SMALL", "--goal",
+            "Carry the last turn report.",
+        ).returncode)
+
+        small = self.run_context(
+            "context", "capsule", "--task-id", "TURN-SMALL", "--json"
+        )
+        self.assertEqual(0, small.returncode, small.stderr)
+        # Within budget the section rides along with its mandatory reason.
+        self.assertIn(
+            "promotion blocked: authority is observed, not verified",
+            json.loads(small.stdout)["last_turn"],
+        )
+
+        long_progress = "verified progress " * 700
+        self.assertEqual(0, self.run_context(
+            "start", "--task-id", "TURN-LARGE", "--goal",
+            "Overflow the capsule budget.",
+        ).returncode)
+        self.assertEqual(0, self.run_context(
+            "update", "--task-id", "TURN-LARGE", "--progress", long_progress
+        ).returncode)
+
+        large = self.run_context(
+            "context", "capsule", "--task-id", "TURN-LARGE", "--json"
+        )
+        self.assertEqual(0, large.returncode, large.stderr)
+        self.assertLessEqual(
+            len(large.stdout.rstrip("\n")), CONTEXT.CAPSULE_CHARACTER_LIMIT
+        )
+        payload = json.loads(large.stdout)
+        # The section yielded first; the sacrifice is reported, not silent.
+        self.assertIsNone(payload["last_turn"])
+        self.assertGreater(payload["omitted"]["last_turn_characters"], 0)
+
+    def test_last_turn_report_is_trusted_only_within_its_window(self) -> None:
+        now = datetime.now(timezone.utc)
+        for timestamp, expected in (
+            (now.isoformat(), True),
+            ((now - timedelta(hours=23)).isoformat(), True),
+            ((now - timedelta(hours=25)).isoformat(), False),
+            ((now + timedelta(hours=2)).isoformat(), False),
+            ("not-a-timestamp", False),
+        ):
+            with self.subTest(timestamp=timestamp):
+                self.write_last_turn_report(timestamp=timestamp)
+                report = CONTEXT.load_last_turn_report(self.repository)
+                self.assertEqual(expected, report is not None)
+
+    def test_last_turn_summary_leads_with_problems_and_stays_bounded(self) -> None:
+        self.write_last_turn_report(
+            excluded_paths=[f"secrets/{index}/" + "x" * 220 for index in range(12)],
+            compaction_errors=["archive directory is read-only"],
+        )
+        summary = CONTEXT.last_turn_section(self.repository)
+
+        # Problems first: the truncation tail may only ever cut routine items.
+        self.assertTrue(
+            summary.startswith(
+                "promotion blocked: authority is observed, not verified"
+            ),
+            summary,
+        )
+        self.assertIn("compaction failed: archive directory is read-only", summary)
+        self.assertLessEqual(
+            len(summary), CONTEXT.LAST_TURN_SECTION_CHARACTER_LIMIT
+        )
+        self.assertTrue(summary.endswith("…"))
+
+    def test_a_turn_that_only_buffers_produces_no_section(self) -> None:
+        self.write_last_turn_report(
+            flushed=False,
+            files=1,
+            pending=2,
+            promotion_blocked=[],
+        )
+        self.assertIsNone(CONTEXT.last_turn_section(self.repository))
+
     def test_context_index_failure_returns_working_only_without_stale_sources(
         self,
     ) -> None:
@@ -1814,6 +2035,82 @@ class ContextEngineTest(unittest.TestCase):
 
         self.assertNotEqual(0, recorded.returncode)
         self.assertIn("Episode file must not be empty", recorded.stderr)
+
+    def test_turn_flush_keeps_manual_progress_in_lightweight_mode(self) -> None:
+        self.run_context(
+            "start", "--task-id", "TASK-CKPT",
+            "--goal", "Keep the manual narrative.",
+        )
+        updated = self.run_context(
+            "update", "--task-id", "TASK-CKPT",
+            "--progress", "Manual narrative.",
+        )
+        self.assertEqual(0, updated.returncode, updated.stderr)
+
+        self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
+        result = self.run_context(
+            "turn", "--task-id", "TASK-CKPT", "--flush", "--json"
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertTrue(json.loads(result.stdout)["flushed"])
+
+        # The flush lands in its own field; the operator's words survive it.
+        task = json.loads(
+            self.run_context("get", "--task-id", "TASK-CKPT", "--json").stdout
+        )
+        self.assertEqual("Manual narrative.", task["progress"])
+        self.assertIn("Auto-checkpoint: 1 turn(s)", task["auto_checkpoint"])
+
+        # The capsule leads with the manual narrative and labels the
+        # checkpoint as a supplement rather than blending the two silently.
+        payload = json.loads(
+            self.run_context(
+                "context", "manual narrative", "--task-id", "TASK-CKPT", "--json"
+            ).stdout
+        )
+        progress = payload["working"]["progress"]
+        self.assertTrue(progress.startswith("Manual narrative."), progress)
+        self.assertIn("Since checkpoint: Auto-checkpoint:", progress)
+
+    def test_working_table_written_before_checkpoints_is_migrated_in_place(
+        self,
+    ) -> None:
+        database = self.repository / "memory-bank/local/context.db"
+        database.parent.mkdir(parents=True, exist_ok=True)
+        legacy = sqlite3.connect(database)
+        legacy.execute(
+            """
+            CREATE TABLE working_tasks(
+                task_id TEXT PRIMARY KEY,
+                goal TEXT NOT NULL,
+                progress TEXT NOT NULL,
+                next_steps TEXT NOT NULL,
+                files TEXT NOT NULL,
+                sources TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        legacy.execute(
+            "INSERT INTO working_tasks VALUES (?, ?, ?, '[]', '[]', '[]', ?, ?)",
+            (
+                "TASK-LEGACY",
+                "Predates automatic checkpoints.",
+                "Manual narrative.",
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+        legacy.commit()
+        legacy.close()
+
+        # An old row asserts "no checkpoint yet" and must read back that way.
+        task = json.loads(
+            self.run_context("get", "--task-id", "TASK-LEGACY", "--json").stdout
+        )
+        self.assertEqual("Manual narrative.", task["progress"])
+        self.assertEqual("", task["auto_checkpoint"])
 
     def test_nonexistent_root_is_rejected_without_creating_it(self) -> None:
         missing = self.repository / "missing"

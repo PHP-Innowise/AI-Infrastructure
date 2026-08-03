@@ -154,6 +154,10 @@
     "authorized_owners": {
       "$ref": "#/$defs/stringList"
     },
+    "auto_checkpoint": {
+      "minLength": 1,
+      "type": "string"
+    },
     "confidence": {
       "maximum": 1,
       "minimum": 0,

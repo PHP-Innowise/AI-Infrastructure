@@ -312,7 +312,7 @@ The indexer discovers eligible files from fixed repository patterns, including:
 - root `README.md`;
 - `specs/**/*.md` and `docs/**/*.md`;
 - active `memory-bank/chunks/*.md`;
-- `tasks/**/*.md` and `Task/Epics/**/*.md`;
+- `tasks/**/*.md`;
 - `CHANGELOG.md`;
 - eligible active Project Brain dynamic records and handoffs.
 
@@ -435,9 +435,14 @@ Authority expresses the evidentiary quality of a record:
 The shipped configuration allows `observed` and `verified`, so inferred records
 remain governed but are not selected by normal indexing/retrieval.
 
-Confidence is a number from `0` to `1`. The schema validates it, but the current
-retrieval code does not threshold or rank by confidence. Do not promise that a
-low-confidence record will be filtered automatically.
+Confidence is a number from `0` to `1`. Governed retrieval ranks with it: each
+candidate's BM25 relevance is scaled by its authority (`verified` outranks
+`observed`), its declared confidence, and a recency decay over the record's
+`updated_at`. Every multiplier is floored, so metadata reorders results but
+never hides a lexical match, and repository documents without a provenance
+timestamp are not decayed. Ranking is the only effect — no threshold excludes
+a low-confidence record automatically, so do not promise that one will be
+filtered out.
 
 Freshness has three checks:
 
@@ -642,9 +647,14 @@ the proposer cannot review their own proposal. Apply rechecks every source
 binding in both modes, so a changed source revision invalidates the proposal
 rather than silently promoting changed content.
 
-Application allocates a Memory Bank ID, writes a chunk, updates the index and
-counter, validates the bank, and updates the proposal. These writes are
-snapshotted and rolled back together on failure.
+Application mints a conflict-free Memory Bank ID (`MEM-YYYYMMDD-xxxxxxxx`,
+the promotion date plus eight hex characters of the source record's UUID),
+writes a chunk, regenerates the index from chunk frontmatter, validates the
+bank, and updates the proposal. These writes are snapshotted and rolled back
+together on failure. No shared counter is involved: the legacy
+`.memory-counter` file is neither read nor written, so concurrent promotions
+on different machines or branches cannot collide, and `context.py
+reindex-bank` rebuilds the index after any merge.
 
 Promotion is appropriate for a reusable consequence, not:
 
@@ -813,6 +823,14 @@ The split is deliberate. At prompt time nothing has happened yet, so there is
 no delta to record; a request is the right moment to *read*. The delta exists
 at the end of a turn, which is the right moment to *write*.
 
+Cursor has no `UserPromptSubmit` equivalent, so its read half is delivered
+differently: the Cursor mirrors of the `stop` and `sessionStart` hooks render
+the freshest capsule into the `alwaysApply` rule
+`.cursor/rules/working-memory.mdc` - ignored local state, one turn stale by
+design and labeled as such ("as of end of previous turn"). See
+`docs/TOOL-INTEGRATIONS.md` for the mechanism and its MIRROR_RULES
+declaration.
+
 The read hook runs `refresh`, which re-indexes procedural, semantic, and
 episodic memory in one incremental pass and reports each layer as `updated` or
 `failed`:
@@ -820,7 +838,7 @@ episodic memory in one incremental pass and reports each layer as `updated` or
 ```text
 Procedural  AGENTS.md, CLAUDE.md, mirrored edition skills
 Semantic    README, docs, specs, active Memory Bank chunks, task documents,
-            capability epics, eligible Brain records and handoffs
+            eligible Brain records and handoffs
 Episodic    CHANGELOG.md, plus local episodes at query time
 ```
 
@@ -834,6 +852,14 @@ than silently narrowing the result. When the hook also has a task — from
 `CONTEXT_TASK_ID` or the current branch — the same process assembles a bounded
 capsule with `--ephemeral`, avoiding the second index pass a separate
 `retrieve` would run. A capsule failure is a warning; the layer refresh stands.
+
+The hook passes the prompt as-is; `refresh` distills it into the retrieval
+query itself. The whole prompt is tokenized, terms the index has never seen or
+that match most of the corpus are dropped, and the rarest terms fill a bounded
+query — so a long request whose actual subject arrives at the end no longer
+retrieves on its preamble. The refresh report also carries per-phase wall-clock
+durations (`stat`, `index`, `retrieval`) so an operator can see which side of
+the work is approaching the hook budget.
 
 The capsule is retrieved context, not authority: the ordinary hierarchy still
 applies, and a capsule entry never outranks the source it summarizes.

@@ -1,6 +1,6 @@
 ---
 {
-  "id": "MEM-0000",
+  "id": "MEM-YYYYMMDD-xxxxxxxx",
   "title": "Replace with one durable concept",
   "type": "convention",
   "status": "needs-review",

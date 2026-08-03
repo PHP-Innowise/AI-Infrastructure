@@ -408,11 +408,50 @@ from the branch name and recording that provenance in the goal itself. Buffered
 turns alone provision nothing, so visiting a branch mints no record. An
 existing task is never overwritten: a goal written by an operator survives.
 
+When the governed record already exists but the machine-local binding does not
+— a second machine or a fresh clone, where `context.db` never travels with Git
+— the flush restores the binding to the existing record instead of failing on
+a duplicate. The turn result and the last-turn report carry the reconnected
+record UUID in `rebound`, and the next capsule's `Last turn` section states
+`binding restored to the existing task`. A turn that fails outright also
+writes the report, with the error text, so the next capsule surfaces
+`turn failed: ...` rather than losing the failure with the silenced output.
+
 Buffered turns are deleted only after the authoritative write lands, so an
 interrupted flush replays rather than loses the buffer.
 
 This is the command the turn-end hook runs. Side effects: the ignored SQLite
 buffer, plus one task update per flush.
+
+### `rebind`
+
+```bash
+python3 memory-bank/scripts/context.py rebind \
+  --task-id ID \
+  [--record UUID] \
+  [--json]
+```
+
+Governed mode only. Restores the machine-local SQLite binding for a governed
+task that already exists in Git — the recovery for a second machine, a fresh
+clone, or a deleted `context.db`. This is a pointer repair, not a mutation:
+the Brain record is never touched, no revision is consumed, and no owner
+check applies.
+
+`--record` names the task record UUID explicitly; without it the record is
+resolved by the task ID. Either way the record must exist, be of type `task`,
+be non-terminal, and carry `--task-id` as its own `external_id` — the command
+can only reconnect a task to its own identity, never repoint one task at
+another. An intact identical binding is reported (`already_bound`) rather
+than recreated; a binding that points at a different record is refused.
+
+The automated flush performs the same restoration on its own (see `turn`), so
+`rebind` is needed when you want the compatibility commands (`get`, `update`,
+`complete`, ...) to resolve before any flush has happened, or when you want
+the reconnection reviewed explicitly.
+
+Side effects: one row in the local `task_bindings` table plus its
+compatibility pointer. Nothing under `project-brain/` changes.
 
 ### `get`
 
@@ -569,7 +608,7 @@ python3 memory-bank/scripts/context.py status [--json]
 Reports local database counts and selected mode/authority. In governed mode,
 `working` counts local task bindings, not all active Brain task files. A zero
 count may mean the current machine has no binding even when Git contains active
-tasks.
+tasks; `rebind` restores such a binding.
 
 Side effects: creates or migrates the local database schema if necessary.
 
@@ -667,15 +706,36 @@ python3 memory-bank/scripts/context.py promote-apply \
 ```
 
 Requires an approved reviewed proposal. At apply time it rechecks each exact
-source type, path, UUID, and revision. It then allocates the next Memory Bank
-ID, writes one chunk, updates `memory-bank/INDEX.md` and
-`.memory-counter`, validates the bank, and marks the promotion applied with its
-destination ID and revision.
+source type, path, UUID, and revision. It then mints a conflict-free Memory
+Bank ID — `MEM-YYYYMMDD-xxxxxxxx`, the promotion date plus eight hex
+characters of the source record's UUID — writes one chunk, regenerates
+`memory-bank/INDEX.md` from chunk frontmatter, validates the bank, and marks
+the promotion applied with its destination ID and revision. Because no shared
+counter is involved, promotions on different machines or branches cannot
+allocate the same ID; merging two branches reduces to a union of chunk files
+followed by `reindex-bank`. The legacy `.memory-counter` file is neither read
+nor written (it may remain on disk; the validator ignores it), and legacy
+`MEM-0001`-style chunks keep their IDs.
 
 All promotion writes are snapshotted and restored on failure. The generated
 chunk currently uses the runtime's fixed promoted-memory defaults; use the
 normal Memory Bank capture workflow when a proposal requires more nuanced
 categorization or an update/supersession decision.
+
+### `reindex-bank`
+
+```bash
+python3 memory-bank/scripts/context.py reindex-bank [--json]
+```
+
+Regenerates `memory-bank/INDEX.md` deterministically from chunk frontmatter:
+rows are sorted by ID (legacy numeric IDs first in numeric order, then
+date-based IDs), and any prose above the table header is preserved. The
+command is idempotent — rerunning it against unchanged chunks rewrites
+nothing (`"changed": false`) — and reconstructs a deleted or conflicted index
+in full. Run it after manually creating or updating a chunk, and after a
+merge that brought chunk files from another branch. Promotion applies it
+automatically.
 
 ### `export`
 
@@ -796,11 +856,16 @@ Symptom: `Working task not found` even though a Brain task exists in Git.
 
 The governed compatibility commands resolve through the machine-local SQLite
 binding. Pulling Project Brain files on another machine does not recreate that
-binding automatically. First verify the task with repository records and
-`validate`; then either continue through the Project Brain record workflow or
-perform an explicitly reviewed rebind/recovery procedure. Do not run `start`
-with the same external ID: duplicate Brain records are rejected, and deleting
-the database does not remove the shared task.
+binding by itself. Two supported recoveries exist:
+
+1. `rebind --task-id ID [--record UUID]` restores the binding explicitly after
+   you verify the task with repository records and `validate`.
+2. Doing nothing: the first automated flush (`turn`) reconnects to the
+   existing record on its own and reports the fact in the turn result, the
+   last-turn report, and the next capsule's `Last turn` section.
+
+Do not run `start` with the same external ID: duplicate Brain records are
+rejected, and deleting the database does not remove the shared task.
 
 ### Stale source fingerprint
 
@@ -844,12 +909,14 @@ mutation blindly.
 Stop all processes using the database. Preserve a copy if forensic recovery
 matters, then recreate the ignored database by running `index`.
 
-Rebuildable: document and metadata indexes.
+Rebuildable: document and metadata indexes. Governed compatibility bindings
+are restorable from the Git-tracked records with `rebind` (or by the next
+automated flush; see
+[Missing governed task binding](#missing-governed-task-binding)).
 
-Not rebuildable from canonical sources: lightweight working tasks, local
-episodes, and governed compatibility bindings. Project Brain records,
-handoffs, manifests, promotions, and Memory Bank chunks remain in Git, but the
-CLI does not automatically reconstruct lost bindings.
+Not rebuildable from canonical sources: lightweight working tasks and local
+episodes. Project Brain records, handoffs, manifests, promotions, and Memory
+Bank chunks remain in Git.
 
 ## Maintenance
 
@@ -890,14 +957,16 @@ For governed continuity:
 3. Set the same authorized owner identity.
 4. Run `validate`, `parity`, Memory Bank validation, and `index`.
 5. Read the task/handoff and verify cited canonical sources before continuing.
-6. Account for the local-binding limitation: `context.db` is ignored and is not
-   transferred. The compatibility task commands require a local binding and do
-   not automatically rebuild it from Git.
+6. Restore the local binding: `context.db` is ignored and is not transferred,
+   and the compatibility task commands resolve through it. Run
+   `rebind --task-id ID` (optionally with `--record UUID` for an explicitly
+   reviewed target) — or simply keep working: the first automated flush
+   reconnects to the existing record on its own and reports that it did.
 
 Do not copy `context.db` between machines as shared authority. Besides being
 ignored and environment-specific, it may contain local-only tasks and episodes.
-If seamless compatibility-command rebinding is required, add a reviewed runtime
-capability rather than relying on undocumented database copying.
+`rebind` rebuilds everything the governed workflow needs from the Git-tracked
+record.
 
 Lightweight work has no guaranteed another-machine continuity. Export its
 verified outcome into an appropriate canonical task document, specification,

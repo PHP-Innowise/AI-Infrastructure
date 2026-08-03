@@ -1,0 +1,14 @@
+{
+  "enabled": false,
+  "metadata_only": true,
+  "prohibited_fields": [
+    "prompt",
+    "response",
+    "source_body",
+    "tool_payload",
+    "secret",
+    "customer_data",
+    "raw_log"
+  ],
+  "schema": "../schemas/token-usage-event.schema.json"
+}

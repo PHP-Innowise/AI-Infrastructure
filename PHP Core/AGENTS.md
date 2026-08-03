@@ -23,7 +23,7 @@ This policy is shared across editions. The same accelerator is mirrored for **Cl
 - MUST place temporary task docs in `tasks/TASK-{N}/`.
 - MUST place living specs in `specs/`.
 - MUST NOT create unprefixed markdown files in `tasks/` or `specs/`, except `README.md`, `CHANGELOG.md`, and `MANIFEST.md`.
-- MUST name shared memory chunks `MEM-{N}-{slug}.md` with a zero-padded identifier from `memory-bank/.memory-counter`.
+- MUST name shared memory chunks `MEM-YYYYMMDD-xxxxxxxx-{slug}.md` (date plus eight hex characters); legacy zero-padded `MEM-{N}-{slug}.md` chunks keep their names. The retired `memory-bank/.memory-counter` is not an identifier source.
 
 ## Agent Behavior
 
@@ -137,7 +137,7 @@ This policy is shared across editions. The same accelerator is mirrored for **Cl
 - MUST apply promotion only after explicit human review; agents may propose but
   MUST NOT self-approve. Approved application records source and destination revisions.
 - MUST keep transient plans, unfinished reasoning, and command output out of both shared stores.
-- MUST read `memory-bank/.memory-counter` before creating a chunk, increment it only after choosing the next unused identifier, and update `memory-bank/INDEX.md` in the same change.
+- MUST mint each new chunk ID as `MEM-YYYYMMDD-xxxxxxxx` (today's UTC date plus eight lowercase hex characters) and regenerate `memory-bank/INDEX.md` with `python3 memory-bank/scripts/context.py reindex-bank` instead of hand-editing index rows or touching the retired `.memory-counter`.
 - MUST keep each chunk cohesive, source-backed, dated, tagged, scoped, and explicit about verification status.
 - MUST update an existing chunk when the same concept changes; MUST NOT create near-duplicate memories.
 - MUST mark contradicted chunks `superseded` and link their replacement. MUST NOT silently preserve stale instructions as active memory.
