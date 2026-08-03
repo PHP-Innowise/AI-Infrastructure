@@ -49,7 +49,7 @@ AGENTS.md                # Shared, enforceable policy (all tools)
 .agents/skills/          # Codex skills (shared .agents convention)
 .codex/                  # Codex config.toml, hooks.json, hooks/, docs
 
-Task/                    # Product/domain planning material and design references
+Task/                    # Product/domain planning material and design references (not a retrieval source)
 tasks/                   # Temporary task documentation
 specs/                   # Permanent living specifications
 memory-bank/             # Indexed durable cross-session project memory

@@ -68,7 +68,7 @@ Any file created by this skill MUST be prefixed with `researcher-`:
 - Not verified: [...]
 
 ## Sources
-- [Title](url) - accessed [date]
+- [Title] ([URL]) - accessed [date]
 ```
 
 ## Guardrails

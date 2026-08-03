@@ -328,7 +328,9 @@ complete guide.
 - Within one edition, mirror supported skill, agent, and command changes
   across `.claude/`, `.cursor/`, `.agents/`, and `.codex/`.
 - Record the change in the edition's `CHANGELOG.md` and run its `DOD.md`
-  verification.
+  verification. Changes to the shared core (the memory/context core,
+  Project Brain, hooks, mirror machinery, root `scripts/`) are recorded in
+  the root `CHANGELOG.md` instead; CI enforces this on pull requests.
 
 For stack-specific details, open the selected edition's README. For its
 durable memory, open the corresponding guide and then that edition's

@@ -1,0 +1,10 @@
+# Allowlist for scripts/check_links.py (fnmatch patterns, one per line).
+# A broken link is suppressed when a pattern matches the raw link target
+# or the repo-relative resolved path. Keep this list minimal.
+#
+# Task/ holds client-owned specification material (owner decision: content
+# must not be edited or deleted by automation). Its documents reference
+# companion directories (e.g. Task/01_Context/, Task/00_Meta/) that the
+# client has not provided in this repository, so links resolving into
+# Task/ are exempt rather than "fixed" by rewriting client documents.
+*/Task/*

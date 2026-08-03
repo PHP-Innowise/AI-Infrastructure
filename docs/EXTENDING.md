@@ -234,7 +234,9 @@ to silence drift you do not want to fix.
   safety, or recovery changes.
 - Validate headings, links, code fences, and Markdown syntax for changed docs.
 - Update the owning accelerator's `CHANGELOG.md` when release notes or
-  generator behavior changes.
+  generator behavior changes; changes to the shared core (memory/context
+  core, Project Brain, hooks, mirror machinery, root `scripts/`) belong in
+  the root `CHANGELOG.md`, which CI enforces on pull requests.
 
 For generated targets, run Infrastructure-Creator's bundled structural gate:
 
@@ -263,7 +265,8 @@ Choose the DOD tier that matches the change:
 Report every command as pass, fail, or `N/A - tooling not configured`. Do not
 install missing tooling without approval, and do not claim success while a
 relevant validator fails. Record user-facing or release-relevant changes in
-the affected `CHANGELOG.md`.
+the affected `CHANGELOG.md` (the root one when the change is to the shared
+core).
 
 ## Downstream Customization and Upgrades
 
