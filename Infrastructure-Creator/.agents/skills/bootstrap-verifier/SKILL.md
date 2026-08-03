@@ -1,23 +1,23 @@
 ---
 name: bootstrap-verifier
-description: Run the final QA gate for a freshly generated accelerator before infra-generate is allowed to report success - validates frontmatter across every generated skill/agent/command, checks every cross-reference resolves to a real generated skill, checks every generated hook's syntax and executable bit, runs the seeded memory-bank/scripts/validate.py, and scans for leftover template placeholders. Takes a required target-project-path argument. Use as the last step of infra-generate, after skill-flow-composer. Triggers on "verify the generated accelerator", "bootstrap-verifier", "run the QA gate", "check what infra-generate produced".
+description: Run the final QA gate for a freshly generated accelerator before infra-generate is allowed to report success - validates frontmatter and cross-references across every generated skill/agent/command, every generated hook's syntax/executable bit and wiring, the seeded memory-bank validator, the context-brain runtime, the .infra-manifest.json upgrade contract, and leftover template placeholders. Takes a required target-project-path argument. Use as the last step of infra-generate or infra-update. Triggers on "verify the generated accelerator", "bootstrap-verifier", "run the QA gate", "check what infra-generate produced".
 phase: verification
 flow-next: null
 flow-alternatives: []
-related: [infra-generate, skill-forge, agent-forge, command-forge, hook-forge, memory-seed, skill-flow-composer]
+related: [infra-generate, infra-update, skill-forge, agent-forge, command-forge, hook-forge, memory-seed, skill-flow-composer]
 ---
 
 # Bootstrap Verifier
 
 ## Overview
 
-`bootstrap-verifier` is the last step of `infra-generate`. It mechanically checks that the generated accelerator is internally consistent and immediately usable, for the selected edition(s) only. A failed run means generation is not done - it must be fixed and re-run before success is reported.
+`bootstrap-verifier` is the last step of `infra-generate` and of `infra-update`. It mechanically checks that the generated accelerator is internally consistent and immediately usable, for the selected edition(s) only. A failed run means generation is not done - it must be fixed and re-run before success is reported.
 
 It uses the bundled `scripts/validate_generated.py` (dependency-free) plus targeted manual checks.
 
 ## Generated File Naming Convention (MANDATORY)
 
-Writes a report to `tasks/TASK-{N}/bootstrap-verifier-report.md`. Does not write into the target.
+Writes a report to `tasks/TASK-{N}/bootstrap-verifier-report.md`. Does not write into the target, with two sanctioned exceptions: safe auto-fixes (e.g. restoring an executable bit) and the manifest hash refresh those auto-fixes may require (recipe below).
 
 ## Process
 
@@ -26,15 +26,46 @@ Writes a report to `tasks/TASK-{N}/bootstrap-verifier-report.md`. Does not write
    - Every selected edition root exists and every unselected edition root is absent (`.claude`; `.cursor`; `.agents` + `.codex` for Codex).
    - Frontmatter validity across every generated `SKILL.md`, agent, and command.
    - Every `flow-next`/`flow-alternatives`/`related`/`invokes`/`spawns` reference resolves to a skill/agent that exists in that edition.
-   - Every generated hook passes `bash -n` and carries the executable bit.
+   - Every generated hook passes `bash -n` and carries the executable bit, and the per-edition hook set is complete (six hooks; Cursor deliberately has no `working-memory-read.sh`).
+   - Every hook wiring file (`.claude/settings.json`, `.cursor/hooks.json`, `.codex/hooks.json` + `config.toml`) references only hook scripts that exist and are executable - no dead hooks; every `.sh` token in a wired command is resolved, so an interpreter-prefixed `bash .claude/hooks/x.sh` cannot slip through.
    - The seeded `memory-bank/` passes its own `scripts/validate.py`.
-   - Every selected edition contains the operational `memory-bank` skill and its agent/command wrappers where applicable.
-   - No template placeholders (`{skill-name}`, `TODO`, literal `YYYY-MM-DD`, `[target_name]`, `TASK-{N}`, etc.) remain.
+   - The context-brain runtime is complete (`context.py`, `brain_runtime.py`, `context_retrieval.py`, `validate.py` under `memory-bank/scripts/`), the `project-brain/` skeleton exists, and `config/runtime.json` parses with a substituted, non-empty framework slug and a `canonical_edition` whose skills tree actually exists in the target (otherwise `context.py parity` would report false total drift).
+   - Smoke: `python3 memory-bank/scripts/context.py status` and `python3 memory-bank/scripts/context.py validate` both exit 0 inside the generated tree.
+   - Every selected edition contains the memory quartet skills (`memory-bank`, `project-brain`, `checkpoint`, `memory`) and their agent/command wrappers where applicable.
+   - The upgrade contract: `.infra-manifest.json` exists at the target root, parses, carries a semver `generator_version`, a `TASK-{N}` reference, a valid `mode` (`full`/`merge`) and a well-formed optional `decisions` map (standing kept/merged decisions over tracked files), lists no runtime state and not itself, every listed file exists with a matching sha256, every generator-owned file on disk is listed (full coverage - enforced for `mode: full` only, since a merge generation tracks just the files it created), and `AGENTS.md`'s first line carries the version stamp matching the manifest's version and task (skipped when a merge-mode target's `AGENTS.md` pre-existed and is untracked).
+   - No template placeholders (`{skill-name}`, `TODO`, literal `YYYY-MM-DD`, `[target_name]`, `TASK-{N}`, `{{TARGET_FRAMEWORK}}`, etc.) remain.
 3. **Confirm edition scoping passed:** treat a missing selected root or present unselected root as generation failure, not a warning.
 4. **Classify failures:**
-   - Auto-fixable (e.g. missing executable bit) - fix and re-run the validator.
+   - Auto-fixable (e.g. missing executable bit) - fix and re-run the validator. After any auto-fix that changed a file's *content*, refresh the manifest before re-running (recipe below); a permissions-only fix does not change hashes.
    - Not safely auto-fixable (e.g. a dangling cross-reference implying a forge under-produced) - escalate to the user; do not paper over it.
 5. **Report** the result in `bootstrap-verifier-report.md`.
+
+## Manifest Refresh Recipe (after content auto-fixes)
+
+Re-hash every file the manifest already lists, in place - never add or remove entries here (set changes belong to `infra-generate`/`infra-update`'s full recipe):
+
+```bash
+python3 - "<path-to-target>" <<'PY'
+import hashlib, json, sys, time
+from pathlib import Path
+target = Path(sys.argv[1]).resolve()
+mp = target / ".infra-manifest.json"
+manifest = json.loads(mp.read_text(encoding="utf-8"))
+missing = []
+for rel in list(manifest["files"]):
+    p = target / rel
+    if p.is_file():
+        manifest["files"][rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+    else:
+        missing.append(rel)
+manifest["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+mp.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+print(f"refreshed {len(manifest['files'])} hash(es)"
+      + (f"; STILL MISSING: {missing}" if missing else ""))
+PY
+```
+
+A non-empty `STILL MISSING` list means a tracked file vanished - that is an escalation, not something to silently drop from the manifest.
 
 ## Output Template
 
@@ -47,9 +78,13 @@ Writes a report to `tasks/TASK-{N}/bootstrap-verifier-report.md`. Does not write
 ## Checks
 - Frontmatter: [pass/fail]
 - Cross-references: [pass/fail]
-- Hooks (bash -n + exec bit): [pass/fail]
+- Hooks (bash -n + exec bit + per-edition set): [pass/fail]
+- Hook wiring (all wired scripts exist + executable): [pass/fail]
 - Edition scope (selected present, unselected absent): [pass/fail]
 - Memory bank validate.py: [pass/fail]
+- Context-brain runtime + project-brain skeleton: [pass/fail]
+- Smoke (context.py status / validate): [pass/fail]
+- Manifest (.infra-manifest.json coverage + hashes + AGENTS.md stamp): [pass/fail]
 - No placeholders: [pass/fail]
 - Edition scoping: [pass/fail]
 
@@ -66,6 +101,8 @@ Writes a report to `tasks/TASK-{N}/bootstrap-verifier-report.md`. Does not write
 - MUST NOT auto-fix anything ambiguous (e.g. rewrite a skill to satisfy a reference) - escalate instead.
 - MUST confirm no unselected edition was generated.
 - MUST run the seeded memory bank's own validator, not a substitute.
+- MUST refresh the manifest hashes (recipe above) after any auto-fix that changed file content, and re-run the validator - a manifest describing pre-fix content is a broken upgrade contract.
+- MUST NOT add or remove manifest entries to make the validator pass - a coverage failure means `infra-generate`/`infra-update` under- or over-tracked and must be escalated.
 
 ## Final Output
 

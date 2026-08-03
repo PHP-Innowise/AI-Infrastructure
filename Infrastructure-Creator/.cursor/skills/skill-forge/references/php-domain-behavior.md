@@ -47,7 +47,7 @@ Its frontmatter `related` should point to generated `requirements-analyst`, `cod
 
 ## Operational `memory-bank` Skill (Always Generated)
 
-`memory-seed` creates the shared files; `memory-bank` is the day-to-day operational skill that makes them usable. Generate `memory-bank` for every target in every selected edition and include it in skill/agent/command arithmetic.
+`memory-seed` creates the shared files; `memory-bank` is the day-to-day operational skill that makes them usable. Generate `memory-bank` for every target in every selected edition and include it in skill/agent/command arithmetic. It is one quarter of the memory quartet - `project-brain`, `checkpoint`, and `memory` are its governed/manual companions, contracted in `references/php-process-skills.md` ("The Memory Quartet"); keep the boundary crisp: `memory-bank` owns durable reusable knowledge and approved-promotion application, never active task state.
 
 Required modes:
 

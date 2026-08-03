@@ -1,6 +1,6 @@
 ---
 name: infra-scan
-description: Run the full Phase 1 discovery pipeline against a target PHP project - seven parallel scanners (including domain behavior), dependency/integration research, a minimal clarifying interview, and synthesis into one reviewable Project Profile. Use when the user wants to start generating a bespoke accelerator for a specific PHP project, points Infrastructure-Creator at a target path, or asks to "scan my project" / "analyze this codebase for infrastructure generation". Triggers on "infra-scan", "scan this project", "analyze my PHP project for the accelerator generator", "start the infrastructure creator".
+description: Run the full Phase 1 discovery pipeline against a target PHP project - seven parallel scanners (including domain behavior), dependency/integration research, a minimal clarifying interview, and synthesis into one reviewable Project Profile. Use when the user wants to start generating a bespoke accelerator for a specific PHP project or points Infrastructure-Creator at a target path. Triggers on "infra-scan", "scan this project", "scan my project", "analyze this codebase for infrastructure generation", "analyze my PHP project for the accelerator generator", "start the infrastructure creator".
 phase: orchestration
 flow-next: infra-generate
 flow-alternatives: [infra-build, stack-adapter]
@@ -59,7 +59,7 @@ All output from this run lives under `tasks/TASK-{N}/` in Infrastructure-Creator
 [2-4 sentences: PHP framework, architecture pattern, key integrations, and the most important confirmed domain invariants/risks]
 
 ## What Will Be Generated (see profile sections 11-12 for full detail)
-- **Skills:** [total count] across architecture (1) / design & interaction (3) / frontend (0 or 5) / process & workflow (15, including memory-bank) / universal PHP (7) / framework-specialty ([N], evidence-driven) / integrations ([M], one per confirmed integration) / domain ([D], evidence-gated bounded-context skills) - each with a target-specific description in section 11.1 (not just a bare name)
+- **Skills:** [total count] across architecture (1) / design & interaction (3) / frontend (0 or 5) / process & workflow (18, including the memory quartet: memory-bank, project-brain, checkpoint, memory) / universal PHP (7) / framework-specialty ([N], evidence-driven) / integrations ([M], one per confirmed integration) / domain ([D], evidence-gated bounded-context skills) - each with a target-specific description in section 11.1 (not just a bare name)
 - **Agents & commands:** [counts from section 11.2, for the selected edition(s)]
 - **Memory bank:** [count] cohesive confirmed concepts planned in section 12, each linked to canonical sources
 

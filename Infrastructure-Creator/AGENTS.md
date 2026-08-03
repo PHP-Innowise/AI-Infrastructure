@@ -52,14 +52,17 @@ Infrastructure-Creator intentionally has no `memory-bank/` of its own: its job i
 - Behavioral findings MUST also preserve source type (`spec/ADR`, `test`, `database constraint`, `workflow configuration`, `authorization rule`, code/configuration, or `interview answer`) and surface contradictions. Implementation behavior and user testimony MUST NOT be silently promoted to stronger authority.
 - Generated skills/agents/commands MUST conform to the standard `SKILL.md`/agent/command frontmatter and structure documented in each forge skill's own `SKILL.md`.
 - Generated output is tool-selected: `policy-forge`, `skill-forge`, `agent-forge`, `command-forge`, and `hook-forge` produce ONLY the edition(s) the target team selected in `clarifying-interview` - never more editions than selected, never fewer.
+- The generator's version has exactly one source of truth: the root `VERSION` file. The Project Profile's metadata, the target's `AGENTS.md` stamp, and `.infra-manifest.json` all read it; nothing hardcodes or recalls a version from the changelog.
+- Generated output is upgradeable: every `infra-generate` run MUST end by stamping the target's `AGENTS.md` and writing `.infra-manifest.json` (generator version, source profile, sha256 per generator-owned file). `infra-update` MUST NOT overwrite any file whose hash differs from that manifest without an explicit per-file human decision, and MUST NOT touch files the manifest does not list.
 
 ## Orchestration Exception (MANDATORY, SCOPED)
 
-The general accelerator rule is "an agent executes exactly one skill, then stops; it never auto-chains." Four skills in this folder are a deliberate, narrowly scoped exception, because pipeline orchestration is their entire purpose:
+The general accelerator rule is "an agent executes exactly one skill, then stops; it never auto-chains." Five skills in this folder are a deliberate, narrowly scoped exception, because pipeline orchestration is their entire purpose:
 
 - `infra-scan` MAY fan out to the seven scanner skills (including `domain-behavior-scanner`), `stack-researcher`, `clarifying-interview`, and `profile-synthesizer` in one run. It MAY also hand off to `stack-adapter` when a non-PHP stack is detected and the user opts in.
 - `infra-generate` MAY fan out to the six forge skills, then `skill-flow-composer`, then `bootstrap-verifier` in one run.
 - `infra-build` MAY chain `infra-scan` then `infra-generate` in one run, pausing at the profile checkpoint only when a blocking ambiguity or a collision is detected.
+- `infra-update` MAY re-validate the profile, fan out the forge skills into its staging directory, apply manifest-verified safe replacements, rewrite `.infra-manifest.json`, and run `bootstrap-verifier` in one run. It writes into the target only what the target's `.infra-manifest.json` proves untouched (sha256 match) or what the user explicitly approved per file; without that manifest it MUST abort.
 - `stack-adapter` MAY research, replicate, re-author, mirror, and self-verify an entire sibling generator in one run, after explicit user confirmation.
 
 Fan-out runs in parallel when the AI tool supports concurrent subagents/tool calls; otherwise sequentially in one session. Every other skill still follows the standard rule when invoked on its own: execute, stop, report, suggest a next step.
@@ -67,7 +70,7 @@ Fan-out runs in parallel when the AI tool supports concurrent subagents/tool cal
 ## Agent Behavior
 
 - MUST output a Context Summary and Next Steps at the end of every skill.
-- MUST NOT make workflow decisions for the user beyond the four sanctioned orchestrators above.
+- MUST NOT make workflow decisions for the user beyond the five sanctioned orchestrators above.
 - MUST read the target's actual `composer.json`/config/PHP source/CI/IaC before making any claim about it.
 - MUST NOT read, print, or write the target's `.env` files, credentials, or anything under a `secrets/`-style path.
 - MUST re-validate a `profile-synthesizer` profile against the target's current files before `infra-generate` consumes it, and MUST flag drift if the target changed since the scan.
@@ -82,7 +85,7 @@ Fan-out runs in parallel when the AI tool supports concurrent subagents/tool cal
 ## Verification
 
 - MUST run the applicable checks in `DOD.md` before claiming a scan or generation is complete.
-- MUST run `bootstrap-verifier` (frontmatter validity, cross-reference integrity, hook syntax/executable bit, the generated `memory-bank/scripts/validate.py`, no leftover template placeholders) before reporting `infra-generate` as done.
+- MUST run `bootstrap-verifier` (frontmatter validity, cross-reference integrity, hook syntax/executable bit, the generated `memory-bank/scripts/validate.py`, the `.infra-manifest.json` upgrade contract, no leftover template placeholders) before reporting `infra-generate` or `infra-update` as done.
 - MUST report unavailable tooling as `N/A - tooling not configured`; do not install tooling without user approval.
 
 ## Git Safety

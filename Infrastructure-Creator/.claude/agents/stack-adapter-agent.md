@@ -1,6 +1,6 @@
 ---
 name: stack-adapter
-description: "Use this agent to build an independent sibling generator - Infrastructure-Creator-[Stack] - for a non-PHP stack detected in a target project. It researches the stack live, replicates the 22-skill/three-edition architecture including domain-behavior discovery, re-authors every stack-specific artifact, and self-verifies the result. Never writes into the original target project.\n\nExamples:\n\n<example>\nContext: infra-scan detected a Flutter project and the user opted in to adaptation.\nuser: \"Yes, create Infrastructure-Creator-Flutter for this target.\"\nassistant: \"I'll use the stack-adapter agent to research Flutter/Dart and build an independent sibling generator with the same architecture.\"\n<Task tool call to stack-adapter agent>\n</example>\n\n<example>\nContext: The user already knows they want a sibling generator without going through infra-scan first.\nuser: \"infra-adapt ../my-node-service\"\nassistant: \"I'll use the stack-adapter agent to detect the stack in ../my-node-service and build its own generator.\"\n<Task tool call to stack-adapter agent>\n</example>"
+description: "Use this agent to build an independent sibling generator - Infrastructure-Creator-[Stack] - for a non-PHP stack detected in a target project. It researches the stack live, replicates the 23-skill/three-edition architecture including domain-behavior discovery, re-authors every stack-specific artifact, and self-verifies the result. Never writes into the original target project.\n\nExamples:\n\n<example>\nContext: infra-scan detected a Flutter project and the user opted in to adaptation.\nuser: \"Yes, create Infrastructure-Creator-Flutter for this target.\"\nassistant: \"I'll use the stack-adapter agent to research Flutter/Dart and build an independent sibling generator with the same architecture.\"\n<Task tool call to stack-adapter agent>\n</example>\n\n<example>\nContext: The user already knows they want a sibling generator without going through infra-scan first.\nuser: \"infra-adapt ../my-node-service\"\nassistant: \"I'll use the stack-adapter agent to detect the stack in ../my-node-service and build its own generator.\"\n<Task tool call to stack-adapter agent>\n</example>"
 model: opus
 invokes: stack-adapter
 phase: orchestration
@@ -9,11 +9,11 @@ phase: orchestration
 # Stack Adapter Agent
 
 ## Role
-Build a fully independent sibling generator for a non-PHP stack, structurally identical to Infrastructure-Creator but freshly researched and authored for the detected stack. This agent is a sanctioned orchestrator: it re-authors all 22 skills, including domain-behavior discovery, then mirrors and self-verifies.
+Build a fully independent sibling generator for a non-PHP stack, structurally identical to Infrastructure-Creator but freshly researched and authored for the detected stack. This agent is a sanctioned orchestrator: it re-authors all 23 skills, including domain-behavior discovery, then mirrors and self-verifies.
 
 ## Instructions
 1. Use the Skill tool to invoke the `stack-adapter` skill, passing the target path (and detected stack name if already known, e.g. from `infra-scan`).
-2. Execute the skill completely following its instructions (confirm scope, collision guard, research, replicate skeleton, re-author 22 skills + reference docs, copy stack-agnostic assets verbatim, mirror editions, self-verify, report).
+2. Execute the skill completely following its instructions (confirm scope, collision guard, research, replicate skeleton, re-author 23 skills + reference docs, copy stack-agnostic assets verbatim, mirror editions, self-verify, report).
 3. STOP and ask before overwriting an existing `Infrastructure-Creator-[Stack]/` at the resolved output path.
 4. Provide structured output (below).
 

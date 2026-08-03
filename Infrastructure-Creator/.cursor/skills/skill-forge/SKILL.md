@@ -19,7 +19,7 @@ Consult the bundled references for PHP-specific grounding:
 - `references/php-frameworks.md` - detection signals, baseline skill scaffolding per PHP framework, and the always-generated Design & Interaction / conditional Frontend skill groups.
 - `references/php-architecture-patterns.md` - architecture detection and its generated-skill implications.
 - `references/php-integration-catalog.md` - integration categories and what good coverage looks like per category.
-- `references/php-process-skills.md` - the 15 always-generated, framework-agnostic process/workflow skills, including operational `memory-bank`.
+- `references/php-process-skills.md` - the 18 always-generated, framework-agnostic process/workflow skills, including the memory quartet (`memory-bank`, `project-brain`, `checkpoint`, `memory`) that operates the shared layer `memory-seed` creates.
 - `references/php-specialty-skills.md` - the evidence-gated framework-specialty catalog, keyed to profile section 3.1's signals.
 - `references/php-domain-behavior.md` - how section 8 enriches existing skills, when a domain skill is justified, and the always-generated operational `memory-bank` skill contract.
 
@@ -35,7 +35,7 @@ Into the target, for each selected edition, write `<edition-skills-dir>/<skill-n
    - `database-designer` owns schema/entity/index/migration DESIGN only; it MUST cross-reference (not duplicate) `orm-patterns` for ORM usage patterns when that specialty skill is also generated (step 7).
    - `api-designer` MUST check whether `api-platform-design` will also be generated (a confirmed declarative API framework in section 3.1); if so, narrow `api-designer` to any remaining hand-rolled endpoints and explicitly defer resource-level design to `api-platform-design` rather than duplicating it.
 4. **Generate the Frontend group conditionally** on section 3.2's verdict: if it applies, generate `frontend-design`, `coder-frontend`, `wcag-accessibility`, `web-design-guidelines`, `browser-verify` per `references/php-frameworks.md`'s "Frontend Skills" section, grounded in the target's real templating/asset stack; if the verdict says no UI surface, generate none of these five and say so in the log.
-5. **Generate the 15 Process & Workflow skills** always, as listed in `references/php-process-skills.md`: `requirements-analyst`, `researcher`, `brainstorming`, `council`, `writing-plans`, `using-git-worktrees`, `systematic-debugger`, `refactorer`, `dependency-manager`, `review-pr`, `finishing-branch`, `documentation-generator`, `skill-creator`, `reflect`, `memory-bank`. Author `memory-bank` to the full operational contract in `references/php-domain-behavior.md`; include it in skill/agent/command logs and arithmetic.
+5. **Generate the 18 Process & Workflow skills** always, as listed in `references/php-process-skills.md`: `requirements-analyst`, `researcher`, `brainstorming`, `council`, `writing-plans`, `using-git-worktrees`, `systematic-debugger`, `refactorer`, `dependency-manager`, `review-pr`, `finishing-branch`, `documentation-generator`, `skill-creator`, `reflect`, `memory-bank`, `project-brain`, `checkpoint`, `memory`. Author `memory-bank` to the full operational contract in `references/php-domain-behavior.md`, and the rest of the memory quartet (`project-brain`, `checkpoint`, `memory`) to the "Memory Quartet" contract in `references/php-process-skills.md`, against the runtime `memory-seed` installs; include all of them in skill/agent/command logs and arithmetic.
 6. **Generate the 7 universal PHP skills** adapted to the detected framework/version and tooling (from `references/php-frameworks.md`):
    - `coding`, `testing`, `code-review`, `security-review`, `performance`, `release`, `debugging`.
    - Each references the target's REAL tools (e.g. the actual test runner and static-analysis config found), not assumed defaults.
@@ -55,7 +55,7 @@ Into the target, for each selected edition, write `<edition-skills-dir>/<skill-n
 # Skill Forge Complete: [target_name]
 
 **Editions:** [selected]
-**Skills generated:** [total count] (1 architecture + 3 design + [0 or 5] frontend + 15 process + 7 universal + [N] specialty + [M] integrations + [D] domain)
+**Skills generated:** [total count] (1 architecture + 3 design + [0 or 5] frontend + 18 process + 7 universal + [N] specialty + [M] integrations + [D] domain)
 - architecture: [name]
 - design & interaction: architecture-implementer, api-designer, database-designer
 - frontend: [list, or "skipped - no UI surface detected"]
@@ -75,7 +75,7 @@ agent-forge (wrap these skills), then command-forge; policy-forge/hook-forge/mem
 ## Guardrails
 
 - MUST author every non-fixed skill from profile evidence; MUST NOT template or invent a skill for an absent integration or an un-confirmed specialty signal.
-- MUST generate all 15 process & workflow skills for every target (including operational `memory-bank`) and all 3 design & interaction skills - these are not conditional.
+- MUST generate all 18 process & workflow skills for every target (including the memory quartet: `memory-bank`, `project-brain`, `checkpoint`, `memory`) and all 3 design & interaction skills - these are not conditional.
 - MUST generate the 5 frontend skills only when section 3.2's verdict applies; MUST NOT generate them for a target with no UI surface.
 - MUST reflect the target's real framework/version and real tooling, not assumed defaults.
 - MUST write only the selected edition(s).

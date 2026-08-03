@@ -9,11 +9,11 @@ This is a PHP accelerator **generator**, not a ready-to-use accelerator. It scan
 
 ## Command -> Agent -> Skill
 
-- **Commands** (`.cursor/commands/*.md`) are `/slash` entry points: `infra-scan`, `infra-generate`, `infra-build`, and `infra-adapt`. Pass the target project path as `$ARGUMENTS`.
-- **Agents** (`.cursor/agents/*.md`) each run one skill in an isolated context, then stop - except the four sanctioned orchestrators (`infra-scan`, `infra-generate`, `infra-build`, and `stack-adapter`).
+- **Commands** (`.cursor/commands/*.md`) are `/slash` entry points: `infra-scan`, `infra-generate`, `infra-build`, `infra-update`, and `infra-adapt`. Pass the target project path as `$ARGUMENTS`.
+- **Agents** (`.cursor/agents/*.md`) each run one skill in an isolated context, then stop - except the five sanctioned orchestrators (`infra-scan`, `infra-generate`, `infra-build`, `infra-update`, and `stack-adapter`).
 - **Skills** (`.cursor/skills/<name>/SKILL.md`) contain the actual workflow.
 
-Execute only the selected skill, then stop unless it is one of the four orchestrators. Always end with a Context Summary and Next Steps.
+Execute only the selected skill, then stop unless it is one of the five orchestrators. Always end with a Context Summary and Next Steps.
 
 ## Two-Phase Flow
 
@@ -31,8 +31,15 @@ Execute only the selected skill, then stop unless it is one of the four orchestr
 
 /infra-generate <target-path>
   -> policy-forge / skill-forge / hook-forge / memory-seed (parallel)
-  -> agent-forge -> command-forge -> skill-flow-composer -> bootstrap-verifier
+  -> agent-forge -> command-forge -> skill-flow-composer
+  -> AGENTS.md version stamp + .infra-manifest.json -> bootstrap-verifier
   -> generated domain skills when evidence-gated + operational memory-bank skill
+
+/infra-update <target-path>   (later, after this generator ships a new release)
+  -> reads the target's .infra-manifest.json (aborts on legacy targets without one)
+  -> replaces only hash-verified untouched files; user-edited files become
+     explicit per-file decisions; unlisted files are never touched
+  -> rewrites the manifest -> bootstrap-verifier
 ```
 
 ## Workspace Boundary
