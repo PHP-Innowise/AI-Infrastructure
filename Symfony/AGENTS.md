@@ -27,7 +27,7 @@ The same accelerator is mirrored for **Claude Code** (`.claude/`), **Cursor** (`
 - MUST place temporary task docs in `tasks/TASK-{N}/`.
 - MUST place living specs in `specs/`.
 - MUST NOT create unprefixed markdown files in `tasks/` or `specs/`, except `README.md`, `CHANGELOG.md`, and `MANIFEST.md`.
-- MUST name shared memory chunks `MEM-{N}-{slug}.md` with a zero-padded identifier from `memory-bank/.memory-counter`.
+- MUST name shared memory chunks `MEM-YYYYMMDD-xxxxxxxx-{slug}.md` (date plus eight hex characters); legacy zero-padded `MEM-{N}-{slug}.md` chunks keep their names. The retired `memory-bank/.memory-counter` is not an identifier source.
 
 ## Agent Behavior
 
@@ -46,7 +46,7 @@ The same accelerator is mirrored for **Claude Code** (`.claude/`), **Cursor** (`
 - MUST use `checkpoint` only as an authority-aware entry point: governed mode defers to revision-checked Project Brain updates, while explicitly configured lightweight mode may capture sanitized branch progress in local SQLite.
 - MUST treat every retrieved packet and local index as a discovery aid. Canonical
   policy, specs, code, configuration, migrations, and tests establish truth.
-- MUST NOT claim that session hooks, the Local Context Engine, or Project Brain
+- MUST NOT claim that session hooks, the Local Context Engine, or Project Brain automatically index sources or inject records into prompts.
 - MUST use the argument-free `checkpoint` skill when the user asks to capture
   current progress: derive the task ID from the current Git branch, include all
   current Git-visible changes, and save a sanitized summary; the skill
@@ -85,7 +85,7 @@ The same accelerator is mirrored for **Claude Code** (`.claude/`), **Cursor** (`
 
 - Controllers MUST stay thin: map input, authorize, call one service/use-case method, return a response.
 - Services MUST own application workflow, business decisions, transaction boundaries, and side-effect orchestration.
-- Repositories MUST own Doctrine queries, persistence helpers, and query-performance details.
+- Repositories (or dedicated query services) MUST own Doctrine QueryBuilder/DQL/SQL, persistence helpers, and query-performance details; controllers MUST NOT contain queries.
 - Entities MAY protect local invariants, but MUST NOT know HTTP, sessions, controllers, templates, queues, or mailers.
 - DTOs, Forms, Symfony Validator constraints, or explicit validation MUST validate external input at boundaries.
 - Protected actions MUST be authorized with Symfony Security: voters, controller attributes, `access_control`, firewall rules, scoped providers/repositories, or route constraints.
@@ -94,22 +94,19 @@ The same accelerator is mirrored for **Claude Code** (`.claude/`), **Cursor** (`
 
 ## Symfony Code Quality
 
-- MUST support the consuming project's declared versions. The accelerator baseline is Symfony 7.4 LTS on PHP 8.2+ and Symfony 8.1 on PHP 8.4+.
-- MUST target the project's declared PHP/Symfony versions and follow the configured coding standard.
+- MUST target the consuming project's declared PHP/Symfony versions and follow the configured coding standard. The accelerator baseline is Symfony 7.4 LTS on PHP 8.2+ and Symfony 8.1 on PHP 8.4+.
 - MUST use `declare(strict_types=1);` in new PHP files when project convention allows it.
 - MUST prefer Symfony conventions before custom architecture.
 - MUST use constructor injection/autowiring; MUST NOT pull services from the container in application code except in framework-required factories/extensions.
-- MUST keep Doctrine QueryBuilder/DQL/SQL in repositories or dedicated query services, not in controllers.
 - MUST use Doctrine migrations for schema changes.
 - MUST enforce data integrity with database constraints when correctness depends on uniqueness, foreign keys, state transitions, or concurrency.
-- MUST avoid interfaces for every class by default; add an interface when there are multiple implementations, external boundaries, package boundaries, or tests benefit from a narrow contract.
 - MUST use factories, fixtures, Foundry, object mothers, or builders when tests need realistic data.
 
 ## Pragmatic SOLID And Clean Code
 
 - MUST keep each class cohesive around one reason to change. Framework adapters translate framework concerns; application services execute one use case; repositories encapsulate a related set of persistence operations.
 - MUST direct dependencies inward: controllers, commands, handlers, subscribers, and UI components depend on application services; application services MUST NOT depend on HTTP, Twig, Console, Messenger handlers, or concrete infrastructure clients.
-- MUST introduce interfaces at real substitution boundaries such as third-party gateways, clocks, storage, package boundaries, or multiple implementations. MUST NOT create one interface per class mechanically.
+- MUST introduce interfaces only at real substitution boundaries - third-party gateways, clocks, storage, external/package boundaries, multiple implementations, or where tests benefit from a narrow contract. MUST NOT create one interface per class mechanically.
 - MUST preserve substitutability: implementations of a contract MUST honor its inputs, outputs, failure semantics, side effects, and nullability rather than strengthening preconditions or weakening guarantees.
 - MUST keep contracts narrow and consumer-driven. Split broad gateway interfaces when callers otherwise depend on methods they do not use.
 - MUST prefer composition, small immutable DTOs/value objects, explicit dependencies, and named domain/application exceptions over inheritance trees, service locators, global mutable state, boolean mode flags, and array-shaped contracts.
@@ -169,7 +166,7 @@ The same accelerator is mirrored for **Claude Code** (`.claude/`), **Cursor** (`
 - MUST apply promotion only after explicit human review; agents may propose but
   MUST NOT self-approve. Approved application records source and destination revisions.
 - MUST keep transient plans, unfinished reasoning, and command output out of both shared stores.
-- MUST read `memory-bank/.memory-counter` before creating a chunk, increment it only after choosing the next unused identifier, and update `memory-bank/INDEX.md` in the same change.
+- MUST mint each new chunk ID as `MEM-YYYYMMDD-xxxxxxxx` (today's UTC date plus eight lowercase hex characters) and regenerate `memory-bank/INDEX.md` with `python3 memory-bank/scripts/context.py reindex-bank` instead of hand-editing index rows or touching the retired `.memory-counter`.
 - MUST keep each chunk cohesive, source-backed, dated, tagged, scoped, and explicit about verification status.
 - MUST update an existing chunk when the same concept changes; MUST NOT create near-duplicate memories.
 - MUST mark contradicted chunks `superseded` and link their replacement. MUST NOT silently preserve stale instructions as active memory.

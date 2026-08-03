@@ -1,6 +1,6 @@
 ---
 name: wcag-accessibility
-description: WCAG 2.2 accessibility guidelines for reviewing and writing accessible web interfaces. Use when reviewing frontend code for accessibility, writing accessible components, checking WCAG compliance, or auditing UI for a11y issues. Triggers on "accessibility", "a11y", "WCAG", "screen reader", "keyboard navigation", "aria", "contrast ratio", "alt text", "focus management", "accessible". Contains 30 rules across 8 categories prioritized by impact.
+description: WCAG 2.2 accessibility guidelines. Use when reviewing frontend code for accessibility, writing accessible components, checking WCAG compliance, or auditing UI for a11y issues. Triggers on "accessibility", "a11y", "WCAG", "screen reader", "keyboard navigation", "aria", "contrast ratio", "alt text", "focus management", "accessible". Contains 30 rules across 8 categories prioritized by impact.
 ---
 
 # WCAG Accessibility Guidelines
