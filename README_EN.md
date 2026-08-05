@@ -15,7 +15,11 @@ AI-Infrastructure/
 ├── Laravel/                  # ready-to-use Laravel edition
 ├── Symfony/                  # ready-to-use Symfony edition
 ├── PHP Core/                 # ready-to-use native PHP edition
-└── Infrastructure-Creator/   # generator for a specific project
+├── Infrastructure-Creator/   # generator for a specific project
+├── scripts/                  # monorepo tooling (mirror build, repo checks)
+├── docs/                     # shared documentation, including docs/CI.md
+├── CHANGELOG.md              # shared-core history
+└── .github/workflows/ci.yml  # CI: tests, parity, mirrors, lint, links, budget
 ~~~
 
 - [Laravel/](Laravel/README.md) — a Laravel-focused edition covering
@@ -33,6 +37,12 @@ The first three directories are independent, ready-to-use editions.
 `Infrastructure-Creator/` solves a different problem: it generates a new
 edition based on the components, integrations, architecture, and CI/CD of a
 given PHP project.
+
+`scripts/`, `docs/`, the root `CHANGELOG.md`, and CI serve the monorepository
+itself and are not copied into a project along with an edition. Each edition
+carries its released version in a `VERSION` file (currently Laravel 1.4.3,
+Symfony 1.3.1, PHP Core 1.2.1, Infrastructure-Creator 1.4.0), which the
+session-start hook prints.
 
 ## Which Edition Should You Choose?
 
@@ -99,7 +109,7 @@ conflict:
 | Tool | Reads | Practical meaning |
 | --- | --- | --- |
 | Claude Code | `.claude/` | The source edition with agents, commands, hooks, skills, and settings. |
-| Cursor | `.cursor/` | A self-contained mirror with skills, commands, agents, rules, and hooks. Disable optional Claude-file loading in Cursor to avoid loading policies twice. One capability differs: Cursor cannot add context to a prompt, so no Task Capsule is delivered automatically there and retrieval stays explicit. |
+| Cursor | `.cursor/` | A self-contained mirror with skills, commands, agents, rules, and hooks. Disable optional Claude-file loading in Cursor to avoid loading policies twice. Cursor cannot add context to a prompt directly, so the Task Capsule arrives through the `.cursor/rules/working-memory.mdc` rule (`alwaysApply: true`): the turn-end and session-start hooks re-render it, which makes the capsule one turn stale. On a cold start the hooks render a warming-up placeholder instead of nothing. The file is local state and is listed in the edition's `.gitignore`. |
 | Codex | `.agents/skills/` and `.codex/` | Skills live in `.agents/skills/`; `.codex/` contains configuration, hooks, and references. There is no separate command layer. |
 
 The selected edition's `AGENTS.md` is executable policy for that stack. Its
@@ -141,7 +151,12 @@ Every edition combines three separate components:
   bounded snippets, token budgets, and retrieval manifests.
 - **Memory Bank — what is remembered permanently.** It stores small,
   Git-tracked, reviewed chunks of reusable constraints, decisions, domain
-  knowledge, integration contracts, and operational lessons.
+  knowledge, integration contracts, and operational lessons. A new chunk is
+  identified as `MEM-YYYYMMDD-xxxxxxxx` (the date plus eight hex characters
+  derived from the source record's UUID), so promotions on two machines or in
+  two branches never race for a shared counter; `INDEX.md` is not appended by
+  hand but regenerated deterministically with `context.py reindex-bank`.
+  Legacy `MEM-NNNN` chunks stay valid.
 
 Governed mode is the default. Project Brain owns shared active-work state;
 `memory-bank/local/context.db` is only a disposable index plus local
@@ -192,9 +207,28 @@ python3 memory-bank/scripts/context.py retrieve \
 ~~~
 
 `context` remains a compatibility alias for `retrieve`; new documentation and
-automation should use `retrieve`. Indexing and retrieval are explicit. Hooks
-report metadata such as mode, index health, active binding count, and validation
-status; they do not index, retrieve, print records, or inject prompt context.
+automation should use `retrieve`.
+
+Alongside the explicit command, an automatic memory loop runs:
+
+- the session-start hook prints metadata only — edition version, mode, index
+  health, active binding count, and validation status; it never prints records
+  or injects context. Validation results are cached per repository state, so a
+  second start does not pay for them again;
+- the prompt hook (`UserPromptSubmit` in Claude Code and Codex) runs
+  `context.py refresh`: it incrementally refreshes the three index layers and
+  injects the Task Capsule into the prompt. On Cursor the re-rendered
+  `working-memory.mdc` rule serves this role (see the tool table);
+- the turn-end hook (`Stop`) runs `context.py turn`: changed paths are buffered
+  in ignored local state and flushed into the authoritative task every fifth
+  turn. Maintenance — closing merged tasks, promotion, and compaction — runs on
+  that same boundary so heavy work never happens on every turn under the hook
+  timeout.
+
+Each turn's outcome is written to `memory-bank/local/last-turn-report.json`
+(what flushed, what was promoted, what was blocked and why, which paths were
+excluded), and the next capsule shows a "Last turn" section — otherwise the
+automatic pipeline would be invisible to the operator.
 
 ### Authority-Aware `memory` and `checkpoint`
 
@@ -228,6 +262,15 @@ contains at most two Procedural, three Semantic, and one Episodic result.
 Retrieved entries are short snippets with source paths; the next agent reads a
 full source only when its current step requires it.
 
+The retrieval query is distilled from the whole prompt rather than its opening
+words: up to 24 terms are selected by rarity in the index, so a point made at
+the end of a long request is not lost. Ranking modulates BM25 with the record's
+declared confidence and a freshness decay over `updated_at`, so a verified
+record outranks an observed one and a fresh record outranks a stale one, all
+else being equal. The privacy gate screens the raw prompt before distillation:
+a secret-looking query is refused outright and reaches neither retrieval nor
+the retrieval manifest.
+
 Simple tasks stay in the current context. Fresh contexts are reserved for
 research-to-planning, planning-to-implementation,
 implementation-to-independent-verification, and recovery after compaction.
@@ -258,6 +301,27 @@ python3 memory-bank/scripts/context.py complete \
 python3 memory-bank/scripts/context.py compact
 ~~~
 
+Companion maintenance commands:
+
+~~~bash
+# restore the machine-local binding on another machine or in a fresh clone
+# (the task record exists in Git, the local binding does not)
+python3 memory-bank/scripts/context.py rebind --task-id BAUMAS-133
+
+# regenerate memory-bank/INDEX.md deterministically from chunk frontmatter
+python3 memory-bank/scripts/context.py reindex-bank
+
+# check skill, hook, command, and agent mirrors inside the edition; add
+# --cross-edition to check the shared core is byte-identical across editions
+python3 memory-bank/scripts/context.py parity
+python3 memory-bank/scripts/context.py parity --cross-edition
+~~~
+
+Automatic rebinding is built into the turn flush: when a task record exists in
+Git but its local binding does not, the binding is restored by branch name and
+the restoration is stated in the turn report — previously that situation
+silently lost every automatic flush on a second machine.
+
 To hand accumulated context to another person or to a team repository, write a
 bundle:
 
@@ -274,10 +338,16 @@ is no `import`: a bundle is a handoff artifact, not a second installation.
 
 Governed cross-store mutations use revision checks and rollback/compensation so
 a failed Brain or SQLite update does not leave a split authoritative state.
-Promotion into Memory Bank is automatic by default: the turn-end hook promotes
-resolved findings and bugs, closed incidents, and accepted decisions without
-asking, and never claims a review that did not happen — `reviewer` stays null,
-`review_mode` is `automatic`, and the chunk is tagged `auto-promoted`. Durable
+Promotion into Memory Bank is automatic by default: on the turn-flush boundary
+resolved findings and bugs, closed incidents, and accepted decisions are
+promoted without asking, and a review that did not happen is never claimed —
+`reviewer` stays null, `review_mode` is `automatic`, and the chunk is tagged
+`auto-promoted`. Only records whose authority is `verified` qualify. Records
+are created as `observed`, and the single legal way to raise one is
+`brain-update --authority verified` under a revision check, recorded in the
+record's transition ledger; the `verify` skill does this for confirmed records
+before their terminal status. A blocked promotion and its reason appear in the
+turn report and in the next capsule. Durable
 memory is therefore accumulated, not curated: treat a retrieved chunk as a
 pointer to its cited source, not as a vetted fact. Set `automatic_promotion` to
 `false` in `project-brain/config/runtime.json` for the reviewed sequence, where
@@ -315,7 +385,19 @@ ambiguity or conflict.
 
 The generator inspects the actual `composer.json`, framework, dependencies,
 integrations, architecture, and CI/CD instead of copying a Laravel, Symfony,
-or PHP Core template. See
+or PHP Core template. A generated accelerator receives the same memory layer as
+the ready-to-use editions: the context-brain runtime under
+`memory-bank/scripts/`, the `project-brain/` skeleton, and the automatic-memory
+hooks, including capsule delivery for Cursor.
+
+Generated output is upgradable in place. Every `infra-generate` run writes
+`.infra-manifest.json` into the target (generator version from the root
+`VERSION`, the profile it consumed, and the sha256 of every generated file) and
+stamps the version on the first line of the generated `AGENTS.md`. Later,
+`infra-update` compares hashes: a file the team never touched is replaced with
+its new version; a file the team edited is never overwritten and lands in a
+"requires decision" report with three-way context; a file absent from the
+manifest is left alone entirely. See
 [Infrastructure-Creator/README.md](Infrastructure-Creator/README.md) for the
 complete guide.
 
@@ -325,12 +407,43 @@ complete guide.
   does not automatically belong in Symfony or PHP Core.
 - Evaluate a universal policy in `PHP Core/` first, then adapt it to the
   relevant framework boundaries instead of copying it blindly.
-- Within one edition, mirror supported skill, agent, and command changes
-  across `.claude/`, `.cursor/`, `.agents/`, and `.codex/`.
+- Never edit a mirror by hand. Skills are canonical in `.agents/skills`; hooks,
+  commands, agents, and policy documents are canonical in `.claude`. After
+  editing the canon, run `python3 scripts/build_mirrors.py --write` and the
+  `.claude`, `.cursor`, and `.codex` mirrors are regenerated from the
+  `MIRROR_RULES` table in `memory-bank/scripts/context_retrieval.py`
+  (`Infrastructure-Creator/mirror_rules.py` for the generator). A legitimate
+  per-mirror difference belongs in that table as a rule or an exception, never
+  as a silently diverging file.
 - Record the change in the edition's `CHANGELOG.md` and run its `DOD.md`
   verification. Changes to the shared core (the memory/context core,
   Project Brain, hooks, mirror machinery, root `scripts/`) are recorded in
   the root `CHANGELOG.md` instead; CI enforces this on pull requests.
+
+### Checks Before Handing Work Over
+
+CI (`.github/workflows/ci.yml`) runs the same steps; their exact local
+equivalents are collected in [docs/CI.md](docs/CI.md):
+
+~~~bash
+# each edition's tests (memory-bank/tests and project-brain/tests) and the generator's
+python3 -m unittest discover        # from each test directory
+
+# mirror parity inside an edition, and shared-core parity across editions
+python3 memory-bank/scripts/context.py parity
+python3 memory-bank/scripts/context.py parity --cross-edition
+
+# mirrors match the canon; relative markdown links resolve; the startup
+# context has not grown past its recorded ceilings
+python3 scripts/build_mirrors.py --check
+python3 scripts/check_links.py
+python3 scripts/context_budget.py --check
+~~~
+
+The startup context budget (each edition's `AGENTS.md` plus skill frontmatter)
+is measured by `scripts/context_budget.py`; the ceilings live in
+`scripts/token_budget.json` and sit five percent above current values, so CI
+catches a regression instead of complaining about every edit.
 
 For stack-specific details, open the selected edition's README. For its
 durable memory, open the corresponding guide and then that edition's
