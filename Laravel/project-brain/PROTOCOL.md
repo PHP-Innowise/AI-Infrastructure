@@ -59,6 +59,19 @@ States with no outgoing edge are terminal. Incident `resolved` and decision
 type uses owner authorization, UUIDv4 relationships, source fingerprints,
 privacy/authority controls, CAS revisions, and append-only transitions.
 
+### Task Phases
+
+A task may declare the delivery-loop phase it stopped on. Storage keeps
+exactly four canonical values — `understanding`, `planning`, `execution`,
+`finalization` — matching the `phase` enums in the dynamic-record and handoff
+schemas. The CLI (`update --phase`, `brain-update --phase`) additionally
+accepts the Skill Flow Phase Map names `implementation`, `quality`, and
+`verification`; each is recorded as `execution`, the canonical phase the
+skills in those Phase Map rows declare in their own frontmatter. `utility` is
+not a task phase: utility skills are cross-cutting tools, not a step a task
+stops on. Phases carry no ordering constraint — any phase may follow any
+other, because reality (rework, re-planning) does.
+
 Tasks retain the compatibility commands `start`, `update`, `get`, `complete`,
 and `clear`. Other dynamic records use:
 

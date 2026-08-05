@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -50,6 +51,37 @@ def run_hook(name: str, payload, cwd: Path | None = None, tmpdir: Path | None = 
         capture_output=True,
         text=True,
         cwd=str(cwd) if cwd is not None else str(EDITION_ROOT),
+        env=env,
+        timeout=HOOK_TIMEOUT,
+    )
+
+
+def restricted_bin(base: Path, names: tuple[str, ...]) -> str:
+    """A PATH directory carrying only the named binaries (symlinked)."""
+    bindir = base / "bin"
+    bindir.mkdir()
+    for name in names:
+        source = shutil.which(name)
+        if source is None:
+            raise unittest.SkipTest("required binary missing: {}".format(name))
+        (bindir / name).symlink_to(source)
+    return str(bindir)
+
+
+def run_hook_restricted(name: str, payload, path_value: str):
+    """Run a hook under a minimal PATH (regression: no external `cat`)."""
+    bash = shutil.which("bash")
+    if bash is None:
+        raise unittest.SkipTest("bash not found")
+    stdin = payload if isinstance(payload, str) else json.dumps(payload)
+    env = dict(os.environ)
+    env["PATH"] = path_value
+    return subprocess.run(
+        [bash, str(hook_path(name))],
+        input=stdin,
+        capture_output=True,
+        text=True,
+        cwd=str(EDITION_ROOT),
         env=env,
         timeout=HOOK_TIMEOUT,
     )
@@ -182,6 +214,32 @@ class BashValidatorTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "")
         self.assertEqual(result.stderr, "")
+
+    def test_stdin_read_does_not_need_external_cat(self) -> None:
+        # TC-030 regression: stdin is read with the bash builtin. With no
+        # `cat` in PATH the validator used to lose the payload and silently
+        # pass every command - including destructive ones.
+        with tempfile.TemporaryDirectory(prefix="no-cat-") as tmp:
+            path_value = restricted_bin(Path(tmp), ("grep", "python3"))
+            result = run_hook_restricted(
+                self.HOOK, self.payload("git reset --hard HEAD~1"), path_value
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("[bash-validator] BLOCKED", result.stderr)
+            self.assertNotIn("command not found", result.stderr)
+
+    def test_no_extractor_warning_survives_missing_cat(self) -> None:
+        # TC-030 regression: with neither `cat` nor any JSON extractor in
+        # PATH, the fail-open warning must still reach stderr instead of
+        # being lost together with the unread payload.
+        with tempfile.TemporaryDirectory(prefix="no-extractor-") as tmp:
+            path_value = restricted_bin(Path(tmp), ("grep",))
+            result = run_hook_restricted(
+                self.HOOK, self.payload("git reset --hard HEAD~1"), path_value
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("no JSON extractor available", result.stderr)
+            self.assertEqual(result.stdout, "")
 
 
 class FileNamingValidatorTest(unittest.TestCase):

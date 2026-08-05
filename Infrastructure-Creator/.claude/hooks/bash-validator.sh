@@ -8,7 +8,12 @@
 
 set -uo pipefail
 
-input="$(cat 2>/dev/null || true)"
+# Read stdin with the bash builtin (read until EOF; JSON carries no NUL
+# bytes): an external `cat` may be missing on a hardened system, and losing
+# stdin there would skip validation silently before the no-extractor
+# warning below could ever fire.
+input=""
+IFS= read -r -d '' input || true
 
 # Cheap self-filter before any process is forked: Codex and Cursor register
 # this hook without a tool matcher, so it runs for every tool call. A real

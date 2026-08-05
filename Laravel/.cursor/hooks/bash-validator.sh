@@ -4,7 +4,12 @@
 # Hook type: PreToolUse:Bash
 # Exit codes: 0 = pass, 1 = warn (continue), 2 = block
 
-INPUT=$(cat)
+# Read stdin with the bash builtin (read until EOF; JSON carries no NUL
+# bytes): an external `cat` may be missing on a hardened system, and losing
+# stdin there would skip validation silently before the no-extractor
+# warning below could ever fire.
+INPUT=""
+IFS= read -r -d '' INPUT || true
 
 # Cheap self-filter before any process is forked: Codex and Cursor register
 # this hook without a tool matcher, so it runs for every tool call. A real

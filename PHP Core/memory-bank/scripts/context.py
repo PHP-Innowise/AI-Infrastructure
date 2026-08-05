@@ -19,7 +19,7 @@ from typing import Optional
 from brain_runtime import (
     BrainError,
     LIFECYCLES,
-    TASK_PHASES,
+    TASK_PHASE_CHOICES,
     TERMINAL_STATES,
     atomic_json,
     auto_compact,
@@ -36,6 +36,7 @@ from brain_runtime import (
     get_task,
     load_config,
     mutation_lock,
+    normalize_task_phase,
     reindex_bank,
     render_current_state,
     rollback_created_record,
@@ -2866,7 +2867,15 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--next-step", action="append", default=[])
     update.add_argument("--file", action="append", default=[])
     update.add_argument("--source", action="append", default=[])
-    update.add_argument("--phase", choices=TASK_PHASES)
+    update.add_argument(
+        "--phase",
+        choices=TASK_PHASE_CHOICES,
+        help=(
+            "delivery-loop phase, using the Skill Flow Phase Map vocabulary; "
+            "'implementation', 'quality', and 'verification' are recorded as "
+            "the canonical stored phase 'execution'"
+        ),
+    )
     update.add_argument("--revision", type=revision_argument)
     update.add_argument("--json", action="store_true")
 
@@ -2919,7 +2928,15 @@ def build_parser() -> argparse.ArgumentParser:
     update_brain.add_argument("--file", action="append", default=[])
     update_brain.add_argument("--source", action="append", default=[])
     update_brain.add_argument("--conflict", action="append", default=[])
-    update_brain.add_argument("--phase", choices=TASK_PHASES)
+    update_brain.add_argument(
+        "--phase",
+        choices=TASK_PHASE_CHOICES,
+        help=(
+            "delivery-loop phase, using the Skill Flow Phase Map vocabulary; "
+            "'implementation', 'quality', and 'verification' are recorded as "
+            "the canonical stored phase 'execution'"
+        ),
+    )
     update_brain.add_argument("--transition")
     update_brain.add_argument(
         "--authority",
@@ -3126,7 +3143,7 @@ def main() -> int:
                         files=files,
                         sources=sources,
                         owner=owner,
-                        phase=arguments.phase,
+                        phase=normalize_task_phase(arguments.phase),
                     )
                 if arguments.json:
                     print(json.dumps(result, ensure_ascii=False))
@@ -3293,7 +3310,7 @@ def main() -> int:
                         actor=owner,
                         conflicts=conflicts,
                         transition_to=arguments.transition,
-                        phase=arguments.phase,
+                        phase=normalize_task_phase(arguments.phase),
                         authority=arguments.authority,
                         reason=arguments.reason,
                     )
@@ -3412,9 +3429,17 @@ def main() -> int:
                     try:
                         # --query accepts the raw prompt: the hook passes it
                         # as-is and distillation to informative terms happens
-                        # here. The raw text is screened before any of it can
-                        # reach a query or a manifest.
+                        # here. Both gates screen the RAW text before any
+                        # distillation: tokenization strips the very
+                        # characters (@, dots, "user:" prefixes) the privacy
+                        # patterns match on, so gating the distilled query
+                        # instead would wave raw private data through and
+                        # persist its tokens in the retrieval manifest.
+                        # A rejected prompt is never distilled.
                         reject_secrets("Task Capsule", [arguments.query])
+                        reject_capsule_privacy(
+                            "Task Capsule request", [arguments.query]
+                        )
                         capsule = assemble_capsule(
                             connection,
                             repository,

@@ -26,6 +26,72 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### 2026-08-03 QA defect fixes (TC-066, TC-021/TC-061/DEF-007)
+
+- **`refresh --query` privacy gate now screens the raw prompt (TC-066)** -
+  the refresh path distilled the raw prompt into retrieval terms before the
+  capsule privacy gate ran, and distillation tokenizes away the very
+  characters the private-data patterns match on (`@`, dots, `user:`
+  prefixes), so a secret-like raw prompt bypassed the refusal that
+  `retrieve`/`context` already gave and its distilled tokens were persisted
+  in the retrieval manifest. `context.py refresh` now applies
+  `reject_capsule_privacy` to the raw `--query` text next to the existing
+  secret gate, before any distillation: a rejected prompt is never
+  distilled, no retrieval runs, and no manifest is written, while the layer
+  refresh itself still succeeds with a "Capsule unavailable" warning.
+  Applied to `Laravel/memory-bank/scripts/context.py` and propagated
+  byte-identically to the Symfony and PHP Core copies in the core-sync step.
+  Regression test: `test_refresh_rejects_private_raw_query_before_distillation`
+  in `memory-bank/tests/test_context.py`.
+- **`--phase` accepts the documented skill vocabulary (TC-021/TC-061/DEF-007)** -
+  `context.py update --phase` and `brain-update --phase` accepted only the
+  four stored values (`understanding`, `planning`, `execution`,
+  `finalization`) with no help text, while the skills' own Phase Map names
+  the delivery steps Understanding / Planning / Implementation / Quality and
+  the verify skill calls its stage "verification" - so agents following the
+  skills were rejected (TC-021 `verification`, TC-061 `implementing`). The
+  CLI now accepts `implementation`, `quality`, and `verification` as
+  documented aliases that are recorded as `execution`, the canonical phase
+  those same skills declare in their frontmatter; `--phase` help states the
+  normalization, and `project-brain/PROTOCOL.md` documents the vocabulary,
+  the alias mapping, the deliberate absence of `utility`, and the absence of
+  phase-ordering constraints. Stored records and the dynamic-record/handoff
+  schema enums are unchanged, so existing records stay valid byte for byte.
+  Regression tests in `memory-bank/tests/test_context.py`: every documented
+  CLI value maps to its stored canonical phase, all twelve ordered
+  canonical-phase transitions are exercised, the alias path works through
+  `brain-update` on the task record, and non-vocabulary values (TC-061's
+  `implementing`) are still rejected with the full documented list.
+
+### 2026-08-03 QA defect fixes (DEF-001/TC-004, TC-030)
+
+- **Cursor cold start gets a warming-up rule (DEF-001/TC-004)** - the Cursor
+  mirrors of the Stop and sessionStart hooks used to render
+  `.cursor/rules/working-memory.mdc` only when the capsule render produced
+  output, and the working task auto-provisions only on the flush boundary
+  (`--flush-after`, default 5), so the first turns of a fresh Cursor session
+  ran with no working-memory rule at all. The `_WM_DELIVERY_*_CURSOR`
+  transforms in `memory-bank/scripts/context_retrieval.py` now render a
+  warming-up placeholder on a cold start (task id, provisioning note, and
+  the last turn report from `memory-bank/local/` when present). A capsule
+  already rendered for the current task is never downgraded to a placeholder
+  (one turn stale beats empty), while a rule left over from a different task
+  is replaced instead of being served as the current task's memory.
+  Governed-memory semantics are untouched: provisioning still happens only
+  at flush time, and `context.py context` still requires a bound task.
+  Regression tests: the `CursorCapsuleRenderTest` cold-start/placeholder
+  cases in `memory-bank/tests/test_hooks.py`.
+- **`bash-validator` reads stdin without external `cat` (TC-030)** - the
+  validator read its payload with `INPUT=$(cat)` before the JSON-extractor
+  guard, so on a system without `cat` in PATH the payload was lost, every
+  command (including destructive ones) passed silently, and the fail-open
+  "no JSON extractor available" warning could never fire. Stdin is now read
+  with the bash builtin (`IFS= read -r -d '' INPUT`) in every edition's
+  canon and mirrors, so validation and the fail-open warning survive
+  `cat`-less systems. Regression tests: the restricted-PATH cases in
+  `memory-bank/tests/test_hooks.py` (per edition) and
+  `Infrastructure-Creator/tests/test_hooks.py`.
+
 ### 2026-08-02 shared-core maintenance round (seven phases)
 
 - **Enforcement hooks hardened and tested** - the hardened hook generation

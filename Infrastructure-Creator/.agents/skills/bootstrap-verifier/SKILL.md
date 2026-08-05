@@ -32,8 +32,8 @@ Writes a report to `tasks/TASK-{N}/bootstrap-verifier-report.md`. Does not write
    - The context-brain runtime is complete (`context.py`, `brain_runtime.py`, `context_retrieval.py`, `validate.py` under `memory-bank/scripts/`), the `project-brain/` skeleton exists, and `config/runtime.json` parses with a substituted, non-empty framework slug and a `canonical_edition` whose skills tree actually exists in the target (otherwise `context.py parity` would report false total drift).
    - Smoke: `python3 memory-bank/scripts/context.py status` and `python3 memory-bank/scripts/context.py validate` both exit 0 inside the generated tree.
    - Every selected edition contains the memory quartet skills (`memory-bank`, `project-brain`, `checkpoint`, `memory`) and their agent/command wrappers where applicable.
-   - The upgrade contract: `.infra-manifest.json` exists at the target root, parses, carries a semver `generator_version`, a `TASK-{N}` reference, a valid `mode` (`full`/`merge`) and a well-formed optional `decisions` map (standing kept/merged decisions over tracked files), lists no runtime state and not itself, every listed file exists with a matching sha256, every generator-owned file on disk is listed (full coverage - enforced for `mode: full` only, since a merge generation tracks just the files it created), and `AGENTS.md`'s first line carries the version stamp matching the manifest's version and task (skipped when a merge-mode target's `AGENTS.md` pre-existed and is untracked).
-   - No template placeholders (`{skill-name}`, `TODO`, literal `YYYY-MM-DD`, `[target_name]`, `TASK-{N}`, `{{TARGET_FRAMEWORK}}`, etc.) remain.
+   - The upgrade contract: `.infra-manifest.json` exists at the target root, parses, carries a semver `generator_version`, a `TASK-{N}` reference, a valid `mode` (`full`/`merge`) and a well-formed optional `decisions` map (standing kept/merged decisions over tracked files), lists no runtime state and not itself, every listed file exists with a matching sha256, and `AGENTS.md`'s first line carries the version stamp matching the manifest's version and task (skipped when a merge-mode target's `AGENTS.md` pre-existed and is untracked). Files the manifest does NOT list are the team's own - `infra-update`'s "untouchable" class, whether they pre-existed a merge generation or were added by the team after any generation - so there is deliberately no disk-to-manifest coverage walk in any mode: a team-added file under an edition root (e.g. their own skill in `.claude/skills`) is normal, never a verification failure.
+   - No template placeholders (`{skill-name}`, `TODO`, literal `YYYY-MM-DD`, `[target_name]`, `TASK-{N}`, `{{TARGET_FRAMEWORK}}`, etc.) remain in any manifest-tracked (generator-owned) file. The team's own files are never scanned - the word TODO in a pre-existing team `AGENTS.md` is not a generation defect.
 3. **Confirm edition scoping passed:** treat a missing selected root or present unselected root as generation failure, not a warning.
 4. **Classify failures:**
    - Auto-fixable (e.g. missing executable bit) - fix and re-run the validator. After any auto-fix that changed a file's *content*, refresh the manifest before re-running (recipe below); a permissions-only fix does not change hashes.
@@ -84,8 +84,8 @@ A non-empty `STILL MISSING` list means a tracked file vanished - that is an esca
 - Memory bank validate.py: [pass/fail]
 - Context-brain runtime + project-brain skeleton: [pass/fail]
 - Smoke (context.py status / validate): [pass/fail]
-- Manifest (.infra-manifest.json coverage + hashes + AGENTS.md stamp): [pass/fail]
-- No placeholders: [pass/fail]
+- Manifest (.infra-manifest.json schema + tracked hashes + AGENTS.md stamp): [pass/fail]
+- No placeholders (generator-owned files only): [pass/fail]
 - Edition scoping: [pass/fail]
 
 ## Auto-fixed
@@ -102,7 +102,8 @@ A non-empty `STILL MISSING` list means a tracked file vanished - that is an esca
 - MUST confirm no unselected edition was generated.
 - MUST run the seeded memory bank's own validator, not a substitute.
 - MUST refresh the manifest hashes (recipe above) after any auto-fix that changed file content, and re-run the validator - a manifest describing pre-fix content is a broken upgrade contract.
-- MUST NOT add or remove manifest entries to make the validator pass - a coverage failure means `infra-generate`/`infra-update` under- or over-tracked and must be escalated.
+- MUST NOT add or remove manifest entries to make the validator pass - set changes belong to `infra-generate`/`infra-update`'s full recipe; a tracked file that is missing or hash-mismatched is an escalation, never something to drop from the manifest.
+- MUST NOT scan, validate, or report files the manifest does not list - they are the target team's own property (`infra-update`'s untouchable class), and flagging them (e.g. a placeholder-looking word in a team file, or "not tracked" noise about a team-added skill) would wrongly block generation and every later `infra-update` verification.
 
 ## Final Output
 

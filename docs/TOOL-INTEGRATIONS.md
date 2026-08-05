@@ -106,8 +106,15 @@ mirrors of `working-memory-write.sh` (after the turn checkpoint) and
 never serves the previous session's capsule) render the freshest capsule into
 `.cursor/rules/working-memory.mdc` - an `alwaysApply` rule Cursor attaches to
 every prompt. The file states its own staleness ("as of end of previous
-turn"), is replaced atomically and only when a fresh render succeeds, and is
-ignored local state (each edition's `.gitignore` lists it). This is a
+turn"), is replaced atomically, and is ignored local state (each edition's
+`.gitignore` lists it). A capsule rendered for the current task is replaced
+only by a fresh successful render; on a cold start - the render is empty
+because the working task has not yet auto-provisioned on the flush boundary,
+and no rule for the current task exists - the hooks render a warming-up
+placeholder (task id, provisioning note, and the last turn report when one
+is present), so the first turns of a fresh session are not left without
+working memory. A rule left over from a different task is replaced by the
+placeholder rather than served as the current task's memory. This is a
 declared MIRROR_RULES transformation of the canonical hooks (the
 `_WM_DELIVERY_*` constants in `memory-bank/scripts/context_retrieval.py`),
 not drift: `scripts/build_mirrors.py --check` verifies it.

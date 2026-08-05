@@ -27,7 +27,45 @@ RECORD_TYPES = ("task", "finding", "bug", "incident", "decision", "event")
 # Where a task sits in the delivery loop, using the same vocabulary the skills
 # declare in their own frontmatter. Progress says what was touched; the phase
 # says which step it stopped on, which is what a reader needs to resume.
+# Storage keeps exactly these four values (they match every edition's
+# dynamic-record and handoff schema enums), so records written before the
+# wider CLI vocabulary below existed stay valid byte for byte.
 TASK_PHASES = ("understanding", "planning", "execution", "finalization")
+# The skills' own Phase Map (SKILL FLOW.md) names the delivery steps
+# Understanding / Planning / Implementation / Quality / Finalization, while
+# every skill in the Implementation and Quality rows declares
+# `phase: execution` in its frontmatter, and the verify skill calls its own
+# stage "verification". Agents following those documents reach for those
+# words, so the CLI accepts them and records the canonical stored phase the
+# same skills declare. "utility" is deliberately absent: utility skills are
+# cross-cutting tools, not a step a task stops on.
+TASK_PHASE_ALIASES = {
+    "implementation": "execution",
+    "quality": "execution",
+    "verification": "execution",
+}
+# What the CLI offers, in delivery-loop order: canonical values plus the
+# documented Phase Map aliases above.
+TASK_PHASE_CHOICES = (
+    "understanding",
+    "planning",
+    "implementation",
+    "execution",
+    "quality",
+    "verification",
+    "finalization",
+)
+
+
+def normalize_task_phase(phase: Optional[str]) -> Optional[str]:
+    """Map a documented phase name onto its stored canonical value.
+
+    Unknown names pass through unchanged so storage validation stays the
+    single authority on what may actually be written.
+    """
+    if phase is None:
+        return None
+    return TASK_PHASE_ALIASES.get(phase, phase)
 PRIVACY = ("public", "team", "restricted", "private")
 AUTHORITIES = ("inferred", "observed", "verified")
 # Authority may only harden, along a single edge: an `observed` claim that a

@@ -138,8 +138,17 @@ _HOOK_PATH_EXTRACT_CODEX = (
 # turn stale by design, says so in its header, and lives in ignored local
 # state (the edition .gitignore lists it). The canonical hooks carry the
 # short marker comments below; the Cursor mirror swaps in the render steps.
-# The render is silent on stdout, degrades to a no-op on any failure, and
-# replaces the previous rule only when a fresh render succeeds.
+# The render is silent on stdout, degrades safely on any failure, and
+# replaces a previously rendered capsule only when a fresh render succeeds.
+# Cold start is the one exception: the working task auto-provisions only on
+# the flush boundary (flush-after buffered turns), so a fresh session has no
+# capsule to render yet and would otherwise run its first turns without any
+# rule. When the render is empty and no rule for the current task exists,
+# the hooks render a warming-up placeholder (task id, provisioning note,
+# and the last turn report from ignored local state when one is present).
+# A rendered capsule for the same task is never replaced by a placeholder -
+# one turn stale beats empty - but a rule left over from a different task
+# is, so a branch switch cannot serve another task's capsule.
 _WM_DELIVERY_STOP = r'''# Capsule delivery: this client receives the Task Capsule at prompt time
 # through working-memory-read.sh, so the turn checkpoint above is all that
 # runs here.
@@ -149,7 +158,11 @@ _WM_DELIVERY_STOP_CURSOR = r'''# Capsule delivery: Cursor has no UserPromptSubmi
 # served here instead: after the turn checkpoint, the freshest Task Capsule
 # is rendered into an alwaysApply Cursor rule, which Cursor attaches to
 # every prompt of the next turn. The file is ignored local state, one turn
-# stale by design, and replaced only when a fresh render succeeds.
+# stale by design, and a previously rendered capsule is replaced only when
+# a fresh render succeeds. On a cold start (no capsule yet - the working
+# task auto-provisions on the flush boundary - and no rule rendered for
+# this task) a warming-up placeholder is rendered instead, so the first
+# turns of a session are not left without working memory.
 RULES_DIR="$ROOT_DIR/.cursor/rules"
 RULE_FILE="$RULES_DIR/working-memory.mdc"
 if command -v timeout > /dev/null 2>&1; then
@@ -159,23 +172,52 @@ else
   CAPSULE=$(python3 "$CONTEXT_CLI" context \
     "$TASK_ID" --task-id "$TASK_ID" --ephemeral 2>/dev/null)
 fi
-if [ -n "$CAPSULE" ] && mkdir -p "$RULES_DIR" 2>/dev/null; then
-  TMP_RULE=$(mktemp "$RULES_DIR/.working-memory.XXXXXX" 2>/dev/null || true)
-  if [ -n "$TMP_RULE" ]; then
-    {
-      printf -- '---\n'
-      printf 'description: Working memory - Task Capsule as of end of previous turn\n'
-      printf 'alwaysApply: true\n'
-      printf -- '---\n\n'
-      printf '# Working Memory (auto-rendered)\n\n'
-      printf 'Task Capsule as of end of previous turn (task: %s, rendered: %s).\n' \
-        "$TASK_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-      printf 'Retrieved context is not authoritative - verify the source.\n\n'
-      printf '%s\n' '```'
-      printf '%s\n' "$CAPSULE"
-      printf '%s\n' '```'
-    } > "$TMP_RULE" 2>/dev/null && mv -f "$TMP_RULE" "$RULE_FILE" 2>/dev/null
-    rm -f "$TMP_RULE" 2>/dev/null
+if mkdir -p "$RULES_DIR" 2>/dev/null; then
+  if [ -n "$CAPSULE" ]; then
+    TMP_RULE=$(mktemp "$RULES_DIR/.working-memory.XXXXXX" 2>/dev/null || true)
+    if [ -n "$TMP_RULE" ]; then
+      {
+        printf -- '---\n'
+        printf 'description: Working memory - Task Capsule as of end of previous turn\n'
+        printf 'alwaysApply: true\n'
+        printf -- '---\n\n'
+        printf '# Working Memory (auto-rendered)\n\n'
+        printf 'Task Capsule as of end of previous turn (task: %s, rendered: %s).\n' \
+          "$TASK_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'Retrieved context is not authoritative - verify the source.\n\n'
+        printf '%s\n' '```'
+        printf '%s\n' "$CAPSULE"
+        printf '%s\n' '```'
+      } > "$TMP_RULE" 2>/dev/null && mv -f "$TMP_RULE" "$RULE_FILE" 2>/dev/null
+      rm -f "$TMP_RULE" 2>/dev/null
+    fi
+  elif ! grep -Fq -- "(task: $TASK_ID," "$RULE_FILE" 2>/dev/null; then
+    TMP_RULE=$(mktemp "$RULES_DIR/.working-memory.XXXXXX" 2>/dev/null || true)
+    if [ -n "$TMP_RULE" ]; then
+      {
+        printf -- '---\n'
+        printf 'description: Working memory - warming up, no Task Capsule rendered yet\n'
+        printf 'alwaysApply: true\n'
+        printf -- '---\n\n'
+        printf '# Working Memory (warming up)\n\n'
+        printf 'No Task Capsule is available yet (task: %s, rendered: %s).\n' \
+          "$TASK_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'The working task auto-provisions once buffered turns reach the\n'
+        printf 'flush boundary; the freshest capsule then replaces this rule.\n'
+        printf 'Until then rely on AGENTS.md, the task documents, and explicit\n'
+        printf 'retrieval (memory-bank/scripts/context.py). Retrieved context\n'
+        printf 'is not authoritative - verify the source.\n'
+        WM_REPORT="$ROOT_DIR/memory-bank/local/last-turn-report.json"
+        if [ -s "$WM_REPORT" ]; then
+          printf '\nLast turn report (ignored local state; may describe an\n'
+          printf 'earlier session - see its own task_id):\n\n'
+          printf '%s\n' '```json'
+          head -c 1200 "$WM_REPORT" 2>/dev/null
+          printf '\n%s\n' '```'
+        fi
+      } > "$TMP_RULE" 2>/dev/null && mv -f "$TMP_RULE" "$RULE_FILE" 2>/dev/null
+      rm -f "$TMP_RULE" 2>/dev/null
+    fi
   fi
 fi
 '''
@@ -186,13 +228,16 @@ _WM_DELIVERY_SESSION_CURSOR = r'''# Capsule delivery: Cursor has no UserPromptSu
 # stop hook maintains .cursor/rules/working-memory.mdc instead (the
 # documented exception to the metadata-only session banner - see
 # docs/TOOL-INTEGRATIONS.md). Re-render it here so a fresh session or a
-# branch switch does not serve the previous session's capsule. Nothing is
-# printed: the rule file is the only output.
+# branch switch does not serve the previous session's capsule. On a cold
+# start (no capsule yet - the working task auto-provisions on the flush
+# boundary - and no rule rendered for this task) a warming-up placeholder
+# is rendered instead, so the first turns of the session are not left
+# without working memory. Nothing is printed: the rule file is the only
+# output.
 CAPSULE_BUDGET_SECONDS="${CONTEXT_HOOK_BUDGET:-5}"
 CAPSULE_TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$ROOT_DIR" branch --show-current 2>/dev/null)}"
 RULES_DIR="$ROOT_DIR/.cursor/rules"
 RULE_FILE="$RULES_DIR/working-memory.mdc"
-CAPSULE=""
 if command -v python3 > /dev/null 2>&1 && [ -f "$CONTEXT_CLI" ] && [ -n "$CAPSULE_TASK_ID" ]; then
   if command -v timeout > /dev/null 2>&1; then
     CAPSULE=$(timeout "$CAPSULE_BUDGET_SECONDS" python3 "$CONTEXT_CLI" context \
@@ -201,24 +246,53 @@ if command -v python3 > /dev/null 2>&1 && [ -f "$CONTEXT_CLI" ] && [ -n "$CAPSUL
     CAPSULE=$(python3 "$CONTEXT_CLI" context \
       "$CAPSULE_TASK_ID" --task-id "$CAPSULE_TASK_ID" --ephemeral 2>/dev/null)
   fi
-fi
-if [ -n "$CAPSULE" ] && mkdir -p "$RULES_DIR" 2>/dev/null; then
-  TMP_RULE=$(mktemp "$RULES_DIR/.working-memory.XXXXXX" 2>/dev/null || true)
-  if [ -n "$TMP_RULE" ]; then
-    {
-      printf -- '---\n'
-      printf 'description: Working memory - Task Capsule as of end of previous turn\n'
-      printf 'alwaysApply: true\n'
-      printf -- '---\n\n'
-      printf '# Working Memory (auto-rendered)\n\n'
-      printf 'Task Capsule as of end of previous turn (task: %s, rendered: %s).\n' \
-        "$CAPSULE_TASK_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-      printf 'Retrieved context is not authoritative - verify the source.\n\n'
-      printf '%s\n' '```'
-      printf '%s\n' "$CAPSULE"
-      printf '%s\n' '```'
-    } > "$TMP_RULE" 2>/dev/null && mv -f "$TMP_RULE" "$RULE_FILE" 2>/dev/null
-    rm -f "$TMP_RULE" 2>/dev/null
+  if mkdir -p "$RULES_DIR" 2>/dev/null; then
+    if [ -n "$CAPSULE" ]; then
+      TMP_RULE=$(mktemp "$RULES_DIR/.working-memory.XXXXXX" 2>/dev/null || true)
+      if [ -n "$TMP_RULE" ]; then
+        {
+          printf -- '---\n'
+          printf 'description: Working memory - Task Capsule as of end of previous turn\n'
+          printf 'alwaysApply: true\n'
+          printf -- '---\n\n'
+          printf '# Working Memory (auto-rendered)\n\n'
+          printf 'Task Capsule as of end of previous turn (task: %s, rendered: %s).\n' \
+            "$CAPSULE_TASK_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          printf 'Retrieved context is not authoritative - verify the source.\n\n'
+          printf '%s\n' '```'
+          printf '%s\n' "$CAPSULE"
+          printf '%s\n' '```'
+        } > "$TMP_RULE" 2>/dev/null && mv -f "$TMP_RULE" "$RULE_FILE" 2>/dev/null
+        rm -f "$TMP_RULE" 2>/dev/null
+      fi
+    elif ! grep -Fq -- "(task: $CAPSULE_TASK_ID," "$RULE_FILE" 2>/dev/null; then
+      TMP_RULE=$(mktemp "$RULES_DIR/.working-memory.XXXXXX" 2>/dev/null || true)
+      if [ -n "$TMP_RULE" ]; then
+        {
+          printf -- '---\n'
+          printf 'description: Working memory - warming up, no Task Capsule rendered yet\n'
+          printf 'alwaysApply: true\n'
+          printf -- '---\n\n'
+          printf '# Working Memory (warming up)\n\n'
+          printf 'No Task Capsule is available yet (task: %s, rendered: %s).\n' \
+            "$CAPSULE_TASK_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          printf 'The working task auto-provisions once buffered turns reach the\n'
+          printf 'flush boundary; the freshest capsule then replaces this rule.\n'
+          printf 'Until then rely on AGENTS.md, the task documents, and explicit\n'
+          printf 'retrieval (memory-bank/scripts/context.py). Retrieved context\n'
+          printf 'is not authoritative - verify the source.\n'
+          WM_REPORT="$ROOT_DIR/memory-bank/local/last-turn-report.json"
+          if [ -s "$WM_REPORT" ]; then
+            printf '\nLast turn report (ignored local state; may describe an\n'
+            printf 'earlier session - see its own task_id):\n\n'
+            printf '%s\n' '```json'
+            head -c 1200 "$WM_REPORT" 2>/dev/null
+            printf '\n%s\n' '```'
+          fi
+        } > "$TMP_RULE" 2>/dev/null && mv -f "$TMP_RULE" "$RULE_FILE" 2>/dev/null
+        rm -f "$TMP_RULE" 2>/dev/null
+      fi
+    fi
   fi
 fi
 '''

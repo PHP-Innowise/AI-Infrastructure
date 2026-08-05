@@ -6,6 +6,21 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Changed
 
+- **`bash-validator` stopped depending on an external `cat` (TC-030).** The
+  hook read its stdin with `$(cat ...)` before the extractor guard, so on a
+  system without `cat` the payload was lost and validation was silently
+  skipped without the fail-open warning. Stdin is now read with the bash
+  builtin (`IFS= read -r -d '' input`), and `hook-forge` mandates the same
+  builtin read for every generated validator. Regression tests:
+  `tests/test_hooks.py` restricted-PATH cases.
+- **Generated Cursor targets no longer cold-start without a rule
+  (DEF-001/TC-004).** `hook-forge` now requires the Cursor copies of
+  `working-memory-write.sh` and `local-context.sh` to render a warming-up
+  placeholder into `.cursor/rules/working-memory.mdc` when the capsule
+  render is empty and no rule exists for the current task (the working task
+  auto-provisions only on the flush boundary), matching the flagship
+  editions' behavior: same-task rules survive failed renders, other-task
+  leftovers are replaced.
 - **Hooks joined the hardened generation.** `bash-validator` extracts the
   command through the jq/php/python3 chain instead of a greedy `sed` (a
   payload that fails to parse is no longer matched raw, which ends false
@@ -24,6 +39,32 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
   gitignored in the target) that the flagship editions use, so Cursor
   installations of generated accelerators read working memory one turn
   behind instead of not at all.
+
+### Fixed
+
+- **`bootstrap-verifier` policed the team's own files, contradicting
+  `infra-update`'s "not listed = untouchable" contract.** Two defects of the
+  same class in `validate_generated.py`, both able to wrongly fail a
+  generation or clinch every later `infra-update` verification:
+  - the leftover-placeholder scan ran on every candidate file, so a
+    merge-mode target whose PRE-EXISTING team `AGENTS.md` happened to
+    contain the word TODO failed the QA gate (TC-008). The scan now applies
+    only to manifest-tracked (generator-owned) files - the manifest's
+    `files` map is the sole definition of generator ownership - and the
+    team's files are never scanned. Without a readable manifest the scan
+    falls back to checking everything (and the broken manifest is reported
+    itself).
+  - the `mode: full` manifest-coverage walk rejected any untracked file
+    under the edition roots as "generated file not tracked", so a team that
+    added its own skill in `.claude/skills` after generation could never
+    pass verification again (TC-014). The disk-to-manifest coverage walk is
+    gone in every mode: files outside the manifest are the team's property
+    (never read, never reported), while the real contract is kept - every
+    file the manifest lists must exist with a matching sha256, and the
+    `AGENTS.md` stamp must agree with the manifest.
+  The `bootstrap-verifier`, `infra-update`, and `infra-generate` SKILL.md
+  contracts now state the ownership rule explicitly; both repro scenarios
+  are pinned by the new regression suite `tests/test_validate_generated.py`.
 
 ## [1.4.0] - 2026-08-02
 

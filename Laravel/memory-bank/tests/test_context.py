@@ -406,6 +406,56 @@ class ContextEngineTest(unittest.TestCase):
             self.assertIsInstance(phases[phase], (int, float))
             self.assertGreaterEqual(phases[phase], 0.0)
 
+    def test_refresh_rejects_private_raw_query_before_distillation(self) -> None:
+        # TC-066: the privacy gate must see the RAW --query prompt.
+        # Distillation tokenizes away the very characters the private-data
+        # patterns match on (@, dots, "user:" prefixes), so gating only the
+        # distilled query waved raw private prompts through and persisted
+        # their tokens in the retrieval manifest.
+        self.repository.joinpath("specs/refund.md").write_text(
+            "# Refund\n\nContact procedure for customer refunds.\n",
+            encoding="utf-8",
+        )
+        started = self.run_governed(
+            "start", "--task-id", "TASK-RAW-QUERY", "--goal", "Handle refunds"
+        )
+        self.assertEqual(0, started.returncode, started.stderr)
+        raw_prompts = (
+            "contact customer john.doe@example.test about the refund",
+            "user: please summarize\nassistant: the refund thread",
+        )
+        for raw in raw_prompts:
+            with self.subTest(raw=raw):
+                result = self.run_governed(
+                    "refresh",
+                    "--task-id",
+                    "TASK-RAW-QUERY",
+                    "--query",
+                    raw,
+                    "--json",
+                )
+                # The layer refresh stands on its own; only the capsule is
+                # refused, exactly as for any other capsule failure.
+                self.assertEqual(0, result.returncode, result.stderr)
+                payload = json.loads(result.stdout)
+                self.assertIsNone(payload["capsule"])
+                self.assertTrue(
+                    any(
+                        "contains private or raw data" in warning
+                        for warning in payload["warnings"]
+                    ),
+                    payload["warnings"],
+                )
+                self.assertNotIn("john", result.stdout + result.stderr)
+        # A rejected prompt is never distilled, so no retrieval ran and no
+        # manifest was written for either request.
+        manifests = (
+            self.repository / "project-brain/control/retrieval-manifests"
+        )
+        self.assertEqual(
+            [], list(manifests.glob("*.json")) if manifests.exists() else []
+        )
+
     def test_index_skips_git_ignored_sources_but_keeps_tracked_sources(self) -> None:
         subprocess.run(
             ["git", "init", "--quiet", str(self.repository)],
@@ -1025,6 +1075,128 @@ class ContextEngineTest(unittest.TestCase):
         self.assertIn("not found", unknown_clear.stderr)
         self.assertIn("Task ID must use", invalid.stderr)
         self.assertIn("requires a changed field", empty_update.stderr)
+
+    def test_update_accepts_documented_phase_vocabulary(self) -> None:
+        # TC-021 / TC-061: agents following the Skill Flow Phase Map say
+        # "implementation", "quality", or "verification"; the CLI used to
+        # reject everything outside the four stored values and documented
+        # nothing. Every documented name must be accepted and recorded as
+        # the canonical stored phase the same skills declare in their own
+        # frontmatter.
+        mapping = (
+            ("understanding", "understanding"),
+            ("planning", "planning"),
+            ("implementation", "execution"),
+            ("execution", "execution"),
+            ("quality", "execution"),
+            ("verification", "execution"),
+            ("finalization", "finalization"),
+        )
+        # The table above is the whole CLI vocabulary: a value added to the
+        # choices without a documented stored mapping should fail here.
+        self.assertEqual(
+            sorted(supplied for supplied, _ in mapping),
+            sorted(CONTEXT.TASK_PHASE_CHOICES),
+        )
+        started = self.run_governed(
+            "start", "--task-id", "TASK-PHASE", "--goal", "Ship invoice export"
+        )
+        self.assertEqual(0, started.returncode, started.stderr)
+        for supplied, stored in mapping:
+            with self.subTest(supplied=supplied):
+                updated = self.run_governed(
+                    "update", "--task-id", "TASK-PHASE", "--phase", supplied
+                )
+                self.assertEqual(0, updated.returncode, updated.stderr)
+                task = json.loads(
+                    self.run_governed(
+                        "get", "--task-id", "TASK-PHASE", "--json"
+                    ).stdout
+                )
+                self.assertEqual(stored, task["phase"])
+
+    def test_update_allows_every_phase_transition(self) -> None:
+        # Phases carry no ordering constraint: rework and re-planning are
+        # real, so any stored phase may follow any other. The walk below
+        # traverses all twelve ordered pairs of the canonical values once.
+        canonical = ("understanding", "planning", "execution", "finalization")
+        walk = (
+            "understanding",
+            "planning",
+            "understanding",
+            "execution",
+            "understanding",
+            "finalization",
+            "planning",
+            "execution",
+            "planning",
+            "finalization",
+            "execution",
+            "finalization",
+            "understanding",
+        )
+        self.assertEqual(
+            {(a, b) for a in canonical for b in canonical if a != b},
+            set(zip(walk, walk[1:])),
+        )
+        started = self.run_governed(
+            "start", "--task-id", "TASK-PHASE-WALK", "--goal", "Walk phases"
+        )
+        self.assertEqual(0, started.returncode, started.stderr)
+        for phase in walk:
+            with self.subTest(phase=phase):
+                updated = self.run_governed(
+                    "update", "--task-id", "TASK-PHASE-WALK", "--phase", phase
+                )
+                self.assertEqual(0, updated.returncode, updated.stderr)
+        task = json.loads(
+            self.run_governed(
+                "get", "--task-id", "TASK-PHASE-WALK", "--json"
+            ).stdout
+        )
+        self.assertEqual(walk[-1], task["phase"])
+
+    def test_update_rejects_phase_outside_documented_vocabulary(self) -> None:
+        # TC-061 tried "implementing"; the vocabulary stays closed, but the
+        # rejection now lists the documented names an agent may reach for.
+        rejected = self.run_governed(
+            "update", "--task-id", "TASK-PHASE", "--phase", "implementing"
+        )
+        self.assertEqual(2, rejected.returncode)
+        self.assertIn("invalid choice: 'implementing'", rejected.stderr)
+        self.assertIn("'implementation'", rejected.stderr)
+        self.assertIn("'verification'", rejected.stderr)
+
+    def test_brain_update_accepts_phase_alias_on_the_task_record(self) -> None:
+        started = self.run_governed(
+            "start",
+            "--task-id",
+            "TASK-BRAIN-PHASE",
+            "--goal",
+            "Alias via brain-update",
+        )
+        self.assertEqual(0, started.returncode, started.stderr)
+        task = json.loads(
+            self.run_governed(
+                "get", "--task-id", "TASK-BRAIN-PHASE", "--json"
+            ).stdout
+        )
+        updated = self.run_governed(
+            "brain-update",
+            "--record-id",
+            task["task_uuid"],
+            "--revision",
+            str(task["revision"]),
+            "--phase",
+            "verification",
+        )
+        self.assertEqual(0, updated.returncode, updated.stderr)
+        refreshed = json.loads(
+            self.run_governed(
+                "get", "--task-id", "TASK-BRAIN-PHASE", "--json"
+            ).stdout
+        )
+        self.assertEqual("execution", refreshed["phase"])
 
     def test_working_rejects_secret_without_echoing_it(self) -> None:
         fake_token = "ghp_" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"

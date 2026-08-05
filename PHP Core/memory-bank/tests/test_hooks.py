@@ -62,6 +62,37 @@ def run_hook(
     )
 
 
+def restricted_bin(base: Path, names: tuple[str, ...]) -> str:
+    """A PATH directory carrying only the named binaries (symlinked)."""
+    bindir = base / "bin"
+    bindir.mkdir()
+    for name in names:
+        source = shutil.which(name)
+        if source is None:
+            raise unittest.SkipTest("required binary missing: {}".format(name))
+        (bindir / name).symlink_to(source)
+    return str(bindir)
+
+
+def run_hook_restricted(tool: str, name: str, payload, path_value: str):
+    """Run a hook under a minimal PATH (regression: no external `cat`)."""
+    bash = shutil.which("bash")
+    if bash is None:
+        raise unittest.SkipTest("bash not found")
+    stdin = payload if isinstance(payload, str) else json.dumps(payload)
+    env = dict(os.environ)
+    env["PATH"] = path_value
+    return subprocess.run(
+        [bash, str(hook_path(tool, name))],
+        input=stdin,
+        capture_output=True,
+        text=True,
+        cwd=str(EDITION_ROOT),
+        env=env,
+        timeout=HOOK_TIMEOUT,
+    )
+
+
 def shell_line(script: str, *args: str) -> str:
     result = subprocess.run(
         ["bash", "-c", script, "bash", *args],
@@ -212,6 +243,42 @@ class BashValidatorTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout, "")
                 self.assertEqual(result.stderr, "")
+
+    def test_stdin_read_does_not_need_external_cat(self) -> None:
+        # TC-030 regression: stdin is read with the bash builtin. With no
+        # `cat` in PATH the validator used to lose the payload and silently
+        # pass every command - including destructive ones.
+        with tempfile.TemporaryDirectory(prefix="no-cat-") as tmp:
+            path_value = restricted_bin(Path(tmp), ("grep", "python3"))
+            for tool in MIRRORS:
+                with self.subTest(tool=tool):
+                    result = run_hook_restricted(
+                        tool,
+                        self.HOOK,
+                        self.payload("git reset --hard HEAD~1"),
+                        path_value,
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn("BLOCKED", result.stderr)
+                    self.assertNotIn("command not found", result.stderr)
+
+    def test_no_extractor_warning_survives_missing_cat(self) -> None:
+        # TC-030 regression: with neither `cat` nor any JSON extractor in
+        # PATH, the fail-open warning must still reach stderr instead of
+        # being lost together with the unread payload.
+        with tempfile.TemporaryDirectory(prefix="no-extractor-") as tmp:
+            path_value = restricted_bin(Path(tmp), ("grep",))
+            for tool in MIRRORS:
+                with self.subTest(tool=tool):
+                    result = run_hook_restricted(
+                        tool,
+                        self.HOOK,
+                        self.payload("git reset --hard HEAD~1"),
+                        path_value,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("no JSON extractor available", result.stderr)
+                    self.assertEqual(result.stdout, "")
 
     def test_block_message_names_the_matching_pattern(self) -> None:
         # The combined single-pass scan must still report which concrete
@@ -597,22 +664,102 @@ class CursorCapsuleRenderTest(unittest.TestCase):
         self.assertNotIn("stub goal", result.stdout)
         self.assertIn("stub goal", self.rule_file().read_text(encoding="utf-8"))
 
-    def test_failed_render_preserves_previous_rule(self) -> None:
-        self.rule_file().write_text("previous capsule\n", encoding="utf-8")
+    def test_failed_render_preserves_previous_rule_for_same_task(self) -> None:
+        # A transient render failure must not downgrade a capsule already
+        # rendered for the current task (one turn stale beats a placeholder).
+        previous = (
+            "# Working Memory (auto-rendered)\n\n"
+            "Task Capsule as of end of previous turn"
+            " (task: TASK-STUB, rendered: earlier).\n"
+            "previous capsule\n"
+        )
+        self.rule_file().write_text(previous, encoding="utf-8")
         self.cli.write_text(self.STUB_SILENT, encoding="utf-8")
         for hook in WorkingMemoryRuleTest.RENDER_HOOKS:
             with self.subTest(hook=hook):
                 result = self.run_cursor_hook(hook)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(
-                    self.rule_file().read_text(encoding="utf-8"),
-                    "previous capsule\n",
+                    self.rule_file().read_text(encoding="utf-8"), previous
                 )
                 # No temp litter: an interrupted render must not accumulate.
                 self.assertEqual(
                     [path.name for path in self.rules_dir.iterdir()],
                     ["working-memory.mdc"],
                 )
+
+    def test_cold_start_renders_warming_up_placeholder(self) -> None:
+        # DEF-001 / TC-004 regression: before the working task auto-provisions
+        # (the flush-after boundary) the capsule render is empty, and a fresh
+        # Cursor session used to run its first turns with no rule at all.
+        self.cli.write_text(self.STUB_SILENT, encoding="utf-8")
+        for hook in WorkingMemoryRuleTest.RENDER_HOOKS:
+            with self.subTest(hook=hook):
+                if self.rule_file().exists():
+                    self.rule_file().unlink()
+                result = self.run_cursor_hook(hook)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                rendered = self.rule_file().read_text(encoding="utf-8")
+                self.assertTrue(rendered.startswith("---\n"))
+                self.assertIn("alwaysApply: true", rendered)
+                self.assertIn("warming up", rendered)
+                self.assertIn("(task: TASK-STUB,", rendered)
+                self.assertIn("auto-provisions", rendered)
+                self.assertIn("not authoritative", rendered)
+                # The placeholder goes to the rule file only, never stdout.
+                self.assertNotIn("warming up", result.stdout)
+                self.assertEqual(
+                    [path.name for path in self.rules_dir.iterdir()],
+                    ["working-memory.mdc"],
+                )
+
+    def test_placeholder_folds_in_last_turn_report(self) -> None:
+        # The placeholder carries the last turn report from ignored local
+        # state when one exists, so a cold start still says what the write
+        # hook last did.
+        self.cli.write_text(self.STUB_SILENT, encoding="utf-8")
+        report_dir = self.root / "memory-bank" / "local"
+        report_dir.mkdir(parents=True)
+        (report_dir / "last-turn-report.json").write_text(
+            '{"task_id": "TASK-STUB", "flushed": false, "pending": 2}\n',
+            encoding="utf-8",
+        )
+        result = self.run_cursor_hook("working-memory-write.sh")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rendered = self.rule_file().read_text(encoding="utf-8")
+        self.assertIn("warming up", rendered)
+        self.assertIn("Last turn report", rendered)
+        self.assertIn('"pending": 2', rendered)
+
+    def test_stale_other_task_rule_replaced_by_placeholder(self) -> None:
+        # A rule left over from a different task (branch switch) must not be
+        # served as this task's memory when the fresh render is empty.
+        self.rule_file().write_text(
+            "Task Capsule as of end of previous turn"
+            " (task: OTHER-TASK, rendered: earlier).\n",
+            encoding="utf-8",
+        )
+        self.cli.write_text(self.STUB_SILENT, encoding="utf-8")
+        result = self.run_cursor_hook("local-context.sh")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rendered = self.rule_file().read_text(encoding="utf-8")
+        self.assertIn("warming up", rendered)
+        self.assertIn("(task: TASK-STUB,", rendered)
+        self.assertNotIn("OTHER-TASK", rendered)
+
+    def test_capsule_replaces_placeholder_once_available(self) -> None:
+        self.cli.write_text(self.STUB_SILENT, encoding="utf-8")
+        self.run_cursor_hook("working-memory-write.sh")
+        self.assertIn(
+            "warming up", self.rule_file().read_text(encoding="utf-8")
+        )
+        self.cli.write_text(self.STUB_CAPSULE, encoding="utf-8")
+        result = self.run_cursor_hook("working-memory-write.sh")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rendered = self.rule_file().read_text(encoding="utf-8")
+        self.assertIn("auto-rendered", rendered)
+        self.assertIn("stub goal", rendered)
+        self.assertNotIn("warming up", rendered)
 
 
 class MirrorConsistencyTest(unittest.TestCase):

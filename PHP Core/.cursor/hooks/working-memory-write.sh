@@ -39,7 +39,11 @@ fi
 # served here instead: after the turn checkpoint, the freshest Task Capsule
 # is rendered into an alwaysApply Cursor rule, which Cursor attaches to
 # every prompt of the next turn. The file is ignored local state, one turn
-# stale by design, and replaced only when a fresh render succeeds.
+# stale by design, and a previously rendered capsule is replaced only when
+# a fresh render succeeds. On a cold start (no capsule yet - the working
+# task auto-provisions on the flush boundary - and no rule rendered for
+# this task) a warming-up placeholder is rendered instead, so the first
+# turns of a session are not left without working memory.
 RULES_DIR="$ROOT_DIR/.cursor/rules"
 RULE_FILE="$RULES_DIR/working-memory.mdc"
 if command -v timeout > /dev/null 2>&1; then
@@ -49,23 +53,52 @@ else
   CAPSULE=$(python3 "$CONTEXT_CLI" context \
     "$TASK_ID" --task-id "$TASK_ID" --ephemeral 2>/dev/null)
 fi
-if [ -n "$CAPSULE" ] && mkdir -p "$RULES_DIR" 2>/dev/null; then
-  TMP_RULE=$(mktemp "$RULES_DIR/.working-memory.XXXXXX" 2>/dev/null || true)
-  if [ -n "$TMP_RULE" ]; then
-    {
-      printf -- '---\n'
-      printf 'description: Working memory - Task Capsule as of end of previous turn\n'
-      printf 'alwaysApply: true\n'
-      printf -- '---\n\n'
-      printf '# Working Memory (auto-rendered)\n\n'
-      printf 'Task Capsule as of end of previous turn (task: %s, rendered: %s).\n' \
-        "$TASK_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-      printf 'Retrieved context is not authoritative - verify the source.\n\n'
-      printf '%s\n' '```'
-      printf '%s\n' "$CAPSULE"
-      printf '%s\n' '```'
-    } > "$TMP_RULE" 2>/dev/null && mv -f "$TMP_RULE" "$RULE_FILE" 2>/dev/null
-    rm -f "$TMP_RULE" 2>/dev/null
+if mkdir -p "$RULES_DIR" 2>/dev/null; then
+  if [ -n "$CAPSULE" ]; then
+    TMP_RULE=$(mktemp "$RULES_DIR/.working-memory.XXXXXX" 2>/dev/null || true)
+    if [ -n "$TMP_RULE" ]; then
+      {
+        printf -- '---\n'
+        printf 'description: Working memory - Task Capsule as of end of previous turn\n'
+        printf 'alwaysApply: true\n'
+        printf -- '---\n\n'
+        printf '# Working Memory (auto-rendered)\n\n'
+        printf 'Task Capsule as of end of previous turn (task: %s, rendered: %s).\n' \
+          "$TASK_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'Retrieved context is not authoritative - verify the source.\n\n'
+        printf '%s\n' '```'
+        printf '%s\n' "$CAPSULE"
+        printf '%s\n' '```'
+      } > "$TMP_RULE" 2>/dev/null && mv -f "$TMP_RULE" "$RULE_FILE" 2>/dev/null
+      rm -f "$TMP_RULE" 2>/dev/null
+    fi
+  elif ! grep -Fq -- "(task: $TASK_ID," "$RULE_FILE" 2>/dev/null; then
+    TMP_RULE=$(mktemp "$RULES_DIR/.working-memory.XXXXXX" 2>/dev/null || true)
+    if [ -n "$TMP_RULE" ]; then
+      {
+        printf -- '---\n'
+        printf 'description: Working memory - warming up, no Task Capsule rendered yet\n'
+        printf 'alwaysApply: true\n'
+        printf -- '---\n\n'
+        printf '# Working Memory (warming up)\n\n'
+        printf 'No Task Capsule is available yet (task: %s, rendered: %s).\n' \
+          "$TASK_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'The working task auto-provisions once buffered turns reach the\n'
+        printf 'flush boundary; the freshest capsule then replaces this rule.\n'
+        printf 'Until then rely on AGENTS.md, the task documents, and explicit\n'
+        printf 'retrieval (memory-bank/scripts/context.py). Retrieved context\n'
+        printf 'is not authoritative - verify the source.\n'
+        WM_REPORT="$ROOT_DIR/memory-bank/local/last-turn-report.json"
+        if [ -s "$WM_REPORT" ]; then
+          printf '\nLast turn report (ignored local state; may describe an\n'
+          printf 'earlier session - see its own task_id):\n\n'
+          printf '%s\n' '```json'
+          head -c 1200 "$WM_REPORT" 2>/dev/null
+          printf '\n%s\n' '```'
+        fi
+      } > "$TMP_RULE" 2>/dev/null && mv -f "$TMP_RULE" "$RULE_FILE" 2>/dev/null
+      rm -f "$TMP_RULE" 2>/dev/null
+    fi
   fi
 fi
 
