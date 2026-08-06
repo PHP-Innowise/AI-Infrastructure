@@ -15,8 +15,13 @@ from build_disposition_ledger import composite_defect_map  # noqa: E402
 from build_sha256_manifest import render_manifest, verify_manifest  # noqa: E402
 from apply_disposition_decisions import apply_decisions  # noqa: E402
 from common import QaError, load_json, verify_sha256_manifest  # noqa: E402
-from reconstruct_workbook import reconstruct  # noqa: E402
-from run_tc_ai import run_case, validate_catalog  # noqa: E402
+from reconstruct_workbook import reconstruct, sanitize_machine_paths  # noqa: E402
+from run_tc_ai import (  # noqa: E402
+    expand_argv,
+    run_case,
+    sanitized_argv,
+    validate_catalog,
+)
 from validate_qa_artifacts import (  # noqa: E402
     validate_run_evidence,
     validate_schema_instance,
@@ -46,6 +51,26 @@ class QaToolingTests(unittest.TestCase):
             "catalog",
         )
         self.assertTrue(any("Additional properties" in error for error in errors))
+
+    def test_shell_commands_use_pinned_python_and_evidence_redacts_paths(self) -> None:
+        argv = expand_argv(
+            [
+                "bash",
+                "-c",
+                "python3 -m unittest; {python_shell} -V; cd {root_shell}",
+            ],
+            ROOT,
+        )
+        self.assertNotIn("python3 -m unittest", argv[2])
+        self.assertIn(sys.executable, argv[2])
+        self.assertIn(str(ROOT), argv[2])
+
+        sanitized = sanitized_argv(argv, ROOT)
+        joined = " ".join(sanitized)
+        self.assertNotIn(sys.executable, joined)
+        self.assertNotIn(str(ROOT), joined)
+        self.assertIn("{python}", joined)
+        self.assertIn("{root}", joined)
 
     def test_duplicate_defect_composite_is_rejected(self) -> None:
         duplicate = {
@@ -79,6 +104,21 @@ class QaToolingTests(unittest.TestCase):
                 )
             self.assertFalse(output.exists())
             self.assertEqual([], list(temporary.glob("*.xlsx")))
+
+    def test_generated_workbook_redacts_machine_local_repository_paths(self) -> None:
+        from openpyxl import Workbook
+
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet["A1"] = "/home/tester/Desktop/AI-Infrastructure/status"
+        sheet["A2"] = "/Users/tester/work/accelerator-php/docs/source.json"
+        sheet["A3"] = "=SUM(B1:B2)"
+
+        sanitize_machine_paths(workbook)
+
+        self.assertEqual("{repository}/status", sheet["A1"].value)
+        self.assertEqual("{repository}/docs/source.json", sheet["A2"].value)
+        self.assertEqual("=SUM(B1:B2)", sheet["A3"].value)
 
     def test_checksum_manifest_cannot_escape_or_follow_symlinks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_name:
@@ -445,10 +485,12 @@ class QaToolingTests(unittest.TestCase):
                         "source_group": "historical-57",
                         "historical_result": "Pass",
                         "evidence_path": "logs/{0}.log".format(run_id),
+                        "native_client_requirement": "none",
                         "review_status": "pending",
                     }
                 )
             records[42]["namespaced_defect_id"] = "DEF-006"
+            records[1]["native_client_requirement"] = "claude-code"
             for number in range(1, 19):
                 records.append(
                     {
@@ -462,6 +504,9 @@ class QaToolingTests(unittest.TestCase):
                 "accelerator_owner": "Accelerator Team",
                 "external_owner": "External Client Team",
                 "historical_pass_policy": "propose-accepted-historical-pass",
+                "historical_regressions": {
+                    "DEF-006": ["test_direct_queries_reject_before_mutation"]
+                },
                 "codex_evidence_root": "docs/qa/evidence",
                 "external_runs": ["RUN-053", "RUN-056", "RUN-057"],
                 "approval_policy": {
@@ -480,11 +525,21 @@ class QaToolingTests(unittest.TestCase):
                 "accepted-historical-pass", by_id["RUN-001"]["final_disposition"]
             )
             self.assertEqual("approved", by_id["RUN-001"]["review_status"])
+            self.assertIsNone(by_id["RUN-002"]["final_disposition"])
+            self.assertEqual("pending", by_id["RUN-002"]["review_status"])
+            self.assertEqual(
+                "native-client-closure",
+                by_id["RUN-002"]["remediation_workstream"],
+            )
             self.assertIsNone(by_id["RUN-043"]["final_disposition"])
             self.assertEqual("pending", by_id["RUN-043"]["review_status"])
             self.assertEqual(
                 "post-remediation-verification",
                 by_id["RUN-043"]["remediation_workstream"],
+            )
+            self.assertEqual(
+                ["test_direct_queries_reject_before_mutation"],
+                by_id["RUN-043"]["required_regressions"],
             )
             self.assertIsNone(by_id["RUN-053"]["final_disposition"])
             self.assertEqual("External Client Team", by_id["RUN-053"]["owner"])

@@ -8,6 +8,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -87,11 +88,47 @@ def missing_test_patterns(
 
 
 def expand_argv(argv: Sequence[str], root: Path) -> List[str]:
-    replacements = {
+    exact_replacements = {
         "{python}": sys.executable,
         "{root}": str(root),
     }
-    return [replacements.get(value, value) for value in argv]
+    embedded_replacements = {
+        "{python_shell}": shlex.quote(sys.executable),
+        "{root_shell}": shlex.quote(str(root)),
+    }
+    expanded: List[str] = []
+    for value in argv:
+        if value in exact_replacements:
+            expanded.append(exact_replacements[value])
+            continue
+        rendered = value
+        for placeholder, replacement in embedded_replacements.items():
+            rendered = rendered.replace(placeholder, replacement)
+        # Legacy shell snippets used a bare `python3`; execute them with the
+        # runner's pinned interpreter so QA dependencies stay available.
+        rendered = re.sub(
+            r"(?<![\w/.-])python3(?=\s)",
+            shlex.quote(sys.executable),
+            rendered,
+        )
+        expanded.append(rendered)
+    return expanded
+
+
+def sanitized_argv(argv: Sequence[str], root: Path) -> List[str]:
+    """Remove machine-local interpreter and repository paths from evidence."""
+    replacements = (
+        (str(root.resolve()), "{root}"),
+        (sys.executable, "{python}"),
+        (str(Path.home()), "~"),
+    )
+    sanitized: List[str] = []
+    for value in argv:
+        rendered = value
+        for private_value, placeholder in replacements:
+            rendered = rendered.replace(private_value, placeholder)
+        sanitized.append(rendered)
+    return sanitized
 
 
 def environment_record(root: Path) -> Dict[str, Any]:
@@ -99,8 +136,8 @@ def environment_record(root: Path) -> Dict[str, Any]:
         "captured_at": utc_now(),
         "platform": platform.platform(),
         "python": sys.version,
-        "executable": sys.executable,
-        "repository_root": str(root),
+        "executable": "{python}",
+        "repository_root": "{root}",
         "repository_commit": repository_commit(root),
         "branch": git_output(["branch", "--show-current"], root=root).strip(),
     }
@@ -218,7 +255,9 @@ def run_case(
                         {
                             "id": command_id,
                             "status": "skipped",
-                            "message": "Command cwd does not exist: {0}".format(cwd),
+                            "message": "Command cwd does not exist: {0}".format(
+                                command["cwd"]
+                            ),
                         }
                     )
                     continue
@@ -259,7 +298,7 @@ def run_case(
                 command_records.append(
                     {
                         "id": command_id,
-                        "argv": argv,
+                        "argv": sanitized_argv(argv, root),
                         "cwd": cwd.relative_to(root).as_posix() or ".",
                         "started_at": command_started,
                         "ended_at": command_ended,

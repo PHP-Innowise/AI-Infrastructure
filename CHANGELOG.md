@@ -73,13 +73,16 @@ edition's own files remain in that edition's changelog.
   ancillary evidence documents, ties each command exit code to a unique
   assertion, rejects malformed/duplicate checksum entries and evidence
   symlinks, and requires a complete consistent package before approving
-  reproduced passes. CI validates the staged ledger and workbook.
+  reproduced passes. CI validates the committed ledger and reconstructed
+  workbook.
 - Added the data-driven `TC-AI-001..018` runner with deterministic command
   mappings, focused-regression discovery gates, explicit native-host skips,
   split command streams, immediate exit codes, assertion arithmetic, Git
   snapshots, provenance, inventories, and per-run SHA-256 manifests. Optional
   local tools such as ShellCheck are now recorded as explicit skips when absent
-  instead of being misclassified as accelerator failures.
+  instead of being misclassified as accelerator failures. Embedded shell
+  commands use the pinned QA interpreter, while generated evidence redacts
+  machine-local repository and interpreter paths.
 - Added a reproducible disposition-policy overlay that assigns approved owner
   labels, proposes package-backed historical Pass dispositions, binds
   checksum-addressed Codex rerun evidence, and records the

@@ -35,7 +35,9 @@ contain enough information to understand every attachment without opening it.
 ## Short Instructions for the Tester
 
 1. Open the repository and AI tool used during your testing.
-2. Give the AI agent this file and `Accelerator TestCases.xlsx`.
+2. Give the AI agent this file and the generated
+   `/tmp/Accelerator-TestCases.reconstructed.xlsx` for historical runs. Codex
+   TC-AI definitions come from `qa/tc-ai/cases.json`.
 3. Specify all Run IDs that you executed.
 4. Give the agent access to any surviving logs, screenshots, transcripts, or
    temporary test projects.
@@ -55,7 +57,8 @@ Repository path:
 <INSERT PATH>
 
 Workbook path:
-Accelerator TestCases.xlsx
+/tmp/Accelerator-TestCases.reconstructed.xlsx for RUN-001..RUN-057
+qa/tc-ai/cases.json for RUN-20260803-001..018
 
 Original evidence locations, if known:
 <INSERT PATHS OR "unknown">
@@ -104,7 +107,7 @@ The agent must:
   approved evidence files;
 - never run `git add`, commit, push, reset, clean, restore, or discard changes;
 - never modify accelerator source files;
-- never edit `Accelerator TestCases.xlsx`;
+- never edit either supplied workbook;
 - never read, print, copy, or attach `.env` contents;
 - never collect credentials, tokens, private keys, cookies, production data,
   customer data, or confidential logs;

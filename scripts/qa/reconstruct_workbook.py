@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import copy
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -301,7 +302,7 @@ def add_provenance_sheet(
     sheet.append(["Source", "SHA-256", "Role", "Precedence"])
     sheet.append(
         [
-            snapshot.as_posix(),
+            "manifests/workbook-snapshot-20260803-2002.xlsx",
             sha256_file(snapshot),
             "Historical formatting, formulas, and 57-run values",
             1,
@@ -317,7 +318,7 @@ def add_provenance_sheet(
     )
     sheet.append(
         [
-            current.as_posix(),
+            "Accelerator TestCases.xlsx",
             sha256_file(current),
             "TC-AI-001..018 definitions, runs, analytics, and defects",
             3,
@@ -325,6 +326,24 @@ def add_provenance_sheet(
     )
     sheet.append(["Generated At", utc_now(), "UTC", None])
     sheet.freeze_panes = "A2"
+
+
+def sanitize_machine_paths(workbook: Any) -> None:
+    """Redact machine-local repository paths from generated workbook values."""
+    patterns = (
+        re.compile(r"/home/[^/\s]+/Desktop/AI-Infrastructure"),
+        re.compile(r"/Users/[^/\s]+/[^\s,;)]*accelerator-php"),
+    )
+    for sheet in workbook.worksheets:
+        for row in sheet.iter_rows():
+            for cell in row:
+                value = cell.value
+                if not isinstance(value, str) or value.startswith("="):
+                    continue
+                sanitized = value
+                for pattern in patterns:
+                    sanitized = pattern.sub("{repository}", sanitized)
+                cell.value = sanitized
 
 
 def validate_reconstructed(workbook: Any) -> None:
@@ -451,6 +470,7 @@ def reconstruct(
         set_table_reference(openpyxl, sheet, table_name, reference)
     set_dashboard_formulas(historical)
     add_provenance_sheet(historical, snapshot_path, current_path, paths)
+    sanitize_machine_paths(historical)
     validate_reconstructed(historical)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -3,7 +3,7 @@
   "status": "sources-must-pass-builder-preflight",
   "current_workbook": {
     "path": "Accelerator TestCases.xlsx",
-    "sha256": "6c2b4934f05818fe4ee0971ab0c8f8db2be257f2d1a1c2673813165941ea268e",
+    "sha256": "8b7e9aa4f91ed00c755a62057e80d6605da2b595634d654491f389d8a7f991fa",
     "role": "Codex TC-AI-001..018 source only"
   },
   "evidence_report": {

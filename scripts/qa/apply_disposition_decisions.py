@@ -36,10 +36,19 @@ def apply_decisions(
     evidence_root = repository_root / str(decisions.get("codex_evidence_root", ""))
     external_runs = set(decisions.get("external_runs", []))
     approval_policy = decisions.get("approval_policy")
+    historical_regressions = decisions.get("historical_regressions", {})
     if not accelerator_owner or not external_owner:
         raise QaError("Decision policy requires accelerator_owner and external_owner")
     if external_runs != {"RUN-053", "RUN-056", "RUN-057"}:
         raise QaError("External run policy must identify RUN-053, RUN-056, and RUN-057")
+    if not isinstance(historical_regressions, dict) or any(
+        not isinstance(defect_id, str)
+        or not isinstance(patterns, list)
+        or not patterns
+        or not all(isinstance(pattern, str) and pattern for pattern in patterns)
+        for defect_id, patterns in historical_regressions.items()
+    ):
+        raise QaError("Historical regression policy must map defects to test patterns")
     if (
         not isinstance(approval_policy, dict)
         or approval_policy.get("id") != "evidence-backed-local-v1"
@@ -78,9 +87,19 @@ def apply_decisions(
             )
         elif record.get("source_group") == "historical-57":
             record["owner"] = accelerator_owner
+            defect_id = record.get("namespaced_defect_id")
+            if defect_id in historical_regressions:
+                record.update(
+                    {
+                        "classification": "accelerator-finding",
+                        "remediation_workstream": "post-remediation-verification",
+                        "required_regressions": historical_regressions[defect_id],
+                    }
+                )
             if (
                 record.get("historical_result") == "Pass"
-                and not record.get("namespaced_defect_id")
+                and not defect_id
+                and record.get("native_client_requirement") == "none"
                 and decisions.get("historical_pass_policy")
                 == "propose-accepted-historical-pass"
             ):
@@ -98,13 +117,24 @@ def apply_decisions(
                         "review_status": "approved",
                     }
                 )
-            elif record.get("historical_result") == "Pass" and record.get(
-                "namespaced_defect_id"
-            ):
+            elif record.get("historical_result") == "Pass" and defect_id:
                 record.update(
                     {
                         "classification": "accelerator-finding",
                         "remediation_workstream": "post-remediation-verification",
+                        "final_disposition": None,
+                        "final_evidence_path": None,
+                        "review_status": "pending",
+                    }
+                )
+            elif (
+                record.get("historical_result") == "Pass"
+                and record.get("native_client_requirement") != "none"
+            ):
+                record.update(
+                    {
+                        "classification": "native-client-verification",
+                        "remediation_workstream": "native-client-closure",
                         "final_disposition": None,
                         "final_evidence_path": None,
                         "review_status": "pending",

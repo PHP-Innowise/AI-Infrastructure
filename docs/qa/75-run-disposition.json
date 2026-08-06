@@ -2,12 +2,12 @@
   "generated_at": "2026-08-06T08:27:54Z",
   "records": [
     {
-      "classification": "historical-evidence-pass",
+      "classification": "native-client-verification",
       "evidence_path": "logs/original/TC-001.log",
       "evidence_sha256": "223bf7d013013c307db54a551f045748df3cb7af91ca994c6feca944f9bf2ab8",
       "evidence_status": "available-original",
-      "final_disposition": "accepted-historical-pass",
-      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-001.log",
+      "final_disposition": null,
+      "final_evidence_path": null,
       "framework": "Laravel",
       "historical_result": "Pass",
       "identity": "RUN-001|TC-001|NONE",
@@ -21,9 +21,9 @@
           "manifests/historical-runs.json"
         ]
       },
-      "remediation_workstream": "historical-evidence-acceptance",
+      "remediation_workstream": "native-client-closure",
       "required_regressions": [],
-      "review_status": "approved",
+      "review_status": "pending",
       "run_id": "RUN-001",
       "source_evidence_status": "package-verified",
       "source_group": "historical-57",
@@ -32,12 +32,12 @@
       "tool": "Claude Code"
     },
     {
-      "classification": "historical-evidence-pass",
+      "classification": "native-client-verification",
       "evidence_path": "logs/original/TC-002.log",
       "evidence_sha256": "adcec68a082b39f06508a00b7a1b4135ffb7c20789f28816e3db11bfe2bc1c4a",
       "evidence_status": "available-original",
-      "final_disposition": "accepted-historical-pass",
-      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-002.log",
+      "final_disposition": null,
+      "final_evidence_path": null,
       "framework": "Symfony",
       "historical_result": "Pass",
       "identity": "RUN-002|TC-002|NONE",
@@ -51,9 +51,9 @@
           "manifests/historical-runs.json"
         ]
       },
-      "remediation_workstream": "historical-evidence-acceptance",
+      "remediation_workstream": "native-client-closure",
       "required_regressions": [],
-      "review_status": "approved",
+      "review_status": "pending",
       "run_id": "RUN-002",
       "source_evidence_status": "package-verified",
       "source_group": "historical-57",
@@ -62,12 +62,12 @@
       "tool": "Claude Code"
     },
     {
-      "classification": "historical-evidence-pass",
+      "classification": "native-client-verification",
       "evidence_path": "logs/original/TC-003.log",
       "evidence_sha256": "6bc395d78e68d45705ae896255f113930252805006b1522399db5a536150eb93",
       "evidence_status": "available-original",
-      "final_disposition": "accepted-historical-pass",
-      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-003.log",
+      "final_disposition": null,
+      "final_evidence_path": null,
       "framework": "PHP Core",
       "historical_result": "Pass",
       "identity": "RUN-003|TC-003|NONE",
@@ -81,9 +81,9 @@
           "manifests/historical-runs.json"
         ]
       },
-      "remediation_workstream": "historical-evidence-acceptance",
+      "remediation_workstream": "native-client-closure",
       "required_regressions": [],
-      "review_status": "approved",
+      "review_status": "pending",
       "run_id": "RUN-003",
       "source_evidence_status": "package-verified",
       "source_group": "historical-57",
@@ -92,7 +92,7 @@
       "tool": "Claude Code"
     },
     {
-      "classification": null,
+      "classification": "accelerator-finding",
       "evidence_path": "logs/original/TC-004.log",
       "evidence_sha256": "7f27bffef458c5a59b5055497de6f73dd15a90c924e25c0b3f80436276937c80",
       "evidence_status": "available-original",
@@ -111,8 +111,10 @@
           "manifests/historical-runs.json"
         ]
       },
-      "remediation_workstream": null,
-      "required_regressions": [],
+      "remediation_workstream": "post-remediation-verification",
+      "required_regressions": [
+        "test_hook_context_warms_four_turns_then_switches_to_governed"
+      ],
       "review_status": "pending",
       "run_id": "RUN-004",
       "source_evidence_status": "package-verified",
@@ -122,12 +124,12 @@
       "tool": "Cursor"
     },
     {
-      "classification": "historical-evidence-pass",
+      "classification": "native-client-verification",
       "evidence_path": "logs/original/TC-005.log",
       "evidence_sha256": "2096be5f9b34ed14119821c1a5f3c61f03f8102adf6dbe655840c2678af2537c",
       "evidence_status": "available-original",
-      "final_disposition": "accepted-historical-pass",
-      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-005.log",
+      "final_disposition": null,
+      "final_evidence_path": null,
       "framework": "Laravel",
       "historical_result": "Pass",
       "identity": "RUN-005|TC-005|NONE",
@@ -141,9 +143,9 @@
           "manifests/historical-runs.json"
         ]
       },
-      "remediation_workstream": "historical-evidence-acceptance",
+      "remediation_workstream": "native-client-closure",
       "required_regressions": [],
-      "review_status": "approved",
+      "review_status": "pending",
       "run_id": "RUN-005",
       "source_evidence_status": "package-verified",
       "source_group": "historical-57",
@@ -182,7 +184,7 @@
       "tool": "Claude Code"
     },
     {
-      "classification": null,
+      "classification": "accelerator-finding",
       "evidence_path": "logs/original/TC-008.log",
       "evidence_sha256": "3afa2d11cf40c84f1b8c0127ddbbdeddbec2e96239c77b1273321276094bea2f",
       "evidence_status": "available-original",
@@ -201,8 +203,10 @@
           "manifests/historical-runs.json"
         ]
       },
-      "remediation_workstream": null,
-      "required_regressions": [],
+      "remediation_workstream": "post-remediation-verification",
+      "required_regressions": [
+        "test_manifest_owned_placeholder_fails"
+      ],
       "review_status": "pending",
       "run_id": "RUN-007",
       "source_evidence_status": "package-verified",
@@ -212,7 +216,7 @@
       "tool": "Claude Code"
     },
     {
-      "classification": null,
+      "classification": "accelerator-finding",
       "evidence_path": "logs/original/TC-014.log",
       "evidence_sha256": "738808a646cb60614b23e4e4a6f97969d554daff101c0eff6fd4d84f79901b94",
       "evidence_status": "available-original",
@@ -231,8 +235,11 @@
           "manifests/historical-runs.json"
         ]
       },
-      "remediation_workstream": null,
-      "required_regressions": [],
+      "remediation_workstream": "post-remediation-verification",
+      "required_regressions": [
+        "test_unmanifested_team_placeholders_are_ignored_in_full_and_merge",
+        "test_untracked_team_agents_file_is_not_opened_or_stamp_checked"
+      ],
       "review_status": "pending",
       "run_id": "RUN-008",
       "source_evidence_status": "package-verified",
@@ -332,12 +339,12 @@
       "tool": "Claude Code"
     },
     {
-      "classification": "historical-evidence-pass",
+      "classification": "native-client-verification",
       "evidence_path": "logs/original/TC-028.log",
       "evidence_sha256": "9fd0e01d6413cf7a9d4543a1f5b368f7710bab4fbb4bfbccd83a68bba8134e04",
       "evidence_status": "available-original",
-      "final_disposition": "accepted-historical-pass",
-      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-028.log",
+      "final_disposition": null,
+      "final_evidence_path": null,
       "framework": "Laravel",
       "historical_result": "Pass",
       "identity": "RUN-012|TC-028|NONE",
@@ -351,9 +358,9 @@
           "manifests/historical-runs.json"
         ]
       },
-      "remediation_workstream": "historical-evidence-acceptance",
+      "remediation_workstream": "native-client-closure",
       "required_regressions": [],
-      "review_status": "approved",
+      "review_status": "pending",
       "run_id": "RUN-012",
       "source_evidence_status": "package-verified",
       "source_group": "historical-57",
@@ -392,7 +399,7 @@
       "tool": "Cross-tool"
     },
     {
-      "classification": null,
+      "classification": "accelerator-finding",
       "evidence_path": "logs/original/TC-030.log",
       "evidence_sha256": "597abb087daba847870d81aa693a00f9e60cb1f1f9b8d2d6671db74004d9092e",
       "evidence_status": "available-original",
@@ -411,8 +418,10 @@
           "manifests/historical-runs.json"
         ]
       },
-      "remediation_workstream": null,
-      "required_regressions": [],
+      "remediation_workstream": "post-remediation-verification",
+      "required_regressions": [
+        "test_no_cat_or_json_extractor_warns_once_and_fails_open"
+      ],
       "review_status": "pending",
       "run_id": "RUN-014",
       "source_evidence_status": "package-verified",
@@ -782,12 +791,12 @@
       "tool": "Cross-tool"
     },
     {
-      "classification": "historical-evidence-pass",
+      "classification": "native-client-verification",
       "evidence_path": "logs/original/TC-050.log",
       "evidence_sha256": "9417c14377777cc09912c7066bc47832ce94c861e5ebbf4b0b6e7c1697c0c381",
       "evidence_status": "available-original",
-      "final_disposition": "accepted-historical-pass",
-      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-050.log",
+      "final_disposition": null,
+      "final_evidence_path": null,
       "framework": "Laravel",
       "historical_result": "Pass",
       "identity": "RUN-027|TC-050|NONE",
@@ -801,9 +810,9 @@
           "manifests/historical-runs.json"
         ]
       },
-      "remediation_workstream": "historical-evidence-acceptance",
+      "remediation_workstream": "native-client-closure",
       "required_regressions": [],
-      "review_status": "approved",
+      "review_status": "pending",
       "run_id": "RUN-027",
       "source_evidence_status": "package-verified",
       "source_group": "historical-57",
@@ -842,12 +851,12 @@
       "tool": "Cross-tool"
     },
     {
-      "classification": "historical-evidence-pass",
+      "classification": "native-client-verification",
       "evidence_path": "logs/original/TC-052.log",
       "evidence_sha256": "9ea657148d0569b41f9bcf82dbe8accf35ec0ed95777fad3f072013132bc4bf5",
       "evidence_status": "available-original",
-      "final_disposition": "accepted-historical-pass",
-      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-052.log",
+      "final_disposition": null,
+      "final_evidence_path": null,
       "framework": "Laravel",
       "historical_result": "Pass",
       "identity": "RUN-029|TC-052|NONE",
@@ -861,9 +870,9 @@
           "manifests/historical-runs.json"
         ]
       },
-      "remediation_workstream": "historical-evidence-acceptance",
+      "remediation_workstream": "native-client-closure",
       "required_regressions": [],
-      "review_status": "approved",
+      "review_status": "pending",
       "run_id": "RUN-029",
       "source_evidence_status": "package-verified",
       "source_group": "historical-57",
@@ -872,12 +881,12 @@
       "tool": "Codex"
     },
     {
-      "classification": "historical-evidence-pass",
+      "classification": "native-client-verification",
       "evidence_path": "logs/original/TC-053.log",
       "evidence_sha256": "89fc7eeac195f90f088f840c06b7015d1bd9f9119f009e043f2bdbbec5b8c712",
       "evidence_status": "available-original",
-      "final_disposition": "accepted-historical-pass",
-      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-053.log",
+      "final_disposition": null,
+      "final_evidence_path": null,
       "framework": "Laravel",
       "historical_result": "Pass",
       "identity": "RUN-030|TC-053|NONE",
@@ -891,9 +900,9 @@
           "manifests/historical-runs.json"
         ]
       },
-      "remediation_workstream": "historical-evidence-acceptance",
+      "remediation_workstream": "native-client-closure",
       "required_regressions": [],
-      "review_status": "approved",
+      "review_status": "pending",
       "run_id": "RUN-030",
       "source_evidence_status": "package-verified",
       "source_group": "historical-57",
@@ -902,12 +911,12 @@
       "tool": "Claude Code"
     },
     {
-      "classification": "historical-evidence-pass",
+      "classification": "native-client-verification",
       "evidence_path": "logs/original/TC-054.log",
       "evidence_sha256": "1904dbb99e8b383dcdf51ac57ce4a710b5b88fe80709d4e8c618e90d4c7ed9f4",
       "evidence_status": "available-original",
-      "final_disposition": "accepted-historical-pass",
-      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-054.log",
+      "final_disposition": null,
+      "final_evidence_path": null,
       "framework": "Laravel",
       "historical_result": "Pass",
       "identity": "RUN-031|TC-054|NONE",
@@ -921,9 +930,9 @@
           "manifests/historical-runs.json"
         ]
       },
-      "remediation_workstream": "historical-evidence-acceptance",
+      "remediation_workstream": "native-client-closure",
       "required_regressions": [],
-      "review_status": "approved",
+      "review_status": "pending",
       "run_id": "RUN-031",
       "source_evidence_status": "package-verified",
       "source_group": "historical-57",
@@ -1052,12 +1061,12 @@
       "tool": "Claude Code"
     },
     {
-      "classification": "historical-evidence-pass",
+      "classification": "native-client-verification",
       "evidence_path": "logs/original/TC-059.log",
       "evidence_sha256": "e58e15ef5a80d4ba1e641a55f010eec33a33f7977df45bb745320d7147cb431d",
       "evidence_status": "available-original",
-      "final_disposition": "accepted-historical-pass",
-      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-059.log",
+      "final_disposition": null,
+      "final_evidence_path": null,
       "framework": "Laravel",
       "historical_result": "Pass",
       "identity": "RUN-036|TC-059|NONE",
@@ -1071,9 +1080,9 @@
           "manifests/historical-runs.json"
         ]
       },
-      "remediation_workstream": "historical-evidence-acceptance",
+      "remediation_workstream": "native-client-closure",
       "required_regressions": [],
-      "review_status": "approved",
+      "review_status": "pending",
       "run_id": "RUN-036",
       "source_evidence_status": "package-verified",
       "source_group": "historical-57",
@@ -1112,7 +1121,7 @@
       "tool": "Cross-tool"
     },
     {
-      "classification": null,
+      "classification": "accelerator-finding",
       "evidence_path": "logs/original/TC-061.log",
       "evidence_sha256": "fcd79129eb12200a702db32e8152a053c7aad09d34eb4a07ff20a812c474e4dd",
       "evidence_status": "available-original",
@@ -1131,8 +1140,11 @@
           "manifests/historical-runs.json"
         ]
       },
-      "remediation_workstream": null,
-      "required_regressions": [],
+      "remediation_workstream": "post-remediation-verification",
+      "required_regressions": [
+        "test_canonical_and_alias_phases_round_trip_canonically",
+        "test_legacy_execution_phase_is_readable_and_migrates_on_update"
+      ],
       "review_status": "pending",
       "run_id": "RUN-038",
       "source_evidence_status": "package-verified",
@@ -1232,12 +1244,12 @@
       "tool": "Cross-tool"
     },
     {
-      "classification": "historical-evidence-pass",
+      "classification": "native-client-verification",
       "evidence_path": "logs/original/TC-065.log",
       "evidence_sha256": "e4c8d1e07804c1add8115fa3829a6886987143370588b498a65bb1b8735b2fb8",
       "evidence_status": "available-original",
-      "final_disposition": "accepted-historical-pass",
-      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-065.log",
+      "final_disposition": null,
+      "final_evidence_path": null,
       "framework": "Laravel",
       "historical_result": "Pass",
       "identity": "RUN-042|TC-065|NONE",
@@ -1251,9 +1263,9 @@
           "manifests/historical-runs.json"
         ]
       },
-      "remediation_workstream": "historical-evidence-acceptance",
+      "remediation_workstream": "native-client-closure",
       "required_regressions": [],
-      "review_status": "approved",
+      "review_status": "pending",
       "run_id": "RUN-042",
       "source_evidence_status": "package-verified",
       "source_group": "historical-57",
@@ -1282,7 +1294,10 @@
         ]
       },
       "remediation_workstream": "post-remediation-verification",
-      "required_regressions": [],
+      "required_regressions": [
+        "test_direct_queries_reject_before_database_or_manifest_mutation",
+        "test_governed_capsule_enforces_layer_and_character_contract_deterministically"
+      ],
       "review_status": "pending",
       "run_id": "RUN-043",
       "source_evidence_status": "package-verified",
@@ -1292,12 +1307,12 @@
       "tool": "Claude Code"
     },
     {
-      "classification": "historical-evidence-pass",
+      "classification": "native-client-verification",
       "evidence_path": "logs/original/TC-067.log",
       "evidence_sha256": "86a85cf8191a67042bbd68e4fdc25d275e08bbdacd5f6f5edfc99e391bbddbb8",
       "evidence_status": "available-original",
-      "final_disposition": "accepted-historical-pass",
-      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-067.log",
+      "final_disposition": null,
+      "final_evidence_path": null,
       "framework": "Laravel",
       "historical_result": "Pass",
       "identity": "RUN-044|TC-067|NONE",
@@ -1311,9 +1326,9 @@
           "manifests/historical-runs.json"
         ]
       },
-      "remediation_workstream": "historical-evidence-acceptance",
+      "remediation_workstream": "native-client-closure",
       "required_regressions": [],
-      "review_status": "approved",
+      "review_status": "pending",
       "run_id": "RUN-044",
       "source_evidence_status": "package-verified",
       "source_group": "historical-57",
@@ -1412,12 +1427,12 @@
       "tool": "Cross-tool"
     },
     {
-      "classification": "historical-evidence-pass",
+      "classification": "native-client-verification",
       "evidence_path": "logs/original/TC-071.log",
       "evidence_sha256": "1b4358c7768f62ad1573a634bde06b53a0379a48420cc42ef0ce0381d06cf958",
       "evidence_status": "available-original",
-      "final_disposition": "accepted-historical-pass",
-      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-071.log",
+      "final_disposition": null,
+      "final_evidence_path": null,
       "framework": "Laravel",
       "historical_result": "Pass",
       "identity": "RUN-048|TC-071|NONE",
@@ -1431,9 +1446,9 @@
           "manifests/historical-runs.json"
         ]
       },
-      "remediation_workstream": "historical-evidence-acceptance",
+      "remediation_workstream": "native-client-closure",
       "required_regressions": [],
-      "review_status": "approved",
+      "review_status": "pending",
       "run_id": "RUN-048",
       "source_evidence_status": "package-verified",
       "source_group": "historical-57",
@@ -1502,12 +1517,12 @@
       "tool": "Claude Code"
     },
     {
-      "classification": "historical-evidence-pass",
+      "classification": "native-client-verification",
       "evidence_path": "logs/original/TC-073.log",
       "evidence_sha256": "8d47b9e435dbc202e9b4acbb8f93cfa482118d5dcaeb4c515afcff00d208ee41",
       "evidence_status": "available-original",
-      "final_disposition": "accepted-historical-pass",
-      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-073.log",
+      "final_disposition": null,
+      "final_evidence_path": null,
       "framework": "Symfony",
       "historical_result": "Pass",
       "identity": "RUN-051|TC-073|NONE",
@@ -1521,9 +1536,9 @@
           "manifests/historical-runs.json"
         ]
       },
-      "remediation_workstream": "historical-evidence-acceptance",
+      "remediation_workstream": "native-client-closure",
       "required_regressions": [],
-      "review_status": "approved",
+      "review_status": "pending",
       "run_id": "RUN-051",
       "source_evidence_status": "package-verified",
       "source_group": "historical-57",
@@ -1552,7 +1567,10 @@
         ]
       },
       "remediation_workstream": "post-remediation-verification",
-      "required_regressions": [],
+      "required_regressions": [
+        "test_canonical_and_alias_phases_round_trip_canonically",
+        "test_legacy_execution_phase_is_readable_and_migrates_on_update"
+      ],
       "review_status": "pending",
       "run_id": "RUN-052",
       "source_evidence_status": "package-verified",
@@ -1592,12 +1610,12 @@
       "tool": "Claude Code"
     },
     {
-      "classification": "historical-evidence-pass",
+      "classification": "native-client-verification",
       "evidence_path": "logs/original/TC-023.log",
       "evidence_sha256": "61206f3a99cb71545ffd65685e9d88bc11960da3423842384eef77d675bfa1c9",
       "evidence_status": "available-original",
-      "final_disposition": "accepted-historical-pass",
-      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-023.log",
+      "final_disposition": null,
+      "final_evidence_path": null,
       "framework": "Symfony",
       "historical_result": "Pass",
       "identity": "RUN-054|TC-023|NONE",
@@ -1611,9 +1629,9 @@
           "manifests/historical-runs.json"
         ]
       },
-      "remediation_workstream": "historical-evidence-acceptance",
+      "remediation_workstream": "native-client-closure",
       "required_regressions": [],
-      "review_status": "approved",
+      "review_status": "pending",
       "run_id": "RUN-054",
       "source_evidence_status": "package-verified",
       "source_group": "historical-57",
@@ -1622,12 +1640,12 @@
       "tool": "Claude Code"
     },
     {
-      "classification": "historical-evidence-pass",
+      "classification": "native-client-verification",
       "evidence_path": "logs/original/TC-025.log",
       "evidence_sha256": "3bb783b650492a3f6c8c64958e5200222d7c69c3fed412d860219de44438e362",
       "evidence_status": "available-original",
-      "final_disposition": "accepted-historical-pass",
-      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-025.log",
+      "final_disposition": null,
+      "final_evidence_path": null,
       "framework": "Symfony",
       "historical_result": "Pass",
       "identity": "RUN-055|TC-025|NONE",
@@ -1641,9 +1659,9 @@
           "manifests/historical-runs.json"
         ]
       },
-      "remediation_workstream": "historical-evidence-acceptance",
+      "remediation_workstream": "native-client-closure",
       "required_regressions": [],
-      "review_status": "approved",
+      "review_status": "pending",
       "run_id": "RUN-055",
       "source_evidence_status": "package-verified",
       "source_group": "historical-57",

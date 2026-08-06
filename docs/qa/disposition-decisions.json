@@ -3,6 +3,33 @@
   "accelerator_owner": "Accelerator Team",
   "external_owner": "External Client Team",
   "historical_pass_policy": "propose-accepted-historical-pass",
+  "historical_regressions": {
+    "DEF-001": [
+      "test_hook_context_warms_four_turns_then_switches_to_governed"
+    ],
+    "DEF-002": [
+      "test_manifest_owned_placeholder_fails"
+    ],
+    "DEF-003": [
+      "test_unmanifested_team_placeholders_are_ignored_in_full_and_merge",
+      "test_untracked_team_agents_file_is_not_opened_or_stamp_checked"
+    ],
+    "DEF-004": [
+      "test_no_cat_or_json_extractor_warns_once_and_fails_open"
+    ],
+    "DEF-005": [
+      "test_canonical_and_alias_phases_round_trip_canonically",
+      "test_legacy_execution_phase_is_readable_and_migrates_on_update"
+    ],
+    "DEF-006": [
+      "test_direct_queries_reject_before_database_or_manifest_mutation",
+      "test_governed_capsule_enforces_layer_and_character_contract_deterministically"
+    ],
+    "DEF-007": [
+      "test_canonical_and_alias_phases_round_trip_canonically",
+      "test_legacy_execution_phase_is_readable_and_migrates_on_update"
+    ]
+  },
   "codex_evidence_root": "docs/qa/evidence",
   "approval_policy": {
     "id": "evidence-backed-local-v1",
@@ -10,11 +37,13 @@
     "approved_at": "2026-08-06",
     "criteria": [
       "package-verified historical Pass with a resolved checksum-backed evidence path",
+      "historical Pass has no uncaptured native-client requirement",
       "newly reproduced Codex run with status passed and a validated evidence manifest"
     ],
     "excluded": [
       "historical Partial, Fail, or Blocked records",
       "historical Pass records that carry a defect until post-remediation evidence is reviewed",
+      "historical Pass records with a native-client requirement until independent native evidence is reviewed",
       "any reproduced run with failed or skipped status",
       "native-client observations not independently captured",
       "RUN-053, RUN-056, and RUN-057 external client findings",

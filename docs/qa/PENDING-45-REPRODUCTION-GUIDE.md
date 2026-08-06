@@ -1,4 +1,4 @@
-# Pending 29 Cases — Developer Testing Guide
+# Pending 45 Cases — Developer Testing Guide
 
 ## Task
 
@@ -14,9 +14,12 @@ AI-client version, exact commands, exit codes, and unavailable dependencies.
 Historical/native:
 
 ```text
-RUN-004, RUN-006, RUN-007, RUN-008, RUN-009, RUN-010, RUN-011,
-RUN-014, RUN-015, RUN-025, RUN-033, RUN-034, RUN-035, RUN-038,
-RUN-043, RUN-049, RUN-050, RUN-052, RUN-053, RUN-056, RUN-057
+RUN-001, RUN-002, RUN-003, RUN-004, RUN-005, RUN-006, RUN-007,
+RUN-008, RUN-009, RUN-010, RUN-011, RUN-012, RUN-014, RUN-015,
+RUN-025, RUN-027, RUN-029, RUN-030, RUN-031, RUN-033, RUN-034,
+RUN-035, RUN-036, RUN-038, RUN-042, RUN-043, RUN-044, RUN-048,
+RUN-049, RUN-050, RUN-051, RUN-052, RUN-053, RUN-054, RUN-055,
+RUN-056, RUN-057
 ```
 
 Codex:
@@ -43,13 +46,16 @@ the test record and preserve:
 - a reason for every result other than `passed`.
 
 Return an `ACCELERATOR-TEST-EVIDENCE-REPORT.md` describing all attachments.
+Historical definitions and evidence must come from the separately supplied,
+checksum-verified package described in
+`docs/qa/SOURCE-EVIDENCE-HANDOFF.md`.
 
 ## Codex Cases
 
 ```bash
-python3 scripts/qa/run_tc_ai.py --list
+/tmp/accelerator-qa-venv/bin/python scripts/qa/run_tc_ai.py --list
 
-python3 scripts/qa/run_tc_ai.py \
+/tmp/accelerator-qa-venv/bin/python scripts/qa/run_tc_ai.py \
   --run-id RUN-20260803-XXX \
   --output-root docs/qa/evidence-<developer>
 ```

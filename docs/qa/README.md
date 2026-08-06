@@ -8,9 +8,16 @@ the package checksum manifest, and fail before writing output if any source is
 missing or inconsistent:
 
 ```bash
-python3 scripts/qa/build_disposition_ledger.py
-python3 scripts/qa/reconstruct_workbook.py
+/tmp/accelerator-qa-venv/bin/python scripts/qa/build_disposition_ledger.py
+/tmp/accelerator-qa-venv/bin/python scripts/qa/reconstruct_workbook.py \
+  --output /tmp/Accelerator-TestCases.reconstructed.xlsx
 ```
+
+The required historical source package is intentionally not committed. Obtain
+the approved sanitized package from the Accelerator Team and place it at
+`docs/Accelerator-TestEvidence-Submission/` before running either builder.
+Verify its `SHA256SUMS.txt` before use. See
+[`SOURCE-EVIDENCE-HANDOFF.md`](SOURCE-EVIDENCE-HANDOFF.md).
 
 Install the workbook dependency in an isolated environment:
 
@@ -22,8 +29,9 @@ python3 -m venv /tmp/accelerator-qa-venv
 List or run the deterministic cases:
 
 ```bash
-python3 scripts/qa/run_tc_ai.py --list
-python3 scripts/qa/run_tc_ai.py --run-id RUN-20260803-001
+/tmp/accelerator-qa-venv/bin/python scripts/qa/run_tc_ai.py --list
+/tmp/accelerator-qa-venv/bin/python scripts/qa/run_tc_ai.py \
+  --run-id RUN-20260803-001
 ```
 
 Evidence is written under `evidence/<Run ID>/`. Existing run directories are
@@ -34,7 +42,7 @@ After a complete evidence run, apply the reviewed owner/disposition policy and
 bind reproduced Codex evidence into the working ledger:
 
 ```bash
-python3 scripts/qa/apply_disposition_decisions.py
+/tmp/accelerator-qa-venv/bin/python scripts/qa/apply_disposition_decisions.py
 ```
 
 The reproducible policy is recorded in `disposition-decisions.json`.
@@ -52,8 +60,11 @@ status replacement.
 Validate working artifacts:
 
 ```bash
-python3 scripts/qa/validate_qa_artifacts.py
+/tmp/accelerator-qa-venv/bin/python scripts/qa/validate_qa_artifacts.py \
+  --skip-run-evidence
 ```
 
-Use `--release` only after all 75 dispositions, all 18 run-evidence
-directories, owners, reviews, evidence links, and checksums are complete.
+For the release gate, obtain the approved private run evidence, pass its
+explicit path, and add `--release`. Use release mode only after all 75
+dispositions, all 18 run-evidence directories, owners, reviews, evidence links,
+and checksums are complete.
