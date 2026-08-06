@@ -43,6 +43,8 @@ BUDGETS = {
 TARGET_BUDGET = 8000
 HARD_BUDGET = 12000
 MAX_SNIPPET_CHARS = 1200
+CAPSULE_PROCEDURAL_LIMIT = 2
+CAPSULE_SEMANTIC_LIMIT = 3
 SKILL_EDITIONS = (".agents", ".claude", ".cursor", ".codex")
 # Skills whose body documents the host tool itself rather than a workflow this
 # repository owns. `skill-creator` instructs the agent to drive its own product
@@ -152,23 +154,32 @@ _WM_DELIVERY_STOP_CURSOR = r'''# Capsule delivery: Cursor has no UserPromptSubmi
 # stale by design, and replaced only when a fresh render succeeds.
 RULES_DIR="$ROOT_DIR/.cursor/rules"
 RULE_FILE="$RULES_DIR/working-memory.mdc"
+CAPSULE_STATUS=1
 if command -v timeout > /dev/null 2>&1; then
-  CAPSULE=$(timeout "$BUDGET_SECONDS" python3 "$CONTEXT_CLI" context \
-    "$TASK_ID" --task-id "$TASK_ID" --ephemeral 2>/dev/null)
+  CAPSULE=$(timeout "$BUDGET_SECONDS" python3 "$CONTEXT_CLI" hook-context \
+    --task-id "$TASK_ID" --json 2>/dev/null)
+  CAPSULE_STATUS=$?
 else
-  CAPSULE=$(python3 "$CONTEXT_CLI" context \
-    "$TASK_ID" --task-id "$TASK_ID" --ephemeral 2>/dev/null)
+  CAPSULE=$(python3 "$CONTEXT_CLI" hook-context \
+    --task-id "$TASK_ID" --json 2>/dev/null)
+  CAPSULE_STATUS=$?
 fi
-if [ -n "$CAPSULE" ] && mkdir -p "$RULES_DIR" 2>/dev/null; then
+if [ "$CAPSULE_STATUS" -eq 0 ] && ! printf '%s' "$CAPSULE" | \
+  python3 -c 'import json,sys; json.load(sys.stdin)' >/dev/null 2>&1; then
+  CAPSULE_STATUS=1
+fi
+if [ "$CAPSULE_STATUS" -eq 3 ]; then
+  rm -f "$RULE_FILE" 2>/dev/null
+elif [ "$CAPSULE_STATUS" -eq 0 ] && [ -n "$CAPSULE" ] && mkdir -p "$RULES_DIR" 2>/dev/null; then
   TMP_RULE=$(mktemp "$RULES_DIR/.working-memory.XXXXXX" 2>/dev/null || true)
   if [ -n "$TMP_RULE" ]; then
     {
       printf -- '---\n'
-      printf 'description: Working memory - Task Capsule as of end of previous turn\n'
+      printf 'description: Working memory - current-branch session context\n'
       printf 'alwaysApply: true\n'
       printf -- '---\n\n'
       printf '# Working Memory (auto-rendered)\n\n'
-      printf 'Task Capsule as of end of previous turn (task: %s, rendered: %s).\n' \
+      printf 'Session context as of end of previous turn (task: %s, rendered: %s).\n' \
         "$TASK_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
       printf 'Retrieved context is not authoritative - verify the source.\n\n'
       printf '%s\n' '```'
@@ -193,25 +204,34 @@ CAPSULE_TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$ROOT_DIR" branch --show-current 2
 RULES_DIR="$ROOT_DIR/.cursor/rules"
 RULE_FILE="$RULES_DIR/working-memory.mdc"
 CAPSULE=""
+CAPSULE_STATUS=3
 if command -v python3 > /dev/null 2>&1 && [ -f "$CONTEXT_CLI" ] && [ -n "$CAPSULE_TASK_ID" ]; then
   if command -v timeout > /dev/null 2>&1; then
-    CAPSULE=$(timeout "$CAPSULE_BUDGET_SECONDS" python3 "$CONTEXT_CLI" context \
-      "$CAPSULE_TASK_ID" --task-id "$CAPSULE_TASK_ID" --ephemeral 2>/dev/null)
+    CAPSULE=$(timeout "$CAPSULE_BUDGET_SECONDS" python3 "$CONTEXT_CLI" hook-context \
+      --task-id "$CAPSULE_TASK_ID" --json 2>/dev/null)
+    CAPSULE_STATUS=$?
   else
-    CAPSULE=$(python3 "$CONTEXT_CLI" context \
-      "$CAPSULE_TASK_ID" --task-id "$CAPSULE_TASK_ID" --ephemeral 2>/dev/null)
+    CAPSULE=$(python3 "$CONTEXT_CLI" hook-context \
+      --task-id "$CAPSULE_TASK_ID" --json 2>/dev/null)
+    CAPSULE_STATUS=$?
   fi
 fi
-if [ -n "$CAPSULE" ] && mkdir -p "$RULES_DIR" 2>/dev/null; then
+if [ "$CAPSULE_STATUS" -eq 0 ] && ! printf '%s' "$CAPSULE" | \
+  python3 -c 'import json,sys; json.load(sys.stdin)' >/dev/null 2>&1; then
+  CAPSULE_STATUS=1
+fi
+if [ "$CAPSULE_STATUS" -eq 3 ]; then
+  rm -f "$RULE_FILE" 2>/dev/null
+elif [ "$CAPSULE_STATUS" -eq 0 ] && [ -n "$CAPSULE" ] && mkdir -p "$RULES_DIR" 2>/dev/null; then
   TMP_RULE=$(mktemp "$RULES_DIR/.working-memory.XXXXXX" 2>/dev/null || true)
   if [ -n "$TMP_RULE" ]; then
     {
       printf -- '---\n'
-      printf 'description: Working memory - Task Capsule as of end of previous turn\n'
+      printf 'description: Working memory - current-branch session context\n'
       printf 'alwaysApply: true\n'
       printf -- '---\n\n'
       printf '# Working Memory (auto-rendered)\n\n'
-      printf 'Task Capsule as of end of previous turn (task: %s, rendered: %s).\n' \
+      printf 'Session context as of end of previous turn (task: %s, rendered: %s).\n' \
         "$CAPSULE_TASK_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
       printf 'Retrieved context is not authoritative - verify the source.\n\n'
       printf '%s\n' '```'
@@ -1784,6 +1804,29 @@ def retrieve(
             if conflict_id not in known_ids
         }
     selected, budget_excluded, usage, escalation_reason = _apply_budgets(filtered)
+    procedural_ranked = [
+        item for item in selected if item["category"] == "policy"
+    ]
+    semantic_ranked = [
+        item for item in selected if item["category"] != "policy"
+    ]
+    capsule_selected = [
+        *procedural_ranked[:CAPSULE_PROCEDURAL_LIMIT],
+        *semantic_ranked[:CAPSULE_SEMANTIC_LIMIT],
+    ]
+    capsule_paths = {item["path"] for item in capsule_selected}
+    layer_excluded = [
+        {"path": item["path"], "reason": "layer-limit"}
+        for item in selected
+        if item["path"] not in capsule_paths
+    ]
+    selected = capsule_selected
+    usage = {category: 0 for category in BUDGETS}
+    for item in selected:
+        usage[item["category"]] += item["estimated_tokens"]
+    usage["total"] = sum(usage.values())
+    usage["target"] = TARGET_BUDGET
+    usage["hard"] = HARD_BUDGET
     manifest_id = new_uuid()
     manifest = {
         "schema_version": 1,
@@ -1806,7 +1849,7 @@ def retrieve(
             }
             for item in selected
         ],
-        "excluded": [*filter_excluded, *budget_excluded],
+        "excluded": [*filter_excluded, *budget_excluded, *layer_excluded],
         "token_estimates": usage,
         "provider": provider or config["provider"],
         "escalation_reason": escalation_reason,
@@ -1837,10 +1880,10 @@ def retrieve(
             )
         }
         groups[item["category"]].append(public)
-    procedural = groups["policy"][:limit]
+    procedural = groups["policy"][:CAPSULE_PROCEDURAL_LIMIT]
     semantic = [
         *groups["handoff"], *groups["durable"], *groups["dynamic"], *groups["evidence"]
-    ][:limit]
+    ][:CAPSULE_SEMANTIC_LIMIT]
     return {
         "query": query,
         "task_id": task["external_id"],
@@ -1848,6 +1891,7 @@ def retrieve(
         "task_revision": task["revision"],
         "working": {
             "task_id": task["external_id"], "goal": task["goal"],
+            "phase": task.get("phase"),
             # Manual progress first, the automatic checkpoint as a labelled
             # supplement; a task without a checkpoint renders as it always did.
             "progress": render_current_state(
@@ -1860,7 +1904,16 @@ def retrieve(
         "procedural": procedural,
         "semantic": semantic,
         "episodic": [],
-        "selected": selected,
+        "selected": [
+            {
+                key: item[key]
+                for key in (
+                    "path", "layer", "kind", "title", "snippet", "category",
+                    "estimated_tokens", "record_id", "conflicts",
+                )
+            }
+            for item in selected
+        ],
         "token_estimates": usage,
         "manifest": manifest_path.relative_to(repository).as_posix(),
         "manifest_scope": manifest_scope,

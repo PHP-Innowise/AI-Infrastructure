@@ -15,7 +15,7 @@ The same accelerator is mirrored for **Claude Code** (`.claude/`), **Cursor** (`
 1. **Enforcement and policy** (`<edition>/hooks`, CI, linters, static analysis, and `AGENTS.md`) - mandatory behavior and safety rules.
 2. **Canonical project sources** (`specs/`, current code, configuration, migrations, and tests) - project-specific decisions and implemented behavior; these always outrank every context system.
 3. **Shared work and control** (`project-brain/`) - governed active tasks, handoffs, records, manifests, and promotion proposals; never overrides canonical sources.
-4. **Verified durable memory** (`memory-bank/`) - reviewed reusable consequences; never overrides current sources above it.
+4. **Verified durable memory** (`memory-bank/`) - verified governed reusable consequences; never overrides current sources above it.
 5. **Operations** (`<edition>/skills/`) - how skills execute.
 6. **Examples** (`examples/`) - reference outputs, never stronger than policy.
 7. **Documentation** (`README.md`, per-edition `README.md`) - human reference.

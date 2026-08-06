@@ -4,7 +4,10 @@
 # Hook type: PreToolUse:Bash
 # Exit codes: 0 = pass, 1 = warn (continue), 2 = block
 
-INPUT=$(cat)
+# Consume the complete hook payload without relying on external utilities.
+# `read -d ''` returns nonzero at EOF, which is the expected delimiter here.
+INPUT=
+IFS= read -r -d '' INPUT || :
 
 # Cheap self-filter before any process is forked: Codex and Cursor register
 # this hook without a tool matcher, so it runs for every tool call. A real
@@ -80,8 +83,7 @@ if printf '%s\n' "$COMMAND" | grep -Eqi -- 'doctrine:fixtures:load'; then
   FIXTURE_TAIL=${COMMAND#*doctrine:fixtures:load}
   FIXTURE_CODE=${FIXTURE_TAIL%%#*}
   if ! printf '%s\n' "$FIXTURE_CODE" | grep -Eqi -- "(^|[[:space:]])--append([[:space:]\"']|$)"; then
-    echo "BLOCKED: Doctrine fixtures load purges existing data unless append mode is explicit." >&2
-    echo "   Command: $COMMAND" >&2
+    echo "BLOCKED: Destructive command detected (rule category: fixture data replacement)." >&2
     exit 2
   fi
 fi
@@ -96,15 +98,7 @@ for PATTERN in "${BLOCKED_PATTERNS[@]}"; do
 done
 
 if printf '%s\n' "$COMMAND" | grep -Eqi -- "$BLOCKED_REGEX"; then
-  MATCHED="one of the blocked patterns"
-  for PATTERN in "${BLOCKED_PATTERNS[@]}"; do
-    if printf '%s\n' "$COMMAND" | grep -Eqi -- "$PATTERN"; then
-      MATCHED=$PATTERN
-      break
-    fi
-  done
-  echo "BLOCKED: Destructive command detected: matches pattern '$MATCHED'" >&2
-  echo "   Command: $COMMAND" >&2
+  echo "BLOCKED: Destructive command detected (rule category: destructive command)." >&2
   echo "   This operation is blocked. See AGENTS.md." >&2
   exit 2
 fi

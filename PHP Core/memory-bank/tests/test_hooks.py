@@ -23,6 +23,7 @@ import unittest
 from pathlib import Path
 
 EDITION_ROOT = Path(__file__).resolve().parents[2]
+BASH = shutil.which("bash") or "/bin/bash"
 
 # tool id -> (hooks directory, skills directory, /tmp loop-counter prefix)
 MIRRORS = {
@@ -52,7 +53,7 @@ def run_hook(
         merged_env = dict(os.environ)
         merged_env.update(env)
     return subprocess.run(
-        ["bash", str(hook_path(tool, name))],
+        [BASH, str(hook_path(tool, name))],
         input=stdin,
         capture_output=True,
         text=True,
@@ -213,17 +214,55 @@ class BashValidatorTest(unittest.TestCase):
                 self.assertEqual(result.stdout, "")
                 self.assertEqual(result.stderr, "")
 
-    def test_block_message_names_the_matching_pattern(self) -> None:
-        # The combined single-pass scan must still report which concrete
-        # pattern matched, not just that something did.
+    def test_empty_input_passes_quietly(self) -> None:
+        for tool in MIRRORS:
+            with self.subTest(tool=tool):
+                result = run_hook(tool, self.HOOK, "")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(result.stderr, "")
+
+    def test_multiline_payload_is_consumed_completely(self) -> None:
+        payload = json.dumps(
+            {"tool_name": "Bash", "tool_input": {"nested": {"command": "git reset --hard"}}},
+            indent=2,
+        )
+        for tool in MIRRORS:
+            with self.subTest(tool=tool):
+                result = run_hook(tool, self.HOOK, payload)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("rule category: destructive command", result.stderr)
+
+    def test_no_cat_or_json_extractor_warns_once_and_fails_open(self) -> None:
+        secret_command = "git reset --hard SECRET-COMMAND-BODY"
+        expected = (
+            "bash-validator: no JSON extractor available "
+            "(jq/php/python3), validation skipped"
+        )
         for tool in MIRRORS:
             with self.subTest(tool=tool):
                 result = run_hook(
-                    tool, self.HOOK, self.payload("git reset --hard HEAD~1")
+                    tool,
+                    self.HOOK,
+                    json.dumps(self.payload(secret_command), indent=2),
+                    env={"PATH": ""},
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(result.stderr.splitlines(), [expected])
+                self.assertNotIn(secret_command, result.stderr)
+                self.assertNotIn("SECRET-COMMAND-BODY", result.stderr)
+
+    def test_block_diagnostic_never_leaks_command_body(self) -> None:
+        secret = "DO-NOT-PRINT-THIS-BODY"
+        for tool in MIRRORS:
+            with self.subTest(tool=tool):
+                result = run_hook(
+                    tool, self.HOOK, self.payload("git reset --hard " + secret)
                 )
                 self.assertEqual(result.returncode, 2, result.stderr)
-                self.assertIn("matches pattern '", result.stderr)
-                self.assertIn("reset", result.stderr)
+                self.assertIn("rule category: destructive command", result.stderr)
+                self.assertNotIn(secret, result.stderr)
 
 
 class FileNamingValidatorTest(unittest.TestCase):
@@ -523,7 +562,7 @@ class WorkingMemoryRuleTest(unittest.TestCase):
                 cursor_text = hook_path("cursor", hook).read_text(encoding="utf-8")
                 self.assertIn("working-memory.mdc", cursor_text)
                 self.assertIn("alwaysApply: true", cursor_text)
-                self.assertIn("as of end of previous turn", cursor_text)
+                self.assertIn("current-branch session context", cursor_text)
                 for tool in ("claude", "codex"):
                     text = hook_path(tool, hook).read_text(encoding="utf-8")
                     self.assertNotIn("working-memory.mdc", text)
@@ -540,13 +579,38 @@ class CursorCapsuleRenderTest(unittest.TestCase):
     TASK_ID = "TASK-STUB"
 
     STUB_CAPSULE = (
-        "import sys\n"
-        "if len(sys.argv) > 1 and sys.argv[1] == \"context\":\n"
-        "    print(\"working: TASK-STUB — stub goal\")\n"
-        "    print(\"semantic:\")\n"
-        "    print(\"  docs/A.md — Stub doc\")\n"
+        "import json, sys\n"
+        "if len(sys.argv) > 1 and sys.argv[1] == \"hook-context\":\n"
+        "    print(json.dumps({\"kind\": \"warming\", \"task_id\": "
+        "\"TASK-STUB\", \"goal\": \"stub goal\"}))\n"
     )
-    STUB_SILENT = "import sys\n"
+    STUB_FAILURE = "import sys\nsys.exit(1)\n"
+    STUB_EMPTY = (
+        "import sys\n"
+        "if len(sys.argv) > 1 and sys.argv[1] == \"hook-context\":\n"
+        "    sys.exit(3)\n"
+    )
+    STUB_MALFORMED = (
+        "import sys\n"
+        "if len(sys.argv) > 1 and sys.argv[1] == \"hook-context\":\n"
+        "    print(\"not-json\")\n"
+    )
+    STUB_SEQUENCE = (
+        "import json, pathlib, sys\n"
+        "counter = pathlib.Path(__file__).with_name(\"turn-count\")\n"
+        "count = int(counter.read_text()) if counter.exists() else 0\n"
+        "if len(sys.argv) > 1 and sys.argv[1] == \"turn\":\n"
+        "    count += 1\n"
+        "    counter.write_text(str(count))\n"
+        "elif len(sys.argv) > 1 and sys.argv[1] == \"hook-context\":\n"
+        "    kind = \"warming\" if count < 5 else \"governed\"\n"
+        "    print(json.dumps({\"kind\": kind, \"task_id\": \"TASK-STUB\", "
+        "\"pending_turns\": min(count, 4)}))\n"
+    )
+    STUB_TIMEOUT = (
+        "import time\n"
+        "time.sleep(1)\n"
+    )
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory(prefix="cursor-rule-")
@@ -561,9 +625,13 @@ class CursorCapsuleRenderTest(unittest.TestCase):
             shutil.copy2(hook_path("cursor", hook), self.hooks_dir / hook)
         self.addCleanup(self._tmp.cleanup)
 
-    def run_cursor_hook(self, name: str):
+    def run_cursor_hook(
+        self, name: str, task_id: str = TASK_ID, budget: str = ""
+    ):
         env = dict(os.environ)
-        env["CONTEXT_TASK_ID"] = self.TASK_ID
+        env["CONTEXT_TASK_ID"] = task_id
+        if budget:
+            env["CONTEXT_HOOK_BUDGET"] = budget
         return subprocess.run(
             ["bash", str(self.hooks_dir / name)],
             input="",
@@ -585,7 +653,7 @@ class CursorCapsuleRenderTest(unittest.TestCase):
         rendered = self.rule_file().read_text(encoding="utf-8")
         self.assertTrue(rendered.startswith("---\n"))
         self.assertIn("alwaysApply: true", rendered)
-        self.assertIn("as of end of previous turn", rendered)
+        self.assertIn("Session context as of end of previous turn", rendered)
         self.assertIn("task: TASK-STUB", rendered)
         self.assertIn("stub goal", rendered)
         self.assertIn("not authoritative", rendered)
@@ -597,9 +665,30 @@ class CursorCapsuleRenderTest(unittest.TestCase):
         self.assertNotIn("stub goal", result.stdout)
         self.assertIn("stub goal", self.rule_file().read_text(encoding="utf-8"))
 
+    def test_first_four_turns_warm_and_fifth_atomically_governs(self) -> None:
+        self.cli.write_text(self.STUB_SEQUENCE, encoding="utf-8")
+        for turn in range(1, 5):
+            result = self.run_cursor_hook("working-memory-write.sh")
+            self.assertEqual(0, result.returncode, result.stderr)
+            rendered = self.rule_file().read_text(encoding="utf-8")
+            self.assertIn('"kind": "warming"', rendered)
+            self.assertIn(f'"pending_turns": {turn}', rendered)
+        restarted = self.run_cursor_hook("local-context.sh")
+        self.assertEqual(0, restarted.returncode, restarted.stderr)
+        self.assertIn(
+            '"kind": "warming"',
+            self.rule_file().read_text(encoding="utf-8"),
+        )
+
+        fifth = self.run_cursor_hook("working-memory-write.sh")
+        self.assertEqual(0, fifth.returncode, fifth.stderr)
+        rendered = self.rule_file().read_text(encoding="utf-8")
+        self.assertIn('"kind": "governed"', rendered)
+        self.assertNotIn('"kind": "warming"', rendered)
+
     def test_failed_render_preserves_previous_rule(self) -> None:
         self.rule_file().write_text("previous capsule\n", encoding="utf-8")
-        self.cli.write_text(self.STUB_SILENT, encoding="utf-8")
+        self.cli.write_text(self.STUB_FAILURE, encoding="utf-8")
         for hook in WorkingMemoryRuleTest.RENDER_HOOKS:
             with self.subTest(hook=hook):
                 result = self.run_cursor_hook(hook)
@@ -613,6 +702,45 @@ class CursorCapsuleRenderTest(unittest.TestCase):
                     [path.name for path in self.rules_dir.iterdir()],
                     ["working-memory.mdc"],
                 )
+
+    def test_valid_empty_branch_context_removes_foreign_rule(self) -> None:
+        self.rule_file().write_text("foreign branch capsule\n", encoding="utf-8")
+        self.cli.write_text(self.STUB_EMPTY, encoding="utf-8")
+        result = self.run_cursor_hook("local-context.sh", "feature/new-branch")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertFalse(self.rule_file().exists())
+
+    def test_no_branch_removes_foreign_rule_on_session_start(self) -> None:
+        self.rule_file().write_text("foreign branch capsule\n", encoding="utf-8")
+        self.cli.write_text(self.STUB_FAILURE, encoding="utf-8")
+        result = self.run_cursor_hook("local-context.sh", "")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertFalse(self.rule_file().exists())
+
+    def test_malformed_render_preserves_previous_rule(self) -> None:
+        self.rule_file().write_text("previous capsule\n", encoding="utf-8")
+        self.cli.write_text(self.STUB_MALFORMED, encoding="utf-8")
+        for hook in WorkingMemoryRuleTest.RENDER_HOOKS:
+            with self.subTest(hook=hook):
+                result = self.run_cursor_hook(hook)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual(
+                    "previous capsule\n",
+                    self.rule_file().read_text(encoding="utf-8"),
+                )
+
+    @unittest.skipUnless(shutil.which("timeout"), "native timeout unavailable")
+    def test_timed_out_render_preserves_previous_rule(self) -> None:
+        self.rule_file().write_text("previous capsule\n", encoding="utf-8")
+        self.cli.write_text(self.STUB_TIMEOUT, encoding="utf-8")
+        result = self.run_cursor_hook(
+            "local-context.sh", budget="0.05"
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(
+            "previous capsule\n",
+            self.rule_file().read_text(encoding="utf-8"),
+        )
 
 
 class MirrorConsistencyTest(unittest.TestCase):

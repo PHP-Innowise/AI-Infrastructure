@@ -24,10 +24,21 @@ UUID4_PATTERN = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
 RECORD_TYPES = ("task", "finding", "bug", "incident", "decision", "event")
-# Where a task sits in the delivery loop, using the same vocabulary the skills
-# declare in their own frontmatter. Progress says what was touched; the phase
-# says which step it stopped on, which is what a reader needs to resume.
-TASK_PHASES = ("understanding", "planning", "execution", "finalization")
+# Stored phases use one governed vocabulary. Compatibility aliases are accepted
+# only at mutation boundaries and are normalized before validation/persistence.
+TASK_PHASES = (
+    "understanding",
+    "planning",
+    "implementation",
+    "verification",
+    "finalization",
+)
+TASK_PHASE_ALIASES = {
+    "implementing": "implementation",
+    "execution": "implementation",
+    "review": "verification",
+}
+TASK_PHASE_INPUTS = (*TASK_PHASES, *TASK_PHASE_ALIASES)
 PRIVACY = ("public", "team", "restricted", "private")
 AUTHORITIES = ("inferred", "observed", "verified")
 # Authority may only harden, along a single edge: an `observed` claim that a
@@ -111,6 +122,23 @@ _LOCK_STATE = threading.local()
 
 class BrainError(Exception):
     """A safe, user-facing Project Brain error."""
+
+
+def normalize_phase(value: str) -> str:
+    """Return the canonical stored phase for a CLI/API input value."""
+    normalized = TASK_PHASE_ALIASES.get(value, value)
+    if normalized not in TASK_PHASES:
+        raise BrainError(
+            "phase must be one of: "
+            + ", ".join(TASK_PHASES)
+            + " (aliases: "
+            + ", ".join(
+                f"{alias}->{canonical}"
+                for alias, canonical in TASK_PHASE_ALIASES.items()
+            )
+            + ")"
+        )
+    return normalized
 
 
 def utc_now() -> str:
@@ -262,6 +290,12 @@ def parse_markdown_record(path: Path) -> tuple[dict[str, Any], str]:
         raise BrainError(f"{path}: invalid JSON frontmatter") from error
     if not isinstance(metadata, dict):
         raise BrainError(f"{path}: frontmatter must be an object")
+    # Records persisted before the canonical phase vocabulary used
+    # `execution`. Normalize that legacy value on read; the next supported
+    # mutation rewrites the record and handoff with `implementation`.
+    if metadata.get("phase") == "execution":
+        metadata = dict(metadata)
+        metadata["phase"] = "implementation"
     return metadata, body.lstrip("\n")
 
 
@@ -922,9 +956,7 @@ def update_record(
         if phase is not None:
             if record["type"] != "task":
                 raise BrainError("only a task may declare a phase")
-            if phase not in TASK_PHASES:
-                raise BrainError(f"phase must be one of: {', '.join(TASK_PHASES)}")
-            record["phase"] = phase
+            record["phase"] = normalize_phase(phase)
         if progress is not None:
             record["progress"] = progress
         if auto_checkpoint is not None:

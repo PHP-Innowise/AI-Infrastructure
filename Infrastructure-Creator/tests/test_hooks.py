@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -24,6 +25,7 @@ import unittest
 from pathlib import Path
 
 EDITION_ROOT = Path(__file__).resolve().parents[1]
+BASH = shutil.which("bash") or "/bin/bash"
 MIRROR_DIRS = (".claude/hooks", ".cursor/hooks", ".codex/hooks")
 HOOK_NAMES = (
     "bash-validator.sh",
@@ -38,14 +40,22 @@ def hook_path(name: str) -> Path:
     return EDITION_ROOT / MIRROR_DIRS[0] / name
 
 
-def run_hook(name: str, payload, cwd: Path | None = None, tmpdir: Path | None = None):
+def run_hook(
+    name: str,
+    payload,
+    cwd: Path | None = None,
+    tmpdir: Path | None = None,
+    env_override: dict[str, str] | None = None,
+):
     """Run a hook the way the harness does: bash, JSON payload on stdin."""
     stdin = payload if isinstance(payload, str) else json.dumps(payload)
     env = dict(os.environ)
     if tmpdir is not None:
         env["TMPDIR"] = str(tmpdir)
+    if env_override:
+        env.update(env_override)
     return subprocess.run(
-        ["bash", str(hook_path(name))],
+        [BASH, str(hook_path(name))],
         input=stdin,
         capture_output=True,
         text=True,
@@ -182,6 +192,44 @@ class BashValidatorTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "")
         self.assertEqual(result.stderr, "")
+
+    def test_empty_input_passes_quietly(self) -> None:
+        result = run_hook(self.HOOK, "")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+
+    def test_multiline_payload_is_consumed_completely(self) -> None:
+        payload = json.dumps(
+            {"tool_name": "Bash", "tool_input": {"nested": {"command": "git reset --hard"}}},
+            indent=2,
+        )
+        result = run_hook(self.HOOK, payload)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("[bash-validator] BLOCKED", result.stderr)
+
+    def test_no_cat_or_json_extractor_warns_once_and_fails_open(self) -> None:
+        secret = "SECRET-COMMAND-BODY"
+        expected = (
+            "[bash-validator] no JSON extractor available "
+            "(jq/php/python3), validation skipped"
+        )
+        result = run_hook(
+            self.HOOK,
+            json.dumps(self.payload("git reset --hard " + secret), indent=2),
+            env_override={"PATH": ""},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr.splitlines(), [expected])
+        self.assertNotIn(secret, result.stderr)
+
+    def test_block_diagnostic_never_leaks_command_body(self) -> None:
+        secret = "DO-NOT-PRINT-THIS-BODY"
+        result = run_hook(self.HOOK, self.payload("git reset --hard " + secret))
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("[bash-validator] BLOCKED", result.stderr)
+        self.assertNotIn(secret, result.stderr)
 
 
 class FileNamingValidatorTest(unittest.TestCase):

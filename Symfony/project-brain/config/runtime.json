@@ -8,7 +8,7 @@
     "team"
   ],
   "automatic_compaction": true,
-  "automatic_completion": true,
+  "automatic_completion": false,
   "automatic_promotion": true,
   "canonical_edition": ".agents",
   "codebase_map_max_drift": 25,

@@ -127,7 +127,7 @@ Use slash commands (Claude Code / Cursor) to move through the workflow:
 | `/dependency-manager` | Audit and manage Composer dependencies |
 | `/systematic-debugger` (`/debugger`) | Find root cause before fixing bugs |
 | `/project-brain` | Govern shared tasks, handoffs, unified retrieval, all six record types, compaction, and promotion proposals |
-| `/memory-bank` | Retrieve, capture, audit, supersede/archive durable memory, or apply an approved promotion |
+| `/memory-bank` | Retrieve, capture, audit, supersede/archive durable memory, or apply a governed automatic/independently reviewed promotion |
 | `/verify` | Run the native PHP Definition of Done |
 | `/review-pr` | Review a GitHub pull request |
 | `/finishing-branch` | Prepare branch completion or PR |

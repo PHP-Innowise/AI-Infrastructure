@@ -1,6 +1,6 @@
 ---
 name: memory-bank
-description: "Use this agent to retrieve, capture, audit, supersede/archive durable project memory, or apply a human-approved Project Brain promotion. Do not use for active task state, handoffs, promotion proposals, or ordinary chat summaries."
+description: "Use this agent to retrieve, capture, audit, supersede/archive durable project memory, or apply a governed automatic or independently reviewed Project Brain promotion. Do not use for active task state, handoffs, promotion proposals, or ordinary chat summaries."
 model: haiku
 invokes: memory-bank
 phase: utility
@@ -16,7 +16,7 @@ Manage secure, indexed, source-backed project memory shared by all supported AI 
 
 1. Use the Skill tool to invoke `memory-bank`.
 2. Execute exactly one requested memory mode completely.
-3. Stop when retrieval, capture, audit, lifecycle change, or approved promotion application is complete.
+3. Stop when retrieval, capture, audit, lifecycle change, or governed promotion application is complete.
 4. Return the structured output below.
 
 ## Output Format

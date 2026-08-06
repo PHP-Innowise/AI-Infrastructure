@@ -48,14 +48,17 @@ router, or dependency-injection container.
 
 ## How to Add an Accelerator to a Project
 
-AI tools look for their files from the workspace root. There are two supported
-ways to connect an edition:
+For a real project, use the
+[inventory-driven installer](install/README.md) from this repository root.
+Start with `--dry-run`, select only the required AI integrations, resolve every
+reported collision manually, and then repeat the command without `--dry-run`.
+The installer refuses collisions before copying and does not install project
+dependencies automatically.
 
-1. Open the selected edition directory as the workspace root and keep the real
-   application alongside or inside it.
-2. Copy the selected directory's contents — including `.claude/`, `.cursor/`,
-   `.agents/`, `.codex/`, `AGENTS.md`, and the documentation — into the root
-   of the real project.
+The selected edition directory may also be opened directly as a standalone
+demonstration or evaluation workspace. Do not manually bulk-copy an edition
+into an established project; follow the complete
+[Safe Adoption Guide](docs/ADOPTION.md).
 
 Opening this monorepository's root does not activate a nested edition by
 itself. Claude Code, Cursor, and Codex do not automatically search

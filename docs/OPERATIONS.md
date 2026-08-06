@@ -15,6 +15,33 @@ python3 memory-bank/scripts/context.py --help
 Requirements are Python 3.9 or later and SQLite with FTS5. No network service,
 MCP server, embeddings provider, or daemon is required.
 
+## Installation Inventory Operations
+
+Ready-made edition installation is governed by exact, versioned inventories,
+not by directory-wide exclusions. From the accelerator repository root:
+
+```bash
+python3 scripts/install_accelerator.py --verify-inventories
+python3 scripts/install_accelerator.py \
+  --edition Laravel \
+  --target "/path/with spaces/project" \
+  --tool claude \
+  --dry-run
+```
+
+The verifier fails for an unlisted or stale distribution path. The installer
+preflights every destination and refuses the entire operation on any collision,
+unless an operator explicitly requests overwrite; normal adoption does not use
+that option. Its tab-separated `WOULD_COPY`, `COPY`, `COLLISION`, and `COMPLETE`
+lines are deterministic for a given inventory and tool selection. Retain the
+successful copy transcript outside the target as the rollback manifest.
+
+Inventories identify files shipped by Laravel, Symfony, and PHP Core, grouped
+as shared, Claude, Cursor, and Codex components. They never inventory
+`memory-bank/local/`, SQLite databases, personal settings, `.env`, or other
+runtime/user state. See [Safe Adoption](ADOPTION.md) for collision resolution,
+activation, rollback, and upgrades.
+
 For the ownership model, authority rules, and data boundaries behind these
 procedures, see [Context and Memory](CONTEXT-AND-MEMORY.md). For the governed
 and lightweight choices, see [Context Modes](CONTEXT-MODES.md). For a complete
@@ -313,6 +340,9 @@ An eligible conflict pair may exceed its category or target budget up to the
 hard ceiling, with an escalation reason. Privacy, authority, lifecycle, owner,
 and freshness filters still take precedence. Token counts are estimates based
 on text length, not provider billing measurements.
+
+The delivered capsule has a separate final contract in both modes: at most 2
+procedural, 3 semantic, and 1 episodic item and 8,000 serialized characters.
 
 Side effects in governed mode: creates
 `project-brain/control/retrieval-manifests/<uuid>.json`, a Git-trackable
@@ -805,10 +835,13 @@ These names describe AI workflows, not additional shell executables:
 
 Skills execute only when selected.
 
-Session-start hooks stay informational and metadata-only: they report branch,
-index, binding, and validation status without indexing, retrieving, or printing
-record bodies. The request and turn-end hooks do more, and only what their
-halves require:
+Session-start hooks stay informational and do not print record bodies. Cursor,
+which has no prompt-submit hook, atomically refreshes its ignored always-apply
+rule: before provisioning it contains only sanitized warming metadata; after
+the fifth turn it is replaced by the governed capsule. A valid branch with no
+task or changes removes foreign context, while runtime failures preserve the
+last valid rule. The request and turn-end hooks do only what their halves
+require:
 
 - the request hook runs `refresh` and injects a bounded capsule; it writes no
   task state, because at prompt time nothing has happened yet to record;
@@ -818,10 +851,11 @@ halves require:
 With `automatic_promotion` enabled in `runtime.json`, the turn-end hook also
 promotes eligible resolved, verified knowledge into durable memory without
 review; such promotions name no reviewer and their chunks are tagged
-`auto-promoted`. With `automatic_completion` enabled, it also completes tasks
-whose branch has merged into the default branch, writing an episode and closing
-the handoff; the outcome states the merge and nothing about correctness.
-With `automatic_compaction` it archives terminal records once
+`auto-promoted`. Reviewed mode remains independently propose → review → apply.
+The turn boundary may report merged branches as sanitized completion
+candidates, but it never closes a task. Shipped `automatic_completion=false`;
+explicit completion requires the current numeric revision and verification.
+With `automatic_compaction` the turn boundary archives terminal records once
 `compaction_threshold` of them accumulate, repointing any promoted Memory Bank
 chunk at the record's new archive path as it goes.
 

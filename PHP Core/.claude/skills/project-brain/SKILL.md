@@ -1,6 +1,6 @@
 ---
 name: project-brain
-description: Govern shared native-PHP task context with Project Brain. Use for task lifecycle, handoffs, unified retrieval, findings, bugs, incidents, decisions, compaction, or promotion proposals. Use memory-bank only for durable retrieval/capture and approved promotion application.
+description: Govern shared native-PHP task context with Project Brain. Use for task lifecycle, handoffs, unified retrieval, findings, bugs, incidents, decisions, compaction, or automatic/independently reviewed promotions. Use memory-bank only for durable retrieval/capture and governed promotion application.
 phase: utility
 flow-next: null
 flow-alternatives: [memory-bank, documentation-generator, reflect]
@@ -42,9 +42,9 @@ Execute only the selected operation, then stop. Inspect `python3 memory-bank/scr
    ```
 
 4. Open cited canonical sources and verify material claims. Preserve surfaced conflicts and stale-source warnings; do not collapse disagreement into a false consensus.
-5. Update only sanitized progress, evidence references, affected paths, next action, blockers, and verification. Supply the expected revision for mutations when supported.
+5. Update only sanitized progress, evidence references, affected paths, next action, blockers, verification, and the canonical phase: `understanding`, `planning`, `implementation`, `verification`, or `finalization`. Input aliases normalize before persistence.
 6. Refresh the handoff after meaningful progress and before changing agent/session. A handoff is a bounded continuation record, not a transcript.
-7. Complete only after verification. Record the outcome and evidence, advance only through legal transitions, and validate the resulting task and handoff.
+7. Complete only after verification, using the current numeric revision. A merge completion candidate is advisory and never authorizes automatic closure. Record the outcome and evidence, advance only through legal transitions, and validate the resulting task and handoff.
 
 Use `--mode lightweight` only by explicit choice. In that mode, local SQLite task state and episodes are machine-local, non-authoritative outside that session, and lost when the local database is deleted. Lightweight episodes are never auto-promoted.
 
@@ -68,7 +68,7 @@ Use `--mode lightweight` only by explicit choice. In that mode, local SQLite tas
 - The public agent interface is only `python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID`; `context` may exist solely as a compatibility alias.
 - Retrieval applies privacy, owner, authority, lifecycle, supersession, and source-freshness filters before selection.
 - Treat SQLite/BM25 output and the context packet as discovery aids. Verify cited sources before implementation or decisions.
-- Keep bounded snippets and category budgets. Do not bypass the hard ceiling or omit an escalation reason.
+- Keep bounded snippets and category budgets. Delivered capsules allow at most 2 procedural, 3 semantic, and 1 episodic item and 8,000 serialized characters. Do not bypass the internal conflict ceiling or omit an escalation reason.
 - Preserve relevant conflicting records together and report excluded/stale/private candidates only as safe metadata.
 - Require a committed retrieval manifest for governed retrieval. The manifest records selection/exclusion metadata, not hidden reasoning or source bodies.
 
@@ -82,11 +82,12 @@ Use `--mode lightweight` only by explicit choice. In that mode, local SQLite tas
 
 ## Promotion Proposals
 
-1. Propose only a durable, reusable, project-specific consequence supported by verified evidence. Exclude transient progress, raw evidence, generic PHP advice, secrets, personal/customer data, and unresolved conflicts.
-2. Search existing active memory first and prefer updating or superseding a matching chunk over creating a duplicate.
-3. Create a proposal under `project-brain/control/promotions/` with source record IDs/revisions, evidence, proposed destination/consequence, privacy review, conflicts, and review status.
-4. Stop at proposal. An agent must not supply the human reviewer, approve its own proposal, or apply it.
-5. After explicit human approval, use the `memory-bank` skill's approved-promotion mode to apply atomically and record the destination memory ID/revision and outcome.
+1. Select the configured mode. In automatic mode, the turn boundary may promote eligible verified knowledge with truthful `automatic`/`approved-without-review` labels and no reviewer. In reviewed mode (`automatic_promotion=false`), use propose → independent human review → apply.
+2. Propose only a durable, reusable, project-specific consequence supported by verified evidence. Exclude transient progress, raw evidence, generic PHP advice, secrets, personal/customer data, and unresolved conflicts.
+3. Search existing active memory first and prefer updating or superseding a matching chunk over creating a duplicate.
+4. In reviewed mode, create a proposal under `project-brain/control/promotions/` with source record IDs/revisions, evidence, proposed destination/consequence, privacy review, conflicts, and review status.
+5. In reviewed mode, stop at proposal. An agent must not supply the independent reviewer, approve its own proposal, or apply it.
+6. After independent approval, use the `memory-bank` skill's reviewed-promotion mode to apply atomically and record the destination memory ID/revision and outcome.
 
 ## Validation
 

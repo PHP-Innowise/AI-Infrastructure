@@ -1,6 +1,6 @@
 ---
 name: project-brain
-description: "Use this agent to manage governed shared Symfony tasks, handoffs, unified retrieval, findings, bugs, incidents, decisions, compaction, or promotion proposals. Use memory-bank for durable memory and approved promotion application."
+description: "Use this agent to manage governed shared Symfony tasks, handoffs, unified retrieval, findings, bugs, incidents, decisions, compaction, or promotion proposals. Use memory-bank for durable memory and governed promotion application."
 model: sonnet
 invokes: project-brain
 phase: utility
@@ -30,7 +30,7 @@ Manage shared task and control records through the governed Project Brain workfl
 
 **Suggested follow-ups:**
 - Continue the Symfony task from the verified handoff and context packet.
-- `/memory-bank [approved promotion ID]` only after explicit human approval.
+- `/memory-bank [approved promotion ID]` for a runtime-authorized automatic or independently approved promotion.
 - `/docs-generator [context summary]` when canonical documentation must change.
 
 ## Constraints

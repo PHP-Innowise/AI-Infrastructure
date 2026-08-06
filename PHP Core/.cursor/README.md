@@ -36,6 +36,6 @@ When shared behavior changes, update `.agents/skills` first, then mirror the sup
 
 Type `/` in Cursor chat to see the commands (e.g. `/coder`, `/architect`, `/security-reviewer`, `/project-brain`, `/memory-bank`), or ask the agent to run a skill by name. Start big/ambiguous work with `/brainstorm` and follow the flow in `.cursor/rules/accelerator-workflow.mdc`.
 
-`/project-brain` manages governed shared tasks, handoffs, unified retrieval, all six record types, compaction, and promotion proposals. Governed mode is the default; `--mode lightweight` is explicit and local-only. `/memory-bank` is limited to durable retrieval/capture/audit/supersession and applying human-approved promotions.
+`/project-brain` manages governed shared tasks, handoffs, unified retrieval, all six record types, compaction, and promotion proposals. Governed mode is the default; `--mode lightweight` is explicit and local-only. `/memory-bank` is limited to durable retrieval/capture/audit/supersession and applying governed automatic or independently reviewed promotions.
 
 The one public task-aware retrieval command is `python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID`. Canonical project sources outrank all retrieved context. Session hooks report metadata only and never index or inject records automatically. Keep Cursor's optional Claude-file loading disabled so native commands, agents, skills, and hooks are not duplicated.

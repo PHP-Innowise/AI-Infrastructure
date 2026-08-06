@@ -173,25 +173,34 @@ CAPSULE_TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$ROOT_DIR" branch --show-current 2
 RULES_DIR="$ROOT_DIR/.cursor/rules"
 RULE_FILE="$RULES_DIR/working-memory.mdc"
 CAPSULE=""
+CAPSULE_STATUS=3
 if command -v python3 > /dev/null 2>&1 && [ -f "$CONTEXT_CLI" ] && [ -n "$CAPSULE_TASK_ID" ]; then
   if command -v timeout > /dev/null 2>&1; then
-    CAPSULE=$(timeout "$CAPSULE_BUDGET_SECONDS" python3 "$CONTEXT_CLI" context \
-      "$CAPSULE_TASK_ID" --task-id "$CAPSULE_TASK_ID" --ephemeral 2>/dev/null)
+    CAPSULE=$(timeout "$CAPSULE_BUDGET_SECONDS" python3 "$CONTEXT_CLI" hook-context \
+      --task-id "$CAPSULE_TASK_ID" --json 2>/dev/null)
+    CAPSULE_STATUS=$?
   else
-    CAPSULE=$(python3 "$CONTEXT_CLI" context \
-      "$CAPSULE_TASK_ID" --task-id "$CAPSULE_TASK_ID" --ephemeral 2>/dev/null)
+    CAPSULE=$(python3 "$CONTEXT_CLI" hook-context \
+      --task-id "$CAPSULE_TASK_ID" --json 2>/dev/null)
+    CAPSULE_STATUS=$?
   fi
 fi
-if [ -n "$CAPSULE" ] && mkdir -p "$RULES_DIR" 2>/dev/null; then
+if [ "$CAPSULE_STATUS" -eq 0 ] && ! printf '%s' "$CAPSULE" | \
+  python3 -c 'import json,sys; json.load(sys.stdin)' >/dev/null 2>&1; then
+  CAPSULE_STATUS=1
+fi
+if [ "$CAPSULE_STATUS" -eq 3 ]; then
+  rm -f "$RULE_FILE" 2>/dev/null
+elif [ "$CAPSULE_STATUS" -eq 0 ] && [ -n "$CAPSULE" ] && mkdir -p "$RULES_DIR" 2>/dev/null; then
   TMP_RULE=$(mktemp "$RULES_DIR/.working-memory.XXXXXX" 2>/dev/null || true)
   if [ -n "$TMP_RULE" ]; then
     {
       printf -- '---\n'
-      printf 'description: Working memory - Task Capsule as of end of previous turn\n'
+      printf 'description: Working memory - current-branch session context\n'
       printf 'alwaysApply: true\n'
       printf -- '---\n\n'
       printf '# Working Memory (auto-rendered)\n\n'
-      printf 'Task Capsule as of end of previous turn (task: %s, rendered: %s).\n' \
+      printf 'Session context as of end of previous turn (task: %s, rendered: %s).\n' \
         "$CAPSULE_TASK_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
       printf 'Retrieved context is not authoritative - verify the source.\n\n'
       printf '%s\n' '```'

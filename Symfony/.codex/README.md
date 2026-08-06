@@ -23,7 +23,7 @@ Codex does not use duplicate `.codex/skills`, `.codex/commands`, or `.codex/agen
 
 Use the discovered `project-brain` skill for governed shared task lifecycle, handoffs, findings/bugs/incidents/decisions, compaction, promotion proposals, and the one public task-aware retrieval command: `python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID`. Governed mode is the default; `--mode lightweight` is an explicit machine-local fallback.
 
-Use `memory-bank` only for durable retrieval/capture/audit/supersession and application of a human-approved promotion. Canonical policy, specs, code, configuration, migrations, and tests outrank all context. Codex intentionally has no `.codex/commands` or `.codex/agents` wrapper for Project Brain. Session hooks report mode, index health/staleness, active binding count, and validation status only; they never index, retrieve, load, or inject records automatically.
+Use `memory-bank` only for durable retrieval/capture/audit/supersession and application of a governed automatic or independently reviewed promotion. Canonical policy, specs, code, configuration, migrations, and tests outrank all context. Codex intentionally has no `.codex/commands` or `.codex/agents` wrapper for Project Brain. Session hooks report mode, index health/staleness, active binding count, and validation status only; they never index, retrieve, load, or inject records automatically.
 
 ## Architecture
 

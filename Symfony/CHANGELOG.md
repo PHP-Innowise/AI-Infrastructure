@@ -11,6 +11,16 @@ it at the top of every session.
 
 ## Unreleased
 
+### Shared context runtime
+
+- Adopted the 2026-08-06 shared-core context remediation documented in the
+  root changelog: pre-index privacy rejection, canonical task phases, bounded
+  2/3/1 capsules, explicit completion, Cursor warming continuity, retrieval
+  quality gates, and metadata-only telemetry.
+- Adopted the shared builtin hook input hardening and deterministic,
+  selected-tool installation inventory/clean-install verification documented in
+  the root changelog.
+
 ### Fixed
 
 - **Three canonical skills carried `sed` damage that the mirrors did not.**

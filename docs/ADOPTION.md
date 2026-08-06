@@ -5,6 +5,11 @@ existing project without replacing existing project files. An accelerator is
 a workflow layer; the consuming project's code, configuration, tests,
 specifications, and CI remain authoritative.
 
+For the concise command reference, see the
+[Installer Quick Start](../install/README.md). This document remains the
+authoritative procedure for backups, collision resolution, validation,
+rollback, and upgrades.
+
 ## 1. Select the Edition from Evidence
 
 Inspect the target project's `composer.json`, lock file, executable entry
@@ -64,35 +69,49 @@ or in an approved VCS commit. At minimum inspect:
 - `memory-bank/` and `project-brain/`;
 - `tasks/`, `specs/`, `examples/`, `.gitignore`, and root documentation.
 
-Also create an install manifest listing every path added. That manifest is
-required for safe rollback because a merged directory may contain pre-existing
-project files that must never be removed.
+The supported installer uses the versioned inventory under
+`install/inventories/` and emits one transcript line for every file. Save that
+exact transcript as the install manifest. It is required for safe rollback
+because a merged directory may contain pre-existing project files that must
+never be removed. The inventory describes repository distribution files only;
+it does not claim machine-local, runtime, or user state.
 
 ## 4. Dry-Run Before Copying
 
-Keep the accelerator source outside the target. Substitute the selected
-edition and target paths, preserving quotes around paths such as `PHP Core`:
+Keep the accelerator source outside the target. From the accelerator repository
+root, substitute the selected edition, target, and tool. Paths containing spaces
+are supported:
 
 ```bash
-EDITION="/path/to/accelerator-php/Laravel"
 TARGET="/path/to/existing-project"
-rsync -a --dry-run --itemize-changes "$EDITION/" "$TARGET/"
+python3 scripts/install_accelerator.py \
+  --edition "PHP Core" \
+  --target "$TARGET" \
+  --tool cursor \
+  --dry-run
 ```
 
-Review every reported path. A dry run predicts additions and replacements; it
-does not authorize replacements. If `rsync` is unavailable, compare equivalent
-staging and target trees with the team's normal file-diff tool.
+Use `--tool claude`, `--tool cursor`, or `--tool codex`; repeat `--tool` to
+select more than one, or omit it to install all three integrations. Codex
+selects both `.agents/` and `.codex/`. Shared cross-tool layout READMEs are
+included as distribution documentation and do not activate an unselected tool.
 
-For a no-overwrite baseline, copy only missing paths:
+Review every `WOULD_COPY` line. Any existing target path is reported as
+`COLLISION`; the command exits nonzero before copying anything. Once the dry run
+is collision-free, run the same command without `--dry-run` and retain its exact
+`COPY` transcript:
 
 ```bash
-rsync -a --ignore-existing "$EDITION/" "$TARGET/"
+python3 scripts/install_accelerator.py \
+  --edition "PHP Core" \
+  --target "$TARGET" \
+  --tool cursor | tee "/safe/backup/path/accelerator-install-transcript.txt"
 ```
 
-`--ignore-existing` avoids replacing files but does not resolve semantic
-collisions. Review and merge each collision explicitly before activation.
-Never use a copy option that deletes target files or overwrites them
-unconditionally.
+The installer refuses overwrite by default and performs a complete collision
+preflight, so a late collision cannot leave a partially copied installation.
+Do not use `--overwrite` for adoption; resolve and merge collisions explicitly
+as described below.
 
 ## 5. Resolve Collisions Explicitly
 
@@ -171,6 +190,8 @@ From the target root:
 ```bash
 python3 memory-bank/scripts/validate.py
 python3 project-brain/scripts/validate.py --root .
+python3 memory-bank/scripts/context.py status --json
+python3 memory-bank/scripts/context.py validate --json
 python3 memory-bank/scripts/context.py index
 git status --short
 ```
