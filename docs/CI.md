@@ -2,13 +2,16 @@
 
 The repository is checked by GitHub Actions:
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml). The workflow runs
-on every push to `main` and on every pull request. It uses only
-`actions/checkout` and `actions/setup-python`, needs no dependencies beyond
-the Python standard library, and never uses `sudo`.
+on every push to `main` and on every pull request. It uses
+`actions/checkout` and `actions/setup-python` and never uses `sudo`. The
+accelerator runtime suites need only the Python standard library; the isolated
+QA-artifact tooling job installs the exact `openpyxl` version pinned in
+[`requirements-qa.txt`](../requirements-qa.txt).
 
 | Job | What it verifies |
 |---|---|
 | `tests` | The unit-test suites of every edition (7 suites, run in a matrix). |
+| `qa-tooling` | Synthetic tests for ledger/workbook refusal, strict schemas, composite defect identity, evidence arithmetic/checksums, and native-host skips. |
 | `parity` | Mirror parity and cross-edition core parity for Laravel, Symfony, and PHP Core. |
 | `mirrors` | Every per-tool mirror matches its canon (`scripts/build_mirrors.py --check`). |
 | `installation` | Exact versioned inventories match the repository, and every Laravel/Symfony/PHP Core × Claude/Cursor/Codex selected-tool install passes isolated validate/status/index smoke tests without application, `.env`, or application-database access. |
@@ -39,6 +42,24 @@ The explicit file loop is intentional: some distribution test directories are
 not importable Python packages because their parent path contains a hyphen.
 Plain `unittest discover` can report a misleading successful zero-test run
 there.
+
+### QA artifact tooling
+
+Use an isolated environment so the runtime editions retain their
+standard-library-only dependency contract:
+
+```bash
+python3 -m venv /tmp/accelerator-qa-venv
+/tmp/accelerator-qa-venv/bin/python -m pip install -r requirements-qa.txt
+/tmp/accelerator-qa-venv/bin/python -m unittest discover -s scripts/qa/tests
+/tmp/accelerator-qa-venv/bin/python scripts/qa/validate_qa_artifacts.py \
+  --skip-run-evidence
+```
+
+CI validates the strict schemas, the complete `TC-AI-001..018` catalog, and the
+staged disposition ledger and reconstructed workbook. It skips only run
+evidence, which remains intentionally untracked. The release gate omits the
+skip flag and adds `--release`.
 
 ### parity
 

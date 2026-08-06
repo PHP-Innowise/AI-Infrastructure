@@ -1,0 +1,33 @@
+{
+  "schema_version": "1.0.0",
+  "accelerator_owner": "Accelerator Team",
+  "external_owner": "External Client Team",
+  "historical_pass_policy": "propose-accepted-historical-pass",
+  "codex_evidence_root": "docs/qa/evidence",
+  "approval_policy": {
+    "id": "evidence-backed-local-v1",
+    "approved_by": "Accelerator Team",
+    "approved_at": "2026-08-06",
+    "criteria": [
+      "package-verified historical Pass with a resolved checksum-backed evidence path",
+      "newly reproduced Codex run with status passed and a validated evidence manifest"
+    ],
+    "excluded": [
+      "historical Partial, Fail, or Blocked records",
+      "historical Pass records that carry a defect until post-remediation evidence is reviewed",
+      "any reproduced run with failed or skipped status",
+      "native-client observations not independently captured",
+      "RUN-053, RUN-056, and RUN-057 external client findings",
+      "unavailable ShellCheck or OS-specific timeout checks"
+    ],
+    "eligible_review_status": "approved",
+    "ineligible_review_status": "pending"
+  },
+  "native_closure": "pending-reviewed-native-runs",
+  "external_runs": [
+    "RUN-053",
+    "RUN-056",
+    "RUN-057"
+  ],
+  "review_status": "pending"
+}

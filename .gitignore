@@ -6,3 +6,5 @@ __pycache__/
 memory-bank/local/
 .venv/
 .superpowers/
+/docs/Accelerator-TestEvidence-Submission/
+/docs/qa/evidence*/

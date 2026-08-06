@@ -60,6 +60,37 @@ edition's own files remain in that edition's changelog.
   with explicit `N/A`, and focused concurrency coverage. Promotion docs now
   distinguish truthful automatic mode from independent reviewed mode.
 
+### 2026-08-06 QA artifact integrity tooling
+
+- Added strict schemas and fail-closed builders for the 75-run disposition
+  ledger and reconstructed workbook. Builders require the complete,
+  checksum-verified historical package, use composite run/case/defect
+  identities, namespace only the four Codex defects, and never emit partial
+  or fabricated historical artifacts.
+- QA artifact validation now applies Draft 2020-12 schemas to the catalog,
+  ledger, and run evidence, confines checksum entries to their evidence root,
+  binds run/case/classification identity, cross-checks assertion status and
+  ancillary evidence documents, ties each command exit code to a unique
+  assertion, rejects malformed/duplicate checksum entries and evidence
+  symlinks, and requires a complete consistent package before approving
+  reproduced passes. CI validates the staged ledger and workbook.
+- Added the data-driven `TC-AI-001..018` runner with deterministic command
+  mappings, focused-regression discovery gates, explicit native-host skips,
+  split command streams, immediate exit codes, assertion arithmetic, Git
+  snapshots, provenance, inventories, and per-run SHA-256 manifests. Optional
+  local tools such as ShellCheck are now recorded as explicit skips when absent
+  instead of being misclassified as accelerator failures.
+- Added a reproducible disposition-policy overlay that assigns approved owner
+  labels, proposes package-backed historical Pass dispositions, binds
+  checksum-addressed Codex rerun evidence, and records the
+  `evidence-backed-local-v1` approval boundary. Only checksum-backed,
+  defect-free historical Passes and fully passed Codex reruns are approved;
+  historical non-passes, defect-bearing historical Passes, skipped/failed
+  checks, native observations, and external findings remain pending.
+- Added synthetic QA tooling tests, CI coverage, minimal non-client fixtures,
+  and release validation for exact IDs/counts, workbook tables/formulas,
+  evidence checksums, RUN-057 withholding, and final-disposition strictness.
+
 ### 2026-08-02 shared-core maintenance round (seven phases)
 
 - **Enforcement hooks hardened and tested** - the hardened hook generation
