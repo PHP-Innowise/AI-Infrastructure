@@ -301,6 +301,63 @@ were non-zero because of an invalid PHPUnit 10 configuration warning and, for
 Branding, incompatible persisted MFA ciphertext; see the
 [complete evidence report](docs/superpowers/reports/2026-07-29-task-capsule-bauherrenmappe.md).
 
+## Optional MCP Integrations
+
+MCP servers are optional external integrations. The accelerator does not
+require them, and teams should enable only the servers that correspond to
+systems the project actually uses. A small, relevant toolset consumes less
+context and creates a smaller security boundary than installing every
+available server.
+
+Useful integrations include:
+
+- [GitHub MCP Server](https://github.com/github/github-mcp-server) — repository,
+  pull-request, issue, code-scanning, and workflow context. Prefer the official
+  server and repository-scoped, least-privilege access.
+- [Context7](https://github.com/upstash/context7) — current,
+  version-specific framework and package documentation. This is especially
+  useful when the installed PHP framework or library version differs from the
+  model's built-in knowledge.
+- [Playwright MCP](https://github.com/microsoft/playwright-mcp) — browser
+  interaction, accessibility snapshots, and UI-flow verification. Use it only
+  for projects with a browser-facing surface.
+- [Sentry MCP](https://mcp.sentry.dev/) or
+  [Datadog MCP](https://docs.datadoghq.com/mcp_server/) — production errors,
+  traces, logs, metrics, monitors, and incident evidence. Select the
+  observability platform the project already uses; do not connect both without
+  a concrete need.
+- [Linear MCP](https://linear.app/docs/mcp) or
+  [Atlassian Rovo MCP](https://github.com/atlassian/atlassian-mcp-server) —
+  requirements, issues, project status, and documentation. Prefer read-only
+  access unless the workflow explicitly requires creating or updating work
+  items.
+- [Figma MCP](https://developers.figma.com/docs/figma-mcp-server/) — design
+  context, component specifications, variables, and design-to-code workflows
+  for projects that use Figma.
+- [AWS MCP Server](https://docs.aws.amazon.com/aws-mcp/latest/userguide/getting-started-aws-mcp-server.html)
+  — current AWS documentation and IAM-authorized cloud operations. Enable it
+  only for AWS-backed projects and keep deployment or destructive operations
+  behind human approval.
+- A database-specific MCP server — schema inspection and query diagnostics
+  when repository evidence is insufficient. There is no single official
+  PostgreSQL MCP server; evaluate implementations carefully, use a dedicated
+  read-only account, and never connect an unrestricted production database by
+  default.
+
+Security rules:
+
+1. Prefer first-party servers and official documentation.
+2. Start with read-only scopes, the smallest toolset, and one project or
+   organization boundary.
+3. Keep tokens, connection strings, and credentials outside the repository.
+4. Require human confirmation for writes, deployments, issue transitions, and
+   other consequential actions.
+5. Treat MCP output as external evidence: verify important claims against
+   canonical project sources before changing code.
+6. Do not add generic filesystem or memory MCP servers merely to duplicate the
+   repository access, Memory Bank, Project Brain, or Local Context Engine
+   already supplied by the accelerator.
+
 ## Infrastructure Creator
 
 `Infrastructure-Creator/` generates an accelerator for a specific target
