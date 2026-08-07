@@ -16,7 +16,7 @@ Incident -> Root Cause -> Rule -> Example -> Enforcement -> Verification
 - A Laravel convention (Form Request validation, Policy authorization, Eloquent parameter binding) is violated repeatedly.
 - A workflow handoff is confusing.
 
-Use stabilization for enforceable behavior that prevents a repeated agent failure. Use `project-brain/` for governed active tasks, handoffs, findings, bugs, incidents, decisions, events, and promotion proposals. Use `memory-bank/` for reviewed reusable consequences and approved promotion application. Use `specs/` for authoritative architecture and behavioral contracts; canonical sources always outrank both context stores.
+Use stabilization for enforceable behavior that prevents a repeated agent failure. Use `project-brain/` for governed active tasks, handoffs, findings, bugs, incidents, decisions, events, and promotion proposals. Use `memory-bank/` for verified governed reusable consequences and governed promotion application. Use `specs/` for authoritative architecture and behavioral contracts; canonical sources always outrank both context stores.
 
 Session hooks may surface only mode, index health/staleness, active binding count, and validation status. They must never index, retrieve, print, or inject Project Brain or Memory Bank records automatically.
 

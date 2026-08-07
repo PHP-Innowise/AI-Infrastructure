@@ -1,6 +1,6 @@
 ---
 name: project-brain
-description: "Use this agent to manage governed shared native-PHP tasks, handoffs, unified retrieval, findings, bugs, incidents, decisions, compaction, or promotion proposals. Use memory-bank for durable memory and approved promotion application."
+description: "Use this agent to manage governed shared native-PHP tasks, handoffs, unified retrieval, findings, bugs, incidents, decisions, compaction, or promotion proposals. Use memory-bank for durable memory and governed promotion application."
 ---
 
 # Project Brain Agent

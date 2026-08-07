@@ -3,7 +3,10 @@
 # Claude hook event: PreToolUse (Write|Edit).
 # Exit codes: 0 = allow, 2 = block.
 
-INPUT=$(cat)
+# Consume the complete hook payload without relying on external utilities.
+# `read -d ''` returns nonzero at EOF, which is the expected delimiter here.
+INPUT=
+IFS= read -r -d '' INPUT || :
 
 extract_paths() {
   if command -v jq >/dev/null 2>&1; then

@@ -217,7 +217,7 @@ Do not install Symfony CLI, bundles, npm packages, or analysis tools without app
 | `verify` | Run the active edition's Definition of Done |
 | `documentation-generator` | Maintain README, ADR, API, worker, and deployment docs |
 | `project-brain` | Govern shared tasks, handoffs, unified retrieval, all six record types, compaction, and promotion proposals |
-| `memory-bank` | Retrieve, capture, audit, supersede/archive durable memory, or apply an approved promotion |
+| `memory-bank` | Retrieve, capture, audit, supersede/archive durable memory, or apply a governed automatic/independently reviewed promotion |
 | `finishing-branch` | Present merge, PR, or cleanup alternatives |
 | `release` | Prepare versioning, changelog, tag, and release notes |
 

@@ -11,6 +11,7 @@ the Python standard library, and never uses `sudo`.
 | `tests` | The unit-test suites of every edition (7 suites, run in a matrix). |
 | `parity` | Mirror parity and cross-edition core parity for Laravel, Symfony, and PHP Core. |
 | `mirrors` | Every per-tool mirror matches its canon (`scripts/build_mirrors.py --check`). |
+| `installation` | Exact versioned inventories match the repository, and every Laravel/Symfony/PHP Core × Claude/Cursor/Codex selected-tool install passes isolated validate/status/index smoke tests without application, `.env`, or application-database access. |
 | `lint` | `bash -n` and `shellcheck -S error` on all tracked `.sh`; `python3 -m json.tool` on all tracked `.json`; startup context budget within ceilings (`scripts/context_budget.py --check`). |
 | `changelog` | Pull requests only: a diff that touches shared-core files (memory/context core, Project Brain, hooks, `scripts/`) must also change the root `CHANGELOG.md` (`scripts/check_core_changelog.sh`). |
 | `links` | All relative markdown links in tracked `.md` files resolve (`scripts/check_links.py`). |
@@ -25,14 +26,19 @@ and (for one lint step) `shellcheck`.
 ### tests
 
 ```bash
-(cd "Laravel/memory-bank/tests"    && python3 -m unittest discover)
-(cd "Laravel/project-brain/tests"  && python3 -m unittest discover)
-(cd "Symfony/memory-bank/tests"    && python3 -m unittest discover)
-(cd "Symfony/project-brain/tests"  && python3 -m unittest discover)
-(cd "PHP Core/memory-bank/tests"   && python3 -m unittest discover)
-(cd "PHP Core/project-brain/tests" && python3 -m unittest discover)
-(cd "Infrastructure-Creator/tests" && python3 -m unittest discover)
+for suite in \
+  "Laravel/memory-bank/tests" "Laravel/project-brain/tests" \
+  "Symfony/memory-bank/tests" "Symfony/project-brain/tests" \
+  "PHP Core/memory-bank/tests" "PHP Core/project-brain/tests" \
+  "Infrastructure-Creator/tests"; do
+  (cd "$suite" && for test_file in test_*.py; do python3 "$test_file"; done)
+done
 ```
+
+The explicit file loop is intentional: some distribution test directories are
+not importable Python packages because their parent path contains a hyphen.
+Plain `unittest discover` can report a misleading successful zero-test run
+there.
 
 ### parity
 
@@ -50,6 +56,21 @@ and (for one lint step) `shellcheck`.
 ```bash
 python3 scripts/build_mirrors.py --check
 ```
+
+### installation
+
+```bash
+python3 scripts/install_accelerator.py --verify-inventories
+python3 -m unittest tests.test_installation
+```
+
+The synthetic matrix installs each PHP edition once for each selected AI tool
+into a path containing spaces. It verifies required Memory Bank and Project
+Brain files, exact copy transcripts, collision refusal, the canonical retired
+file state, and `validate`/`status`/`index` smoke behavior. Synthetic `.env`,
+Composer hooks, and application-database sentinels prove the test does not
+execute application code or use application configuration/data. The context
+engine uses only its disposable database inside the temporary target.
 
 ### lint
 

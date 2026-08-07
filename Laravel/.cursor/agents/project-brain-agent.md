@@ -1,6 +1,6 @@
 ---
 name: project-brain
-description: "Use this agent to manage governed shared Laravel tasks, handoffs, unified retrieval, findings, bugs, incidents, decisions, events, compaction, or promotion proposals. Use memory-bank for durable memory and approved promotion application."
+description: "Use this agent to manage governed shared Laravel tasks, handoffs, unified retrieval, findings, bugs, incidents, decisions, events, compaction, or promotion proposals. Use memory-bank for durable memory and governed promotion application."
 ---
 
 # Project Brain Agent

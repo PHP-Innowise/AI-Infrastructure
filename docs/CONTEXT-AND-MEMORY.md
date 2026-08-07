@@ -514,9 +514,12 @@ Governed retrieval estimates tokens as roughly one token per four characters.
 This is a deterministic safety budget, not a tokenizer-accurate provider usage
 measurement.
 
-The category limits are policy 1,200, handoff 1,500, durable 3,500, dynamic
-1,500, and evidence 2,000 estimated tokens. The normal target is 8,000 and the
-hard ceiling is 12,000. Individual snippets are capped at 1,200 characters.
+The internal category limits are policy 1,200, handoff 1,500, durable 3,500,
+dynamic 1,500, and evidence 2,000 estimated tokens. Candidate selection has an
+8,000-token target and a 12,000-token conflict ceiling. After ranking and
+policy filtering, the delivered capsule is independently capped at 2
+procedural, 3 semantic, and 1 episodic item and 8,000 serialized characters.
+Snippets are deterministically shortened as needed.
 
 These controls bound selected retrieval context, not the size of source files,
 Brain records, user prompts, or model responses. Conflict escalation can exceed
@@ -535,7 +538,7 @@ recent 200, and are provenance for the local machine only.
 
 A manifest binds:
 
-- creation time and query;
+- creation time and the privacy-checked, distilled retrieval query;
 - Brain task UUID and revision;
 - privacy, owner, authority, freshness, and active-only filters;
 - selected paths, categories, estimated tokens, and source hashes;
@@ -562,11 +565,12 @@ The runtime creates it with the task, refreshes it on supported task updates,
 closes it on completion/cancellation, and archives it with its terminal task
 during compaction.
 
-A task may declare a `phase` — `understanding`, `planning`, `execution`, or
-`finalization` — using the same vocabulary the skills declare in their own
-frontmatter. Progress says what was touched; the phase says which step of the
-loop the work stopped on, which is what a reader needs in order to resume. The
-handoff carries it.
+A task may declare a `phase`: `understanding`, `planning`, `implementation`,
+`verification`, or `finalization`. The compatibility inputs `implementing` and
+`execution` normalize to `implementation`; `review` normalizes to
+`verification`. Only canonical values reach records, handoffs, retrieval
+output, and indexes. Progress says what was touched; the phase says which step
+of the loop the work stopped on.
 
 `phase` is optional, and deliberately so: requiring it would invalidate every
 record written before it existed. An automatically provisioned task declares
@@ -897,24 +901,13 @@ once they reach a terminal status.
 Both hooks are fail-open and time-bounded: context tooling never blocks a
 prompt or turns a checkpoint failure into a turn error.
 
-With `automatic_completion` enabled, the turn hook also completes tasks whose
-branch has landed in the default branch, recording an episode as it goes. The
-scan covers every active task rather than the current one, because a merge is
-observed after the branch is left, not while it is being worked on. Detection
-is `git merge-base --is-ancestor`, so merging the default branch *into* a
-long-running branch never looks like completion, and a branch is skipped when
-it is the default branch itself, which is trivially its own ancestor. A deleted
-branch is never treated as merged: deletion cannot be told apart from
-abandonment.
-
-The outcome claims only what was actually checked:
-
-```text
-Branch feature/reports merged into main. Last recorded progress: <checkpoint>
-Verification: feature/reports is an ancestor of main
-```
-
-Nothing here verified that the work is correct, so the record does not say so.
+The turn boundary scans for branch-merge evidence and reports a sanitized
+completion candidate. It never changes lifecycle state or records an episode.
+The default ships `automatic_completion=false`; the compatibility setting no
+longer grants closure authority. Completion requires an explicit `complete`
+command with the caller's current numeric revision and verification evidence.
+Merging the default branch *into* a long-running branch is not a candidate; the
+default branch itself and deleted branches are also excluded.
 
 With `automatic_promotion` enabled, the turn hook also promotes eligible
 resolved knowledge into durable memory on the same boundary, and with
@@ -922,10 +915,9 @@ resolved knowledge into durable memory on the same boundary, and with
 of them have accumulated. Compaction runs in batches rather than every turn:
 archiving one record at a time would churn Git history for no benefit.
 
-The order within a turn is fixed — complete, promote, then archive — because a
-record must be promoted before it is moved. Archived records stay promotable
-anyway, so a promotion run that hits its per-run cap does not lose the
-remainder to the archive.
+The order within a turn is fixed — report completion candidates, promote, then
+archive. Archived records stay promotable, so a promotion run that hits its
+per-run cap does not lose the remainder to the archive.
 
 This distinction matters: a healthy status line means the tools are available;
 it does not mean an agent has loaded, verified, or acted on the relevant

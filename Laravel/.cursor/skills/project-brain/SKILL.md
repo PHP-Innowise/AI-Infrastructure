@@ -1,6 +1,6 @@
 ---
 name: project-brain
-description: Govern shared Laravel task context with Project Brain. Use for task lifecycle, handoffs, unified retrieval, findings, bugs, incidents, decisions, events, compaction, or promotion proposals. Use memory-bank only for durable retrieval/capture and approved promotion application.
+description: Govern shared Laravel task context with Project Brain. Use for task lifecycle, handoffs, unified retrieval, findings, bugs, incidents, decisions, events, compaction, or automatic/independently reviewed promotions. Use memory-bank only for durable retrieval/capture and governed promotion application.
 phase: utility
 flow-next: null
 flow-alternatives: [memory-bank, documentation-generator, reflect]
@@ -14,7 +14,7 @@ Operate the shared, repository-backed control plane in `project-brain/` through 
 
 1. Canonical policy, specs, current code, configuration, migrations, and tests establish truth and always outrank retrieved context.
 2. `project-brain/` owns shared active tasks, handoffs, findings, bugs, incidents, decisions, events, retrieval manifests, conflicts, and promotion proposals.
-3. `memory-bank/` owns reviewed reusable consequences, not active progress. SQLite is a disposable index plus local binding/cache in governed mode.
+3. `memory-bank/` owns governed reusable consequences, not active progress. SQLite is a disposable index plus local binding/cache in governed mode.
 4. Never claim automatic prompt injection. Indexing and retrieval happen only through explicit CLI calls.
 5. Never write raw prompts, responses, chain-of-thought, command output, secrets, customer data, personal data, or unredacted incident payloads.
 
@@ -26,7 +26,7 @@ Operate the shared, repository-backed control plane in `project-brain/` through 
 - **Record:** create or revise a finding, bug, incident, decision, or immutable event.
 - **Complete:** verify outcomes and advance the shared task lifecycle.
 - **Compact:** validate and atomically archive terminal, superseded, or stale records without deletion.
-- **Propose promotion:** nominate a reusable consequence for human review; never self-approve or apply it.
+- **Promote durable knowledge:** use the configured automatic or independently reviewed promotion mode without falsifying review provenance.
 - **Lightweight:** explicitly use local-only task/episode behavior with its durability and collaboration limits.
 
 Execute only the selected operation, then stop. Inspect `python3 memory-bank/scripts/context.py --help` and the relevant `project-brain/templates/` file before mutation; do not invent unsupported flags or hand-edit revision/lifecycle fields when a command exists.
@@ -44,11 +44,17 @@ Tasks are the sixth governed record type alongside findings, bugs, incidents, de
    ```
 
 4. Open cited canonical sources and verify material claims. Preserve surfaced conflicts and stale-source warnings; do not collapse disagreement into a false consensus.
-5. Update sanitized progress with `update --task-id ID --revision REVISION` plus only supported `--progress`, `--next-step`, `--file`, and `--source` flags.
+5. Update sanitized progress with `update --task-id ID --revision REVISION` plus only supported `--progress`, `--next-step`, `--file`, `--source`, and `--phase` flags. Persist only the canonical phase `understanding`, `planning`, `implementation`, `verification`, or `finalization`; input aliases normalize at the mutation boundary.
 6. Refresh the handoff after meaningful progress and before changing agent/session. A handoff is a bounded continuation record, not a transcript.
-7. Complete only after verification with `complete --task-id ID --revision REVISION --outcome OUTCOME` and supported summary/evidence flags.
+7. Complete only after verification with `complete --task-id ID --revision REVISION --outcome OUTCOME` and supported summary/evidence flags. A merge completion candidate is advisory and never authorizes automatic closure.
 
 Use global `--mode lightweight` only by explicit choice and place it before the subcommand. In lightweight mode, local SQLite task state and episodes are machine-local, non-authoritative outside that workflow, and lost when the local database is deleted. Lightweight episodes are never auto-promoted.
+
+## Supported Record Commands
+
+- Shared task records use governed `start`, `update`, and `get`; these commands also maintain task binding and handoff state.
+- The other five governed record types—`finding`, `bug`, `incident`, `decision`, and immutable `event`—use `brain-create`, `brain-update`, and `brain-get`.
+- Inspect each subcommand's `--help` before use. Supply only supported flags; do not invent generic CRUD or lifecycle options.
 
 ## Governed Records
 
@@ -57,33 +63,35 @@ Use global `--mode lightweight` only by explicit choice and place it before the 
 3. Revise mutable records through `brain-update --record-id UUID --revision REVISION` with supported progress, next-step, evidence, conflict, transition, and reason flags.
 4. Events are immutable: create and get them, but do not revise their content.
 5. Distinguish observed evidence from inference. Use UUIDv4 identity, owner, lifecycle, authority, confidence, privacy, fingerprints, evidence, conflict, and supersession fields required by `project-brain/PROTOCOL.md`.
-6. On a stale revision, reload, reconcile, and retry; never overwrite concurrent work.
-7. Validate active and archived records equally and rebuild deterministic indexes only through supported mutations.
+6. Keep restricted content out unless the caller is authorized and configured privacy policy permits retrieval.
+7. On a stale revision, reload, reconcile, and retry; never overwrite concurrent work.
+8. Validate active and archived records equally and rebuild deterministic indexes only through supported mutations.
 
 ## Unified Retrieval
 
 - The public agent interface is only `python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID`; `context` may exist solely as a compatibility alias.
 - Retrieval applies privacy, owner, authority, lifecycle, supersession, and source-freshness filters before selection.
 - Treat SQLite/BM25 output and the context packet as discovery aids. Verify cited sources before implementation or decisions.
-- Keep bounded snippets and category budgets. Do not bypass the hard ceiling or omit an escalation reason.
+- Keep bounded snippets and category budgets. Delivered capsules allow at most 2 procedural, 3 semantic, and 1 episodic item and 8,000 serialized characters. Do not bypass the internal conflict ceiling or omit an escalation reason.
 - Preserve relevant conflicting records together and report excluded/stale/private candidates only as safe metadata.
 - Require a committed retrieval manifest for governed retrieval. The manifest records selection/exclusion metadata, not hidden reasoning or source bodies.
 
 ## Compaction
 
-1. Run `validate` first.
+1. Run `validate` across the complete active and archive sets first.
 2. Compact only terminal, superseded, or policy-stale records eligible under `project-brain/PROTOCOL.md`.
 3. Run `compact` through the repository-wide mutation lock. Compaction moves records atomically; it never deletes history.
 4. Rebuild deterministic active/archive indexes through the runtime and validate again.
-5. Report moved IDs, unchanged records, validation results, and any blocker.
+5. Report moved IDs, unchanged records, validation results, and any blocker. Do not compact records with unresolved lifecycle, privacy, link, or fingerprint errors.
 
 ## Promotion Proposals
 
-1. Propose only a durable, reusable, project-specific consequence supported by verified evidence. Exclude transient progress, raw evidence, generic Laravel advice, secrets, personal/customer data, and unresolved conflicts.
-2. Search existing active memory first and prefer updating or superseding a matching chunk over creating a duplicate.
-3. Use `promote-propose --source-id UUID --title TITLE --content CONTENT`.
-4. Stop at proposal. An agent must not run `promote-review`, supply the human reviewer, approve its own proposal, or run `promote-apply`.
-5. After explicit human approval, hand off to the `memory-bank` skill's approved-promotion mode.
+1. Select the configured mode. In automatic mode, the turn boundary may promote eligible verified knowledge with truthful `automatic`/`approved-without-review` labels and no reviewer. In reviewed mode (`automatic_promotion=false`), use propose → independent human review → apply.
+2. Propose only a durable, reusable, project-specific consequence supported by verified evidence. Exclude transient progress, raw evidence, generic Laravel advice, secrets, personal/customer data, and unresolved conflicts.
+3. Search existing active memory first and prefer updating or superseding a matching chunk over creating a duplicate.
+4. In reviewed mode, create the proposal with `promote-propose --source-id UUID --title TITLE --content CONTENT`.
+5. In reviewed mode, stop at proposal. An agent must not run `promote-review`, supply the independent reviewer, approve its own proposal, or run `promote-apply`.
+6. After independent approval, hand off to the `memory-bank` skill's reviewed-promotion mode to apply atomically and record the destination memory ID/revision and outcome.
 
 ## Validation
 

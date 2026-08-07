@@ -52,8 +52,8 @@ This flow keeps Laravel work structured while preserving user control. Agents su
 - Use `/dependency-manager` for Composer audits, updates, and vetting new packages.
 - Use `/debugger` when tests fail for unclear reasons or behavior is unexpected.
 - Use `documentation-generator` when setup, deployment, worker/cron, API, or architecture documentation changed.
-- Use `project-brain` for governed task lifecycle, handoffs, unified retrieval, all six governed record types, compaction, and promotion proposals. Governed mode is the default; `--mode lightweight` is an explicit local-only fallback.
-- Use `memory-bank` only for durable retrieval/capture/audit/supersession and human-approved promotion application; active work stays in Project Brain.
+- Use `project-brain` for governed task lifecycle, handoffs, unified retrieval, all six governed record types, compaction, and automatic or independently reviewed promotions. Governed mode is the default; `--mode lightweight` is an explicit local-only fallback.
+- Use `memory-bank` only for durable retrieval/capture/audit/supersession and governed automatic or independently reviewed promotion application; active work stays in Project Brain.
 - Use `checkpoint`, `memory` for authority-aware progress capture and unified context refresh; governed mode never creates SQLite task authority.
 
 ## Phase Map

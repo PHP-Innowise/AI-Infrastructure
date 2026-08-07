@@ -170,7 +170,7 @@ Use slash commands to move through the workflow:
 | `/dependency-manager` | Audit and manage Composer/Laravel packages |
 | `/debugger` | Find root cause before fixing bugs |
 | `/project-brain` | Govern shared tasks, handoffs, unified retrieval, all six record types, compaction, and promotion proposals |
-| `/memory-bank` | Retrieve, capture, audit, supersede/archive durable memory, or apply an approved promotion |
+| `/memory-bank` | Retrieve, capture, audit, supersede/archive durable memory, or apply a governed automatic/independently reviewed promotion |
 | `/verify` | Run the Laravel Definition of Done |
 | `/review-pr` | Review a GitHub pull request |
 | `/finishing-branch` | Prepare branch completion or PR |

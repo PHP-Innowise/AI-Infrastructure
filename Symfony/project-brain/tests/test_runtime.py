@@ -27,8 +27,75 @@ try:
     import brain_runtime as brain
     import context as context_cli
     import context_retrieval as retrieval
+    import telemetry as telemetry_runtime
 finally:
     sys.path.pop(0)
+
+
+class DirectQueryPrivacyBoundaryTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="query-privacy-test-")
+        self.repository = Path(self.temporary.name)
+        self.database = self.repository / "sentinel.db"
+        self.database.write_bytes(b"unchanged-index-sentinel")
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_direct_queries_reject_before_database_or_manifest_mutation(self) -> None:
+        unsafe_queries = (
+            "person@example.test",
+            "Customer id: 10492",
+            "Call +370 600 12345",
+            "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456",
+            "User: copied request",
+            "Assistant: copied response",
+        )
+        for mode in ("governed", "lightweight"):
+            for command in ("refresh", "retrieve", "context"):
+                for ephemeral in (False, True):
+                    for query in unsafe_queries:
+                        with self.subTest(
+                            mode=mode,
+                            command=command,
+                            ephemeral=ephemeral,
+                            query=query.split(":", 1)[0],
+                        ):
+                            arguments = [
+                                sys.executable,
+                                str(CONTEXT_SCRIPT),
+                                "--root",
+                                str(self.repository),
+                                "--db",
+                                str(self.database),
+                                "--mode",
+                                mode,
+                                command,
+                            ]
+                            if command == "refresh":
+                                arguments.extend(
+                                    ["--query", query, "--task-id", "TASK-PRIVACY"]
+                                )
+                            else:
+                                arguments.extend(
+                                    [query, "--task-id", "TASK-PRIVACY"]
+                                )
+                            if ephemeral:
+                                arguments.append("--ephemeral")
+                            result = subprocess.run(
+                                arguments, text=True, capture_output=True
+                            )
+                            self.assertNotEqual(0, result.returncode)
+                            self.assertEqual("", result.stdout)
+                            self.assertNotIn(query, result.stderr)
+                            self.assertEqual(
+                                b"unchanged-index-sentinel",
+                                self.database.read_bytes(),
+                            )
+                            self.assertEqual(
+                                [],
+                                list(self.repository.glob("**/*manifest*.json")),
+                            )
 
 
 class RuntimeHarness(unittest.TestCase):
@@ -110,6 +177,132 @@ class RuntimeHarness(unittest.TestCase):
 
 
 class ProjectBrainRuntimeTest(RuntimeHarness):
+    def test_governed_capsule_enforces_layer_and_character_contract_deterministically(
+        self,
+    ) -> None:
+        self.start("TASK-CAPSULE-LIMITS")
+        for index in range(8):
+            self.repository.joinpath(f"specs/cobalt-{index}.md").write_text(
+                f"# Cobalt {index}\n\n"
+                + "cobalt capsule deterministic ranking "
+                + ("bounded context " * 600),
+                encoding="utf-8",
+            )
+        for filename in ("AGENTS.md", "CLAUDE.md"):
+            self.repository.joinpath(filename).write_text(
+                "# Cobalt policy\n\ncobalt capsule deterministic ranking\n",
+                encoding="utf-8",
+            )
+        first = self.run_cli(
+            "retrieve", "cobalt capsule deterministic ranking",
+            "--task-id", "TASK-CAPSULE-LIMITS", "--limit", "20",
+            "--ephemeral", "--json",
+        )
+        second = self.run_cli(
+            "retrieve", "cobalt capsule deterministic ranking",
+            "--task-id", "TASK-CAPSULE-LIMITS", "--limit", "20",
+            "--ephemeral", "--json",
+        )
+        self.assertEqual(0, first.returncode, first.stderr)
+        self.assertEqual(0, second.returncode, second.stderr)
+        left, right = json.loads(first.stdout), json.loads(second.stdout)
+        self.assertLessEqual(len(left["procedural"]), 2)
+        self.assertLessEqual(len(left["semantic"]), 3)
+        self.assertLessEqual(len(left["episodic"]), 1)
+        self.assertLessEqual(len(first.stdout.strip()), 8000)
+        for layer in ("procedural", "semantic", "episodic"):
+            self.assertEqual(left[layer], right[layer])
+        manifest = json.loads(
+            (self.repository / left["manifest"]).read_text(encoding="utf-8")
+        )
+        self.assertTrue(
+            any(item["reason"] == "layer-limit" for item in manifest["excluded"])
+        )
+
+    def test_frozen_retrieval_corpus_meets_quality_and_privacy_gates(self) -> None:
+        fixture = json.loads(
+            (
+                Path(__file__).parent / "fixtures/retrieval-golden.json"
+            ).read_text(encoding="utf-8")
+        )
+        for document in fixture["documents"]:
+            path = self.repository / document["path"]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                f"# Golden fixture\n\n{document['text']}\n",
+                encoding="utf-8",
+            )
+        self.repository.joinpath("specs/private-golden.md").write_text(
+            "# Private fixture\n\nCobalt pagination cursor private customer evidence.\n",
+            encoding="utf-8",
+        )
+        private = brain.create_record(
+            self.repository,
+            "finding",
+            "PRIVATE-GOLDEN",
+            "Cobalt pagination cursor private customer evidence",
+            [],
+            ["specs/private-golden.md"],
+            owner="local",
+            privacy="private",
+            authority="verified",
+        )
+        stale = brain.create_record(
+            self.repository,
+            "finding",
+            "STALE-GOLDEN",
+            "Amber webhook signature stale evidence",
+            [],
+            ["specs/authority.md"],
+            owner="local",
+            privacy="team",
+            authority="verified",
+        )
+        self.repository.joinpath("specs/authority.md").write_text(
+            "# Authority\n\nChanged after both source fingerprints.\n",
+            encoding="utf-8",
+        )
+
+        connection = context_cli.connect(
+            context_cli.default_database(self.repository)
+        )
+        try:
+            context_cli.index_repository(connection, self.repository)
+            config = brain.load_config(self.repository)
+            precisions: list[float] = []
+            recalls: list[float] = []
+            for case in fixture["cases"]:
+                first, _ = retrieval._runtime_filter(
+                    self.repository,
+                    retrieval._candidates(connection, case["query"]),
+                    config,
+                )
+                second, _ = retrieval._runtime_filter(
+                    self.repository,
+                    retrieval._candidates(connection, case["query"]),
+                    config,
+                )
+                first_paths = [item["path"] for item in first[:5]]
+                self.assertEqual(
+                    first_paths, [item["path"] for item in second[:5]]
+                )
+                self.assertNotIn(
+                    f"project-brain/dynamic/findings/{private['id']}.md",
+                    first_paths,
+                )
+                self.assertNotIn(
+                    f"project-brain/dynamic/findings/{stale['id']}.md",
+                    first_paths,
+                )
+                expected = set(case["expected"])
+                relevant = len(expected.intersection(first_paths))
+                precisions.append(relevant / len(first_paths))
+                recalls.append(relevant / len(expected))
+            self.assertGreaterEqual(sum(precisions) / len(precisions), 0.80)
+            self.assertGreaterEqual(sum(recalls) / len(recalls), 0.90)
+        finally:
+            connection.close()
+
     def test_governed_mode_is_default_and_sqlite_only_keeps_binding_pointer(self) -> None:
         task = self.start()
         self.assertTrue(brain.is_uuid4(task["task_uuid"]))
@@ -297,6 +490,110 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
             thread.join(timeout=5)
         self.assertEqual(1, sum(isinstance(item, dict) for item in results))
         self.assertEqual(1, sum(isinstance(item, brain.BrainError) for item in results))
+
+    def test_concurrent_completion_cas_creates_exactly_one_episode(self) -> None:
+        task = self.start("TASK-COMPLETE-RACE")
+        results: list[subprocess.CompletedProcess[str]] = []
+
+        def complete(outcome: str) -> None:
+            results.append(
+                self.run_cli(
+                    "complete",
+                    "--task-id", "TASK-COMPLETE-RACE",
+                    "--revision", str(task["revision"]),
+                    "--outcome", outcome,
+                    "--verification", "Focused checks passed",
+                    "--json",
+                )
+            )
+
+        threads = [
+            threading.Thread(target=complete, args=("First completion.",)),
+            threading.Thread(target=complete, args=("Second completion.",)),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+        self.assertEqual([0, 1], sorted(result.returncode for result in results))
+        failed = next(result for result in results if result.returncode)
+        self.assertTrue(
+            "Stale task revision" in failed.stderr
+            or "Working task not found" in failed.stderr
+        )
+        connection = sqlite3.connect(
+            self.repository / "memory-bank/local/context.db"
+        )
+        try:
+            self.assertEqual(
+                1, connection.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
+            )
+        finally:
+            connection.close()
+
+    def test_governed_completion_requires_an_explicit_numeric_revision(self) -> None:
+        self.start("TASK-EXPLICIT-COMPLETE")
+        for revision_arguments in ((), ("--revision", "auto")):
+            with self.subTest(revision_arguments=revision_arguments):
+                result = self.run_cli(
+                    "complete",
+                    "--task-id", "TASK-EXPLICIT-COMPLETE",
+                    *revision_arguments,
+                    "--outcome", "Must not close.",
+                )
+                self.assertEqual(1, result.returncode)
+                self.assertIn("current numeric --revision", result.stderr)
+        self.assertEqual(
+            "active",
+            json.loads(
+                self.run_cli(
+                    "get", "--task-id", "TASK-EXPLICIT-COMPLETE", "--json"
+                ).stdout
+            )["status"],
+        )
+
+    def test_flush_and_manual_update_do_not_lose_a_successful_update(self) -> None:
+        task = self.start("TASK-FLUSH-RACE")
+        self.repository.joinpath("race.txt").write_text("work\n", encoding="utf-8")
+        results: dict[str, subprocess.CompletedProcess[str]] = {}
+
+        threads = [
+            threading.Thread(
+                target=lambda: results.setdefault(
+                    "update",
+                    self.run_cli(
+                        "update", "--task-id", "TASK-FLUSH-RACE",
+                        "--revision", str(task["revision"]),
+                        "--progress", "Manual progress survives.", "--json",
+                    ),
+                )
+            ),
+            threading.Thread(
+                target=lambda: results.setdefault(
+                    "flush",
+                    self.run_cli(
+                        "turn", "--task-id", "TASK-FLUSH-RACE",
+                        "--flush", "--json",
+                    ),
+                )
+            ),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+        self.assertEqual(0, results["flush"].returncode, results["flush"].stderr)
+        self.assertIn(results["update"].returncode, (0, 1))
+        task_after = json.loads(
+            self.run_cli(
+                "get", "--task-id", "TASK-FLUSH-RACE", "--json"
+            ).stdout
+        )
+        if results["update"].returncode == 0:
+            self.assertEqual("Manual progress survives.", task_after["progress"])
+        else:
+            self.assertIn("Stale", results["update"].stderr)
+        self.assertIn("Auto-checkpoint:", task_after["auto_checkpoint"])
 
     def test_index_filters_private_record_before_fts_storage(self) -> None:
         task = brain.create_task(
@@ -884,6 +1181,8 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
                 "complete",
                 "--task-id",
                 "TASK-ROLLBACK",
+                "--revision",
+                str(before["revision"]),
                 "--outcome",
                 "Must roll back",
             )
@@ -1267,6 +1566,59 @@ class AuthorityLifecycleTest(RuntimeHarness):
 
 class AutomaticWorkingMemoryTest(RuntimeHarness):
     """Cover the automated read and write paths the memory hooks depend on."""
+
+    def test_hook_context_warms_four_turns_then_switches_to_governed(self) -> None:
+        self.repository.joinpath("safe.php").write_text(
+            "<?php // work\n", encoding="utf-8"
+        )
+        self.repository.joinpath(".env.local").write_text(
+            "SECRET=never-render\n", encoding="utf-8"
+        )
+        for turn in range(1, 5):
+            buffered = self.run_cli(
+                "turn", "--task-id", "feature/warming",
+                "--flush-after", "5", "--json",
+            )
+            self.assertEqual(0, buffered.returncode, buffered.stderr)
+            self.assertFalse(json.loads(buffered.stdout)["flushed"])
+            warming = self.run_cli(
+                "hook-context", "--task-id", "feature/warming", "--json"
+            )
+            self.assertEqual(0, warming.returncode, warming.stderr)
+            capsule = json.loads(warming.stdout)
+            self.assertEqual("warming", capsule["kind"])
+            self.assertEqual(turn, capsule["pending_turns"])
+            self.assertEqual(1, capsule["excluded_files"])
+            self.assertNotIn("safe.php", warming.stdout)
+            self.assertNotIn(".env.local", warming.stdout)
+            self.assertNotIn("never-render", warming.stdout)
+
+        fifth = self.run_cli(
+            "turn", "--task-id", "feature/warming",
+            "--flush-after", "5", "--json",
+        )
+        self.assertEqual(0, fifth.returncode, fifth.stderr)
+        self.assertTrue(json.loads(fifth.stdout)["flushed"])
+        governed = self.run_cli(
+            "hook-context", "--task-id", "feature/warming", "--json"
+        )
+        self.assertEqual(0, governed.returncode, governed.stderr)
+        capsule = json.loads(governed.stdout)
+        self.assertNotEqual("warming", capsule.get("kind"))
+        self.assertTrue(brain.is_uuid4(capsule["task_uuid"]))
+
+    def test_hook_context_returns_valid_empty_for_clean_unbound_branch(self) -> None:
+        self.repository.joinpath(".gitignore").write_text(
+            "memory-bank/local/\nproject-brain/local/\n",
+            encoding="utf-8",
+        )
+        self.git("add", "-A")
+        self.git("commit", "-qm", "clean baseline")
+        result = self.run_cli(
+            "hook-context", "--task-id", "feature/clean", "--json"
+        )
+        self.assertEqual(3, result.returncode, result.stderr)
+        self.assertEqual("", result.stdout)
 
     def open_database(self) -> sqlite3.Connection:
         return context_cli.connect(self.repository / "memory-bank/local/context.db")
@@ -1675,21 +2027,53 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
             json.loads(result.stdout)["codebase"],
         )
 
-    def test_a_task_phase_reaches_the_handoff(self) -> None:
-        self.start("TASK-PHASE")
-        result = self.run_cli(
-            "update", "--task-id", "TASK-PHASE", "--revision", "auto",
-            "--phase", "execution", "--progress", "Arithmetic done.", "--json",
+    def test_canonical_and_alias_phases_round_trip_canonically(self) -> None:
+        cases = (
+            ("understanding", "understanding"),
+            ("planning", "planning"),
+            ("implementation", "implementation"),
+            ("verification", "verification"),
+            ("finalization", "finalization"),
+            ("implementing", "implementation"),
+            ("execution", "implementation"),
+            ("review", "verification"),
         )
-        self.assertEqual(0, result.returncode, result.stderr)
-        task = json.loads(result.stdout)
-        self.assertEqual("execution", task["phase"])
+        for index, (supplied, canonical) in enumerate(cases):
+            task_id = f"TASK-PHASE-{index}"
+            self.start(task_id)
+            result = self.run_cli(
+                "update", "--task-id", task_id, "--revision", "auto",
+                "--phase", supplied, "--progress", "Arithmetic done.", "--json",
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            task = json.loads(result.stdout)
+            self.assertEqual(canonical, task["phase"])
+            record_path = (
+                self.repository
+                / "project-brain/dynamic/tasks"
+                / f"{task['task_uuid']}.md"
+            )
+            self.assertEqual(
+                canonical,
+                json.loads(record_path.read_text(encoding="utf-8").split("---")[1])[
+                    "phase"
+                ],
+            )
+            handoff = (
+                self.repository
+                / "project-brain/control/handoffs"
+                / f"{task['task_uuid']}.md"
+            ).read_text(encoding="utf-8")
+            self.assertIn(f"## Phase\n{canonical}", handoff)
+            if supplied != canonical:
+                self.assertNotIn(f"## Phase\n{supplied}", handoff)
 
-        handoff = next(
-            (self.repository / "project-brain/control/handoffs").glob("*.md")
-        ).read_text(encoding="utf-8")
-        # Progress says what was touched; the phase says where work stopped.
-        self.assertIn("## Phase\nexecution", handoff)
+            packet = self.run_cli(
+                "retrieve", "cobalt authority", "--task-id", task_id,
+                "--ephemeral", "--json",
+            )
+            self.assertEqual(0, packet.returncode, packet.stderr)
+            self.assertEqual(canonical, json.loads(packet.stdout)["working"]["phase"])
 
     def test_a_record_written_before_phases_stays_valid(self) -> None:
         task = self.start("TASK-LEGACY")
@@ -1705,6 +2089,43 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
             )["phase"]
         )
 
+    def test_legacy_execution_phase_is_readable_and_migrates_on_update(self) -> None:
+        task = self.start("TASK-LEGACY-EXECUTION")
+        phased = self.run_cli(
+            "update", "--task-id", "TASK-LEGACY-EXECUTION", "--revision", "auto",
+            "--phase", "implementation", "--progress", "Started.", "--json",
+        )
+        self.assertEqual(0, phased.returncode, phased.stderr)
+        task_uuid = json.loads(phased.stdout)["task_uuid"]
+        paths = (
+            self.repository / "project-brain/dynamic/tasks" / f"{task_uuid}.md",
+            brain.handoff_path(self.repository, task_uuid),
+        )
+        for path in paths:
+            metadata, body = brain.parse_markdown_record(path)
+            metadata["phase"] = "execution"
+            path.write_text(
+                brain.render_markdown_record(metadata, body),
+                encoding="utf-8",
+            )
+
+        self.assertEqual(0, self.run_cli("validate").returncode)
+        loaded = json.loads(
+            self.run_cli(
+                "get", "--task-id", "TASK-LEGACY-EXECUTION", "--json"
+            ).stdout
+        )
+        self.assertEqual("implementation", loaded["phase"])
+
+        updated = self.run_cli(
+            "update", "--task-id", "TASK-LEGACY-EXECUTION", "--revision", "auto",
+            "--progress", "Continued safely.", "--json",
+        )
+        self.assertEqual(0, updated.returncode, updated.stderr)
+        for path in paths:
+            raw = json.loads(path.read_text(encoding="utf-8").split("---")[1])
+            self.assertEqual("implementation", raw["phase"])
+
     def test_only_a_task_may_declare_a_phase(self) -> None:
         record = json.loads(
             self.run_cli(
@@ -1714,7 +2135,7 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         )
         result = self.run_cli(
             "brain-update", "--record-id", record["id"], "--revision", "auto",
-            "--phase", "execution",
+            "--phase", "implementation",
         )
         self.assertEqual(1, result.returncode)
         self.assertIn("only a task may declare a phase", result.stderr)
@@ -1936,7 +2357,7 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         self.git("commit", "-qm", "init")
         self.git("branch", "-M", "main")
 
-    def test_turn_completes_a_task_when_its_branch_is_merged(self) -> None:
+    def test_turn_reports_merge_candidate_without_completing_task(self) -> None:
         self.enable_automation(automatic_completion=True)
         self.commit_main()
         self.git("checkout", "-q", "-b", "feature/reports")
@@ -1948,16 +2369,15 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
 
         # Still on the branch and unmerged: nothing may close.
         result = self.run_cli("turn", "--task-id", "feature/reports", "--flush", "--json")
-        self.assertEqual([], json.loads(result.stdout)["closed"])
+        self.assertEqual([], json.loads(result.stdout)["completion_candidates"])
 
         self.git("checkout", "-q", "main")
         self.git("merge", "-q", "--no-ff", "feature/reports", "-m", "merge")
         self.repository.joinpath("after.txt").write_text("more\n", encoding="utf-8")
         result = self.run_cli("turn", "--task-id", "main", "--flush", "--json")
 
-        closed = json.loads(result.stdout)["closed"]
-        self.assertEqual(["feature/reports"], [item["task_id"] for item in closed])
-        self.assertIsNotNone(closed[0]["episode_id"])
+        candidates = json.loads(result.stdout)["completion_candidates"]
+        self.assertEqual(["feature/reports"], [item["task_id"] for item in candidates])
 
         record = json.loads(
             next(
@@ -1966,13 +2386,11 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
                 if "feature/reports" in path.read_text(encoding="utf-8")
             ).read_text(encoding="utf-8").split("---")[1]
         )
-        self.assertEqual("completed", record["status"])
-        # The outcome may claim only the merge, which is all that was checked.
-        self.assertIn("merged into main", record["progress"])
-        self.assertIn("is an ancestor of main", record["progress"])
-        self.assertIn("Last recorded progress", record["progress"])
+        self.assertEqual("active", record["status"])
+        self.assertEqual(record["revision"], candidates[0]["revision"])
+        self.assertNotIn("merged into main", record["progress"])
 
-    def test_automatic_completion_ignores_a_branch_that_never_diverged(self) -> None:
+    def test_completion_candidate_ignores_a_branch_that_never_diverged(self) -> None:
         # A branch created a moment ago is already an ancestor of its target,
         # so ancestry alone would complete the task the instant it existed.
         self.enable_automation(automatic_completion=True)
@@ -1981,7 +2399,7 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
 
         result = self.run_cli("turn", "--task-id", "feature/fresh", "--flush", "--json")
-        self.assertEqual([], json.loads(result.stdout)["closed"])
+        self.assertEqual([], json.loads(result.stdout)["completion_candidates"])
         self.assertEqual(
             "active",
             json.loads(
@@ -1989,7 +2407,7 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
             )["status"],
         )
 
-    def test_automatic_completion_ignores_a_branch_kept_current_with_target(
+    def test_completion_candidate_ignores_a_branch_kept_current_with_target(
         self,
     ) -> None:
         self.enable_automation(automatic_completion=True)
@@ -2012,9 +2430,9 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
             "turn", "--task-id", "feature/long-lived", "--flush", "--json"
         )
         # Merging main in does not make the branch an ancestor of main.
-        self.assertEqual([], json.loads(result.stdout)["closed"])
+        self.assertEqual([], json.loads(result.stdout)["completion_candidates"])
 
-    def test_automatic_completion_never_closes_the_default_branch_task(self) -> None:
+    def test_completion_candidate_ignores_the_default_branch_task(self) -> None:
         self.enable_automation(automatic_completion=True)
         self.commit_main()
         self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
@@ -2023,7 +2441,7 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         self.run_cli("turn", "--task-id", "main", "--flush", "--json")
         result = self.run_cli("turn", "--task-id", "main", "--flush", "--json")
 
-        self.assertEqual([], json.loads(result.stdout)["closed"])
+        self.assertEqual([], json.loads(result.stdout)["completion_candidates"])
         self.assertEqual(
             "active",
             json.loads(self.run_cli("get", "--task-id", "main", "--json").stdout)[
@@ -2031,7 +2449,7 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
             ],
         )
 
-    def test_automatic_completion_ignores_a_deleted_branch(self) -> None:
+    def test_completion_candidate_ignores_a_deleted_branch(self) -> None:
         self.enable_automation(automatic_completion=True)
         self.commit_main()
         self.git("checkout", "-q", "-b", "feature/abandoned")
@@ -2044,9 +2462,9 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         result = self.run_cli("turn", "--task-id", "main", "--flush", "--json")
 
         # Deleted cannot be told apart from abandoned, so it must not complete.
-        self.assertEqual([], json.loads(result.stdout)["closed"])
+        self.assertEqual([], json.loads(result.stdout)["completion_candidates"])
 
-    def test_automatic_completion_stays_off_unless_configured(self) -> None:
+    def test_completion_candidate_is_advisory_even_when_automation_is_off(self) -> None:
         self.commit_main()
         self.git("checkout", "-q", "-b", "feature/quiet")
         self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
@@ -2056,7 +2474,7 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
 
         self.repository.joinpath("other.txt").write_text("more\n", encoding="utf-8")
         result = self.run_cli("turn", "--task-id", "main", "--flush", "--json")
-        self.assertEqual([], json.loads(result.stdout)["closed"])
+        self.assertEqual([], json.loads(result.stdout)["completion_candidates"])
 
     def test_maintenance_waits_for_the_flush_boundary(self) -> None:
         # The Stop hook drives `turn` under a hard timeout on every turn, so
@@ -2069,8 +2487,8 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         }
         compaction = {"enabled": False, "moved": 0, "pending": 0, "error": None}
         with mock.patch.object(
-            context_cli, "close_merged_tasks", return_value=[]
-        ) as close, mock.patch.object(
+            context_cli, "merge_completion_candidates", return_value=[]
+        ) as candidates, mock.patch.object(
             context_cli, "auto_promote", return_value=promotion
         ) as promote, mock.patch.object(
             context_cli, "auto_compact", return_value=compaction
@@ -2081,7 +2499,7 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
             )
             self.assertEqual(0, code, stderr)
             self.assertFalse(json.loads(stdout)["flushed"])
-            close.assert_not_called()
+            candidates.assert_not_called()
             promote.assert_not_called()
             compact.assert_not_called()
 
@@ -2090,11 +2508,11 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
             )
             self.assertEqual(0, code, stderr)
             self.assertTrue(json.loads(stdout)["flushed"])
-            close.assert_called_once()
+            candidates.assert_called_once()
             promote.assert_called_once()
             compact.assert_called_once()
 
-    def test_a_buffered_turn_defers_completion_until_the_flush(self) -> None:
+    def test_a_buffered_turn_defers_completion_candidate_scan_until_flush(self) -> None:
         self.enable_automation(automatic_completion=True)
         self.commit_main()
         self.git("checkout", "-q", "-b", "feature/deferred")
@@ -2114,7 +2532,7 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         self.assertFalse(payload["flushed"])
         # The merge is already observable, but a buffered turn does not pay
         # for the scan; the task stays open until the boundary.
-        self.assertEqual([], payload["closed"])
+        self.assertEqual([], payload["completion_candidates"])
         self.assertEqual(
             "active",
             json.loads(
@@ -2126,12 +2544,12 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         payload = json.loads(flushed.stdout)
         self.assertTrue(payload["flushed"])
         self.assertEqual(
-            ["feature/deferred"], [item["task_id"] for item in payload["closed"]]
+            ["feature/deferred"], [item["task_id"] for item in payload["completion_candidates"]]
         )
 
-    def test_batched_merge_scan_closes_only_the_merged_branch(self) -> None:
+    def test_batched_merge_scan_reports_only_the_merged_branch(self) -> None:
         # One reference listing now serves every task; the per-branch verdicts
-        # must not change: merged closes, unmerged stays open.
+        # must not change: merged is reported, unmerged stays unreported.
         self.enable_automation(automatic_completion=True)
         self.commit_main()
         for branch in ("feature/one", "feature/two"):
@@ -2153,8 +2571,8 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
 
         self.repository.joinpath("after.txt").write_text("more\n", encoding="utf-8")
         result = self.run_cli("turn", "--task-id", "main", "--flush", "--json")
-        closed = json.loads(result.stdout)["closed"]
-        self.assertEqual(["feature/one"], [item["task_id"] for item in closed])
+        candidates = json.loads(result.stdout)["completion_candidates"]
+        self.assertEqual(["feature/one"], [item["task_id"] for item in candidates])
         self.assertEqual(
             "active",
             json.loads(
@@ -2529,7 +2947,7 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
 
     def test_compaction_archives_a_completed_task_with_its_handoff(self) -> None:
         self.enable_automation(
-            automatic_completion=True, automatic_compaction=True,
+            automatic_completion=False, automatic_compaction=True,
             compaction_threshold=1,
         )
         self.commit_main()
@@ -2541,11 +2959,25 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         self.git("checkout", "-q", "main")
         self.git("merge", "-q", "--no-ff", "feature/archived", "-m", "merge")
 
+        task = json.loads(
+            self.run_cli(
+                "get", "--task-id", "feature/archived", "--json"
+            ).stdout
+        )
+        completed = self.run_cli(
+            "complete",
+            "--task-id", "feature/archived",
+            "--revision", str(task["revision"]),
+            "--outcome", "Verified and explicitly completed after merge.",
+            "--verification", "Focused tests passed",
+            "--json",
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
         self.repository.joinpath("after.txt").write_text("more\n", encoding="utf-8")
         result = self.run_cli("turn", "--task-id", "main", "--flush", "--json")
 
         payload = json.loads(result.stdout)
-        self.assertEqual(["feature/archived"], [i["task_id"] for i in payload["closed"]])
+        self.assertEqual([], payload["completion_candidates"])
         self.assertGreater(payload["archived"], 0)
         self.assertEqual(
             1, len(list((self.repository / "project-brain/archive/task").glob("*.md")))
@@ -3238,15 +3670,15 @@ class ShippedRuntimeConfigTest(unittest.TestCase):
     def setUp(self) -> None:
         self.config = json.loads(self.SHIPPED.read_text(encoding="utf-8"))
 
-    def test_memory_is_automatic_by_default(self) -> None:
-        for flag in ("automatic_promotion", "automatic_completion", "automatic_compaction"):
+    def test_only_safe_memory_maintenance_is_automatic_by_default(self) -> None:
+        for flag in ("automatic_promotion", "automatic_compaction"):
             with self.subTest(flag=flag):
-                self.assertIs(
-                    True,
-                    self.config.get(flag),
-                    f"{flag} is documented as enabled by default; "
-                    "changing it is a breaking change and must be released as one",
-                )
+                self.assertIs(True, self.config.get(flag))
+        self.assertIs(
+            False,
+            self.config.get("automatic_completion"),
+            "merge evidence may suggest completion but must never close a task",
+        )
 
     def test_mode_and_provider_are_the_documented_defaults(self) -> None:
         self.assertEqual("governed", self.config.get("mode"))
@@ -3257,6 +3689,118 @@ class ShippedRuntimeConfigTest(unittest.TestCase):
 
     def test_private_records_are_not_retrievable_by_default(self) -> None:
         self.assertNotIn("private", self.config.get("allowed_privacy", []))
+
+
+class MetadataTelemetryTest(RuntimeHarness):
+    def configure(self, enabled: bool) -> None:
+        config = self.repository / "project-brain/config"
+        config.mkdir(parents=True, exist_ok=True)
+        config.joinpath("telemetry.json").write_text(
+            json.dumps(
+                {
+                    "enabled": enabled,
+                    "metadata_only": True,
+                    "prohibited_fields": [
+                        "prompt", "response", "source_body", "tool_payload",
+                        "secret", "customer_data", "raw_log",
+                    ],
+                    "schema": "../schemas/token-usage-event.schema.json",
+                }
+            ),
+            encoding="utf-8",
+        )
+        config.joinpath("runtime.json").write_text(
+            json.dumps({"telemetry_enabled": enabled}),
+            encoding="utf-8",
+        )
+
+    def test_disabled_telemetry_produces_no_event(self) -> None:
+        self.configure(False)
+        result = telemetry_runtime.write_metadata_event(
+            self.repository,
+            {"provider": "native", "operation": "retrieve"},
+        )
+        self.assertIsNone(result)
+        self.assertEqual([], list(self.repository.glob("**/telemetry/*.json")))
+
+    def test_unavailable_metrics_are_explicitly_na(self) -> None:
+        self.configure(True)
+        path = telemetry_runtime.write_metadata_event(
+            self.repository,
+            {
+                "provider": "native",
+                "model": "host-managed",
+                "operation": "retrieve",
+                "input_tokens": None,
+                "output_tokens": None,
+                "context_tokens": None,
+                "cached_input_tokens": None,
+                "cost_usd": None,
+                "ttfr_ms": None,
+                "task_id": None,
+            },
+        )
+        self.assertIsNotNone(path)
+        event = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual("N/A", event["availability"])
+        for field in telemetry_runtime.METRIC_FIELDS:
+            self.assertIsNone(event[field])
+
+    def test_telemetry_metrics_match_integer_and_finite_number_schema(self) -> None:
+        self.configure(True)
+        invalid = (
+            ("input_tokens", 1.5),
+            ("output_tokens", True),
+            ("context_tokens", -1),
+            ("cost_usd", float("nan")),
+            ("ttfr_ms", float("inf")),
+        )
+        for field, value in invalid:
+            with self.subTest(field=field, value=value):
+                with self.assertRaises(telemetry_runtime.TelemetryError):
+                    telemetry_runtime.write_metadata_event(
+                        self.repository,
+                        {
+                            "provider": "native",
+                            "operation": "retrieve",
+                            field: value,
+                        },
+                    )
+        self.assertEqual([], list(self.repository.glob("**/telemetry/*.json")))
+
+    def test_telemetry_canonicalizes_task_uuid(self) -> None:
+        self.configure(True)
+        supplied = "F47AC10B-58CC-4372-A567-0E02B2C3D479"
+        path = telemetry_runtime.write_metadata_event(
+            self.repository,
+            {
+                "provider": "native",
+                "operation": "retrieve",
+                "task_id": supplied,
+            },
+        )
+        event = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(supplied.lower(), event["task_id"])
+
+    def test_private_and_payload_fields_cannot_be_recorded(self) -> None:
+        self.configure(True)
+        for field in (
+            "prompt", "response", "source_body", "tool_payload",
+            "secret", "customer_data", "raw_log",
+        ):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(
+                    telemetry_runtime.TelemetryError, "prohibited"
+                ):
+                    telemetry_runtime.write_metadata_event(
+                        self.repository,
+                        {
+                            "provider": "native",
+                            "operation": "retrieve",
+                            field: "must-not-be-written",
+                        },
+                    )
+        self.assertEqual([], list(self.repository.glob("**/telemetry/*.json")))
 
 
 if __name__ == "__main__":

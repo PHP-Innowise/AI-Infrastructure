@@ -7,7 +7,7 @@ flow-alternatives: [project-brain, docs-generator, reflect]
 
 # Memory Bank
 
-Retrieve, capture, audit, supersede/archive durable memory, or apply a human-approved Project Brain promotion.
+Retrieve, capture, audit, supersede/archive durable memory, or apply a governed automatic or independently reviewed Project Brain promotion.
 
 ## Input
 

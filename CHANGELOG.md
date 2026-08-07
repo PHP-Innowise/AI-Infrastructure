@@ -26,6 +26,42 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+## 2.0.0 - 2026-08-07
+
+### 2026-08-06 hook and installation hardening
+
+- Hook payload capture now uses Bash builtins in every canonical validator,
+  file-naming validator, and loop detector. Cat-less/extractor-less Bash
+  validation fails open with exactly one sanitized warning, while block
+  diagnostics disclose only the rule category and never the command body.
+- Added exact versioned Laravel, Symfony, and PHP Core installation inventories
+  plus a standard-library installer with selected Claude/Cursor/Codex scope,
+  spaced-path support, deterministic transcripts, dry runs, complete collision
+  preflight, symlink-path refusal (including the target root), and default
+  overwrite refusal.
+- Added the nine-way edition/tool synthetic clean-install matrix, including
+  Memory Bank/Project Brain completeness, retired-file parity,
+  validate/status/index smoke checks, source immutability, and sentinels proving
+  no application execution or application `.env`/database access.
+
+### 2026-08-06 context-runtime remediation
+
+- Direct `refresh`, `retrieve`, and `context` queries now pass the original
+  privacy gate before SQLite or manifest access; unsafe input fails with
+  sanitized output and no side effects.
+- Task phases persist one canonical five-phase vocabulary, while compatibility
+  aliases normalize at the mutation boundary.
+- Both context modes now deliver deterministic 2/3/1 capsules within 8,000
+  serialized characters, with governed layer exclusions retained in manifests.
+- Task completion is explicit and numeric-revision checked. Turn maintenance
+  reports sanitized merge candidates without closing tasks; the shipped
+  `automatic_completion` setting is false.
+- Cursor now carries sanitized warming context through turns one to four and
+  atomically replaces it with governed context on the fifth-turn boundary.
+- Added frozen retrieval-quality gates, disabled-by-default metadata telemetry
+  with explicit `N/A`, and focused concurrency coverage. Promotion docs now
+  distinguish truthful automatic mode from independent reviewed mode.
+
 ### 2026-08-02 shared-core maintenance round (seven phases)
 
 - **Enforcement hooks hardened and tested** - the hardened hook generation

@@ -8,9 +8,9 @@ All implementation, review, and planning work must respect root `AGENTS.md`, `sp
 
 ```text
 /requirements-analyst
-  -> /researcher                       (when options/libraries/approaches are unclear)
+  -> /researcher        (when options/libraries/approaches are unclear)
   -> /brainstorm
-  -> /council                          (for high-stakes trade-offs)
+  -> /council           (for high-stakes trade-offs)
   -> /architect
   -> /database-designer                (when Doctrine schema/data model is non-trivial)
   -> /doctrine-migration-designer      (when migration/rollout risk exists)
@@ -24,9 +24,9 @@ All implementation, review, and planning work must respect root `AGENTS.md`, `sp
   -> /architecture-boundary-reviewer   (for layer-sensitive changes)
   -> /code-reviewer
   -> /repository-reviewer              (for Doctrine-heavy changes)
-  -> /security-reviewer                (for security-sensitive changes)
+  -> /security-reviewer (for security-sensitive changes)
   -> /test-generator
-  -> /performance-optimization         (when speed/resource use matters)
+  -> /performance-optimization   (when speed/resource use matters)
   -> /verify
   -> /finishing-branch
 ```
@@ -35,7 +35,7 @@ All implementation, review, and planning work must respect root `AGENTS.md`, `sp
 
 - Use `/coder` directly for small, well-understood Symfony Controller -> Service -> Repository fixes.
 - Use `/researcher` before `/council` or `/architect` when you need sourced evidence about Symfony components, bundles, Doctrine, API Platform, Messenger, or security approaches.
-- Use `/architecture-implementer` to turn an `/architect` decision into a compiling Symfony skeleton before `/coder`.
+- Use `/architecture-implementer` to turn an `/architect` decision into a compiling skeleton before `/coder`.
 - Use `/database-designer` before `/coder` when entities, relationships, keys, indexes, constraints, or migrations are unclear.
 - Use `/doctrine-migration-designer` before `/coder` when schema changes need safe rollout/backfill planning.
 - Use `/api-designer` before `/coder` when route, request, response, serializer, status-code, or error contracts are unclear.
@@ -54,8 +54,8 @@ All implementation, review, and planning work must respect root `AGENTS.md`, `sp
 - Use `/dependency-manager` for Composer audits, Symfony bundle vetting, Symfony Flex recipe impact, and dependency updates.
 - Use `/debugger` when tests fail for unclear reasons or behavior is unexpected.
 - Use `/docs-generator` when setup, deployment, worker/cron, API, or architecture documentation changed.
-- Use `/project-brain` for governed task lifecycle, handoffs, unified retrieval, findings/bugs/incidents/decisions, compaction, and promotion proposals. Governed mode is the default; `--mode lightweight` is an explicit local-only fallback.
-- Use `/memory-bank` only for durable retrieval/capture/audit/supersession and human-approved promotion application; active work stays in Project Brain.
+- Use `/project-brain` for governed task lifecycle, handoffs, unified retrieval, all six governed record types, compaction, and automatic or independently reviewed promotions. Governed mode is the default; `--mode lightweight` is an explicit local-only fallback.
+- Use `/memory-bank` only for durable retrieval/capture/audit/supersession and governed automatic or independently reviewed promotion application; active work stays in Project Brain.
 - Use `/checkpoint`, `/memory` for authority-aware progress capture and unified context refresh; governed mode never creates SQLite task authority.
 
 ## Phase Map
@@ -84,7 +84,7 @@ The returning handoff contains only:
 - controller/service/repository placement when implementation is involved;
 - verification evidence;
 - risks and assumptions;
-- the next step or recommended next skill;
+- the next step or recommended next command;
 - unresolved blockers or questions;
 - memory chunk IDs used or changed, when applicable;
 - Project Brain task/record revisions, handoff, and retrieval manifest, when

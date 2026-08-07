@@ -7,7 +7,10 @@
 
 set -uo pipefail
 
-input="$(cat 2>/dev/null || true)"
+# Consume the complete hook payload without relying on external utilities.
+# `read -d ''` returns nonzero at EOF, which is the expected delimiter here.
+input=
+IFS= read -r -d '' input || :
 
 # Only file-editing tools may advance the loop counter. Codex registers this
 # hook without a tool matcher, so read-only payloads that carry a file_path

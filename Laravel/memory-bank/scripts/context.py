@@ -19,7 +19,7 @@ from typing import Optional
 from brain_runtime import (
     BrainError,
     LIFECYCLES,
-    TASK_PHASES,
+    TASK_PHASE_INPUTS,
     TERMINAL_STATES,
     atomic_json,
     auto_compact,
@@ -753,6 +753,20 @@ def reject_capsule_privacy(
         )
 
 
+def validate_direct_query_request(arguments: argparse.Namespace) -> None:
+    """Reject unsafe direct queries before opening or mutating local state."""
+    if arguments.command in {"context", "retrieve"}:
+        query = arguments.query
+    elif arguments.command == "refresh":
+        query = arguments.query
+    else:
+        return
+    if query is None:
+        return
+    reject_secrets("Task Capsule", [query])
+    reject_capsule_privacy("Task Capsule request", [query])
+
+
 def project_working_task(
     working: Optional[dict[str, object]],
 ) -> tuple[Optional[dict[str, object]], dict[str, int]]:
@@ -968,6 +982,113 @@ def enforce_capsule_budget(capsule: dict[str, object]) -> dict[str, object]:
             f"{CAPSULE_CHARACTER_LIMIT} characters"
         )
 
+    return compacted
+
+
+def enforce_governed_capsule_contract(
+    capsule: dict[str, object],
+) -> dict[str, object]:
+    """Apply the shared 2/3/1 and 8,000-character contract to governed output."""
+    compacted = json.loads(serialize_capsule(capsule))
+    compacted["procedural"] = compacted.get("procedural", [])[
+        :CAPSULE_LAYER_LIMITS["procedural"]
+    ]
+    compacted["semantic"] = compacted.get("semantic", [])[
+        :CAPSULE_LAYER_LIMITS["semantic"]
+    ]
+    compacted["episodic"] = compacted.get("episodic", [])[
+        :CAPSULE_LAYER_LIMITS["episodic"]
+    ]
+    compacted["omitted"] = {
+        "procedural": max(
+            0,
+            len(capsule.get("procedural", []))
+            - CAPSULE_LAYER_LIMITS["procedural"],
+        ),
+        "semantic": max(
+            0,
+            len(capsule.get("semantic", [])) - CAPSULE_LAYER_LIMITS["semantic"],
+        ),
+        "episodic": max(
+            0,
+            len(capsule.get("episodic", [])) - CAPSULE_LAYER_LIMITS["episodic"],
+        ),
+    }
+
+    working = compacted.get("working")
+    if isinstance(working, dict):
+        working["next_steps"] = list(working.get("next_steps", []))[-1:]
+        working["files"] = list(working.get("files", []))[
+            :CAPSULE_WORKING_FILE_LIMIT
+        ]
+        working["sources"] = list(working.get("sources", []))[
+            :CAPSULE_WORKING_SOURCE_LIMIT
+        ]
+
+    def synchronize_views() -> None:
+        selected_paths = {
+            item["path"]
+            for layer in ("procedural", "semantic")
+            for item in compacted[layer]
+            if isinstance(item, dict) and isinstance(item.get("path"), str)
+        }
+        compacted["selected"] = [
+            item
+            for item in compacted.get("selected", [])
+            if isinstance(item, dict) and item.get("path") in selected_paths
+        ]
+        categories = compacted.get("categories")
+        if isinstance(categories, dict):
+            for category, items in categories.items():
+                categories[category] = [
+                    item
+                    for item in items
+                    if isinstance(item, dict) and item.get("path") in selected_paths
+                ]
+
+    # Snippets are discovery aids. Bounding each rendered copy leaves the full
+    # source and its hash in the auditable manifest while avoiding duplicated
+    # aliases consuming the entire capsule.
+    for collection in (
+        compacted["procedural"],
+        compacted["semantic"],
+        compacted["episodic"],
+        compacted.get("selected", []),
+        *(
+            compacted.get("categories", {}).values()
+            if isinstance(compacted.get("categories"), dict)
+            else []
+        ),
+    ):
+        for item in collection:
+            if isinstance(item, dict) and isinstance(item.get("snippet"), str):
+                item["snippet"] = item["snippet"][:320]
+    synchronize_views()
+
+    while capsule_character_count(compacted) > CAPSULE_CHARACTER_LIMIT:
+        if compacted.get("last_turn"):
+            compacted["last_turn"] = None
+            continue
+        dropped = False
+        for layer in ("episodic", "semantic", "procedural"):
+            if compacted[layer]:
+                compacted[layer].pop()
+                compacted["omitted"][layer] += 1
+                synchronize_views()
+                dropped = True
+                break
+        if dropped:
+            continue
+        if isinstance(working, dict) and working.get("progress"):
+            excess = capsule_character_count(compacted) - CAPSULE_CHARACTER_LIMIT
+            keep = max(0, len(working["progress"]) - excess - 1)
+            if keep:
+                working["progress"] = f"…{working['progress'][-keep:]}"
+                continue
+        raise ContextError(
+            "mandatory Task Capsule content exceeds "
+            f"{CAPSULE_CHARACTER_LIMIT} characters"
+        )
     return compacted
 
 
@@ -1551,9 +1672,12 @@ def summarize_last_turn(report: dict[str, object]) -> Optional[str]:
             + ", ".join(shown)
             + (f" (+{more} more)" if more else "")
         )
-    closed = strings("closed_on_merge")
-    if closed:
-        parts.append("closed on merge: " + ", ".join(closed))
+    completion_candidates = strings("completion_candidates")
+    if completion_candidates:
+        parts.append(
+            "completion candidate (explicit complete required): "
+            + ", ".join(completion_candidates)
+        )
     promoted = entries("promoted")
     if promoted:
         parts.append(f"promoted: {len(promoted)} record(s)")
@@ -1628,9 +1752,6 @@ def assemble_capsule(
             warnings=warnings,
         )
         result["last_turn"] = last_turn
-        # Character budget applies only here: retrieve() below runs its own
-        # token budget (TARGET_BUDGET/HARD_BUDGET) and its payload legitimately
-        # exceeds CAPSULE_CHARACTER_LIMIT.
         return enforce_capsule_budget(result)
     if task_id is None:
         raise ContextError("Governed retrieval requires --task-id")
@@ -1639,22 +1760,89 @@ def assemble_capsule(
     reject_secrets("Task Capsule", [query])
     reject_capsule_privacy("Task Capsule request", [query])
     binding = governed_binding(connection, task_id)
+    request_query = build_capsule_query(query, None)
     result = retrieve(
         connection,
         repository,
-        query,
+        request_query,
         binding["task_uuid"],
         limit=limit,
         manifest_scope="local" if ephemeral else "governed",
     )
     result["episodic"] = (
-        search_documents(connection, query, limit, "episodic", relevant_only=True)
-        + search_episodes(connection, query, limit)
-    )[:limit]
+        search_documents(
+            connection,
+            request_query,
+            CAPSULE_LAYER_LIMITS["episodic"],
+            "episodic",
+            relevant_only=True,
+        )
+        + search_episodes(
+            connection, request_query, CAPSULE_LAYER_LIMITS["episodic"]
+        )
+    )[:CAPSULE_LAYER_LIMITS["episodic"]]
     # The print tail dereferences result["warnings"]; retrieve() has no such key.
     result["warnings"] = warnings
     result["last_turn"] = last_turn
-    return result
+    return enforce_governed_capsule_contract(result)
+
+
+def assemble_hook_context(
+    connection: sqlite3.Connection,
+    repository: Path,
+    *,
+    mode: str,
+    task_id: str,
+) -> Optional[dict[str, object]]:
+    """Return a governed capsule or a sanitized pre-provision warming capsule."""
+    task_id = validate_task_id(task_id)
+    reject_capsule_privacy("Task Capsule request", [], [task_id])
+    if mode == "lightweight":
+        if find_working_task(connection, task_id) is not None:
+            return assemble_capsule(
+                connection,
+                repository,
+                mode=mode,
+                query=task_id,
+                task_id=task_id,
+                limit=3,
+                ephemeral=True,
+            )
+    else:
+        try:
+            governed_binding(connection, task_id)
+        except ContextError:
+            pass
+        else:
+            return assemble_capsule(
+                connection,
+                repository,
+                mode=mode,
+                query=task_id,
+                task_id=task_id,
+                limit=3,
+                ephemeral=True,
+            )
+
+    files, excluded = changed_paths(repository)
+    if not files:
+        return None
+    pending = len(pending_turn_deltas(connection, task_id))
+    return {
+        "kind": "warming",
+        "task_id": task_id,
+        "working": None,
+        "procedural": [],
+        "semantic": [],
+        "episodic": [],
+        "changed_files": len(files),
+        "excluded_files": len(excluded),
+        "pending_turns": pending,
+        "warnings": [
+            "Governed task not provisioned yet; authoritative persistence "
+            f"starts at the {DEFAULT_TURN_FLUSH_AFTER}-turn boundary."
+        ],
+    }
 
 
 def print_capsule(capsule: dict[str, object]) -> None:
@@ -2132,13 +2320,14 @@ def resolve_task_reference(
     return None
 
 
-def close_merged_tasks(
-    connection: sqlite3.Connection, repository: Path, owner: str
+def merge_completion_candidates(
+    connection: sqlite3.Connection, repository: Path
 ) -> list[dict[str, object]]:
-    """Complete governed tasks whose branch has landed in the default branch.
+    """Report active tasks whose branch has landed in the default branch.
 
-    The scan covers every active task rather than the current one: a merge is
-    observed after the branch is left, not while it is being worked on.
+    Merge evidence is advisory only. Completion remains an explicit,
+    revision-checked user action after verification; this probe never mutates
+    a task, handoff, episode, or binding.
 
     A branch counts as merged only when it is an ancestor of the target *and*
     the target has moved ahead of it, which is what a merge does. Ancestry
@@ -2156,9 +2345,6 @@ def close_merged_tasks(
     listing, one reachability listing, one target probe — instead of up to
     four processes per active task.
     """
-    config = load_config(repository)
-    if not config.get("automatic_completion"):
-        return []
     candidates = [
         record
         for _, record, _ in iter_records(repository)
@@ -2183,7 +2369,7 @@ def close_merged_tasks(
         return []
     references = repository_references(repository)
     reachable = merged_reference_names(repository, target)
-    closed: list[dict[str, object]] = []
+    completion_candidates: list[dict[str, object]] = []
     for record in candidates:
         branch = str(record["external_id"])
         # A branch is its own ancestor, so the default branch would close
@@ -2197,57 +2383,16 @@ def close_merged_tasks(
         # moved ahead: the never-diverged and fast-forward cases.
         if references[reference] == target_commit:
             continue
-        # State the fact that was actually verified — the merge — rather than
-        # a claim about the work being correct, which nothing here checked.
-        # The last recorded state combines the operator's progress with the
-        # automatic checkpoint: an auto-provisioned task may only ever have
-        # been checkpointed, and that trail is still worth closing with.
-        last_state = render_current_state(
-            str(record["progress"]), record.get("auto_checkpoint")
-        )
-        outcome = (
-            f"Branch {branch} merged into {target}. "
-            f"Last recorded progress: {last_state or 'none recorded'}"
-        )
-        verification = [f"{branch} is an ancestor of {target}"]
-        try:
-            binding = governed_binding(connection, branch)
-        except ContextError:
-            # Bound on another machine: close the shared record without
-            # inventing a local episode for work this machine did not do.
-            with mutation_lock(repository):
-                completed = close_task(
-                    repository,
-                    str(record["id"]),
-                    outcome,
-                    verification,
-                    expected_revision=record["revision"],
-                    actor=owner,
-                )
-            closed.append(
-                {"task_id": branch, "task_uuid": completed["id"], "episode_id": None}
-            )
-            continue
-        result = complete_governed_task(
-            connection,
-            repository,
-            binding,
-            outcome=outcome,
-            summary=None,
-            files=[],
-            verification=verification,
-            sources=[],
-            expected_revision=AUTO_REVISION,
-            owner=owner,
-        )
-        closed.append(
+        completion_candidates.append(
             {
                 "task_id": branch,
-                "task_uuid": result["task_uuid"],
-                "episode_id": result["episode_id"],
+                "task_uuid": record["id"],
+                "revision": record["revision"],
+                "target": target,
+                "evidence": "branch is an ancestor of the merge target",
             }
         )
-    return closed
+    return completion_candidates
 
 
 def changed_paths(repository: Path) -> tuple[list[str], list[str]]:
@@ -2415,20 +2560,22 @@ def run_turn(
     # timeout on every turn, so an ordinary turn must stay at one
     # git status probe plus a local buffer write — a SIGTERM there
     # interrupts nothing mid-mutation.
-    closed: list[dict[str, object]] = []
+    completion_candidates: list[dict[str, object]] = []
     promotion = {
         "enabled": False, "promoted": [], "failed": [],
         "blocked": [], "skipped": 0,
     }
     compaction = {"enabled": False, "moved": 0, "pending": 0, "error": None}
     if flushed is not None and mode != "lightweight":
-        # A merge is observed after the branch is left, so this
-        # scans every active task rather than only the current one.
+        # Merge evidence is advisory. It may suggest an explicit completion,
+        # but this unattended path never changes task lifecycle state.
         try:
-            closed = close_merged_tasks(connection, repository, owner)
+            completion_candidates = merge_completion_candidates(
+                connection, repository
+            )
         except (BrainError, OSError) as error:
             raise ContextError(
-                f"Automatic completion failed: {error}"
+                f"Merge completion-candidate detection failed: {error}"
             ) from error
         # Durable memory is promoted on the same boundary as the
         # working-memory flush, so the whole pipeline runs
@@ -2456,7 +2603,7 @@ def run_turn(
         # The UUID of the pre-existing record the flush restored the local
         # binding to — the second-machine signal. None on an ordinary flush.
         "rebound": flushed.get("rebound") if flushed else None,
-        "closed": closed,
+        "completion_candidates": completion_candidates,
         "promoted": promotion["promoted"],
         "promotion_failed": promotion["failed"],
         "promotion_blocked": promotion["blocked"],
@@ -2479,8 +2626,8 @@ def run_turn(
             "pending": result["pending"],
             "provisioned": result["provisioned"],
             "rebound": result["rebound"],
-            "closed_on_merge": [
-                item["task_id"] for item in closed
+            "completion_candidates": [
+                str(item["task_id"]) for item in completion_candidates
             ],
             "promoted": promotion["promoted"],
             "promotion_failed": promotion["failed"],
@@ -2508,8 +2655,11 @@ def run_turn(
     if not arguments.json:
         if result["rebound"]:
             print(f"binding restored to existing task: {result['rebound']}")
-        for item in closed:
-            print(f"task completed on merge: {item['task_id']}")
+        for item in completion_candidates:
+            print(
+                "completion candidate (explicit complete required): "
+                f"{item['task_id']} at revision {item['revision']}"
+            )
         for item in promotion["promoted"]:
             print(
                 f"promoted without review: {item['type']} -> "
@@ -2776,6 +2926,13 @@ def build_parser() -> argparse.ArgumentParser:
     retrieve_command.add_argument("--limit", type=int, default=3)
     retrieve_command.add_argument("--json", action="store_true")
 
+    hook_context = commands.add_parser(
+        "hook-context",
+        help="render a governed or pre-provision warming capsule for host hooks",
+    )
+    hook_context.add_argument("--task-id", required=True)
+    hook_context.add_argument("--json", action="store_true")
+
     for retrieval_parser in (context, retrieve_command):
         retrieval_parser.add_argument(
             "--ephemeral",
@@ -2866,7 +3023,14 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--next-step", action="append", default=[])
     update.add_argument("--file", action="append", default=[])
     update.add_argument("--source", action="append", default=[])
-    update.add_argument("--phase", choices=TASK_PHASES)
+    update.add_argument(
+        "--phase",
+        choices=TASK_PHASE_INPUTS,
+        help=(
+            "delivery phase; aliases implementing/execution/review are stored "
+            "as implementation/implementation/verification"
+        ),
+    )
     update.add_argument("--revision", type=revision_argument)
     update.add_argument("--json", action="store_true")
 
@@ -2919,7 +3083,14 @@ def build_parser() -> argparse.ArgumentParser:
     update_brain.add_argument("--file", action="append", default=[])
     update_brain.add_argument("--source", action="append", default=[])
     update_brain.add_argument("--conflict", action="append", default=[])
-    update_brain.add_argument("--phase", choices=TASK_PHASES)
+    update_brain.add_argument(
+        "--phase",
+        choices=TASK_PHASE_INPUTS,
+        help=(
+            "task delivery phase; compatibility aliases are normalized before "
+            "persistence"
+        ),
+    )
     update_brain.add_argument("--transition")
     update_brain.add_argument(
         "--authority",
@@ -3023,6 +3194,11 @@ def main() -> int:
             raise ContextError(
                 f"Repository root must be an existing directory: {repository}"
             )
+        # Direct query commands have a strict CLI contract: reject the original
+        # value before connect() can create a database or an index/manifest can
+        # be refreshed. Host hooks remain fail-safe by swallowing this nonzero
+        # result outside the CLI.
+        validate_direct_query_request(arguments)
         database = (arguments.db or default_database(repository)).resolve()
         mode = configured_mode(repository, arguments.mode)
         owner = arguments.owner or os.environ.get("PROJECT_BRAIN_OWNER", "local")
@@ -3193,6 +3369,11 @@ def main() -> int:
                     )
                     result = {"episode_id": episode_id}
                 else:
+                    if arguments.revision in (None, AUTO_REVISION):
+                        raise ContextError(
+                            "Governed completion requires the current numeric "
+                            "--revision"
+                        )
                     result = complete_governed_task(
                         connection,
                         repository,
@@ -3391,6 +3572,24 @@ def main() -> int:
                     limit=arguments.limit,
                     ephemeral=arguments.ephemeral,
                 )
+                if arguments.json:
+                    print(serialize_capsule(result))
+                else:
+                    print_capsule(result)
+                return 0
+
+            if arguments.command == "hook-context":
+                result = assemble_hook_context(
+                    connection,
+                    repository,
+                    mode=mode,
+                    task_id=arguments.task_id,
+                )
+                if result is None:
+                    # A valid current branch with no meaningful change has no
+                    # context. Cursor uses this distinct code to remove a
+                    # foreign branch's stale rule; real failures remain code 1.
+                    return 3
                 if arguments.json:
                     print(serialize_capsule(result))
                 else:

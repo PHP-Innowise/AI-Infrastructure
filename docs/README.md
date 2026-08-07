@@ -6,7 +6,8 @@ your situation.
 
 ## Choose a Starting Point
 
-- **Install a ready-made edition safely:** [Adoption Guide](ADOPTION.md)
+- **Install a ready-made edition:** [Installer Quick Start](../install/README.md)
+  and [Safe Adoption Guide](ADOPTION.md)
 - **Configure Claude Code, Cursor, or Codex:** [Tool Integrations](TOOL-INTEGRATIONS.md)
 - **Choose governed or lightweight context:** [Context Modes](CONTEXT-MODES.md)
 - **Operate Project Brain and memory:** [Context and Memory Operations](OPERATIONS.md)
@@ -69,8 +70,9 @@ commands, agents, rules, settings, and hooks remain native adapters.
 
 1. Select an edition from the project’s actual framework and declared
    versions.
-2. Follow the [Adoption Guide](ADOPTION.md), including backup, collision
-   review, local ignores, and validation.
+2. Follow the [Installer Quick Start](../install/README.md) and
+   [Adoption Guide](ADOPTION.md), including dry-run, backup, collision review,
+   local ignores, and validation.
 3. Activate only the tool integrations the team uses.
 4. Use [Context Modes](CONTEXT-MODES.md) before changing the default governed
    context behavior.

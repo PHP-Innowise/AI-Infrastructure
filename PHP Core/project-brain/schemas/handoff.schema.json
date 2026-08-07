@@ -41,7 +41,8 @@
       "enum": [
         "understanding",
         "planning",
-        "execution",
+        "implementation",
+        "verification",
         "finalization"
       ]
     },

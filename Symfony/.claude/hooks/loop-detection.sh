@@ -6,7 +6,10 @@
 #
 # Currently: warn at 7, block at 10.
 
-INPUT=$(cat)
+# Consume the complete hook payload without relying on external utilities.
+# `read -d ''` returns nonzero at EOF, which is the expected delimiter here.
+INPUT=
+IFS= read -r -d '' INPUT || :
 
 # Only file-editing tools may advance the loop counter. Codex registers this
 # hook without a tool matcher, so read-only payloads that carry a file_path

@@ -8,7 +8,10 @@
 
 set -uo pipefail
 
-input="$(cat 2>/dev/null || true)"
+# Consume the complete hook payload without relying on external utilities.
+# `read -d ''` returns nonzero at EOF, which is the expected delimiter here.
+input=
+IFS= read -r -d '' input || :
 
 # Cheap self-filter before any process is forked: Codex and Cursor register
 # this hook without a tool matcher, so it runs for every tool call. A real

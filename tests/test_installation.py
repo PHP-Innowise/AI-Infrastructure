@@ -1,0 +1,363 @@
+#!/usr/bin/env python3
+"""Synthetic clean-install tests for deterministic edition inventories."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+INSTALLER = ROOT / "scripts" / "install_accelerator.py"
+EDITIONS = ("Laravel", "Symfony", "PHP Core")
+TOOLS = ("claude", "cursor", "codex")
+TIMEOUT = 90
+REQUIRED_SHARED = (
+    "AGENTS.md",
+    "memory-bank/README.md",
+    "memory-bank/INDEX.md",
+    "memory-bank/scripts/context.py",
+    "memory-bank/scripts/validate.py",
+    "project-brain/PROTOCOL.md",
+    "project-brain/config/runtime.json",
+    "project-brain/scripts/validate.py",
+)
+REQUIRED_TOOLS = {
+    "claude": (".claude/hooks/bash-validator.sh", ".claude/skills/memory-bank/SKILL.md"),
+    "cursor": (".cursor/hooks/bash-validator.sh", ".cursor/skills/memory-bank/SKILL.md"),
+    "codex": (".codex/hooks/bash-validator.sh", ".agents/skills/memory-bank/SKILL.md"),
+}
+
+
+def run(*args: str, cwd: Path = ROOT, env: dict[str, str] | None = None):
+    return subprocess.run(
+        list(args),
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=TIMEOUT,
+    )
+
+
+def inventory(edition: str) -> dict:
+    name = edition.lower().replace(" ", "-") + ".json"
+    return json.loads((ROOT / "install" / "inventories" / name).read_text())
+
+
+def source_digest(edition: str, data: dict) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(path for values in data["components"].values() for path in values):
+        digest.update(path.encode())
+        digest.update(b"\0")
+        digest.update((ROOT / edition / path).read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def source_status() -> str:
+    result = run("git", "status", "--porcelain=v1", "--untracked-files=all")
+    if result.returncode:
+        raise AssertionError(result.stderr)
+    return result.stdout
+
+
+class InventoryTest(unittest.TestCase):
+    def test_inventories_match_repository_distribution(self) -> None:
+        result = run(sys.executable, str(INSTALLER), "--verify-inventories")
+        self.assertEqual(0, result.returncode, result.stderr)
+        for edition in EDITIONS:
+            self.assertIn("VERIFIED\t{}".format(edition), result.stdout)
+
+    def test_dry_run_reports_collision_and_refuses_all_writes(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="install collision ") as raw:
+            target = Path(raw).resolve()
+            collision = target / "AGENTS.md"
+            collision.write_text("project-owned\n", encoding="utf-8")
+            result = run(
+                sys.executable,
+                str(INSTALLER),
+                "--edition",
+                "PHP Core",
+                "--target",
+                str(target),
+                "--tool",
+                "cursor",
+                "--dry-run",
+            )
+            self.assertEqual(2, result.returncode)
+            self.assertIn("COLLISION\tshared\tAGENTS.md", result.stderr)
+            self.assertIn("no files copied", result.stderr)
+            self.assertEqual("project-owned\n", collision.read_text(encoding="utf-8"))
+            self.assertFalse((target / "memory-bank").exists())
+
+    def test_parent_obstruction_is_preflighted_before_copy(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="install obstruction ") as raw:
+            target = Path(raw).resolve()
+            obstruction = target / "memory-bank"
+            obstruction.write_text("project-owned path\n", encoding="utf-8")
+            result = run(
+                sys.executable,
+                str(INSTALLER),
+                "--edition",
+                "Laravel",
+                "--target",
+                str(target),
+                "--tool",
+                "claude",
+            )
+            self.assertEqual(2, result.returncode)
+            self.assertIn("parent-obstruction", result.stderr)
+            self.assertIn("no files copied", result.stderr)
+            self.assertEqual(
+                "project-owned path\n", obstruction.read_text(encoding="utf-8")
+            )
+            self.assertFalse((target / "AGENTS.md").exists())
+
+    def test_overwrite_refuses_final_symlink_without_touching_referent(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="install symlink ") as raw:
+            base = Path(raw).resolve()
+            target = base / "target"
+            target.mkdir()
+            outside = base / "outside-policy.md"
+            outside.write_text("outside\n", encoding="utf-8")
+            (target / "AGENTS.md").symlink_to(outside)
+
+            result = run(
+                sys.executable,
+                str(INSTALLER),
+                "--edition",
+                "PHP Core",
+                "--target",
+                str(target),
+                "--tool",
+                "cursor",
+                "--overwrite",
+            )
+
+            self.assertEqual(2, result.returncode)
+            self.assertIn("COLLISION\tshared\tAGENTS.md\tsymlink", result.stderr)
+            self.assertIn("no files copied", result.stderr)
+            self.assertEqual("outside\n", outside.read_text(encoding="utf-8"))
+            self.assertFalse((target / "memory-bank").exists())
+
+    def test_overwrite_refuses_symlinked_parent_without_external_writes(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="install parent symlink ") as raw:
+            base = Path(raw).resolve()
+            target = base / "target"
+            outside = base / "outside"
+            target.mkdir()
+            outside.mkdir()
+            (target / "memory-bank").symlink_to(outside, target_is_directory=True)
+
+            result = run(
+                sys.executable,
+                str(INSTALLER),
+                "--edition",
+                "Laravel",
+                "--target",
+                str(target),
+                "--tool",
+                "claude",
+                "--overwrite",
+            )
+
+            self.assertEqual(2, result.returncode)
+            self.assertIn("parent-obstruction", result.stderr)
+            self.assertIn("no files copied", result.stderr)
+            self.assertEqual([], list(outside.iterdir()))
+            self.assertFalse((target / "AGENTS.md").exists())
+
+    def test_symlinked_target_root_is_refused_without_external_writes(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="install root symlink ") as raw:
+            base = Path(raw).resolve()
+            outside = base / "outside"
+            outside.mkdir()
+            linked_target = base / "target"
+            linked_target.symlink_to(outside, target_is_directory=True)
+
+            result = run(
+                sys.executable,
+                str(INSTALLER),
+                "--edition",
+                "PHP Core",
+                "--target",
+                str(linked_target),
+                "--tool",
+                "cursor",
+                "--overwrite",
+            )
+
+            self.assertEqual(1, result.returncode)
+            self.assertIn("target path contains a symlink", result.stderr)
+            self.assertEqual([], list(outside.iterdir()))
+
+    def test_paths_with_spaces_and_exact_dry_run_transcript(self) -> None:
+        data = inventory("PHP Core")
+        expected = len(data["components"]["shared"]) + len(
+            data["components"]["cursor"]
+        )
+        with tempfile.TemporaryDirectory(prefix="target with spaces ") as raw:
+            target = Path(raw).resolve()
+            result = run(
+                sys.executable,
+                str(INSTALLER),
+                "--edition",
+                "PHP Core",
+                "--target",
+                str(target),
+                "--tool",
+                "cursor",
+                "--dry-run",
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            lines = result.stdout.splitlines()
+            copies = [line for line in lines if line.startswith("WOULD_COPY\t")]
+            self.assertEqual(expected, len(copies))
+            self.assertEqual(
+                "COMPLETE\tPHP Core\ttools=cursor\tfiles={}\tdry_run=true".format(
+                    expected
+                ),
+                lines[-1],
+            )
+            self.assertFalse(any(target.iterdir()))
+
+
+class CleanInstallTest(unittest.TestCase):
+    def test_every_edition_and_tool_clean_install(self) -> None:
+        baseline_status = source_status()
+        for edition in EDITIONS:
+            data = inventory(edition)
+            baseline_digest = source_digest(edition, data)
+            for tool in TOOLS:
+                with self.subTest(edition=edition, tool=tool):
+                    self._run_clean_install(edition, tool, data)
+                    self.assertEqual(baseline_digest, source_digest(edition, data))
+                    self.assertEqual(baseline_status, source_status())
+
+    def _run_clean_install(self, edition: str, tool: str, data: dict) -> None:
+        with tempfile.TemporaryDirectory(prefix="clean install ") as raw:
+            target = Path(raw).resolve()
+            env_file = target / ".env"
+            env_file.write_text("TOP_SECRET=must-not-be-read\n", encoding="utf-8")
+            app_db = target / "application.sqlite"
+            app_db.write_bytes(b"synthetic-application-database")
+            app_db_digest = hashlib.sha256(app_db.read_bytes()).hexdigest()
+            composer = target / "composer.json"
+            composer.write_text(
+                json.dumps(
+                    {
+                        "name": "synthetic/no-application-execution",
+                        "scripts": {"post-install-cmd": ["touch APPLICATION_EXECUTED"]},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            initialized = run(
+                "git",
+                "-c",
+                "init.defaultBranch=main",
+                "init",
+                "-q",
+                str(target),
+            )
+            self.assertEqual(0, initialized.returncode, initialized.stderr)
+            if os.name != "nt":
+                env_file.chmod(0)
+                app_db.chmod(0)
+            try:
+                result = run(
+                    sys.executable,
+                    str(INSTALLER),
+                    "--edition",
+                    edition,
+                    "--target",
+                    str(target),
+                    "--tool",
+                    tool,
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                expected = len(data["components"]["shared"]) + len(
+                    data["components"][tool]
+                )
+                copies = [
+                    line for line in result.stdout.splitlines() if line.startswith("COPY\t")
+                ]
+                self.assertEqual(expected, len(copies))
+                self.assertEqual(
+                    "COMPLETE\t{}\ttools={}\tfiles={}\tdry_run=false".format(
+                        edition, tool, expected
+                    ),
+                    result.stdout.splitlines()[-1],
+                )
+                for path in (*REQUIRED_SHARED, *REQUIRED_TOOLS[tool]):
+                    self.assertTrue((target / path).is_file(), path)
+
+                counter_source = ROOT / edition / "memory-bank" / ".memory-counter"
+                self.assertEqual(
+                    counter_source.is_file(),
+                    (target / "memory-bank" / ".memory-counter").is_file(),
+                )
+
+                command_env = dict(os.environ)
+                command_env.update(
+                    {
+                        "DATABASE_URL": "sqlite:///{}".format(app_db),
+                        "DB_DATABASE": str(app_db),
+                    }
+                )
+                local_db = target / "memory-bank" / "local" / "install-test.db"
+                commands = (
+                    (sys.executable, "memory-bank/scripts/validate.py"),
+                    (
+                        sys.executable,
+                        "project-brain/scripts/validate.py",
+                        "--root",
+                        ".",
+                    ),
+                    (
+                        sys.executable,
+                        "memory-bank/scripts/context.py",
+                        "--db",
+                        str(local_db),
+                        "status",
+                        "--json",
+                    ),
+                    (
+                        sys.executable,
+                        "memory-bank/scripts/context.py",
+                        "--db",
+                        str(local_db),
+                        "validate",
+                        "--json",
+                    ),
+                    (
+                        sys.executable,
+                        "memory-bank/scripts/context.py",
+                        "--db",
+                        str(local_db),
+                        "index",
+                        "--json",
+                    ),
+                )
+                for command in commands:
+                    smoke = run(*command, cwd=target, env=command_env)
+                    self.assertEqual(0, smoke.returncode, smoke.stderr)
+                    self.assertNotIn("must-not-be-read", smoke.stdout + smoke.stderr)
+                self.assertFalse((target / "APPLICATION_EXECUTED").exists())
+            finally:
+                if os.name != "nt":
+                    env_file.chmod(0o600)
+                    app_db.chmod(0o600)
+            self.assertEqual(
+                app_db_digest, hashlib.sha256(app_db.read_bytes()).hexdigest()
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()
