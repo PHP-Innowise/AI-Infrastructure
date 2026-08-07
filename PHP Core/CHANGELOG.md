@@ -11,6 +11,8 @@ it at the top of every session.
 
 ## Unreleased
 
+## 2.0.0 - 2026-08-07
+
 ### Shared context runtime
 
 - Adopted the 2026-08-06 shared-core context remediation documented in the

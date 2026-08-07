@@ -26,6 +26,8 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+## 2.0.0 - 2026-08-07
+
 ### 2026-08-06 hook and installation hardening
 
 - Hook payload capture now uses Bash builtins in every canonical validator,

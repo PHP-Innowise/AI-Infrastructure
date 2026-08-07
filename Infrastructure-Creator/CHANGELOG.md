@@ -4,6 +4,8 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+## [2.0.0] - 2026-08-07
+
 ### Changed
 
 - **Manifest membership is now the only ownership authority.** Full and merge
