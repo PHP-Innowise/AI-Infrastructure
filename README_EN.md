@@ -308,13 +308,20 @@ project; it does not replace the ready-to-use Laravel, Symfony, or PHP Core
 editions. Keep it outside the target project, either in a separate workspace
 or a sibling directory.
 
-The workflow is `infra-scan → review → infra-generate`. `infra-scan` only
-reads the target project and writes nothing to it; it creates a project
-profile for review. During review, you can correct its conclusions.
-`infra-generate` writes an accelerator only for the selected AI tools and asks
-for confirmation before overwriting anything. When a separate review is not
-needed, `infra-build` runs analysis and generation as one flow, stopping on
-ambiguity or conflict.
+The workflow is `infra-scan → review → infra-generate`. These are AI-assistant
+workflows, not terminal executables. Obtain the existing target project's
+absolute filesystem path and ask your assistant:
+
+```text
+Run infra-scan against the existing target project at
+"/absolute/path/to/my-php-app".
+```
+
+The absolute path is reliable even when it contains spaces or the visible
+project root differs from the assistant's working directory. `infra-scan` only
+reads the target and creates a reviewable project profile. `infra-generate`
+writes an accelerator only for selected integrations and asks before
+overwriting anything. `infra-build` combines both phases.
 
 The generator inspects the actual `composer.json`, framework, dependencies,
 integrations, architecture, and CI/CD instead of copying a Laravel, Symfony,

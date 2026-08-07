@@ -4,7 +4,11 @@
 
 A generator, not an accelerator. Infrastructure-Creator *builds* a bespoke accelerator for a specific **PHP project** you point it at - by scanning it, researching its actual dependencies, asking you the few things it could not determine on its own, and generating a working `AGENTS.md`, skills, agents, commands, hooks, and a seeded `memory-bank/` straight into that project's root, for only the AI tool(s) your team uses.
 
-It is a standalone, self-contained tool: no bundled reference accelerator, no dependency on any other project. You run it from **Claude Code**, **Cursor**, or **OpenAI Codex** - whichever you already use - because the complete 23-skill generator ships in all three editions.
+It is a standalone, self-contained tool with no bundled reference accelerator
+and no dependency on another project. Any AI assistant that can read repository
+instructions and follow the documented workflows can operate it; native
+integration directories are optional convenience layers, not a requirement for
+the scan-and-generate process.
 
 ## Why This Exists
 
@@ -12,18 +16,42 @@ Generic PHP boilerplate covers common stacks in the abstract, but real projects 
 
 ## Load and Run (Quick Start)
 
-1. Open or clone this folder as its own workspace, separate from the PHP project you want to generate for.
-2. Have the target project available as a sibling directory (or note its path).
-3. From your AI tool, run the scan against the target:
-   - `infra-scan ../my-php-app`
-4. Read `tasks/TASK-{N}/infra-scan-project-profile.md`. Section 8 shows the evidence-backed behavioral contract, section 11 previews generated skills/agents/commands, and section 12 previews cohesive memory concepts. Fix anything wrong before generation.
-5. Generate:
-   - `infra-generate ../my-php-app`
-6. Open the target project. Its new `AGENTS.md`, the AI-tool edition(s) you selected, and `memory-bank/` are ready to use.
+These are workflows for an AI assistant, not terminal executables. Invoke them
+through whatever command, skill, prompt, or agent mechanism your assistant
+supports.
 
-In a hurry and you trust the scan? Run the one-shot: `infra-build ../my-php-app` chains scan -> generate and only pauses if it hits a blocking ambiguity or a collision.
+1. Open or clone the repository containing `Infrastructure-Creator/`.
+2. Obtain the existing target project's absolute filesystem path using your
+   editor, file manager, or terminal.
+3. Ask your AI assistant:
 
-**Target isn't PHP?** `infra-scan` will tell you rather than silently failing - see "Non-PHP Targets" below.
+   ```text
+   Run infra-scan against the existing target project at
+   "/absolute/path/to/my-php-app".
+   ```
+
+   Keep the path in quotes when any directory name contains spaces. The absolute
+   path avoids ambiguity between the visible project root and the assistant's
+   working directory.
+4. Read `Infrastructure-Creator/tasks/TASK-{N}/infra-scan-project-profile.md`
+   (or `tasks/TASK-{N}/...` when `Infrastructure-Creator/` itself is the
+   workspace). Fix anything wrong before generation.
+5. Ask the assistant to generate from the reviewed profile:
+
+   ```text
+   Run infra-generate against
+   "/absolute/path/to/my-php-app".
+   ```
+
+6. Open the target project. Its new `AGENTS.md`, selected AI-tool edition(s),
+   and `memory-bank/` are ready to use.
+
+In a hurry and you trust the scan, ask the assistant to
+`Run infra-build against "/absolute/path/to/my-php-app".` It chains scan ->
+generate and pauses only for a blocking ambiguity or collision.
+
+**Target isn't PHP?** `infra-scan` will tell you rather than silently failing -
+see "Non-PHP Targets" below.
 
 ## Two-Phase Workflow
 
@@ -59,20 +87,21 @@ Infrastructure-Creator only generates PHP accelerators directly - but it does no
 
 Your project isn't PHP (Flutter, Node.js, Python, Go, or similar) but you still want the same kind of bespoke, discovery-driven accelerator? Here's the whole path, start to finish:
 
-1. **Point at your project, same as always.** From this folder, in your AI tool: `infra-scan ../my-flutter-app`.
+1. **Point at your project, same as always.** Obtain its absolute path and ask your AI assistant to `Run infra-scan against "/absolute/path/to/my-flutter-app".`
 2. **Let it detect the stack.** No `composer.json`/`*.php` found, so it checks for a recognizable manifest (`pubspec.yaml`, `package.json`, `go.mod`, etc.) instead of just giving up.
 3. **Confirm the offer.** It asks once: *"This uses Flutter/Dart, not PHP - want me to build `Infrastructure-Creator-Flutter`, an independent sibling generator for it?"* Say yes.
-   - Already certain you need this and don't want to go through `infra-scan` first? Skip straight to it: `infra-adapt ../my-flutter-app`.
+   - Already certain you need this and don't want to go through `infra-scan` first? Ask the assistant to `Run infra-adapt against "/absolute/path/to/my-flutter-app".`
 4. **Wait for it to build.** `stack-adapter` re-authors all 23 skills, including the new stack's own domain-behavior scanner, then mirrors and verifies the sibling.
 5. **Check the report.** It tells you the new generator's path (e.g. `../Infrastructure-Creator-Flutter/`) and whether self-verification passed. If it flags a problem, don't proceed until that's resolved.
 6. **Switch workspaces.** Open `Infrastructure-Creator-Flutter/` (the new folder) as its own workspace - separate from both this generator and your target project.
-7. **Use it exactly like this one.** From inside the new folder: `infra-scan ../my-flutter-app`, review the profile, then `infra-generate ../my-flutter-app` (or `infra-build` for the one-shot). From this point on, everything works the same as the PHP flow above - just for Flutter.
+7. **Use it exactly like this one.** Ask the assistant to run `infra-scan` against the absolute target path, review the profile, then ask it to run `infra-generate` (or `infra-build` for the one-shot) against the same path. From this point on, everything works the same as the PHP flow above - just for Flutter.
 
 One confirmation, one wait, then a brand-new generator ready to use for that stack.
 
 ## What Gets Generated
 
-For the selected AI-tool edition(s) only (Claude Code / Cursor / Codex - chosen during `clarifying-interview`):
+The generator always creates the shared, tool-neutral infrastructure and adds
+only the native integration directories selected during `clarifying-interview`:
 
 - `AGENTS.md`, `DOD.md`, `GOLDEN-PRINCIPLES.md`, `STABILIZATION.md` - policy tailored to what was found.
 - A full, custom PHP skill set in eight groups - not just a handful of generic skills:
