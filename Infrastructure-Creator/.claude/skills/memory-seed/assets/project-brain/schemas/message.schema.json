@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "body": {
+      "maxLength": 8000,
+      "minLength": 1,
+      "type": "string"
+    },
+    "capsule_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "from_actor": {
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+      "type": "string"
+    },
+    "id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "refs": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "seq": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "task_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "task_revision": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "to_actor": {
+      "pattern": "^([a-z0-9][a-z0-9_-]{0,63}|\\*)$",
+      "type": "string"
+    },
+    "type": {
+      "enum": [
+        "finding",
+        "question",
+        "handoff",
+        "dispatch",
+        "completion"
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "id",
+    "seq",
+    "task_id",
+    "task_revision",
+    "created_at",
+    "from_actor",
+    "to_actor",
+    "type",
+    "body",
+    "refs"
+  ],
+  "type": "object"
+}

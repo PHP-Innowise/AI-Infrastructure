@@ -14,7 +14,7 @@ related: [infra-generate, policy-forge, skill-forge, agent-forge, command-forge,
 `memory-seed` bootstraps the target project's complete memory layer and seeds it with an initial set of `active` chunks drawn strictly from confirmed profile evidence. The layer has two shared roots, both created once at the target root (not per edition), so they survive when the team prunes editions:
 
 - **`memory-bank/`** - the durable, indexed shared-memory layer, plus the **context-brain runtime** under `memory-bank/scripts/`: `context.py` (the CLI facade), `brain_runtime.py` (governed Project Brain runtime), `context_retrieval.py` (local SQLite/BM25 retrieval), and `validate.py` (the bank validator). The runtime is dependency-free (standard library only) and stack-agnostic.
-- **`project-brain/`** - the governed control plane for active work: dynamic records (tasks, findings, bugs, incidents, decisions, events), handoffs, retrieval manifests, promotion proposals, schemas, and `PROTOCOL.md`. The runtime under `memory-bank/scripts/` operates it.
+- **`project-brain/`** - the governed control plane for active work: dynamic records (tasks, findings, bugs, incidents, decisions, events), handoffs, the append-only agent message channel that orchestrated flows write to, retrieval manifests, promotion proposals, schemas, and `PROTOCOL.md`. The runtime under `memory-bank/scripts/` operates it.
 
 `skill-forge` separately generates the operational skills that drive this layer in every selected edition (`memory-bank`, `project-brain`, `checkpoint`, `memory` - see `skill-forge/references/php-process-skills.md`), and `hook-forge` generates the working-memory hooks (`working-memory-read.sh` / `working-memory-write.sh`) that call `memory-bank/scripts/context.py refresh` / `turn` automatically. The paths this skill creates are the contract those hooks and skills depend on - never rename them.
 
@@ -35,10 +35,10 @@ Into the target root, create:
 
 **`project-brain/` (governed control plane, copied verbatim from `assets/project-brain/`):**
 - `PROTOCOL.md`, `README.md`, `.gitignore`
-- `schemas/` (all five `*.schema.json` files), `templates/` (all nine record/control templates), `scripts/validate.py`
+- `schemas/` (all six `*.schema.json` files, including `message.schema.json` for the agent channel), `templates/` (all nine record/control templates), `scripts/validate.py`
 - `config/providers.json`, `config/telemetry.json`, and `config/runtime.json` (from `runtime.json.template`, after the one substitution below)
 - `indexes/active.json`, `indexes/archive.json` (both `[]`)
-- empty, `.gitkeep`-held directories: `archive/`, `local/`, `control/handoffs/`, `control/promotions/`, `control/retrieval-manifests/`, `dynamic/bugs/`, `dynamic/decisions/`, `dynamic/events/`, `dynamic/findings/`, `dynamic/incidents/`, `dynamic/tasks/`
+- empty, `.gitkeep`-held directories: `archive/`, `local/`, `control/handoffs/`, `control/messages/`, `control/promotions/`, `control/retrieval-manifests/`, `dynamic/bugs/`, `dynamic/decisions/`, `dynamic/events/`, `dynamic/findings/`, `dynamic/incidents/`, `dynamic/tasks/`
 
 **Target `.gitignore`:** ensure it excludes `memory-bank/local/` and `__pycache__/` (append if missing; `project-brain/` ships its own `.gitignore` for `local/`).
 

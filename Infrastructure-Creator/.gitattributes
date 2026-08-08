@@ -38,6 +38,7 @@
 .claude/skills/memory-seed/assets/project-brain/config/runtime.json.template -diff linguist-generated=true
 .claude/skills/memory-seed/assets/project-brain/config/telemetry.json -diff linguist-generated=true
 .claude/skills/memory-seed/assets/project-brain/control/handoffs/.gitkeep -diff linguist-generated=true
+.claude/skills/memory-seed/assets/project-brain/control/messages/.gitkeep -diff linguist-generated=true
 .claude/skills/memory-seed/assets/project-brain/control/promotions/.gitkeep -diff linguist-generated=true
 .claude/skills/memory-seed/assets/project-brain/control/retrieval-manifests/.gitkeep -diff linguist-generated=true
 .claude/skills/memory-seed/assets/project-brain/dynamic/bugs/.gitkeep -diff linguist-generated=true
@@ -51,6 +52,7 @@
 .claude/skills/memory-seed/assets/project-brain/local/.gitkeep -diff linguist-generated=true
 .claude/skills/memory-seed/assets/project-brain/schemas/dynamic-record.schema.json -diff linguist-generated=true
 .claude/skills/memory-seed/assets/project-brain/schemas/handoff.schema.json -diff linguist-generated=true
+.claude/skills/memory-seed/assets/project-brain/schemas/message.schema.json -diff linguist-generated=true
 .claude/skills/memory-seed/assets/project-brain/schemas/promotion.schema.json -diff linguist-generated=true
 .claude/skills/memory-seed/assets/project-brain/schemas/retrieval-manifest.schema.json -diff linguist-generated=true
 .claude/skills/memory-seed/assets/project-brain/schemas/token-usage-event.schema.json -diff linguist-generated=true
@@ -154,6 +156,7 @@
 .cursor/skills/memory-seed/assets/project-brain/config/runtime.json.template -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/project-brain/config/telemetry.json -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/project-brain/control/handoffs/.gitkeep -diff linguist-generated=true
+.cursor/skills/memory-seed/assets/project-brain/control/messages/.gitkeep -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/project-brain/control/promotions/.gitkeep -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/project-brain/control/retrieval-manifests/.gitkeep -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/project-brain/dynamic/bugs/.gitkeep -diff linguist-generated=true
@@ -167,6 +170,7 @@
 .cursor/skills/memory-seed/assets/project-brain/local/.gitkeep -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/project-brain/schemas/dynamic-record.schema.json -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/project-brain/schemas/handoff.schema.json -diff linguist-generated=true
+.cursor/skills/memory-seed/assets/project-brain/schemas/message.schema.json -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/project-brain/schemas/promotion.schema.json -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/project-brain/schemas/retrieval-manifest.schema.json -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/project-brain/schemas/token-usage-event.schema.json -diff linguist-generated=true

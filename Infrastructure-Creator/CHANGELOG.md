@@ -6,6 +6,26 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Changed
 
+- **Generated accelerators reach orchestration parity with the hand-built
+  editions.** The seeded context-brain runtime was a stale fork — no agent
+  channel at all, no `hook-context`/`rebind`/`reindex-bank`, and a
+  four-value phase vocabulary the engine stopped using — so
+  `memory-seed`'s bundled `scripts/` and `project-brain/` skeleton are
+  re-synced from the canonical runtime, gaining `msg-send` / `msg-read` /
+  `msg-dispatch`, `capsule --validate`, `update --actor`, the forward-only
+  phase guard, `message.schema.json`, and `control/messages/`. On top of
+  that: `agent-forge` emits `writes: true` for write-capable agents in both
+  editions (without it the generated gate's serialization never engages),
+  `command-forge` generates `flow-feature` and `flow-review` composed only
+  of agents the run actually produced, `hook-forge` adds
+  `subagent-dispatch.sh` with its `SubagentStop`/`subagentStop` wiring
+  (shipped unregistered on Codex) plus the gate's write serialization,
+  `policy-forge` writes an Orchestration section into the generated
+  AGENTS.md, and `bootstrap-verifier` / `validate_generated.py` enforce the
+  eight-hook contract and the flow contract — stages naming generated
+  agents, at most one write-capable agent per parallel stage, a checkpoint
+  in every multi-stage flow.
+
 - **Generated accelerators now restrict subagents to their own roster.**
   `hook-forge` produces a seventh hook, `subagent-gate.sh` - three
   tool-owned variants (Claude PreToolUse exit codes against the generated

@@ -15,6 +15,9 @@ Checks:
   - Every hook script passes `bash -n` and carries the executable bit, and the
     expected hook set is complete per edition (working-memory-read.sh is
     deliberately absent from Cursor - it has no prompt-time hook event).
+  - Every flow command's stages name agents that were generated, no parallel
+    stage holds two write-capable agents (the gate runs those one at a time),
+    and a multi-stage flow declares at least one checkpoint.
   - Every hook wiring file (.claude/settings.json, .cursor/hooks.json,
     .codex/hooks.json) references only hook scripts that exist and are
     executable - every .sh token in a wired command is resolved, so an
@@ -101,6 +104,9 @@ BASE_HOOKS = (
     "loop-detection.sh",
     "working-memory-write.sh",
     "subagent-gate.sh",
+    # Ships in every edition; wired on Claude/Cursor and deliberately
+    # unregistered on Codex, where multi-agent is off and nothing stops.
+    "subagent-dispatch.sh",
 )
 REQUIRED_HOOKS = {
     "claude": BASE_HOOKS + ("working-memory-read.sh",),
@@ -158,6 +164,57 @@ def read_frontmatter(path: Path) -> tuple[dict, str]:
             else:
                 meta[key] = val
     return meta, text
+
+
+STAGE_RE = re.compile(r"^\s*-\s*\{(?P<body>.*)\}\s*$")
+AGENTS_RE = re.compile(r"agents:\s*\[(?P<names>[^\]]*)\]")
+
+
+def validate_flow(
+    edition: str, path: Path, text: str, roster: set, write_agents: set, errors: list
+) -> None:
+    """Check a flow command's stages against the roster this run generated.
+
+    Flows are the one command class that spawns more than one agent, so a
+    stage naming an agent that was never generated is a dead flow. A single
+    write-capable agent in a parallel stage is harmless - it takes the write
+    lock and the read-only agents beside it are unaffected - but two of them
+    deadlock the stage against each other, which is what is flagged here.
+    """
+    end = text.find("\n---", 3)
+    block = text[3:end] if end != -1 else ""
+    stages = [m.group("body") for m in
+              (STAGE_RE.match(line) for line in block.splitlines()) if m]
+    if not stages:
+        errors.append(f"[{edition}] {path}: flow declares no stages")
+        return
+    for body in stages:
+        found = AGENTS_RE.search(body)
+        names = ([n.strip() for n in found.group("names").split(",") if n.strip()]
+                 if found else [])
+        if not names:
+            errors.append(f"[{edition}] {path}: flow stage names no agents: {body}")
+            continue
+        for name in names:
+            if name not in roster:
+                errors.append(
+                    f"[{edition}] {path}: flow stage agent '{name}' was not generated"
+                )
+        if "parallel: true" in body:
+            writers = [n for n in names if n in write_agents]
+            if len(writers) > 1:
+                errors.append(
+                    f"[{edition}] {path}: parallel stage holds write-capable "
+                    f"agents {writers}; the gate runs them one at a time, so "
+                    f"the stage blocks itself"
+                )
+    # A single-stage flow is one fan-out whose result the user reads
+    # immediately; a multi-stage flow runs agents back to back and must
+    # hand control back somewhere.
+    if len(stages) > 1 and not any("checkpoint:" in body for body in stages):
+        errors.append(
+            f"[{edition}] {path}: multi-stage flow declares no checkpoint"
+        )
 
 
 def is_owned(files: dict, rel: str) -> bool:
@@ -240,6 +297,8 @@ def validate_edition(target: Path, edition: str, files: dict, errors: list) -> N
                         f"[{edition}] {sp}: {ref_key} -> '{ref}' does not resolve to a generated skill"
                     )
     # Agents (editions that carry them).
+    roster: set = set()
+    write_agents: set = set()
     if agents_rel:
         agents_dir = target / agents_rel
         if agents_dir.exists():
@@ -250,6 +309,10 @@ def validate_edition(target: Path, edition: str, files: dict, errors: list) -> N
                 meta, _ = read_frontmatter(af)
                 if not meta.get("name"):
                     errors.append(f"[{edition}] {af}: agent missing 'name'")
+                else:
+                    roster.add(meta["name"])
+                    if str(meta.get("writes", "")).lower() == "true":
+                        write_agents.add(meta["name"])
                 invokes = meta.get("invokes")
                 if invokes and invokes not in skill_names:
                     errors.append(
@@ -272,7 +335,7 @@ def validate_edition(target: Path, edition: str, files: dict, errors: list) -> N
                 cf = target / rel
                 if cf.name == "README.md":
                     continue
-                meta, _ = read_frontmatter(cf)
+                meta, text = read_frontmatter(cf)
                 spawns = meta.get("spawns")
                 if spawns:
                     agent_base = spawns.replace("-agent", "")
@@ -280,6 +343,10 @@ def validate_edition(target: Path, edition: str, files: dict, errors: list) -> N
                         errors.append(
                             f"[{edition}] {cf}: spawns '{spawns}' has no matching skill"
                         )
+                elif meta.get("flow") or cf.name.startswith("flow-"):
+                    validate_flow(
+                        edition, cf, text, roster or skill_names, write_agents, errors
+                    )
             for required_skill in MEMORY_QUARTET:
                 required_rel = f"{commands_rel}/{required_skill}.md"
                 if required_skill in skill_names and not is_owned(files, required_rel):

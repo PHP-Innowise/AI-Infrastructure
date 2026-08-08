@@ -5,28 +5,28 @@
       "agents_md_bytes": 14766,
       "descriptor_bytes": 12769,
       "frontmatter_bytes": 19368,
-      "body_bytes": 362602,
+      "body_bytes": 363885,
       "skills": 47
     },
     "Symfony": {
       "agents_md_bytes": 17959,
       "descriptor_bytes": 10702,
       "frontmatter_bytes": 15564,
-      "body_bytes": 173949,
+      "body_bytes": 175232,
       "skills": 50
     },
     "PHP Core": {
       "agents_md_bytes": 14273,
       "descriptor_bytes": 9947,
       "frontmatter_bytes": 14844,
-      "body_bytes": 200817,
+      "body_bytes": 202100,
       "skills": 37
     },
     "Infrastructure-Creator": {
       "agents_md_bytes": 12720,
       "descriptor_bytes": 12849,
       "frontmatter_bytes": 18078,
-      "body_bytes": 168514,
+      "body_bytes": 176549,
       "skills": 25
     }
   }

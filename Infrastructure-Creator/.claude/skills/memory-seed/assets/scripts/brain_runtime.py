@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
-from validate import validate_bank
+from validate import FILENAME_PATTERN as BANK_FILENAME_PATTERN, validate_bank
 
 
 SCHEMA_VERSION = 1
@@ -24,10 +24,30 @@ UUID4_PATTERN = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
 RECORD_TYPES = ("task", "finding", "bug", "incident", "decision", "event")
-# Where a task sits in the delivery loop, using the same vocabulary the skills
-# declare in their own frontmatter. Progress says what was touched; the phase
-# says which step it stopped on, which is what a reader needs to resume.
-TASK_PHASES = ("understanding", "planning", "execution", "finalization")
+# Stored phases use one governed vocabulary. Compatibility aliases are accepted
+# only at mutation boundaries and are normalized before validation/persistence.
+TASK_PHASES = (
+    "understanding",
+    "planning",
+    "implementation",
+    "verification",
+    "finalization",
+)
+TASK_PHASE_ALIASES = {
+    "implementing": "implementation",
+    "execution": "implementation",
+    "review": "verification",
+}
+TASK_PHASE_INPUTS = (*TASK_PHASES, *TASK_PHASE_ALIASES)
+# The agent message channel: an append-only JSONL journal per task under
+# control/messages. `finding`/`question`/`handoff` carry agent-to-agent
+# content; `dispatch`/`completion` are the orchestration log (who was spawned
+# with which capsule, who finished). Actors are roster agent slugs plus the
+# reserved `main` (the orchestrating conversation); `*` addresses everyone
+# and is legal only as a recipient.
+MESSAGE_TYPES = ("finding", "question", "handoff", "dispatch", "completion")
+MESSAGE_BODY_LIMIT = 8000
+ACTOR_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 PRIVACY = ("public", "team", "restricted", "private")
 AUTHORITIES = ("inferred", "observed", "verified")
 # Authority may only harden, along a single edge: an `observed` claim that a
@@ -111,6 +131,23 @@ _LOCK_STATE = threading.local()
 
 class BrainError(Exception):
     """A safe, user-facing Project Brain error."""
+
+
+def normalize_phase(value: str) -> str:
+    """Return the canonical stored phase for a CLI/API input value."""
+    normalized = TASK_PHASE_ALIASES.get(value, value)
+    if normalized not in TASK_PHASES:
+        raise BrainError(
+            "phase must be one of: "
+            + ", ".join(TASK_PHASES)
+            + " (aliases: "
+            + ", ".join(
+                f"{alias}->{canonical}"
+                for alias, canonical in TASK_PHASE_ALIASES.items()
+            )
+            + ")"
+        )
+    return normalized
 
 
 def utc_now() -> str:
@@ -262,6 +299,12 @@ def parse_markdown_record(path: Path) -> tuple[dict[str, Any], str]:
         raise BrainError(f"{path}: invalid JSON frontmatter") from error
     if not isinstance(metadata, dict):
         raise BrainError(f"{path}: frontmatter must be an object")
+    # Records persisted before the canonical phase vocabulary used
+    # `execution`. Normalize that legacy value on read; the next supported
+    # mutation rewrites the record and handoff with `implementation`.
+    if metadata.get("phase") == "execution":
+        metadata = dict(metadata)
+        metadata["phase"] = "implementation"
     return metadata, body.lstrip("\n")
 
 
@@ -855,6 +898,7 @@ def update_record(
     authority: Optional[str] = None,
     auto_checkpoint: Optional[str] = None,
     reason: str = "Task updated",
+    allow_phase_regression: bool = False,
 ) -> dict[str, Any]:
     """Mutate a record under the caller's compare-and-swap revision.
 
@@ -922,9 +966,19 @@ def update_record(
         if phase is not None:
             if record["type"] != "task":
                 raise BrainError("only a task may declare a phase")
-            if phase not in TASK_PHASES:
-                raise BrainError(f"phase must be one of: {', '.join(TASK_PHASES)}")
-            record["phase"] = phase
+            new_phase = normalize_phase(phase)
+            current_phase = record.get("phase")
+            if (
+                not allow_phase_regression
+                and current_phase in TASK_PHASES
+                and TASK_PHASES.index(new_phase) < TASK_PHASES.index(current_phase)
+            ):
+                raise BrainError(
+                    f"Phase may not move backward: {current_phase} -> {new_phase};"
+                    " pass allow_phase_regression to state the regression is"
+                    " deliberate"
+                )
+            record["phase"] = new_phase
         if progress is not None:
             record["progress"] = progress
         if auto_checkpoint is not None:
@@ -1030,6 +1084,164 @@ def cancel_task(repository: Path, identifier: str, *, actor: str) -> dict[str, A
         transition_to="cancelled",
         reason="Task abandoned",
     )
+
+
+def messages_path(repository: Path, task_uuid: str) -> Path:
+    return brain_root(repository) / "control" / "messages" / f"{task_uuid}.jsonl"
+
+
+def validate_actor(value: str, *, allow_broadcast: bool = False) -> str:
+    actor = (value or "").strip()
+    if allow_broadcast and actor == "*":
+        return actor
+    if ACTOR_PATTERN.fullmatch(actor) is None:
+        raise BrainError(
+            "Actor must be a lowercase slug (letters, digits, '-', '_') up to"
+            " 64 characters"
+        )
+    return actor
+
+
+def validate_message(record: dict[str, Any]) -> None:
+    """Validate one channel entry with in-code rules.
+
+    The JSON schema file is defense for the governed monorepo; a copied-out
+    edition without ``project-brain/schemas`` still enforces the same
+    contract through this function.
+    """
+    if record.get("schema_version") != SCHEMA_VERSION:
+        raise BrainError(f"message schema_version must be {SCHEMA_VERSION}")
+    if not is_uuid4(record.get("id")):
+        raise BrainError("message id must be UUIDv4")
+    if not is_uuid4(record.get("task_id")):
+        raise BrainError("message task_id must be UUIDv4")
+    for key in ("seq", "task_revision"):
+        if not isinstance(record.get(key), int) or record[key] < 1:
+            raise BrainError(f"message {key} must be a positive integer")
+    _require_datetime(record, "created_at")
+    validate_actor(str(record.get("from_actor", "")))
+    validate_actor(str(record.get("to_actor", "")), allow_broadcast=True)
+    if record.get("type") not in MESSAGE_TYPES:
+        raise BrainError(
+            "message type must be one of: " + ", ".join(MESSAGE_TYPES)
+        )
+    body = record.get("body")
+    if not isinstance(body, str) or not body.strip():
+        raise BrainError("message body must not be empty")
+    if len(body) > MESSAGE_BODY_LIMIT:
+        raise BrainError(
+            f"message body exceeds {MESSAGE_BODY_LIMIT} characters"
+        )
+    refs = record.get("refs")
+    if not isinstance(refs, list) or any(
+        not isinstance(item, str) or not item.strip() for item in refs
+    ):
+        raise BrainError("message refs must be a list of non-empty strings")
+    digest = record.get("capsule_digest")
+    if digest is not None and (
+        not isinstance(digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+    ):
+        raise BrainError("message capsule_digest must be a SHA-256 hex digest")
+
+
+def append_message(
+    repository: Path,
+    identifier: str,
+    *,
+    from_actor: str,
+    to_actor: str,
+    message_type: str,
+    body: str,
+    refs: Optional[list[str]] = None,
+    capsule_digest: Optional[str] = None,
+) -> dict[str, Any]:
+    """Append one entry to the task's agent channel.
+
+    The journal is append-only under the global mutation lock: entries are
+    never rewritten, so the git history of the file is the audit trail. A
+    terminal task refuses new messages - the channel exists for active
+    coordination, not for post-mortem edits.
+    """
+    with mutation_lock(repository):
+        _, task, _ = find_task(repository, identifier)
+        if task["status"] in LIFECYCLES["task"]["terminal"]:
+            raise BrainError(
+                "Messages require an active task; this task is terminal"
+            )
+        path = messages_path(repository, task["id"])
+        seq = 1
+        if path.is_file():
+            with path.open("r", encoding="utf-8") as handle:
+                seq += sum(1 for line in handle if line.strip())
+        record: dict[str, Any] = {
+            "schema_version": SCHEMA_VERSION,
+            "id": new_uuid(),
+            "seq": seq,
+            "task_id": task["id"],
+            "task_revision": task["revision"],
+            "created_at": utc_now(),
+            "from_actor": validate_actor(from_actor),
+            "to_actor": validate_actor(to_actor, allow_broadcast=True),
+            "type": message_type,
+            "body": body,
+            "refs": list(refs or []),
+        }
+        if capsule_digest is not None:
+            record["capsule_digest"] = capsule_digest
+        validate_message(record)
+        validate_schema_file(repository, "message.schema.json", record)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        return record
+
+
+def read_messages(
+    repository: Path,
+    identifier: str,
+    *,
+    for_actor: Optional[str] = None,
+    since_seq: int = 0,
+    message_type: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """Return channel entries, filtered for a recipient.
+
+    ``for_actor`` selects entries addressed to that actor or broadcast
+    (``*``); ``since_seq`` skips entries the caller has already consumed -
+    the journal keeps no read cursor, consumers track their own position.
+    Terminal tasks stay readable: the audit trail outlives the work.
+    """
+    _, task, _ = find_record(
+        repository, identifier, record_type="task", include_archive=True
+    )
+    path = messages_path(repository, task["id"])
+    if not path.is_file():
+        return []
+    recipient = validate_actor(for_actor) if for_actor is not None else None
+    selected: list[dict[str, Any]] = []
+    for number, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), 1
+    ):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise BrainError(
+                f"Corrupt message journal line {number}: {path}"
+            ) from error
+        validate_message(record)
+        if record["seq"] <= since_seq:
+            continue
+        if message_type is not None and record["type"] != message_type:
+            continue
+        if recipient is not None and record["to_actor"] not in {recipient, "*"}:
+            continue
+        selected.append(record)
+    return selected
 
 
 def record_is_eligible(repository: Path, record: dict[str, Any], config: dict[str, Any]) -> tuple[bool, str]:
@@ -1143,6 +1355,39 @@ def validate_repository(repository: Path) -> list[str]:
                 if handoff["status"] != "closed":
                     raise BrainError("archived handoff must be closed")
             except (BrainError, KeyError) as error:
+                errors.append(f"{path}: {error}")
+    messages_root = brain_root(repository) / "control" / "messages"
+    if messages_root.is_dir():
+        for path in sorted(messages_root.glob("*.jsonl")):
+            try:
+                if not is_uuid4(path.stem):
+                    raise BrainError("message journal name must be a task UUID")
+                find_record(
+                    repository, path.stem, record_type="task", include_archive=True
+                )
+                previous_seq = 0
+                for number, line in enumerate(
+                    path.read_text(encoding="utf-8").splitlines(), 1
+                ):
+                    if not line.strip():
+                        raise BrainError(
+                            f"line {number}: blank line in message journal"
+                        )
+                    entry = json.loads(line)
+                    validate_message(entry)
+                    validate_schema_file(
+                        repository, "message.schema.json", entry
+                    )
+                    if entry["task_id"] != path.stem:
+                        raise BrainError(
+                            f"line {number}: task_id does not match the journal"
+                        )
+                    if entry["seq"] != previous_seq + 1:
+                        raise BrainError(
+                            f"line {number}: seq must increase by exactly one"
+                        )
+                    previous_seq = entry["seq"]
+            except (OSError, json.JSONDecodeError, BrainError, KeyError) as error:
                 errors.append(f"{path}: {error}")
     manifest_keys = {
         "schema_version", "id", "created_at", "query", "task_id", "task_revision",
@@ -1688,11 +1933,114 @@ def auto_compact(repository: Path, *, owner: str = "local") -> dict[str, Any]:
     return {"enabled": True, "moved": moved, "pending": 0, "error": None}
 
 
+# INDEX.md is a derived view over chunk frontmatter, regenerated in full by
+# `render_bank_index` rather than appended to. The preamble below is used only
+# when the index is missing or unrecognizable; an existing preamble (anything
+# above the table header) is preserved verbatim, so per-edition prose survives
+# reindexing.
+BANK_INDEX_PREAMBLE = (
+    "# Memory Index\n\n"
+    "Read [README.md](README.md) before using this index. Load only active "
+    "chunks relevant to the current task, then verify them against their "
+    "cited sources.\n\n"
+)
+BANK_INDEX_HEADER = (
+    "| ID | Title | Type | Scope | Tags | Status | Last Verified | File |\n"
+    "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+)
+
+
+def _bank_index_sort_key(memory_id: str) -> tuple[int, str, str]:
+    """Stable index order: numeric legacy IDs first, then date-based IDs.
+
+    Legacy `MEM-0001` identifiers sort numerically (so `MEM-10000` follows
+    `MEM-9999`); date-based `MEM-YYYYMMDD-xxxxxxxx` identifiers sort
+    lexicographically, which is chronological up to the UUID fragment.
+    """
+    legacy = re.fullmatch(r"MEM-(\d{4,})", memory_id)
+    if legacy:
+        return (0, f"{int(legacy.group(1)):020d}", memory_id)
+    return (1, memory_id, memory_id)
+
+
+def render_bank_index(bank: Path) -> tuple[str, int]:
+    """Render INDEX.md deterministically from chunk frontmatter.
+
+    Returns the full index text and the number of chunk rows. Because every
+    row is derived from a chunk file, merging two branches that each promoted
+    knowledge reduces to a union of chunk files followed by one reindex —
+    there is no hand-maintained table left to conflict on.
+    """
+    chunks_dir = bank / "chunks"
+    rows: dict[str, str] = {}
+    if chunks_dir.is_dir():
+        for path in sorted(chunks_dir.iterdir()):
+            if (
+                path.is_symlink()
+                or not path.is_file()
+                or BANK_FILENAME_PATTERN.fullmatch(path.name) is None
+            ):
+                continue
+            metadata, _ = parse_markdown_record(path)
+            memory_id = metadata.get("id")
+            if not isinstance(memory_id, str) or not memory_id:
+                raise BrainError(f"{path}: chunk frontmatter has no id")
+            if memory_id in rows:
+                raise BrainError(f"Duplicate Memory Bank chunk ID: {memory_id}")
+            try:
+                rows[memory_id] = (
+                    f"| {memory_id} | {metadata['title']} | {metadata['type']} | "
+                    f"{', '.join(metadata['scope'])} | {', '.join(metadata['tags'])} | "
+                    f"{metadata['status']} | {metadata['last_verified']} | "
+                    f"chunks/{path.name} |\n"
+                )
+            except (KeyError, TypeError) as error:
+                raise BrainError(
+                    f"{path}: chunk frontmatter is incomplete for indexing"
+                ) from error
+    preamble = BANK_INDEX_PREAMBLE
+    index_path = bank / "INDEX.md"
+    if index_path.is_file():
+        head, header, _ = index_path.read_text(encoding="utf-8").partition(
+            "| ID | Title |"
+        )
+        if header:
+            preamble = head
+    body = "".join(
+        rows[memory_id] for memory_id in sorted(rows, key=_bank_index_sort_key)
+    )
+    return preamble + BANK_INDEX_HEADER + body, len(rows)
+
+
+def reindex_bank(repository: Path) -> dict[str, Any]:
+    """Regenerate memory-bank/INDEX.md from chunk frontmatter.
+
+    Idempotent: rerunning against unchanged chunks rewrites nothing, and a
+    deleted index is reconstructed in full. This replaces every manual
+    "update INDEX.md and increment .memory-counter" step; the retired
+    `.memory-counter` file is neither read nor written.
+    """
+    bank = repository / "memory-bank"
+    index_path = bank / "INDEX.md"
+    with mutation_lock(repository):
+        rendered, chunks = render_bank_index(bank)
+        previous = (
+            index_path.read_text(encoding="utf-8") if index_path.is_file() else None
+        )
+        changed = previous != rendered
+        if changed:
+            atomic_write(index_path, rendered)
+    return {
+        "index": "memory-bank/INDEX.md",
+        "chunks": chunks,
+        "changed": changed,
+    }
+
+
 def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
     promotion_path = brain_root(repository) / "control" / "promotions" / f"{promotion_id}.json"
     bank = repository / "memory-bank"
     index_path = bank / "INDEX.md"
-    counter_path = bank / ".memory-counter"
     with mutation_lock(repository):
         try:
             proposal = json.loads(promotion_path.read_text(encoding="utf-8"))
@@ -1718,18 +2066,21 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
                 or current["revision"] != source["revision"]
             ):
                 raise BrainError(f"Promotion source revision changed: {source['id']}")
-        try:
-            counter = int(counter_path.read_text(encoding="utf-8").strip())
-            old_index = index_path.read_text(encoding="utf-8")
-            old_counter = counter_path.read_text(encoding="utf-8")
-        except (OSError, ValueError) as error:
-            raise BrainError("Memory Bank counter or index is unavailable") from error
-        memory_id = f"MEM-{counter:04d}"
+        today = datetime.now(timezone.utc).date()
+        # Conflict-free identifier: the promotion date plus eight hex
+        # characters of the source record's UUID. Two machines or branches
+        # promoting concurrently cannot collide the way the retired shared
+        # `.memory-counter` file did, so a later merge is a plain union of
+        # chunk files. The legacy counter file may remain on disk; it is
+        # neither read nor written here.
+        source_uuid = proposal["source_records"][0]["id"]
+        memory_id = (
+            f"MEM-{today.strftime('%Y%m%d')}-{source_uuid.replace('-', '')[:8]}"
+        )
         slug = re.sub(r"[^a-z0-9]+", "-", proposal["title"].lower()).strip("-") or "promoted"
         destination = bank / "chunks" / f"{memory_id}-{slug}.md"
         if destination.exists():
             raise BrainError(f"Promotion destination already exists: {destination}")
-        today = datetime.now(timezone.utc).date()
         # Tag the chunk so the bank itself shows which knowledge no human
         # approved; a reader must not have to open the promotion to find out.
         tags = ["project-brain", "promoted"] + (["auto-promoted"] if automatic else [])
@@ -1750,18 +2101,13 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
             metadata,
             content if content.startswith(heading) else f"{heading}\n\n{content}",
         )
-        row = (
-            f"| {memory_id} | {proposal['title']} | decision | application | "
-            f"{', '.join(tags)} | active | {today.isoformat()} | "
-            f"chunks/{destination.name} |\n"
-        )
-        snapshot = snapshot_files(
-            [destination, index_path, counter_path, promotion_path]
-        )
+        snapshot = snapshot_files([destination, index_path, promotion_path])
         try:
             atomic_write(destination, chunk)
-            atomic_write(index_path, old_index.rstrip() + "\n" + row)
-            atomic_write(counter_path, f"{counter + 1}\n")
+            # The index is derived state: regenerate it from chunk
+            # frontmatter instead of appending a row, so the same rendering
+            # path serves promotions, manual capture, and post-merge repair.
+            atomic_write(index_path, render_bank_index(bank)[0])
             validation_errors = validate_bank(bank)
             if validation_errors:
                 raise BrainError(
