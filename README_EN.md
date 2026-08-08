@@ -358,6 +358,28 @@ Security rules:
    repository access, Memory Bank, Project Brain, or Local Context Engine
    already supplied by the accelerator.
 
+Context rules:
+
+7. Scope every server to the smallest toolset it needs. Tool definitions sit
+   at the front of the model's context and are re-read on every turn of the
+   session, so their cost is paid per turn, not once. `github-mcp-server`
+   defaults to five toolsets (`context, repos, issues, pull_requests, users`)
+   and `--toolsets all` is substantially larger; do not use `all`. Run with
+   `--read-only` (`GITHUB_READ_ONLY=1`) unless a workflow needs writes, which
+   also satisfies rule 4. Run `playwright-mcp` without `--caps` unless a
+   capability is genuinely required. A server left at its widest setting can
+   occupy several times the context of this accelerator's own policy and skill
+   descriptions combined.
+8. Decide the server set before starting a session. Tool definitions are the
+   first tier of the prompt cache, ahead of the system prompt and the
+   conversation, so adding or removing a server mid-session invalidates that
+   cache and the accumulated context is re-established at full price.
+9. What a server returns usually costs more than what it declares, because a
+   large result stays in context and is re-read for the rest of the session.
+   Prefer bounded, structured output, and constrain at the call site anything
+   that can return a page, a log stream, or a query result set. Where an API
+   has no size parameter, the only lever is a narrower request.
+
 ## Infrastructure Creator
 
 `Infrastructure-Creator/` generates an accelerator for a specific target

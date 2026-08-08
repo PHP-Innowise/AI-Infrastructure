@@ -112,6 +112,58 @@ edition's own files remain in that edition's changelog.
   `.codex/config.toml`, the `subagent-policy.mdc` Cursor rule, and an
   AGENTS.md "Subagents" section as the steering layer. Regression coverage:
   `SubagentGateTest` in `memory-bank/tests/test_hooks.py`.
+- `scripts/build_mirrors.py` now generates and verifies a per-edition
+  `.gitattributes` marking every file it produces as
+  `-diff linguist-generated=true`. A generated mirror carries no information
+  its canon does not, so it collapses to a stub in review diffs; measured on
+  PR #11, the diff falls from 941,788 to 688,674 bytes (225,470 to 166,671
+  cl100k tokens, -26.1%). The list is derived from `MIRROR_RULES`, not
+  globbed: the tool directories also hold canonical files — hooks, commands,
+  agents, settings, Cursor rules, `config.toml` — which are deliberately
+  excluded and keep their diffs. Listed in each edition's install inventory
+  as a `shared` component. `git diff --name-only` is unaffected, so
+  `check_core_changelog.sh` and other name-based gates still see these files.
+- `scripts/cost_attribution.py`: developer-local counterpart to
+  `context_budget.py`. Reads the transcripts Claude Code writes under
+  `~/.claude/projects` and reports spend weighted by billing tier, grouped by
+  stratum, project, skill, MCP server, MCP tool, plugin and agent. No
+  exporter, no network, no configuration; never invoked by a hook, a skill,
+  or CI.
+
+### Changed
+
+- The Cursor working-memory rule no longer varies between turns when the
+  context does not. `.cursor/rules/working-memory.mdc` is `alwaysApply`, so it
+  is re-sent on every prompt; it previously embedded a render timestamp and
+  the serialized capsule, whose `manifest` key is a fresh UUID path per call.
+  Both changed every turn regardless of content. The Cursor hooks now render
+  the capsule (`hook-context` without `--json`) exactly as the Claude and
+  Codex hooks already did, so all three clients agree on one form. The
+  JSON-parse guard that protected the serialized form is replaced by a render
+  marker: a capsule is accepted only if it opens with the `working:` line, so
+  a broken render still cannot replace a good rule.
+- `print_capsule` reports pre-provision progress (`warming: N turn(s)
+  pending`) — the one field the serialized form carried that the warning text
+  did not. Emitted only while a task is unprovisioned.
+- The `review-pr` skill diffs the PR locally against its merge base instead of
+  calling `gh pr diff`, which renders server-side, accepts no pathspec, and
+  therefore cannot apply the generated-file markers. Triages on
+  `--name-only` first, and states that a stub is not a gap: review the canon
+  the file was generated from, and treat a stub whose canonical source is
+  absent from the diff as drift worth flagging.
+- Per-edition `README.md` files gained the "Optional MCP Integrations"
+  section, which previously existed only in the repository-root
+  `README_EN.md` / `README_RU.md` — neither of which ships to a consuming
+  project. Both root READMEs gained context rules 7-9: scope every server to
+  the smallest toolset, fix the server set before a session starts because
+  tool definitions are the first tier of the prompt cache, and bound what a
+  server returns because a large result is re-read for the rest of the
+  session.
+- `docs/OPERATIONS.md` gained a Context Economy subsection under Operating
+  Rules: delegate to a subagent only when it displaces roughly seven or more
+  main-session turns, and compact deliberately near ~400k of context. Both
+  thresholds are derived from local transcripts and are marked as such.
+
 ## 2.0.0 - 2026-08-07
 
 ### 2026-08-06 hook and installation hardening

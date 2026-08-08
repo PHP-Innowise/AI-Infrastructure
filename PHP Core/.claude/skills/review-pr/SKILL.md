@@ -38,20 +38,41 @@ Extract the PR number. If a URL is provided, parse the number from it.
 
 ### Step 2: Gather PR Context
 
-Run these commands to collect information about the PR:
+Collect metadata and the changed-file list first. Both are cheap, and the
+list decides how to read the diff:
 
 ```bash
 # PR metadata (title, body, author, base branch, state, labels)
 gh pr view <number> --json title,body,author,baseRefName,headRefName,state,labels,additions,deletions,changedFiles
 
-# The full diff
-gh pr diff <number>
-
 # Existing review comments (to avoid duplicating feedback)
 gh pr view <number> --json reviews,comments
 ```
 
-Read the diff carefully. If the diff is very large, focus on the most impactful files first -- look at the changed file list and prioritize:
+Then fetch the PR locally and diff it against its merge base:
+
+```bash
+git fetch origin "pull/<number>/head:pr-<number>"
+BASE=$(git merge-base origin/<baseRefName> "pr-<number>")
+
+# Triage: the file list alone, to plan the read
+git diff --name-only "$BASE" "pr-<number>"
+
+# The diff itself
+git diff "$BASE" "pr-<number>"
+```
+
+Diff locally rather than with `gh pr diff`. `gh pr diff` renders server-side,
+accepts no pathspec, and does not apply this repository's `.gitattributes` --
+so it re-sends every generated mirror in full. Locally, files marked
+`-diff linguist-generated=true` collapse to a one-line stub.
+
+**A stub is not a gap.** Those files are regenerated from a canonical source
+and verified by `build_mirrors.py --check`; the real change is in the canon
+they came from. Review the canonical file, not its copies. If a stub appears
+whose canonical source is *not* in the diff, that is drift worth flagging.
+
+Read the diff carefully. If it is still large, prioritize:
 1. Business logic over config/lockfiles
 2. New files over minor edits
 3. Files with security-sensitive operations (auth, DB queries, input handling)
