@@ -1,6 +1,6 @@
 ---
 name: sdd
-description: Spec-driven development. Use to carry a native PHP feature through durable spec, design, and task-list artifacts under specs/ and tasks/ before and while it is built, or to pick that work up again in a later session. Triggers on "spec-driven", "SDD", "write a spec first", "resume the spec", "break the spec into tasks".
+description: Spec-driven development: carry a feature through durable spec, design and task-list artifacts in specs/ and tasks/, resumable across sessions. Invoked as /sdd.
 phase: planning
 flow-next: writing-plans
 flow-alternatives: [coder, architecture-implementer]

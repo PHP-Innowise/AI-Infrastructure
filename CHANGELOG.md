@@ -172,6 +172,28 @@ edition's own files remain in that edition's changelog.
 
 ### Changed
 
+- **Body-size ceilings refit again after the `sdd` skill, and only those.**
+  `scripts/token_budget.json` `body_bytes` moves to observed + 5 % — Laravel
+  370,217, Symfony 181,612, PHP Core 208,474 — while the descriptor and
+  frontmatter ceilings stay where they are. The two categories are paid at
+  different times, and `/sdd` is the case that makes the difference visible:
+  its body is 6,031 B (~1,426 t) charged only when the flow runs, perhaps once
+  in a project's life, but its descriptor is charged on **every** session of
+  that edition, whether or not the flow is ever used. At the measured
+  descriptor ratio that is ~68 t per session against ~1,426 t once, so the
+  descriptor overtakes the body after about 20 sessions: a rarely-invoked
+  skill is the *worst* case for the startup surface, not a cheap one. Raising
+  the body ceiling therefore costs approximately nothing, and raising the
+  descriptor ceiling would buy a permanent startup tax in every consuming
+  project — so instead the `sdd` description was cut from ~330 B to 172 B by
+  dropping the trigger phrases, which exist to win automatic skill selection
+  that a deliberately typed `/sdd` does not need. That returns 158 B per
+  edition per session and leaves the descriptor headroom at 426 B (Laravel),
+  328 B (Symfony) and 292 B (PHP Core) without moving a ceiling. Skill-count
+  ceilings are also untouched: 36 × 1.05 rounds to PHP Core's existing 37, so
+  its single remaining slot is what the policy prescribes rather than an
+  accounting artefact.
+
 - Body-size ceilings in `scripts/token_budget.json` refit to observed + 5 %
   after the branch's final content edits (browser-verify bounds and the
   Infrastructure-Creator forge instructions), per the ceiling file's own

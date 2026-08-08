@@ -5,21 +5,21 @@
       "agents_md_bytes": 14766,
       "descriptor_bytes": 12769,
       "frontmatter_bytes": 19368,
-      "body_bytes": 363885,
+      "body_bytes": 370217,
       "skills": 47
     },
     "Symfony": {
       "agents_md_bytes": 17959,
       "descriptor_bytes": 10702,
       "frontmatter_bytes": 15564,
-      "body_bytes": 175232,
+      "body_bytes": 181612,
       "skills": 50
     },
     "PHP Core": {
       "agents_md_bytes": 14273,
       "descriptor_bytes": 9947,
       "frontmatter_bytes": 14844,
-      "body_bytes": 202100,
+      "body_bytes": 208474,
       "skills": 37
     },
     "Infrastructure-Creator": {
