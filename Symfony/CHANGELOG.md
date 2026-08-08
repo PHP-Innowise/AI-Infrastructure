@@ -13,6 +13,28 @@ it at the top of every session.
 
 ### Added
 
+- Spec-driven development: the `sdd` skill and the `/sdd` flow command.
+  `/sdd` runs specify -> design -> **checkpoint** -> task breakdown ->
+  **checkpoint** -> execute task by task -> tests -> parallel review ->
+  verify, spawning roster agents from the main conversation like the other
+  flows. What makes it spec-driven rather than a second feature flow is that
+  no stage completes without its artifact: the spec and the design land in
+  `specs/` and are registered in `specs/MANIFEST.md`, the task breakdown lands
+  in `tasks/<TASK-ID>/writing-plans-plan.md` as a checkbox list, and execution
+  marks a box and records a `context.py update` per task. The spec carries
+  user scenarios, numbered acceptance criteria and an edge-case table; every
+  task cites the criteria it serves, each coder capsule carries those criteria
+  verbatim rather than just the spec's path, and tests are written per
+  criterion. Where a criterion cannot be met as written the flow stops and
+  amends the spec instead of quietly redefining done. That citation chain is
+  what keeps implementation tied to the spec, and the artifacts are what make a
+  run resumable - `/sdd` reads the artifacts, works out which phase is done,
+  and continues at the first gap instead of restarting. It drives the
+  previously inert `specs/MANIFEST.md` scaffold, adds no new agent, and does
+  not integrate: `/finishing-branch` stays a separate step. `/sdd` is listed
+  among the sanctioned flow commands in AGENTS.md, so the subagent gate
+  treats it as one.
+
 - Opt-in orchestration flows: `/flow-feature` (requirements -> architecture
   -> plan -> checkpoint -> code -> tests -> parallel review -> verify ->
   checkpoint -> finishing-branch) and `/flow-review` (three read-only review

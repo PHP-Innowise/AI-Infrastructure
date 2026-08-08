@@ -49,6 +49,7 @@
 .claude/skills/requirements-analyst/SKILL.md -diff linguist-generated=true
 .claude/skills/researcher/SKILL.md -diff linguist-generated=true
 .claude/skills/review-pr/SKILL.md -diff linguist-generated=true
+.claude/skills/sdd/SKILL.md -diff linguist-generated=true
 .claude/skills/security-reviewer/SKILL.md -diff linguist-generated=true
 .claude/skills/systematic-debugger/SKILL.md -diff linguist-generated=true
 .claude/skills/test-generator/SKILL.md -diff linguist-generated=true
@@ -187,6 +188,7 @@
 .cursor/commands/requirements-analyst.md -diff linguist-generated=true
 .cursor/commands/researcher.md -diff linguist-generated=true
 .cursor/commands/review-pr.md -diff linguist-generated=true
+.cursor/commands/sdd.md -diff linguist-generated=true
 .cursor/commands/security-reviewer.md -diff linguist-generated=true
 .cursor/commands/skill-creator.md -diff linguist-generated=true
 .cursor/commands/test-generator.md -diff linguist-generated=true
@@ -236,6 +238,7 @@
 .cursor/skills/requirements-analyst/SKILL.md -diff linguist-generated=true
 .cursor/skills/researcher/SKILL.md -diff linguist-generated=true
 .cursor/skills/review-pr/SKILL.md -diff linguist-generated=true
+.cursor/skills/sdd/SKILL.md -diff linguist-generated=true
 .cursor/skills/security-reviewer/SKILL.md -diff linguist-generated=true
 .cursor/skills/systematic-debugger/SKILL.md -diff linguist-generated=true
 .cursor/skills/test-generator/SKILL.md -diff linguist-generated=true

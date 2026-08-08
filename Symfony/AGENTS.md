@@ -92,11 +92,11 @@ The same accelerator is mirrored for **Claude Code** (`.claude/`), **Cursor** (`
 
 ## Orchestration (Flows, SCOPED)
 
-- A sanctioned flow command (`/flow-feature`, `/flow-review`) run in the MAIN
-  conversation MAY spawn several roster agents in sequence - in parallel only
-  for read-only agents - per its declared `stages:` list. This is the one
-  exception to "MUST NOT chain"; spawned agents keep every rule in this file
-  and MUST NOT chain themselves or spawn outside the roster.
+- A sanctioned flow command (`/flow-feature`, `/flow-review`, `/sdd`) run in
+  the MAIN conversation MAY spawn several roster agents in sequence - in
+  parallel only for read-only agents - per its declared `stages:` list. This
+  is the one exception to "MUST NOT chain"; spawned agents keep every rule in
+  this file and MUST NOT chain themselves or spawn outside the roster.
 - A flow MUST pass each agent a bounded delegation capsule (objective, output
   format, tool/source guidance, boundaries, decisions-and-assumptions so far),
   MUST pause at every declared checkpoint for explicit user approval, MUST run

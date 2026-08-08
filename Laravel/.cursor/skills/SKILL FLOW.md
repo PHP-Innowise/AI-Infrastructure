@@ -71,6 +71,12 @@ multi-phase work, not for small fixes.
 - `/flow-review` - code-reviewer, security-reviewer and
   performance-optimization in parallel (read-only), then one deduplicated
   report synthesized in the main conversation.
+- `/sdd` - spec-driven development: specify -> design -> **checkpoint** ->
+  task breakdown -> **checkpoint** -> execute task by task -> tests ->
+  parallel review -> verify. Every phase leaves a durable artifact in
+  `specs/` and `tasks/`, so the run can be resumed in a later session; see
+  the `sdd` skill for the artifact contract. Does not integrate - finish
+  with `/finishing-branch`.
 
 Each stage hands the next agent a bounded Task Capsule (see below); the user
 can amend, skip a stage, or abort at any checkpoint.
