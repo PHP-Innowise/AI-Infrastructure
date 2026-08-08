@@ -109,6 +109,32 @@ correctness note it encodes: Claude Code writes one transcript record per
 content block and repeats `message.usage` on each, so totals must be collapsed
 on `message.id` — summing records inflates spend by more than 2x.
 
+## scripts/collect_context.py
+
+Packages a chosen slice of the repository into one bundle for an external
+model, wrapping the optional `code2prompt` CLI. Developer-local: no edition,
+inventory, hook or blocking CI gate depends on it, and
+`tests/test_collect_context.py::test_containment` fails if one ever does.
+
+```bash
+./collect                                   # list the scopes
+./collect skills --edition Laravel --dry-run
+./collect core --edition Symfony
+./collect diff --base origin/main --stdout
+```
+
+`./collect` is a one-line `exec` wrapper in the repository root; this file is
+executable too, so `scripts/collect_context.py` works the same way. In Claude
+Code, `.claude/commands/collect.md` at the repository root exposes the same
+tool as `/collect <scope> [options]`.
+
+The scopes exist because a bare `code2prompt` invocation in this checkout
+reads `.git` blobs, the client-owned `Task/` specifications, and all three
+generated mirror trees. It also treats `*` as crossing directory separators,
+so `-i "*.md"` at the root collects 419 files rather than the four intended.
+Bundles and their manifests land in the ignored `/.c2p/`. Full rationale and
+the tokenizer caveat: [`docs/TOOL-INTEGRATIONS.md`](../docs/TOOL-INTEGRATIONS.md).
+
 ## Adding or changing files
 
 1. Edit the **canonical** copy only (see the table above), then run

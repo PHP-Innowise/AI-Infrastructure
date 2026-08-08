@@ -11,7 +11,7 @@ the Python standard library, and never uses `sudo`.
 | `tests` | The unit-test suites of every edition (7 suites, run in a matrix). |
 | `parity` | Mirror parity and cross-edition core parity for Laravel, Symfony, and PHP Core. |
 | `mirrors` | Every per-tool mirror matches its canon (`scripts/build_mirrors.py --check`). |
-| `installation` | Exact versioned inventories match the repository, and every Laravel/Symfony/PHP Core × Claude/Cursor/Codex selected-tool install passes isolated validate/status/index smoke tests without application, `.env`, or application-database access. |
+| `installation` | Exact versioned inventories match the repository, and every Laravel/Symfony/PHP Core × Claude/Cursor/Codex selected-tool install passes isolated validate/status/index smoke tests without application, `.env`, or application-database access. Also that framework-specific skill semantics survive, and that the optional context-collection tool stays out of the editions and the installer. |
 | `lint` | `bash -n` and `shellcheck -S error` on all tracked `.sh`; `python3 -m json.tool` on all tracked `.json`; startup context budget within ceilings (`scripts/context_budget.py --check`). |
 | `changelog` | Pull requests only: a diff that touches shared-core files (memory/context core, Project Brain, hooks, `scripts/`) must also change the root `CHANGELOG.md` (`scripts/check_core_changelog.sh`). |
 | `links` | All relative markdown links in tracked `.md` files resolve (`scripts/check_links.py`). |
@@ -62,6 +62,8 @@ python3 scripts/build_mirrors.py --check
 ```bash
 python3 scripts/install_accelerator.py --verify-inventories
 python3 -m unittest tests.test_installation
+python3 -m unittest tests.test_framework_semantics
+python3 -m unittest tests.test_collect_context
 ```
 
 The synthetic matrix installs each PHP edition once for each selected AI tool
@@ -72,13 +74,22 @@ Composer hooks, and application-database sentinels prove the test does not
 execute application code or use application configuration/data. The context
 engine uses only its disposable database inside the temporary target.
 
+`tests.test_collect_context` covers the optional context-collection tool
+(`scripts/collect_context.py`). Its live checks skip themselves when the
+`code2prompt` binary is absent, which is always the case here — CI carries no
+Rust toolchain and the tool is never a blocking gate. What runs is the
+contract: the argv and exclude pins, and `test_containment`, which fails if
+`code2prompt` is ever referenced from an edition or from the installer.
+
 ### lint
 
 ```bash
-git ls-files -z -- '*.sh' | xargs -0 -r -n1 bash -n
+# 'collect' is a shell script without the .sh extension; it is listed
+# explicitly so that every tracked shell file stays inside the gate.
+git ls-files -z -- '*.sh' 'collect' | xargs -0 -r -n1 bash -n
 
 # Requires shellcheck (preinstalled on GitHub ubuntu-latest runners).
-git ls-files -z -- '*.sh' | xargs -0 -r shellcheck -S error
+git ls-files -z -- '*.sh' 'collect' | xargs -0 -r shellcheck -S error
 
 git ls-files -z -- '*.json' | while IFS= read -r -d '' f; do
   python3 -m json.tool "$f" > /dev/null || { echo "Invalid JSON: $f" >&2; exit 1; }

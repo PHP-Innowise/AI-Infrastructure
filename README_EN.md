@@ -380,6 +380,61 @@ Context rules:
    that can return a page, a log stream, or a query result set. Where an API
    has no size parameter, the only lever is a narrower request.
 
+## Optional Developer Tooling: Context Collection
+
+`scripts/collect_context.py` packages a chosen slice of **this repository**
+into a single bundle for pasting into an external model — a review in a chat
+window, a second opinion on the memory core, a diff explained to a model that
+cannot see the checkout. It wraps the optional
+[`code2prompt`](https://code2prompt.dev/docs/how_to/cli/) CLI and belongs to
+the same category as the MCP servers above: optional, external, opt-in per
+developer. It is never installed into a target project, never listed in an
+inventory, and never a blocking CI gate.
+
+In Claude Code, opened at the monorepo root, the command is `/collect`:
+
+```text
+/collect                                  # list the scopes
+/collect skills --edition Laravel --dry-run
+/collect core --edition Symfony           # -> .c2p/
+```
+
+In a shell, `./collect` at the repository root is the same tool — no
+interpreter prefix, arguments and exit status passed straight through:
+
+```bash
+./collect                                   # list the scopes
+./collect skills --edition Laravel --dry-run
+./collect diff --base origin/main --stdout
+```
+
+Scopes are `edition`, `skills`, `core` and `hooks` (each takes `--edition`),
+plus `tooling`, `docs`, `harness`, `diff` and `custom`. Bundles land in the
+ignored `/.c2p/` next to a manifest recording the exact patterns, counts and
+binary version.
+
+`/collect` lives in the repository-root `.claude/commands/`, outside every
+edition, so it travels with this monorepo and never with an installed
+accelerator. It writes the bundle to a file and reports only the summary —
+the bundle is meant for a model that cannot see the checkout, so loading it
+into the session that produced it would spend exactly the context it was
+built to move elsewhere.
+
+The wrapper exists because a bare `code2prompt` invocation is unsafe in this
+checkout. It always excludes `.git`; it excludes `Task/` unless `--with-task`,
+because that directory holds client-owned product specifications; it excludes
+the generated `.claude`/`.cursor`/`.codex` mirrors unless `--with-mirrors`,
+since they carry no information their canon does not; and it runs in an
+isolated directory, because a `.c2pconfig` in the working directory is
+auto-loaded with no way to opt out. A pattern that matches nothing becomes an
+error rather than upstream's silent empty bundle.
+
+Reported token counts come from cl100k, the OpenAI BPE tokenizer the CLI
+carries. **That is not a count of Claude tokens** — it is a calibrated
+relative unit, useful for comparing two bundles, not for predicting a bill.
+Full rationale, measurements and the decision not to adopt the `code2prompt`
+MCP server or Python SDK: [docs/TOOL-INTEGRATIONS.md](docs/TOOL-INTEGRATIONS.md).
+
 ## Infrastructure Creator
 
 `Infrastructure-Creator/` generates an accelerator for a specific target

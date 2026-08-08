@@ -28,6 +28,46 @@ edition's own files remain in that edition's changelog.
 
 ### Added
 
+- **A context-collection command for external models
+  (`scripts/collect_context.py`), wrapping the optional `code2prompt`
+  CLI.** Invoked as `/collect <scope> [options]` in Claude Code, from a
+  new repository-root `.claude/commands/collect.md`, or as `./collect` in
+  a shell — a one-line `exec` wrapper over the now-executable
+  `scripts/collect_context.py`, so arguments and exit status pass through
+  unchanged. A bare invocation lists the scopes. Both entry points sit at
+  the repository root, outside every edition, so an installed accelerator
+  never carries a command for a tool it does not ship, and
+  `build_mirrors.py` — which walks only the four edition directories —
+  never sees them. The slash command caps its injected output and tells
+  the model to report the summary without opening the bundle, which
+  exists for a model that cannot see the checkout. Because `collect`
+  carries no `.sh` extension, the `lint` job now lists it by name
+  alongside `*.sh`, keeping every tracked shell file inside `bash -n` and
+  `shellcheck`. Nine scopes — `edition`, `skills`, `core`, `hooks`, `tooling`,
+  `docs`, `harness`, `diff`, `custom` — package a chosen slice of the
+  repository into one bundle in the ignored `/.c2p/`, with a manifest
+  recording the exact patterns, counts and binary version. Phase 1 of
+  `docs/CODE2PROMPT-INTEGRATION-PLAN.md`, and deliberately the whole of
+  it: developer-local, zero runtime tokens saved, never a blocking gate.
+  The wrapper exists because the bare CLI is unsafe in this checkout,
+  and each guard answers a behaviour verified on 4.3.0: `.git` is always
+  excluded (the root with `--hidden` and no include reads 2,213 files,
+  `.git/config` among them); the client-owned `Task/` specifications are
+  excluded unless `--with-task` (collecting `Laravel/**/*.md` without it
+  adds ~87k tokens of named-client material); the generated
+  `.claude`/`.cursor`/`.codex` mirrors are excluded unless
+  `--with-mirrors`; every run executes in an empty directory with
+  `XDG_CONFIG_HOME` redirected, because a `.c2pconfig` in the working
+  directory is auto-loaded with no opt-out; and a pattern matching
+  nothing becomes an error instead of upstream's silent empty bundle.
+  Two upstream traits are absorbed rather than documented away: `*`
+  crosses directory separators there, so scopes declare top-level wants
+  separately and the wrapper expands them with Python's own glob.
+  `tests/test_collect_context.py` runs in CI without the binary; its
+  `test_containment` fails if `code2prompt` is ever referenced from an
+  edition or the installer. Token counts are cl100k (OpenAI BPE) and are
+  labelled everywhere as not a count of Claude tokens.
+
 - **Stage D — the external batch harness joins the monorepo as a
   repo-root companion (`harness/`).** A LangGraph-based runner for
   unattended pipelines: the fleet-review graph (Send fan-out of review

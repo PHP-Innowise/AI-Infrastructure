@@ -6,3 +6,5 @@ __pycache__/
 memory-bank/local/
 .venv/
 .superpowers/
+/.c2p/
+/.c2pconfig
