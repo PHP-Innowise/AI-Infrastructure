@@ -1,28 +1,32 @@
 {
-  "_comment": "Ceilings for the startup context budget, checked by scripts/context_budget.py --check (CI job lint). Policy: ceiling = observed value + ~5% headroom, so CI catches regressions without flagging noise. After a deliberate slimming, tighten to the new observed values + ~5%; raise a ceiling only together with the change that justifies the growth. Current values: python3 scripts/context_budget.py.",
+  "_comment": "Ceilings for the context budget, checked by scripts/context_budget.py --check (CI job lint). Policy: ceiling = observed value + ~5% headroom, so CI catches regressions without flagging noise. After a deliberate slimming, tighten to the new observed values + ~5%; raise a ceiling only together with the change that justifies the growth. Values are BYTES; the script converts them to calibrated cl100k estimates for the report (see BYTES_PER_TOKEN there). body_bytes is the per-invocation cost of skill bodies - an order of magnitude above the startup surface, which is why it is gated rather than left unmeasured. Current values: python3 scripts/context_budget.py.",
   "editions": {
     "Laravel": {
       "agents_md_bytes": 14766,
-      "frontmatter_bytes": 19312,
-      "description_bytes": 11161,
+      "descriptor_bytes": 12769,
+      "frontmatter_bytes": 19368,
+      "body_bytes": 362602,
       "skills": 47
     },
     "Symfony": {
       "agents_md_bytes": 17959,
-      "frontmatter_bytes": 15500,
-      "description_bytes": 8865,
+      "descriptor_bytes": 10702,
+      "frontmatter_bytes": 15564,
+      "body_bytes": 173949,
       "skills": 50
     },
     "PHP Core": {
       "agents_md_bytes": 14273,
-      "frontmatter_bytes": 14788,
-      "description_bytes": 8649,
+      "descriptor_bytes": 9947,
+      "frontmatter_bytes": 14844,
+      "body_bytes": 200817,
       "skills": 37
     },
     "Infrastructure-Creator": {
-      "agents_md_bytes": 12272,
+      "agents_md_bytes": 12720,
+      "descriptor_bytes": 12849,
       "frontmatter_bytes": 18078,
-      "description_bytes": 11990,
+      "body_bytes": 168514,
       "skills": 25
     }
   }

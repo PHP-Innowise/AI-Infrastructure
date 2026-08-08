@@ -44,6 +44,30 @@ Use the project's documented command (check `README.md`, `composer.json` scripts
 - Responsive layouts work at mobile and desktop widths.
 - For Blade + Alpine.js pages, the page still works with JavaScript disabled where the design calls for a no-JS baseline; for Livewire/Inertia pages (inherently JS-dependent), instead confirm a clear loading indicator appears while the JS/assets are loading and a sensible error message appears if a request fails.
 
+## Payload Bounds (MANDATORY)
+
+Browser tooling returns the heaviest payloads in this workflow: one full-page
+accessibility snapshot or screenshot can cost more context than every other
+step of the verification combined, and it is carried for the rest of the
+session. Stay inside these bounds regardless of which browser tool is wired:
+
+- Prefer a targeted read - one element, one selector, the page title, the
+  form error - over a full-page snapshot. Take a full snapshot only when a
+  targeted read cannot answer the question.
+- At most three screenshots per verification, each scoped to the element or
+  viewport under test rather than the full page, unless layout itself is what
+  is being verified.
+- Filter console and network reads to errors and the request under test;
+  never dump the whole log or the whole request list.
+- Never paste a raw snapshot, DOM dump, or screenshot payload into the
+  report, the handoff, or a Brain record: cite the URL, the element, and the
+  observed behavior instead.
+- Close the tab or session once the checklist is done, so no page state is
+  carried into the next turn.
+
+When a bound would prevent answering the question, say so in the report
+rather than silently exceeding it.
+
 ## Evidence
 
 Capture:

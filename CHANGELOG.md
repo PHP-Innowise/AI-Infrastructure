@@ -132,6 +132,38 @@ edition's own files remain in that edition's changelog.
 
 ### Changed
 
+- **`context_budget.py` now measures what is actually paid.** Token
+  estimates use per-class bytes-per-token ratios measured with cl100k on
+  this repository's own files instead of a flat `bytes / 4`, which runs
+  19–25 % high on exactly these files; the calibration reproduces the
+  research's independent figures to 0.1 % (Laravel bodies 81,639 vs 81,719
+  cl100k t). The gated surface is now `descriptor_bytes` (`name` +
+  `description` — the text skill selection matches against) rather than the
+  whole frontmatter, and skill **bodies are budgeted for the first time**:
+  they are an order of magnitude above the startup surface (Laravel ~81.6k
+  vs ~4.0k t) and were previously unmeasured, so the gate covered about a
+  twentieth of the cost. The monorepo row is relabelled — it is what a
+  monorepo checkout exposes, not a price any consuming project pays.
+  Ceilings regenerated for the new categories; skill-count ceilings kept
+  where they were, since tightening those is a separate decision.
+- **browser-verify gained mandatory payload bounds.** Full-page snapshots
+  and screenshots are the heaviest payloads in these workflows and are
+  carried for the rest of the session; the skill now caps screenshots,
+  prefers targeted reads over full snapshots, forbids pasting raw
+  snapshot/DOM payloads into reports or Brain records, and requires closing
+  the session. Roughly 1 KB of skill body, paid once per invocation, in
+  front of payloads measured in tens of KB.
+- **Two subagent-gate fixes from the harness self-review.** The write-agent
+  lock is now taken under `flock`, so two write-capable agents spawned in
+  one message can no longer both observe an unlocked state (covered by a
+  concurrent regression test); and the roster parser reads only the first
+  frontmatter block, so a `---` rule inside an agent's body can no longer
+  declare `writes:` and change the gate's decision. Both degrade to the
+  previous behaviour where `flock` or a writable guard path is missing,
+  never failing closed.
+- CI gains a lint step that fails when a per-turn invalidator (`date`,
+  `$RANDOM`, `uuidgen`) reappears in the Cursor rule render — the cheap
+  textual net in front of the behavioural test that already covers it.
 - The Cursor working-memory rule no longer varies between turns when the
   context does not. `.cursor/rules/working-memory.mdc` is `alwaysApply`, so it
   is re-sent on every prompt; it previously embedded a render timestamp and

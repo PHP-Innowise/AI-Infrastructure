@@ -63,18 +63,26 @@ AGENTS_DIR="$ROOT_DIR/.claude/agents"
 # Roster = every frontmatter `name:` in the accelerator's agent definitions.
 # `writes: true` marks a write-capable agent (its skill edits repository
 # files); those run one at a time, serialized by a TTL lock below.
+# Only the FIRST frontmatter block is metadata. A sed line range would
+# restart at every later `---` pair, so a horizontal rule in an agent's body
+# could declare `writes:` and change the gate's decision.
+first_frontmatter() {
+  awk 'NR==1 && $0!="---" {exit} NR==1 {next} $0=="---" {exit} {print}' "$1"
+}
+
 ROSTER=""
 WRITES="false"
 for agent_file in "$AGENTS_DIR"/*.md; do
   [ -f "$agent_file" ] || continue
   case "${agent_file##*/}" in README.md) continue ;; esac
-  name=$(sed -n '/^---$/,/^---$/s/^name:[[:space:]]*//p' "$agent_file" \
+  front=$(first_frontmatter "$agent_file")
+  name=$(printf '%s\n' "$front" | sed -n 's/^name:[[:space:]]*//p' \
     | head -n 1 | tr -d '"' | sed 's/[[:space:]]*$//')
   [ -n "$name" ] || continue
   ROSTER="$ROSTER$name
 "
   if [ "$name" = "$SUB_TYPE" ]; then
-    flag=$(sed -n '/^---$/,/^---$/s/^writes:[[:space:]]*//p' "$agent_file" \
+    flag=$(printf '%s\n' "$front" | sed -n 's/^writes:[[:space:]]*//p' \
       | head -n 1 | tr -d '"' | sed 's/[[:space:]]*$//')
     [ "$flag" = "true" ] && WRITES="true"
   fi
@@ -96,6 +104,19 @@ if printf '%s' "$ROSTER" | grep -qxF -- "$SUB_TYPE"; then
   case "$LOCK_TTL_MINUTES" in
     *[!0-9]*|'') LOCK_TTL_MINUTES=30 ;;  # a bogus TTL must not become "never expires"
   esac
+  # Serialize the check-and-take below: two write-capable agents spawned in
+  # one message would otherwise both read an unlocked state and both proceed.
+  # The guard descriptor is released when this script exits, which happens
+  # immediately after the decision. Without flock, or without a writable
+  # guard path, the window remains and the gate degrades to its previous
+  # behavior rather than failing closed. The appendability probe runs first
+  # because a failing `exec` redirection ends a non-interactive shell — and
+  # no redirection may be attached to `exec` itself, which would apply it to
+  # the whole script (silencing the block message below).
+  if command -v flock > /dev/null 2>&1 && : >> "$LOCK_FILE.guard" 2>/dev/null; then
+    exec 9>>"$LOCK_FILE.guard"
+    flock 9 2>/dev/null || :
+  fi
   if [ -f "$LOCK_FILE" ] \
     && [ -z "$(find "$LOCK_FILE" -mmin +"$LOCK_TTL_MINUTES" 2>/dev/null)" ]; then
     HOLDER=$(cat "$LOCK_FILE" 2>/dev/null)

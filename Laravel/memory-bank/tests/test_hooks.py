@@ -22,6 +22,7 @@ import sys
 import tempfile
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 EDITION_ROOT = Path(__file__).resolve().parents[2]
@@ -1001,6 +1002,45 @@ class SubagentWriteLockTest(WriteLockMixin, unittest.TestCase):
         result = self.spawn("cursor", "code-reviewer")
         self.assertEqual(
             "allow", json.loads(result.stdout)["permission"], result.stderr
+        )
+
+    def test_concurrent_write_spawns_take_the_lock_exactly_once(self) -> None:
+        """Parallel spawns in one message must not both pass the gate.
+
+        The check-and-take is serialized with flock; without it both
+        invocations read an unlocked state and mutual exclusion is lost.
+        """
+        if shutil.which("flock") is None:
+            self.skipTest("flock unavailable; the gate degrades by design")
+        agents = ("coder", "refactorer", "test-generator")
+        with ThreadPoolExecutor(max_workers=len(agents)) as pool:
+            codes = [
+                result.returncode
+                for result in pool.map(lambda a: self.spawn("claude", a), agents)
+            ]
+        self.assertEqual(1, codes.count(0), codes)
+        self.assertEqual(len(agents) - 1, codes.count(2), codes)
+
+    def test_body_horizontal_rule_cannot_declare_writes(self) -> None:
+        """Only the first frontmatter block is metadata.
+
+        A `---`-delimited section in an agent's body used to re-open the
+        sed range, so a body line reading `writes: true` marked a read-only
+        agent as write-capable.
+        """
+        trap = EDITION_ROOT / ".claude" / "agents" / "zz-parser-trap-agent.md"
+        trap.write_text(
+            "---\nname: zz-parser-trap\ndescription: read-only fixture\n"
+            "phase: understanding\n---\n\n# Trap\n\nProse.\n\n---\n"
+            "writes: true\n---\n\nMore prose.\n",
+            encoding="utf-8",
+        )
+        self.addCleanup(trap.unlink)
+        result = self.spawn("claude", "zz-parser-trap")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertFalse(
+            self.lock_path("claude").exists(),
+            "a body horizontal rule must not make an agent write-capable",
         )
 
 
