@@ -26,7 +26,7 @@ Writes a report to `tasks/TASK-{N}/bootstrap-verifier-report.md`. Does not write
    - Every selected edition root exists and every unselected edition root is absent (`.claude`; `.cursor`; `.agents` + `.codex` for Codex).
    - Frontmatter validity across every generated `SKILL.md`, agent, and command.
    - Every `flow-next`/`flow-alternatives`/`related`/`invokes`/`spawns` reference resolves to a skill/agent that exists in that edition.
-   - Every generated hook passes `bash -n` and carries the executable bit, and the per-edition hook set is complete (six hooks; Cursor deliberately has no `working-memory-read.sh`).
+   - Every generated hook passes `bash -n` and carries the executable bit, and the per-edition hook set is complete (seven hooks - six shared plus the tool-owned `subagent-gate.sh` variant; Cursor deliberately has no `working-memory-read.sh`).
    - Every hook wiring file (`.claude/settings.json`, `.cursor/hooks.json`, `.codex/hooks.json` + `config.toml`) references only hook scripts that exist and are executable - no dead hooks; every `.sh` token in a wired command is resolved, so an interpreter-prefixed `bash .claude/hooks/x.sh` cannot slip through.
    - The seeded `memory-bank/` passes its own `scripts/validate.py`.
    - The context-brain runtime is complete (`context.py`, `brain_runtime.py`, `context_retrieval.py`, `validate.py` under `memory-bank/scripts/`), the `project-brain/` skeleton exists, and `config/runtime.json` parses with a substituted, non-empty framework slug and a `canonical_edition` whose skills tree actually exists in the target (otherwise `context.py parity` would report false total drift).

@@ -6,6 +6,19 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Changed
 
+- **Generated accelerators now restrict subagents to their own roster.**
+  `hook-forge` produces a seventh hook, `subagent-gate.sh` - three
+  tool-owned variants (Claude PreToolUse exit codes against the generated
+  `.claude/agents` roster, Cursor `subagentStart` permission JSON with
+  `failClosed`, Codex spawn_agent-family deny) - and wires the
+  configuration half per edition: `Agent(...)` deny rules plus the
+  built-in-agent env keys in `.claude/settings.json`, `subagentStart` in
+  `.cursor/hooks.json`, `multi_agent = false` and `[agents] enabled =
+  false` in `.codex/config.toml`. `policy-forge` adds a Subagents section
+  to the generated `AGENTS.md`; `bootstrap-verifier` and
+  `validate_generated.py` enforce the seven-hook contract (the gate is
+  exempt from byte-identity by design).
+
 - `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` joins `.claude/settings.json`:
   the generator's flows orchestrate from the main conversation, so nested
   subagent trees add cost without oversight. The tool-owned

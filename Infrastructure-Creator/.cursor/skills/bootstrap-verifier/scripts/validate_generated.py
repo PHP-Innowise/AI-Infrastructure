@@ -91,13 +91,16 @@ RUNTIME_SCRIPTS = (
 # it has no UserPromptSubmit-equivalent event to wire it to. Its read path is
 # the alwaysApply rule .cursor/rules/working-memory.mdc that the Cursor
 # copies of working-memory-write.sh and local-context.sh render instead
-# (hook-forge step 6).
+# (hook-forge step 6). subagent-gate.sh is present in every edition but is
+# tool-owned - each edition ships a variant matching its host's gate
+# contract, so byte-identity across editions is NOT expected for it.
 BASE_HOOKS = (
     "local-context.sh",
     "bash-validator.sh",
     "file-naming-validator.sh",
     "loop-detection.sh",
     "working-memory-write.sh",
+    "subagent-gate.sh",
 )
 REQUIRED_HOOKS = {
     "claude": BASE_HOOKS + ("working-memory-read.sh",),
