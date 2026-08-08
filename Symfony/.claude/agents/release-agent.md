@@ -20,6 +20,7 @@ assistant: \"I'll use the release agent to tag and publish the release.\"
 model: haiku
 invokes: release
 phase: finalization
+writes: true
 ---
 
 # Release Agent

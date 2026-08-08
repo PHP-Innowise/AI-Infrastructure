@@ -28,6 +28,61 @@ edition's own files remain in that edition's changelog.
 
 ### Added
 
+- **Host-native orchestration enhancers — Stage C of
+  `docs/AGENT-ORCHESTRATION-DESIGN.md`.** A new canonical hook,
+  `subagent-dispatch.sh` (registered on Claude Code's `SubagentStop` and
+  Cursor's `subagentStop`; the Codex mirror exists but stays unregistered
+  while multi-agent is off), records every subagent completion in the Stage B
+  channel automatically — one sanitized line from the final assistant message
+  (Cursor: `status`, since its documented `summary` field is unreliable) —
+  and releases the write-agent lock. Write-capable agents are now declared
+  with `writes: true` frontmatter (13 core agents plus each edition's
+  framework implementers; the Cursor mirrors carry the key) and the
+  subagent gates serialize them: one write-capable agent at a time per
+  repository via a TTL lock (`/tmp/<tool>-write-agent-lock-<repo-key>`,
+  30 min default, `SUBAGENT_WRITE_LOCK_TTL_MINUTES` override), released on
+  completion or expiry; read-only agents keep running in parallel.
+  `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` lands in every edition's
+  settings.json — the orchestrator is the main conversation, nested trees
+  add cost without oversight. The Codex decision point is resolved:
+  multi-agent stays off (the edition delegates through skills by design;
+  hooks there are a guardrail, not a boundary). Flow commands drop the
+  manual completion recording (the observer covers it) and prefer resuming
+  an agent over respawning. Regression coverage: `SubagentWriteLockTest`
+  and `SubagentDispatchTest` in `memory-bank/tests/test_hooks.py`.
+- **Agent communication substrate — Stage B of
+  `docs/AGENT-ORCHESTRATION-DESIGN.md`.** The context runtime gains a
+  task-scoped agent channel: an append-only JSONL journal per task under
+  `project-brain/control/messages/`, written under the global mutation lock
+  and validated line-by-line (in-code rules plus the new
+  `message.schema.json`) — `msg-send` / `msg-read` (recipient, `--since`, and
+  type filters; no read cursor by design) and `msg-dispatch`, the
+  orchestration log that fingerprints each delegation capsule (SHA-256) and
+  refuses a spawn whose capsule fails the mandatory-section check exposed
+  standalone as `capsule --validate` (objective, output format, tool and
+  source guidance, boundaries, decisions and assumptions). Bodies are capped
+  at the 8,000-character capsule bound and screened by the existing secret
+  patterns; a terminal task refuses new messages but its journal stays
+  readable after the binding is gone. `update` gains `--actor` (roster-slug
+  attribution prefixed to progress) and a phase-order guard: phases move
+  only forward unless `--allow-phase-regression` states the regression is
+  deliberate. PROTOCOL.md documents the channel; the flow commands record
+  their spawns and completions through it; regression coverage in the new
+  `memory-bank/tests/test_channel.py` (12 tests, byte-identical across the
+  PHP editions).
+- **Opt-in orchestration flows — Stage A of
+  `docs/AGENT-ORCHESTRATION-DESIGN.md`.** Each PHP edition ships
+  `/flow-feature` and `/flow-review`: commands whose `stages:` frontmatter
+  declares the agent sequence, executed by the MAIN conversation as
+  orchestrator — roster agents only, one bounded delegation capsule per spawn
+  (objective, output format, tool/source guidance, boundaries,
+  decisions-and-assumptions), parallel stages restricted to read-only agents,
+  and a mandatory pause at every declared checkpoint. AGENTS.md gains the
+  "Orchestration (Flows, SCOPED)" section; SKILL FLOW.md documents the flows;
+  Cursor command mirrors are generated, Codex deliberately keeps its
+  sequential skill flow. The `agents_md_bytes` ceilings in
+  `scripts/token_budget.json` rise to the new observed values + 5% — the
+  growth is the two policy sections, per the ceiling file's stated policy.
 - **Subagent spawning is now restricted to the accelerator's own roster.**
   Each edition ships a tool-owned `subagent-gate.sh` in all three hooks
   directories — a `MIRROR_RULES` `skip` entry, since each host exposes a

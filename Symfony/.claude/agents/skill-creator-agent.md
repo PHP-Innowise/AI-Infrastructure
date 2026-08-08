@@ -4,6 +4,7 @@ description: "Use this agent to create or update skills that extend Claude's cap
 model: sonnet
 invokes: skill-creator
 phase: utility
+writes: true
 ---
 
 # Skill Creator Agent

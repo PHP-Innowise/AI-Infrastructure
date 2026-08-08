@@ -13,10 +13,13 @@ Project-scoped hooks load only when the project is **trusted**.
 | `Stop` | `working-memory-write.sh` | Buffer the turn's change set from Git porcelain metadata and flush a consolidated update on a boundary, provisioning the task on first flush; sensitive paths and runtime churn are excluded. | always `0` |
 | `PreToolUse` | `bash-validator.sh` | Block destructive shell commands (force-push, hard reset, DB drops/truncates, destructive migration resets, secret-writing Composer config, `--no-verify`). | `0` allow / `2` block |
 | `PreToolUse` | `file-naming-validator.sh` | Flag `.md` files in `tasks/`/`specs/` that break the skill-prefix naming convention. | `0` / `1` warn |
+| `PreToolUse` | `subagent-gate.sh` | Block Codex's built-in multi-agent tools (`spawn_agent` family); version-proof backstop for the `[features] multi_agent` and `[agents] enabled` switches in `config.toml`. | `0` allow / `2` block |
 | `PostToolUse` | `loop-detection.sh` | Track edit count per file to detect doom loops. | `0` / `1` warn / `2` block |
 
 No `matcher` is set on any group: each script self-filters on its input before doing any real work — `bash-validator.sh` exits unless the payload carries a `command`/`cmd` key, and `file-naming-validator.sh` and `loop-detection.sh` exit unless `tool_name` is a file-editing tool (or is absent) — so it is safe to run on every tool call and returns `0` when not applicable.
 
+
+`subagent-dispatch.sh` exists here as a byte-identical mirror of the canonical hook but stays unregistered: multi-agent is disabled in this edition's `config.toml`, so there are no subagent stops to observe.
 ## Supported events (Codex)
 
 `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `SessionStart`, `SubagentStart`, `SubagentStop`, `UserPromptSubmit`, `Stop`. Only command handlers run today; prompt/agent handlers are parsed but skipped.

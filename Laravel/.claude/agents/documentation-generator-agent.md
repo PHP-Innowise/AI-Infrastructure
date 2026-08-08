@@ -4,6 +4,7 @@ description: "Use this agent to generate and maintain Laravel project documentat
 model: haiku
 invokes: documentation-generator
 phase: finalization
+writes: true
 ---
 
 # Documentation Generator Agent

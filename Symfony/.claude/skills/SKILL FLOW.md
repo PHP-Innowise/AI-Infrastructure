@@ -58,6 +58,25 @@ All implementation, review, and planning work must respect root `AGENTS.md`, `sp
 - Use `/memory-bank` only for durable retrieval/capture/audit/supersession and governed automatic or independently reviewed promotion application; active work stays in Project Brain.
 - Use `/checkpoint`, `/memory` for authority-aware progress capture and unified context refresh; governed mode never creates SQLite task authority.
 
+## Flows (opt-in orchestration)
+
+A flow command runs several roster agents from the main conversation in one
+run: sequential stages, parallel only for read-only agents, and a mandatory
+pause at every declared checkpoint. Flows are the one sanctioned exception to
+"agents do not automatically chain" (see AGENTS.md, Orchestration section)
+and cost several agent runs' worth of tokens - use them for well-understood
+multi-phase work, not for small fixes.
+
+- `/flow-feature` - requirements -> architecture -> plan -> **checkpoint**
+  -> code -> tests -> parallel review (code + security) -> verify ->
+  **checkpoint** -> finishing-branch.
+- `/flow-review` - code-reviewer, security-reviewer and
+  performance-optimization in parallel (read-only), then one deduplicated
+  report synthesized in the main conversation.
+
+Each stage hands the next agent a bounded Task Capsule (see below); the user
+can amend, skip a stage, or abort at any checkpoint.
+
 ## Phase Map
 
 | Phase | Commands |

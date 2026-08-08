@@ -39,6 +39,15 @@ TASK_PHASE_ALIASES = {
     "review": "verification",
 }
 TASK_PHASE_INPUTS = (*TASK_PHASES, *TASK_PHASE_ALIASES)
+# The agent message channel: an append-only JSONL journal per task under
+# control/messages. `finding`/`question`/`handoff` carry agent-to-agent
+# content; `dispatch`/`completion` are the orchestration log (who was spawned
+# with which capsule, who finished). Actors are roster agent slugs plus the
+# reserved `main` (the orchestrating conversation); `*` addresses everyone
+# and is legal only as a recipient.
+MESSAGE_TYPES = ("finding", "question", "handoff", "dispatch", "completion")
+MESSAGE_BODY_LIMIT = 8000
+ACTOR_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 PRIVACY = ("public", "team", "restricted", "private")
 AUTHORITIES = ("inferred", "observed", "verified")
 # Authority may only harden, along a single edge: an `observed` claim that a
@@ -889,6 +898,7 @@ def update_record(
     authority: Optional[str] = None,
     auto_checkpoint: Optional[str] = None,
     reason: str = "Task updated",
+    allow_phase_regression: bool = False,
 ) -> dict[str, Any]:
     """Mutate a record under the caller's compare-and-swap revision.
 
@@ -956,7 +966,19 @@ def update_record(
         if phase is not None:
             if record["type"] != "task":
                 raise BrainError("only a task may declare a phase")
-            record["phase"] = normalize_phase(phase)
+            new_phase = normalize_phase(phase)
+            current_phase = record.get("phase")
+            if (
+                not allow_phase_regression
+                and current_phase in TASK_PHASES
+                and TASK_PHASES.index(new_phase) < TASK_PHASES.index(current_phase)
+            ):
+                raise BrainError(
+                    f"Phase may not move backward: {current_phase} -> {new_phase};"
+                    " pass allow_phase_regression to state the regression is"
+                    " deliberate"
+                )
+            record["phase"] = new_phase
         if progress is not None:
             record["progress"] = progress
         if auto_checkpoint is not None:
@@ -1062,6 +1084,164 @@ def cancel_task(repository: Path, identifier: str, *, actor: str) -> dict[str, A
         transition_to="cancelled",
         reason="Task abandoned",
     )
+
+
+def messages_path(repository: Path, task_uuid: str) -> Path:
+    return brain_root(repository) / "control" / "messages" / f"{task_uuid}.jsonl"
+
+
+def validate_actor(value: str, *, allow_broadcast: bool = False) -> str:
+    actor = (value or "").strip()
+    if allow_broadcast and actor == "*":
+        return actor
+    if ACTOR_PATTERN.fullmatch(actor) is None:
+        raise BrainError(
+            "Actor must be a lowercase slug (letters, digits, '-', '_') up to"
+            " 64 characters"
+        )
+    return actor
+
+
+def validate_message(record: dict[str, Any]) -> None:
+    """Validate one channel entry with in-code rules.
+
+    The JSON schema file is defense for the governed monorepo; a copied-out
+    edition without ``project-brain/schemas`` still enforces the same
+    contract through this function.
+    """
+    if record.get("schema_version") != SCHEMA_VERSION:
+        raise BrainError(f"message schema_version must be {SCHEMA_VERSION}")
+    if not is_uuid4(record.get("id")):
+        raise BrainError("message id must be UUIDv4")
+    if not is_uuid4(record.get("task_id")):
+        raise BrainError("message task_id must be UUIDv4")
+    for key in ("seq", "task_revision"):
+        if not isinstance(record.get(key), int) or record[key] < 1:
+            raise BrainError(f"message {key} must be a positive integer")
+    _require_datetime(record, "created_at")
+    validate_actor(str(record.get("from_actor", "")))
+    validate_actor(str(record.get("to_actor", "")), allow_broadcast=True)
+    if record.get("type") not in MESSAGE_TYPES:
+        raise BrainError(
+            "message type must be one of: " + ", ".join(MESSAGE_TYPES)
+        )
+    body = record.get("body")
+    if not isinstance(body, str) or not body.strip():
+        raise BrainError("message body must not be empty")
+    if len(body) > MESSAGE_BODY_LIMIT:
+        raise BrainError(
+            f"message body exceeds {MESSAGE_BODY_LIMIT} characters"
+        )
+    refs = record.get("refs")
+    if not isinstance(refs, list) or any(
+        not isinstance(item, str) or not item.strip() for item in refs
+    ):
+        raise BrainError("message refs must be a list of non-empty strings")
+    digest = record.get("capsule_digest")
+    if digest is not None and (
+        not isinstance(digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+    ):
+        raise BrainError("message capsule_digest must be a SHA-256 hex digest")
+
+
+def append_message(
+    repository: Path,
+    identifier: str,
+    *,
+    from_actor: str,
+    to_actor: str,
+    message_type: str,
+    body: str,
+    refs: Optional[list[str]] = None,
+    capsule_digest: Optional[str] = None,
+) -> dict[str, Any]:
+    """Append one entry to the task's agent channel.
+
+    The journal is append-only under the global mutation lock: entries are
+    never rewritten, so the git history of the file is the audit trail. A
+    terminal task refuses new messages - the channel exists for active
+    coordination, not for post-mortem edits.
+    """
+    with mutation_lock(repository):
+        _, task, _ = find_task(repository, identifier)
+        if task["status"] in LIFECYCLES["task"]["terminal"]:
+            raise BrainError(
+                "Messages require an active task; this task is terminal"
+            )
+        path = messages_path(repository, task["id"])
+        seq = 1
+        if path.is_file():
+            with path.open("r", encoding="utf-8") as handle:
+                seq += sum(1 for line in handle if line.strip())
+        record: dict[str, Any] = {
+            "schema_version": SCHEMA_VERSION,
+            "id": new_uuid(),
+            "seq": seq,
+            "task_id": task["id"],
+            "task_revision": task["revision"],
+            "created_at": utc_now(),
+            "from_actor": validate_actor(from_actor),
+            "to_actor": validate_actor(to_actor, allow_broadcast=True),
+            "type": message_type,
+            "body": body,
+            "refs": list(refs or []),
+        }
+        if capsule_digest is not None:
+            record["capsule_digest"] = capsule_digest
+        validate_message(record)
+        validate_schema_file(repository, "message.schema.json", record)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        return record
+
+
+def read_messages(
+    repository: Path,
+    identifier: str,
+    *,
+    for_actor: Optional[str] = None,
+    since_seq: int = 0,
+    message_type: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """Return channel entries, filtered for a recipient.
+
+    ``for_actor`` selects entries addressed to that actor or broadcast
+    (``*``); ``since_seq`` skips entries the caller has already consumed -
+    the journal keeps no read cursor, consumers track their own position.
+    Terminal tasks stay readable: the audit trail outlives the work.
+    """
+    _, task, _ = find_record(
+        repository, identifier, record_type="task", include_archive=True
+    )
+    path = messages_path(repository, task["id"])
+    if not path.is_file():
+        return []
+    recipient = validate_actor(for_actor) if for_actor is not None else None
+    selected: list[dict[str, Any]] = []
+    for number, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), 1
+    ):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise BrainError(
+                f"Corrupt message journal line {number}: {path}"
+            ) from error
+        validate_message(record)
+        if record["seq"] <= since_seq:
+            continue
+        if message_type is not None and record["type"] != message_type:
+            continue
+        if recipient is not None and record["to_actor"] not in {recipient, "*"}:
+            continue
+        selected.append(record)
+    return selected
 
 
 def record_is_eligible(repository: Path, record: dict[str, Any], config: dict[str, Any]) -> tuple[bool, str]:
@@ -1175,6 +1355,39 @@ def validate_repository(repository: Path) -> list[str]:
                 if handoff["status"] != "closed":
                     raise BrainError("archived handoff must be closed")
             except (BrainError, KeyError) as error:
+                errors.append(f"{path}: {error}")
+    messages_root = brain_root(repository) / "control" / "messages"
+    if messages_root.is_dir():
+        for path in sorted(messages_root.glob("*.jsonl")):
+            try:
+                if not is_uuid4(path.stem):
+                    raise BrainError("message journal name must be a task UUID")
+                find_record(
+                    repository, path.stem, record_type="task", include_archive=True
+                )
+                previous_seq = 0
+                for number, line in enumerate(
+                    path.read_text(encoding="utf-8").splitlines(), 1
+                ):
+                    if not line.strip():
+                        raise BrainError(
+                            f"line {number}: blank line in message journal"
+                        )
+                    entry = json.loads(line)
+                    validate_message(entry)
+                    validate_schema_file(
+                        repository, "message.schema.json", entry
+                    )
+                    if entry["task_id"] != path.stem:
+                        raise BrainError(
+                            f"line {number}: task_id does not match the journal"
+                        )
+                    if entry["seq"] != previous_seq + 1:
+                        raise BrainError(
+                            f"line {number}: seq must increase by exactly one"
+                        )
+                    previous_seq = entry["seq"]
+            except (OSError, json.JSONDecodeError, BrainError, KeyError) as error:
                 errors.append(f"{path}: {error}")
     manifest_keys = {
         "schema_version", "id", "created_at", "query", "task_id", "task_revision",

@@ -1,6 +1,7 @@
 ---
 name: using-git-worktrees
 description: "Use this agent to create isolated git worktrees for feature development. Supports unified worktrees (backend + frontend together), separate worktrees for parallel development, or single-layer worktrees (backend-only or frontend-only).\n\nExamples:\n\n<example>\nContext: The user wants to start a new feature.\nuser: \"Create a worktree for the payment feature\"\nassistant: \"I'll use the using-git-worktrees agent to set up an isolated workspace.\"\n<Task tool call to using-git-worktrees agent>\n</example>\n\n<example>\nContext: The user wants parallel backend/frontend development.\nuser: \"Create separate worktrees for the dashboard - need backend and frontend isolated\"\nassistant: \"I'll use the using-git-worktrees agent to create separate workspaces.\"\n<Task tool call to using-git-worktrees agent>\n</example>"
+writes: true
 ---
 
 # Using Git Worktrees Agent

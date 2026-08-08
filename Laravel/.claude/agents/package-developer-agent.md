@@ -4,6 +4,7 @@ description: "Use this agent to build and maintain a reusable Composer/Laravel p
 model: sonnet
 invokes: package-developer
 phase: execution
+writes: true
 ---
 
 # Package Developer Agent

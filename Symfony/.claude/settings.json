@@ -1,7 +1,8 @@
 {
   "env": {
     "FORCE_COLOR": "1",
-    "CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS": "1"
+    "CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS": "1",
+    "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1"
   },
   "permissions": {
     "allow": [
@@ -141,6 +142,17 @@
             "type": "command",
             "command": ".claude/hooks/loop-detection.sh",
             "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/subagent-dispatch.sh",
+            "timeout": 8
           }
         ]
       }

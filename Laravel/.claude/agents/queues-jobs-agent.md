@@ -4,6 +4,7 @@ description: "Use this agent to design and implement Laravel queued Jobs: job cl
 model: sonnet
 invokes: queues-jobs
 phase: execution
+writes: true
 ---
 
 # Queues & Jobs Agent

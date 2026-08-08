@@ -4,6 +4,7 @@ description: "Use this agent to implement native PHP backend features and fix bu
 model: sonnet
 invokes: coder
 phase: execution
+writes: true
 ---
 
 # Coder (Backend) Agent

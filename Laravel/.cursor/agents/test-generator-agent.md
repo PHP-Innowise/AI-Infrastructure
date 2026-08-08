@@ -1,6 +1,7 @@
 ---
 name: test-generator
 description: "Use this agent to generate Laravel tests following project patterns. Creates Pest or PHPUnit feature tests for routes, Form Request validation tests, Policy authorization tests, Eloquent model/factory-based tests, and tests using fakes for queues, mail, notifications, and external HTTP clients.\n\nExamples:\n\n<example>\nContext: The user wants tests for new code.\nuser: \"Generate tests for the invitation registration service\"\nassistant: \"I'll use the test-generator agent to create Laravel feature and unit tests.\"\n<Task tool call to test-generator agent>\n</example>\n\n<example>\nContext: The user needs HTTP workflow tests.\nuser: \"Create feature tests for the checkout flow\"\nassistant: \"I'll use the test-generator agent to generate feature test coverage with RefreshDatabase and model factories.\"\n<Task tool call to test-generator agent>\n</example>"
+writes: true
 ---
 
 # Test Generator Agent

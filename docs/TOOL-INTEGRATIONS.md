@@ -213,6 +213,27 @@ key is absent, so a schema mismatch may become a no-op rather than blocking the
 turn. After a Codex upgrade, test each safety hook with a benign representative
 operation and inspect hook diagnostics before relying on enforcement.
 
+## Optional External Companion: Batch Harness
+
+Unattended multi-stage pipelines (nightly fleet review, mass migrations)
+live outside the accelerator, in the separate `AI-Infrastructure-Harness`
+project — a LangGraph-based runner that drives headless host sessions
+(`claude -p --output-format json`, `codex exec --json`) as workers. It
+follows the same rule as MCP servers: **optional, external, opt-in per
+team; the accelerator does not require, ship, or depend on it**, and the
+shipped runtime stays standard-library-only.
+
+Two properties make the companion composable rather than parallel
+infrastructure: workers run in the project directory *without* `--bare`, so
+the project's `.claude/` world — permission deny rules, the subagent gate,
+skills, the SubagentStop observer — applies inside every worker; and all
+durable state flows through the project's own `context.py` (task lifecycle,
+capsule validation, the `msg-dispatch` journal), so interactive sessions
+and unattended runs share one audit trail. LangGraph's checkpointer holds
+only graph position. See `docs/AGENT-ORCHESTRATION-DESIGN.md` (Stage D)
+for the decision record, including when a plain Agent SDK script is the
+better tool.
+
 ## Version Caveats
 
 - **Codex:** the edition follows the skill-based model used after custom

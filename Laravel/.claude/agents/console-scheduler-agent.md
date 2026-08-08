@@ -4,6 +4,7 @@ description: "Use this agent to build custom Artisan console commands and schedu
 model: sonnet
 invokes: console-scheduler
 phase: execution
+writes: true
 ---
 
 # Console Scheduler Agent

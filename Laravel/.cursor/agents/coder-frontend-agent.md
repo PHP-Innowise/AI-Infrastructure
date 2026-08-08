@@ -1,6 +1,7 @@
 ---
 name: coder-frontend
 description: "Use this agent to implement frontend features in Laravel projects using Blade templates/components, Livewire components, or Inertia.js pages (Vue/React/Svelte), with Vite for asset compilation and Alpine.js for lightweight interactivity.\n\nExamples:\n\n<example>\nContext: The user wants to implement a frontend component.\nuser: \"Create the invitation form with validation feedback\"\nassistant: \"I'll use the coder-frontend agent to implement the server-rendered form.\"\n<Task tool call to coder-frontend agent>\n</example>\n\n<example>\nContext: The user needs frontend state behavior.\nuser: \"Implement loading and empty states for the invitation list\"\nassistant: \"I'll use the coder-frontend agent to implement the frontend state behavior.\"\n<Task tool call to coder-frontend agent>\n</example>"
+writes: true
 ---
 
 # Coder (Frontend) Agent

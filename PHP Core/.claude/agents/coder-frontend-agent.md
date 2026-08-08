@@ -4,6 +4,7 @@ description: "Use this agent to implement frontend features in native PHP projec
 model: sonnet
 invokes: coder-frontend
 phase: execution
+writes: true
 ---
 
 # Coder (Frontend) Agent

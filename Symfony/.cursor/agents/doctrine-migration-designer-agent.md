@@ -1,6 +1,7 @@
 ---
 name: doctrine-migration-designer
 description: "Use this agent to design safe Doctrine migrations, backfills, indexes, constraints, rollout, and rollback."
+writes: true
 ---
 
 # Doctrine Migration Designer Agent

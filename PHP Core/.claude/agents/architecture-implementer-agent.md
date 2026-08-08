@@ -4,6 +4,7 @@ description: "Use this agent to scaffold and wire an approved architecture into 
 model: sonnet
 invokes: architecture-implementer
 phase: execution
+writes: true
 ---
 
 # Architecture Implementer Agent

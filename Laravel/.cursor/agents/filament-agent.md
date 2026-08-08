@@ -1,6 +1,7 @@
 ---
 name: filament
 description: "Use this agent to build or extend Filament admin panels on Laravel: Resources, Schemas (Forms/Infolists), Tables, Relation Managers, Actions, and Widgets backed by Eloquent models and Policies. For customer-facing UI (not an admin panel) use coder-frontend instead.\n\nExamples:\n\n<example>\nContext: The user wants an admin CRUD screen for a model.\nuser: \"Add a Filament resource for managing invitations\"\nassistant: \"I'll use the filament agent to build the Resource, form schema, and table.\"\n<Task tool call to filament agent>\n</example>\n\n<example>\nContext: The user wants a dashboard widget.\nuser: \"Add a stats widget showing pending invitations on the admin dashboard\"\nassistant: \"I'll use the filament agent to build the dashboard widget.\"\n<Task tool call to filament agent>\n</example>"
+writes: true
 ---
 
 # Filament Agent

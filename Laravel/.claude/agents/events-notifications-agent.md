@@ -4,6 +4,7 @@ description: "Use this agent to design and implement Laravel Events, Listeners, 
 model: sonnet
 invokes: events-notifications
 phase: execution
+writes: true
 ---
 
 # Events & Notifications Agent

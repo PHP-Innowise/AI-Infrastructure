@@ -1,6 +1,7 @@
 ---
 name: form-validator-designer
 description: "Use this agent to design Symfony Forms, request DTOs, Validator constraints, custom constraints, validation groups, and error behavior."
+writes: true
 ---
 
 # Form Validator Designer Agent

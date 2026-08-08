@@ -4,6 +4,7 @@ description: "Use this agent to generate Laravel tests following project pattern
 model: sonnet
 invokes: test-generator
 phase: execution
+writes: true
 ---
 
 # Test Generator Agent

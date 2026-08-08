@@ -4,6 +4,7 @@ description: "Use this agent to diagnose and fix performance problems in native 
 model: sonnet
 invokes: performance-optimization
 phase: execution
+writes: true
 ---
 
 # Performance Optimization Agent

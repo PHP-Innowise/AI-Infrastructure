@@ -77,6 +77,28 @@ This policy is shared across editions. The same accelerator is mirrored for **Cl
 - MUST read `memory-bank/README.md` and `memory-bank/INDEX.md` when a memory bank exists, then load only chunks relevant to the task's scope and tags.
 - MUST verify remembered claims against current policy, specs, code, configuration, migrations, and tests before relying on them.
 
+## Subagents
+
+- MUST delegate only through this accelerator's own agents and skills; the
+  host tool's built-in subagents (Claude Code's Explore/Plan/general-purpose,
+  Cursor's explore/bash/browser, Codex's spawn_agent roles) are disabled by
+  configuration and denied by the `subagent-gate` hook.
+- MUST NOT retry a denied subagent spawn; when no project agent fits the
+  task, do the work in the main conversation instead.
+
+## Orchestration (Flows, SCOPED)
+
+- A sanctioned flow command (`/flow-feature`, `/flow-review`) run in the MAIN
+  conversation MAY spawn several roster agents in sequence - in parallel only
+  for read-only agents - per its declared `stages:` list. This is the one
+  exception to "MUST NOT chain"; spawned agents keep every rule in this file
+  and MUST NOT chain themselves or spawn outside the roster.
+- A flow MUST pass each agent a bounded delegation capsule (objective, output
+  format, tool/source guidance, boundaries, decisions-and-assumptions so far),
+  MUST pause at every declared checkpoint for explicit user approval, MUST run
+  write-capable agents one at a time, and MUST stop and report a failed stage
+  instead of silently retrying.
+
 ## PHP Code Quality
 
 - MUST target the project's declared PHP version and follow PSR-1, PSR-12, and PER Coding Style.

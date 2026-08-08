@@ -4,6 +4,7 @@ description: "Use this agent to create isolated git worktrees for feature develo
 model: haiku
 invokes: using-git-worktrees
 phase: execution
+writes: true
 ---
 
 # Using Git Worktrees Agent

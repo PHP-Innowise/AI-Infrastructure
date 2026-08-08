@@ -4,6 +4,7 @@ description: "Use this agent to implement Symfony backend features and fix bugs 
 model: sonnet
 invokes: coder
 phase: execution
+writes: true
 ---
 
 # Coder (Backend) Agent

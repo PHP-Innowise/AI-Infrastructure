@@ -17,6 +17,7 @@ user: \"Publish version 2.0.0 to GitHub\"
 assistant: \"I'll use the release agent to tag and publish the release.\"
 <Task tool call to release agent>
 </example>"
+writes: true
 ---
 
 # Release Agent

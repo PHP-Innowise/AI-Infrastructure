@@ -4,6 +4,7 @@ description: "Use this agent to implement Laravel file storage and uploads: the 
 model: sonnet
 invokes: file-storage
 phase: execution
+writes: true
 ---
 
 # File Storage Agent

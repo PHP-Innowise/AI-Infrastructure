@@ -1,6 +1,7 @@
 ---
 name: refactorer
 description: "Use this agent for behavior-preserving refactors and safe Laravel/PHP upgrades: reduce duplication, extract fat controllers into Actions/Services, convert raw queries to Eloquent, improve types, and apply reviewed Rector/rector-laravel rules, all under a test safety net.\n\nExamples:\n\n<example>\nContext: A class has grown unwieldy.\nuser: \"This 400-line controller is a mess, clean it up without breaking anything\"\nassistant: \"I'll use the refactorer agent to extract it into Actions/Services under a characterization test net.\"\n<Task tool call to refactorer agent>\n</example>\n\n<example>\nContext: Modernizing an old codebase.\nuser: \"Add strict types and modern type hints across this module\"\nassistant: \"I'll use the refactorer agent to modernize types safely.\"\n<Task tool call to refactorer agent>\n</example>"
+writes: true
 ---
 
 # Refactorer Agent

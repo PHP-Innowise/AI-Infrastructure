@@ -1,6 +1,7 @@
 ---
 name: api-platform-designer
 description: "Use this agent when a Symfony project uses API Platform and needs resource, provider, processor, DTO, security, serialization, or OpenAPI design."
+writes: true
 ---
 
 # API Platform Designer Agent

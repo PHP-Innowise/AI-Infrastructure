@@ -11,6 +11,19 @@ it at the top of every session.
 
 ## Unreleased
 
+### Added
+
+- Opt-in orchestration flows: `/flow-feature` (requirements -> architecture
+  -> plan -> checkpoint -> code -> tests -> parallel review -> verify ->
+  checkpoint -> finishing-branch) and `/flow-review` (three read-only review
+  agents in parallel, one synthesized report). The main conversation is the
+  orchestrator: it spawns only roster agents, passes each a bounded
+  delegation capsule, and pauses at declared checkpoints. AGENTS.md gains
+  the "Orchestration (Flows, SCOPED)" section; SKILL FLOW.md documents the
+  flows. Cursor mirrors are generated; Codex keeps its sequential skill
+  flow by design.
+
+
 ## 2.0.0 - 2026-08-07
 
 ### Shared context runtime

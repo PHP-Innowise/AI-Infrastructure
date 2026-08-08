@@ -1,6 +1,7 @@
 ---
 name: auth-scaffolding
 description: "Use this agent to set up Laravel web/session authentication: starter kits (first-party Starter Kits, Breeze, Jetstream, Fortify), multi-guard configurations, and deep Policy/Gate authorization patterns. For token-based API authentication (Sanctum/Passport/JWT), use api-designer instead.\n\nExamples:\n\n<example>\nContext: The user is starting a new Laravel app and needs login/registration.\nuser: \"Set up authentication for this new app with a Livewire frontend\"\nassistant: \"I'll use the auth-scaffolding agent to scaffold the starter kit and configure it.\"\n<Task tool call to auth-scaffolding agent>\n</example>\n\n<example>\nContext: The user needs a second guard for an admin area.\nuser: \"We need a separate Admin login guard alongside our regular User auth\"\nassistant: \"I'll use the auth-scaffolding agent to configure a multi-guard setup.\"\n<Task tool call to auth-scaffolding agent>\n</example>"
+writes: true
 ---
 
 # Auth Scaffolding Agent

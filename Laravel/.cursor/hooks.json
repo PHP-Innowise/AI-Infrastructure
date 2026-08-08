@@ -14,6 +14,12 @@
         "failClosed": true
       }
     ],
+    "subagentStop": [
+      {
+        "command": ".cursor/hooks/subagent-dispatch.sh",
+        "timeout": 8
+      }
+    ],
     "beforeShellExecution": [
       {
         "command": ".cursor/hooks/bash-validator.sh",

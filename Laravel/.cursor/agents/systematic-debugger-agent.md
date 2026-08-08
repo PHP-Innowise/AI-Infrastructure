@@ -1,6 +1,7 @@
 ---
 name: systematic-debugger
 description: "Use this agent when encountering any bug, test failure, or unexpected behavior. Requires root cause investigation before proposing fixes - no guessing allowed.\n\nExamples:\n\n<example>\nContext: The user has a failing test.\nuser: \"Debug why this test is failing\"\nassistant: \"I'll use the systematic-debugger agent to investigate the root cause.\"\n<Task tool call to systematic-debugger agent>\n</example>\n\n<example>\nContext: The user encounters unexpected behavior.\nuser: \"The API returns 500 errors randomly, help me debug\"\nassistant: \"I'll use the systematic-debugger agent to systematically find the root cause.\"\n<Task tool call to systematic-debugger agent>\n</example>"
+writes: true
 ---
 
 # Systematic Debugger Agent

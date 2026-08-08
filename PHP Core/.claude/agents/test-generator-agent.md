@@ -4,6 +4,7 @@ description: "Use this agent to generate native PHP tests following project patt
 model: sonnet
 invokes: test-generator
 phase: execution
+writes: true
 ---
 
 # Test Generator Agent

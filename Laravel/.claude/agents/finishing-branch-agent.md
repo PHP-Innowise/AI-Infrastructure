@@ -4,6 +4,7 @@ description: "Use this agent when implementation is complete, all tests pass, an
 model: sonnet
 invokes: finishing-branch
 phase: execution
+writes: true
 ---
 
 # Finishing Branch Agent

@@ -1,6 +1,7 @@
 ---
 name: package-developer
 description: "Use this agent to build and maintain a reusable Composer/Laravel package: service provider structure, config/migration/view publishing, and testing with Orchestra Testbench. Use only when the deliverable is a standalone package, not an application feature.\n\nExamples:\n\n<example>\nContext: The user wants to extract shared logic into a reusable library.\nuser: \"We need to turn our internal audit-logging code into a package other apps can install\"\nassistant: \"I'll use the package-developer agent to scaffold the package with a service provider and Testbench tests.\"\n<Task tool call to package-developer agent>\n</example>\n\n<example>\nContext: The user is adding a publishable config file to an existing package.\nuser: \"Add a publishable config file and migration to our laravel-billing-toolkit package\"\nassistant: \"I'll use the package-developer agent to wire up the config publishing and migration in the service provider.\"\n<Task tool call to package-developer agent>\n</example>"
+writes: true
 ---
 
 # Package Developer Agent

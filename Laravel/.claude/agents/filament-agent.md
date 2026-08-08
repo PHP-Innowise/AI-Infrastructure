@@ -4,6 +4,7 @@ description: "Use this agent to build or extend Filament admin panels on Laravel
 model: sonnet
 invokes: filament
 phase: execution
+writes: true
 ---
 
 # Filament Agent

@@ -4,6 +4,7 @@ description: "Use this agent when encountering any bug, test failure, or unexpec
 model: opus
 invokes: systematic-debugger
 phase: execution
+writes: true
 ---
 
 # Systematic Debugger Agent

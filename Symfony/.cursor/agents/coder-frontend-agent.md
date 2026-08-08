@@ -1,6 +1,7 @@
 ---
 name: coder-frontend
 description: "Use this agent to implement frontend features in Symfony projects using Twig templates, semantic HTML, CSS, and progressive enhancement with Symfony UX/Stimulus/Turbo. Symfony-first: use Twig, Forms, Symfony UX, Stimulus/Turbo, and the project's existing frontend stack.\n\nExamples:\n\n<example>\nContext: The user wants to implement a frontend component.\nuser: \"Create the invitation form with validation feedback\"\nassistant: \"I'll use the coder-frontend agent to implement the server-rendered form.\"\n<Task tool call to coder-frontend agent>\n</example>\n\n<example>\nContext: The user needs frontend state behavior.\nuser: \"Implement loading and empty states for the invitation list\"\nassistant: \"I'll use the coder-frontend agent to implement the frontend state behavior.\"\n<Task tool call to coder-frontend agent>\n</example>"
+writes: true
 ---
 
 # Coder (Frontend) Agent

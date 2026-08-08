@@ -1,6 +1,7 @@
 ---
 name: architecture-implementer
 description: "Use this agent to scaffold and wire an approved architecture into Laravel: models, controllers, policies, Form Requests, API Resources, migrations, and Service Provider bindings, leaving feature logic as clearly marked TODOs for the coder. Bridges /architect and /coder.\n\nExamples:\n\n<example>\nContext: An architecture decision is ready to build out.\nuser: \"Scaffold the billing module we designed\"\nassistant: \"I'll use the architecture-implementer agent to lay down the models, policies, and Service Provider bindings.\"\n<Task tool call to architecture-implementer agent>\n</example>\n\n<example>\nContext: The user wants seams before writing logic.\nuser: \"Set up the module skeleton with interfaces so we can implement and test cleanly\"\nassistant: \"I'll use the architecture-implementer agent to build the testable skeleton.\"\n<Task tool call to architecture-implementer agent>\n</example>"
+writes: true
 ---
 
 # Architecture Implementer Agent

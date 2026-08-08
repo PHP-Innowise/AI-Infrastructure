@@ -4,6 +4,7 @@ description: "Use this agent for behavior-preserving refactors and safe PHP upgr
 model: sonnet
 invokes: refactorer
 phase: execution
+writes: true
 ---
 
 # Refactorer Agent

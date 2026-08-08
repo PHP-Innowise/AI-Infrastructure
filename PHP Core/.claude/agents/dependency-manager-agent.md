@@ -4,6 +4,7 @@ description: "Use this agent to manage Composer dependencies for native PHP proj
 model: sonnet
 invokes: dependency-manager
 phase: execution
+writes: true
 ---
 
 # Dependency Manager Agent

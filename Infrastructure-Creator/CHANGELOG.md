@@ -4,6 +4,15 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Changed
+
+- `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` joins `.claude/settings.json`:
+  the generator's flows orchestrate from the main conversation, so nested
+  subagent trees add cost without oversight. The tool-owned
+  `subagent-gate.sh` copies are refreshed to the monorepo's Stage C
+  versions; the new write-serialization logic is dormant here until an
+  agent declares `writes: true`.
+
 ### Added
 
 - **The generator's own tool configs now restrict subagent spawning to the

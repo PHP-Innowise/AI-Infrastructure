@@ -4,6 +4,7 @@ description: "Use this agent to implement frontend features in Symfony projects 
 model: sonnet
 invokes: coder-frontend
 phase: execution
+writes: true
 ---
 
 # Coder (Frontend) Agent

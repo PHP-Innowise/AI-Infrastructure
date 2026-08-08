@@ -4,6 +4,7 @@ description: "Use this agent to set up Laravel web/session authentication: start
 model: sonnet
 invokes: auth-scaffolding
 phase: execution
+writes: true
 ---
 
 # Auth Scaffolding Agent

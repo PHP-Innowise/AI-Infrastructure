@@ -4,6 +4,7 @@ description: "Use this agent to implement or review deep Eloquent ORM patterns o
 model: sonnet
 invokes: eloquent
 phase: execution
+writes: true
 ---
 
 # Eloquent Agent

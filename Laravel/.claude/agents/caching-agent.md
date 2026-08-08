@@ -4,6 +4,7 @@ description: "Use this agent to design and implement a Laravel application-data 
 model: sonnet
 invokes: caching
 phase: execution
+writes: true
 ---
 
 # Caching Agent
