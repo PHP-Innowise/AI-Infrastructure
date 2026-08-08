@@ -4,6 +4,21 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Added
+
+- **The generator's own tool configs now restrict subagent spawning to the
+  project roster.** A tool-owned `subagent-gate.sh` joins each hooks
+  directory — the one deliberate exception to the byte-identical hooks
+  invariant, skipped in `mirror_rules.py`, because each host exposes a
+  different gate contract (Claude PreToolUse exit codes, Cursor
+  `subagentStart` permission JSON, Codex `spawn_agent` deny). Configuration
+  backs the hooks: `Agent(...)` deny rules and
+  `CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS=1` in `.claude/settings.json`,
+  `[features] multi_agent = false` plus `[agents] enabled = false` in
+  `.codex/config.toml`, a `subagentStart` entry in `.cursor/hooks.json`, the
+  `subagent-policy.mdc` Cursor rule, and an AGENTS.md "Subagents" section.
+  Covered by `SubagentGateTest` in `tests/test_hooks.py`.
+
 ## [2.0.0] - 2026-08-07
 
 ### Changed

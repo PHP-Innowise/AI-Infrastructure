@@ -1,7 +1,8 @@
 {
   "env": {
     "APP_ENV": "local",
-    "FORCE_COLOR": "1"
+    "FORCE_COLOR": "1",
+    "CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS": "1"
   },
   "permissions": {
     "allow": [
@@ -49,6 +50,12 @@
       "WebFetch(domain:psalm.dev)"
     ],
     "deny": [
+      "Agent(Explore)",
+      "Agent(Plan)",
+      "Agent(general-purpose)",
+      "Agent(claude)",
+      "Agent(statusline-setup)",
+      "Agent(claude-code-guide)",
       "Read(.env)",
       "Read(.env.*)",
       "Edit(.env)",
@@ -96,6 +103,16 @@
       }
     ],
     "PreToolUse": [
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/subagent-gate.sh",
+            "timeout": 5
+          }
+        ]
+      },
       {
         "matcher": "Write|Edit",
         "hooks": [

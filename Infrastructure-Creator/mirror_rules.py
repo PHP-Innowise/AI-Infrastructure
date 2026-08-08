@@ -14,7 +14,10 @@ specific to Infrastructure-Creator:
 - Skills are byte-identical across all three mirrors, including
   `SKILL FLOW.md` (there is no per-tool adaptation and no skill-creator).
 - Hooks are byte-identical across all three mirrors, including README.md -
-  a documented invariant of `.claude/hooks/README.md`.
+  a documented invariant of `.claude/hooks/README.md`. The one exception is
+  `subagent-gate.sh`, which is tool-owned: each host exposes a different
+  subagent-gate contract (Claude PreToolUse exit codes, Cursor subagentStart
+  permission JSON, Codex spawn_agent deny).
 - Cursor command descriptions are hand-written one-liners (not derived from
   the body), so they are pinned here as description_overrides.
 """
@@ -41,6 +44,14 @@ MIRROR_RULES = {
                 ".cursor/hooks": {"transform": "copy"},
                 ".codex/hooks": {"transform": "copy"},
             },
+            "skip": [
+                # Tool-owned: each host exposes a different subagent-gate
+                # contract (Claude PreToolUse exit codes, Cursor subagentStart
+                # permission JSON, Codex spawn_agent deny) and reads a
+                # different roster source, so the three copies are separate
+                # generations by design.
+                "subagent-gate.sh",
+            ],
         },
         {
             # Slash commands: Claude's orchestration frontmatter is reduced to

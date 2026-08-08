@@ -1,10 +1,17 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "env": {
-    "INFRA_CREATOR": "1"
+    "INFRA_CREATOR": "1",
+    "CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS": "1"
   },
   "permissions": {
     "deny": [
+      "Agent(Explore)",
+      "Agent(Plan)",
+      "Agent(general-purpose)",
+      "Agent(claude)",
+      "Agent(statusline-setup)",
+      "Agent(claude-code-guide)",
       "Read(.env)",
       "Read(.env.*)",
       "Read(**/.env)",
@@ -26,6 +33,12 @@
       }
     ],
     "PreToolUse": [
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          { "type": "command", "command": ".claude/hooks/subagent-gate.sh", "timeout": 5 }
+        ]
+      },
       {
         "matcher": "Write|Edit",
         "hooks": [

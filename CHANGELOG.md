@@ -26,6 +26,25 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Added
+
+- **Subagent spawning is now restricted to the accelerator's own roster.**
+  Each edition ships a tool-owned `subagent-gate.sh` in all three hooks
+  directories — a `MIRROR_RULES` `skip` entry, since each host exposes a
+  different gate contract. The Claude Code gate (PreToolUse, matcher
+  `Agent|Task`) allows only the frontmatter `name:`s defined in
+  `.claude/agents/` and blocks the built-in agents (Explore, Plan,
+  general-purpose, claude, ...); the Cursor gate (`subagentStart`, registered
+  with `failClosed`) answers `{"permission": "allow"|"deny"}` against the
+  `.cursor/agents/` roster, since Cursor has no setting that disables its
+  built-ins; the Codex gate denies the `spawn_agent` multi-agent tool family
+  outright, as the Codex edition delegates through skills only. Configuration
+  backs the hooks: `Agent(...)` deny rules and
+  `CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS=1` in `.claude/settings.json`,
+  `[features] multi_agent = false` plus `[agents] enabled = false` in
+  `.codex/config.toml`, the `subagent-policy.mdc` Cursor rule, and an
+  AGENTS.md "Subagents" section as the steering layer. Regression coverage:
+  `SubagentGateTest` in `memory-bank/tests/test_hooks.py`.
 ## 2.0.0 - 2026-08-07
 
 ### 2026-08-06 hook and installation hardening
