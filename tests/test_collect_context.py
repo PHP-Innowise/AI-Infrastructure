@@ -7,7 +7,13 @@ the boundary it must not cross. The second kind actually invokes the binary
 and is skipped when it is absent — CI has no Rust toolchain and this tool is
 never a blocking gate.
 
-The load-bearing one is test_containment. code2prompt is a developer-local
+Run both paths before pushing — a developer machine has the binary and CI does
+not, so the with-binary run alone will not tell you what CI sees:
+
+    python3 -m unittest tests.test_collect_context
+    CODE2PROMPT_BIN=/nonexistent python3 -m unittest tests.test_collect_context
+
+The load-bearing test is test_containment. code2prompt is a developer-local
 convenience; the moment an edition, an inventory or an installed hook refers
 to it, every consuming project inherits a dependency it never asked for.
 """
@@ -89,11 +95,16 @@ class TestInvocation(unittest.TestCase):
         self.assertEqual(listing.returncode, 0, listing.stderr)
         self.assertIn("Scopes", listing.stdout)
         # An argument the script rejects must come back as the script's failure,
-        # not as a shell success.
-        rejected = subprocess.run([str(self.WRAPPER), "tooling", "--edition", "Laravel"],
+        # not as a shell success. The rejection is taken at the argparse level
+        # on purpose: everything past it needs the code2prompt binary, which CI
+        # does not have, and a check that passes only on a developer machine is
+        # worse than no check.
+        rejected = subprocess.run([str(self.WRAPPER), "definitely-not-a-scope"],
                                   cwd=ROOT, capture_output=True, text=True)
-        self.assertEqual(rejected.returncode, 1)
-        self.assertIn("does not take --edition", rejected.stderr)
+        self.assertNotEqual(rejected.returncode, 0, "the wrapper swallowed a failure")
+        self.assertIn("invalid choice", rejected.stderr)
+        # The argument reached the script rather than being dropped by the shell.
+        self.assertIn("definitely-not-a-scope", rejected.stderr)
 
     def test_wrapper_is_covered_by_the_shell_lint_gate(self):
         """It has no .sh extension, so CI must list it by name."""
