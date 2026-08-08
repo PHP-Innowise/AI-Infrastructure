@@ -132,6 +132,10 @@ edition's own files remain in that edition's changelog.
 
 ### Changed
 
+- Body-size ceilings in `scripts/token_budget.json` refit to observed + 5 %
+  after the branch's final content edits (browser-verify bounds and the
+  Infrastructure-Creator forge instructions), per the ceiling file's own
+  policy.
 - **`context_budget.py` now measures what is actually paid.** Token
   estimates use per-class bytes-per-token ratios measured with cl100k on
   this repository's own files instead of a flat `bytes / 4`, which runs
