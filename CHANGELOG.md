@@ -28,6 +28,18 @@ edition's own files remain in that edition's changelog.
 
 ### Added
 
+- **Stage D — the external batch harness joins the monorepo as a
+  repo-root companion (`harness/`).** A LangGraph-based runner for
+  unattended pipelines: the fleet-review graph (Send fan-out of review
+  lenses -> durable interrupt approval gate -> report) over headless host
+  workers (`claude -p --output-format json` without `--bare`, so the
+  project's `.claude` world applies inside every worker; `codex exec
+  --json`; an offline `dry-run` worker), with SQLite checkpointing, hard
+  cost ceilings, and all durable state flowing through the target
+  project's own `context.py` blackboard. Deliberately OUTSIDE the
+  editions: never shipped by the installer, never listed in inventories,
+  own venv — the shipped runtime stays stdlib-only. First real run
+  reviewed the accelerator's own Stage C hooks ($1.68, 10 findings).
 - **Host-native orchestration enhancers — Stage C of
   `docs/AGENT-ORCHESTRATION-DESIGN.md`.** A new canonical hook,
   `subagent-dispatch.sh` (registered on Claude Code's `SubagentStop` and

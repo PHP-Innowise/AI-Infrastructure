@@ -12,12 +12,13 @@
 > SubagentStop/subagentStop, `writes: true` во фронтматтере + сериализация
 > пишущих агентов TTL-замком в гейтах, `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1`;
 > решение по Codex принято — multi-agent остаётся выключенным). Stage D
-> реализована (2026-08-08) как отдельный проект-компаньон
-> `../AI-Infrastructure-Harness`: LangGraph-граф fleet-review (Send-фан-аут
-> линз -> interrupt-гейт -> отчёт), SQLite-чекпоинтер, воркеры
-> `claude -p`/`codex exec`/`dry-run`, blackboard — через `context.py`
-> целевого проекта; в монорепо — только раздел в TOOL-INTEGRATIONS.md
-> (MCP-shape: опционально, внешне, без зависимости).
+> реализована (2026-08-08) как проект-компаньон: LangGraph-граф
+> fleet-review (Send-фан-аут линз -> interrupt-гейт -> отчёт),
+> SQLite-чекпоинтер, воркеры `claude -p`/`codex exec`/`dry-run`,
+> blackboard — через `context.py` целевого проекта. Живёт в каталоге
+> `harness/` в корне монорепо — вне редакций, инсталлятора и инвентарей,
+> со своим venv (MCP-shape: опционально, редакции от него не зависят);
+> см. раздел в TOOL-INTEGRATIONS.md.
 
 # Agent orchestration & communication layer — design proposal
 

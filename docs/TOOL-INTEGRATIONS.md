@@ -216,9 +216,11 @@ operation and inspect hook diagnostics before relying on enforcement.
 ## Optional External Companion: Batch Harness
 
 Unattended multi-stage pipelines (nightly fleet review, mass migrations)
-live outside the accelerator, in the separate `AI-Infrastructure-Harness`
-project — a LangGraph-based runner that drives headless host sessions
-(`claude -p --output-format json`, `codex exec --json`) as workers. It
+live outside the editions, in the repo-root `harness/` directory — a
+LangGraph-based runner that drives headless host sessions
+(`claude -p --output-format json`, `codex exec --json`) as workers. It has
+its own venv and dependencies and is never shipped by the installer or
+listed in the inventories. It
 follows the same rule as MCP servers: **optional, external, opt-in per
 team; the accelerator does not require, ship, or depend on it**, and the
 shipped runtime stays standard-library-only.
