@@ -110,11 +110,14 @@ expensive rather than cheap. `frontmatter_bytes` and `body_bytes` are gated
 alongside as file facts — the first a superset of the descriptors including
 orchestration keys the model never sees, the second the per-invocation cost.
 
-Commands and agents usually carry no `description` in frontmatter; Claude
-Code derives one from the first body paragraph and the script does the same.
-A skill declaring `disable-model-invocation: true` is left out of
-`descriptor_bytes`, because such a skill's description is not put in context
-at all.
+Every startup category counts the text a tool renders to the model, not the
+file that carries it: a frontmatter field contributes its value with the key,
+the colon, any quotes and their escapes removed. Commands and agents usually
+declare no `description` at all; Claude Code then derives one from the first
+body paragraph and the script does the same. A skill declaring
+`disable-model-invocation: true` is left out of `descriptor_bytes`, because
+such a skill's description is not put in context at all. `frontmatter_bytes`
+is the deliberate exception - it is a file fact, keys included.
 
 The two listings are measured on the `.claude` tree, which is the richest of
 the three tool surfaces, so gating it bounds the others instead of tracking

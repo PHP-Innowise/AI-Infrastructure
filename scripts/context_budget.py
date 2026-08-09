@@ -10,16 +10,17 @@ measures both, per edition:
   category            what is counted                          when paid
   ------------------  ---------------------------------------  ----------
   agents_md_bytes     UTF-8 bytes of <edition>/AGENTS.md       startup
-  descriptor_bytes    `name` + `description` of every canon    startup
-                      SKILL.md (the text skill selection
-                      actually reads; continuation lines
-                      included)
-  command_bytes       file stem + description of every         startup
+  descriptor_bytes    `name` + `description` values of every   startup
+                      canon SKILL.md - the text skill
+                      selection actually reads, without the
+                      YAML carrying it
+  command_bytes       file stem + description value of every   startup
                       .claude/commands/*.md
-  agent_bytes         file stem + description of every         startup
+  agent_bytes         file stem + description value of every   startup
                       .claude/agents/*-agent.md
   frontmatter_bytes   all YAML between the two `---`           startup
-                      delimiters (a superset of descriptor)
+                      delimiters, keys included: a file fact,
+                      not a rendered one
   body_bytes          everything after the closing `---`       on invocation
   skills              number of SKILL.md files parsed          -
 
@@ -58,14 +59,13 @@ tracking each:
                skill descriptors, so for Codex these two categories
                over-state the cost by their whole value.
 
-One convention inherited from descriptor_bytes: when a `description` field
-exists, the counted text is the whole entry including the `description:` key,
-as descriptor_value has always counted `name:` and `description:`. Where the
-description is derived from the body instead there is no key to count. The
-difference is a constant ~14 bytes per file - about 5 % of agent_bytes - so
-the figure runs slightly above what a tool actually renders. It is consistent
-across runs, which is what a regression gate needs, and the calibration ratios
-were measured on text extracted the same way.
+What is counted is the text a tool renders, not the file that carries it: the
+value of a frontmatter field with the key, the colon, any surrounding quotes
+and that scalar's backslash escapes removed, and continuation lines folded to
+single spaces as YAML folds a wrapped scalar. So `descriptor_bytes` counts the
+skill's name and description as the model reads them, and never the YAML
+around them. frontmatter_bytes is the exception on purpose - it is a file
+fact, keys included, and is gated as one.
 
 Token estimates use per-class bytes-per-token ratios measured with
 cl100k on this repository's own files (docs/TOKEN-ECONOMY-RESEARCH.md),
@@ -127,20 +127,24 @@ STARTUP_CATEGORIES = ("agents_md_bytes", "descriptor_bytes", "command_bytes",
 # counts. The body ratio pairs the research's token count with the byte
 # count of the same file set, so it carries that pairing's drift; it is
 # still an order of magnitude closer than bytes / 4.
-# The command and agent ratios were measured the same way, on this repository
-# after the agent descriptions were slimmed, using code2prompt's cl100k with
-# the template wrapper subtracted:
+# The three listing ratios below were re-measured on this repository once the
+# categories began counting rendered values instead of whole YAML entries -
+# the research figure of 4.99 for descriptors was taken on text that still
+# carried `name:` and `description:`, so it no longer describes what is
+# counted. Method: payload to one file, code2prompt cl100k, an empty file of
+# the same name subtracted to remove the template wrapper.
 #
-#   command  Laravel/Symfony/PHP Core   19,426 B = 3,803 t   (5.07-5.18 range)
-#   agent    the four editions          28,032 B = 5,434 t   (5.12-5.21 range)
+#   descriptor  the four editions   41,387 B = 8,421 t   (4.78-5.05 range)
+#   command     the four editions   19,336 B = 3,790 t   (5.06-5.15 range)
+#   agent       the four editions   36,182 B = 7,036 t   (5.02-5.24 range)
 #
-# Both are prose-with-identifiers and tokenize alike, which is why they land
-# close to the descriptor ratio and well away from the body ratio.
+# All three are prose-with-identifiers and tokenize alike, which is why they
+# cluster and sit well away from the body ratio.
 BYTES_PER_TOKEN = {
     "agents_md_bytes": 4.76,
-    "descriptor_bytes": 4.99,
-    "command_bytes": 5.11,
-    "agent_bytes": 5.16,
+    "descriptor_bytes": 4.91,
+    "command_bytes": 5.10,
+    "agent_bytes": 5.14,
     "frontmatter_bytes": 4.59,
     "body_bytes": 4.23,
 }
@@ -177,17 +181,40 @@ def field_block(frontmatter: str, key: str) -> str | None:
     return None
 
 
+def field_value(frontmatter: str, key: str) -> str | None:
+    """Return what the tool renders for `key`: the value, no YAML syntax.
+
+    The key, the colon, quotes around a quoted scalar and that scalar's
+    backslash escapes are all YAML, not text the model is shown. Continuation
+    lines are folded to single spaces, as YAML folds a wrapped plain scalar.
+    """
+    block = field_block(frontmatter, key)
+    if block is None:
+        return None
+    value = block[len(key) + 1:]                       # drop `key:`
+    value = " ".join(part.strip() for part in value.split("\n")).strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        quote, value = value[0], value[1:-1]
+        if quote == '"':
+            for esc, char in (("\\n", "\n"), ("\\t", "\t"),
+                              ('\\"', '"'), ("\\\\", "\\")):
+                value = value.replace(esc, char)
+    return value
+
+
 def descriptor_value(frontmatter: str, path: Path) -> str:
-    """Return the `name` + `description` entries: the text skill selection reads.
+    """Return the `name` + `description` text skill selection reads.
 
     Everything else in the frontmatter (phase, flow-next, related) is
     orchestration metadata the model does not match against, so gating the
     full frontmatter over-states the surface that actually drives selection.
+    The YAML around the two values is stripped for the same reason: the model
+    is shown the values, not the syntax carrying them.
     """
-    description = field_block(frontmatter, "description")
+    description = field_value(frontmatter, "description")
     if description is None:
         raise BudgetError(f"{path}: frontmatter has no description field")
-    name = field_block(frontmatter, "name")
+    name = field_value(frontmatter, "name")
     if name is None:
         raise BudgetError(f"{path}: frontmatter has no name field")
     return f"{name}\n{description}"
@@ -231,7 +258,7 @@ def listing_bytes(paths: list[Path]) -> tuple[int, int]:
             frontmatter, body = split_skill(text, path.relative_to(ROOT))
         except BudgetError:
             frontmatter, body = "", text
-        description = field_block(frontmatter, "description")
+        description = field_value(frontmatter, "description")
         if description is None:
             description = first_paragraph(body)
         total += len(f"{path.stem}\n{description}".encode("utf-8"))

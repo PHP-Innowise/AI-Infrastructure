@@ -199,13 +199,25 @@ edition's own files remain in that edition's changelog.
   writing an agent there - so for a Codex session these two categories
   over-state the cost by their whole value, leaving `AGENTS.md` plus the skill
   descriptors. Recorded in the script, in the ceiling file and in
-  [`docs/CI.md`](docs/CI.md) rather than left for a reader to rediscover. One
-  convention is inherited from `descriptor_bytes` and noted with it: where a
-  `description` field exists the counted text includes the `description:` key,
-  which runs about 14 bytes per file - some 5 % of `agent_bytes` - above what
-  a tool renders. It is constant across runs, which is what a regression gate
-  needs, and the calibration ratios were measured on text extracted the same
-  way.
+  [`docs/CI.md`](docs/CI.md) rather than left for a reader to rediscover.
+
+  **Every startup category now counts what a tool renders, not what the file
+  says.** A frontmatter field contributes its value with the key, the colon,
+  surrounding quotes and their backslash escapes removed and wrapped lines
+  folded, which is how the model receives it; `frontmatter_bytes` stays the
+  deliberate exception as a file fact. This started as a noticed wart - the
+  old code counted the whole `description: "..."` entry, some 14 bytes per
+  file above the rendered text - and comparing the Claude and Cursor listings
+  made it visible as a phantom 645-byte "difference" that was only Cursor's
+  generated `description:` keys. Fixing it moves `descriptor_bytes` too, which
+  had counted `name:` and `description:` entries since it was written. All
+  three listing ratios were re-measured on the rendered text (descriptor
+  4.99 -> 4.91, command 5.11 -> 5.10, agent 5.16 -> 5.14; the 4.99 came from
+  research taken on key-inclusive text and no longer described what is
+  counted), and the three ceilings were refit to observed + 5 % - keeping them
+  would have handed out phantom headroom created by changing the ruler. The
+  report's estimate now lands within 0.1 % of a direct cl100k count of the
+  same payload.
 
 - **`sdd` is user-invoked only (`disable-model-invocation: true`).** Claude
   Code documents that this keeps a skill's description *out of context
