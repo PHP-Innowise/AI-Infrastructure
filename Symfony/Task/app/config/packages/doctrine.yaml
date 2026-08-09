@@ -2,6 +2,12 @@ doctrine:
     dbal:
         url: '%env(resolve:DATABASE_URL)%'
 
+        # account.email is CITEXT so uniqueness and lookup are case-insensitive
+        # at the database level (BR-01-2) rather than by convention at each
+        # call site. Doctrine needs to know how to read the type back.
+        mapping_types:
+            citext: string
+
         # IMPORTANT: You MUST configure your server version,
         # either here or in the DATABASE_URL env var (see .env file)
         #server_version: '16'
@@ -10,6 +16,14 @@ doctrine:
     orm:
         validate_xml_mapping: true
         naming_strategy: doctrine.orm.naming_strategy.underscore
+
+        # Tenancy layer 2. Enabled per request by TenantContext once a tenant
+        # is resolved, never enabled by default: an enabled filter with no
+        # parameter would be a filter nobody can reason about.
+        filters:
+            tenant:
+                class: App\Platform\Tenancy\TenantFilter
+                enabled: false
         identity_generation_preferences:
             Doctrine\DBAL\Platforms\PostgreSQLPlatform: identity
         auto_mapping: true

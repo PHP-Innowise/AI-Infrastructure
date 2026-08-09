@@ -60,8 +60,14 @@ migrate: ## Apply Doctrine migrations (runs as the owner role)
 migration: ## Generate a new migration from mapping changes (runs as the owner role)
 	$(PHP) sh -c 'DATABASE_URL="$$MIGRATION_DATABASE_URL" php bin/console doctrine:migrations:diff --no-interaction'
 
+# Fixtures run as the owner role, not the application role. The purger issues
+# DELETE FROM on every table, and under Row-Level Security the application role
+# deletes nothing at all from a trainer-scoped table when no tenant is set — so
+# a second `make seed` would leave the old rows in place and then collide with
+# a unique constraint. The owner is exempt from the policies, so its purge is
+# actually complete.
 seed: ## Load fixtures: the four MVP roles a reviewer can log in as
-	$(CONSOLE) doctrine:fixtures:load --no-interaction
+	$(PHP) sh -c 'DATABASE_URL="$$MIGRATION_DATABASE_URL" php bin/console doctrine:fixtures:load --no-interaction'
 
 reset: destroy up migrate seed ## Rebuild the database from nothing and reseed
 
@@ -72,6 +78,7 @@ test-db: ## Create, grant and migrate the test database
 	$(PHP) sh -c 'APP_ENV=test DATABASE_URL="$$MIGRATION_DATABASE_URL" php bin/console doctrine:database:create --if-not-exists'
 	$(PHP) sh -c 'sh docker/postgres/grant-roles.sh "$${POSTGRES_DB}_test"'
 	$(PHP) sh -c 'APP_ENV=test DATABASE_URL="$$MIGRATION_DATABASE_URL" php bin/console doctrine:migrations:migrate --no-interaction --allow-no-migration'
+	$(PHP) sh -c 'APP_ENV=test DATABASE_URL="$$MIGRATION_DATABASE_URL" php bin/console doctrine:fixtures:load --no-interaction'
 
 test: test-db ## Run the test suite inside the container
 	$(PHP) php vendor/bin/phpunit

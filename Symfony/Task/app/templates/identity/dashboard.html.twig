@@ -1,0 +1,37 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}{{ roleLabel }} dashboard — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <p class="skeleton-eyebrow">{{ roleLabel }}</p>
+        <h1>Welcome, {{ account.profile ? account.profile.firstName : account.email }}</h1>
+
+        <p>You are signed in as <strong>{{ account.email }}</strong>.</p>
+
+        <h2>Tenant context</h2>
+        {% if activeTrainerId %}
+            <p>Active trainer: <code>#{{ activeTrainerId }}</code>. Trainer-scoped
+               data is readable only within this tenant.</p>
+        {% else %}
+            <p>No tenant resolved. Trainer-scoped data is unreachable — for a
+               Super Admin this is deliberate, because no role hierarchy grants
+               ownership implicitly.</p>
+        {% endif %}
+
+        {% if trainerLinks %}
+            <h2>Your trainers</h2>
+            {# Separated per trainer, never combined: owner decision A6 and
+               BR-01-10. This list is the switcher, not a merged view. #}
+            <ul>
+                {% for link in trainerLinks %}
+                    <li>{{ link.trainer.businessName }} — {{ link.roleInTenant }}</li>
+                {% endfor %}
+            </ul>
+        {% endif %}
+
+        <p>
+            <a href="{{ path('identity_auth_logout') }}">Sign out</a>
+        </p>
+    </div>
+{% endblock %}
