@@ -1,0 +1,23 @@
+includes:
+    - vendor/phpstan/phpstan-symfony/extension.neon
+    - vendor/phpstan/phpstan-symfony/rules.neon
+
+parameters:
+    # Level 8 from the first commit rather than level 6. Raising the level later,
+    # across nine modules and ~45 entities, is the kind of debt that never gets
+    # paid; nullability discipline is cheapest to hold from an empty src/.
+    level: 8
+
+    paths:
+        - bin/
+        - config/
+        - public/
+        - src/
+        - tests/
+
+    symfony:
+        containerXmlPath: var/cache/dev/App_KernelDevDebugContainer.xml
+
+    # The Doctrine extension is added by the Epic-01 work, together with
+    # tests/object-manager.php, since it needs a bootable EntityManager and
+    # there are no entities yet.
