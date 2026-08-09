@@ -24,6 +24,12 @@ That creates `.env` from `env.example` if it is missing, starts the stack, waits
 for every service to report healthy, applies migrations, and then starts the
 worker. From a clean clone it is the only command you need.
 
+> **State of the build.** This is the walking skeleton: the stack runs, the
+> tenancy controls are enforced, and the design-token pipeline is live, but no
+> epic has been implemented yet. There is no login and no seeded user — `src/`
+> is still flat, and the nine modules the architecture describes do not exist.
+> Epic-01 is what makes the four MVP roles reachable.
+
 Then:
 
 | What | Where |
@@ -50,7 +56,7 @@ Run `make help` for the full list.
 | `make reset` | `destroy`, then `up`, then `seed` — a clean database from nothing |
 | `make migrate` | Apply Doctrine migrations (as the owner role) |
 | `make migration` | Generate a migration from mapping changes |
-| `make seed` | Load fixtures, including a login for each of the four MVP roles |
+| `make seed` | Load fixtures. **Currently a no-op**: the four MVP-role logins arrive with Epic-01, which owns the `Account` entity |
 | `make test` | Create/migrate the test database, then run PHPUnit |
 | `make lint` | Container, YAML, Twig, Composer and PHPStan checks |
 | `make smoke` | Prove the running stack answers over HTTP |
