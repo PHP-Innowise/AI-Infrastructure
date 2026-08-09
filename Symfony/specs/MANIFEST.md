@@ -46,6 +46,7 @@ number. Build order derives from each epic's own "Required Before This Epic":
 | architect-architecture.md | Platform shape, tenancy, modules, layering, authorization | all epic specs | 2026-08-09 |
 | api-designer-spec.md | ~130 HTTP routes across nine modules, voters, Stripe webhook contract, public tenant resolution, impersonation | architect-architecture, all epic specs | 2026-08-09 |
 | frontend-design-spec.md | CSS token layers, Twig hierarchy, component inventory, ~65 screens, WCAG 2.2 AA contract | architect-architecture, DESIGN_TOKENS.md | 2026-08-09 |
+| database-designer-schema.md | 58 tables (18 global, 40 trainer-scoped), RLS policies, ledger invariants, fee rounding, migration order | architect-architecture, all epic specs | 2026-08-09 |
 | council-sharelink-tenant-resolution.md | Verdict on the ShareLink tenant-resolution gap; amendments applied to architect-architecture | architect-architecture, api-designer-spec | 2026-08-09 |
 
 ---
