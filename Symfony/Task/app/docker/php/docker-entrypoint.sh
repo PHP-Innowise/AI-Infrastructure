@@ -78,6 +78,7 @@ esac
 # and at least one policy. Skipped on a database that has not been migrated yet,
 # so that 'docker compose up' works before 'make migrate'.
 SCOPED_MANIFEST=/app/config/tenancy/trainer_scoped_tables.txt
+GLOBAL_MANIFEST=/app/config/tenancy/resolver_global_tables.txt
 migrated="$(psql_app "SELECT to_regclass('public.doctrine_migration_versions') IS NOT NULL;")" || migrated=f
 
 if [ "$migrated" = "t" ] && [ -f "$SCOPED_MANIFEST" ]; then
@@ -97,6 +98,27 @@ if [ "$migrated" = "t" ] && [ -f "$SCOPED_MANIFEST" ]; then
         fail "Row-Level Security is not in force on trainer-scoped tables:${missing}"
     fi
     log "startup gate passed: RLS in force on all declared trainer-scoped tables"
+
+    # Gate 5 — the mirror image. The tenant resolver reads these tables BEFORE a
+    # tenant exists, so a policy on them would be evaluated with no tenant set
+    # and return nothing: every login and every public code-resolved route would
+    # break, without raising anything. Absence of RLS here is as load-bearing as
+    # its presence above.
+    if [ -f "$GLOBAL_MANIFEST" ]; then
+        wrongly_scoped=""
+        while IFS= read -r table; do
+            case "$table" in ''|\#*) continue ;; esac
+            exists="$(psql_app "SELECT to_regclass('public.${table}') IS NOT NULL;")"
+            [ "$exists" = "t" ] || continue
+            enabled="$(psql_app "SELECT relrowsecurity::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relname = '${table}';")"
+            [ "$enabled" = "true" ] && wrongly_scoped="${wrongly_scoped} ${table}"
+        done < "$GLOBAL_MANIFEST"
+
+        if [ -n "$wrongly_scoped" ]; then
+            fail "Row-Level Security is enabled on tables the tenant resolver must read before a tenant exists:${wrongly_scoped}. Every login and every public route would silently resolve nothing."
+        fi
+        log "startup gate passed: no RLS on the resolver's own global tables"
+    fi
 else
     log "startup gate: schema not migrated yet, RLS table check deferred"
 fi

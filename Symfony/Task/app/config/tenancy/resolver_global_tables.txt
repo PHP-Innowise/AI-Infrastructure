@@ -1,0 +1,25 @@
+# Tables the tenant resolver reads BEFORE a tenant exists.
+#
+# One table name per line. Blank lines and lines starting with # are ignored.
+#
+# These must never carry Row-Level Security. The resolver reads them to work out
+# which tenant applies, so a policy on them would be evaluated with no tenant
+# set and would simply return nothing — breaking every login and every public
+# code-resolved route, in a way that is hard to diagnose precisely because it
+# raises no error. The container startup gate asserts the absence of RLS here,
+# the mirror image of what it asserts for config/tenancy/trainer_scoped_tables.txt.
+#
+# Keeping a table on this list is a deliberate, reviewable act: it is a table
+# tenancy does not protect. Both are minimal by design — they hold only what
+# resolution needs, so neither can drift into an authority over anything else.
+#
+# See specs/architect-architecture.md, "Layer 3 — the mandatory tenant context"
+# and specs/council-sharelink-tenant-resolution.md.
+
+# Account -> trainer pairing, with role-in-tenant and status. Read on every
+# authenticated request to validate the selected trainer context.
+account_trainer_link
+
+# Public code -> trainer mapping, with an opaque (kind, referenceId). Read on
+# allow-listed code-resolved routes: ShareLink acceptance and Epic-08 forms.
+public_tenant_code
