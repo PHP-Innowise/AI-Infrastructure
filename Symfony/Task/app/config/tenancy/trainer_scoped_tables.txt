@@ -1,0 +1,21 @@
+# Trainer-scoped tables — the tenancy manifest.
+#
+# One table name per line. Blank lines and lines starting with # are ignored.
+#
+# The container startup gate (docker/php/docker-entrypoint.sh) reads this file
+# and refuses to start if any table listed here exists without Row-Level
+# Security enabled and at least one policy attached. That check is the reason
+# a forgotten policy on a new table fails at boot instead of leaking one
+# trainer's rows to another months later.
+#
+# RULE: every migration that creates a trainer-scoped table must add the table
+# here in the same commit. A table carrying the denormalized tenant key and
+# missing from this list is a defect, not an omission.
+#
+# Global (not trainer-scoped) tables must NOT be listed: accounts, the trainer
+# registry, branding, feature toggles, account-trainer links, camp form
+# submissions before conversion, and the audit log. See
+# specs/architect-architecture.md, "Entity population".
+#
+# Populated by the Epic-01 migration onward. Empty until then, which is why
+# the gate reports "schema not migrated yet, RLS table check deferred".

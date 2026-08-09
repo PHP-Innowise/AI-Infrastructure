@@ -1,0 +1,180 @@
+name: ${COMPOSE_PROJECT_NAME:-practiceperfect}
+
+# PracticePerfect runtime. Docker Compose is the only supported way to run this
+# application: nothing here requires PHP, Composer, Node or PostgreSQL on the
+# host. See specs/architect-architecture.md, "Deployment shape".
+
+x-app-build: &app-build
+  build:
+    context: .
+    dockerfile: docker/php/Dockerfile
+    args:
+      UID: ${UID:-1000}
+      GID: ${GID:-1000}
+
+# Connection strings are composed here from the role credentials rather than
+# restated in .env, so there is exactly one place where "which role does the
+# application connect as" is decided. Values set here also win over anything a
+# Flex recipe appends to .env: Compose `environment` beats `env_file`, and
+# Symfony's Dotenv never overrides a real environment variable.
+x-app-environment: &app-environment
+  DATABASE_URL: "postgresql://${APP_DB_USER:-pp_app}:${APP_DB_PASSWORD:-app_dev_only}@db:5432/${POSTGRES_DB:-practiceperfect}?serverVersion=17&charset=utf8"
+  MIGRATION_DATABASE_URL: "postgresql://${POSTGRES_OWNER_USER:-pp_owner}:${POSTGRES_OWNER_PASSWORD:-owner_dev_only}@db:5432/${POSTGRES_DB:-practiceperfect}?serverVersion=17&charset=utf8"
+  CROSSING_DATABASE_URL: "postgresql://${CROSSING_DB_USER:-pp_crossing}:${CROSSING_DB_PASSWORD:-crossing_dev_only}@db:5432/${POSTGRES_DB:-practiceperfect}?serverVersion=17&charset=utf8"
+  MAILER_DSN: "smtp://mail:1025"
+  MESSENGER_TRANSPORT_DSN: "doctrine://default?auto_setup=0"
+  # Used to generate absolute URLs outside an HTTP request — worker emails,
+  # console commands. Must match the port the stack is published on.
+  DEFAULT_URI: "http://localhost:${HTTP_PORT:-8080}"
+  # Consumed by the container startup gate.
+  DB_HOST: db
+  DB_PORT_INTERNAL: "5432"
+  POSTGRES_DB: ${POSTGRES_DB:-practiceperfect}
+  POSTGRES_OWNER_USER: ${POSTGRES_OWNER_USER:-pp_owner}
+  POSTGRES_OWNER_PASSWORD: ${POSTGRES_OWNER_PASSWORD:-owner_dev_only}
+  APP_DB_USER: ${APP_DB_USER:-pp_app}
+  APP_DB_PASSWORD: ${APP_DB_PASSWORD:-app_dev_only}
+  CROSSING_DB_USER: ${CROSSING_DB_USER:-pp_crossing}
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL. Backs the domain schema, Messenger transport, HTTP sessions,
+  # the cache pool and the lock store. There is deliberately no Redis.
+  # Row-Level Security is the fifth tenancy layer, so this container bootstraps
+  # three distinct roles: owner (DDL), application (RLS-bound), crossing
+  # (read-only, BYPASSRLS).
+  # ---------------------------------------------------------------------------
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-practiceperfect}
+      POSTGRES_USER: ${POSTGRES_OWNER_USER:-pp_owner}
+      POSTGRES_PASSWORD: ${POSTGRES_OWNER_PASSWORD:-owner_dev_only}
+      APP_DB_USER: ${APP_DB_USER:-pp_app}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:-app_dev_only}
+      CROSSING_DB_USER: ${CROSSING_DB_USER:-pp_crossing}
+      CROSSING_DB_PASSWORD: ${CROSSING_DB_PASSWORD:-crossing_dev_only}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ./docker/postgres/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    ports:
+      # Host-side ports are deliberately unusual: 5432 and 8025 are commonly
+      # taken by another local stack, and a collision fails `up` outright.
+      - "${DB_PORT:-15433}:5432"
+
+  # ---------------------------------------------------------------------------
+  # php-fpm. Serves the application. Connects as the RLS-bound application role.
+  # ---------------------------------------------------------------------------
+  php:
+    <<: *app-build
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      <<: *app-environment
+    volumes:
+      - ./:/app
+      - app-var:/app/var
+      - uploads:/app/public/uploads
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/php-healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # HTTP front end. Serves public/ and proxies PHP to php-fpm.
+  # ---------------------------------------------------------------------------
+  web:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      php:
+        condition: service_healthy
+    volumes:
+      - ./public:/app/public:ro
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+    healthcheck:
+      # 127.0.0.1, not localhost: inside the container localhost resolves to
+      # ::1 first, and nginx binds IPv4 only, so the check would never pass.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # Async worker: Messenger consumer plus Symfony Scheduler. Host cron is
+  # forbidden by the Compose-only constraint, so the scheduler lives here.
+  # ---------------------------------------------------------------------------
+  worker:
+    <<: *app-build
+    restart: unless-stopped
+    depends_on:
+      php:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      <<: *app-environment
+    volumes:
+      - ./:/app
+      - app-var:/app/var
+      - uploads:/app/public/uploads
+    command: ["worker"]
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f messenger:consume >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # Mail catcher. No mail leaves the development stack.
+  # ---------------------------------------------------------------------------
+  mail:
+    image: axllent/mailpit:v1.21
+    restart: unless-stopped
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+    ports:
+      - "${MAIL_UI_PORT:-8125}:8025"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8025/livez || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+# The doctrine/doctrine-bundle and symfony/mailer Flex recipes want to add their
+# own `database` and `mailer` services. This stack already provides PostgreSQL
+# as `db` — with the three-role bootstrap the tenancy model requires — and
+# Mailpit as `mail`, so those services are deliberately absent.
+#
+# The empty recipe markers below are load-bearing: Flex only injects when its
+# marker is missing, so keeping them empty stops every future `composer require`
+# from re-adding a second, differently-credentialled PostgreSQL. Do not delete.
+###> doctrine/doctrine-bundle ###
+###< doctrine/doctrine-bundle ###
+
+volumes:
+  db-data:
+  app-var:
+  uploads:
+
