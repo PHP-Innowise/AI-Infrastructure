@@ -1,3 +1,227 @@
+/* ==========================================================================
+   PracticePerfect design tokens — static layer.
+
+   Source of truth: Task/designs/DESIGN_TOKENS.md (read-only client material).
+   Implementation spec: specs/frontend-design-spec.md § "Design tokens".
+
+   Compiled once by AssetMapper and identical for every trainer. Never declare
+   --brand-* here: those five properties are the runtime layer, emitted per
+   request as an inline <style> block on the layout, which is what makes
+   white-label branding a runtime value instead of a rebuild.
+
+   Custom properties resolve at compute time against whatever is cascaded onto
+   :root, not at declaration time — so the shadow rules below may reference
+   var(--brand-primary-rgb) even though the inline block that sets it appears
+   later in <head>.
+   ========================================================================== */
+
+:root {
+  /* --- Typography — DESIGN_TOKENS.md "Typography Scale", lines 9-20 --------
+     No font-family survives in any source SVG (the exports flatten text to
+     outlines), so the family below is a placeholder pending the client naming
+     the typeface. See specs/frontend-design-spec.md § "Open questions". */
+  --font-family-base: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    Helvetica, Arial, sans-serif;
+
+  --text-hero-title-size: 30px;    --text-hero-title-line: 38px;    --text-hero-title-weight: 700;
+  --text-section-title-size: 22px; --text-section-title-line: 28px; --text-section-title-weight: 700;
+  --text-block-title-size: 18px;   --text-block-title-line: 24px;   --text-block-title-weight: 700;
+  --text-card-title-size: 16px;    --text-card-title-line: 22px;    --text-card-title-weight: 600;
+  --text-body-lg-size: 16px;       --text-body-lg-line: 26px;       --text-body-lg-weight: 400;
+  --text-body-size: 14px;          --text-body-line: 22px;          --text-body-weight: 400;
+  --text-caption-size: 12px;       --text-caption-line: 18px;       --text-caption-weight: 400;
+  --text-eyebrow-size: 11px;       --text-eyebrow-line: 16px;       --text-eyebrow-weight: 600;
+  --text-eyebrow-tracking: 0.04em;
+
+  /* --- Grayscale — DESIGN_TOKENS.md "Base Palette (Grayscale)", lines 24-27 */
+  --gray-50:  #F3F3F3;
+  --gray-200: #CFCFCF;
+  --gray-400: #868686;
+  --gray-600: #5E5E5E;
+  --gray-800: #363636;
+  --gray-900: #0D0D0D;
+
+  /* Surface and text semantics built on the grayscale. */
+  --color-surface: #FFFFFF;
+  --color-surface-sunken: var(--gray-50);
+  --color-border: var(--gray-200);
+  --color-border-strong: var(--gray-400);
+  --color-text-primary: var(--gray-900);
+  --color-text-secondary: var(--gray-600);
+  --color-text-disabled: var(--gray-400);
+
+  /* Error is sourced from Task/designs/inputs.svg, the one place an input
+     error state is actually drawn, where #FF5E58 is used for both fill and
+     stroke. DESIGN_TOKENS.md names an error state but gives no colour. */
+  --color-error: #FF5E58;
+  --color-error-soft: #FFEEED;
+
+  /* --- Spacing — DESIGN_TOKENS.md "Spacing Scale", lines 48-58 ------------- */
+  --space-xxs: 4px;
+  --space-xs: 8px;
+  --space-sm: 12px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --space-xxl: 40px;
+
+  /* --- Radius — DESIGN_TOKENS.md "Border Radius", lines 60-69 ------------- */
+  --radius-xs: 6px;
+  --radius-sm: 10px;
+  --radius-md: 16px;
+  --radius-lg: 24px;
+  --radius-xl: 32px;
+  --radius-pill: 999px;
+
+  /* --- Shadows — DESIGN_TOKENS.md "Shadow System", lines 90-97 ------------
+     The two button shadows are brand-dependent and read the runtime layer. */
+  --shadow-card-soft: 0 2px 8px rgba(0, 0, 0, 0.2);
+  --shadow-card-strong: 0 4px 16px rgba(0, 0, 0, 0.3);
+  --shadow-button-primary: 0 10px 30px rgba(var(--brand-primary-rgb), 0.55);
+  --shadow-button-primary-hover: 0 12px 34px rgba(var(--brand-primary-rgb), 0.7);
+
+  /* --- Component geometry — DESIGN_TOKENS.md lines 71-88 ------------------ */
+  --control-height-input: 40px;
+  --control-padding-input: 10px;
+  --control-size-checkbox: 14px;
+  --control-hit-checkbox: 24px;   /* WCAG 2.2 SC 2.5.8: the drawn box is 14px,
+                                     the hit target must not be */
+  --control-radius-checkbox: 2px;
+  --control-size-radio: 22px;
+  --control-size-toggle-w: 39px;
+  --control-size-toggle-h: 24px;
+  --control-size-toggle-knob: 21px;
+
+  /* DESIGN_TOKENS.md line 76 reads "sm (padding 18px 8px), md (padding 24px
+     10px)". Taken literally in CSS order that makes the small button taller
+     than the 40px input, so the pairs are read as horizontal-then-vertical
+     and re-stated here in CSS's vertical-then-horizontal convention. */
+  --button-padding-sm: 8px 18px;
+  --button-padding-md: 10px 24px;
+  --button-hover-lift: -4px;
+  --button-hover-scale: 1.02;
+
+  /* The error ring uses a literal rather than var(), because it must still
+     render on surfaces reached before any brand context exists. */
+  --focus-ring: 0 0 0 3px rgba(var(--brand-primary-rgb), 0.25);
+  --focus-ring-error: 0 0 0 3px rgba(255, 94, 88, 0.25);
+
+  /* --- Motion ------------------------------------------------------------ */
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  --duration-fast: 120ms;
+  --duration-standard: 200ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 0ms;
+    --duration-standard: 0ms;
+    --button-hover-lift: 0px;
+    --button-hover-scale: 1;
+  }
+}
+
+/* ==========================================================================
+   Base element styling. Component classes arrive with the epics that need
+   them; this is only enough for the skeleton to render legibly.
+   ========================================================================== */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
 body {
-    background-color: skyblue;
+  margin: 0;
+  font-family: var(--font-family-base);
+  font-size: var(--text-body-size);
+  line-height: var(--text-body-line);
+  color: var(--color-text-primary);
+  background-color: var(--color-surface-sunken);
+}
+
+h1 {
+  font-size: var(--text-hero-title-size);
+  line-height: var(--text-hero-title-line);
+  font-weight: var(--text-hero-title-weight);
+}
+
+h2 {
+  font-size: var(--text-section-title-size);
+  line-height: var(--text-section-title-line);
+  font-weight: var(--text-section-title-weight);
+}
+
+h3 {
+  font-size: var(--text-block-title-size);
+  line-height: var(--text-block-title-line);
+  font-weight: var(--text-block-title-weight);
+}
+
+a {
+  color: var(--brand-primary-deep);
+}
+
+/* Placeholder landing page only — removed with the Epic-01 layout work. */
+.skeleton-card {
+  max-width: 44rem;
+  margin: var(--space-xxl) auto;
+  padding: var(--space-xl);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card-soft);
+}
+
+.skeleton-eyebrow {
+  margin: 0;
+  font-size: var(--text-eyebrow-size);
+  line-height: var(--text-eyebrow-line);
+  font-weight: var(--text-eyebrow-weight);
+  letter-spacing: var(--text-eyebrow-tracking);
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.skeleton-swatch {
+  display: inline-block;
+  width: var(--space-xxl);
+  height: var(--space-lg);
+  vertical-align: middle;
+  border-radius: var(--radius-xs);
+  background: var(--brand-primary);
+  box-shadow: var(--shadow-button-primary);
+}
+
+.skeleton-caption {
+  font-size: var(--text-caption-size);
+  color: var(--color-text-secondary);
+}
+
+/* Keyboard users must be able to bypass repeated navigation: WCAG 2.2 SC 2.4.1.
+   Off-screen until focused, rather than display:none, which would remove it
+   from the tab order entirely. */
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: var(--space-xs);
+  padding: var(--space-xs) var(--space-md);
+  background: var(--color-surface);
+  color: var(--color-text-primary);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-card-strong);
+  z-index: 100;
+}
+
+.skip-link:focus-visible {
+  left: var(--space-xs);
+}
+
+/* Focus must remain visible for every interactive element: WCAG 2.2 SC 2.4.11.
+   :focus-visible only, so pointer users do not see a ring on click. */
+:focus-visible {
+  outline: 2px solid var(--brand-primary);
+  outline-offset: 2px;
+  box-shadow: var(--focus-ring);
 }
