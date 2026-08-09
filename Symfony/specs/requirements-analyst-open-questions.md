@@ -20,7 +20,29 @@ the priority call; it does not replace them.
 
 ---
 
-## Section A — Blocking. Design cannot start without these.
+## Section A — ANSWERED 2026-08-09. These are now decisions.
+
+The owner answered A1, A3, A6 and A8 directly; the rest were carried on the
+recommendation stated with each, without objection. **Do not relitigate these
+in a later session** — reopen only if the client changes the underlying epic.
+
+| # | Decision |
+|---|---|
+| A1 | **All under-18 players require a parent-managed account.** Epic-01 BR-01-17 governs; the COPPA question is closed for MVP. No independent 16-18 accounts. |
+| A2 | **User Role Editor is out of MVP.** The four roles are fixed constants, not runtime-editable data. Epic-07 governs over the plan. |
+| A3 | **A camp registrant who never converts gets a form submission plus a camp payment record, and no account.** Requires a fourth CRM association source (`camp_registration`) and a payment record that does not require an account holder. Auto-creating a shadow account is explicitly rejected. |
+| A4 | Follows from A3: camp money is recorded platform-side against the submission, not against a player account, so it can be reconciled and refunded. |
+| A5 | **On conversion, the earlier camp payment and registration attach to the new account.** |
+| A6 | **No combined cross-trainer view on any player-facing screen.** Epic-01 AC-01-15 governs; Epic-05 AC-05-24's "Family Overview" is dropped. Tenancy isolation wins. |
+| A7 | **Every token spend records the beneficiary player**, even though the balance sits at the parent-trainer pair. |
+| A8 | **Content is sold as per-playlist one-time purchase.** The other three candidate models in D-SCOPE-011 are out of MVP; the purchase record must not foreclose adding them later. |
+| A9 | **Playlist visibility is three-state: public / private / coach-only**, not binary. |
+| A10 | **Build order: 01 -> 02 -> {03, 04} -> 05 -> {06, 07, 08}**, derived from each epic's own "Required Before This Epic". The plan's diagram is wrong about Epic-08. |
+| A11 | **Epic-04 content structure first, then Epic-05, then wire the paywall.** |
+| A12 | **Proceed with 85 user stories.** US-02.09 does not exist in the source; report it to the client rather than inventing it. |
+| Fee | **The trainer absorbs the 5% platform fee**; it is included in the listed price. Epic-05 BR-05-7 governs. |
+
+### Original statement of the blocking questions
 
 These change the data model, the authorization model, or the money path.
 Getting one wrong is expensive after data exists.

@@ -43,6 +43,10 @@ number. Build order derives from each epic's own "Required Before This Epic":
 | requirements-analyst-epic-07-super-admin-spec.md | Epic-07 impersonation, feature toggles, audit log, Event Master | epic-01, epic-02, epic-05 | 2026-08-09 |
 | requirements-analyst-epic-08-forms-registration-spec.md | Epic-08 camp/evaluation forms, external registration, conversion | epic-01, epic-05 | 2026-08-09 |
 | requirements-analyst-open-questions.md | Consolidated question register; Section A blocks Phase 2 design | all epic specs | 2026-08-09 |
+| architect-architecture.md | Platform shape, tenancy, modules, layering, authorization | all epic specs | 2026-08-09 |
+| api-designer-spec.md | ~130 HTTP routes across nine modules, voters, Stripe webhook contract, public tenant resolution, impersonation | architect-architecture, all epic specs | 2026-08-09 |
+| frontend-design-spec.md | CSS token layers, Twig hierarchy, component inventory, ~65 screens, WCAG 2.2 AA contract | architect-architecture, DESIGN_TOKENS.md | 2026-08-09 |
+| council-sharelink-tenant-resolution.md | Verdict on the ShareLink tenant-resolution gap; amendments applied to architect-architecture | architect-architecture, api-designer-spec | 2026-08-09 |
 
 ---
 
