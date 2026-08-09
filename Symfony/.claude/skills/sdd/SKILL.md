@@ -1,6 +1,7 @@
 ---
 name: sdd
 description: Spec-driven development: carry a feature through durable spec, design and task-list artifacts in specs/ and tasks/, resumable across sessions. Invoked as /sdd.
+disable-model-invocation: true
 phase: planning
 flow-next: writing-plans
 flow-alternatives: [coder, architecture-implementer]
@@ -18,6 +19,12 @@ work survives a closed session, a compacted context, or a week away.
 `/sdd` runs the phases by spawning roster agents. This skill is the contract
 those agents write against: where each artifact lives, what it must contain,
 and how to tell which phase is already done.
+
+You invoke it; the model does not. The frontmatter carries
+`disable-model-invocation: true`, which keeps this description out of every
+session's context and means Claude will not start a multi-agent, multi-session
+flow on its own initiative. The trade is deliberate: a skill run perhaps once
+in a project's life should not be advertised on every prompt of it.
 
 ## Choose the right entry point
 

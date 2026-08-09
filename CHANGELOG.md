@@ -172,6 +172,22 @@ edition's own files remain in that edition's changelog.
 
 ### Changed
 
+- **`sdd` is user-invoked only (`disable-model-invocation: true`).** Claude
+  Code documents that this keeps a skill's description *out of context
+  entirely* rather than merely blocking automatic loading, which turns the
+  startup cost of a rarely-used skill from "halved by a shorter description"
+  into zero. The description stays short anyway - it is what the `/` menu
+  shows - and now also states how to invoke it, since the model will no longer
+  surface the skill on its own. The second effect is the reason to want this
+  independently of bytes: a multi-agent, multi-session flow should not begin
+  because a prompt looked spec-shaped. Note the consequence for the gate:
+  `scripts/context_budget.py` measures files, not runtime behaviour, so it
+  still counts these 172 bytes per edition against `descriptor_bytes` even
+  though Claude Code no longer loads them. The gated figure now over-states
+  the real startup cost by exactly this skill's descriptor. Cursor and Codex
+  receive the key through the mirrors and may ignore it; the flow is driven by
+  the `/sdd` command in every tool regardless.
+
 - **Body-size ceilings refit again after the `sdd` skill, and only those.**
   `scripts/token_budget.json` `body_bytes` moves to observed + 5 % — Laravel
   370,217, Symfony 181,612, PHP Core 208,474 — while the descriptor and
