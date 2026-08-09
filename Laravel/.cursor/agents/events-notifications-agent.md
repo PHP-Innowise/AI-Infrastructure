@@ -1,6 +1,6 @@
 ---
 name: events-notifications
-description: "Use this agent to design and implement Laravel Events, Listeners, model Observers, Notifications (mail/database/broadcast/Slack), and Mailables for decoupled side effects and multi-channel user communication.\n\nExamples:\n\n<example>\nContext: The user needs a domain event and side effects when an order ships.\nuser: \"When an order ships, email the customer and notify our Slack channel\"\nassistant: \"I'll use the events-notifications agent to implement the OrderShipped event, its listeners, and the Notification.\"\n<Task tool call to events-notifications agent>\n</example>\n\n<example>\nContext: The user wants a queued transactional email.\nuser: \"Send a Markdown mail to trainers when a new invitation is accepted, queued so registration isn't slowed down\"\nassistant: \"I'll use the events-notifications agent to build the Mailable and wire it up as a queued notification.\"\n<Task tool call to events-notifications agent>\n</example>"
+description: "Use this agent to design and implement Laravel Events, Listeners, model Observers, Notifications (mail/database/broadcast/Slack), and Mailables for decoupled side effects and multi-channel user communication."
 writes: true
 ---
 
@@ -35,3 +35,21 @@ When done, provide:
 - DO NOT chain to other skills automatically
 - DO NOT make workflow decisions
 - STOP after skill completion and output suggestions
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: The user needs a domain event and side effects when an order ships.
+user: "When an order ships, email the customer and notify our Slack channel"
+assistant: "I'll use the events-notifications agent to implement the OrderShipped event, its listeners, and the Notification."
+<Task tool call to events-notifications agent>
+</example>
+
+<example>
+Context: The user wants a queued transactional email.
+user: "Send a Markdown mail to trainers when a new invitation is accepted, queued so registration isn't slowed down"
+assistant: "I'll use the events-notifications agent to build the Mailable and wire it up as a queued notification."
+<Task tool call to events-notifications agent>
+</example>

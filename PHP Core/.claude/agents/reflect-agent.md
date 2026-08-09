@@ -1,6 +1,6 @@
 ---
 name: reflect
-description: "Turn agent mistakes, failures, and user corrections into permanent rules. Use after any error, test failure pattern, hook false positive, or user correction like \"don't do this again\" or \"this keeps happening\".\n\nExamples:\n\n<example>\nContext: An agent created a file with wrong naming.\nuser: \"The coder agent created tasks/TASK-001/notes.md without a skill prefix\"\nassistant: \"I'll use the reflect agent to create a rule preventing this.\"\n<Task tool call to reflect agent>\n</example>\n\n<example>\nContext: A pattern keeps recurring.\nuser: \"Agents keep skipping lint before finishing, add a rule\"\nassistant: \"I'll use the reflect agent to stabilize this into an enforceable rule.\"\n<Task tool call to reflect agent>\n</example>"
+description: "Turn agent mistakes, failures, and user corrections into permanent rules. Use after any error, test failure pattern, hook false positive, or user correction like \"don't do this again\" or \"this keeps happening\"."
 model: sonnet
 invokes: reflect
 phase: utility
@@ -37,3 +37,21 @@ When done, provide:
 - DO NOT chain to other skills automatically
 - DO NOT write rules without user approval
 - STOP after skill completion and output suggestions
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: An agent created a file with wrong naming.
+user: "The coder agent created tasks/TASK-001/notes.md without a skill prefix"
+assistant: "I'll use the reflect agent to create a rule preventing this."
+<Task tool call to reflect agent>
+</example>
+
+<example>
+Context: A pattern keeps recurring.
+user: "Agents keep skipping lint before finishing, add a rule"
+assistant: "I'll use the reflect agent to stabilize this into an enforceable rule."
+<Task tool call to reflect agent>
+</example>

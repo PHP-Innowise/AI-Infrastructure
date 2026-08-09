@@ -172,6 +172,25 @@ edition's own files remain in that edition's changelog.
 
 ### Changed
 
+- **The context budget now gates the whole startup surface, not the half of
+  it that was easy to measure.** `scripts/context_budget.py` grew two
+  categories, `command_bytes` and `agent_bytes`, because a measurement of what
+  a session actually pays found that commands and the agent roster were
+  **62 % of Laravel's startup cost and gated nowhere**: the agent listing
+  alone was 7,405 t against 2,455 t for the skill descriptors the gate did
+  watch. Both listings are `name` + `description`, derived from the first body
+  paragraph when frontmatter declares none, exactly as Claude Code derives it;
+  that derivation was validated against this repository's own mirror
+  generator, which implements the same rule for Cursor - 43 of 45 Laravel
+  commands byte-identical, the two exceptions being the pinned
+  `description_overrides`. The new bytes-per-token ratios, 5.11 and 5.16, were
+  measured with real cl100k rather than estimated. `startup_tokens()` now sums
+  the four startup categories instead of `AGENTS.md` + full frontmatter, which
+  over-stated the listing surface by roughly 1.5x, and a skill declaring
+  `disable-model-invocation: true` is excluded from `descriptor_bytes` because
+  Claude Code does not put its description in context - closing the
+  over-statement noted when `/sdd` took that flag.
+
 - **`sdd` is user-invoked only (`disable-model-invocation: true`).** Claude
   Code documents that this keeps a skill's description *out of context
   entirely* rather than merely blocking automatic loading, which turns the

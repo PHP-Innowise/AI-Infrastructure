@@ -1,6 +1,6 @@
 ---
 name: finishing-branch
-description: "Use this agent when implementation is complete, all tests pass, and you need to decide how to integrate the work. Guides completion by presenting structured options for merge, PR, or cleanup.\n\nExamples:\n\n<example>\nContext: The user has finished implementing a feature.\nuser: \"I'm done with the feature, help me finish up\"\nassistant: \"I'll use the finishing-branch agent to guide the completion process.\"\n<Task tool call to finishing-branch agent>\n</example>\n\n<example>\nContext: The user wants to create a PR for completed work.\nuser: \"Create a PR for my changes\"\nassistant: \"I'll use the finishing-branch agent to verify and create the PR.\"\n<Task tool call to finishing-branch agent>\n</example>"
+description: "Use this agent when implementation is complete, all tests pass, and you need to decide how to integrate the work. Guides completion by presenting structured options for merge, PR, or cleanup."
 model: sonnet
 invokes: finishing-branch
 phase: execution
@@ -38,3 +38,21 @@ When done, provide:
 - DO NOT chain to other skills automatically
 - DO NOT make workflow decisions
 - STOP after skill completion and output suggestions
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: The user has finished implementing a feature.
+user: "I'm done with the feature, help me finish up"
+assistant: "I'll use the finishing-branch agent to guide the completion process."
+<Task tool call to finishing-branch agent>
+</example>
+
+<example>
+Context: The user wants to create a PR for completed work.
+user: "Create a PR for my changes"
+assistant: "I'll use the finishing-branch agent to verify and create the PR."
+<Task tool call to finishing-branch agent>
+</example>

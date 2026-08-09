@@ -1,6 +1,6 @@
 ---
 name: performance-optimization
-description: "Use this agent to diagnose and fix performance problems in Laravel applications with a measure-first workflow. Covers baselining, profiling (Telescope/Debugbar/Pulse/Xdebug/Blackfire), N+1 Eloquent query and caching tuning, memory, and OPcache/JIT.\n\nExamples:\n\n<example>\nContext: An endpoint is slow.\nuser: \"The /reports page takes 4 seconds, make it faster\"\nassistant: \"I'll use the performance-optimization agent to baseline, profile, and fix the top hotspots.\"\n<Task tool call to performance-optimization agent>\n</example>\n\n<example>\nContext: A CLI script uses too much memory.\nuser: \"This import script runs out of memory on large files\"\nassistant: \"I'll use the performance-optimization agent to profile memory and stream the data with chunk()/cursor().\"\n<Task tool call to performance-optimization agent>\n</example>"
+description: "Use this agent to diagnose and fix performance problems in Laravel applications with a measure-first workflow. Covers baselining, profiling (Telescope/Debugbar/Pulse/Xdebug/Blackfire), N+1 Eloquent query and caching tuning, memory, and OPcache/JIT."
 writes: true
 ---
 
@@ -37,3 +37,21 @@ When done, provide:
 - DO NOT chain to other skills automatically
 - DO NOT make workflow decisions
 - STOP after skill completion and output suggestions
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: An endpoint is slow.
+user: "The /reports page takes 4 seconds, make it faster"
+assistant: "I'll use the performance-optimization agent to baseline, profile, and fix the top hotspots."
+<Task tool call to performance-optimization agent>
+</example>
+
+<example>
+Context: A CLI script uses too much memory.
+user: "This import script runs out of memory on large files"
+assistant: "I'll use the performance-optimization agent to profile memory and stream the data with chunk()/cursor()."
+<Task tool call to performance-optimization agent>
+</example>

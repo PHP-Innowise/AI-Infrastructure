@@ -98,13 +98,27 @@ done
 python3 scripts/context_budget.py --check
 ```
 
-The budget step measures each edition's startup context price — `AGENTS.md`
-plus the frontmatter (and, within it, the `description` trigger text) of
-every skill in the canon `.agents/skills` — and compares it against the
-per-edition ceilings in [`scripts/token_budget.json`](../scripts/token_budget.json)
-(observed values + ~5% headroom, so only regressions fail). Run
-`python3 scripts/context_budget.py` without flags for the current numbers;
-raise a ceiling only together with the change that justifies the growth.
+The budget step measures each edition's startup context price and compares it
+against the per-edition ceilings in
+[`scripts/token_budget.json`](../scripts/token_budget.json) (observed values
++ ~5% headroom, so only regressions fail). The startup price is `AGENTS.md`
+plus every listing the tool shows the model before any work happens: skill
+descriptors from the canon `.agents/skills`, the `.claude/commands` listing,
+and the `.claude/agents` listing. All of it is paid on every session of the
+edition, used or not, which is what makes a rarely-invoked skill or agent
+expensive rather than cheap. `frontmatter_bytes` and `body_bytes` are gated
+alongside as file facts — the first a superset of the descriptors including
+orchestration keys the model never sees, the second the per-invocation cost.
+
+Commands and agents usually carry no `description` in frontmatter; Claude
+Code derives one from the first body paragraph and the script does the same.
+A skill declaring `disable-model-invocation: true` is left out of
+`descriptor_bytes`, because such a skill's description is not put in context
+at all.
+
+Run `python3 scripts/context_budget.py` without flags for the current
+numbers; raise a ceiling only together with the change that justifies the
+growth.
 
 ### changelog
 

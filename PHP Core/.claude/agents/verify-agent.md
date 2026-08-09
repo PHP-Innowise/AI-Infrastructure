@@ -1,6 +1,6 @@
 ---
 name: verify
-description: "Use this agent to run the full Definition of Done checklist before merging or claiming completion. Reports structured pass/fail status with actionable fix suggestions.\n\nExamples:\n\n<example>\nContext: The user wants to verify before merging.\nuser: \"Check if we're ready to merge\"\nassistant: \"I'll use the verify agent to run the DoD checklist.\"\n<Task tool call to verify agent>\n</example>\n\n<example>\nContext: The user wants a pre-PR check.\nuser: \"Run verification before I create a PR\"\nassistant: \"I'll use the verify agent to check all requirements.\"\n<Task tool call to verify agent>\n</example>"
+description: "Use this agent to run the full Definition of Done checklist before merging or claiming completion. Reports structured pass/fail status with actionable fix suggestions."
 model: sonnet
 invokes: verify
 phase: execution
@@ -38,3 +38,21 @@ When done, provide:
 - DO NOT chain to other skills automatically
 - DO NOT make workflow decisions
 - STOP after skill completion and output suggestions
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: The user wants to verify before merging.
+user: "Check if we're ready to merge"
+assistant: "I'll use the verify agent to run the DoD checklist."
+<Task tool call to verify agent>
+</example>
+
+<example>
+Context: The user wants a pre-PR check.
+user: "Run verification before I create a PR"
+assistant: "I'll use the verify agent to check all requirements."
+<Task tool call to verify agent>
+</example>

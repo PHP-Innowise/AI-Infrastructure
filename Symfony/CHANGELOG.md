@@ -13,6 +13,16 @@ it at the top of every session.
 
 ### Added
 
+- Agent `<example>` blocks moved out of `description:` frontmatter into a
+  `## Selection examples` body section. An agent's description is loaded into
+  the orchestrator's context on every session, spawned or not, and the
+  examples were about two thirds of those bytes while teaching the selector
+  what the surrounding prose already says. Nothing was deleted - the blocks
+  sit verbatim in the body, where a reader still finds them and a session no
+  longer pays for them. Measured with cl100k: the agent listing drops from
+  5624 t to 1852 t per session, and the edition's whole startup surface
+  from 12400 t to 8636 t.
+
 - Spec-driven development: the `sdd` skill and the `/sdd` flow command.
   `/sdd` runs specify -> design -> **checkpoint** -> task breakdown ->
   **checkpoint** -> execute task by task -> tests -> parallel review ->

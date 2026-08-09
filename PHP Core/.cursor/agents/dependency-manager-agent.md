@@ -1,6 +1,6 @@
 ---
 name: dependency-manager
-description: "Use this agent to manage Composer dependencies for native PHP projects: run composer audit, review outdated packages, tighten version constraints, optimize autoloading, and vet new packages before adding them.\n\nExamples:\n\n<example>\nContext: The user wants a dependency health check.\nuser: \"Check our dependencies for vulnerabilities and outdated packages\"\nassistant: \"I'll use the dependency-manager agent to audit and review the tree.\"\n<Task tool call to dependency-manager agent>\n</example>\n\n<example>\nContext: Adding a package.\nuser: \"We need a UUID library, add a good one\"\nassistant: \"I'll use the dependency-manager agent to vet and add a maintained package with a sane constraint.\"\n<Task tool call to dependency-manager agent>\n</example>"
+description: "Use this agent to manage Composer dependencies for native PHP projects: run composer audit, review outdated packages, tighten version constraints, optimize autoloading, and vet new packages before adding them."
 writes: true
 ---
 
@@ -37,3 +37,21 @@ When done, provide:
 - DO NOT chain to other skills automatically
 - DO NOT make workflow decisions
 - STOP after skill completion and output suggestions
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: The user wants a dependency health check.
+user: "Check our dependencies for vulnerabilities and outdated packages"
+assistant: "I'll use the dependency-manager agent to audit and review the tree."
+<Task tool call to dependency-manager agent>
+</example>
+
+<example>
+Context: Adding a package.
+user: "We need a UUID library, add a good one"
+assistant: "I'll use the dependency-manager agent to vet and add a maintained package with a sane constraint."
+<Task tool call to dependency-manager agent>
+</example>

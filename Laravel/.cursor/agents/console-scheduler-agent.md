@@ -1,6 +1,6 @@
 ---
 name: console-scheduler
-description: "Use this agent to build custom Artisan console commands and schedule recurring tasks in Laravel: command signatures/arguments/options, console output styling, task scheduling (routes/console.php or app/Console/Kernel.php depending on version), overlap prevention, and scheduled-task failure handling.\n\nExamples:\n\n<example>\nContext: The user needs a new Artisan command that also needs to run on a recurring basis.\nuser: \"Create an Artisan command that sends a weekly digest email and schedule it for Monday mornings\"\nassistant: \"I'll use the console-scheduler agent to build the command's signature/output and register it on the schedule.\"\n<Task tool call to console-scheduler agent>\n</example>\n\n<example>\nContext: An existing scheduled task is running twice on a multi-server deployment.\nuser: \"Our nightly cleanup command is running on both app servers at once and stepping on itself\"\nassistant: \"I'll use the console-scheduler agent to add withoutOverlapping and onOneServer to the schedule entry.\"\n<Task tool call to console-scheduler agent>\n</example>"
+description: "Use this agent to build custom Artisan console commands and schedule recurring tasks in Laravel: command signatures/arguments/options, console output styling, task scheduling (routes/console.php or app/Console/Kernel.php depending on version), overlap prevention, and scheduled-task failure handling."
 writes: true
 ---
 
@@ -36,3 +36,21 @@ When done, provide:
 - DO NOT chain to other skills automatically
 - DO NOT make workflow decisions
 - STOP after skill completion and output suggestions
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: The user needs a new Artisan command that also needs to run on a recurring basis.
+user: "Create an Artisan command that sends a weekly digest email and schedule it for Monday mornings"
+assistant: "I'll use the console-scheduler agent to build the command's signature/output and register it on the schedule."
+<Task tool call to console-scheduler agent>
+</example>
+
+<example>
+Context: An existing scheduled task is running twice on a multi-server deployment.
+user: "Our nightly cleanup command is running on both app servers at once and stepping on itself"
+assistant: "I'll use the console-scheduler agent to add withoutOverlapping and onOneServer to the schedule entry."
+<Task tool call to console-scheduler agent>
+</example>

@@ -2,9 +2,10 @@
 """Measure the context budget of every edition.
 
 An agent that opens an edition pays a fixed price before doing any work —
-the edition's AGENTS.md plus every skill descriptor — and a second, much
-larger price each time it actually invokes a skill and the body loads. This
-script measures both, per edition:
+the edition's AGENTS.md, plus a one-line summary of everything the tool
+lists as available: skills, commands and agents — and a second, much larger
+price each time it actually invokes a skill and the body loads. This script
+measures both, per edition:
 
   category            what is counted                          when paid
   ------------------  ---------------------------------------  ----------
@@ -13,10 +14,32 @@ script measures both, per edition:
                       SKILL.md (the text skill selection
                       actually reads; continuation lines
                       included)
+  command_bytes       file stem + description of every         startup
+                      .claude/commands/*.md
+  agent_bytes         file stem + description of every         startup
+                      .claude/agents/*-agent.md
   frontmatter_bytes   all YAML between the two `---`           startup
-                      delimiters (a superset of the above)
+                      delimiters (a superset of descriptor)
   body_bytes          everything after the closing `---`       on invocation
   skills              number of SKILL.md files parsed          -
+
+Commands and agents were unmeasured until they were measured once by hand,
+and together they were 62 % of Laravel's real startup surface — the agent
+roster alone was three times the gated skill descriptors, because two thirds
+of each agent `description` was `<example>` blocks. They are gated here so
+that stays visible.
+
+A skill carrying `disable-model-invocation: true` is excluded from
+descriptor_bytes: Claude Code does not put such a skill's description in
+context at all, so counting it would over-state what a session pays. It still
+counts toward frontmatter_bytes and body_bytes, which are file facts.
+
+Commands and agents normally have no `description` in frontmatter; Claude
+Code then derives one from the first paragraph of the body, and so does this
+script. That derivation was checked against the repository's own mirror
+generator, which implements the same rule for the Cursor mirrors: 43 of 45
+Laravel commands matched byte for byte, the two exceptions being the pinned
+description_overrides in MIRROR_RULES.
 
 Token estimates use per-class bytes-per-token ratios measured with
 cl100k on this repository's own files (docs/TOKEN-ECONOMY-RESEARCH.md),
@@ -53,10 +76,15 @@ EDITIONS = ("Laravel", "Symfony", "PHP Core", "Infrastructure-Creator")
 CATEGORIES = (
     "agents_md_bytes",
     "descriptor_bytes",
+    "command_bytes",
+    "agent_bytes",
     "frontmatter_bytes",
     "body_bytes",
     "skills",
 )
+# The categories a session pays before any work happens.
+STARTUP_CATEGORIES = ("agents_md_bytes", "descriptor_bytes", "command_bytes",
+                      "agent_bytes")
 
 # Bytes per cl100k token, measured on this repository's own files
 # (docs/TOKEN-ECONOMY-RESEARCH.md, all figures marked [M] there). Each class
@@ -73,9 +101,20 @@ CATEGORIES = (
 # counts. The body ratio pairs the research's token count with the byte
 # count of the same file set, so it carries that pairing's drift; it is
 # still an order of magnitude closer than bytes / 4.
+# The command and agent ratios were measured the same way, on this repository
+# after the agent descriptions were slimmed, using code2prompt's cl100k with
+# the template wrapper subtracted:
+#
+#   command  Laravel/Symfony/PHP Core   19,426 B = 3,803 t   (5.07-5.18 range)
+#   agent    the four editions          28,032 B = 5,434 t   (5.12-5.21 range)
+#
+# Both are prose-with-identifiers and tokenize alike, which is why they land
+# close to the descriptor ratio and well away from the body ratio.
 BYTES_PER_TOKEN = {
     "agents_md_bytes": 4.76,
     "descriptor_bytes": 4.99,
+    "command_bytes": 5.11,
+    "agent_bytes": 5.16,
     "frontmatter_bytes": 4.59,
     "body_bytes": 4.23,
 }
@@ -128,6 +167,47 @@ def descriptor_value(frontmatter: str, path: Path) -> str:
     return f"{name}\n{description}"
 
 
+def first_paragraph(body: str) -> str:
+    """The description Claude Code derives when frontmatter declares none.
+
+    Headings are skipped; the first run of non-blank lines is the paragraph.
+    """
+    para: list[str] = []
+    for line in body.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            if para:
+                break
+            continue
+        if stripped.startswith("#"):
+            if para:
+                break
+            continue
+        para.append(stripped)
+    return " ".join(para)
+
+
+def listing_bytes(paths: list[Path]) -> tuple[int, int]:
+    """Bytes of the `name + description` listing for commands or agents.
+
+    Returns (bytes, count). The name is the file stem, which is what the tool
+    lists; the description is the frontmatter field when present and the first
+    body paragraph otherwise.
+    """
+    total = 0
+    for path in sorted(paths):
+        text = path.read_text(encoding="utf-8")
+        try:
+            frontmatter, body = split_skill(text, path.relative_to(ROOT))
+        except BudgetError:
+            frontmatter, body = "", text
+        description = field_block(frontmatter, "description")
+        if description is None:
+            description = first_paragraph(body)
+        total += len(f"{path.stem}\n{description}".encode("utf-8"))
+    return total, len(paths)
+
+
 def measure_edition(edition: str) -> dict:
     edition_dir = ROOT / edition
     agents_md = edition_dir / "AGENTS.md"
@@ -147,14 +227,22 @@ def measure_edition(edition: str) -> dict:
         frontmatter_bytes += len(frontmatter.encode("utf-8"))
         body_bytes += len(body.encode("utf-8"))
         descriptor = descriptor_value(frontmatter, skill_md.relative_to(ROOT))
-        descriptor_bytes += len(descriptor.encode("utf-8"))
+        # A user-invoked-only skill is never listed to the model, so its
+        # descriptor is not part of what a session pays.
+        if "disable-model-invocation: true" not in frontmatter:
+            descriptor_bytes += len(descriptor.encode("utf-8"))
         skills += 1
     if skills == 0:
         raise BudgetError(f"{edition}: no */SKILL.md found under {skills_dir}")
 
+    command_bytes, _ = listing_bytes(list((edition_dir / ".claude" / "commands").glob("*.md")))
+    agent_bytes, _ = listing_bytes(list((edition_dir / ".claude" / "agents").glob("*-agent.md")))
+
     return {
         "agents_md_bytes": agents_md.stat().st_size,
         "descriptor_bytes": descriptor_bytes,
+        "command_bytes": command_bytes,
+        "agent_bytes": agent_bytes,
         "frontmatter_bytes": frontmatter_bytes,
         "body_bytes": body_bytes,
         "skills": skills,
@@ -170,35 +258,39 @@ def fmt_bytes(nbytes: int, category: str) -> str:
 
 
 def startup_tokens(m: dict) -> int:
-    """Token estimate for what loads before any work: AGENTS.md + frontmatter."""
-    return (tokens(m["agents_md_bytes"], "agents_md_bytes")
-            + tokens(m["frontmatter_bytes"], "frontmatter_bytes"))
+    """What loads before any work: AGENTS.md plus every listing the tool shows.
+
+    Not frontmatter_bytes: the model is shown `name` + `description`, not the
+    orchestration keys beside them, so the full frontmatter over-states this
+    by roughly 1.5x. frontmatter_bytes stays gated as a file fact.
+    """
+    return sum(tokens(m[cat], cat) for cat in STARTUP_CATEGORIES)
+
+
+STARTUP_LABELS = {
+    "agents_md_bytes": "AGENTS.md",
+    "descriptor_bytes": "skill descriptors",
+    "command_bytes": "command listing",
+    "agent_bytes": "agent listing",
+}
 
 
 def report(measurements: dict[str, dict]) -> None:
-    headers = ("Edition", "Skills", "AGENTS.md", "Frontmatter",
-               "  of which descriptor", "Startup total", "Bodies (on invocation)")
+    headers = ("Edition", "Skills") + tuple(STARTUP_LABELS.values()) + (
+        "Startup total", "Bodies (on invocation)")
     rows = [headers]
     total = {cat: 0 for cat in CATEGORIES}
     for edition, m in measurements.items():
-        rows.append((
-            edition, str(m["skills"]),
-            fmt_bytes(m["agents_md_bytes"], "agents_md_bytes"),
-            fmt_bytes(m["frontmatter_bytes"], "frontmatter_bytes"),
-            fmt_bytes(m["descriptor_bytes"], "descriptor_bytes"),
-            f"~{startup_tokens(m)} t",
-            fmt_bytes(m["body_bytes"], "body_bytes"),
-        ))
+        rows.append((edition, str(m["skills"]))
+                    + tuple(fmt_bytes(m[cat], cat) for cat in STARTUP_CATEGORIES)
+                    + (f"~{startup_tokens(m)} t",
+                       fmt_bytes(m["body_bytes"], "body_bytes")))
         for cat in CATEGORIES:
             total[cat] += m[cat]
-    rows.append((
-        "ALL EDITIONS (monorepo checkout)", str(total["skills"]),
-        fmt_bytes(total["agents_md_bytes"], "agents_md_bytes"),
-        fmt_bytes(total["frontmatter_bytes"], "frontmatter_bytes"),
-        fmt_bytes(total["descriptor_bytes"], "descriptor_bytes"),
-        f"~{startup_tokens(total)} t",
-        fmt_bytes(total["body_bytes"], "body_bytes"),
-    ))
+    rows.append(("ALL EDITIONS (monorepo checkout)", str(total["skills"]))
+                + tuple(fmt_bytes(total[cat], cat) for cat in STARTUP_CATEGORIES)
+                + (f"~{startup_tokens(total)} t",
+                   fmt_bytes(total["body_bytes"], "body_bytes")))
 
     widths = [max(len(r[i]) for r in rows) for i in range(len(headers))]
     print("Context budget (bytes; token estimates calibrated per class, see "
@@ -209,14 +301,18 @@ def report(measurements: dict[str, dict]) -> None:
         if n == 0:
             print("  ".join("-" * w for w in widths))
     print()
-    print("Startup total = AGENTS.md + skill frontmatter, paid on every session")
-    print("of that edition. The descriptor column is the part of the frontmatter")
-    print("skill selection actually matches against. Bodies are paid per skill")
-    print("invocation, not at startup - they are an order of magnitude larger,")
+    print("Startup total = AGENTS.md plus every listing the tool shows the model:")
+    print("skill descriptors, commands and agents. All of it is paid on every")
+    print("session of that edition, whether or not any of it is used - which is")
+    print("why a rarely-invoked skill or agent is expensive rather than cheap.")
+    print("Bodies are paid per invocation instead, an order of magnitude larger,")
     print("which is why they are budgeted separately rather than ignored.")
     print()
+    print("frontmatter_bytes is gated too but not shown here: it is a superset of")
+    print("the descriptors including orchestration keys the model is never shown.")
+    print()
     print("The last row is what a monorepo checkout exposes, where every")
-    print("edition's descriptors are visible at once. A consuming project")
+    print("edition's listings are visible at once. A consuming project")
     print("installs ONE edition and pays only that edition's row.")
 
 

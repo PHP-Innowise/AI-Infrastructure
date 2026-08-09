@@ -26,7 +26,8 @@ Into the target, for each generated skill `<name>` and each selected agent-carry
 1. **Read the skill-forge log** to get the exact set of generated skills; read profile section 1 to confirm which of {Claude, Cursor} were selected. If neither is selected, write nothing and report that no edition carries agents.
 2. **For each generated skill, one agent per selected edition.** Never create an agent for a skill absent from the log.
 3. **Author the Claude agent** at `.claude/agents/<name>-agent.md` with frontmatter keys `name`, `description`, `model`, `invokes`, `phase`, and `writes` when write-capable:
-   - `description` is a QUOTED string that embeds the usage sentence plus one or more `<example>...</example>` blocks (user request -> why this agent fires).
+   - `description` is a QUOTED string holding the usage sentence ONLY: what the agent is for, and which sibling agent to prefer when they are close. Keep it under ~250 characters. Every agent description is loaded into the orchestrator's context on every session of the generated accelerator, spawned or not, so this string is the accelerator's largest recurring startup cost after AGENTS.md.
+   - `<example>...</example>` blocks (user request -> why this agent fires) go in the BODY, under a `## Selection examples` heading - never in `description`. They teach a reader; the prose above is what actually routes work. Embedding them measured about two thirds of the description bytes in the hand-built editions.
    - `model`: `opus` for heavy planning/architecture skills (architecture skill, security-review, performance, and evidence-gated domain-review skills); `sonnet` for the rest.
    - `invokes`: the exact skill name; `phase`: the skill's phase.
    - `writes: true` when the wrapped skill modifies repository files - implementation, scaffolding, refactoring, test generation, migrations, dependency changes, documentation writing, release/branch operations. Omit the key for read-only skills (research, mapping, review, audit, design-only). The subagent gate reads this key to run write-capable agents one at a time; an agent that edits files without it will run concurrently with another writer, and one marked wrongly will serialize a read-only stage for no reason. Decide from what the skill's own Process section actually writes, not from its phase.
@@ -55,7 +56,7 @@ command-forge (wrap these agents as commands); hook-forge/memory-seed if not alr
 
 - MUST author one agent per skill in the skill-forge log; MUST NOT invent an agent for a skill that was not generated.
 - MUST write agents ONLY into selected editions among {Claude, Cursor}; MUST NEVER write an agent into Codex.
-- MUST give the Claude agent full frontmatter (`name`, `description` with embedded `<example>` blocks, `model`, `invokes`, `phase`) and the Cursor agent frontmatter reduced to `name`, `description`; both carry `writes: true` when the wrapped skill modifies repository files, and neither carries the key otherwise.
+- MUST give the Claude agent full frontmatter (`name`, `description` as a usage sentence with NO embedded `<example>` blocks - those belong in the body - `model`, `invokes`, `phase`) and the Cursor agent frontmatter reduced to `name`, `description`; both carry `writes: true` when the wrapped skill modifies repository files, and neither carries the key otherwise.
 - MUST decide `writes` from what the wrapped skill writes, and MUST keep the flag identical for the same skill across both editions: the flag is what makes the generated accelerator's write serialization work at all.
 - MUST set `model: opus` for heavy planning/architecture/domain-review skills and `sonnet` for the rest.
 - MUST make each agent invoke exactly one skill and STOP - no auto-chaining.

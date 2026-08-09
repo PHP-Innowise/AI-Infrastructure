@@ -1,6 +1,6 @@
 ---
 name: documentation-generator
-description: "Use this agent to generate and maintain project documentation including READMEs, ADRs (Architecture Decision Records), changelogs, and Symfony code documentation.\n\nExamples:\n\n<example>\nContext: The user wants to update documentation.\nuser: \"Update the README with the new features\"\nassistant: \"I'll use the documentation-generator agent to update the documentation.\"\n<Task tool call to documentation-generator agent>\n</example>\n\n<example>\nContext: The user needs to create an ADR.\nuser: \"Create an ADR for the caching decision we made\"\nassistant: \"I'll use the documentation-generator agent to create the architecture decision record.\"\n<Task tool call to documentation-generator agent>\n</example>"
+description: "Use this agent to generate and maintain project documentation including READMEs, ADRs (Architecture Decision Records), changelogs, and Symfony code documentation."
 writes: true
 ---
 
@@ -36,3 +36,21 @@ When done, provide:
 - DO NOT chain to other skills automatically
 - DO NOT make workflow decisions
 - STOP after skill completion and output suggestions
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: The user wants to update documentation.
+user: "Update the README with the new features"
+assistant: "I'll use the documentation-generator agent to update the documentation."
+<Task tool call to documentation-generator agent>
+</example>
+
+<example>
+Context: The user needs to create an ADR.
+user: "Create an ADR for the caching decision we made"
+assistant: "I'll use the documentation-generator agent to create the architecture decision record."
+<Task tool call to documentation-generator agent>
+</example>

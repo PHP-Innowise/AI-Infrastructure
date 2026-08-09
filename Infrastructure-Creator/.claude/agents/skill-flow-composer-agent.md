@@ -1,6 +1,6 @@
 ---
 name: skill-flow-composer
-description: "Use this agent to build the target PHP project's own SKILL FLOW.md from the exact set of skills skill-forge actually generated - a Main Flow diagram, Shortcuts, a Phase Map table, and a Context Handoff section - assembled dynamically from the real generated set rather than a template. It requires a target-project-path argument and ensures every cross-reference resolves to a generated skill. Runs exactly one skill and stops.\n\nExamples:\n\n<example>\nContext: skill-forge has produced its log and the user wants a navigational map for the generated skills.\nuser: \"compose the skill flow for ../acme-billing\"\nassistant: \"I'll use the skill-flow-composer agent to build SKILL FLOW.md from the real generated skill set.\"\n<Task tool call to skill-flow-composer agent>\n</example>\n\n<example>\nContext: The user wants the target's flow map wired only among skills that exist.\nuser: \"Build the SKILL FLOW.md for this project\"\nassistant: \"I'll use the skill-flow-composer agent to assemble the flow dynamically from the skill-forge log.\"\n<Task tool call to skill-flow-composer agent>\n</example>"
+description: "Use this agent to build the target PHP project's own SKILL FLOW.md from the exact set of skills skill-forge actually generated - a Main Flow diagram, Shortcuts, a Phase Map table, and a Context Handoff section - assembled dynamically from the real generated set rather than a template. It requires a target-project-path argument and ensures every cross-reference resolves to a generated skill. Runs exactly one skill and stops."
 model: sonnet
 invokes: skill-flow-composer
 phase: generation
@@ -34,3 +34,21 @@ When done, provide:
 - MUST ensure every skill referenced anywhere resolves to a generated skill, and write SKILL FLOW.md only into selected editions' skills dirs.
 - MUST NOT include any secret or credential value.
 - Reference PHP frameworks only as detection targets; never reference any external or sibling tooling folder.
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: skill-forge has produced its log and the user wants a navigational map for the generated skills.
+user: "compose the skill flow for ../acme-billing"
+assistant: "I'll use the skill-flow-composer agent to build SKILL FLOW.md from the real generated skill set."
+<Task tool call to skill-flow-composer agent>
+</example>
+
+<example>
+Context: The user wants the target's flow map wired only among skills that exist.
+user: "Build the SKILL FLOW.md for this project"
+assistant: "I'll use the skill-flow-composer agent to assemble the flow dynamically from the skill-forge log."
+<Task tool call to skill-flow-composer agent>
+</example>

@@ -1,6 +1,6 @@
 ---
 name: refactorer
-description: "Use this agent for behavior-preserving refactors and safe Laravel/PHP upgrades: reduce duplication, extract fat controllers into Actions/Services, convert raw queries to Eloquent, improve types, and apply reviewed Rector/rector-laravel rules, all under a test safety net.\n\nExamples:\n\n<example>\nContext: A class has grown unwieldy.\nuser: \"This 400-line controller is a mess, clean it up without breaking anything\"\nassistant: \"I'll use the refactorer agent to extract it into Actions/Services under a characterization test net.\"\n<Task tool call to refactorer agent>\n</example>\n\n<example>\nContext: Modernizing an old codebase.\nuser: \"Add strict types and modern type hints across this module\"\nassistant: \"I'll use the refactorer agent to modernize types safely.\"\n<Task tool call to refactorer agent>\n</example>"
+description: "Use this agent for behavior-preserving refactors and safe Laravel/PHP upgrades: reduce duplication, extract fat controllers into Actions/Services, convert raw queries to Eloquent, improve types, and apply reviewed Rector/rector-laravel rules, all under a test safety net."
 model: sonnet
 invokes: refactorer
 phase: execution
@@ -40,3 +40,21 @@ When done, provide:
 - DO NOT chain to other skills automatically
 - DO NOT make workflow decisions
 - STOP after skill completion and output suggestions
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: A class has grown unwieldy.
+user: "This 400-line controller is a mess, clean it up without breaking anything"
+assistant: "I'll use the refactorer agent to extract it into Actions/Services under a characterization test net."
+<Task tool call to refactorer agent>
+</example>
+
+<example>
+Context: Modernizing an old codebase.
+user: "Add strict types and modern type hints across this module"
+assistant: "I'll use the refactorer agent to modernize types safely."
+<Task tool call to refactorer agent>
+</example>

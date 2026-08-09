@@ -1,6 +1,6 @@
 ---
 name: skill-creator
-description: "Use this agent to create or update skills that extend Claude's capabilities with specialized knowledge, workflows, or tool integrations.\n\nExamples:\n\n<example>\nContext: The user wants to create a new skill.\nuser: \"Create a skill for database migrations\"\nassistant: \"I'll use the skill-creator agent to guide the skill creation.\"\n<Task tool call to skill-creator agent>\n</example>\n\n<example>\nContext: The user wants to update an existing skill.\nuser: \"Improve the code-reviewer skill to check for more issues\"\nassistant: \"I'll use the skill-creator agent to update the skill.\"\n<Task tool call to skill-creator agent>\n</example>"
+description: "Use this agent to create or update skills that extend Claude's capabilities with specialized knowledge, workflows, or tool integrations."
 model: sonnet
 invokes: skill-creator
 phase: utility
@@ -39,3 +39,21 @@ When done, provide:
 - DO NOT chain to other skills automatically
 - DO NOT make workflow decisions
 - STOP after skill completion and output suggestions
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: The user wants to create a new skill.
+user: "Create a skill for database migrations"
+assistant: "I'll use the skill-creator agent to guide the skill creation."
+<Task tool call to skill-creator agent>
+</example>
+
+<example>
+Context: The user wants to update an existing skill.
+user: "Improve the code-reviewer skill to check for more issues"
+assistant: "I'll use the skill-creator agent to update the skill."
+<Task tool call to skill-creator agent>
+</example>

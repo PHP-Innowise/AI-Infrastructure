@@ -1,6 +1,6 @@
 ---
 name: coder
-description: "Use this agent to implement Symfony backend features and fix bugs (behavior-changing work). Covers Symfony controllers, routing, input validation, domain services, Doctrine repositories, migrations, value objects, and tests. For pure behavior-preserving cleanups use the refactorer agent; for scaffolding an approved architecture use the architecture-implementer agent.\n\nExamples:\n\n<example>\nContext: The user wants to implement a backend feature.\nuser: \"Implement invitation-only user registration\"\nassistant: \"I'll use the coder agent to implement the Symfony backend functionality.\"\n<Task tool call to coder agent>\n</example>\n\n<example>\nContext: The user needs to fix a backend bug.\nuser: \"Fix the validation issue in the order request\"\nassistant: \"I'll use the coder agent to fix the PHP bug.\"\n<Task tool call to coder agent>\n</example>"
+description: "Use this agent to implement Symfony backend features and fix bugs (behavior-changing work). Covers Symfony controllers, routing, input validation, domain services, Doctrine repositories, migrations, value objects, and tests. For pure behavior-preserving cleanups use the refactorer agent; for scaffolding an approved architecture use the architecture-implementer agent."
 model: sonnet
 invokes: coder
 phase: execution
@@ -39,3 +39,21 @@ When done, provide:
 - DO NOT chain to other skills automatically
 - DO NOT make workflow decisions
 - STOP after skill completion and output suggestions
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: The user wants to implement a backend feature.
+user: "Implement invitation-only user registration"
+assistant: "I'll use the coder agent to implement the Symfony backend functionality."
+<Task tool call to coder agent>
+</example>
+
+<example>
+Context: The user needs to fix a backend bug.
+user: "Fix the validation issue in the order request"
+assistant: "I'll use the coder agent to fix the PHP bug."
+<Task tool call to coder agent>
+</example>

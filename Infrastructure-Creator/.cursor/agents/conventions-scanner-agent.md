@@ -1,6 +1,6 @@
 ---
 name: conventions-scanner
-description: "Use this agent to detect a PHP target's coding conventions and project hygiene from real evidence - code style/format config, git hooks, editorconfig, commit conventions, docs/ADRs, and contribution governance - focusing on style and governance rather than duplicating stack-scanner's tooling scan. Phase 1 discovery, strictly read-only on the target.\n\nExamples:\n\n<example>\nContext: The user wants to know a project's code-style and governance conventions.\nuser: \"conventions-scanner ../acme-billing\"\nassistant: \"I'll use the conventions-scanner agent to detect the code style, git hooks, commit conventions, and governance files of ../acme-billing.\"\n<Task tool call to conventions-scanner agent>\n</example>\n\n<example>\nContext: The user asks about the code style and commit conventions of a codebase.\nuser: \"What code style and commit conventions does this project use?\"\nassistant: \"I'll use the conventions-scanner agent to detect the style/format config and commit conventions and report with confidence.\"\n<Task tool call to conventions-scanner agent>\n</example>"
+description: "Use this agent to detect a PHP target's coding conventions and project hygiene from real evidence - code style/format config, git hooks, editorconfig, commit conventions, docs/ADRs, and contribution governance - focusing on style and governance rather than duplicating stack-scanner's tooling scan. Phase 1 discovery, strictly read-only on the target."
 ---
 
 # Conventions Scanner Agent
@@ -28,3 +28,21 @@ When done, provide:
 - DO NOT chain to other skills automatically.
 - STOP after the skill completes.
 - MUST operate read-only on the target and MUST NOT read `.env`/secrets.
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: The user wants to know a project's code-style and governance conventions.
+user: "conventions-scanner ../acme-billing"
+assistant: "I'll use the conventions-scanner agent to detect the code style, git hooks, commit conventions, and governance files of ../acme-billing."
+<Task tool call to conventions-scanner agent>
+</example>
+
+<example>
+Context: The user asks about the code style and commit conventions of a codebase.
+user: "What code style and commit conventions does this project use?"
+assistant: "I'll use the conventions-scanner agent to detect the style/format config and commit conventions and report with confidence."
+<Task tool call to conventions-scanner agent>
+</example>
