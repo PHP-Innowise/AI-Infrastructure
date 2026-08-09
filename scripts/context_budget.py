@@ -41,6 +41,32 @@ generator, which implements the same rule for the Cursor mirrors: 43 of 45
 Laravel commands matched byte for byte, the two exceptions being the pinned
 description_overrides in MIRROR_RULES.
 
+Which tool these numbers describe
+---------------------------------
+command_bytes and agent_bytes are measured on the `.claude` tree, and that is
+the richest of the three surfaces, so gating it bounds the others rather than
+tracking each:
+
+  Claude Code  pays all four startup categories.
+  Cursor       same file counts in `.cursor/commands` and `.cursor/agents`;
+               a few files are deliberately condensed for Cursor, so the
+               bytes differ slightly from the gated figure either way.
+  Codex        pays NEITHER. `.codex/` carries only config.toml, the
+               governance documents, hooks and hooks.json - there is no
+               commands or agents directory, and agent-forge forbids writing
+               one. A Codex session's startup surface is AGENTS.md plus the
+               skill descriptors, so for Codex these two categories
+               over-state the cost by their whole value.
+
+One convention inherited from descriptor_bytes: when a `description` field
+exists, the counted text is the whole entry including the `description:` key,
+as descriptor_value has always counted `name:` and `description:`. Where the
+description is derived from the body instead there is no key to count. The
+difference is a constant ~14 bytes per file - about 5 % of agent_bytes - so
+the figure runs slightly above what a tool actually renders. It is consistent
+across runs, which is what a regression gate needs, and the calibration ratios
+were measured on text extracted the same way.
+
 Token estimates use per-class bytes-per-token ratios measured with
 cl100k on this repository's own files (docs/TOKEN-ECONOMY-RESEARCH.md),
 not the flat bytes / 4 this script used to apply — that heuristic runs
@@ -193,6 +219,10 @@ def listing_bytes(paths: list[Path]) -> tuple[int, int]:
     Returns (bytes, count). The name is the file stem, which is what the tool
     lists; the description is the frontmatter field when present and the first
     body paragraph otherwise.
+
+    Callers pass the `.claude` tree: it is the richest surface, so gating it
+    bounds Cursor's and over-states Codex's, which has no commands or agents
+    at all. See the module docstring.
     """
     total = 0
     for path in sorted(paths):
@@ -310,6 +340,10 @@ def report(measurements: dict[str, dict]) -> None:
     print()
     print("frontmatter_bytes is gated too but not shown here: it is a superset of")
     print("the descriptors including orchestration keys the model is never shown.")
+    print()
+    print("The command and agent listings are measured on the .claude tree, the")
+    print("richest of the three: Cursor's differ slightly, and Codex has neither")
+    print("directory at all, so a Codex session pays only the first two columns.")
     print()
     print("The last row is what a monorepo checkout exposes, where every")
     print("edition's listings are visible at once. A consuming project")

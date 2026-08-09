@@ -116,6 +116,15 @@ A skill declaring `disable-model-invocation: true` is left out of
 `descriptor_bytes`, because such a skill's description is not put in context
 at all.
 
+The two listings are measured on the `.claude` tree, which is the richest of
+the three tool surfaces, so gating it bounds the others instead of tracking
+each separately. Cursor carries the same files with a few deliberately
+condensed for it. **Codex carries neither**: `.codex/` holds only
+`config.toml`, the governance documents, `hooks/` and `hooks.json`, and
+`agent-forge` forbids writing an agent there. A Codex session's startup
+surface is `AGENTS.md` plus the skill descriptors, so for Codex these two
+categories over-state the cost by their whole value.
+
 Run `python3 scripts/context_budget.py` without flags for the current
 numbers; raise a ceiling only together with the change that justifies the
 growth.

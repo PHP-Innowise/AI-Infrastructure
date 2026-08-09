@@ -191,6 +191,22 @@ edition's own files remain in that edition's changelog.
   Claude Code does not put its description in context - closing the
   over-statement noted when `/sdd` took that flag.
 
+  Both listings are measured on the `.claude` tree, the richest of the three
+  tool surfaces, so gating it bounds the others rather than tracking each.
+  Cursor carries the same files with a few deliberately condensed for it;
+  **Codex carries neither** - `.codex/` holds only `config.toml`, the
+  governance documents, `hooks/` and `hooks.json`, and `agent-forge` forbids
+  writing an agent there - so for a Codex session these two categories
+  over-state the cost by their whole value, leaving `AGENTS.md` plus the skill
+  descriptors. Recorded in the script, in the ceiling file and in
+  [`docs/CI.md`](docs/CI.md) rather than left for a reader to rediscover. One
+  convention is inherited from `descriptor_bytes` and noted with it: where a
+  `description` field exists the counted text includes the `description:` key,
+  which runs about 14 bytes per file - some 5 % of `agent_bytes` - above what
+  a tool renders. It is constant across runs, which is what a regression gate
+  needs, and the calibration ratios were measured on text extracted the same
+  way.
+
 - **`sdd` is user-invoked only (`disable-model-invocation: true`).** Claude
   Code documents that this keeps a skill's description *out of context
   entirely* rather than merely blocking automatic loading, which turns the
