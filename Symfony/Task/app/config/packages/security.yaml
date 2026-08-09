@@ -1,39 +1,53 @@
 security:
-    # https://symfony.com/doc/current/security.html#registering-the-user-hashing-passwords
     password_hashers:
         Symfony\Component\Security\Core\User\PasswordAuthenticatedUserInterface: 'auto'
 
-    # https://symfony.com/doc/current/security.html#loading-the-user-the-user-provider
     providers:
-        users_in_memory: { memory: null }
+        accounts:
+            entity:
+                class: App\Identity\Entity\Account
+                property: email
+
+    # No role_hierarchy, deliberately. If ROLE_SUPER_ADMIN inherited the other
+    # roles, an ownership voter would pass silently for a Super Admin holding
+    # no tenant — exactly the cross-tenant access the tenancy model forbids.
+    # Every voter handles Super Admin explicitly instead.
+    # See specs/architect-architecture.md Decisions, "Role hierarchy".
 
     firewalls:
         dev:
-            # Ensure dev tools and static assets are always allowed
-            pattern: ^/(_profiler|_wdt|assets|build)/
+            pattern: ^/(_(profiler|wdt)|css|images|js)/
             security: false
+
         main:
             lazy: true
-            provider: users_in_memory
+            provider: accounts
+            form_login:
+                login_path: identity_auth_login
+                check_path: identity_auth_login
+                enable_csrf: true
+                default_target_path: app_dashboard
+            logout:
+                path: identity_auth_logout
+                target: identity_auth_login
 
-            # Activate different ways to authenticate:
-            # https://symfony.com/doc/current/security.html#the-firewall
-
-            # https://symfony.com/doc/current/security/impersonating_user.html
-            # switch_user: true
-
-    # Note: Only the *first* matching rule is applied
+    # Coarse gates on route prefixes only. These are never the real check:
+    # object-level decisions belong to voters, because "is this row mine"
+    # cannot be expressed as a path pattern.
     access_control:
-        # - { path: ^/admin, roles: ROLE_ADMIN }
-        # - { path: ^/profile, roles: ROLE_USER }
+        - { path: ^/login$, roles: PUBLIC_ACCESS }
+        - { path: ^/health$, roles: PUBLIC_ACCESS }
+        - { path: ^/join/, roles: PUBLIC_ACCESS }
+        - { path: ^/forms/, roles: PUBLIC_ACCESS }
+        - { path: ^/admin/, roles: ROLE_SUPER_ADMIN }
+        - { path: ^/trainer/, roles: ROLE_TRAINER }
+        - { path: ^/coach/, roles: ROLE_COACH }
+        - { path: ^/portal/, roles: ROLE_PLAYER }
 
 when@test:
     security:
         password_hashers:
-            # Password hashers are resource-intensive by design to ensure security.
-            # In tests, it's safe to reduce their cost to improve performance.
+            # Fast, deliberately weak hashing so the suite is not dominated by
+            # bcrypt. Never reachable outside the test environment.
             Symfony\Component\Security\Core\User\PasswordAuthenticatedUserInterface:
-                algorithm: auto
-                cost: 4 # Lowest possible value for bcrypt
-                time_cost: 3 # Lowest possible value for argon
-                memory_cost: 10 # Lowest possible value for argon
+                algorithm: plaintext
