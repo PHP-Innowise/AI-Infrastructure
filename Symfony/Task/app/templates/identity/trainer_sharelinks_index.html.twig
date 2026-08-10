@@ -14,6 +14,33 @@
             <p>No static link has been provisioned for this trainer.</p>
         {% endif %}
 
+        {# AC-03-61 (optional MVP): unique, one-time links per player/parent. #}
+        <h2>Unique player invite links</h2>
+        {{ form_start(uniqueLinkForm, {action: path('identity_trainer_sharelinks_unique_create')}) }}
+            {{ form_widget(uniqueLinkForm) }}
+        {{ form_end(uniqueLinkForm) }}
+
+        {# AC-03-63 (optional MVP): a detailed tracking report — date, link
+           type, opens, joins. #}
+        {% if uniqueLinks is empty %}
+            <p>No unique invite links generated yet.</p>
+        {% else %}
+            <table>
+                <thead><tr><th>Date</th><th>Link type</th><th>Sent to</th><th>Opens</th><th>Joined</th></tr></thead>
+                <tbody>
+                {% for row in uniqueLinks %}
+                    <tr>
+                        <td>{{ row.link.createdAt|date('Y-m-d') }}</td>
+                        <td>Unique player invite</td>
+                        <td>{{ row.link.targetEmail }}</td>
+                        <td>{{ row.opens }}</td>
+                        <td>{{ row.link.useCount > 0 ? 'Yes' : 'No' }}</td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+
         <h2>Coach invitations</h2>
         {% if coachInvites is empty %}
             <p>No coach invitations sent yet.</p>

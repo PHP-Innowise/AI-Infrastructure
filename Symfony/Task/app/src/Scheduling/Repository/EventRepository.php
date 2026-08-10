@@ -74,6 +74,27 @@ class EventRepository extends ServiceEntityRepository
     }
 
     /**
+     * AC-03-35: "Events This Week" (vs. last week) — events STARTING within
+     * the given window, within the active tenant. The caller supplies both
+     * this-week's and last-week's bounds and calls this twice; no "week"
+     * concept is baked in here, matching the Quick View dashboard's own
+     * "fixed windows" framing (specs/api-designer-spec.md:533).
+     */
+    public function countStartingBetween(\DateTimeImmutable $from, \DateTimeImmutable $to): int
+    {
+        $count = $this->createQueryBuilder('e')
+            ->select('COUNT(e.id)')
+            ->andWhere('e.startsAt >= :from')
+            ->andWhere('e.startsAt < :to')
+            ->setParameter('from', $from)
+            ->setParameter('to', $to)
+            ->getQuery()
+            ->getSingleScalarResult();
+
+        return (int) $count;
+    }
+
+    /**
      * AC-07-22..24/AC-02-55..56: Super Admin's Event Master tool reads
      * across every trainer, so it never goes through this repository at all
      * — see CrossTenantReadService. This repository stays tenant-scoped,

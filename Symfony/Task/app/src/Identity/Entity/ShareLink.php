@@ -10,9 +10,9 @@ use App\Platform\Tenancy\TrainerScoped;
 use Doctrine\ORM\Mapping as ORM;
 
 /**
- * A trainer's invitation code: a static, unlimited-use link for players, or a
- * unique, one-time, 7-day-expiry link for a coach (or a coach-issued player
- * invite, Epic-03).
+ * A trainer's invitation code: a static, unlimited-use link for players, a
+ * unique, one-time, 7-day-expiry link for a coach, or (Epic-03) a unique,
+ * one-time, no-expiry link a COACH issues to invite a player.
  *
  * Trainer-scoped, and deliberately reached in two different ways: through the
  * ordinary trainer-scoped repository once a tenant is resolved, and through
@@ -21,8 +21,24 @@ use Doctrine\ORM\Mapping as ORM;
  * also create the matching `PublicTenantCode` row in the same transaction —
  * see `ShareLinkService`.
  *
+ * `TYPE_COACH_PLAYER_INVITE` resolves an open question the epic itself flags
+ * as unsettled (`specs/requirements-analyst-epic-03-crm-players-spec.md`
+ * Open questions, "Cross-epic gap, new ShareLink type") the way
+ * `specs/api-designer-spec.md`'s "Identity module" Decisions table settles
+ * it: `/invite/{code}` is "One route serving both Epic-01's coach invitation
+ * and Epic-03's coach-issued player invitation, branching on
+ * `ShareLink.type`" — which requires a third, distinct type value, not a
+ * reuse of `TYPE_UNIQUE_COACH` under a different issuer, since "only the
+ * stored `ShareLink.type` differs" between the two flows sharing that URL.
+ * Unlike `TYPE_UNIQUE_COACH` (BR-01-15: mandatory target email, mandatory
+ * 7-day expiry), AC-03-50's recipient email is optional
+ * (`specs/api-designer-spec.md:421`, `InvitePlayerType`) and no expiry is
+ * stated anywhere in the epic — modeled as single-use, no expiry, optional
+ * email. See the coder's final report.
+ *
  * @see specs/database-designer-schema.md "`share_link`"
  * @see specs/requirements-analyst-epic-01-user-management-spec.md BR-01-14, BR-01-15, BR-01-27
+ * @see specs/requirements-analyst-epic-03-crm-players-spec.md AC-03-50..53, Open questions
  */
 #[ORM\Entity(repositoryClass: ShareLinkRepository::class)]
 #[ORM\Table(name: 'share_link')]
@@ -33,6 +49,8 @@ class ShareLink
 {
     public const TYPE_STATIC_PLAYER = 'static_player';
     public const TYPE_UNIQUE_COACH = 'unique_coach';
+    public const TYPE_COACH_PLAYER_INVITE = 'coach_player_invite';
+    public const TYPE_UNIQUE_PLAYER_INVITE = 'unique_player_invite';
 
     #[ORM\Id]
     #[ORM\GeneratedValue]
@@ -50,7 +68,7 @@ class ShareLink
     #[ORM\Column(type: 'string', length: 64)]
     private string $code;
 
-    #[ORM\Column(name: 'link_type', type: 'string', length: 16)]
+    #[ORM\Column(name: 'link_type', type: 'string', length: 24)]
     private string $linkType;
 
     #[ORM\ManyToOne(targetEntity: Account::class)]
@@ -85,7 +103,7 @@ class ShareLink
         Account $createdByAccount,
         ?string $targetEmail = null,
     ) {
-        if (!\in_array($linkType, [self::TYPE_STATIC_PLAYER, self::TYPE_UNIQUE_COACH], true)) {
+        if (!\in_array($linkType, [self::TYPE_STATIC_PLAYER, self::TYPE_UNIQUE_COACH, self::TYPE_COACH_PLAYER_INVITE, self::TYPE_UNIQUE_PLAYER_INVITE], true)) {
             throw new \InvalidArgumentException(sprintf('Unknown ShareLink type "%s".', $linkType));
         }
 
@@ -107,6 +125,29 @@ class ShareLink
 
             $this->targetEmail = $targetEmail;
             $this->expiresAt = $this->createdAt->modify('+7 days');
+            $this->maxUses = 1;
+        }
+
+        if (self::TYPE_COACH_PLAYER_INVITE === $linkType) {
+            // AC-03-50/52: single-use, no stated expiry, recipient email
+            // optional (unlike the coach-invite type above) — see this
+            // class's own docblock for why this is a third type rather than
+            // a reuse of TYPE_UNIQUE_COACH.
+            $this->targetEmail = '' === trim((string) $targetEmail) ? null : $targetEmail;
+            $this->maxUses = 1;
+        }
+
+        if (self::TYPE_UNIQUE_PLAYER_INVITE === $linkType) {
+            // AC-03-61 (optional MVP): a TRAINER's own unique, one-time link
+            // per player/parent — the same single-use/no-expiry/optional-email
+            // shape as the coach's own player invite above, kept as a
+            // separate type (not a reuse of TYPE_COACH_PLAYER_INVITE) purely
+            // for issuer clarity: nothing downstream currently branches on
+            // this distinction (the landing flow at /join/{code} already
+            // handles any usable ShareLink type generically), but a link
+            // literally named "coach_player_invite" created by a trainer
+            // would be a misleading audit trail.
+            $this->targetEmail = '' === trim((string) $targetEmail) ? null : $targetEmail;
             $this->maxUses = 1;
         }
     }
@@ -136,6 +177,26 @@ class ShareLink
         return self::TYPE_UNIQUE_COACH === $this->linkType;
     }
 
+    /**
+     * AC-03-50..53: a coach-issued invitation to a specific player, reached
+     * through the same `/invite/{code}` URL as `isCoachLink()`'s type — see
+     * this class's own docblock.
+     */
+    public function isCoachPlayerInviteLink(): bool
+    {
+        return self::TYPE_COACH_PLAYER_INVITE === $this->linkType;
+    }
+
+    /**
+     * AC-03-61 (optional MVP): a trainer's own unique, one-time invite to a
+     * specific player/parent, reached through `/join/{code}` — the same
+     * landing flow as the static mass link, which does not branch on type.
+     */
+    public function isUniquePlayerInviteLink(): bool
+    {
+        return self::TYPE_UNIQUE_PLAYER_INVITE === $this->linkType;
+    }
+
     public function getCreatedByAccount(): Account
     {
         return $this->createdByAccount;
@@ -154,6 +215,14 @@ class ShareLink
     public function getUseCount(): int
     {
         return $this->useCount;
+    }
+
+    /**
+     * AC-03-63 (optional MVP): the tracking report's own "date" column.
+     */
+    public function getCreatedAt(): \DateTimeImmutable
+    {
+        return $this->createdAt;
     }
 
     public function getMaxUses(): ?int

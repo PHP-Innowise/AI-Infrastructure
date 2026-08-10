@@ -70,6 +70,58 @@ class PlayerTrainerMembershipRepository extends ServiceEntityRepository
         return $rows;
     }
 
+    /**
+     * AC-03-43/64: the coach-scoped player list — every active membership
+     * for a caller-supplied set of player ids (CoachVisibilityService's own
+     * reachable set), within the active tenant. An empty id list means an
+     * empty roster (AC-03-64: "a coach assigned to zero events sees zero
+     * players"), not "no filter."
+     *
+     * @param list<int> $playerIds
+     *
+     * @return list<PlayerTrainerMembership>
+     */
+    public function findActiveForPlayerIds(array $playerIds): array
+    {
+        if ([] === $playerIds) {
+            return [];
+        }
+
+        /** @var list<PlayerTrainerMembership> $rows */
+        $rows = $this->createQueryBuilder('m')
+            ->andWhere('m.status = :active')
+            ->andWhere('IDENTITY(m.player) IN (:playerIds)')
+            ->setParameter('active', PlayerTrainerMembership::STATUS_ACTIVE)
+            ->setParameter('playerIds', $playerIds)
+            ->orderBy('m.joinedAt', 'DESC')
+            ->getQuery()
+            ->getResult();
+
+        return $rows;
+    }
+
+    /**
+     * AC-03-39/BR-03-23: "5 new players joined via ShareLink" this week —
+     * `joined_at` doubles as "when this association was created" (BR-01-12's
+     * reactivate-in-place model means a re-join also updates it), within the
+     * active tenant.
+     */
+    public function countNewViaShareLinkBetween(\DateTimeImmutable $from, \DateTimeImmutable $to): int
+    {
+        $count = $this->createQueryBuilder('m')
+            ->select('COUNT(m.id)')
+            ->andWhere('m.source = :source')
+            ->andWhere('m.joinedAt >= :from')
+            ->andWhere('m.joinedAt < :to')
+            ->setParameter('source', PlayerTrainerMembership::SOURCE_SHARELINK)
+            ->setParameter('from', $from)
+            ->setParameter('to', $to)
+            ->getQuery()
+            ->getSingleScalarResult();
+
+        return (int) $count;
+    }
+
     public function add(PlayerTrainerMembership $membership): void
     {
         $this->getEntityManager()->persist($membership);

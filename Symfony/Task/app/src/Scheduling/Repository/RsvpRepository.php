@@ -137,6 +137,67 @@ class RsvpRepository extends ServiceEntityRepository
         return $rows;
     }
 
+    /**
+     * AC-03-36: total RSVPs requested this week, broken down by the owning
+     * event's type — Training/Private/Small Group. Every status counts (a
+     * pending-payment RSVP is still an RSVP the trainer would want to see on
+     * the dashboard), unlike `countHeld()`'s capacity-specific statuses.
+     *
+     * @return array<string, int> eventType => count
+     */
+    public function countByEventTypeRequestedBetween(\DateTimeImmutable $from, \DateTimeImmutable $to): array
+    {
+        /** @var list<array{eventType: string, cnt: string}> $rows */
+        $rows = $this->createQueryBuilder('r')
+            ->select('e.eventType AS eventType', 'COUNT(r.id) AS cnt')
+            ->join('r.event', 'e')
+            ->andWhere('r.requestedAt >= :from')
+            ->andWhere('r.requestedAt < :to')
+            ->setParameter('from', $from)
+            ->setParameter('to', $to)
+            ->groupBy('e.eventType')
+            ->getQuery()
+            ->getResult();
+
+        $counts = array_fill_keys(Event::types(), 0);
+
+        foreach ($rows as $row) {
+            $counts[$row['eventType']] = (int) $row['cnt'];
+        }
+
+        return $counts;
+    }
+
+    /**
+     * AC-03-43/64: the player ids RSVP'd (confirmed) across a set of events —
+     * the raw material `CoachVisibilityService::reachablePlayerIds()` reduces
+     * to a distinct set. Confirmed only, matching AC-03-43's "sees only
+     * players who have RSVP'd to events where the coach is assigned" reading
+     * (a pending-payment or canceled RSVP is not yet a real attendee).
+     *
+     * @param list<int> $eventIds
+     *
+     * @return list<int>
+     */
+    public function confirmedPlayerIdsForEvents(array $eventIds): array
+    {
+        if ([] === $eventIds) {
+            return [];
+        }
+
+        /** @var list<string> $rows */
+        $rows = $this->createQueryBuilder('r')
+            ->select('DISTINCT IDENTITY(r.player) AS playerId')
+            ->andWhere('r.event IN (:eventIds)')
+            ->andWhere('r.status = :confirmed')
+            ->setParameter('eventIds', $eventIds)
+            ->setParameter('confirmed', Rsvp::STATUS_CONFIRMED)
+            ->getQuery()
+            ->getSingleColumnResult();
+
+        return array_map('intval', $rows);
+    }
+
     public function add(Rsvp $rsvp): void
     {
         $this->getEntityManager()->persist($rsvp);
