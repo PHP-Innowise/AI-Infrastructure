@@ -1,0 +1,143 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}{{ player.firstName }} — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>{{ player.firstName }}</h1>
+
+        {# AC-03-27: Basic Profile. #}
+        <section>
+            <h2>Profile</h2>
+            <dl>
+                <dt>Age</dt><dd>{{ player.ageOn(now)|default('n/a') }}</dd>
+                <dt>Gender</dt><dd>{{ player.gender }}</dd>
+                <dt>Skill level</dt><dd>{{ membership.skillLevel }}</dd>
+                <dt>School/Team/Club</dt><dd>{{ player.schoolOrTeam }}</dd>
+                <dt>Registered</dt><dd>{{ membership.joinedAt|date('Y-m-d') }}</dd>
+            </dl>
+
+            {# AC-03-33: limited-field edit. #}
+            {{ form_start(editForm, {action: path('crm_trainer_player_edit', {membership: membership.id})}) }}
+                {{ form_widget(editForm) }}
+            {{ form_end(editForm) }}
+        </section>
+
+        {# AC-03-28: Labels. #}
+        <section>
+            <h2>Labels</h2>
+            {% for playerLabel in labels %}
+                <span class="badge" style="background:{{ playerLabel.label.colorHex }}">
+                    {{ playerLabel.label.name }}
+                    <form method="post" action="{{ path('crm_trainer_player_label_remove', {membership: membership.id, label: playerLabel.label.id}) }}" style="display:inline">
+                        <input type="hidden" name="_token" value="{{ csrf_token('player-label-remove' ~ playerLabel.label.id) }}">
+                        <button type="submit" aria-label="Remove {{ playerLabel.label.name }}">×</button>
+                    </form>
+                </span>
+            {% else %}
+                <p>No labels applied.</p>
+            {% endfor %}
+
+            <p>+ Add Label</p>
+            {{ form_start(applyLabelsForm, {action: path('crm_trainer_player_label_add', {membership: membership.id})}) }}
+                {{ form_widget(applyLabelsForm) }}
+            {{ form_end(applyLabelsForm) }}
+        </section>
+
+        {# AC-03-29: Flags. #}
+        <section>
+            <h2>Flags <span class="skeleton-caption">{{ activeFlags|length }} flag{{ activeFlags|length == 1 ? '' : 's' }}</span></h2>
+            {% for flag in activeFlags %}
+                <div class="badge">
+                    <strong>{{ flagDefinitions[flag.flagType] }}</strong>
+                    — applied by {{ flag.appliedByAccount.profile ? flag.appliedByAccount.profile.fullName : flag.appliedByAccount.email }}
+                    on {{ flag.appliedAt|date('Y-m-d') }}
+                    {% if flag.note %}<p>{{ flag.note }}</p>{% endif %}
+                    <form method="post" action="{{ path('crm_trainer_player_flag_resolve', {membership: membership.id, flag: flag.id}) }}" onsubmit="return confirm('Mark as resolved?');">
+                        <input type="hidden" name="_token" value="{{ csrf_token('player-flag-resolve' ~ flag.id) }}">
+                        <button type="submit">Remove Flag</button>
+                    </form>
+                </div>
+            {% else %}
+                <p>No active flags.</p>
+            {% endfor %}
+
+            <p>+ Add Flag</p>
+            {{ form_start(flagForm, {action: path('crm_trainer_player_flag_add', {membership: membership.id})}) }}
+                {{ form_widget(flagForm) }}
+            {{ form_end(flagForm) }}
+        </section>
+
+        {# AC-03-30/AC-03-19: general Notes. #}
+        <section>
+            <h2>Notes</h2>
+            {% for note in generalNotes %}
+                <div class="note">
+                    <p>{{ note.noteText }}</p>
+                    <p class="skeleton-caption">
+                        {{ note.createdByAccount.profile ? note.createdByAccount.profile.fullName : note.createdByAccount.email }}
+                        — {{ note.createdAt|date('Y-m-d H:i') }}
+                    </p>
+                    <form method="post" action="{{ path('crm_trainer_player_note_delete', {membership: membership.id, note: note.id}) }}">
+                        <input type="hidden" name="_token" value="{{ csrf_token('player-note-delete' ~ note.id) }}">
+                        <button type="submit">Delete</button>
+                    </form>
+                </div>
+            {% else %}
+                <p>No notes yet.</p>
+            {% endfor %}
+
+            {# AC-03-19/AC-03-20: general note, or tie it to an event via the selector below. #}
+            <p>+ Add Note</p>
+            {{ form_start(noteForm, {action: path('crm_trainer_player_note_add', {membership: membership.id})}) }}
+                {{ form_widget(noteForm) }}
+            {{ form_end(noteForm) }}
+        </section>
+
+        {# AC-03-31: Event History. #}
+        <section>
+            <h2>Event History</h2>
+            <p class="skeleton-caption">
+                {{ attendedCount }} of {{ totalTrackedCount }} events
+                ({{ totalTrackedCount > 0 ? (100 * attendedCount / totalTrackedCount)|round : 0 }}%)
+                — {{ noShowCount }} no-shows
+                {% if lastEventAt %} — last event {{ lastEventAt|date('Y-m-d') }}{% endif %}
+            </p>
+
+            {% if attendanceRecords is empty %}
+                <p>No events recorded yet.</p>
+            {% else %}
+                <table>
+                    <thead><tr><th>Date</th><th>Event</th><th>Status</th><th>Notes</th></tr></thead>
+                    <tbody>
+                        {% for record in attendanceRecords %}
+                            <tr>
+                                <td>{{ record.event.startsAt|date('Y-m-d') }}</td>
+                                <td>{{ record.event.title }}</td>
+                                <td>{{ record.status|capitalize }}</td>
+                                <td>
+                                    {% for note in eventNotes %}
+                                        {% if note.event.id == record.event.id %}
+                                            <p>[{{ note.event.title }}] - [{{ note.createdAt|date('Y-m-d') }}]: {{ note.noteText }}</p>
+                                        {% endif %}
+                                    {% endfor %}
+                                </td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            {% endif %}
+        </section>
+
+        {# AC-03-32: Coach Feedback (optional MVP), read-only to the trainer. #}
+        <section>
+            <h2>Coach Feedback</h2>
+            {% for feedback in coachFeedback %}
+                <p>Coach {{ feedback.createdByAccount.profile ? feedback.createdByAccount.profile.fullName : feedback.createdByAccount.email }}:
+                    "{{ feedback.noteText }}" — [{{ feedback.event.title }}] - [{{ feedback.createdAt|date('Y-m-d') }}]</p>
+            {% else %}
+                <p>No coach feedback yet.</p>
+            {% endfor %}
+        </section>
+    </div>
+{% endblock %}

@@ -1,0 +1,16 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Delete {{ label.name }} — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Delete label</h1>
+        {# BR-03-5: "Remove [Label] from [N] players?" #}
+        <p role="alert">Remove "{{ label.name }}" from {{ affectedPlayers }} player{{ affectedPlayers == 1 ? '' : 's' }}?</p>
+
+        <form method="post" action="{{ path('crm_trainer_label_delete', {label: label.id}) }}">
+            <input type="hidden" name="_token" value="{{ csrf_token('label-delete' ~ label.id) }}">
+            <button type="submit">Confirm delete</button>
+        </form>
+    </div>
+{% endblock %}

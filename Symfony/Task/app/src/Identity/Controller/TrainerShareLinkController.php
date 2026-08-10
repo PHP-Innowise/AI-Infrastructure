@@ -4,12 +4,16 @@ declare(strict_types=1);
 
 namespace App\Identity\Controller;
 
+use App\Identity\Entity\Account;
 use App\Identity\Entity\ShareLink;
+use App\Identity\Form\UniqueShareLinkType;
 use App\Identity\Repository\ShareLinkOpenRepository;
 use App\Identity\Repository\ShareLinkRepository;
 use App\Identity\Service\IdentityMailer;
 use App\Identity\Service\ShareLinkService;
 use App\Identity\Voter\CoachMembershipVoter;
+use App\Identity\Voter\ShareLinkVoter;
+use App\Platform\Entity\Trainer;
 use App\Platform\Tenancy\TenantContext;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
@@ -20,7 +24,9 @@ use Symfony\Component\Security\Http\Attribute\IsGranted;
 
 /**
  * AC-01-73: the trainer's static player link and their outstanding coach
- * invites, with open/join counts (BR-01-27).
+ * invites, with open/join counts (BR-01-27). AC-03-59/61..63 (Epic-03): the
+ * SAME static link viewed with its Epic-03 CRM framing, plus (optional MVP)
+ * unique per-player links and their own tracking report.
  */
 #[IsGranted('ROLE_TRAINER')]
 final class TrainerShareLinkController extends AbstractController
@@ -40,13 +46,53 @@ final class TrainerShareLinkController extends AbstractController
     {
         $trainerId = $this->tenantContext->requireTrainerId();
         $staticLink = $this->shareLinks->findStaticPlayerLink($trainerId);
+        $uniqueLinks = $this->shareLinks->findUniquePlayerInvitesForTrainer($trainerId);
 
         return $this->render('identity/trainer_sharelinks_index.html.twig', [
             'staticLink' => $staticLink,
             'staticLinkOpens' => null !== $staticLink ? $this->shareLinkOpens->countFor((int) $staticLink->getId()) : 0,
             'coachInvites' => $this->shareLinks->findCoachInvitesForTrainer($trainerId),
+            // AC-03-61/63: each unique link's own open count, for the
+            // tracking report (date, link type, opens, joins).
+            'uniqueLinks' => array_map(
+                fn (ShareLink $link): array => [
+                    'link' => $link,
+                    'opens' => $this->shareLinkOpens->countFor((int) $link->getId()),
+                ],
+                $uniqueLinks,
+            ),
+            'uniqueLinkForm' => $this->createForm(UniqueShareLinkType::class),
             'now' => new \DateTimeImmutable(),
         ]);
+    }
+
+    /**
+     * AC-03-61 (optional MVP): a unique, one-time link for one named
+     * player/parent.
+     */
+    #[Route('/trainer/sharelinks/unique', name: 'identity_trainer_sharelinks_unique_create', methods: ['POST'])]
+    public function createUnique(Request $request): Response
+    {
+        $this->denyAccessUnlessGranted(ShareLinkVoter::SHARELINK_CREATE);
+
+        $form = $this->createForm(UniqueShareLinkType::class);
+        $form->handleRequest($request);
+
+        if ($form->isSubmitted() && $form->isValid()) {
+            /** @var array{recipientName: ?string, email: ?string} $data */
+            $data = $form->getData();
+            /** @var Account $actor */
+            $actor = $this->getUser();
+            $trainerId = $this->tenantContext->requireTrainerId();
+            /** @var Trainer $trainer */
+            $trainer = $this->entityManager->getReference(Trainer::class, $trainerId);
+
+            $link = $this->shareLinkService->issueUniquePlayerInvite($trainer, $actor, '' === ($data['email'] ?? '') ? null : $data['email']);
+
+            $this->addFlash('success', sprintf('Unique invite link generated: /join/%s', $link->getCode()));
+        }
+
+        return $this->redirectToRoute('identity_trainer_sharelinks_index');
     }
 
     /**

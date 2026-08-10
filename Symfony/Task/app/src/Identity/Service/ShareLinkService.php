@@ -70,6 +70,44 @@ final readonly class ShareLinkService
     }
 
     /**
+     * AC-03-50: a coach's own single-use invitation to a specific player,
+     * distinct from the trainer-issued coach invite above — see ShareLink's
+     * own docblock for why this is a third `linkType` value.
+     */
+    public function issueCoachPlayerInvite(Trainer $trainer, Account $createdBy, ?string $targetEmail): ShareLink
+    {
+        return $this->entityManager->wrapInTransaction(function () use ($trainer, $createdBy, $targetEmail): ShareLink {
+            $code = $this->generateCode();
+            $link = new ShareLink($trainer, $code, ShareLink::TYPE_COACH_PLAYER_INVITE, $createdBy, $targetEmail);
+            $this->shareLinks->add($link);
+            $this->entityManager->flush();
+
+            $this->publicTenantCodes->issue($code, $trainer, PublicTenantCode::KIND_SHARELINK, (int) $link->getId());
+
+            return $link;
+        });
+    }
+
+    /**
+     * AC-03-61 (optional MVP): a trainer's own unique, one-time link
+     * addressed to a specific player/parent, tracked separately from the
+     * static mass link.
+     */
+    public function issueUniquePlayerInvite(Trainer $trainer, Account $createdBy, ?string $targetEmail): ShareLink
+    {
+        return $this->entityManager->wrapInTransaction(function () use ($trainer, $createdBy, $targetEmail): ShareLink {
+            $code = $this->generateCode();
+            $link = new ShareLink($trainer, $code, ShareLink::TYPE_UNIQUE_PLAYER_INVITE, $createdBy, $targetEmail);
+            $this->shareLinks->add($link);
+            $this->entityManager->flush();
+
+            $this->publicTenantCodes->issue($code, $trainer, PublicTenantCode::KIND_SHARELINK, (int) $link->getId());
+
+            return $link;
+        });
+    }
+
+    /**
      * AC-01-42: reissues a fresh 7-day window under the SAME code, so the
      * PublicTenantCode mapping (and any link already shared) keeps working.
      */

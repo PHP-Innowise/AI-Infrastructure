@@ -138,6 +138,54 @@ class CoachAssignmentRepository extends ServiceEntityRepository
         return $rows;
     }
 
+    /**
+     * AC-03-66 ("In Scope (MVP) — Quick View Dashboard — Coach Hours
+     * Tracking", no dedicated story or Data Requirements entry — see the
+     * coder's final report): "Coach has done 200 hours" / "covered 50
+     * events". Confirmed assignments only, all-time (no window is stated
+     * anywhere in the epic) — analytics for the trainer to manage coach
+     * payments that happen externally; the platform never processes them.
+     *
+     * @return list<array{coachMembershipId: int, name: string, sessionsCount: int, hoursTotal: float}>
+     */
+    public function hoursSummaryForActiveTenant(): array
+    {
+        /** @var list<CoachAssignment> $confirmed */
+        $confirmed = $this->createQueryBuilder('a')
+            ->addSelect('e')
+            ->join('a.event', 'e')
+            ->andWhere('a.status = :confirmed')
+            ->setParameter('confirmed', CoachAssignment::STATUS_CONFIRMED)
+            ->getQuery()
+            ->getResult();
+
+        $byCoach = [];
+
+        foreach ($confirmed as $assignment) {
+            $coach = $assignment->getCoachMembership();
+            $coachId = (int) $coach->getId();
+            $event = $assignment->getEvent();
+            $hours = ($event->getEndsAt()->getTimestamp() - $event->getStartsAt()->getTimestamp()) / 3600;
+
+            if (!isset($byCoach[$coachId])) {
+                $profile = $coach->getAccount()->getProfile();
+                $name = null !== $profile ? trim($profile->getFirstName().' '.$profile->getLastName()) : $coach->getAccount()->getEmail();
+
+                $byCoach[$coachId] = [
+                    'coachMembershipId' => $coachId,
+                    'name' => '' === $name ? $coach->getAccount()->getEmail() : $name,
+                    'sessionsCount' => 0,
+                    'hoursTotal' => 0.0,
+                ];
+            }
+
+            ++$byCoach[$coachId]['sessionsCount'];
+            $byCoach[$coachId]['hoursTotal'] += $hours;
+        }
+
+        return array_values($byCoach);
+    }
+
     public function add(CoachAssignment $assignment): void
     {
         $this->getEntityManager()->persist($assignment);
