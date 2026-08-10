@@ -50,6 +50,7 @@ python3 scripts/install_accelerator.py \
   --edition "PHP Core" \
   --target "$TARGET" \
   --tool cursor \
+  --merge-existing \
   --dry-run
 ```
 
@@ -63,13 +64,26 @@ Repeat `--tool` to select multiple integrations. Omit it to install all three.
 Shared policy, workflow, Memory Bank, and Project Brain files are included with
 every selection.
 
-Review all `WOULD_COPY` lines. If the target contains any selected path, the
-installer prints `COLLISION`, returns a nonzero exit code, and copies nothing.
+`--merge-existing` handles the standard root files commonly present in an
+existing project:
+
+- identical files are reported as `UNCHANGED`;
+- `.gitignore` and `.gitattributes` retain project entries and receive only
+  missing accelerator directives in an installer-managed block;
+- existing `AGENTS.md` retains project policy first and receives a marked,
+  replaceable accelerator policy block;
+- existing `README.md` remains untouched and the accelerator documentation is
+  installed as `ACCELERATOR.md`.
+
+Review `WOULD_COPY`, `WOULD_MERGE`, and `WOULD_COPY_AS` lines. Any other
+existing selected path is still reported as `COLLISION`; the command returns a
+nonzero exit code and writes nothing.
 
 ## 4. Resolve Collisions
 
-Do not use `--overwrite` for normal adoption. Review every conflict and choose
-one of these actions:
+Keep `--merge-existing` in the command for normal adoption. It is conservative:
+unsupported collisions still require review. For each remaining conflict,
+choose one of these actions:
 
 1. Keep the existing project file.
 2. Merge compatible accelerator behavior into it manually.
@@ -88,13 +102,15 @@ After obtaining a collision-free dry run, repeat the same command without
 python3 scripts/install_accelerator.py \
   --edition "PHP Core" \
   --target "$TARGET" \
-  --tool cursor |
+  --tool cursor \
+  --merge-existing |
   tee "/safe/backup/path/accelerator-install-transcript.txt"
 ```
 
-Keep the `COPY` transcript. It identifies files created by the installation and
-is required for safe rollback. A final `COMPLETE` line reports the edition,
-selected tools, and copied file count.
+Keep the complete transcript, including `COPY`, `MERGE`, `COPY_AS`, and
+`UNCHANGED` records. It identifies installer actions and is required for safe
+rollback. A final `COMPLETE` line reports the edition, selected tools, and
+selected file count.
 
 ## 6. Validate the Installation
 
@@ -355,10 +371,17 @@ for the complete scan, generation, collision, ownership, and update contracts.
 
 ## Ready-made Installer Rollback
 
-Use the saved transcript to remove only files created by the installer. Never
-delete whole `.claude/`, `.cursor/`, `.agents/`, `.codex/`, `memory-bank/`, or
-`project-brain/` directories because they may contain pre-existing project
-files or active records.
+Use the saved transcript and Git diff:
+
+- remove paths recorded as `COPY` or `COPY_AS` only when they were created by
+  that installation and have not since become project-owned;
+- for `MERGE` records, review and remove only the marked accelerator block or
+  restore the pre-install version from the project's recovery point;
+- do nothing for `UNCHANGED` records.
+
+Never delete whole `.claude/`, `.cursor/`, `.agents/`, `.codex/`,
+`memory-bank/`, or `project-brain/` directories because they may contain
+pre-existing project files or active records.
 
 ## Maintainer Commands
 

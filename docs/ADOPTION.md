@@ -88,6 +88,7 @@ python3 scripts/install_accelerator.py \
   --edition "PHP Core" \
   --target "$TARGET" \
   --tool cursor \
+  --merge-existing \
   --dry-run
 ```
 
@@ -96,22 +97,29 @@ select more than one, or omit it to install all three integrations. Codex
 selects both `.agents/` and `.codex/`. Shared cross-tool layout READMEs are
 included as distribution documentation and do not activate an unselected tool.
 
-Review every `WOULD_COPY` line. Any existing target path is reported as
-`COLLISION`; the command exits nonzero before copying anything. Once the dry run
-is collision-free, run the same command without `--dry-run` and retain its exact
-`COPY` transcript:
+With `--merge-existing`, identical files are `UNCHANGED`; `.gitignore`,
+`.gitattributes`, and `AGENTS.md` use marked conservative merges; and an
+existing root `README.md` is preserved while accelerator documentation is
+written as `ACCELERATOR.md`. Review every `WOULD_COPY`, `WOULD_MERGE`, and
+`WOULD_COPY_AS` line. Any unsupported existing path remains a `COLLISION`, and
+the command exits nonzero before writing anything.
+
+Once the dry run has no unsupported collisions, run the same command without
+`--dry-run` and retain its exact transcript:
 
 ```bash
 python3 scripts/install_accelerator.py \
   --edition "PHP Core" \
   --target "$TARGET" \
-  --tool cursor | tee "/safe/backup/path/accelerator-install-transcript.txt"
+  --tool cursor \
+  --merge-existing |
+  tee "/safe/backup/path/accelerator-install-transcript.txt"
 ```
 
 The installer refuses overwrite by default and performs a complete collision
 preflight, so a late collision cannot leave a partially copied installation.
-Do not use `--overwrite` for adoption; resolve and merge collisions explicitly
-as described below.
+Do not use `--overwrite` for adoption. Use the supported merge mode for standard
+root files and resolve every remaining collision explicitly as described below.
 
 ## 5. Resolve Collisions Explicitly
 

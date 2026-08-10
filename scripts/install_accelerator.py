@@ -16,6 +16,11 @@ EDITIONS = ("Laravel", "Symfony", "PHP Core")
 TOOLS = ("claude", "cursor", "codex")
 COMPONENTS = ("shared", *TOOLS)
 INVENTORY_DIR = ROOT / "install" / "inventories"
+ADDITIVE_FILES = {".gitattributes", ".gitignore"}
+AGENTS_BEGIN = "<!-- BEGIN ACCELERATOR MANAGED POLICY -->"
+AGENTS_END = "<!-- END ACCELERATOR MANAGED POLICY -->"
+ENTRIES_BEGIN = "# BEGIN ACCELERATOR MANAGED ENTRIES"
+ENTRIES_END = "# END ACCELERATOR MANAGED ENTRIES"
 
 
 class InventoryError(Exception):
@@ -75,6 +80,55 @@ def selected_files(data: dict, tools: list[str]) -> list[tuple[str, str]]:
         if component in selected
         for path in data["components"][component]
     ]
+
+
+def without_managed_block(text: str, begin: str, end: str) -> str:
+    """Remove one complete installer-managed block before rebuilding it."""
+    begin_count = text.count(begin)
+    end_count = text.count(end)
+    if begin_count != end_count or begin_count > 1:
+        raise InventoryError("existing managed block is malformed")
+    if begin_count == 0:
+        return text.rstrip()
+    before, remainder = text.split(begin, 1)
+    _, after = remainder.split(end, 1)
+    return (before.rstrip() + "\n" + after.lstrip()).rstrip()
+
+
+def merge_additive_file(existing: str, source: str) -> str:
+    """Preserve project entries and add missing accelerator directives."""
+    base = without_managed_block(existing, ENTRIES_BEGIN, ENTRIES_END)
+    existing_entries = {
+        line.strip()
+        for line in base.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    additions = [
+        line.rstrip()
+        for line in source.splitlines()
+        if line.strip()
+        and not line.lstrip().startswith("#")
+        and line.strip() not in existing_entries
+    ]
+    if not additions:
+        return base + ("\n" if existing.endswith("\n") else "")
+    prefix = base + "\n\n" if base else ""
+    return (
+        prefix
+        + ENTRIES_BEGIN
+        + "\n"
+        + "\n".join(additions)
+        + "\n"
+        + ENTRIES_END
+        + "\n"
+    )
+
+
+def merge_agents_file(existing: str, source: str) -> str:
+    """Keep project policy first and maintain one replaceable accelerator block."""
+    base = without_managed_block(existing, AGENTS_BEGIN, AGENTS_END)
+    prefix = base + "\n\n" if base else ""
+    return prefix + AGENTS_BEGIN + "\n" + source.rstrip() + "\n" + AGENTS_END + "\n"
 
 
 def discover_distribution_files(root: Path, edition: str) -> list[str]:
@@ -182,18 +236,61 @@ def install(
     tools: list[str],
     dry_run: bool,
     overwrite: bool,
+    merge_existing: bool,
 ) -> int:
     data = load_inventory(edition, root)
     files = selected_files(data, tools)
     collisions: list[tuple[str, str, str]] = []
+    resolutions: dict[str, tuple[str, Path, bytes | None]] = {}
     for component, path in files:
+        source = root / edition / PurePosixPath(path)
         destination = target / PurePosixPath(path)
         if destination.is_symlink():
             collisions.append((component, path, "symlink"))
             continue
         if destination.exists():
-            reason = "existing-file" if destination.is_file() else "existing-non-file"
-            collisions.append((component, path, reason))
+            if not destination.is_file():
+                collisions.append((component, path, "existing-non-file"))
+                continue
+            if source.read_bytes() == destination.read_bytes():
+                resolutions[path] = ("unchanged", destination, None)
+                continue
+            if merge_existing and path in ADDITIVE_FILES:
+                try:
+                    merged = merge_additive_file(
+                        destination.read_text(encoding="utf-8"),
+                        source.read_text(encoding="utf-8"),
+                    ).encode("utf-8")
+                except (UnicodeError, InventoryError) as error:
+                    collisions.append((component, path, f"cannot-merge:{error}"))
+                    continue
+                action = "unchanged" if merged == destination.read_bytes() else "merge"
+                resolutions[path] = (action, destination, merged)
+                continue
+            if merge_existing and path == "AGENTS.md":
+                try:
+                    merged = merge_agents_file(
+                        destination.read_text(encoding="utf-8"),
+                        source.read_text(encoding="utf-8"),
+                    ).encode("utf-8")
+                except (UnicodeError, InventoryError) as error:
+                    collisions.append((component, path, f"cannot-merge:{error}"))
+                    continue
+                action = "unchanged" if merged == destination.read_bytes() else "merge"
+                resolutions[path] = (action, destination, merged)
+                continue
+            if merge_existing and path == "README.md":
+                alternate = target / "ACCELERATOR.md"
+                if alternate.is_symlink() or (alternate.exists() and not alternate.is_file()):
+                    collisions.append((component, path, "accelerator-readme-obstruction"))
+                elif alternate.exists() and alternate.read_bytes() != source.read_bytes():
+                    collisions.append((component, path, "accelerator-readme-exists"))
+                elif alternate.exists():
+                    resolutions[path] = ("unchanged", alternate, None)
+                else:
+                    resolutions[path] = ("copy-as", alternate, None)
+                continue
+            collisions.append((component, path, "existing-file"))
             continue
         parent = destination.parent
         while parent != target.parent and parent != target:
@@ -222,6 +319,24 @@ def install(
         destination = target / PurePosixPath(path)
         if not source.is_file():
             raise InventoryError(f"source file missing: {source}")
+        if path in resolutions:
+            resolution, resolved_destination, content = resolutions[path]
+            if resolution == "unchanged":
+                print(f"UNCHANGED\t{component}\t{path}")
+                continue
+            label = {
+                "merge": "WOULD_MERGE" if dry_run else "MERGE",
+                "copy-as": "WOULD_COPY_AS" if dry_run else "COPY_AS",
+            }[resolution]
+            if not dry_run:
+                resolved_destination.parent.mkdir(parents=True, exist_ok=True)
+                if content is None:
+                    shutil.copy2(source, resolved_destination)
+                else:
+                    resolved_destination.write_bytes(content)
+            relative = resolved_destination.relative_to(target).as_posix()
+            print(f"{label}\t{component}\t{path}\t{relative}")
+            continue
         current_action = "WOULD_OVERWRITE" if dry_run and path in overwrite_paths else action
         if not dry_run:
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -246,7 +361,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target", type=Path)
     parser.add_argument("--tool", action="append", choices=TOOLS)
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--overwrite", action="store_true")
+    collision_mode = parser.add_mutually_exclusive_group()
+    collision_mode.add_argument("--overwrite", action="store_true")
+    collision_mode.add_argument(
+        "--merge-existing",
+        action="store_true",
+        help="safely merge supported root files and refuse all other conflicts",
+    )
     args = parser.parse_args()
     if args.edition and args.target is None:
         parser.error("--target is required with --edition")
@@ -272,6 +393,7 @@ def main() -> int:
             tools,
             args.dry_run,
             args.overwrite,
+            args.merge_existing,
         )
     except (InventoryError, OSError, subprocess.CalledProcessError) as error:
         print(f"install-accelerator: {error}", file=sys.stderr)
