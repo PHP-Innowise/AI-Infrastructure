@@ -106,6 +106,47 @@ def discover_distribution_files(root: Path, edition: str) -> list[str]:
     )
 
 
+# Areas inside an edition that hold work produced *by* the accelerator for one
+# specific project, rather than files the installer distributes. The inventory's
+# own scope already reads "excludes runtime, local, and user state"; these rules
+# are what make that true for the areas the tooling actually writes into.
+#
+# A path in one of these areas is skipped only when the inventory does not list
+# it, so the seeds that genuinely ship — specs/MANIFEST.md, the .gitkeep
+# placeholders, the starter memory chunk, the empty brain indexes — stay
+# verified exactly as before, and deleting one still fails the check.
+#
+# The trade-off is deliberate and worth stating: a real distribution file
+# mistakenly placed under one of these prefixes would no longer be caught here.
+# Everything outside them is still accounted for file by file.
+PROJECT_WORK_AREAS = (
+    "Task/app/",  # an application built with the accelerator
+    "codebase/",  # a codebase map produced by codebase-mapper
+    "specs/",  # specifications derived for one project
+    "memory-bank/chunks/",  # durable memory captured for one project
+    "project-brain/control/",  # governed task runtime: handoffs, messages
+    "project-brain/dynamic/",  # governed task runtime: tasks, findings, bugs
+)
+
+
+def is_project_work(path: str, distributed: frozenset[str]) -> bool:
+    """Return True when `path` is per-project output, not a distribution file."""
+    if path in distributed:
+        return False
+    return any(path.startswith(area) for area in PROJECT_WORK_AREAS)
+
+
+def distributed_paths(edition: str, root: Path) -> frozenset[str]:
+    """Paths the current inventory claims to distribute, or empty when absent."""
+    try:
+        data = load_inventory(edition, root)
+    except (InventoryError, FileNotFoundError, json.JSONDecodeError):
+        return frozenset()
+    return frozenset(
+        path for paths in data["components"].values() for path in paths
+    )
+
+
 def component_for(path: str) -> str:
     # Cross-tool layout documentation is cited by shared durable memory and is
     # therefore installed with every tool selection. It describes distribution
@@ -128,7 +169,10 @@ def component_for(path: str) -> str:
 
 def build_inventory(root: Path, edition: str) -> dict:
     components = {component: [] for component in COMPONENTS}
+    distributed = distributed_paths(edition, root)
     for path in discover_distribution_files(root, edition):
+        if is_project_work(path, distributed):
+            continue
         components[component_for(path)].append(path)
     version_file = root / edition / "VERSION"
     release = version_file.read_text(encoding="utf-8").strip()
@@ -156,10 +200,15 @@ def write_inventories(root: Path) -> None:
 
 def verify_inventory(root: Path, edition: str) -> None:
     data = load_inventory(edition, root)
-    actual = discover_distribution_files(root, edition)
     expected = sorted(
         path for paths in data["components"].values() for path in paths
     )
+    distributed = frozenset(expected)
+    actual = [
+        path
+        for path in discover_distribution_files(root, edition)
+        if not is_project_work(path, distributed)
+    ]
     missing_sources = [
         path for path in expected if not (root / edition / path).is_file()
     ]
