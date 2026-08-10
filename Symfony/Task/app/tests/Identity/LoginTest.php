@@ -29,8 +29,9 @@ final class LoginTest extends WebTestCase
     }
 
     /**
-     * AC-01-36: every MVP role reaches its dashboard with correct credentials.
-     * This is the criterion "all four MVP roles can log in" is measured by.
+     * AC-01-36, AC-01-65: every MVP role reaches its dashboard with correct
+     * credentials. This is the criterion "all four MVP roles can log in
+     * with email/password" is measured by.
      */
     #[DataProvider('mvpRoleProvider')]
     public function testEachMvpRoleCanLogIn(string $email, AccountRole $expectedRole): void

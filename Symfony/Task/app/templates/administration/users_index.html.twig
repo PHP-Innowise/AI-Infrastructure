@@ -1,0 +1,41 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Users — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Users</h1>
+        <p><a class="button button--primary" href="{{ path('administration_trainer_create') }}">+ Create trainer</a></p>
+
+        <form method="get">
+            <input type="text" name="q" placeholder="Search name or email" value="{{ app.request.query.get('q') }}">
+            <select name="role">
+                <option value="">Any role</option>
+                {% for role in roles %}
+                    <option value="{{ role.value }}" {{ app.request.query.get('role') == role.value ? 'selected' }}>{{ role.label }}</option>
+                {% endfor %}
+            </select>
+            <select name="status">
+                <option value="">Any status</option>
+                {% for status in statuses %}
+                    <option value="{{ status.value }}" {{ app.request.query.get('status') == status.value ? 'selected' }}>{{ status.value }}</option>
+                {% endfor %}
+            </select>
+            <button type="submit" class="button">Filter</button>
+        </form>
+
+        <table>
+            <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th></tr></thead>
+            <tbody>
+            {% for account in accounts %}
+                <tr class="{{ account.status.value != 'active' ? 'is-inactive' }}">
+                    <td><a href="{{ path('administration_user_show', {account: account.id}) }}">{{ account.profile ? account.profile.fullName : '—' }}</a></td>
+                    <td>{{ account.email }}</td>
+                    <td>{{ account.role.label }}</td>
+                    <td>{{ account.status.value }}</td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+{% endblock %}

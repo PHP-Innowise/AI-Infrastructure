@@ -9,6 +9,16 @@
 
         <p>You are signed in as <strong>{{ account.email }}</strong>.</p>
 
+        {% if not account.emailVerified %}
+            <p class="skeleton-caption">
+                Your email address is not verified.
+                <form method="post" action="{{ path('identity_email_verify_resend') }}" style="display:inline">
+                    <input type="hidden" name="_token" value="{{ csrf_token('email-verify-resend') }}">
+                    <button type="submit">Resend verification email</button>
+                </form>
+            </p>
+        {% endif %}
+
         <h2>Tenant context</h2>
         {% if activeTrainerId %}
             <p>Active trainer: <code>#{{ activeTrainerId }}</code>. Trainer-scoped
@@ -25,10 +35,41 @@
                BR-01-10. This list is the switcher, not a merged view. #}
             <ul>
                 {% for link in trainerLinks %}
-                    <li>{{ link.trainer.businessName }} — {{ link.roleInTenant }}</li>
+                    <li>
+                        {{ link.trainer.businessName }} — {{ link.roleInTenant }}
+                        {% if trainerLinks|length > 1 %}
+                            <form method="post" action="{{ path('platform_context_trainer_switch', {trainer: link.trainer.id}) }}" style="display:inline">
+                                <input type="hidden" name="_token" value="{{ csrf_token('trainer-context' ~ link.trainer.id) }}">
+                                <button type="submit">Switch to this trainer</button>
+                            </form>
+                        {% endif %}
+                    </li>
                 {% endfor %}
             </ul>
         {% endif %}
+
+        <nav>
+            <h2>Account</h2>
+            <ul>
+                <li><a href="{{ path('identity_account_profile_edit') }}">Your profile</a></li>
+                {% if role.value == 'super_admin' %}
+                    <li><a href="{{ path('administration_users_index') }}">Users</a></li>
+                {% endif %}
+                {% if role.value == 'trainer' %}
+                    <li><a href="{{ path('identity_trainer_coaches_index') }}">Coaches</a></li>
+                    <li><a href="{{ path('identity_trainer_sharelinks_index') }}">ShareLinks</a></li>
+                    <li><a href="{{ path('identity_trainer_branding_edit') }}">Branding</a></li>
+                {% endif %}
+                {% if role.value == 'coach' %}
+                    <li><a href="{{ path('identity_coach_availability_edit') }}">My Times</a></li>
+                {% endif %}
+                {% if role.value == 'player' %}
+                    <li><a href="{{ path('identity_portal_family_index') }}">Family</a></li>
+                    <li><a href="{{ path('identity_portal_approvals_index') }}">Approvals</a></li>
+                    <li><a href="{{ path('identity_portal_availability_edit') }}">My Times</a></li>
+                {% endif %}
+            </ul>
+        </nav>
 
         <p>
             <a href="{{ path('identity_auth_logout') }}">Sign out</a>

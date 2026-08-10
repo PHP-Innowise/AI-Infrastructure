@@ -1,0 +1,34 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Approvals — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Approvals</h1>
+
+        {% if requests is empty %}
+            <p>Nothing pending.</p>
+        {% else %}
+            <table>
+                <thead><tr><th>Child</th><th>Type</th><th>Status</th><th>Requested</th><th></th></tr></thead>
+                <tbody>
+                {% for request in requests %}
+                    <tr>
+                        <td>{{ request.childPlayer.firstName }}</td>
+                        <td>{{ request.actionType }}</td>
+                        <td>{{ request.displayStatus(now) }}</td>
+                        <td>{{ request.requestedAt|date('Y-m-d H:i') }}</td>
+                        <td>
+                            {% if request.displayStatus(now) == 'pending' %}
+                                <a href="{{ path('identity_portal_approval_approve', {approval: request.id}) }}">Approve</a>
+                                ·
+                                <a href="{{ path('identity_portal_approval_deny', {approval: request.id}) }}">Deny</a>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+{% endblock %}

@@ -1,0 +1,32 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Coaches — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Coaches</h1>
+        <p><a class="button button--primary" href="{{ path('identity_trainer_coach_invite') }}">Invite a coach</a></p>
+        <p class="skeleton-caption">
+            Outstanding (not yet accepted) invitations are tracked on the
+            <a href="{{ path('identity_trainer_sharelinks_index') }}">ShareLinks</a> page.
+        </p>
+
+        {% if coaches is empty %}
+            <p>No coaches yet.</p>
+        {% else %}
+            <table>
+                <thead>
+                    <tr><th>Coach</th><th>Status</th></tr>
+                </thead>
+                <tbody>
+                    {% for coach in coaches %}
+                        <tr>
+                            <td>{{ coach.account.profile ? coach.account.profile.fullName : coach.account.email }}</td>
+                            <td>{{ coach.status }}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+{% endblock %}

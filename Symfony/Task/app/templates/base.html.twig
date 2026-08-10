@@ -43,9 +43,36 @@
     <body>
         <a class="skip-link" href="#main">Skip to main content</a>
 
+        {#
+            AC-01-34: a sticky, color-coded banner on every page for the
+            duration of an impersonation session. Driven entirely from
+            IS_IMPERSONATOR (Symfony's own switch_user marker role) rather
+            than a bespoke flag, so it can never drift out of sync with the
+            actual security token — specs/api-designer-spec.md
+            "Impersonation — a whole session, one identity swap".
+        #}
+        {% if is_granted('IS_IMPERSONATOR') %}
+            <div class="impersonation-banner" role="alert">
+                <span>Viewing as {{ app.user.email }}</span>
+                <form method="post" action="{{ path('impersonation_exit') }}">
+                    <input type="hidden" name="_token" value="{{ csrf_token('impersonation-exit') }}">
+                    <button type="submit">Exit Impersonation</button>
+                </form>
+            </div>
+        {% endif %}
+
         {% block header %}{% endblock %}
 
         <main id="main" tabindex="-1">
+            {# AC-01-49 and every other "...with a confirmation message"
+               criterion: flash messages set via addFlash() render here, once,
+               for every page in the application. #}
+            {% for type, messages in app.flashes %}
+                {% for message in messages %}
+                    <p role="status" class="flash flash--{{ type }}">{{ message }}</p>
+                {% endfor %}
+            {% endfor %}
+
             {% block body %}{% endblock %}
         </main>
 

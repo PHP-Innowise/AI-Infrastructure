@@ -22,6 +22,11 @@ security:
         main:
             lazy: true
             provider: accounts
+            # AC-01-52 edge case: form_login alone never looks at account
+            # status — a deactivated (or GDPR-anonymized) Account can still
+            # present a correct password. AccountStatusUserChecker is what
+            # actually blocks the login attempt; see its own docblock.
+            user_checker: App\Identity\Security\AccountStatusUserChecker
             form_login:
                 login_path: identity_auth_login
                 check_path: identity_auth_login
@@ -30,16 +35,42 @@ security:
             logout:
                 path: identity_auth_logout
                 target: identity_auth_login
+            # US-01.07: Symfony's native identity-swap mechanism
+            # (specs/api-designer-spec.md "Impersonation — a whole session,
+            # one identity swap"). `role: ROLE_SUPER_ADMIN` directly, rather
+            # than the default ROLE_ALLOWED_TO_SWITCH, because there is no
+            # role_hierarchy to grant an alias role through (see AccountRole's
+            # own docblock) — the actor must hold ROLE_SUPER_ADMIN outright.
+            # `administration_impersonation_start` still runs
+            # ImpersonationVoter::IMPERSONATION_START first (BR-01-21/AC-01-37,
+            # which this role check alone cannot express) before ever
+            # redirecting to the `?_switch_user=` URL that triggers this.
+            switch_user:
+                role: ROLE_SUPER_ADMIN
+                parameter: _switch_user
 
     # Coarse gates on route prefixes only. These are never the real check:
     # object-level decisions belong to voters, because "is this row mine"
-    # cannot be expressed as a path pattern.
+    # cannot be expressed as a path pattern. Ordered most-specific-first —
+    # Symfony uses the FIRST matching rule, not the best one.
     access_control:
         - { path: ^/login$, roles: PUBLIC_ACCESS }
         - { path: ^/health$, roles: PUBLIC_ACCESS }
+        - { path: ^/password/, roles: PUBLIC_ACCESS }
+        - { path: ^/email/verify/resend, roles: IS_AUTHENTICATED_FULLY }
+        - { path: ^/email/verify/, roles: PUBLIC_ACCESS }
+        - { path: ^/account/setup/, roles: PUBLIC_ACCESS }
+        - { path: ^/account/, roles: IS_AUTHENTICATED_FULLY }
+        # identity_sharelink_associate: an already-authenticated player
+        # selecting which family members join a second trainer — more
+        # specific than the general /join/ rule below, so it must come first.
+        - { path: ^/join/[^/]+/associate, roles: ROLE_PLAYER }
         - { path: ^/join/, roles: PUBLIC_ACCESS }
+        - { path: ^/invite/, roles: PUBLIC_ACCESS }
         - { path: ^/forms/, roles: PUBLIC_ACCESS }
-        - { path: ^/admin/, roles: ROLE_SUPER_ADMIN }
+        - { path: ^/context/, roles: ROLE_PLAYER }
+        - { path: ^/impersonation/, roles: IS_IMPERSONATOR }
+        - { path: ^/super-admin/, roles: ROLE_SUPER_ADMIN }
         - { path: ^/trainer/, roles: ROLE_TRAINER }
         - { path: ^/coach/, roles: ROLE_COACH }
         - { path: ^/portal/, roles: ROLE_PLAYER }

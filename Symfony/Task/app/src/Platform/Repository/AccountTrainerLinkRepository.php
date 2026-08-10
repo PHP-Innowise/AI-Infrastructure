@@ -6,6 +6,7 @@ namespace App\Platform\Repository;
 
 use App\Identity\Entity\Account;
 use App\Platform\Entity\AccountTrainerLink;
+use App\Platform\Entity\Trainer;
 use Doctrine\Bundle\DoctrineBundle\Repository\ServiceEntityRepository;
 use Doctrine\Persistence\ManagerRegistry;
 
@@ -17,6 +18,16 @@ class AccountTrainerLinkRepository extends ServiceEntityRepository
     public function __construct(ManagerRegistry $registry)
     {
         parent::__construct($registry, AccountTrainerLink::class);
+    }
+
+    /**
+     * MembershipService's own upsert target: is there already a link row
+     * (active or not) for this (account, trainer) pair to reactivate, or does
+     * a new one need creating.
+     */
+    public function findOneByAccountAndTrainer(Account $account, Trainer $trainer): ?AccountTrainerLink
+    {
+        return $this->findOneBy(['account' => $account, 'trainer' => $trainer]);
     }
 
     /**
@@ -78,5 +89,10 @@ class AccountTrainerLinkRepository extends ServiceEntityRepository
             ->getResult();
 
         return $links;
+    }
+
+    public function add(AccountTrainerLink $link): void
+    {
+        $this->getEntityManager()->persist($link);
     }
 }

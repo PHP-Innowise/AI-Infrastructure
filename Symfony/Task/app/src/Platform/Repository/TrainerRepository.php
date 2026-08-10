@@ -22,4 +22,35 @@ class TrainerRepository extends ServiceEntityRepository
     {
         return $this->findOneBy(['slug' => $slug]);
     }
+
+    public function slugExists(string $slug): bool
+    {
+        return null !== $this->findOneBySlug($slug);
+    }
+
+    /**
+     * AC-07-38 and administration_trainers_index's own listing.
+     *
+     * @return list<Trainer>
+     */
+    public function search(?string $query, int $limit = 50): array
+    {
+        $qb = $this->createQueryBuilder('t')
+            ->orderBy('t.createdAt', 'DESC')
+            ->setMaxResults($limit);
+
+        if (null !== $query && '' !== trim($query)) {
+            $qb->andWhere('t.businessName LIKE :q')->setParameter('q', '%'.$query.'%');
+        }
+
+        /** @var list<Trainer> $rows */
+        $rows = $qb->getQuery()->getResult();
+
+        return $rows;
+    }
+
+    public function add(Trainer $trainer): void
+    {
+        $this->getEntityManager()->persist($trainer);
+    }
 }
