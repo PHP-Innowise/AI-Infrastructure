@@ -72,6 +72,13 @@ final class ApprovalController extends AbstractController
             return $this->redirectToRoute($approving ? 'scheduling_portal_rsvp_approval_approve' : 'scheduling_portal_rsvp_approval_deny', ['approval' => $approval->getId()]);
         }
 
+        // Epic-04, same reasoning: a content-purchase request needs
+        // Content's own post-decision step (granting a PlaylistAccessGrant
+        // on approval) — Identity must not call into Content directly.
+        if (ChildApprovalRequest::ACTION_CONTENT_PURCHASE === $approval->getActionType()) {
+            return $this->redirectToRoute($approving ? 'content_portal_purchase_approval_approve' : 'content_portal_purchase_approval_deny', ['approval' => $approval->getId()]);
+        }
+
         $form = $this->createForm(ApprovalDecisionType::class, null, ['label' => $approving ? 'Approve' : 'Deny']);
         $form->handleRequest($request);
 

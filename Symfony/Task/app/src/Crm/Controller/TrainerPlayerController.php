@@ -23,9 +23,13 @@ use App\Crm\Service\LabelService;
 use App\Crm\Service\PlayerFlagService;
 use App\Crm\Service\PlayerNoteService;
 use App\Crm\Voter\PlayerVoter;
+use App\Content\Entity\Playlist;
+use App\Content\Service\ContentAssignmentResolver;
+use App\Content\Service\ContentProgressService;
 use App\Identity\Entity\Account;
 use App\Identity\Entity\AccountRole;
 use App\Identity\Entity\PlayerTrainerMembership;
+use App\Platform\Entity\Trainer;
 use App\Platform\Tenancy\TenantContext;
 use App\Scheduling\Entity\AttendanceRecord;
 use App\Scheduling\Entity\Event;
@@ -64,6 +68,8 @@ final class TrainerPlayerController extends AbstractController
         private readonly LabelService $labelService,
         private readonly PlayerFlagService $playerFlagService,
         private readonly PlayerNoteService $playerNoteService,
+        private readonly ContentAssignmentResolver $contentAssignments,
+        private readonly ContentProgressService $contentProgress,
         private readonly TenantContext $tenantContext,
         private readonly EntityManagerInterface $entityManager,
     ) {
@@ -333,6 +339,7 @@ final class TrainerPlayerController extends AbstractController
         ));
 
         return [
+            'contentAssignments' => $this->contentProgressForPlayer($membership),
             'now' => new \DateTimeImmutable(),
             'membership' => $membership,
             'player' => $player,
@@ -352,6 +359,36 @@ final class TrainerPlayerController extends AbstractController
             'flagForm' => $this->createForm(ApplyFlagType::class),
             'noteForm' => $this->createForm(AddNoteType::class, null, ['events' => $this->eventChoicesForPlayer($membership)]),
         ];
+    }
+
+    /**
+     * AC-04-30: "a trainer can view a player's progress from the CRM player
+     * detail, showing assigned playlists, completion status, and last
+     * activity." Reads Content's own repositories through Content's own
+     * service (`ContentProgressService`/`ContentAssignmentResolver`), never
+     * directly — architect-architecture.md "Module map": Crm "may call...
+     * Content (read)".
+     *
+     * @return list<array{playlist: Playlist, progress: array{completed: int, total: int}}>
+     */
+    private function contentProgressForPlayer(PlayerTrainerMembership $membership): array
+    {
+        /** @var Trainer $trainer */
+        $trainer = $membership->getTrainer();
+        $player = $membership->getPlayer();
+
+        $assigned = [
+            ...$this->contentAssignments->assignedPlaylistsForPlayer($trainer, $player, Playlist::PILLAR_LEARN),
+            ...$this->contentAssignments->assignedPlaylistsForPlayer($trainer, $player, Playlist::PILLAR_PRACTICE),
+        ];
+
+        return array_map(
+            fn (Playlist $playlist): array => [
+                'playlist' => $playlist,
+                'progress' => $this->contentProgress->playlistProgress($trainer, $player, $playlist),
+            ],
+            $assigned,
+        );
     }
 
     /**

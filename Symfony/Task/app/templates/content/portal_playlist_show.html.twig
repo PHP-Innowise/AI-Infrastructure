@@ -1,0 +1,32 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}{{ playlist.title }} — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>{{ playlist.title }}</h1>
+        {% if playlist.description %}<p>{{ playlist.description }}</p>{% endif %}
+
+        {% if locked %}
+            <p role="status">Locked</p>
+            <p><a class="button button--primary" href="{{ path('content_portal_playlist_checkout', {playlist: playlist.id}) }}">Purchase access</a></p>
+        {% else %}
+            {% if progress %}<p>{{ progress.completed }} of {{ progress.total }} items completed</p>{% endif %}
+
+            <ol>
+                {% for item in items %}
+                    <li>
+                        {% if item.contentItem.deleted %}
+                            <span role="status">{{ playlist.pillar == 'practice' ? 'Drill unavailable' : 'Unavailable' }}</span>
+                        {% else %}
+                            <a href="{{ path('content_portal_item_play', {item: item.contentItem.id}) }}">{{ item.contentItem.title }}</a>
+                            ({{ item.contentItem.durationSeconds }}s)
+                            {% if completedItemIds[item.contentItem.id] is defined %}<span role="status">✓ Completed</span>{% endif %}
+                            {% if item.trainerNotes %}<p>{{ item.trainerNotes }}</p>{% endif %}
+                        {% endif %}
+                    </li>
+                {% endfor %}
+            </ol>
+        {% endif %}
+    </div>
+{% endblock %}

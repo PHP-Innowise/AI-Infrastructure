@@ -129,6 +129,23 @@
             {% endif %}
         </section>
 
+        {# AC-04-30: LPPP content progress — assigned playlists, completion
+           status, read through Content's own service (see
+           TrainerPlayerController::contentProgressForPlayer()'s own
+           docblock on the module-boundary reasoning). #}
+        <section>
+            <h2>LPPP Progress</h2>
+            {% if contentAssignments is empty %}
+                <p>No content assigned yet.</p>
+            {% else %}
+                <ul>
+                    {% for row in contentAssignments %}
+                        <li>{{ row.playlist.title }} — {{ row.progress.completed }} of {{ row.progress.total }} items completed</li>
+                    {% endfor %}
+                </ul>
+            {% endif %}
+        </section>
+
         {# AC-03-32: Coach Feedback (optional MVP), read-only to the trainer. #}
         <section>
             <h2>Coach Feedback</h2>
