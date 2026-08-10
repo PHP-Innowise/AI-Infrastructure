@@ -1,0 +1,39 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Drill Database — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Drill Database</h1>
+
+        <nav>
+            <a href="{{ path('content_trainer_drills_index', {scope: 'mine'}) }}" {{ scope == 'mine' ? 'aria-current="page"' : '' }}>My Drills</a>
+            ·
+            <a href="{{ path('content_trainer_drills_index', {scope: 'public'}) }}" {{ scope == 'public' ? 'aria-current="page"' : '' }}>Public Drills</a>
+        </nav>
+
+        {% if scope == 'mine' %}
+            <p><a class="button button--primary" href="{{ path('content_trainer_drill_create') }}">+ Create New Drill</a></p>
+        {% else %}
+            <form method="get">
+                <input type="hidden" name="scope" value="public">
+                <input type="search" name="q" placeholder="Search drills" value="{{ app.request.query.get('q') }}">
+                <button type="submit">Search</button>
+            </form>
+        {% endif %}
+
+        {% if results is empty %}
+            <p>{{ scope == 'public' ? 'No drills match your filters. Try adjusting criteria.' : 'No drills yet.' }}</p>
+        {% else %}
+            <ul>
+                {% for drill in results %}
+                    <li>
+                        <a href="{{ path('content_trainer_drill_show', {drill: drill.id}) }}">{{ drill.title }}</a>
+                        — By {{ drill.trainer.businessName }} — {{ drill.difficultyLevel }}
+                        {% if drill.public %}<span class="badge badge--public">Public</span>{% endif %}
+                    </li>
+                {% endfor %}
+            </ul>
+        {% endif %}
+    </div>
+{% endblock %}

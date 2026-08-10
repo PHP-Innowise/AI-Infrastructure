@@ -1,0 +1,13 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}{{ mode == 'edit' ? 'Edit drill' : '+ Create New Drill' }} — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>{{ mode == 'edit' ? 'Edit drill' : '+ Create New Drill' }}</h1>
+
+        {{ form_start(form) }}
+            {{ form_widget(form) }}
+        {{ form_end(form) }}
+    </div>
+{% endblock %}

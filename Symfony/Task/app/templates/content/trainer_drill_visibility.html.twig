@@ -1,0 +1,14 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Visibility — {{ drill.title }} — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Visibility — {{ drill.title }}</h1>
+        <p>Make "{{ drill.title }}" public? Other trainers will be able to discover and use it.</p>
+
+        {{ form_start(form) }}
+            {{ form_widget(form) }}
+        {{ form_end(form) }}
+    </div>
+{% endblock %}

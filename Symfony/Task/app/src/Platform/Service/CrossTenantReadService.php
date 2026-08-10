@@ -384,4 +384,208 @@ final readonly class CrossTenantReadService
 
         return $counts;
     }
+
+    /**
+     * AC-04-37 "Content Stats": total playlists and drills across every
+     * trainer, and the public-vs-private ratio (playlists and content items
+     * combined — the epic states one ratio, not two separate ones).
+     *
+     * @return array{totalPlaylists: int, totalDrills: int, publicCount: int, privateCount: int}
+     */
+    public function contentStats(Account $actor): array
+    {
+        $totalPlaylists = (int) $this->crossing->fetchOne('SELECT COUNT(*) FROM playlist WHERE deleted_at IS NULL');
+        $totalDrills = (int) $this->crossing->fetchOne('SELECT COUNT(*) FROM drill_detail dd JOIN content_item ci ON ci.id = dd.id WHERE ci.deleted_at IS NULL');
+        $publicCount = (int) $this->crossing->fetchOne(
+            "SELECT (SELECT COUNT(*) FROM playlist WHERE deleted_at IS NULL AND is_public) + (SELECT COUNT(*) FROM content_item WHERE deleted_at IS NULL AND is_public)",
+        );
+        $privateCount = (int) $this->crossing->fetchOne(
+            "SELECT (SELECT COUNT(*) FROM playlist WHERE deleted_at IS NULL AND NOT is_public) + (SELECT COUNT(*) FROM content_item WHERE deleted_at IS NULL AND NOT is_public)",
+        );
+
+        $this->auditLogger->record($actor, 'cross_tenant_read.content_analytics_stats', 'ContentItem', null, null, []);
+        $this->entityManager->flush();
+
+        return ['totalPlaylists' => $totalPlaylists, 'totalDrills' => $totalDrills, 'publicCount' => $publicCount, 'privateCount' => $privateCount];
+    }
+
+    /**
+     * AC-04-37 "top 10 most-used public drills" — "used" is measured by
+     * `content_usage`, which is scoped to the REUSING trainer by design
+     * (architect-architecture.md: "the creator's 'used by N trainers' figure
+     * is therefore a crossing read, which is correct: it is cross-tenant
+     * information") — the count of DISTINCT other trainers who have added
+     * the drill to one of their own playlists.
+     *
+     * @return list<array{contentItemId: int, title: string, trainerName: string, usedByTrainers: int}>
+     */
+    public function topPublicDrills(Account $actor, int $limit = 10): array
+    {
+        $rows = $this->crossing->fetchAllAssociative(
+            <<<'SQL'
+                SELECT ci.id, ci.title, t.business_name AS trainer_name, COUNT(cu.id) AS used_by
+                FROM content_item ci
+                JOIN drill_detail dd ON dd.id = ci.id
+                JOIN trainer t ON t.id = ci.trainer_id
+                LEFT JOIN content_usage cu ON cu.content_item_id = ci.id
+                WHERE ci.is_public = true AND ci.deleted_at IS NULL
+                GROUP BY ci.id, ci.title, t.business_name
+                ORDER BY used_by DESC, ci.title ASC
+                LIMIT :limit
+                SQL,
+            ['limit' => $limit],
+        );
+
+        $this->auditLogger->record($actor, 'cross_tenant_read.content_analytics_top_drills', 'ContentItem', null, null, []);
+        $this->entityManager->flush();
+
+        return array_map(
+            static fn (array $row): array => [
+                'contentItemId' => (int) $row['id'],
+                'title' => (string) $row['title'],
+                'trainerName' => (string) $row['trainer_name'],
+                'usedByTrainers' => (int) $row['used_by'],
+            ],
+            $rows,
+        );
+    }
+
+    /**
+     * AC-04-37 "top content creators (trainers with the most public
+     * content)" — playlists and content items marked public, combined per
+     * trainer.
+     *
+     * @return list<array{trainerId: int, trainerName: string, publicItemCount: int}>
+     */
+    public function topContentCreators(Account $actor, int $limit = 10): array
+    {
+        $rows = $this->crossing->fetchAllAssociative(
+            <<<'SQL'
+                SELECT t.id, t.business_name, COUNT(*) AS public_count
+                FROM trainer t
+                JOIN (
+                    SELECT trainer_id FROM playlist WHERE is_public = true AND deleted_at IS NULL
+                    UNION ALL
+                    SELECT trainer_id FROM content_item WHERE is_public = true AND deleted_at IS NULL
+                ) items ON items.trainer_id = t.id
+                GROUP BY t.id, t.business_name
+                ORDER BY public_count DESC, t.business_name ASC
+                LIMIT :limit
+                SQL,
+            ['limit' => $limit],
+        );
+
+        $this->auditLogger->record($actor, 'cross_tenant_read.content_analytics_top_creators', 'Trainer', null, null, []);
+        $this->entityManager->flush();
+
+        return array_map(
+            static fn (array $row): array => [
+                'trainerId' => (int) $row['id'],
+                'trainerName' => (string) $row['business_name'],
+                'publicItemCount' => (int) $row['public_count'],
+            ],
+            $rows,
+        );
+    }
+
+    /**
+     * AC-04-38 "Engagement Stats": total player video views (all-time and
+     * this week), average watch time per player, completion rate. This
+     * schema carries no separate view-event log (`content_progress` is one
+     * row per player-per-item, not one row per play) — "views" is therefore
+     * the count of `content_progress` rows that have EVER been viewed
+     * (`first_viewed_at IS NOT NULL`), the closest honest proxy the settled
+     * schema supports. Recorded in the coder's final report.
+     *
+     * @return array{totalViewsAllTime: int, totalViewsThisWeek: int, avgWatchTimeSeconds: float, completionRate: float}
+     */
+    public function contentEngagementStats(Account $actor, \DateTimeImmutable $weekStart): array
+    {
+        $totalViewsAllTime = (int) $this->crossing->fetchOne('SELECT COUNT(*) FROM content_progress WHERE first_viewed_at IS NOT NULL');
+        $totalViewsThisWeek = (int) $this->crossing->fetchOne(
+            'SELECT COUNT(*) FROM content_progress WHERE first_viewed_at >= :weekStart',
+            ['weekStart' => $weekStart->format('Y-m-d H:i:sP')],
+        );
+
+        $distinctPlayers = (int) $this->crossing->fetchOne('SELECT COUNT(DISTINCT player_id) FROM content_progress');
+        $totalWatchTime = (int) $this->crossing->fetchOne('SELECT COALESCE(SUM(watch_time_seconds), 0) FROM content_progress');
+        $avgWatchTime = $distinctPlayers > 0 ? $totalWatchTime / $distinctPlayers : 0.0;
+
+        $totalProgressRows = (int) $this->crossing->fetchOne('SELECT COUNT(*) FROM content_progress');
+        $completedRows = (int) $this->crossing->fetchOne("SELECT COUNT(*) FROM content_progress WHERE status = 'completed'");
+        $completionRate = $totalProgressRows > 0 ? $completedRows / $totalProgressRows : 0.0;
+
+        $this->auditLogger->record($actor, 'cross_tenant_read.content_analytics_engagement', 'ContentProgress', null, null, []);
+        $this->entityManager->flush();
+
+        return [
+            'totalViewsAllTime' => $totalViewsAllTime,
+            'totalViewsThisWeek' => $totalViewsThisWeek,
+            'avgWatchTimeSeconds' => $avgWatchTime,
+            'completionRate' => $completionRate,
+        ];
+    }
+
+    /**
+     * AC-04-39 "Growth Trends": content-creation (playlists + drills per
+     * week), player-engagement (views per week), and public-content growth
+     * (new public items per week) — each as the last `$weeks` weekly buckets
+     * ending at `$now`, oldest first.
+     *
+     * @return list<array{weekStart: string, contentCreated: int, views: int, newPublicItems: int}>
+     */
+    public function contentGrowthTrends(Account $actor, \DateTimeImmutable $now, int $weeks = 8): array
+    {
+        $trend = [];
+
+        for ($i = $weeks - 1; $i >= 0; --$i) {
+            $weekStart = $now->modify(sprintf('-%d weeks', $i))->modify('monday this week')->setTime(0, 0);
+            $weekEnd = $weekStart->modify('+7 days');
+            $params = ['from' => $weekStart->format('Y-m-d H:i:sP'), 'to' => $weekEnd->format('Y-m-d H:i:sP')];
+
+            $created = (int) $this->crossing->fetchOne(
+                'SELECT (SELECT COUNT(*) FROM playlist WHERE created_at >= :from AND created_at < :to) + (SELECT COUNT(*) FROM content_item WHERE created_at >= :from AND created_at < :to)',
+                $params,
+            );
+            $views = (int) $this->crossing->fetchOne(
+                'SELECT COUNT(*) FROM content_progress WHERE first_viewed_at >= :from AND first_viewed_at < :to',
+                $params,
+            );
+            $newPublic = (int) $this->crossing->fetchOne(
+                'SELECT (SELECT COUNT(*) FROM playlist WHERE ever_published_at >= :from AND ever_published_at < :to) + (SELECT COUNT(*) FROM content_item WHERE ever_published_at >= :from AND ever_published_at < :to)',
+                $params,
+            );
+
+            $trend[] = ['weekStart' => $weekStart->format('Y-m-d'), 'contentCreated' => $created, 'views' => $views, 'newPublicItems' => $newPublic];
+        }
+
+        $this->auditLogger->record($actor, 'cross_tenant_read.content_analytics_trends', 'ContentItem', null, null, []);
+        $this->entityManager->flush();
+
+        return $trend;
+    }
+
+    /**
+     * AC-04-40 "drill down into a specific trainer's LPPP stats".
+     *
+     * @return array{playlists: int, drills: int, publicItems: int, views: int}
+     */
+    public function trainerContentStats(Account $actor, int $trainerId): array
+    {
+        $playlists = (int) $this->crossing->fetchOne('SELECT COUNT(*) FROM playlist WHERE trainer_id = :id AND deleted_at IS NULL', ['id' => $trainerId]);
+        $drills = (int) $this->crossing->fetchOne(
+            'SELECT COUNT(*) FROM drill_detail dd JOIN content_item ci ON ci.id = dd.id WHERE ci.trainer_id = :id AND ci.deleted_at IS NULL',
+            ['id' => $trainerId],
+        );
+        $publicItems = (int) $this->crossing->fetchOne(
+            'SELECT (SELECT COUNT(*) FROM playlist WHERE trainer_id = :id AND is_public AND deleted_at IS NULL) + (SELECT COUNT(*) FROM content_item WHERE trainer_id = :id AND is_public AND deleted_at IS NULL)',
+            ['id' => $trainerId],
+        );
+        $views = (int) $this->crossing->fetchOne('SELECT COUNT(*) FROM content_progress WHERE trainer_id = :id AND first_viewed_at IS NOT NULL', ['id' => $trainerId]);
+
+        $this->auditLogger->record($actor, 'cross_tenant_read.content_analytics_trainer_drilldown', 'Trainer', $trainerId, null, []);
+        $this->entityManager->flush();
+
+        return ['playlists' => $playlists, 'drills' => $drills, 'publicItems' => $publicItems, 'views' => $views];
+    }
 }

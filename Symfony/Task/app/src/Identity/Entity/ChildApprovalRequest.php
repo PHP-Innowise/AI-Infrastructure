@@ -151,6 +151,16 @@ class ChildApprovalRequest
         return $this->rsvpId;
     }
 
+    /**
+     * The deferred-FK link to `playlist` (see this class's own docblock) —
+     * added by Epic-04's `PurchasePlaylistAccessService`, mirroring
+     * `getRsvpId()`'s own precedent exactly.
+     */
+    public function getRequestedPlaylistId(): ?int
+    {
+        return $this->requestedPlaylistId;
+    }
+
     public function getActionType(): string
     {
         return $this->actionType;

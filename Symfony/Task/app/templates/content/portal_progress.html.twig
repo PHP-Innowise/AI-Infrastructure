@@ -1,0 +1,49 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Progress — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Progress</h1>
+
+        <dl>
+            <dt>Playlists assigned</dt><dd>{{ stats.playlistsAssigned }}</dd>
+            <dt>Items completed</dt><dd>{{ stats.itemsCompleted }}</dd>
+            <dt>Watch time</dt><dd>{{ stats.watchTimeSeconds }}s</dd>
+            <dt>Completion rate</dt><dd>{{ (stats.completionRate * 100)|round }}%</dd>
+        </dl>
+
+        <h2>Recent activity</h2>
+        {% if recentActivity is empty %}
+            <p>Nothing completed yet.</p>
+        {% else %}
+            <ul>
+                {% for row in recentActivity %}
+                    <li>{{ row.contentItem.title }} — {{ row.contentItem.pillar }} — {{ row.completedAt|date('M j, Y') }}</li>
+                {% endfor %}
+            </ul>
+        {% endif %}
+
+        <h2>Incomplete assignments</h2>
+        {% if incomplete is empty %}
+            <p>Nothing outstanding.</p>
+        {% else %}
+            <ul>
+                {% for row in incomplete %}
+                    <li>
+                        <a href="{{ path('content_portal_playlist_show', {playlist: row.playlist.id}) }}">{{ row.playlist.title }}</a>
+                        {% if row.dueDate %}— due {{ row.dueDate|date('M j, Y') }}{% endif %}
+                        — {{ row.progress.completed }} of {{ row.progress.total }} items completed
+                    </li>
+                {% endfor %}
+            </ul>
+        {% endif %}
+
+        <h2>Per-playlist progress</h2>
+        <ul>
+            {% for row in assigned %}
+                <li>{{ row.playlist.title }}: {{ row.progress.completed }} of {{ row.progress.total }} items completed</li>
+            {% endfor %}
+        </ul>
+    </div>
+{% endblock %}

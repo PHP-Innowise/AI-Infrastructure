@@ -1,0 +1,438 @@
+<?php
+
+declare(strict_types=1);
+
+namespace DoctrineMigrations;
+
+use Doctrine\DBAL\Schema\Schema;
+use Doctrine\Migrations\AbstractMigration;
+
+/**
+ * M3b — Content (Epic-04): playlists, content items (videos and drills via
+ * Class Table Inheritance), playlist-item ordering, playlist assignments,
+ * per-player content progress, one-time purchase access grants, and
+ * cross-tenant reuse tracking.
+ *
+ * Two deviations from specs/database-designer-schema.md's literal text,
+ * both forced rather than chosen, both recorded at their exact point below
+ * and in the coder's final report: `drill_detail`'s shared PK/FK column is
+ * named `id`, not `content_item_id` (Doctrine ORM 3.6 has no way to rename
+ * a JOINED-inheritance child table's identifier column — see the
+ * `drill_detail` CREATE TABLE below and `Drill`'s own docblock); and
+ * `drill_detail` is deliberately absent from
+ * config/tenancy/trainer_scoped_tables.txt despite that file's own
+ * pre-populated header listing it (see the RLS section below).
+ *
+ * Runs as the owner role (see the `migrate` make target).
+ *
+ * RLS session variable: `app.current_trainer`, matching
+ * `App\Platform\Tenancy\TenantContext::SESSION_VARIABLE` and every migration
+ * since Epic-01 — NOT `app.current_trainer_id`, the same
+ * documentation/implementation naming mismatch every prior migration's own
+ * docblock already notes (see Version20260810120000).
+ *
+ * **The publication exception** (architect-architecture.md "The publication
+ * exception"; specs/database-designer-schema.md "Widened policy —
+ * `playlist`, `content_item`"): `playlist` and `content_item` get FOUR
+ * policies each (SELECT/INSERT/UPDATE/DELETE) instead of the standard
+ * single USING+WITH CHECK pair every other trainer-scoped table in this
+ * migration gets — the SELECT policy widens on `ever_published_at IS NOT
+ * NULL`, every other policy stays strictly `trainer_id = current tenant`.
+ * Reads widen; writes never do.
+ *
+ * **`drill_detail` carries no RLS policy and is NOT added to
+ * config/tenancy/trainer_scoped_tables.txt**, despite that file's own
+ * pre-populated header comment listing it under "Content / LPPP (Epic-04)".
+ * This is a genuine conflict between two settled inputs, resolved in favor
+ * of the more detailed, specifically-reasoned one:
+ * specs/database-designer-schema.md states explicitly, twice — once under
+ * `drill_detail`'s own column table ("No `trainer_id` column of its own...
+ * it is intentionally not trainer-scoped as its own RLS subject") and once
+ * under "Tenancy manifest" ("`drill_detail` is deliberately absent... the
+ * gate script checks `to_regclass` + `relrowsecurity` per named table,
+ * which would simply never find a matching tenant column on it") — that the
+ * manifest file should NOT list it. The pre-populated manifest file
+ * disagrees with the schema doc's own stated target state for itself. Since
+ * `drill_detail` genuinely has no `trainer_id` column (confirmed by this
+ * migration's own CREATE TABLE below) and the container startup gate would
+ * refuse to boot once this table exists in the manifest without RLS, this
+ * migration follows the schema doc's explicit, specifically-reasoned
+ * instruction and removes `drill_detail` from the manifest in the same
+ * commit — recorded here and in the coder's final report, per the task's
+ * "report conflicts" instruction, rather than silently picking one.
+ *
+ * Attaches the deferred FK from M1: `child_approval_request.requested_playlist_id`
+ * -> `playlist(id)` RESTRICT (nullable column already exists since
+ * Version20260810090000; `playlist` did not exist until now).
+ *
+ * @see specs/database-designer-schema.md "Content module (Epic-04)"
+ * @see specs/requirements-analyst-epic-04-lp-content-spec.md
+ */
+final class Version20260810190000 extends AbstractMigration
+{
+    /**
+     * Trainer-scoped tables created here that DO carry the standard RLS
+     * policy. `playlist` and `content_item` are handled separately (widened
+     * policy, four clauses each); `drill_detail` carries none at all (see
+     * this class's own docblock).
+     */
+    private const STANDARD_TRAINER_SCOPED_TABLES = [
+        'playlist_item',
+        'playlist_assignment',
+        'content_progress',
+        'playlist_access_grant',
+        'content_usage',
+    ];
+
+    public function getDescription(): string
+    {
+        return 'Epic-04: playlists, content items, drills, playlist items, assignments, progress, access grants, usage';
+    }
+
+    public function up(Schema $schema): void
+    {
+        $this->abortIf(
+            !$this->connection->getDatabasePlatform() instanceof \Doctrine\DBAL\Platforms\PostgreSQLPlatform,
+            'PracticePerfect targets PostgreSQL only: Row-Level Security is load-bearing.',
+        );
+
+        // --- playlist ----------------------------------------------------
+        $this->addSql(<<<'SQL'
+            CREATE TABLE playlist (
+                id BIGINT GENERATED BY DEFAULT AS IDENTITY NOT NULL,
+                trainer_id BIGINT NOT NULL,
+                title VARCHAR(255) NOT NULL,
+                description TEXT DEFAULT NULL,
+                pillar VARCHAR(16) NOT NULL,
+                is_public BOOLEAN DEFAULT false NOT NULL,
+                ever_published_at TIMESTAMP(0) WITH TIME ZONE DEFAULT NULL,
+                audience VARCHAR(24) DEFAULT 'players_and_coaches' NOT NULL,
+                filter_skill_levels TEXT[] DEFAULT NULL,
+                filter_positions TEXT[] DEFAULT NULL,
+                filter_age_levels TEXT[] DEFAULT NULL,
+                created_at TIMESTAMP(0) WITH TIME ZONE NOT NULL,
+                updated_at TIMESTAMP(0) WITH TIME ZONE NOT NULL,
+                deleted_at TIMESTAMP(0) WITH TIME ZONE DEFAULT NULL,
+                PRIMARY KEY(id),
+                CONSTRAINT fk_playlist_trainer FOREIGN KEY (trainer_id)
+                    REFERENCES trainer (id) ON DELETE RESTRICT,
+                CONSTRAINT chk_playlist_pillar CHECK (pillar IN ('learn', 'practice')),
+                CONSTRAINT chk_playlist_audience CHECK (audience IN ('players_and_coaches', 'coaches_only')),
+                CONSTRAINT chk_playlist_no_public_coaches_only CHECK (NOT (is_public AND audience = 'coaches_only')),
+                CONSTRAINT chk_playlist_published_flag CHECK ((is_public = false) OR (ever_published_at IS NOT NULL))
+            )
+            SQL);
+        $this->addSql('CREATE INDEX idx_playlist_trainer_deleted ON playlist (trainer_id, deleted_at)');
+        $this->addSql('CREATE INDEX idx_playlist_ever_published ON playlist (ever_published_at) WHERE ever_published_at IS NOT NULL');
+
+        // --- content_item (+ drill_detail, joined-table inheritance) ------
+        $this->addSql(<<<'SQL'
+            CREATE TABLE content_item (
+                id BIGINT GENERATED BY DEFAULT AS IDENTITY NOT NULL,
+                trainer_id BIGINT NOT NULL,
+                type VARCHAR(16) NOT NULL,
+                pillar VARCHAR(16) NOT NULL,
+                title VARCHAR(100) NOT NULL,
+                instructions TEXT DEFAULT NULL,
+                youtube_url VARCHAR(2048) NOT NULL,
+                duration_seconds INTEGER DEFAULT NULL,
+                tags TEXT[] DEFAULT NULL,
+                is_public BOOLEAN DEFAULT false NOT NULL,
+                ever_published_at TIMESTAMP(0) WITH TIME ZONE DEFAULT NULL,
+                created_at TIMESTAMP(0) WITH TIME ZONE NOT NULL,
+                updated_at TIMESTAMP(0) WITH TIME ZONE NOT NULL,
+                deleted_at TIMESTAMP(0) WITH TIME ZONE DEFAULT NULL,
+                PRIMARY KEY(id),
+                CONSTRAINT fk_content_item_trainer FOREIGN KEY (trainer_id)
+                    REFERENCES trainer (id) ON DELETE RESTRICT,
+                CONSTRAINT chk_content_item_type CHECK (type IN ('video', 'drill')),
+                CONSTRAINT chk_content_item_pillar CHECK (pillar IN ('learn', 'practice')),
+                CONSTRAINT chk_content_item_drill_practice CHECK (type <> 'drill' OR pillar = 'practice'),
+                CONSTRAINT chk_content_item_title_length CHECK (char_length(title) <= 100),
+                CONSTRAINT chk_content_item_instructions_length CHECK (instructions IS NULL OR char_length(instructions) <= 1000),
+                CONSTRAINT chk_content_item_published_flag CHECK ((is_public = false) OR (ever_published_at IS NOT NULL))
+            )
+            SQL);
+        $this->addSql('CREATE INDEX idx_content_item_trainer_deleted ON content_item (trainer_id, deleted_at)');
+        $this->addSql("CREATE INDEX idx_content_item_public ON content_item (type) WHERE is_public = true AND deleted_at IS NULL");
+
+        // drill_detail: shared PK/FK to content_item (Doctrine JOINED
+        // inheritance). No trainer_id, no RLS — see this migration's own
+        // docblock.
+        //
+        // The shared PK/FK column is named `id`, not `content_item_id` as
+        // specs/database-designer-schema.md literally names it — see
+        // Drill's own docblock for why: Doctrine ORM 3.6 has no mapping
+        // attribute to rename a JOINED-inheritance child table's identifier
+        // column away from the parent's own `id`, and naming it
+        // content_item_id would break every generated query against this
+        // table.
+        $this->addSql(<<<'SQL'
+            CREATE TABLE drill_detail (
+                id BIGINT NOT NULL,
+                difficulty_level VARCHAR(16) NOT NULL,
+                equipment TEXT[] DEFAULT NULL,
+                space_requirement VARCHAR(16) DEFAULT NULL,
+                player_count VARCHAR(20) DEFAULT NULL,
+                duration_min_minutes INTEGER DEFAULT NULL,
+                duration_max_minutes INTEGER DEFAULT NULL,
+                categories TEXT[] DEFAULT NULL,
+                PRIMARY KEY(id),
+                CONSTRAINT fk_drill_detail_content_item FOREIGN KEY (id)
+                    REFERENCES content_item (id) ON DELETE CASCADE,
+                CONSTRAINT chk_drill_detail_difficulty CHECK (difficulty_level IN ('beginner', 'intermediate', 'advanced', 'elite')),
+                CONSTRAINT chk_drill_detail_space CHECK (space_requirement IS NULL OR space_requirement IN ('small', 'medium', 'large')),
+                CONSTRAINT chk_drill_detail_duration_range CHECK (duration_max_minutes IS NULL OR duration_min_minutes IS NULL OR duration_max_minutes >= duration_min_minutes)
+            )
+            SQL);
+
+        // --- playlist_item -------------------------------------------------
+        $this->addSql(<<<'SQL'
+            CREATE TABLE playlist_item (
+                id BIGINT GENERATED BY DEFAULT AS IDENTITY NOT NULL,
+                trainer_id BIGINT NOT NULL,
+                playlist_id BIGINT NOT NULL,
+                content_item_id BIGINT NOT NULL,
+                sequence_order INTEGER NOT NULL,
+                is_required BOOLEAN DEFAULT true NOT NULL,
+                trainer_notes TEXT DEFAULT NULL,
+                PRIMARY KEY(id),
+                CONSTRAINT fk_playlist_item_trainer FOREIGN KEY (trainer_id)
+                    REFERENCES trainer (id) ON DELETE RESTRICT,
+                CONSTRAINT fk_playlist_item_playlist FOREIGN KEY (playlist_id)
+                    REFERENCES playlist (id) ON DELETE CASCADE,
+                CONSTRAINT fk_playlist_item_content_item FOREIGN KEY (content_item_id)
+                    REFERENCES content_item (id) ON DELETE RESTRICT
+            )
+            SQL);
+        // DEFERRABLE is a CONSTRAINT property, not a plain CREATE INDEX
+        // option — PostgreSQL rejects "CREATE UNIQUE INDEX ... DEFERRABLE"
+        // outright, so this is a table constraint (which PostgreSQL still
+        // backs with a unique index internally) rather than a bare index.
+        // INITIALLY DEFERRED: a reorder operation updates every row's
+        // sequence_order inside one transaction without a transient
+        // collision (specs/database-designer-schema.md "`playlist_item`").
+        $this->addSql(<<<'SQL'
+            ALTER TABLE playlist_item
+                ADD CONSTRAINT uniq_playlist_item_playlist_sequence UNIQUE (playlist_id, sequence_order)
+                DEFERRABLE INITIALLY DEFERRED
+            SQL);
+        $this->addSql('CREATE INDEX idx_playlist_item_content ON playlist_item (content_item_id)');
+
+        // --- playlist_assignment --------------------------------------------
+        $this->addSql(<<<'SQL'
+            CREATE TABLE playlist_assignment (
+                id BIGINT GENERATED BY DEFAULT AS IDENTITY NOT NULL,
+                trainer_id BIGINT NOT NULL,
+                playlist_id BIGINT NOT NULL,
+                target_type VARCHAR(16) NOT NULL,
+                target_player_id BIGINT DEFAULT NULL,
+                target_label_id BIGINT DEFAULT NULL,
+                target_skill_level VARCHAR(50) DEFAULT NULL,
+                assigned_by_account_id BIGINT NOT NULL,
+                assigned_at TIMESTAMP(0) WITH TIME ZONE NOT NULL,
+                due_date DATE DEFAULT NULL,
+                note TEXT DEFAULT NULL,
+                PRIMARY KEY(id),
+                CONSTRAINT fk_playlist_assignment_trainer FOREIGN KEY (trainer_id)
+                    REFERENCES trainer (id) ON DELETE RESTRICT,
+                CONSTRAINT fk_playlist_assignment_playlist FOREIGN KEY (playlist_id)
+                    REFERENCES playlist (id) ON DELETE RESTRICT,
+                CONSTRAINT fk_playlist_assignment_target_player FOREIGN KEY (target_player_id)
+                    REFERENCES player_profile (id) ON DELETE RESTRICT,
+                CONSTRAINT fk_playlist_assignment_target_label FOREIGN KEY (target_label_id)
+                    REFERENCES label (id) ON DELETE RESTRICT,
+                CONSTRAINT fk_playlist_assignment_assigned_by FOREIGN KEY (assigned_by_account_id)
+                    REFERENCES account (id) ON DELETE RESTRICT,
+                CONSTRAINT chk_playlist_assignment_target_type CHECK (target_type IN ('player', 'label', 'skill_level')),
+                CONSTRAINT chk_playlist_assignment_target_shape CHECK (
+                    (target_type = 'player' AND target_player_id IS NOT NULL AND target_label_id IS NULL AND target_skill_level IS NULL)
+                    OR (target_type = 'label' AND target_label_id IS NOT NULL AND target_player_id IS NULL AND target_skill_level IS NULL)
+                    OR (target_type = 'skill_level' AND target_skill_level IS NOT NULL AND target_player_id IS NULL AND target_label_id IS NULL)
+                )
+            )
+            SQL);
+        $this->addSql('CREATE INDEX idx_playlist_assignment_playlist ON playlist_assignment (playlist_id)');
+        $this->addSql('CREATE INDEX idx_playlist_assignment_target_player ON playlist_assignment (target_player_id)');
+        $this->addSql('CREATE INDEX idx_playlist_assignment_target_label ON playlist_assignment (target_label_id)');
+
+        // --- content_progress ------------------------------------------------
+        $this->addSql(<<<'SQL'
+            CREATE TABLE content_progress (
+                id BIGINT GENERATED BY DEFAULT AS IDENTITY NOT NULL,
+                trainer_id BIGINT NOT NULL,
+                player_id BIGINT NOT NULL,
+                content_item_id BIGINT NOT NULL,
+                status VARCHAR(16) DEFAULT 'not_started' NOT NULL,
+                progress_percent SMALLINT DEFAULT 0 NOT NULL,
+                first_viewed_at TIMESTAMP(0) WITH TIME ZONE DEFAULT NULL,
+                completed_at TIMESTAMP(0) WITH TIME ZONE DEFAULT NULL,
+                watch_time_seconds INTEGER DEFAULT 0 NOT NULL,
+                updated_at TIMESTAMP(0) WITH TIME ZONE NOT NULL,
+                PRIMARY KEY(id),
+                CONSTRAINT fk_content_progress_trainer FOREIGN KEY (trainer_id)
+                    REFERENCES trainer (id) ON DELETE RESTRICT,
+                CONSTRAINT fk_content_progress_player FOREIGN KEY (player_id)
+                    REFERENCES player_profile (id) ON DELETE RESTRICT,
+                CONSTRAINT fk_content_progress_content_item FOREIGN KEY (content_item_id)
+                    REFERENCES content_item (id) ON DELETE RESTRICT,
+                CONSTRAINT chk_content_progress_status CHECK (status IN ('not_started', 'in_progress', 'completed')),
+                CONSTRAINT chk_content_progress_percent CHECK (progress_percent BETWEEN 0 AND 100),
+                CONSTRAINT chk_content_progress_completed_shape CHECK ((status = 'completed') = (completed_at IS NOT NULL))
+            )
+            SQL);
+        $this->addSql('CREATE UNIQUE INDEX uniq_content_progress_player_item ON content_progress (player_id, content_item_id)');
+        $this->addSql('CREATE INDEX idx_content_progress_trainer_player ON content_progress (trainer_id, player_id)');
+
+        // --- playlist_access_grant ---------------------------------------
+        // payment_record_id is a deferred FK, deliberately nullable here —
+        // see PlaylistAccessGrant's own docblock for why this migration
+        // does not follow the schema doc's per-table "NO" (not null)
+        // listing, which conflicts with that same document's own
+        // "Migration ordering" section.
+        $this->addSql(<<<'SQL'
+            CREATE TABLE playlist_access_grant (
+                id BIGINT GENERATED BY DEFAULT AS IDENTITY NOT NULL,
+                trainer_id BIGINT NOT NULL,
+                playlist_id BIGINT NOT NULL,
+                player_id BIGINT NOT NULL,
+                parent_account_id BIGINT NOT NULL,
+                payment_record_id BIGINT DEFAULT NULL,
+                granted_at TIMESTAMP(0) WITH TIME ZONE NOT NULL,
+                PRIMARY KEY(id),
+                CONSTRAINT fk_playlist_access_grant_trainer FOREIGN KEY (trainer_id)
+                    REFERENCES trainer (id) ON DELETE RESTRICT,
+                CONSTRAINT fk_playlist_access_grant_playlist FOREIGN KEY (playlist_id)
+                    REFERENCES playlist (id) ON DELETE RESTRICT,
+                CONSTRAINT fk_playlist_access_grant_player FOREIGN KEY (player_id)
+                    REFERENCES player_profile (id) ON DELETE RESTRICT,
+                CONSTRAINT fk_playlist_access_grant_parent_account FOREIGN KEY (parent_account_id)
+                    REFERENCES account (id) ON DELETE RESTRICT
+            )
+            SQL);
+        $this->addSql('CREATE UNIQUE INDEX uniq_playlist_access_grant_payment_record ON playlist_access_grant (payment_record_id) WHERE payment_record_id IS NOT NULL');
+        $this->addSql('CREATE UNIQUE INDEX uniq_playlist_access_grant_playlist_player ON playlist_access_grant (playlist_id, player_id)');
+        $this->addSql('CREATE INDEX idx_playlist_access_grant_player ON playlist_access_grant (player_id)');
+
+        // --- content_usage -------------------------------------------------
+        $this->addSql(<<<'SQL'
+            CREATE TABLE content_usage (
+                id BIGINT GENERATED BY DEFAULT AS IDENTITY NOT NULL,
+                trainer_id BIGINT NOT NULL,
+                content_item_id BIGINT NOT NULL,
+                first_used_at TIMESTAMP(0) WITH TIME ZONE NOT NULL,
+                PRIMARY KEY(id),
+                CONSTRAINT fk_content_usage_trainer FOREIGN KEY (trainer_id)
+                    REFERENCES trainer (id) ON DELETE RESTRICT,
+                CONSTRAINT fk_content_usage_content_item FOREIGN KEY (content_item_id)
+                    REFERENCES content_item (id) ON DELETE RESTRICT
+            )
+            SQL);
+        $this->addSql('CREATE UNIQUE INDEX uniq_content_usage_trainer_item ON content_usage (trainer_id, content_item_id)');
+        $this->addSql('CREATE INDEX idx_content_usage_content_item ON content_usage (content_item_id)');
+
+        // --- Deferred FK from M1: child_approval_request.requested_playlist_id
+        $this->addSql(<<<'SQL'
+            ALTER TABLE child_approval_request
+                ADD CONSTRAINT fk_car_playlist FOREIGN KEY (requested_playlist_id)
+                    REFERENCES playlist (id) ON DELETE RESTRICT
+            SQL);
+
+        $this->applyRowLevelSecurity();
+    }
+
+    /**
+     * Standard trainer-scoped tables get one USING+WITH CHECK policy each
+     * (identical shape to every migration since Epic-01). `playlist` and
+     * `content_item` each get the widened four-policy shape instead — see
+     * this class's own docblock. `drill_detail` gets none.
+     */
+    private function applyRowLevelSecurity(): void
+    {
+        foreach (self::STANDARD_TRAINER_SCOPED_TABLES as $table) {
+            $this->addSql(sprintf('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', $table));
+
+            $this->addSql(sprintf(
+                <<<'SQL'
+                    CREATE POLICY %1$s_tenant_isolation ON %1$s
+                        USING (trainer_id = NULLIF(current_setting('app.current_trainer', true), '')::bigint)
+                        WITH CHECK (trainer_id = NULLIF(current_setting('app.current_trainer', true), '')::bigint)
+                    SQL,
+                $table,
+            ));
+        }
+
+        foreach (['playlist', 'content_item'] as $table) {
+            $this->addSql(sprintf('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', $table));
+
+            // SELECT: widened — this trainer's own row, OR anything that
+            // has ever been published. The one declared widening of tenant
+            // isolation in this product (architect-architecture.md "The
+            // publication exception").
+            $this->addSql(sprintf(
+                <<<'SQL'
+                    CREATE POLICY %1$s_tenant_isolation_select ON %1$s
+                        FOR SELECT
+                        USING (
+                            trainer_id = NULLIF(current_setting('app.current_trainer', true), '')::bigint
+                            OR ever_published_at IS NOT NULL
+                        )
+                    SQL,
+                $table,
+            ));
+
+            // INSERT/UPDATE/DELETE: never widened — strictly this tenant's
+            // own rows, on every write path, regardless of publication.
+            $this->addSql(sprintf(
+                <<<'SQL'
+                    CREATE POLICY %1$s_tenant_isolation_insert ON %1$s
+                        FOR INSERT
+                        WITH CHECK (trainer_id = NULLIF(current_setting('app.current_trainer', true), '')::bigint)
+                    SQL,
+                $table,
+            ));
+            $this->addSql(sprintf(
+                <<<'SQL'
+                    CREATE POLICY %1$s_tenant_isolation_update ON %1$s
+                        FOR UPDATE
+                        USING (trainer_id = NULLIF(current_setting('app.current_trainer', true), '')::bigint)
+                        WITH CHECK (trainer_id = NULLIF(current_setting('app.current_trainer', true), '')::bigint)
+                    SQL,
+                $table,
+            ));
+            $this->addSql(sprintf(
+                <<<'SQL'
+                    CREATE POLICY %1$s_tenant_isolation_delete ON %1$s
+                        FOR DELETE
+                        USING (trainer_id = NULLIF(current_setting('app.current_trainer', true), '')::bigint)
+                    SQL,
+                $table,
+            ));
+        }
+    }
+
+    public function down(Schema $schema): void
+    {
+        $this->addSql('ALTER TABLE child_approval_request DROP CONSTRAINT IF EXISTS fk_car_playlist');
+
+        foreach (self::STANDARD_TRAINER_SCOPED_TABLES as $table) {
+            $this->addSql(sprintf('DROP POLICY IF EXISTS %1$s_tenant_isolation ON %1$s', $table));
+        }
+
+        foreach (['playlist', 'content_item'] as $table) {
+            $this->addSql(sprintf('DROP POLICY IF EXISTS %1$s_tenant_isolation_select ON %1$s', $table));
+            $this->addSql(sprintf('DROP POLICY IF EXISTS %1$s_tenant_isolation_insert ON %1$s', $table));
+            $this->addSql(sprintf('DROP POLICY IF EXISTS %1$s_tenant_isolation_update ON %1$s', $table));
+            $this->addSql(sprintf('DROP POLICY IF EXISTS %1$s_tenant_isolation_delete ON %1$s', $table));
+        }
+
+        $this->addSql('DROP TABLE IF EXISTS content_usage');
+        $this->addSql('DROP TABLE IF EXISTS playlist_access_grant');
+        $this->addSql('DROP TABLE IF EXISTS content_progress');
+        $this->addSql('DROP TABLE IF EXISTS playlist_assignment');
+        $this->addSql('DROP TABLE IF EXISTS playlist_item');
+        $this->addSql('DROP TABLE IF EXISTS drill_detail');
+        $this->addSql('DROP TABLE IF EXISTS content_item');
+        $this->addSql('DROP TABLE IF EXISTS playlist');
+    }
+}

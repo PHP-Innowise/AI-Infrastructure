@@ -51,12 +51,18 @@ player_flag
 player_note
 
 # --- Content / LPPP (Epic-04) ----------------------------------------------
+# drill_detail is deliberately NOT listed here, despite this header comment
+# originally including it: it carries no trainer_id column of its own (RLS
+# is enforced through the join to content_item — see Drill's own docblock
+# and Version20260810190000's docblock for the full conflict this resolves,
+# per specs/database-designer-schema.md "Tenancy manifest": "drill_detail is
+# deliberately absent... the gate script... would simply never find a
+# matching tenant column on it").
 playlist
 playlist_item
 playlist_assignment
 playlist_access_grant
 content_item
-drill_detail
 content_progress
 content_usage
 
