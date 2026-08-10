@@ -172,6 +172,16 @@ edition's own files remain in that edition's changelog.
 
 ### Changed
 
+- **The ready-made accelerator installer can now adopt standard existing
+  project root files without destructive overwrites.** The new
+  `--merge-existing` mode preserves project `.gitignore`, `.gitattributes`, and
+  `AGENTS.md` content while adding marked accelerator-managed blocks, keeps an
+  existing `README.md` and installs accelerator documentation as
+  `ACCELERATOR.md`, treats byte-identical files as unchanged, and continues to
+  abort atomically on every unsupported collision. The installation and
+  adoption guides document preview, transcript, and rollback behavior, with
+  tests covering safe merging, idempotence, and unsupported conflicts.
+
 - **The context budget now gates the whole startup surface, not the half of
   it that was easy to measure.** `scripts/context_budget.py` grew two
   categories, `command_bytes` and `agent_bytes`, because a measurement of what
