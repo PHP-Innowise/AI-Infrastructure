@@ -1,0 +1,39 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Events — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Event Builder</h1>
+        <p>
+            <a class="button button--primary" href="{{ path('scheduling_trainer_event_create') }}">Create Event</a>
+            ·
+            <a href="{{ path('scheduling_trainer_event_create_recurring') }}">Create Recurring Events</a>
+        </p>
+
+        {% if events is empty %}
+            <p>No events yet.</p>
+        {% else %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Title</th><th>Type</th><th>Start</th><th>Location</th><th>Capacity</th><th>Status</th><th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for event in events %}
+                        <tr>
+                            <td>{{ event.title }}</td>
+                            <td>{{ event.eventType }}</td>
+                            <td>{{ event.startsAt|date('Y-m-d H:i', event.trainer.timezone) }}</td>
+                            <td>{{ event.location }}</td>
+                            <td>{{ event.capacity }}</td>
+                            <td>{{ event.displayStatus(now) }}</td>
+                            <td><a href="{{ path('scheduling_trainer_event_show', {event: event.id}) }}">View</a></td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+{% endblock %}

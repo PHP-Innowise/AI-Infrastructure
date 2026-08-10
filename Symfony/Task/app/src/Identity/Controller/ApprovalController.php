@@ -58,6 +58,20 @@ final class ApprovalController extends AbstractController
     {
         $this->denyAccessUnlessGranted(ChildApprovalVoter::CHILD_APPROVAL_DECIDE, $approval);
 
+        // AC-02-23..26/33: an RSVP-related request (actionType 'rsvp' or
+        // 'rsvp_cancellation') needs Scheduling's own post-decision step —
+        // deciding it here would flip the request's own status without ever
+        // confirming/canceling the underlying Rsvp, leaving it stuck.
+        // Identity must not call into Scheduling directly (module
+        // dependency direction), so this route simply refuses the request
+        // and sends the parent to the one that can:
+        // PortalReservationController's own decide actions. The approvals
+        // index template already links there directly for these types;
+        // this is defense against a stale or hand-typed URL.
+        if (\in_array($approval->getActionType(), [ChildApprovalRequest::ACTION_RSVP, ChildApprovalRequest::ACTION_RSVP_CANCELLATION], true)) {
+            return $this->redirectToRoute($approving ? 'scheduling_portal_rsvp_approval_approve' : 'scheduling_portal_rsvp_approval_deny', ['approval' => $approval->getId()]);
+        }
+
         $form = $this->createForm(ApprovalDecisionType::class, null, ['label' => $approving ? 'Approve' : 'Deny']);
         $form->handleRequest($request);
 

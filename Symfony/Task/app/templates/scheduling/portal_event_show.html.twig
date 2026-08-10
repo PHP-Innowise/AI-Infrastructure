@@ -1,0 +1,35 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}{{ event.title }} — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <p class="skeleton-eyebrow">{{ event.eventType }}</p>
+        <h1>{{ event.title }}</h1>
+        <p>{{ event.startsAt|date('l, F j, Y \\a\\t g:i A', event.trainer.timezone) }} — {{ event.location }}</p>
+        {% if event.description %}<p>{{ event.description }}</p>{% endif %}
+
+        {% if event.free %}
+            <p>Free</p>
+        {% else %}
+            <p>
+                {% if event.usdPricingEnabled %}${{ (event.usdPriceMinorUnits / 100)|number_format(2) }}{% endif %}
+                {% if event.usdPricingEnabled and event.tokenPricingEnabled %} OR {% endif %}
+                {% if event.tokenPricingEnabled %}{{ event.tokenPrice }} token{{ event.tokenPrice > 1 ? 's' : '' }}{% endif %}
+            </p>
+        {% endif %}
+
+        {% if existingRsvp %}
+            <p role="status">Already registered.</p>
+        {% elseif isFull %}
+            <p role="alert">
+                {{ event.free ? 'Event Full - No spots available' : 'Event Full' }}.
+                Check back later or contact the trainer.
+            </p>
+        {% elseif form %}
+            {{ form_start(form) }}
+                {{ form_widget(form) }}
+            {{ form_end(form) }}
+        {% endif %}
+    </div>
+{% endblock %}

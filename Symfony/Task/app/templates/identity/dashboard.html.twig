@@ -54,16 +54,21 @@
                 <li><a href="{{ path('identity_account_profile_edit') }}">Your profile</a></li>
                 {% if role.value == 'super_admin' %}
                     <li><a href="{{ path('administration_users_index') }}">Users</a></li>
+                    <li><a href="{{ path('administration_event_master_index') }}">Event Master Tool</a></li>
                 {% endif %}
                 {% if role.value == 'trainer' %}
+                    <li><a href="{{ path('scheduling_trainer_event_index') }}">Events</a></li>
                     <li><a href="{{ path('identity_trainer_coaches_index') }}">Coaches</a></li>
                     <li><a href="{{ path('identity_trainer_sharelinks_index') }}">ShareLinks</a></li>
                     <li><a href="{{ path('identity_trainer_branding_edit') }}">Branding</a></li>
                 {% endif %}
                 {% if role.value == 'coach' %}
+                    <li><a href="{{ path('scheduling_coach_activities') }}">My Activities</a></li>
                     <li><a href="{{ path('identity_coach_availability_edit') }}">My Times</a></li>
                 {% endif %}
                 {% if role.value == 'player' %}
+                    <li><a href="{{ path('scheduling_portal_calendar') }}">Training Calendar</a></li>
+                    <li><a href="{{ path('scheduling_portal_reservations') }}">My Reservations</a></li>
                     <li><a href="{{ path('identity_portal_family_index') }}">Family</a></li>
                     <li><a href="{{ path('identity_portal_approvals_index') }}">Approvals</a></li>
                     <li><a href="{{ path('identity_portal_availability_edit') }}">My Times</a></li>

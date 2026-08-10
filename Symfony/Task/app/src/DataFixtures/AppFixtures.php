@@ -16,6 +16,11 @@ use App\Platform\Entity\AccountTrainerLink;
 use App\Platform\Entity\PublicTenantCode;
 use App\Platform\Entity\Trainer;
 use App\Platform\Tenancy\TenantContext;
+use App\Scheduling\Entity\AttendanceRecord;
+use App\Scheduling\Entity\CoachAssignment;
+use App\Scheduling\Entity\Event;
+use App\Scheduling\Entity\EventInvitation;
+use App\Scheduling\Entity\Rsvp;
 use Doctrine\Bundle\FixturesBundle\Fixture;
 use Doctrine\Persistence\ObjectManager;
 use Symfony\Component\PasswordHasher\Hasher\UserPasswordHasherInterface;
@@ -87,12 +92,16 @@ final class AppFixtures extends Fixture
         $this->tenantContext->activateFor($trainerA);
         $staticLinkA = new ShareLink($trainerA, 'join-peak-performance', ShareLink::TYPE_STATIC_PLAYER, $trainerAccountA);
         $manager->persist($staticLinkA);
-        $manager->persist(new CoachMembership($trainerA, $coachAccount, CoachMembership::STATUS_ACTIVE));
+        $coachMembershipA = new CoachMembership($trainerA, $coachAccount, CoachMembership::STATUS_ACTIVE);
+        $manager->persist($coachMembershipA);
         $manager->flush();
         $manager->persist(new PlayerTrainerMembership($trainerA, $patSelf, PlayerTrainerMembership::SOURCE_SHARELINK, $staticLinkA));
-        $manager->persist(new PlayerTrainerMembership($trainerA, $childA, PlayerTrainerMembership::SOURCE_SHARELINK, $staticLinkA));
+        $playerMembershipAlexA = new PlayerTrainerMembership($trainerA, $childA, PlayerTrainerMembership::SOURCE_SHARELINK, $staticLinkA);
+        $manager->persist($playerMembershipAlexA);
         $manager->persist(new PublicTenantCode($staticLinkA->getCode(), $trainerA, PublicTenantCode::KIND_SHARELINK, (int) $staticLinkA->getId()));
         $manager->flush();
+
+        $this->schedulingFixtures($manager, $trainerA, $trainerAccountA, $coachMembershipA, $patSelf, $childA);
 
         $this->tenantContext->activateFor($trainerB);
         $staticLinkB = new ShareLink($trainerB, 'join-baseline-athletics', ShareLink::TYPE_STATIC_PLAYER, $trainerAccountB);
@@ -105,6 +114,108 @@ final class AppFixtures extends Fixture
         $this->tenantContext->clear();
 
         unset($superAdmin);
+    }
+
+    /**
+     * Epic-02: enough real Scheduling data under Trainer A for a reviewer to
+     * see the feature without creating everything by hand — one free,
+     * upcoming public event with a confirmed coach and a confirmed RSVP; one
+     * private, token-priced event awaiting the coach's confirmation,
+     * visible only to Alex; and one completed event with attendance already
+     * recorded, showing the history AC-02-40 describes.
+     */
+    private function schedulingFixtures(
+        ObjectManager $manager,
+        Trainer $trainer,
+        Account $trainerAccount,
+        CoachMembership $coach,
+        PlayerProfile $patSelf,
+        PlayerProfile $childAlex,
+    ): void {
+        $now = new \DateTimeImmutable();
+        // Event times are the trainer's local time (Trainer::getTimezone()),
+        // never UTC display — the same rule TrainerEventController's own
+        // form pre-fill follows. $local is used only for the wall-clock
+        // date/time math below (setTime() etc.); $now (above) stays UTC for
+        // ordinary "created at"-style timestamps elsewhere in this method.
+        $local = $now->setTimezone($trainer->getTimezone());
+
+        // --- Upcoming, free, public — coach confirmed, Pat registered -----
+        $upcoming = new Event(
+            $trainer,
+            'Tuesday Shooting Drills',
+            Event::TYPE_TRAINING_SESSION,
+            $local->modify('+2 days')->setTime(16, 0),
+            $local->modify('+2 days')->setTime(17, 0),
+            'Peak Performance Gym — Court 1',
+            10,
+            Event::VISIBILITY_PUBLIC,
+            'Fundamentals: form shooting, footwork, and free throws.',
+        );
+        $upcoming->setTokenPricing(false, 1);
+        $manager->persist($upcoming);
+        $manager->flush();
+
+        $upcomingAssignment = new CoachAssignment($trainer, $upcoming, $coach, $now);
+        $upcomingAssignment->confirm($now);
+        $manager->persist($upcomingAssignment);
+
+        $patRsvp = new Rsvp($trainer, $upcoming, $patSelf, Rsvp::METHOD_FREE, $now);
+        $manager->persist($patRsvp);
+        $manager->flush();
+
+        // --- Upcoming, private, token-priced — coach still Pending --------
+        $private = new Event(
+            $trainer,
+            'Elite 1-on-1 Skills Session',
+            Event::TYPE_PRIVATE_SESSION,
+            $local->modify('+5 days')->setTime(9, 0),
+            $local->modify('+5 days')->setTime(10, 0),
+            'Peak Performance Gym — Court 2',
+            1,
+            Event::VISIBILITY_PRIVATE,
+            'Invite-only 1-on-1 coaching.',
+        );
+        $manager->persist($private);
+        $manager->flush();
+
+        $manager->persist(new EventInvitation($trainer, $private, $childAlex, $trainerAccount));
+        $manager->persist(new CoachAssignment($trainer, $private, $coach, $now));
+        $manager->flush();
+
+        // --- Completed — attendance already recorded (AC-02-40) -----------
+        $completed = new Event(
+            $trainer,
+            "Last Week's Practice",
+            Event::TYPE_TRAINING_SESSION,
+            $local->modify('-3 days')->setTime(16, 0),
+            $local->modify('-3 days')->setTime(17, 0),
+            'Peak Performance Gym — Court 1',
+            10,
+            Event::VISIBILITY_PUBLIC,
+        );
+        $completed->setTokenPricing(false, 1);
+        $manager->persist($completed);
+        $manager->flush();
+
+        $completedAssignment = new CoachAssignment($trainer, $completed, $coach, $now->modify('-10 days'));
+        $completedAssignment->confirm($now->modify('-9 days'));
+        $manager->persist($completedAssignment);
+
+        $completedRsvp = new Rsvp($trainer, $completed, $patSelf, Rsvp::METHOD_FREE, $now->modify('-9 days'));
+        $manager->persist($completedRsvp);
+        $manager->flush();
+
+        $manager->persist(new AttendanceRecord(
+            $trainer,
+            $completed,
+            $patSelf,
+            $completedRsvp,
+            AttendanceRecord::STATUS_PRESENT,
+            $coach,
+            $local->modify('-3 days')->setTime(17, 5),
+        ));
+        $manager->flush();
     }
 
     private function account(

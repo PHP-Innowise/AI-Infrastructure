@@ -20,9 +20,20 @@
                         <td>{{ request.requestedAt|date('Y-m-d H:i') }}</td>
                         <td>
                             {% if request.displayStatus(now) == 'pending' %}
-                                <a href="{{ path('identity_portal_approval_approve', {approval: request.id}) }}">Approve</a>
-                                ·
-                                <a href="{{ path('identity_portal_approval_deny', {approval: request.id}) }}">Deny</a>
+                                {# AC-02-23..26/33: an RSVP-related request needs Scheduling's own
+                                   post-decision step (confirming/canceling the actual Rsvp row),
+                                   so it routes to PortalReservationController's decide actions
+                                   instead of ApprovalController's generic ones — see that
+                                   controller's own docblock. #}
+                                {% if request.actionType in ['rsvp', 'rsvp_cancellation'] %}
+                                    <a href="{{ path('scheduling_portal_rsvp_approval_approve', {approval: request.id}) }}">Approve</a>
+                                    ·
+                                    <a href="{{ path('scheduling_portal_rsvp_approval_deny', {approval: request.id}) }}">Deny</a>
+                                {% else %}
+                                    <a href="{{ path('identity_portal_approval_approve', {approval: request.id}) }}">Approve</a>
+                                    ·
+                                    <a href="{{ path('identity_portal_approval_deny', {approval: request.id}) }}">Deny</a>
+                                {% endif %}
                             {% endif %}
                         </td>
                     </tr>

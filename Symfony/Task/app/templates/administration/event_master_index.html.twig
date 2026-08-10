@@ -1,0 +1,44 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Event Master Tool — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Event Master Tool</h1>
+        <p class="skeleton-caption">{{ total }} events across all trainers.</p>
+
+        <form method="get" action="{{ path('administration_event_master_index') }}">
+            <input type="search" name="q" placeholder="Search title, trainer, or location">
+            <button type="submit">Search</button>
+        </form>
+
+        <p><a href="{{ path('administration_event_master_export') }}">Export CSV</a></p>
+
+        {% if items is empty %}
+            <p>No events found.</p>
+        {% else %}
+            <table>
+                <thead><tr><th>Title</th><th>Trainer</th><th>Type</th><th>Start</th><th>Location</th><th>Status</th><th></th></tr></thead>
+                <tbody>
+                    {% for row in items %}
+                        <tr>
+                            <td>{{ row.title }}</td>
+                            <td>{{ row.trainer_name }}</td>
+                            <td>{{ row.event_type }}</td>
+                            <td>{{ row.starts_at }}</td>
+                            <td>{{ row.location }}</td>
+                            <td>{{ row.display_status }}</td>
+                            <td><a href="{{ path('administration_event_master_show', {event: row.id}) }}">View</a></td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+
+            <nav>
+                {% if page > 1 %}<a href="{{ path('administration_event_master_index', {page: page - 1}) }}">Previous</a>{% endif %}
+                <span>Page {{ page }} of {{ (total / perPage)|round(0, 'ceil')|default(1) }}</span>
+                {% if page * perPage < total %}<a href="{{ path('administration_event_master_index', {page: page + 1}) }}">Next</a>{% endif %}
+            </nav>
+        {% endif %}
+    </div>
+{% endblock %}

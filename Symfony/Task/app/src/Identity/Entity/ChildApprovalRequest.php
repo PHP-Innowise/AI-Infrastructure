@@ -35,6 +35,7 @@ use Doctrine\ORM\Mapping as ORM;
 class ChildApprovalRequest
 {
     public const ACTION_RSVP = 'rsvp';
+    public const ACTION_RSVP_CANCELLATION = 'rsvp_cancellation';
     public const ACTION_TOKEN_PURCHASE = 'token_purchase';
     public const ACTION_CONTENT_PURCHASE = 'content_purchase';
 
@@ -116,7 +117,7 @@ class ChildApprovalRequest
      */
     public static function actionTypes(): array
     {
-        return [self::ACTION_RSVP, self::ACTION_TOKEN_PURCHASE, self::ACTION_CONTENT_PURCHASE];
+        return [self::ACTION_RSVP, self::ACTION_RSVP_CANCELLATION, self::ACTION_TOKEN_PURCHASE, self::ACTION_CONTENT_PURCHASE];
     }
 
     public function getId(): ?int
@@ -137,6 +138,17 @@ class ChildApprovalRequest
     public function getParentAccount(): Account
     {
         return $this->parentAccount;
+    }
+
+    /**
+     * The deferred-FK link to `rsvp` (see this class's own docblock) — added
+     * by Epic-02's `RsvpService`, the first actual consumer of the
+     * `requestApproval()` primitive this class's docblock names as the
+     * hook Epic-02 would call.
+     */
+    public function getRsvpId(): ?int
+    {
+        return $this->rsvpId;
     }
 
     public function getActionType(): string

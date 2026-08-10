@@ -79,18 +79,34 @@ final readonly class ChildApprovalService
 
     /**
      * AC-01-26, BR-01-20.
+     *
+     * Fixed to actually persist the decision: this previously mutated
+     * $request in memory and returned without ever calling flush() — masked
+     * in-process by Doctrine's identity map (a same-request re-fetch by id
+     * returns the same managed instance regardless), but a genuine defect
+     * for the decision to survive past the current request at all. Found
+     * incidentally while wiring Epic-02's own consumer of this same method
+     * (RsvpService's post-decision hooks, called right after this by
+     * PortalReservationController, need their own writes to commit
+     * together with this one).
      */
     public function approve(ChildApprovalRequest $request, ?string $note = null): void
     {
-        $this->tenantContext->activateFor($request->getTrainer());
-        $request->approve($note);
+        $this->entityManager->wrapInTransaction(function () use ($request, $note): void {
+            $this->tenantContext->activateFor($request->getTrainer());
+            $request->approve($note);
+            $this->entityManager->flush();
+        });
         $this->mailer->sendApprovalDecided($request);
     }
 
     public function deny(ChildApprovalRequest $request, ?string $note = null): void
     {
-        $this->tenantContext->activateFor($request->getTrainer());
-        $request->deny($note);
+        $this->entityManager->wrapInTransaction(function () use ($request, $note): void {
+            $this->tenantContext->activateFor($request->getTrainer());
+            $request->deny($note);
+            $this->entityManager->flush();
+        });
         $this->mailer->sendApprovalDecided($request);
     }
 

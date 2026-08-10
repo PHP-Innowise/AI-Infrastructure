@@ -1,0 +1,14 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Create Recurring Events — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Create recurring events</h1>
+        <p class="skeleton-caption">Every field below describes the first occurrence. The pattern repeats weekly, on the same day and time, through the "repeat until" date.</p>
+
+        {{ form_start(form) }}
+            {{ form_widget(form) }}
+        {{ form_end(form) }}
+    </div>
+{% endblock %}
