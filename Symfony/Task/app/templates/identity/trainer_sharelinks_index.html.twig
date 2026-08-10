@@ -1,0 +1,47 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}ShareLinks — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>ShareLinks</h1>
+
+        <h2>Player invitation link</h2>
+        {% if staticLink %}
+            <p><code>{{ url('identity_sharelink_show', {code: staticLink.code}) }}</code></p>
+            <p class="skeleton-caption">{{ staticLinkOpens }} opens, {{ staticLink.useCount }} joins.</p>
+        {% else %}
+            <p>No static link has been provisioned for this trainer.</p>
+        {% endif %}
+
+        <h2>Coach invitations</h2>
+        {% if coachInvites is empty %}
+            <p>No coach invitations sent yet.</p>
+        {% else %}
+            <table>
+                <thead><tr><th>Email</th><th>Status</th><th></th></tr></thead>
+                <tbody>
+                {% for invite in coachInvites %}
+                    <tr>
+                        <td>{{ invite.targetEmail }}</td>
+                        <td>
+                            {% if invite.isExhausted %}Accepted
+                            {% elseif invite.isExpired(now) %}Expired
+                            {% else %}Pending{% endif %}
+                        </td>
+                        <td>
+                            {# AC-01-42: resend, whether still pending or already expired. #}
+                            {% if not invite.isExhausted %}
+                                <form method="post" action="{{ path('identity_trainer_sharelink_resend', {shareLink: invite.id}) }}">
+                                    <input type="hidden" name="_token" value="{{ csrf_token('resend-sharelink' ~ invite.id) }}">
+                                    <button type="submit">Resend invite</button>
+                                </form>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+{% endblock %}

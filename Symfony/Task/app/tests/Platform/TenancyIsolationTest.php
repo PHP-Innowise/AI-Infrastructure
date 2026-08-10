@@ -40,8 +40,12 @@ final class TenancyIsolationTest extends KernelTestCase
     }
 
     /**
-     * The central guarantee: the same query, run under two tenants, returns
-     * each tenant's own rows and never the other's.
+     * AC-01-74: trainers see only their own organization's players (the
+     * player-trainer relationship, which is what `PlayerTrainerMembership`
+     * is); the coach side of the same criterion is exercised at the HTTP
+     * layer by CoachListTenancyTest. The central guarantee: the same query,
+     * run under two tenants, returns each tenant's own rows and never the
+     * other's.
      */
     public function testATrainerCannotSeeAnotherTrainersMemberships(): void
     {

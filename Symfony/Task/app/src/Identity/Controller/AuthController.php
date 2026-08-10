@@ -7,6 +7,7 @@ namespace App\Identity\Controller;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\Routing\Attribute\Route;
+use Symfony\Component\Security\Core\Exception\CustomUserMessageAccountStatusException;
 use Symfony\Component\Security\Http\Authentication\AuthenticationUtils;
 
 /**
@@ -24,12 +25,19 @@ final class AuthController extends AbstractController
             return $this->redirectToRoute('app_dashboard');
         }
 
+        $error = $authenticationUtils->getLastAuthenticationError();
+
         return $this->render('identity/login.html.twig', [
             'last_username' => $authenticationUtils->getLastUsername(),
-            // Deliberately the framework's generic message: a login form that
-            // distinguishes "no such account" from "wrong password" is an
-            // account-enumeration oracle.
-            'error' => $authenticationUtils->getLastAuthenticationError(),
+            // Deliberately the framework's generic message for a genuine
+            // wrong-password/no-such-account attempt: a login form that
+            // distinguishes the two is an account-enumeration oracle.
+            'error' => $error,
+            // AC-01-52's edge case is a different situation, not an
+            // enumeration risk: these credentials are correct, so the
+            // account owner already knows they exist. AccountStatusUserChecker
+            // is the only source of this specific exception type.
+            'accountStatusMessage' => $error instanceof CustomUserMessageAccountStatusException ? $error->getMessage() : null,
         ]);
     }
 

@@ -80,6 +80,45 @@ class AccountProfile
         return $this->phone;
     }
 
+    public function getPhotoUrl(): ?string
+    {
+        return $this->photoUrl;
+    }
+
+    public function getSchoolOrOrganization(): ?string
+    {
+        return $this->schoolOrOrganization;
+    }
+
+    /**
+     * AC-01-48/50: the common editable set for any role — first/last name,
+     * phone. Email, role and (for players) skill level are never accepted
+     * here; they are simply never bound from the edit form (AC-01-48).
+     */
+    public function updateCommonFields(string $firstName, string $lastName, ?string $phone, ?string $schoolOrOrganization): void
+    {
+        if ('' === trim($firstName) || '' === trim($lastName)) {
+            throw new \InvalidArgumentException('First and last name are required.');
+        }
+
+        $this->firstName = $firstName;
+        $this->lastName = $lastName;
+        $this->phone = $phone;
+        $this->schoolOrOrganization = $schoolOrOrganization;
+        $this->updatedAt = new \DateTimeImmutable();
+    }
+
+    /**
+     * AC-01-49: an uploaded photo is stored in file storage with an updated
+     * photo URL. (No thumbnail generation — recorded as a deliberate MVP
+     * simplification, not silently dropped.)
+     */
+    public function updatePhoto(?string $photoUrl): void
+    {
+        $this->photoUrl = $photoUrl;
+        $this->updatedAt = new \DateTimeImmutable();
+    }
+
     /**
      * BR-01-24: personal data is nulled in place. The row survives so that
      * historical records stay joinable while ceasing to identify anyone.

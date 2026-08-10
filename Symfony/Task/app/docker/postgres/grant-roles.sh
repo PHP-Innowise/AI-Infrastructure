@@ -32,6 +32,23 @@ psql -h "${DB_HOST:-db}" -p "${DB_PORT_INTERNAL:-5432}" \
     GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO "${APP_DB_USER}";
     GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO "${APP_DB_USER}";
     GRANT SELECT ON ALL TABLES IN SCHEMA public TO "${CROSSING_DB_USER}";
+
+    -- The blanket grant above would silently re-widen any table a migration
+    -- has deliberately narrowed (audit_log_entry today; token_entry once
+    -- Epic-05 lands) back to UPDATE/DELETE on every re-run of this script —
+    -- which \`make test\` does unconditionally, every invocation, even when
+    -- the table already exists from a prior run and its own migration
+    -- (which only ever runs once) is not there to re-apply the REVOKE.
+    -- Re-narrowing here, guarded by existence, keeps I7/BR-07-6's
+    -- append-only guarantee durable across repeated \`make test\` runs, not
+    -- just true immediately after a fresh migration.
+    DO \$body\$
+    BEGIN
+        IF to_regclass('public.audit_log_entry') IS NOT NULL THEN
+            EXECUTE format('REVOKE UPDATE, DELETE ON audit_log_entry FROM %I', '${APP_DB_USER}');
+        END IF;
+    END
+    \$body\$;
 SQL
 
 echo "[grants] applied to ${DB} for ${APP_DB_USER} and ${CROSSING_DB_USER}"

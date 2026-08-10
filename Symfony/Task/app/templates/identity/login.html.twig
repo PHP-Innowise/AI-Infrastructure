@@ -7,7 +7,12 @@
         <p class="skeleton-eyebrow">PracticePerfect</p>
         <h1>Sign in</h1>
 
-        {% if error %}
+        {% if accountStatusMessage %}
+            {# AC-01-52 edge case: "Account deactivated. Contact support." —
+               not an enumeration risk, since a correct password already
+               proves the visitor owns these credentials. #}
+            <p role="alert" class="form-error">{{ accountStatusMessage }}</p>
+        {% elseif error %}
             {# Generic by design: distinguishing "no such account" from "wrong
                password" would turn this form into an enumeration oracle. #}
             <p role="alert" class="form-error">Invalid credentials.</p>

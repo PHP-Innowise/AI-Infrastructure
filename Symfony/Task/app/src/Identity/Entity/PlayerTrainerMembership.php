@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Identity\Entity;
 
+use App\Identity\Repository\PlayerTrainerMembershipRepository;
 use App\Platform\Entity\Trainer;
 use App\Platform\Tenancy\TrainerScoped;
 use Doctrine\ORM\Mapping as ORM;
@@ -22,7 +23,7 @@ use Doctrine\ORM\Mapping as ORM;
  *
  * @see specs/database-designer-schema.md "`player_trainer_membership`"
  */
-#[ORM\Entity]
+#[ORM\Entity(repositoryClass: PlayerTrainerMembershipRepository::class)]
 #[ORM\Table(name: 'player_trainer_membership')]
 #[ORM\UniqueConstraint(name: 'uniq_player_trainer', columns: ['player_profile_id', 'trainer_id'])]
 #[ORM\Index(name: 'idx_ptm_trainer', columns: ['trainer_id'])]
@@ -63,10 +64,25 @@ class PlayerTrainerMembership
     #[ORM\Column(name: 'skill_level', type: 'string', length: 50, nullable: true)]
     private ?string $skillLevel = null;
 
+    /**
+     * BR-01-27: which ShareLink was used to connect them, if any (not every
+     * source is code-driven — coach_invite and camp_registration are not).
+     */
+    #[ORM\ManyToOne(targetEntity: ShareLink::class)]
+    #[ORM\JoinColumn(name: 'share_link_id', referencedColumnName: 'id', nullable: true, onDelete: 'RESTRICT')]
+    private ?ShareLink $shareLink = null;
+
     #[ORM\Column(name: 'joined_at', type: 'datetimetz_immutable')]
     private \DateTimeImmutable $joinedAt;
 
-    public function __construct(Trainer $trainer, PlayerProfile $player, string $source)
+    /**
+     * AC-01-24: set when the parent removes the child from this trainer.
+     * Soft-removal — the row (and its history) survives.
+     */
+    #[ORM\Column(name: 'removed_at', type: 'datetimetz_immutable', nullable: true)]
+    private ?\DateTimeImmutable $removedAt = null;
+
+    public function __construct(Trainer $trainer, PlayerProfile $player, string $source, ?ShareLink $shareLink = null)
     {
         if (!\in_array($source, self::sources(), true)) {
             throw new \InvalidArgumentException(sprintf('Unknown association source "%s".', $source));
@@ -75,6 +91,7 @@ class PlayerTrainerMembership
         $this->trainer = $trainer;
         $this->player = $player;
         $this->source = $source;
+        $this->shareLink = $shareLink;
         $this->joinedAt = new \DateTimeImmutable();
     }
 
@@ -111,8 +128,63 @@ class PlayerTrainerMembership
         return $this->source;
     }
 
+    public function getShareLink(): ?ShareLink
+    {
+        return $this->shareLink;
+    }
+
+    public function getSkillLevel(): ?string
+    {
+        return $this->skillLevel;
+    }
+
+    public function setSkillLevel(?string $skillLevel): void
+    {
+        $this->skillLevel = $skillLevel;
+    }
+
+    public function getJoinedAt(): \DateTimeImmutable
+    {
+        return $this->joinedAt;
+    }
+
+    public function getRemovedAt(): ?\DateTimeImmutable
+    {
+        return $this->removedAt;
+    }
+
     public function isActive(): bool
     {
         return self::STATUS_ACTIVE === $this->status;
+    }
+
+    /**
+     * AC-01-24: disassociates the child from this trainer. Soft: the row and
+     * its history remain, `status` moves to inactive and `removedAt` records
+     * when. The caller is responsible for the "cancels upcoming RSVPs"
+     * fan-out once Scheduling exists (Epic-02) — out of Epic-01's reach.
+     */
+    public function remove(): void
+    {
+        $this->status = self::STATUS_INACTIVE;
+        $this->removedAt = new \DateTimeImmutable();
+    }
+
+    /**
+     * AC-01-13/BR-01-12: re-joining a trainer reactivates the same row
+     * instead of a second insert — "no duplicate account... only a new
+     * trainer association" extended to the membership row itself.
+     */
+    public function reactivate(string $source, ?ShareLink $shareLink = null): void
+    {
+        if (!\in_array($source, self::sources(), true)) {
+            throw new \InvalidArgumentException(sprintf('Unknown association source "%s".', $source));
+        }
+
+        $this->status = self::STATUS_ACTIVE;
+        $this->source = $source;
+        $this->shareLink = $shareLink;
+        $this->joinedAt = new \DateTimeImmutable();
+        $this->removedAt = null;
     }
 }

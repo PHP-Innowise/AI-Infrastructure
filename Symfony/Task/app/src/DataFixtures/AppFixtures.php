@@ -7,8 +7,11 @@ namespace App\DataFixtures;
 use App\Identity\Entity\Account;
 use App\Identity\Entity\AccountProfile;
 use App\Identity\Entity\AccountRole;
+use App\Identity\Entity\CoachMembership;
+use App\Identity\Entity\ParentChildLink;
 use App\Identity\Entity\PlayerProfile;
 use App\Identity\Entity\PlayerTrainerMembership;
+use App\Identity\Entity\ShareLink;
 use App\Platform\Entity\AccountTrainerLink;
 use App\Platform\Entity\PublicTenantCode;
 use App\Platform\Entity\Trainer;
@@ -20,7 +23,10 @@ use Symfony\Component\PasswordHasher\Hasher\UserPasswordHasherInterface;
 /**
  * A reviewer needs to log in as each of the four MVP roles, and needs a second
  * trainer to exist so cross-tenant isolation is demonstrable rather than
- * theoretical.
+ * theoretical. Also seeds one real ShareLink per trainer (with its matching
+ * PublicTenantCode) and a parent/child relationship spanning two trainers, so
+ * Epic-01's multi-trainer, multi-child scenarios have real data behind them
+ * rather than only being reachable by creating everything by hand.
  *
  * Every password is `password`. This is development seed data and is never
  * loaded outside dev/test.
@@ -57,29 +63,43 @@ final class AppFixtures extends Fixture
         $manager->persist(new AccountTrainerLink($trainerAccountB, $trainerB, 'trainer'));
         $manager->persist(new AccountTrainerLink($coachAccount, $trainerA, 'coach'));
         $manager->persist(new AccountTrainerLink($playerAccount, $trainerA, 'player'));
+        $manager->flush();
 
-        // A ShareLink code for tenant A, resolvable with no authentication.
-        $manager->persist(new PublicTenantCode('join-peak-performance', $trainerA, PublicTenantCode::KIND_SHARELINK, 1));
-
+        // Pat is a self-training player under Trainer A AND a parent of two
+        // children associated with two DIFFERENT trainers — "a parent
+        // account is itself treated as a player account" made concrete,
+        // alongside AC-01-15's "separated contexts".
+        $patSelf = new PlayerProfile('Pat', new \DateTimeImmutable('1988-02-20'), $playerAccount);
+        $manager->persist($patSelf);
         $childA = new PlayerProfile('Alex', new \DateTimeImmutable('2012-04-18'));
-        $childA->markAsChild();
         $manager->persist($childA);
-
         $childB = new PlayerProfile('Blake', new \DateTimeImmutable('2011-09-02'));
-        $childB->markAsChild();
         $manager->persist($childB);
+        $manager->flush();
 
+        $manager->persist(new ParentChildLink($playerAccount, $childA));
+        $manager->persist(new ParentChildLink($playerAccount, $childB));
         $manager->flush();
 
         // Trainer-scoped rows must be written under the tenant they belong to:
         // the RLS WITH CHECK clause rejects anything else. Writing one row per
         // tenant here is also what makes the isolation test meaningful.
         $this->tenantContext->activateFor($trainerA);
-        $manager->persist(new PlayerTrainerMembership($trainerA, $childA, PlayerTrainerMembership::SOURCE_SHARELINK));
+        $staticLinkA = new ShareLink($trainerA, 'join-peak-performance', ShareLink::TYPE_STATIC_PLAYER, $trainerAccountA);
+        $manager->persist($staticLinkA);
+        $manager->persist(new CoachMembership($trainerA, $coachAccount, CoachMembership::STATUS_ACTIVE));
+        $manager->flush();
+        $manager->persist(new PlayerTrainerMembership($trainerA, $patSelf, PlayerTrainerMembership::SOURCE_SHARELINK, $staticLinkA));
+        $manager->persist(new PlayerTrainerMembership($trainerA, $childA, PlayerTrainerMembership::SOURCE_SHARELINK, $staticLinkA));
+        $manager->persist(new PublicTenantCode($staticLinkA->getCode(), $trainerA, PublicTenantCode::KIND_SHARELINK, (int) $staticLinkA->getId()));
         $manager->flush();
 
         $this->tenantContext->activateFor($trainerB);
-        $manager->persist(new PlayerTrainerMembership($trainerB, $childB, PlayerTrainerMembership::SOURCE_COACH_INVITE));
+        $staticLinkB = new ShareLink($trainerB, 'join-baseline-athletics', ShareLink::TYPE_STATIC_PLAYER, $trainerAccountB);
+        $manager->persist($staticLinkB);
+        $manager->flush();
+        $manager->persist(new PlayerTrainerMembership($trainerB, $childB, PlayerTrainerMembership::SOURCE_SHARELINK, $staticLinkB));
+        $manager->persist(new PublicTenantCode($staticLinkB->getCode(), $trainerB, PublicTenantCode::KIND_SHARELINK, (int) $staticLinkB->getId()));
         $manager->flush();
 
         $this->tenantContext->clear();

@@ -83,8 +83,29 @@ class AccountTrainerLink
         return $this->roleInTenant;
     }
 
+    public function getLinkedAt(): \DateTimeImmutable
+    {
+        return $this->linkedAt;
+    }
+
     public function isActive(): bool
     {
         return self::STATUS_ACTIVE === $this->status;
+    }
+
+    /**
+     * Written only by MembershipService/CoachMembership's owning workflow and
+     * trainer creation, per this entity's own docblock — never directly by a
+     * controller.
+     */
+    public function reactivate(): void
+    {
+        $this->status = self::STATUS_ACTIVE;
+        $this->linkedAt = new \DateTimeImmutable();
+    }
+
+    public function deactivate(): void
+    {
+        $this->status = self::STATUS_INACTIVE;
     }
 }

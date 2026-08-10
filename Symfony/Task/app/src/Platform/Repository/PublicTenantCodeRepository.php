@@ -37,4 +37,19 @@ class PublicTenantCodeRepository extends ServiceEntityRepository
 
         return null === $row ? null : (int) $row['trainerId'];
     }
+
+    public function findOneByReference(string $kind, int $referenceId): ?PublicTenantCode
+    {
+        return $this->findOneBy(['kind' => $kind, 'referenceId' => $referenceId]);
+    }
+
+    public function add(PublicTenantCode $code): void
+    {
+        $this->getEntityManager()->persist($code);
+    }
+
+    public function remove(PublicTenantCode $code): void
+    {
+        $this->getEntityManager()->remove($code);
+    }
 }

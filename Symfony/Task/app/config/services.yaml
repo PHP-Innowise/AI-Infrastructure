@@ -13,6 +13,13 @@ services:
     _defaults:
         autowire: true      # Automatically injects dependencies in your services.
         autoconfigure: true # Automatically registers your services as commands, event subscribers, etc.
+        bind:
+            # AC-01-49, AC-01-60: where an uploaded profile photo / trainer
+            # logo is written, and the public URL prefix it is served under.
+            # Bound globally so any service taking these exact parameter
+            # names is wired consistently, without a per-service argument.
+            string $uploadsDirectory: '%kernel.project_dir%/public/uploads'
+            string $uploadsPublicPath: '/uploads'
 
     # makes classes in src/ available to be used as services
     # this creates a service per class whose id is the fully-qualified class name

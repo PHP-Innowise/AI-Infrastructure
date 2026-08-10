@@ -42,6 +42,19 @@ class Trainer
     private string $slug;
 
     /**
+     * AC-01-51: Trainer role-specific profile fields ("organization
+     * details").
+     */
+    #[ORM\Column(name: 'organization_address', type: 'string', length: 500, nullable: true)]
+    private ?string $organizationAddress = null;
+
+    #[ORM\Column(name: 'organization_website', type: 'string', length: 2048, nullable: true)]
+    private ?string $organizationWebsite = null;
+
+    #[ORM\Column(name: 'organization_description', type: 'text', nullable: true)]
+    private ?string $organizationDescription = null;
+
+    /**
      * Not named by any epic, and required anyway: the 24-hour refund boundary
      * (BR-05-10) and the one-advance-booking-per-day rule (BR-05-14) are both
      * meaningless without knowing whose day is being measured. The architecture
@@ -88,5 +101,31 @@ class Trainer
     public function getTimezone(): \DateTimeZone
     {
         return new \DateTimeZone($this->timezone);
+    }
+
+    public function getOrganizationAddress(): ?string
+    {
+        return $this->organizationAddress;
+    }
+
+    public function getOrganizationWebsite(): ?string
+    {
+        return $this->organizationWebsite;
+    }
+
+    public function getOrganizationDescription(): ?string
+    {
+        return $this->organizationDescription;
+    }
+
+    /**
+     * AC-01-51: the Trainer role's own profile-editing branch.
+     */
+    public function updateOrganizationDetails(?string $address, ?string $website, ?string $description): void
+    {
+        $this->organizationAddress = $address;
+        $this->organizationWebsite = $website;
+        $this->organizationDescription = $description;
+        $this->updatedAt = new \DateTimeImmutable();
     }
 }

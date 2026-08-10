@@ -24,10 +24,14 @@ final class TenantFromPublicCode
      * @var list<string>
      */
     private const ROUTES = [
-        // Epic-01 — ShareLink acceptance.
+        // Epic-01 — ShareLink acceptance (player static links).
         'identity_sharelink_show',
         'identity_sharelink_register',
         'identity_sharelink_associate',
+        // Epic-01 — ShareLink acceptance (unique coach invite links, and
+        // coach-issued player invites, which reuse the same shape).
+        'identity_invite_show',
+        'identity_invite_register',
         // Epic-08 — public camp and evaluation forms.
         'forms_public_show',
         'forms_public_submit',

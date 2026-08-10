@@ -142,15 +142,69 @@ class Account implements UserInterface, PasswordAuthenticatedUserInterface
         $this->touch();
     }
 
+    /**
+     * BR-01-23: blocks login; every historical record referencing this
+     * account is untouched and stays visible.
+     */
     public function deactivate(): void
     {
+        if (AccountStatus::Deleted === $this->status) {
+            throw new \LogicException('A deleted account cannot be deactivated — deletion is already permanent.');
+        }
+
         $this->status = AccountStatus::Inactive;
         $this->touch();
     }
 
+    /**
+     * AC-01-54/58: reversible from Inactive; never from Deleted — GDPR
+     * anonymisation is permanent, unlike deactivation.
+     */
     public function reactivate(): void
     {
+        if (AccountStatus::Deleted === $this->status) {
+            throw new \LogicException('A deleted account cannot be reactivated — anonymisation is permanent.');
+        }
+
         $this->status = AccountStatus::Active;
+        $this->touch();
+    }
+
+    /**
+     * AC-01-71: Super Admin edit form includes email. Uniqueness is the
+     * caller's job (the DB-level CITEXT UNIQUE constraint is the final
+     * backstop) — the entity only guards non-emptiness, same as the
+     * constructor.
+     */
+    public function changeEmail(string $email): void
+    {
+        if ('' === trim($email)) {
+            throw new \InvalidArgumentException('An account requires an email address.');
+        }
+
+        $this->email = $email;
+        $this->touch();
+    }
+
+    /**
+     * BR-01-24: the email becomes a deterministic, collision-free
+     * placeholder. The caller supplies the value (`deleted_<id>@example.com`)
+     * since the entity has no reason to know that format is the platform's
+     * convention rather than its own.
+     */
+    public function anonymizeEmail(string $replacementEmail): void
+    {
+        $this->email = $replacementEmail;
+        $this->touch();
+    }
+
+    /**
+     * AC-01-56: status becomes Deleted. Permanent — see reactivate()'s own
+     * guard.
+     */
+    public function markDeleted(): void
+    {
+        $this->status = AccountStatus::Deleted;
         $this->touch();
     }
 

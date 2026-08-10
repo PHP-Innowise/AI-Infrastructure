@@ -225,3 +225,26 @@ a {
   outline-offset: 2px;
   box-shadow: var(--focus-ring);
 }
+
+/* AC-01-34: a sticky, color-coded impersonation banner. Deliberately not a
+   brand colour (--brand-primary is trainer-controlled — see the runtime
+   branding block in base.html.twig — and this warning must stay legible and
+   consistent regardless of which trainer's palette is active). */
+.impersonation-banner {
+  position: sticky;
+  top: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-md);
+  padding: var(--space-xs) var(--space-md);
+  background: var(--color-error);
+  color: #FFFFFF;
+  font-size: var(--text-body-size);
+}
+
+.impersonation-banner form {
+  margin: 0;
+}
+
