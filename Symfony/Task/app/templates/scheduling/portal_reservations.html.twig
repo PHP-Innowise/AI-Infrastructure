@@ -1,0 +1,53 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}My Reservations — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>My Reservations</h1>
+
+        <h2>Upcoming</h2>
+        {% if upcoming is empty %}
+            <p>No upcoming reservations.</p>
+        {% else %}
+            <table>
+                <thead><tr><th>Event</th><th>Date/Time</th><th>Status</th><th></th></tr></thead>
+                <tbody>
+                    {% for rsvp in upcoming %}
+                        <tr>
+                            <td>{{ rsvp.event.title }}</td>
+                            <td>{{ rsvp.event.startsAt|date('Y-m-d H:i', rsvp.event.trainer.timezone) }}</td>
+                            <td>{{ rsvp.status }}</td>
+                            <td>
+                                {% if rsvp.status != 'canceled' %}
+                                    <form method="post" action="{{ path('scheduling_portal_rsvp_cancel', {rsvp: rsvp.id}) }}" style="display:inline">
+                                        <input type="hidden" name="_token" value="{{ csrf_token('rsvp-cancel' ~ rsvp.id) }}">
+                                        <button type="submit" onclick="return confirm('Are you sure? This will free your spot.')">Cancel RSVP</button>
+                                    </form>
+                                {% endif %}
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+
+        <h2>Past</h2>
+        {% if past is empty %}
+            <p>No past reservations.</p>
+        {% else %}
+            <table>
+                <thead><tr><th>Event</th><th>Date/Time</th><th>Status</th></tr></thead>
+                <tbody>
+                    {% for rsvp in past %}
+                        <tr>
+                            <td>{{ rsvp.event.title }}</td>
+                            <td>{{ rsvp.event.startsAt|date('Y-m-d H:i', rsvp.event.trainer.timezone) }}</td>
+                            <td>{{ rsvp.status }}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+{% endblock %}

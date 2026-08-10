@@ -164,6 +164,36 @@ final readonly class MembershipService
     }
 
     /**
+     * specs/requirements-analyst-epic-02-event-management-spec.md AC-02-8:
+     * "the dropdown includes the trainer themselves (trainers can assign
+     * themselves as coach)." A trainer's own account never goes through the
+     * invite-and-accept flow `acceptCoachInvite()` models, so this is the
+     * lazy, idempotent find-or-create Epic-02's coach-assignment dropdown
+     * needs: the first time a trainer picks themselves, their own
+     * CoachMembership row is created (Active, no ShareLink) if it does not
+     * already exist. Purely additive — every existing caller of this class
+     * is unaffected.
+     */
+    public function ensureSelfCoachMembership(Trainer $trainer): CoachMembership
+    {
+        return $this->entityManager->wrapInTransaction(function () use ($trainer): CoachMembership {
+            $this->tenantContext->activateFor($trainer);
+
+            $existing = $this->coachMemberships->findOneForAccountInActiveTenant($trainer->getOwnerAccount());
+
+            if (null !== $existing) {
+                return $existing;
+            }
+
+            $membership = new CoachMembership($trainer, $trainer->getOwnerAccount(), CoachMembership::STATUS_ACTIVE);
+            $this->coachMemberships->add($membership);
+            $this->entityManager->flush();
+
+            return $membership;
+        });
+    }
+
+    /**
      * Upserts the resolver's own source (`account_trainer_link`) — the
      * dual-write this schema's own docblock calls out as "worth a dedicated
      * integration test" (`TenancyIsolationTest` covers the RLS half;

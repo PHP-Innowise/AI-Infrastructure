@@ -1,0 +1,18 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Take Attendance — {{ event.title }} — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Take Attendance</h1>
+        <p class="skeleton-caption">{{ event.title }} — {{ event.startsAt|date('Y-m-d H:i', event.trainer.timezone) }}</p>
+
+        {% if players is empty %}
+            <p>No registered players to mark.</p>
+        {% else %}
+            {{ form_start(form) }}
+                {{ form_widget(form) }}
+            {{ form_end(form) }}
+        {% endif %}
+    </div>
+{% endblock %}

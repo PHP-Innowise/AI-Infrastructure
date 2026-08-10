@@ -1,18 +1,52 @@
 doctrine:
     dbal:
-        url: '%env(resolve:DATABASE_URL)%'
+        default_connection: default
 
-        # account.email is CITEXT so uniqueness and lookup are case-insensitive
-        # at the database level (BR-01-2) rather than by convention at each
-        # call site. Doctrine needs to know how to read the type back.
-        mapping_types:
-            citext: string
+        # `crossing` is the one component permitted to read across tenants
+        # (architect-architecture.md "Crossing the boundary" /
+        # specs/database-designer-schema.md "Row-Level Security"): a
+        # BYPASSRLS, SELECT-only role, on its own connection with no ORM
+        # entity manager behind it (no `orm.entity_managers` entry mapped to
+        # it below), so it is structurally incapable of returning a managed
+        # entity — only `CrossTenantReadService` uses it, and only for raw,
+        # array-returning reads. The role and the env var
+        # (CROSSING_DATABASE_URL) are already provisioned
+        # (docker/postgres/initdb/00-roles.sh, compose.yaml); this is where
+        # Epic-02 first wires them in, for the Super Admin Event Master
+        # slice (AC-02-55..57).
+        connections:
+            default:
+                url: '%env(resolve:DATABASE_URL)%'
 
-        # IMPORTANT: You MUST configure your server version,
-        # either here or in the DATABASE_URL env var (see .env file)
-        #server_version: '16'
+                # account.email is CITEXT so uniqueness and lookup are
+                # case-insensitive at the database level (BR-01-2) rather
+                # than by convention at each call site. Doctrine needs to
+                # know how to read the type back. `_text` is Postgres's own
+                # internal name for a `TEXT[]` column (event.skill_levels,
+                # event.genders) — without this, schema introspection
+                # (doctrine:schema:validate, phpstan-doctrine) cannot map
+                # the native column type back to a DBAL type at all; runtime
+                # reads/writes go through TextArrayType regardless, via the
+                # ORM column mapping, not this table.
+                mapping_types:
+                    citext: string
+                    _text: text_array
 
-        profiling_collect_backtrace: '%kernel.debug%'
+                # IMPORTANT: You MUST configure your server version,
+                # either here or in the DATABASE_URL env var (see .env file)
+                #server_version: '16'
+
+                profiling_collect_backtrace: '%kernel.debug%'
+
+            crossing:
+                url: '%env(resolve:CROSSING_DATABASE_URL)%'
+                mapping_types:
+                    citext: string
+
+        types:
+            # event.skill_levels / event.genders — native Postgres TEXT[].
+            # See App\Scheduling\Doctrine\TextArrayType's own docblock.
+            text_array: App\Scheduling\Doctrine\TextArrayType
     orm:
         validate_xml_mapping: true
         naming_strategy: doctrine.orm.naming_strategy.underscore
@@ -44,8 +78,16 @@ doctrine:
 when@test:
     doctrine:
         dbal:
-            # "TEST_TOKEN" is typically set by ParaTest
-            dbname_suffix: '_test%env(default::TEST_TOKEN)%'
+            # "TEST_TOKEN" is typically set by ParaTest. Set per-connection
+            # now that `dbal.connections` is plural — the flat top-level
+            # `dbname_suffix` shorthand only ever applied to a single
+            # implicit "default" connection, and `crossing` needs the same
+            # suffix or it would read the dev database during tests.
+            connections:
+                default:
+                    dbname_suffix: '_test%env(default::TEST_TOKEN)%'
+                crossing:
+                    dbname_suffix: '_test%env(default::TEST_TOKEN)%'
 
 when@prod:
     doctrine:

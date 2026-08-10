@@ -1,0 +1,27 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}RSVP List — {{ event.title }} — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>RSVP List (Super Admin)</h1>
+        <p class="skeleton-caption">{{ event.title }} — {{ event.trainer.businessName }}</p>
+
+        {% if rows is empty %}
+            <p>No registrations yet.</p>
+        {% else %}
+            <table>
+                <thead><tr><th>Player</th><th>Status</th><th>RSVP Time</th></tr></thead>
+                <tbody>
+                    {% for row in rows %}
+                        <tr>
+                            <td>{{ row.name }}</td>
+                            <td>{{ row.status }}</td>
+                            <td>{{ row.requestedAt }}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+{% endblock %}
