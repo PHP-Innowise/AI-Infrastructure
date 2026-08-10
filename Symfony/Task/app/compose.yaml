@@ -87,6 +87,10 @@ services:
       - ./:/app
       - app-var:/app/var
       - uploads:/app/public/uploads
+      # The derived specs are the source of truth for acceptance criteria.
+      # Mounted read-only so `app:ac-coverage` can count them without the
+      # application ever being able to edit a specification.
+      - ../../specs:/specs:ro
     healthcheck:
       test: ["CMD", "/usr/local/bin/php-healthcheck"]
       interval: 10s
@@ -136,6 +140,10 @@ services:
       - ./:/app
       - app-var:/app/var
       - uploads:/app/public/uploads
+      # The derived specs are the source of truth for acceptance criteria.
+      # Mounted read-only so `app:ac-coverage` can count them without the
+      # application ever being able to edit a specification.
+      - ../../specs:/specs:ro
     command: ["worker"]
     healthcheck:
       test: ["CMD-SHELL", "pgrep -f messenger:consume >/dev/null || exit 1"]
