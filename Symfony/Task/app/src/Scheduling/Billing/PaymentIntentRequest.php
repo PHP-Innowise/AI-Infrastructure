@@ -16,12 +16,21 @@ use App\Scheduling\Entity\Rsvp;
  */
 final readonly class PaymentIntentRequest
 {
+    /**
+     * @param ?string $couponCode Epic-06: set only when a valid coupon was
+     *                            applied and `$amount` already reflects its
+     *                            discount — see
+     *                            `App\Content\Billing\PaymentIntentRequest::$couponCode`'s
+     *                            own docblock for the full reasoning
+     *                            (identical shape here).
+     */
     public function __construct(
         public Trainer $trainer,
         public Rsvp $rsvp,
         public Account $payer,
         public string $paymentMethod,
         public int $amount,
+        public ?string $couponCode = null,
     ) {
     }
 }

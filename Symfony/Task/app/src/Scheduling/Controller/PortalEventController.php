@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Scheduling\Controller;
 
+use App\Growth\Exception\InvalidCouponException;
 use App\Identity\Entity\Account;
 use App\Identity\Service\PlayerContextResolver;
 use App\Scheduling\Entity\Event;
@@ -83,17 +84,26 @@ final class PortalEventController extends AbstractController
             return $this->redirectToRoute('scheduling_portal_event_show', ['event' => $event->getId()]);
         }
 
-        /** @var array{paymentMethod: string} $data */
+        /** @var array{paymentMethod: string, couponCode: ?string} $data */
         $data = $form->getData();
 
         try {
-            $rsvpEntity = $this->rsvpService->rsvp($event, $player, $actor, $data['paymentMethod']);
+            $rsvpEntity = $this->rsvpService->rsvp($event, $player, $actor, $data['paymentMethod'], $data['couponCode']);
         } catch (EventFullException) {
             $this->addFlash('error', 'Event Full - No spots available.');
 
             return $this->redirectToRoute('scheduling_portal_event_show', ['event' => $event->getId()]);
         } catch (AlreadyRegisteredException) {
             $this->addFlash('error', 'Already registered.');
+
+            return $this->redirectToRoute('scheduling_portal_event_show', ['event' => $event->getId()]);
+        } catch (InvalidCouponException $e) {
+            // AC-06-23: "Invalid or expired code" — no discount applied, no
+            // payment attempted. This route is POST-only (no re-render), so
+            // — matching EventFullException/AlreadyRegisteredException's
+            // own sibling handling immediately above — the message is
+            // surfaced as a flash rather than a bound form error.
+            $this->addFlash('error', $e->getMessage());
 
             return $this->redirectToRoute('scheduling_portal_event_show', ['event' => $event->getId()]);
         }

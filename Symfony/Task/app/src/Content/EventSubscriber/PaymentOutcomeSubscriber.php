@@ -7,8 +7,12 @@ namespace App\Content\EventSubscriber;
 use App\Billing\Entity\PaymentRecord;
 use App\Billing\Event\PaymentRecordSettled;
 use App\Billing\Repository\PaymentRecordRepository;
+use App\Content\Entity\Playlist;
 use App\Content\Repository\PlaylistRepository;
 use App\Content\Service\PurchasePlaylistAccessService;
+use App\Growth\Repository\CouponRepository;
+use App\Growth\Service\CouponPricingService;
+use App\Identity\Entity\PlayerProfile;
 use App\Identity\Repository\PlayerProfileRepository;
 use Symfony\Component\EventDispatcher\Attribute\AsEventListener;
 
@@ -36,6 +40,8 @@ final readonly class PaymentOutcomeSubscriber
         private PlayerProfileRepository $playerProfiles,
         private PaymentRecordRepository $paymentRecords,
         private PurchasePlaylistAccessService $purchaseService,
+        private CouponRepository $coupons,
+        private CouponPricingService $couponPricing,
     ) {
     }
 
@@ -64,5 +70,42 @@ final readonly class PaymentOutcomeSubscriber
         // `PurchasePlaylistAccessService::attemptGrant()` would have
         // resolved via `PlayerAccountResolver` at request time.
         $this->purchaseService->grantFor($playlist, $player, $payer, $event->paymentRecordId);
+
+        // AC-06-25: records the coupon use once the discounted payment has
+        // actually succeeded — 'coupon_code' only appears in metadata when
+        // `PurchasePlaylistAccessService::purchase()` actually applied one
+        // (see PaymentIntentRequest::$couponCode's own docblock).
+        $this->recordCouponRedemptionIfPresent($event, $playlist, $player, $paymentRecord);
+    }
+
+    private function recordCouponRedemptionIfPresent(
+        PaymentRecordSettled $event,
+        Playlist $playlist,
+        PlayerProfile $player,
+        PaymentRecord $paymentRecord,
+    ): void {
+        $couponCode = isset($event->metadata['coupon_code']) ? (string) $event->metadata['coupon_code'] : null;
+
+        if (null === $couponCode || '' === $couponCode) {
+            return;
+        }
+
+        $coupon = $this->coupons->findOneByTrainerAndCode($playlist->getTrainer(), $couponCode);
+
+        if (null === $coupon) {
+            // The coupon existed at checkout time but is gone by the time
+            // the webhook confirms — nothing sane to record against; the
+            // discount was already applied to the charge itself regardless.
+            return;
+        }
+
+        // The original (undiscounted) price is derivable at any time from
+        // the playlist's own static pricing — no need to have carried it
+        // through Stripe metadata alongside the coupon code.
+        $original = $playlist->priceForMethod('usd');
+        $final = $paymentRecord->getAmountMinorUnits();
+        $discount = max(0, $original - $final);
+
+        $this->couponPricing->redeem($coupon, $player, $paymentRecord, $original, $discount, $final);
     }
 }

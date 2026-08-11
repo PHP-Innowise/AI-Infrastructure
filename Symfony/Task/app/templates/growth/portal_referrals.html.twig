@@ -1,0 +1,21 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Get the Assist — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        {# AC-06-1/2: no "generate" step — the link already exists by the time this page renders. #}
+        <h1>Get the Assist</h1>
+        <p>Share your link with friends. When they join {{ trainer.businessName }} and make their first purchase, you earn a reward.</p>
+
+        <p>
+            <input type="text" id="referral-link-input" value="{{ referralUrl }}" readonly style="width: 100%; max-width: 32rem;">
+        </p>
+        <p>
+            <button type="button" class="button button--primary" onclick="navigator.clipboard.writeText(document.getElementById('referral-link-input').value); this.textContent = 'Copied!';">Share</button>
+        </p>
+
+        {# AC-06-2: "You've referred 3 players (2 converted)" #}
+        <p>You've referred {{ totalReferrals }} player{{ totalReferrals == 1 ? '' : 's' }} ({{ totalConverted }} converted).</p>
+    </div>
+{% endblock %}

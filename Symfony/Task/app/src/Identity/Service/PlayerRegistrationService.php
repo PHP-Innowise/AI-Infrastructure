@@ -11,11 +11,13 @@ use App\Identity\Entity\ParentChildLink;
 use App\Identity\Entity\PlayerProfile;
 use App\Identity\Entity\PlayerTrainerMembership;
 use App\Identity\Entity\ShareLink;
+use App\Identity\Event\PlayerRegistered;
 use App\Identity\Exception\DuplicateEmailException;
 use App\Identity\Repository\AccountRepository;
 use App\Identity\Repository\ParentChildLinkRepository;
 use App\Identity\Repository\PlayerProfileRepository;
 use Doctrine\ORM\EntityManagerInterface;
+use Symfony\Component\EventDispatcher\EventDispatcherInterface;
 use Symfony\Component\PasswordHasher\Hasher\UserPasswordHasherInterface;
 
 /**
@@ -44,6 +46,7 @@ final readonly class PlayerRegistrationService
         private ShareLinkService $shareLinkService,
         private EmailVerificationService $emailVerification,
         private IdentityMailer $mailer,
+        private EventDispatcherInterface $eventDispatcher,
     ) {
     }
 
@@ -65,7 +68,9 @@ final readonly class PlayerRegistrationService
             throw DuplicateEmailException::forEmail($email);
         }
 
-        return $this->entityManager->wrapInTransaction(function () use (
+        $registeredPlayer = null;
+
+        $account = $this->entityManager->wrapInTransaction(function () use (
             $shareLink,
             $accountFirstName,
             $accountLastName,
@@ -75,6 +80,7 @@ final readonly class PlayerRegistrationService
             $playerFirstName,
             $playerDateOfBirth,
             $playerGender,
+            &$registeredPlayer,
         ): Account {
             $account = new Account($email, '', AccountRole::Player);
             $account->changePasswordHash($this->passwordHasher->hashPassword($account, $plainPassword));
@@ -85,6 +91,7 @@ final readonly class PlayerRegistrationService
 
             $player = new PlayerProfile($playerFirstName, $playerDateOfBirth, $isChild ? null : $account, $playerGender);
             $this->playerProfiles->add($player);
+            $registeredPlayer = $player;
 
             if ($isChild) {
                 $this->parentChildLinks->add(new ParentChildLink($account, $player));
@@ -104,5 +111,19 @@ final readonly class PlayerRegistrationService
 
             return $account;
         });
+
+        // Epic-06: dispatched AFTER commit — see PlayerRegistered's own
+        // docblock for why this runs post-transaction, and why Identity
+        // dispatches a plain event here rather than calling into Growth
+        // directly (the module map permits Identity to call only Platform).
+        \assert(null !== $registeredPlayer && null !== $registeredPlayer->getId());
+        $this->eventDispatcher->dispatch(new PlayerRegistered(
+            (int) $account->getId(),
+            (int) $registeredPlayer->getId(),
+            (int) $shareLink->getTrainer()->getId(),
+            new \DateTimeImmutable(),
+        ));
+
+        return $account;
     }
 }

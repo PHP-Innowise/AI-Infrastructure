@@ -16,6 +16,7 @@ use App\Content\Service\ContentProgressService;
 use App\Content\Service\PurchasePlaylistAccessService;
 use App\Content\Voter\ContentItemVoter;
 use App\Content\Voter\PlaylistVoter;
+use App\Growth\Exception\InvalidCouponException;
 use App\Identity\Entity\Account;
 use App\Identity\Entity\ChildApprovalRequest;
 use App\Identity\Entity\PlayerProfile;
@@ -28,6 +29,7 @@ use App\Platform\Entity\Trainer;
 use App\Platform\Tenancy\TenantContext;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
+use Symfony\Component\Form\FormError;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\Routing\Attribute\Route;
@@ -139,10 +141,18 @@ final class PortalContentController extends AbstractController
         $form->handleRequest($request);
 
         if ($form->isSubmitted() && $form->isValid()) {
-            /** @var array{method: string} $data */
+            /** @var array{method: string, couponCode: ?string} $data */
             $data = $form->getData();
 
-            $outcome = $this->purchaseService->purchase($playlist, $player, $this->actor(), $data['method']);
+            try {
+                $outcome = $this->purchaseService->purchase($playlist, $player, $this->actor(), $data['method'], $data['couponCode']);
+            } catch (InvalidCouponException $e) {
+                // AC-06-23: "Invalid or expired code" — no discount
+                // applied, no purchase attempted.
+                $form->get('couponCode')->addError(new FormError($e->getMessage()));
+
+                return $this->render('content/portal_playlist_checkout.html.twig', ['form' => $form, 'playlist' => $playlist]);
+            }
 
             if (null !== $outcome->grant) {
                 $this->addFlash('success', sprintf('%s unlocked!', $playlist->getTitle()));

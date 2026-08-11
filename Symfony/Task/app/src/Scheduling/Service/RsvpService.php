@@ -5,6 +5,9 @@ declare(strict_types=1);
 namespace App\Scheduling\Service;
 
 use App\Billing\Entity\PaymentRecord;
+use App\Growth\Entity\Coupon;
+use App\Growth\Exception\InvalidCouponException;
+use App\Growth\Service\CouponPricingService;
 use App\Identity\Entity\Account;
 use App\Identity\Entity\ChildApprovalRequest;
 use App\Identity\Entity\PlayerProfile;
@@ -66,14 +69,16 @@ final readonly class RsvpService
         private PlayerAccountResolver $playerAccounts,
         private SchedulingMailer $mailer,
         private AuditLogger $auditLogger,
+        private CouponPricingService $couponPricing,
     ) {
     }
 
     /**
      * @throws AlreadyRegisteredException
      * @throws EventFullException
+     * @throws InvalidCouponException
      */
-    public function rsvp(Event $event, PlayerProfile $player, Account $actor, string $paymentMethod): Rsvp
+    public function rsvp(Event $event, PlayerProfile $player, Account $actor, string $paymentMethod, ?string $couponCode = null): Rsvp
     {
         if (null !== $this->rsvps->findActiveOneByEventAndPlayer($event, $player)) {
             throw AlreadyRegisteredException::forEventId((int) $event->getId());
@@ -167,7 +172,7 @@ final readonly class RsvpService
             return $rsvp;
         }
 
-        $this->completeConfirmationOrPayment($rsvp, $actor);
+        $this->completeConfirmationOrPayment($rsvp, $actor, $couponCode);
 
         return $rsvp;
     }
@@ -452,8 +457,18 @@ final readonly class RsvpService
      * usd-only so `completeAfterParentApproval()`'s own token path (a
      * parent-approved child's token purchase, which does NOT go through
      * rsvp()'s inline branch) still resolves correctly.
+     *
+     * $couponCode is only ever non-null on the immediate, bypass-granted
+     * `usd` path from `rsvp()` itself — `completeAfterParentApproval()`
+     * never carries one through (no column preserves a coupon code across
+     * the approval window, matching
+     * `App\Content\Service\PurchasePlaylistAccessService`'s identical
+     * "child's original choice is not preserved" precedent for its own
+     * payment method).
+     *
+     * @throws InvalidCouponException
      */
-    private function completeConfirmationOrPayment(Rsvp $rsvp, Account $payer): void
+    private function completeConfirmationOrPayment(Rsvp $rsvp, Account $payer, ?string $couponCode = null): void
     {
         if (Rsvp::STATUS_CONFIRMED === $rsvp->getStatus()) {
             $this->mailer->sendRsvpConfirmed($rsvp);
@@ -462,8 +477,9 @@ final readonly class RsvpService
         }
 
         $event = $rsvp->getEvent();
-        $amount = $event->priceForMethod($rsvp->getPaymentMethod());
-        $request = new PaymentIntentRequest($rsvp->getTrainer(), $rsvp, $payer, $rsvp->getPaymentMethod(), $amount);
+        $originalAmount = $event->priceForMethod($rsvp->getPaymentMethod());
+        [$amount, $appliedCouponCode] = $this->applyCouponIfPresent($event, $rsvp->getPlayer(), $rsvp->getPaymentMethod(), $originalAmount, $couponCode);
+        $request = new PaymentIntentRequest($rsvp->getTrainer(), $rsvp, $payer, $rsvp->getPaymentMethod(), $amount, $appliedCouponCode);
         $result = $this->paymentGateway->requestPayment($request);
 
         if (null !== $result->paymentRecordId) {
@@ -483,6 +499,37 @@ final readonly class RsvpService
             $this->entityManager->flush();
             $this->mailer->sendRsvpConfirmed($rsvp);
         }
+    }
+
+    /**
+     * AC-06-20..23, BR-06-9: coupons only ever discount a CARD (usd) RSVP —
+     * see `App\Content\Service\PurchasePlaylistAccessService::
+     * applyCouponIfPresent()`'s own docblock for the identical reasoning. A
+     * token-funded RSVP silently ignores any submitted coupon code.
+     *
+     * @return array{0: int, 1: ?string} [amount to actually charge, the
+     *                                    coupon code to carry through to
+     *                                    checkout metadata]
+     *
+     * @throws InvalidCouponException
+     */
+    private function applyCouponIfPresent(Event $event, PlayerProfile $player, string $paymentMethod, int $originalAmount, ?string $couponCode): array
+    {
+        if (Event::PAYMENT_USD !== $paymentMethod || null === $couponCode || '' === trim($couponCode)) {
+            return [$originalAmount, null];
+        }
+
+        $quote = $this->couponPricing->quote($event->getTrainer(), $couponCode, $player, Coupon::APPLIES_TO_EVENTS, $originalAmount);
+
+        if (!$quote->valid) {
+            // AC-06-23: "Invalid or expired code" — no discount applied,
+            // no payment attempted.
+            throw InvalidCouponException::withMessage($quote->message);
+        }
+
+        \assert(null !== $quote->finalAmountMinorUnits && null !== $quote->coupon);
+
+        return [$quote->finalAmountMinorUnits, $quote->coupon->getCode()];
     }
 
     /**

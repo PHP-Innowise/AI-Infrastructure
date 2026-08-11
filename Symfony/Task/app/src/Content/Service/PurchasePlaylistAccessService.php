@@ -11,6 +11,9 @@ use App\Content\Billing\PaymentIntentRequest;
 use App\Content\Entity\Playlist;
 use App\Content\Entity\PlaylistAccessGrant;
 use App\Content\Repository\PlaylistAccessGrantRepository;
+use App\Growth\Entity\Coupon;
+use App\Growth\Exception\InvalidCouponException;
+use App\Growth\Service\CouponPricingService;
 use App\Identity\Entity\Account;
 use App\Identity\Entity\ChildApprovalRequest;
 use App\Identity\Entity\PlayerProfile;
@@ -49,6 +52,7 @@ final readonly class PurchasePlaylistAccessService
         private PaymentIntentGateway $paymentGateway,
         private PlayerAccountResolver $playerAccounts,
         private PaymentRecordRepository $paymentRecords,
+        private CouponPricingService $couponPricing,
     ) {
     }
 
@@ -60,7 +64,10 @@ final readonly class PurchasePlaylistAccessService
         return [self::METHOD_TOKEN, self::METHOD_USD];
     }
 
-    public function purchase(Playlist $playlist, PlayerProfile $player, Account $actor, string $paymentMethod): PlaylistPurchaseOutcome
+    /**
+     * @throws InvalidCouponException
+     */
+    public function purchase(Playlist $playlist, PlayerProfile $player, Account $actor, string $paymentMethod, ?string $couponCode = null): PlaylistPurchaseOutcome
     {
         $existing = $this->grants->findOneByPlaylistAndPlayer($playlist, $player);
 
@@ -68,9 +75,13 @@ final readonly class PurchasePlaylistAccessService
             return PlaylistPurchaseOutcome::granted($existing);
         }
 
-        if ($playlist->priceForMethod($paymentMethod) <= 0) {
+        $originalAmount = $playlist->priceForMethod($paymentMethod);
+
+        if ($originalAmount <= 0) {
             throw new \DomainException('This content has no price set for the chosen payment method.');
         }
+
+        [$amount, $appliedCouponCode] = $this->applyCouponIfPresent($playlist, $player, $paymentMethod, $originalAmount, $couponCode);
 
         $fundingMethod = self::METHOD_USD === $paymentMethod ? FundingMethod::Usd : FundingMethod::Token;
 
@@ -90,7 +101,42 @@ final readonly class PurchasePlaylistAccessService
             return PlaylistPurchaseOutcome::pendingApproval();
         }
 
-        return $this->attemptGrant($playlist, $player, $actor, $paymentMethod);
+        return $this->attemptGrant($playlist, $player, $actor, $paymentMethod, $amount, $appliedCouponCode);
+    }
+
+    /**
+     * AC-06-20..23, BR-06-9: coupons only ever discount a CARD (usd)
+     * purchase — the epic's own discount examples are exclusively USD
+     * ("$20 event, 20% off = $16"), and a token price is an integer count
+     * with no well-defined fractional-token discount. A token-funded
+     * purchase silently ignores any submitted coupon code — a deliberate
+     * scope decision recorded in the coder's final report, not a defect.
+     *
+     * @return array{0: int, 1: ?string} [amount to actually charge, the
+     *                                    coupon code to carry through to
+     *                                    checkout metadata (null if none
+     *                                    applied)]
+     *
+     * @throws InvalidCouponException
+     */
+    private function applyCouponIfPresent(Playlist $playlist, PlayerProfile $player, string $paymentMethod, int $originalAmount, ?string $couponCode): array
+    {
+        if (self::METHOD_USD !== $paymentMethod || null === $couponCode || '' === trim($couponCode)) {
+            return [$originalAmount, null];
+        }
+
+        $quote = $this->couponPricing->quote($playlist->getTrainer(), $couponCode, $player, Coupon::APPLIES_TO_CONTENT, $originalAmount);
+
+        if (!$quote->valid) {
+            // AC-06-23: "Invalid or expired code" error, no discount
+            // applied — surfaced to the controller as a form error rather
+            // than silently charging full price.
+            throw InvalidCouponException::withMessage($quote->message);
+        }
+
+        \assert(null !== $quote->finalAmountMinorUnits && null !== $quote->coupon);
+
+        return [$quote->finalAmountMinorUnits, $quote->coupon->getCode()];
     }
 
     /**
@@ -109,14 +155,13 @@ final readonly class PurchasePlaylistAccessService
             return PlaylistPurchaseOutcome::granted($existing);
         }
 
-        return $this->attemptGrant($playlist, $player, $payer, self::METHOD_TOKEN);
+        return $this->attemptGrant($playlist, $player, $payer, self::METHOD_TOKEN, $playlist->priceForMethod(self::METHOD_TOKEN));
     }
 
-    private function attemptGrant(Playlist $playlist, PlayerProfile $player, Account $actor, string $paymentMethod): PlaylistPurchaseOutcome
+    private function attemptGrant(Playlist $playlist, PlayerProfile $player, Account $actor, string $paymentMethod, int $amount, ?string $couponCode = null): PlaylistPurchaseOutcome
     {
         $payer = $this->playerAccounts->resolve($player) ?? $actor;
-        $amount = $playlist->priceForMethod($paymentMethod);
-        $request = new PaymentIntentRequest($playlist->getTrainer(), $playlist, $player, $payer, $paymentMethod, $amount);
+        $request = new PaymentIntentRequest($playlist->getTrainer(), $playlist, $player, $payer, $paymentMethod, $amount, $couponCode);
         $result = $this->paymentGateway->requestPayment($request);
 
         if (PaymentIntentOutcome::Failed === $result->outcome) {

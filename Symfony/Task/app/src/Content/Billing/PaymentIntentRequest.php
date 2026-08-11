@@ -26,6 +26,17 @@ use App\Platform\Entity\Trainer;
  */
 final readonly class PaymentIntentRequest
 {
+    /**
+     * @param ?string $couponCode Epic-06: set only when a valid coupon was
+     *                            applied and `$amount` already reflects its
+     *                            discount — carried through to Stripe
+     *                            Checkout metadata so the async webhook path
+     *                            can record the redemption once the payment
+     *                            actually succeeds (`ContentPaymentIntentGateway`,
+     *                            `App\Content\EventSubscriber\PaymentOutcomeSubscriber`).
+     *                            `null` for a coupon-free or token-funded
+     *                            purchase.
+     */
     public function __construct(
         public Trainer $trainer,
         public Playlist $playlist,
@@ -33,6 +44,7 @@ final readonly class PaymentIntentRequest
         public Account $payer,
         public string $paymentMethod,
         public int $amount,
+        public ?string $couponCode = null,
     ) {
     }
 }

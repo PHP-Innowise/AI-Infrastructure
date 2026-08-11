@@ -132,10 +132,18 @@ final readonly class SchedulingPaymentIntentGateway implements PaymentIntentGate
         $this->paymentRecords->add($paymentRecord);
         $this->entityManager->flush();
 
+        // Epic-06: 'coupon_code' travels via Stripe Checkout metadata,
+        // echoed back verbatim on PaymentRecordSettled — see
+        // App\Content\Billing\PaymentIntentRequest::$couponCode's own
+        // docblock for the identical mechanism ContentPaymentIntentGateway
+        // already uses.
+        $metadata = null !== $request->couponCode ? ['coupon_code' => $request->couponCode] : [];
+
         $session = $this->stripeGateway->createCheckoutSession(
             $paymentRecord,
             $this->urlGenerator->generate('billing_portal_checkout_success', ['context' => 'rsvp'], UrlGeneratorInterface::ABSOLUTE_URL),
             $this->urlGenerator->generate('billing_portal_checkout_cancel', ['context' => 'rsvp'], UrlGeneratorInterface::ABSOLUTE_URL),
+            metadata: $metadata,
         );
 
         return PaymentIntentResult::pending((int) $paymentRecord->getId(), $session->checkoutUrl);
