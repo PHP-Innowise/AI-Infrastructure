@@ -206,6 +206,7 @@ final readonly class ProcessStripeWebhookEventHandler
             $paymentRecord->getRelatedRsvp()?->getId(),
             $paymentRecord->getRelatedPlaylist()?->getId(),
             $this->stringMetadata($object),
+            $paymentRecord->getRelatedFormSubmission()?->getId(),
         ));
     }
 

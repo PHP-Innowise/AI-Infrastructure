@@ -248,3 +248,17 @@ a {
   margin: 0;
 }
 
+/* Epic-08 (AC-08 "Form Spam Submissions" risk): the honeypot field on the
+   public camp/evaluation form. Off-screen like .skip-link, not
+   display:none/visibility:hidden/type="hidden" — those are exactly what an
+   unsophisticated bot's generic form-filler skips, which defeats the
+   purpose. aria-hidden on the wrapping element (set in the template) keeps
+   it out of assistive tech too. */
+.honeypot {
+  position: absolute;
+  left: -9999px;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+}
+

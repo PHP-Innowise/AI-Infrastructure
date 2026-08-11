@@ -1,0 +1,56 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Camps & Evaluations — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Camps &amp; Evaluations</h1>
+
+        <p>
+            <a href="{{ path('forms_trainer_camp_create') }}">+ Create Camp</a>
+            &nbsp;|&nbsp;
+            <a href="{{ path('forms_trainer_evaluation_create') }}">+ Create Evaluation</a>
+        </p>
+
+        {% if forms is empty %}
+            <p>No camps or evaluations yet.</p>
+        {% else %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Type</th>
+                        <th>Status</th>
+                        <th>Registrations</th>
+                        <th>Spots Remaining</th>
+                        <th>Shareable Link</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for f in forms %}
+                    <tr>
+                        <td>{{ f.name }}</td>
+                        <td>{{ f.formType|capitalize }}</td>
+                        <td>
+                            {% if not formService.isPublished(f) %}Draft
+                            {% elseif f.isCamp and not f.isActiveFlag %}Registration Closed
+                            {% else %}Open{% endif %}
+                        </td>
+                        <td>{{ formService.submissionCountFor(f) }}</td>
+                        <td>{{ formService.remainingSpotsFor(f) ?? 'Unlimited' }}</td>
+                        <td>
+                            {% if formService.isPublished(f) %}
+                                <code>{{ url('forms_public_show', {code: f.shareableSlug}) }}</code>
+                            {% else %}
+                                <em>Not published yet</em>
+                            {% endif %}
+                        </td>
+                        <td><a href="{{ path('forms_trainer_form_edit', {form: f.id}) }}">Manage</a></td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+{% endblock %}

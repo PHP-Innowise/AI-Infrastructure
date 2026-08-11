@@ -1,0 +1,59 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}{{ form.name }} — Registrations{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>{{ form.name }} — Registrations</h1>
+
+        <p>
+            <a href="{{ path('forms_trainer_submissions_export', {form: form.id, conversionStatus: conversionStatus}) }}">Export CSV</a>
+            &nbsp;|&nbsp;
+            <a href="{{ path('forms_trainer_submission_attendance', {form: form.id}) }}">Mark Attendance</a>
+            &nbsp;|&nbsp;
+            <a href="{{ path('forms_trainer_submissions_bulk_email', {form: form.id}) }}">Send Bulk Email</a>
+        </p>
+
+        {# AC-08-18: filterable by conversion status. Payment-status
+           filtering is not offered as "Pending" would always be empty —
+           see TrainerFormSubmissionController::index()'s own docblock for
+           why. #}
+        <form method="get">
+            <label for="conversionStatus">Conversion status</label>
+            <select id="conversionStatus" name="conversionStatus" onchange="this.form.submit()">
+                <option value="" {{ conversionStatus == '' ? 'selected' : '' }}>All</option>
+                <option value="converted" {{ conversionStatus == 'converted' ? 'selected' : '' }}>User Created</option>
+                <option value="not-converted" {{ conversionStatus == 'not-converted' ? 'selected' : '' }}>Not Converted</option>
+            </select>
+        </form>
+
+        {% if submissions is empty %}
+            <p>No registrations yet.</p>
+        {% else %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Email</th>
+                        <th>Payment Status</th>
+                        <th>Submitted</th>
+                        <th>Converted to User</th>
+                        <th>Attended</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for submission in submissions %}
+                    <tr>
+                        <td>{{ submission.participantName }}</td>
+                        <td>{{ submission.contactEmail }}</td>
+                        <td>{{ submission.paymentStatus|capitalize }}</td>
+                        <td>{{ submission.submittedAt|date('Y-m-d H:i') }}</td>
+                        <td>{{ submission.isConverted ? 'Yes' : 'No' }}</td>
+                        <td>{{ submission.isAttended ? 'Yes' : 'No' }}</td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+{% endblock %}

@@ -22,11 +22,12 @@ namespace App\Billing\Event;
  * the worker process, so a second layer of async dispatch would add
  * nothing.
  *
- * `App\Scheduling\EventSubscriber\PaymentOutcomeSubscriber` and
- * `App\Content\EventSubscriber\PaymentOutcomeSubscriber` are the two
+ * `App\Scheduling\EventSubscriber\PaymentOutcomeSubscriber`,
+ * `App\Content\EventSubscriber\PaymentOutcomeSubscriber` and
+ * `App\Forms\EventSubscriber\PaymentOutcomeSubscriber` are the three
  * subscribers today, filtering on `$type` for the rows they own
- * (`event_rsvp`, `content_purchase` respectively) and ignoring every other
- * `$type`.
+ * (`event_rsvp`, `content_purchase`, `camp_registration` respectively) and
+ * ignoring every other `$type`.
  */
 final class PaymentRecordSettled
 {
@@ -53,6 +54,7 @@ final class PaymentRecordSettled
         public readonly ?int $relatedRsvpId,
         public readonly ?int $relatedPlaylistId,
         public readonly array $metadata = [],
+        public readonly ?int $relatedFormSubmissionId = null,
     ) {
     }
 }

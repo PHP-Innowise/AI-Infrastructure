@@ -6,6 +6,7 @@ namespace App\Billing\Entity;
 
 use App\Billing\Repository\PaymentRecordRepository;
 use App\Content\Entity\Playlist;
+use App\Forms\Entity\FormSubmission;
 use App\Identity\Entity\Account;
 use App\Platform\Entity\Trainer;
 use App\Platform\Tenancy\TrainerScoped;
@@ -170,12 +171,24 @@ class PaymentRecord
     private ?Playlist $relatedPlaylist = null;
 
     /**
-     * Deferred FK — `Forms`/Epic-08 does not exist in this codebase. Plain
-     * nullable column, matching every other deferred-FK precedent in this
-     * schema (`Rsvp::$paymentRecordId` before this same epic attached it).
+     * Epic-08's own migration attaches the real constraint and upgrades this
+     * to a genuine `#[ORM\ManyToOne]` relation — NOT kept as a scalar id,
+     * for the identical reason `Rsvp::$paymentRecord` was upgraded rather
+     * than left scalar (see that entity's own docblock): Doctrine's fixture
+     * `ORMPurger` computes table deletion order from ORM association
+     * metadata alone, and a scalar column carrying a real, unmapped
+     * database-level FK is invisible to it.
+     *
+     * `ON DELETE NO ACTION`, not `RESTRICT` — `form_submission.
+     * payment_record_id` points back at this table, so the migration DDL
+     * for both constraints is `DEFERRABLE INITIALLY DEFERRED`, the same
+     * treatment as `$relatedRsvp` above and for the same reason (a mutual
+     * FK cycle has no valid linear deletion order under immediate,
+     * per-statement constraint checking).
      */
-    #[ORM\Column(name: 'related_form_submission_id', type: 'bigint', nullable: true)]
-    private ?int $relatedFormSubmissionId = null;
+    #[ORM\ManyToOne(targetEntity: FormSubmission::class)]
+    #[ORM\JoinColumn(name: 'related_form_submission_id', referencedColumnName: 'id', nullable: true, onDelete: 'NO ACTION')]
+    private ?FormSubmission $relatedFormSubmission = null;
 
     #[ORM\Column(name: 'created_at', type: 'datetimetz_immutable')]
     private \DateTimeImmutable $createdAt;
@@ -257,7 +270,7 @@ class PaymentRecord
         $refund->relatedTokenPackage = $original->relatedTokenPackage;
         $refund->relatedRsvp = $original->relatedRsvp;
         $refund->relatedPlaylist = $original->relatedPlaylist;
-        $refund->relatedFormSubmissionId = $original->relatedFormSubmissionId;
+        $refund->relatedFormSubmission = $original->relatedFormSubmission;
         $refund->status = self::STATUS_COMPLETED;
 
         return $refund;
@@ -373,9 +386,9 @@ class PaymentRecord
         return $this->relatedPlaylist;
     }
 
-    public function getRelatedFormSubmissionId(): ?int
+    public function getRelatedFormSubmission(): ?FormSubmission
     {
-        return $this->relatedFormSubmissionId;
+        return $this->relatedFormSubmission;
     }
 
     public function getCreatedAt(): \DateTimeImmutable
@@ -403,6 +416,23 @@ class PaymentRecord
     public function attachRelatedPlaylist(Playlist $playlist): void
     {
         $this->relatedPlaylist = $playlist;
+        $this->touch();
+    }
+
+    public function attachRelatedFormSubmission(FormSubmission $formSubmission): void
+    {
+        $this->relatedFormSubmission = $formSubmission;
+        $this->touch();
+    }
+
+    /**
+     * A5: on conversion, the earlier camp payment additively attaches to
+     * the new account — a plain UPDATE, since this table is not append-only
+     * (schema doc "`form_submission`" — "A3/A4, made concrete").
+     */
+    public function attachPayerAccount(Account $account): void
+    {
+        $this->payerAccount = $account;
         $this->touch();
     }
 

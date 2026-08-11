@@ -1,0 +1,64 @@
+# Epic-08: the public, unauthenticated Forms surface is the only place in
+# this platform an anonymous request writes trainer-scoped data carrying
+# PII of minors (form_submission) — the architecture flags this as an open
+# risk no epic specifies a mitigation for
+# (specs/council-sharelink-tenant-resolution.md "Open architecture risk 7").
+#
+# Three named limiters, one per abuse shape:
+# - forms_public_show: deters code-enumeration scanning against the
+#   PublicTenantCode-resolved /forms/{code} route (council doc: "rate-limit
+#   the anonymous code lookup"). Generous — a real visitor reloading or a
+#   slow connection retrying must never be blocked.
+# - forms_public_submit: the actual write. Tight — BR-08's own "Risks &
+#   Mitigations — Form Spam Submissions" names "per-IP rate limiting on
+#   submissions" explicitly, alongside the honeypot field
+#   (PublicSubmissionFormBuilder) this alone does not replace.
+# - forms_public_convert_account: also a write (creates an Account) reached
+#   from a bearer code — same tight policy as submission.
+#
+# No shared "PostgreSQL-backed cache pool" exists anywhere in this codebase
+# to point these at (verified: no framework.lock config, no PDO cache
+# adapter wired despite architecture's own aspiration for one — see the
+# coder's final report) — the default `cache.rate_limiter` pool (backed by
+# `cache.app`, filesystem, under the `app-var` volume shared between `php`
+# and `worker`) is safe here specifically because this stack runs exactly
+# one `php` container, never horizontally scaled (compose.yaml's own single
+# replica). If the deployment ever scales beyond one instance, this must
+# move to a shared backend (Redis/Postgres) or per-instance limits stop
+# being meaningful.
+framework:
+    rate_limiter:
+        forms_public_show:
+            policy: 'sliding_window'
+            limit: 60
+            interval: '1 minute'
+        forms_public_submit:
+            policy: 'sliding_window'
+            limit: 10
+            interval: '1 hour'
+        forms_public_convert_account:
+            policy: 'sliding_window'
+            limit: 10
+            interval: '1 hour'
+
+when@test:
+    framework:
+        rate_limiter:
+            # Generous in tests: the suite legitimately exercises the same
+            # routes far more times per run than any real visitor would in
+            # the same wall-clock window, and the limiter's own behavior
+            # under load is exercised by a dedicated, narrowly-scoped test
+            # instead (see FormAbuseProtectionTest), not by every other
+            # functional test incidentally tripping it.
+            forms_public_show:
+                policy: 'sliding_window'
+                limit: 1000
+                interval: '1 minute'
+            forms_public_submit:
+                policy: 'sliding_window'
+                limit: 1000
+                interval: '1 hour'
+            forms_public_convert_account:
+                policy: 'sliding_window'
+                limit: 1000
+                interval: '1 hour'

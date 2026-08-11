@@ -36,6 +36,18 @@ final class TenantFromPublicCode
         'forms_public_show',
         'forms_public_submit',
         'forms_public_confirmation',
+        // AC-08-23..26: account conversion stays inside the code-resolved
+        // flow — same trainer the form belongs to, still no session context
+        // (api-designer-spec.md: "the account and the membership are
+        // created in the same request that is still running under source
+        // 5's tenant resolution").
+        'forms_public_convert_account',
+        // Stripe Checkout return waypoints — also code-resolved, so the
+        // submission lookup they perform runs under an established tenant
+        // rather than failing closed on a fresh, session-less redirect back
+        // from Stripe.
+        'forms_public_checkout_success',
+        'forms_public_checkout_cancel',
     ];
 
     public static function isAllowListed(mixed $routeName): bool

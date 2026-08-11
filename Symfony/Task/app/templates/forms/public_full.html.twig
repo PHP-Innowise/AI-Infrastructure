@@ -1,0 +1,12 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}{{ form.name }} — Camp Full{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <p class="skeleton-eyebrow">{{ form.trainer.businessName }}</p>
+        <h1>{{ form.name }}</h1>
+        {# AC-08-15/BR-08-7. #}
+        <p role="status">This camp is full. Registration is closed.</p>
+    </div>
+{% endblock %}
