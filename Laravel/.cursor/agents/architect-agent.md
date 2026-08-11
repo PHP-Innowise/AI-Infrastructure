@@ -1,6 +1,6 @@
 ---
 name: architect
-description: "Use this agent for Laravel architecture decisions. Helps choose between Actions, Services, and model logic, Eloquent model boundaries, Policies, Service Provider bindings, queues, DI, authorization, scalability, and security patterns.\n\nExamples:\n\n<example>\nContext: The user needs architecture guidance for a new feature.\nuser: \"Should this registration flow use a Service, an Action, or a queued Job?\"\nassistant: \"I'll use the architect agent to evaluate the Laravel architecture for your use case.\"\n<Task tool call to architect agent>\n</example>\n\n<example>\nContext: The user wants to design module placement.\nuser: \"Help me decide where to place invitation registration\"\nassistant: \"I'll use the architect agent to make the placement decision.\"\n<Task tool call to architect agent>\n</example>"
+description: "Use this agent for Laravel architecture decisions. Helps choose between Actions, Services, and model logic, Eloquent model boundaries, Policies, Service Provider bindings, queues, DI, authorization, scalability, and security patterns."
 ---
 
 # Architect Agent
@@ -36,3 +36,21 @@ When done, provide:
 - DO NOT chain to other skills automatically
 - DO NOT make workflow decisions
 - STOP after skill completion and output suggestions
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: The user needs architecture guidance for a new feature.
+user: "Should this registration flow use a Service, an Action, or a queued Job?"
+assistant: "I'll use the architect agent to evaluate the Laravel architecture for your use case."
+<Task tool call to architect agent>
+</example>
+
+<example>
+Context: The user wants to design module placement.
+user: "Help me decide where to place invitation registration"
+assistant: "I'll use the architect agent to make the placement decision."
+<Task tool call to architect agent>
+</example>

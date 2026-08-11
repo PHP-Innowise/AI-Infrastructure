@@ -1,28 +1,40 @@
 {
-  "_comment": "Ceilings for the startup context budget, checked by scripts/context_budget.py --check (CI job lint). Policy: ceiling = observed value + ~5% headroom, so CI catches regressions without flagging noise. After a deliberate slimming, tighten to the new observed values + ~5%; raise a ceiling only together with the change that justifies the growth. Current values: python3 scripts/context_budget.py.",
+  "_comment": "Ceilings for the context budget, checked by scripts/context_budget.py --check (CI job lint). Policy: ceiling = observed value + ~5% headroom, so CI catches regressions without flagging noise. After a deliberate slimming, tighten to the new observed values + ~5%; raise a ceiling only together with the change that justifies the growth. Values are BYTES of the text a tool renders to the model - the value of a frontmatter field, not the `key: \"value\"` entry carrying it, and the first body paragraph where a command or agent declares no description; the script converts them to calibrated cl100k estimates for the report (see BYTES_PER_TOKEN there). agents_md_bytes, descriptor_bytes, command_bytes and agent_bytes are the startup surface - paid on every session of the edition whether or not any of it is used, which makes a rarely-invoked skill or agent expensive rather than cheap. command_bytes and agent_bytes are measured on the .claude tree, the richest of the three tool surfaces: Cursor's equivalents differ slightly and Codex has no commands or agents directory at all, so for a Codex session those two categories over-state the cost by their whole value. body_bytes is the per-invocation cost of skill bodies, an order of magnitude above the startup surface, which is why it is gated rather than left unmeasured. Current values: python3 scripts/context_budget.py.",
   "editions": {
     "Laravel": {
-      "agents_md_bytes": 13289,
-      "frontmatter_bytes": 19312,
-      "description_bytes": 11161,
+      "agents_md_bytes": 14766,
+      "descriptor_bytes": 11870,
+      "command_bytes": 7425,
+      "agent_bytes": 10613,
+      "frontmatter_bytes": 19368,
+      "body_bytes": 370217,
       "skills": 47
     },
     "Symfony": {
-      "agents_md_bytes": 16482,
-      "frontmatter_bytes": 15500,
-      "description_bytes": 8865,
+      "agents_md_bytes": 17959,
+      "descriptor_bytes": 9728,
+      "command_bytes": 6726,
+      "agent_bytes": 9389,
+      "frontmatter_bytes": 15564,
+      "body_bytes": 181612,
       "skills": 50
     },
     "PHP Core": {
-      "agents_md_bytes": 12796,
-      "frontmatter_bytes": 14788,
-      "description_bytes": 8649,
+      "agents_md_bytes": 14273,
+      "descriptor_bytes": 9227,
+      "command_bytes": 5175,
+      "agent_bytes": 7506,
+      "frontmatter_bytes": 14844,
+      "body_bytes": 208474,
       "skills": 37
     },
     "Infrastructure-Creator": {
-      "agents_md_bytes": 12272,
+      "agents_md_bytes": 12720,
+      "descriptor_bytes": 12478,
+      "command_bytes": 840,
+      "agent_bytes": 10342,
       "frontmatter_bytes": 18078,
-      "description_bytes": 11990,
+      "body_bytes": 176549,
       "skills": 25
     }
   }

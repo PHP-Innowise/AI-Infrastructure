@@ -1,9 +1,10 @@
 ---
 name: test-generator
-description: "Use this agent to generate native PHP tests following project patterns. Creates PHPUnit or Pest unit/integration tests, HTTP handler tests, validation and authorization tests, data-access tests, and tests using test doubles/fakes for queues, mail, and external clients.\n\nExamples:\n\n<example>\nContext: The user wants tests for new code.\nuser: \"Generate tests for the invitation registration service\"\nassistant: \"I'll use the test-generator agent to create native PHP tests.\"\n<Task tool call to test-generator agent>\n</example>\n\n<example>\nContext: The user needs HTTP workflow tests.\nuser: \"Create integration tests for the checkout flow\"\nassistant: \"I'll use the test-generator agent to generate integration test coverage.\"\n<Task tool call to test-generator agent>\n</example>"
+description: "Use this agent to generate native PHP tests following project patterns. Creates PHPUnit or Pest unit/integration tests, HTTP handler tests, validation and authorization tests, data-access tests, and tests using test doubles/fakes for queues, mail, and external clients."
 model: sonnet
 invokes: test-generator
 phase: execution
+writes: true
 ---
 
 # Test Generator Agent
@@ -39,3 +40,21 @@ When done, provide:
 - DO NOT chain to other skills automatically
 - DO NOT make workflow decisions
 - STOP after skill completion and output suggestions
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: The user wants tests for new code.
+user: "Generate tests for the invitation registration service"
+assistant: "I'll use the test-generator agent to create native PHP tests."
+<Task tool call to test-generator agent>
+</example>
+
+<example>
+Context: The user needs HTTP workflow tests.
+user: "Create integration tests for the checkout flow"
+assistant: "I'll use the test-generator agent to generate integration test coverage."
+<Task tool call to test-generator agent>
+</example>

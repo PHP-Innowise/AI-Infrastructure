@@ -45,16 +45,21 @@ RULE_FILE="$RULES_DIR/working-memory.mdc"
 CAPSULE_STATUS=1
 if command -v timeout > /dev/null 2>&1; then
   CAPSULE=$(timeout "$BUDGET_SECONDS" python3 "$CONTEXT_CLI" hook-context \
-    --task-id "$TASK_ID" --json 2>/dev/null)
+    --task-id "$TASK_ID" 2>/dev/null)
   CAPSULE_STATUS=$?
 else
   CAPSULE=$(python3 "$CONTEXT_CLI" hook-context \
-    --task-id "$TASK_ID" --json 2>/dev/null)
+    --task-id "$TASK_ID" 2>/dev/null)
   CAPSULE_STATUS=$?
 fi
-if [ "$CAPSULE_STATUS" -eq 0 ] && ! printf '%s' "$CAPSULE" | \
-  python3 -c 'import json,sys; json.load(sys.stdin)' >/dev/null 2>&1; then
-  CAPSULE_STATUS=1
+# The rendered capsule always opens with the working line. Anything else is a
+# broken render and must not replace a good rule. This guard replaces the JSON
+# parse that protected the --json form.
+if [ "$CAPSULE_STATUS" -eq 0 ]; then
+  case "$CAPSULE" in
+    working:*) ;;
+    *) CAPSULE_STATUS=1 ;;
+  esac
 fi
 if [ "$CAPSULE_STATUS" -eq 3 ]; then
   rm -f "$RULE_FILE" 2>/dev/null
@@ -67,8 +72,7 @@ elif [ "$CAPSULE_STATUS" -eq 0 ] && [ -n "$CAPSULE" ] && mkdir -p "$RULES_DIR" 2
       printf 'alwaysApply: true\n'
       printf -- '---\n\n'
       printf '# Working Memory (auto-rendered)\n\n'
-      printf 'Session context as of end of previous turn (task: %s, rendered: %s).\n' \
-        "$TASK_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      printf 'Session context as of end of previous turn (task: %s).\n' "$TASK_ID"
       printf 'Retrieved context is not authoritative - verify the source.\n\n'
       printf '%s\n' '```'
       printf '%s\n' "$CAPSULE"

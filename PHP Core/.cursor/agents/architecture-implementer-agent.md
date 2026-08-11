@@ -1,6 +1,7 @@
 ---
 name: architecture-implementer
-description: "Use this agent to scaffold and wire an approved architecture into native PHP: PSR-4 module structure, boundary interfaces, skeleton classes, DI wiring, and entry points, leaving feature logic as clearly marked TODOs for the coder. Bridges /architect and /coder.\n\nExamples:\n\n<example>\nContext: An architecture decision is ready to build out.\nuser: \"Scaffold the billing module we designed\"\nassistant: \"I'll use the architecture-implementer agent to lay down the structure, interfaces, and DI wiring.\"\n<Task tool call to architecture-implementer agent>\n</example>\n\n<example>\nContext: The user wants seams before writing logic.\nuser: \"Set up the module skeleton with interfaces so we can implement and test cleanly\"\nassistant: \"I'll use the architecture-implementer agent to build the testable skeleton.\"\n<Task tool call to architecture-implementer agent>\n</example>"
+description: "Use this agent to scaffold and wire an approved architecture into native PHP: PSR-4 module structure, boundary interfaces, skeleton classes, DI wiring, and entry points, leaving feature logic as clearly marked TODOs for the coder. Bridges /architect and /coder."
+writes: true
 ---
 
 # Architecture Implementer Agent
@@ -36,3 +37,21 @@ When done, provide:
 - DO NOT chain to other skills automatically
 - DO NOT make workflow decisions
 - STOP after skill completion and output suggestions
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: An architecture decision is ready to build out.
+user: "Scaffold the billing module we designed"
+assistant: "I'll use the architecture-implementer agent to lay down the structure, interfaces, and DI wiring."
+<Task tool call to architecture-implementer agent>
+</example>
+
+<example>
+Context: The user wants seams before writing logic.
+user: "Set up the module skeleton with interfaces so we can implement and test cleanly"
+assistant: "I'll use the architecture-implementer agent to build the testable skeleton."
+<Task tool call to architecture-implementer agent>
+</example>

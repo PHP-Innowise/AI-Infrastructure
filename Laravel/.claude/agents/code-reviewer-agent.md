@@ -1,6 +1,6 @@
 ---
 name: code-reviewer
-description: "Use this agent to review Laravel code for quality, standards compliance, security issues, and performance problems. Essential after implementation to ensure code quality.\n\nExamples:\n\n<example>\nContext: The user wants code reviewed.\nuser: \"Review the changes in my authentication module\"\nassistant: \"I'll use the code-reviewer agent to analyze the code for quality and issues.\"\n<Task tool call to code-reviewer agent>\n</example>\n\n<example>\nContext: The user wants to check for security issues.\nuser: \"Check this code for security vulnerabilities\"\nassistant: \"I'll use the code-reviewer agent to review for security and quality issues.\"\n<Task tool call to code-reviewer agent>\n</example>"
+description: "Use this agent to review Laravel code for quality, standards compliance, security issues, and performance problems. Essential after implementation to ensure code quality."
 model: opus
 invokes: code-reviewer
 phase: execution
@@ -38,3 +38,21 @@ When done, provide:
 - DO NOT chain to other skills automatically
 - DO NOT make workflow decisions
 - STOP after skill completion and output suggestions
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: The user wants code reviewed.
+user: "Review the changes in my authentication module"
+assistant: "I'll use the code-reviewer agent to analyze the code for quality and issues."
+<Task tool call to code-reviewer agent>
+</example>
+
+<example>
+Context: The user wants to check for security issues.
+user: "Check this code for security vulnerabilities"
+assistant: "I'll use the code-reviewer agent to review for security and quality issues."
+<Task tool call to code-reviewer agent>
+</example>

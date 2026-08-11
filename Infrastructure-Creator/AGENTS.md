@@ -75,6 +75,15 @@ Fan-out runs in parallel when the AI tool supports concurrent subagents/tool cal
 - MUST NOT read, print, or write the target's `.env` files, credentials, or anything under a `secrets/`-style path.
 - MUST re-validate a `profile-synthesizer` profile against the target's current files before `infra-generate` consumes it, and MUST flag drift if the target changed since the scan.
 
+## Subagents
+
+- MUST delegate only through this accelerator's own agents and skills; the
+  host tool's built-in subagents (Claude Code's Explore/Plan/general-purpose,
+  Cursor's explore/bash/browser, Codex's spawn_agent roles) are disabled by
+  configuration and denied by the `subagent-gate` hook.
+- MUST NOT retry a denied subagent spawn; when no project agent fits the
+  task, do the work in the main conversation instead.
+
 ## File Naming
 
 - MUST prefix generated task/spec markdown in this folder with the skill name: `{skill-name}-{purpose}.md` (e.g. `infra-scan-project-profile.md`, `stack-scanner-findings.md`).

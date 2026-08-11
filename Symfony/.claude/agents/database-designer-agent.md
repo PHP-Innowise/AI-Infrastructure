@@ -1,6 +1,6 @@
 ---
 name: database-designer
-description: "Use this agent to design relational schemas and Doctrine entity and repository patterns for Symfony projects: entities, relationships, keys, indexes, constraints, migrations, and repository query shapes.\n\nExamples:\n\n<example>\nContext: The user needs a schema.\nuser: \"Design the database schema for invitations and users\"\nassistant: \"I'll use the database-designer agent to design the tables, keys, and indexes.\"\n<Task tool call to database-designer agent>\n</example>\n\n<example>\nContext: A query is slow and the model may be wrong.\nuser: \"Our orders query is slow, review the schema and indexing\"\nassistant: \"I'll use the database-designer agent to review the model, keys, and indexes.\"\n<Task tool call to database-designer agent>\n</example>"
+description: "Use this agent to design relational schemas and Doctrine entity and repository patterns for Symfony projects: entities, relationships, keys, indexes, constraints, migrations, and repository query shapes."
 model: sonnet
 invokes: database-designer
 phase: planning
@@ -39,3 +39,21 @@ When done, provide:
 - DO NOT chain to other skills automatically
 - DO NOT make workflow decisions
 - STOP after skill completion and output suggestions
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: The user needs a schema.
+user: "Design the database schema for invitations and users"
+assistant: "I'll use the database-designer agent to design the tables, keys, and indexes."
+<Task tool call to database-designer agent>
+</example>
+
+<example>
+Context: A query is slow and the model may be wrong.
+user: "Our orders query is slow, review the schema and indexing"
+assistant: "I'll use the database-designer agent to review the model, keys, and indexes."
+<Task tool call to database-designer agent>
+</example>

@@ -1,0 +1,10 @@
+---
+description: Subagent policy - delegate only to the project agents
+alwaysApply: true
+---
+
+# Subagent Policy
+
+- Delegate only to the project subagents defined in `.cursor/agents/`; enter them through the matching `/command` or by agent name.
+- Never launch Cursor's built-in subagents (explore, bash/shell, browser, general-purpose). The `subagentStart` hook (`.cursor/hooks/subagent-gate.sh`) denies them; do not retry a denied spawn.
+- If no project agent fits the task, do the work in the main conversation instead of spawning a subagent.

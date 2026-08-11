@@ -1,6 +1,6 @@
 ---
 name: stack-adapter
-description: "Use this agent to build an independent sibling generator - Infrastructure-Creator-[Stack] - for a non-PHP stack detected in a target project. It researches the stack live, replicates the 23-skill/three-edition architecture including domain-behavior discovery, re-authors every stack-specific artifact, and self-verifies the result. Never writes into the original target project.\n\nExamples:\n\n<example>\nContext: infra-scan detected a Flutter project and the user opted in to adaptation.\nuser: \"Yes, create Infrastructure-Creator-Flutter for this target.\"\nassistant: \"I'll use the stack-adapter agent to research Flutter/Dart and build an independent sibling generator with the same architecture.\"\n<Task tool call to stack-adapter agent>\n</example>\n\n<example>\nContext: The user already knows they want a sibling generator without going through infra-scan first.\nuser: \"infra-adapt ../my-node-service\"\nassistant: \"I'll use the stack-adapter agent to detect the stack in ../my-node-service and build its own generator.\"\n<Task tool call to stack-adapter agent>\n</example>"
+description: "Use this agent to build an independent sibling generator - Infrastructure-Creator-[Stack] - for a non-PHP stack detected in a target project. It researches the stack live, replicates the 23-skill/three-edition architecture including domain-behavior discovery, re-authors every stack-specific artifact, and self-verifies the result. Never writes into the original target project."
 ---
 
 # Stack Adapter Agent
@@ -29,3 +29,21 @@ When done, provide:
 - MUST NOT let the new generator's content mention PHP, Laravel, Symfony, PHP Core, or "Infrastructure-Creator".
 - MUST run self-verification and MUST NOT report success while it is failing.
 - MUST NOT overwrite an existing sibling generator without an explicit overwrite/merge/abort decision.
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: infra-scan detected a Flutter project and the user opted in to adaptation.
+user: "Yes, create Infrastructure-Creator-Flutter for this target."
+assistant: "I'll use the stack-adapter agent to research Flutter/Dart and build an independent sibling generator with the same architecture."
+<Task tool call to stack-adapter agent>
+</example>
+
+<example>
+Context: The user already knows they want a sibling generator without going through infra-scan first.
+user: "infra-adapt ../my-node-service"
+assistant: "I'll use the stack-adapter agent to detect the stack in ../my-node-service and build its own generator."
+<Task tool call to stack-adapter agent>
+</example>

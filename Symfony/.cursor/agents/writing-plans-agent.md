@@ -1,6 +1,6 @@
 ---
 name: writing-plans
-description: "Use this agent to create detailed implementation plans with bite-sized tasks for engineers with zero codebase context. Plans are saved to docs/plans/.\n\nExamples:\n\n<example>\nContext: The user has a spec and wants an implementation plan.\nuser: \"Create an implementation plan for the authentication module\"\nassistant: \"I'll use the writing-plans agent to create a detailed plan with actionable tasks.\"\n<Task tool call to writing-plans agent>\n</example>\n\n<example>\nContext: The user wants to break down a complex feature into steps.\nuser: \"I need a step-by-step plan to implement this feature\"\nassistant: \"I'll use the writing-plans agent to create detailed implementation tasks.\"\n<Task tool call to writing-plans agent>\n</example>"
+description: "Use this agent to create detailed implementation plans with bite-sized tasks for engineers with zero codebase context. Plans are saved to docs/plans/."
 ---
 
 # Writing Plans Agent
@@ -35,3 +35,21 @@ When done, provide:
 - DO NOT chain to other skills automatically
 - DO NOT make workflow decisions
 - STOP after skill completion and output suggestions
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: The user has a spec and wants an implementation plan.
+user: "Create an implementation plan for the authentication module"
+assistant: "I'll use the writing-plans agent to create a detailed plan with actionable tasks."
+<Task tool call to writing-plans agent>
+</example>
+
+<example>
+Context: The user wants to break down a complex feature into steps.
+user: "I need a step-by-step plan to implement this feature"
+assistant: "I'll use the writing-plans agent to create detailed implementation tasks."
+<Task tool call to writing-plans agent>
+</example>

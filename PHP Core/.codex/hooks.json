@@ -41,6 +41,10 @@
           {
             "type": "command",
             "command": ".codex/hooks/file-naming-validator.sh"
+          },
+          {
+            "type": "command",
+            "command": ".codex/hooks/subagent-gate.sh"
           }
         ]
       }

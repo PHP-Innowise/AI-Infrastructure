@@ -18,8 +18,11 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 EDITION_ROOT = Path(__file__).resolve().parents[2]
@@ -567,6 +570,30 @@ class WorkingMemoryRuleTest(unittest.TestCase):
                     text = hook_path(tool, hook).read_text(encoding="utf-8")
                     self.assertNotIn("working-memory.mdc", text)
 
+    def test_render_carries_no_per_turn_invalidator(self) -> None:
+        """The rule is re-sent on every prompt, so it may not embed a clock.
+
+        A timestamp - or the serialized capsule, whose `manifest` key is a
+        fresh UUID path per call - changes the rule every turn even when the
+        context is identical, and is paid again on each of them.
+
+        Only the capsule command is inspected: `--json` on the unrelated
+        `status` and `validate` calls costs nothing per turn.
+        """
+        for hook in self.RENDER_HOOKS:
+            with self.subTest(hook=hook):
+                text = hook_path("cursor", hook).read_text(encoding="utf-8")
+                self.assertNotIn("date -u", text)
+                logical = text.replace("\\\n", " ")
+                capsule_calls = [
+                    line
+                    for line in logical.splitlines()
+                    if "hook-context" in line and not line.lstrip().startswith("#")
+                ]
+                self.assertTrue(capsule_calls, "no capsule command found")
+                for line in capsule_calls:
+                    self.assertNotIn("--json", line)
+
 
 class CursorCapsuleRenderTest(unittest.TestCase):
     """Functional render tests against a throwaway edition tree.
@@ -578,11 +605,13 @@ class CursorCapsuleRenderTest(unittest.TestCase):
 
     TASK_ID = "TASK-STUB"
 
+    # The hooks render the capsule (`hook-context` without --json), so the
+    # stubs emit what print_capsule emits: a leading "working:" marker line,
+    # plus a "warming:" line while the task is not yet provisioned.
     STUB_CAPSULE = (
-        "import json, sys\n"
+        "import sys\n"
         "if len(sys.argv) > 1 and sys.argv[1] == \"hook-context\":\n"
-        "    print(json.dumps({\"kind\": \"warming\", \"task_id\": "
-        "\"TASK-STUB\", \"goal\": \"stub goal\"}))\n"
+        "    print(\"working: TASK-STUB - stub goal\")\n"
     )
     STUB_FAILURE = "import sys\nsys.exit(1)\n"
     STUB_EMPTY = (
@@ -590,22 +619,24 @@ class CursorCapsuleRenderTest(unittest.TestCase):
         "if len(sys.argv) > 1 and sys.argv[1] == \"hook-context\":\n"
         "    sys.exit(3)\n"
     )
+    # Output that does not open with the working line: a broken render, which
+    # must not replace a good rule.
     STUB_MALFORMED = (
         "import sys\n"
         "if len(sys.argv) > 1 and sys.argv[1] == \"hook-context\":\n"
-        "    print(\"not-json\")\n"
+        "    print(\"not-a-capsule\")\n"
     )
     STUB_SEQUENCE = (
-        "import json, pathlib, sys\n"
+        "import pathlib, sys\n"
         "counter = pathlib.Path(__file__).with_name(\"turn-count\")\n"
         "count = int(counter.read_text()) if counter.exists() else 0\n"
         "if len(sys.argv) > 1 and sys.argv[1] == \"turn\":\n"
         "    count += 1\n"
         "    counter.write_text(str(count))\n"
         "elif len(sys.argv) > 1 and sys.argv[1] == \"hook-context\":\n"
-        "    kind = \"warming\" if count < 5 else \"governed\"\n"
-        "    print(json.dumps({\"kind\": kind, \"task_id\": \"TASK-STUB\", "
-        "\"pending_turns\": min(count, 4)}))\n"
+        "    print(\"working: TASK-STUB - stub goal\")\n"
+        "    if count < 5:\n"
+        "        print(f\"warming: {min(count, 4)} turn(s) pending\")\n"
     )
     STUB_TIMEOUT = (
         "import time\n"
@@ -658,6 +689,18 @@ class CursorCapsuleRenderTest(unittest.TestCase):
         self.assertIn("stub goal", rendered)
         self.assertIn("not authoritative", rendered)
 
+    def test_repeat_render_is_byte_identical(self) -> None:
+        """Same context in, same rule out - across turns and across hooks."""
+        self.cli.write_text(self.STUB_CAPSULE, encoding="utf-8")
+        renders = []
+        for hook in ("working-memory-write.sh", "local-context.sh",
+                     "working-memory-write.sh"):
+            result = self.run_cursor_hook(hook)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            renders.append(self.rule_file().read_text(encoding="utf-8"))
+        self.assertEqual(renders[0], renders[1])
+        self.assertEqual(renders[1], renders[2])
+
     def test_session_start_renders_rule_without_printing_it(self) -> None:
         self.cli.write_text(self.STUB_CAPSULE, encoding="utf-8")
         result = self.run_cursor_hook("local-context.sh")
@@ -671,20 +714,16 @@ class CursorCapsuleRenderTest(unittest.TestCase):
             result = self.run_cursor_hook("working-memory-write.sh")
             self.assertEqual(0, result.returncode, result.stderr)
             rendered = self.rule_file().read_text(encoding="utf-8")
-            self.assertIn('"kind": "warming"', rendered)
-            self.assertIn(f'"pending_turns": {turn}', rendered)
+            self.assertIn(f"warming: {turn} turn(s) pending", rendered)
         restarted = self.run_cursor_hook("local-context.sh")
         self.assertEqual(0, restarted.returncode, restarted.stderr)
-        self.assertIn(
-            '"kind": "warming"',
-            self.rule_file().read_text(encoding="utf-8"),
-        )
+        self.assertIn("warming:", self.rule_file().read_text(encoding="utf-8"))
 
         fifth = self.run_cursor_hook("working-memory-write.sh")
         self.assertEqual(0, fifth.returncode, fifth.stderr)
         rendered = self.rule_file().read_text(encoding="utf-8")
-        self.assertIn('"kind": "governed"', rendered)
-        self.assertNotIn('"kind": "warming"', rendered)
+        self.assertIn("working: TASK-STUB", rendered)
+        self.assertNotIn("warming:", rendered)
 
     def test_failed_render_preserves_previous_rule(self) -> None:
         self.rule_file().write_text("previous capsule\n", encoding="utf-8")
@@ -741,6 +780,365 @@ class CursorCapsuleRenderTest(unittest.TestCase):
             "previous capsule\n",
             self.rule_file().read_text(encoding="utf-8"),
         )
+
+
+class SubagentGateTest(unittest.TestCase):
+    """Tool-owned subagent gates: only roster agents spawn, built-ins deny.
+
+    The three copies are deliberately NOT byte-identical (each host has a
+    different gate contract), so each is exercised against its own contract.
+    """
+
+    BUILTIN_CLAUDE = ("Explore", "Plan", "general-purpose", "claude")
+    BUILTIN_CURSOR = ("explore", "shell", "bash", "browser", "generalPurpose")
+
+    def setUp(self) -> None:
+        self.clear_write_locks()
+        self.addCleanup(self.clear_write_locks)
+
+    @staticmethod
+    def clear_write_locks() -> None:
+        key = repo_key(EDITION_ROOT)
+        for tool in ("claude", "cursor"):
+            Path(f"/tmp/{tool}-write-agent-lock-{key}").unlink(missing_ok=True)
+
+    @staticmethod
+    def roster(tool: str) -> list[str]:
+        agents_dir = EDITION_ROOT / {
+            "claude": ".claude/agents",
+            "cursor": ".cursor/agents",
+        }[tool]
+        names = []
+        for path in sorted(agents_dir.glob("*.md")):
+            if path.name == "README.md":
+                continue
+            in_frontmatter = False
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if line == "---":
+                    if in_frontmatter:
+                        break
+                    in_frontmatter = True
+                    continue
+                if in_frontmatter and line.startswith("name:"):
+                    names.append(line.split(":", 1)[1].strip().strip('"'))
+                    break
+        return names
+
+    @staticmethod
+    def spawn_payload(sub_type: str) -> dict:
+        return {
+            "tool_name": "Agent",
+            "tool_input": {"subagent_type": sub_type, "prompt": "x"},
+        }
+
+    def test_claude_blocks_builtin_agents(self) -> None:
+        for builtin in self.BUILTIN_CLAUDE:
+            with self.subTest(agent=builtin):
+                result = run_hook(
+                    "claude", "subagent-gate.sh", self.spawn_payload(builtin)
+                )
+                self.assertEqual(2, result.returncode)
+                self.assertIn("BLOCKED", result.stderr)
+
+    def test_claude_blocks_via_legacy_task_tool_name(self) -> None:
+        payload = {
+            "tool_name": "Task",
+            "tool_input": {"subagent_type": "general-purpose"},
+        }
+        result = run_hook("claude", "subagent-gate.sh", payload)
+        self.assertEqual(2, result.returncode)
+
+    def test_claude_allows_every_roster_agent(self) -> None:
+        names = self.roster("claude")
+        self.assertTrue(names)
+        for name in names:
+            with self.subTest(agent=name):
+                result = run_hook(
+                    "claude", "subagent-gate.sh", self.spawn_payload(name)
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+            # Write-capable agents take the serialization lock on spawn;
+            # release it so the roster sweep stays isolation-free.
+            self.clear_write_locks()
+
+    def test_claude_ignores_other_tools_and_typeless_payloads(self) -> None:
+        for payload in (
+            {"tool_name": "Bash", "tool_input": {"command": "ls"}},
+            {"tool_name": "Agent", "tool_input": {}},
+            "not json",
+            "",
+        ):
+            with self.subTest(payload=payload):
+                result = run_hook("claude", "subagent-gate.sh", payload)
+                self.assertEqual(0, result.returncode)
+
+    def test_cursor_denies_builtins_with_permission_json(self) -> None:
+        for builtin in self.BUILTIN_CURSOR:
+            with self.subTest(agent=builtin):
+                result = run_hook(
+                    "cursor", "subagent-gate.sh", {"subagent_type": builtin}
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                verdict = json.loads(result.stdout)
+                self.assertEqual("deny", verdict["permission"])
+                self.assertIn("user_message", verdict)
+
+    def test_cursor_allows_every_roster_agent(self) -> None:
+        names = self.roster("cursor")
+        self.assertTrue(names)
+        for name in names:
+            with self.subTest(agent=name):
+                result = run_hook(
+                    "cursor", "subagent-gate.sh", {"subagent_type": name}
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual(
+                    "allow", json.loads(result.stdout)["permission"]
+                )
+            self.clear_write_locks()
+
+    def test_cursor_typeless_payload_allows(self) -> None:
+        result = run_hook("cursor", "subagent-gate.sh", {"task": "x"})
+        self.assertEqual(0, result.returncode)
+        self.assertEqual("allow", json.loads(result.stdout)["permission"])
+
+    def test_codex_blocks_the_multi_agent_tool_family(self) -> None:
+        for tool in (
+            "spawn_agent",
+            "Agent",
+            "send_input",
+            "resume_agent",
+            "wait_agent",
+            "close_agent",
+        ):
+            with self.subTest(tool=tool):
+                result = run_hook(
+                    "codex",
+                    "subagent-gate.sh",
+                    {"tool_name": tool, "tool_input": {}},
+                )
+                self.assertEqual(2, result.returncode)
+                self.assertIn("BLOCKED", result.stderr)
+
+    def test_codex_ignores_ordinary_tools(self) -> None:
+        for payload in (
+            {"tool_name": "Shell", "tool_input": {"command": "ls"}},
+            {"tool_name": "Edit", "tool_input": {"file_path": "a.php"}},
+            "",
+        ):
+            with self.subTest(payload=payload):
+                result = run_hook("codex", "subagent-gate.sh", payload)
+                self.assertEqual(0, result.returncode)
+
+
+class WriteLockMixin:
+    """Lock paths as the gate and dispatch hooks compute them.
+
+    Both derive the key from the git toplevel above the hook script, which
+    inside this monorepo is the repository root.
+    """
+
+    def lock_path(self, tool: str) -> Path:
+        return Path(f"/tmp/{tool}-write-agent-lock-{repo_key(EDITION_ROOT)}")
+
+    def clear_locks(self) -> None:
+        for tool in ("claude", "cursor"):
+            self.lock_path(tool).unlink(missing_ok=True)
+
+
+class SubagentWriteLockTest(WriteLockMixin, unittest.TestCase):
+    """`writes: true` agents are serialized by a TTL lock in both gates."""
+
+    def setUp(self) -> None:
+        self.clear_locks()
+        self.addCleanup(self.clear_locks)
+
+    @staticmethod
+    def spawn(tool: str, agent: str):
+        if tool == "claude":
+            payload = {"tool_name": "Agent", "tool_input": {"subagent_type": agent}}
+        else:
+            payload = {"subagent_type": agent}
+        return run_hook(tool, "subagent-gate.sh", payload)
+
+    def test_write_agent_takes_the_lock_and_blocks_the_next(self) -> None:
+        first = self.spawn("claude", "coder")
+        self.assertEqual(0, first.returncode, first.stderr)
+        self.assertEqual("coder", self.lock_path("claude").read_text())
+        second = self.spawn("claude", "refactorer")
+        self.assertEqual(2, second.returncode)
+        self.assertIn("already running", second.stderr)
+
+    def test_read_only_agent_passes_while_locked(self) -> None:
+        self.assertEqual(0, self.spawn("claude", "coder").returncode)
+        result = self.spawn("claude", "code-reviewer")
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_same_agent_respawn_refreshes_the_lock(self) -> None:
+        self.assertEqual(0, self.spawn("claude", "coder").returncode)
+        again = self.spawn("claude", "coder")
+        self.assertEqual(0, again.returncode, again.stderr)
+        self.assertEqual("coder", self.lock_path("claude").read_text())
+
+    def test_stale_lock_is_overwritten(self) -> None:
+        lock = self.lock_path("claude")
+        lock.write_text("coder")
+        stale = time.time() - 3600
+        os.utime(lock, (stale, stale))
+        result = self.spawn("claude", "refactorer")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("refactorer", lock.read_text())
+
+    def test_cursor_gate_denies_with_permission_json(self) -> None:
+        self.assertEqual(0, self.spawn("cursor", "coder").returncode)
+        result = self.spawn("cursor", "refactorer")
+        self.assertEqual(0, result.returncode, result.stderr)
+        verdict = json.loads(result.stdout)
+        self.assertEqual("deny", verdict["permission"])
+        self.assertIn("one at a time", verdict["user_message"])
+
+    def test_cursor_read_only_allows_while_locked(self) -> None:
+        self.assertEqual(0, self.spawn("cursor", "coder").returncode)
+        result = self.spawn("cursor", "code-reviewer")
+        self.assertEqual(
+            "allow", json.loads(result.stdout)["permission"], result.stderr
+        )
+
+    def test_concurrent_write_spawns_take_the_lock_exactly_once(self) -> None:
+        """Parallel spawns in one message must not both pass the gate.
+
+        The check-and-take is serialized with flock; without it both
+        invocations read an unlocked state and mutual exclusion is lost.
+        """
+        if shutil.which("flock") is None:
+            self.skipTest("flock unavailable; the gate degrades by design")
+        agents = ("coder", "refactorer", "test-generator")
+        with ThreadPoolExecutor(max_workers=len(agents)) as pool:
+            codes = [
+                result.returncode
+                for result in pool.map(lambda a: self.spawn("claude", a), agents)
+            ]
+        self.assertEqual(1, codes.count(0), codes)
+        self.assertEqual(len(agents) - 1, codes.count(2), codes)
+
+    def test_body_horizontal_rule_cannot_declare_writes(self) -> None:
+        """Only the first frontmatter block is metadata.
+
+        A `---`-delimited section in an agent's body used to re-open the
+        sed range, so a body line reading `writes: true` marked a read-only
+        agent as write-capable.
+        """
+        trap = EDITION_ROOT / ".claude" / "agents" / "zz-parser-trap-agent.md"
+        trap.write_text(
+            "---\nname: zz-parser-trap\ndescription: read-only fixture\n"
+            "phase: understanding\n---\n\n# Trap\n\nProse.\n\n---\n"
+            "writes: true\n---\n\nMore prose.\n",
+            encoding="utf-8",
+        )
+        self.addCleanup(trap.unlink)
+        result = self.spawn("claude", "zz-parser-trap")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertFalse(
+            self.lock_path("claude").exists(),
+            "a body horizontal rule must not make an agent write-capable",
+        )
+
+
+class SubagentDispatchTest(WriteLockMixin, unittest.TestCase):
+    """The SubagentStop observer records completions and releases the lock.
+
+    The hook resolves its runtime relative to its own location, so it is
+    exercised from an isolated copy of the edition layout: hooks plus the
+    Python runtime in a throwaway git repository.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="dispatch-test-")
+        self.repo = Path(self._tmp.name)
+        (self.repo / ".claude" / "hooks").mkdir(parents=True)
+        scripts = self.repo / "memory-bank" / "scripts"
+        scripts.mkdir(parents=True)
+        for source in (EDITION_ROOT / "memory-bank" / "scripts").glob("*.py"):
+            shutil.copy(source, scripts / source.name)
+        self.hook = self.repo / ".claude" / "hooks" / "subagent-dispatch.sh"
+        shutil.copy(hook_path("claude", "subagent-dispatch.sh"), self.hook)
+        subprocess.run(
+            ["git", "-c", "init.defaultBranch=main", "init", "-q", str(self.repo)],
+            check=True, capture_output=True, timeout=HOOK_TIMEOUT,
+        )
+        subprocess.run(
+            ["git", "-C", str(self.repo), "checkout", "-qb", "feat/demo"],
+            check=True, capture_output=True, timeout=HOOK_TIMEOUT,
+        )
+        started = self.cli("start", "--task-id", "feat/demo", "--goal", "Demo")
+        self.assertEqual(0, started.returncode, started.stderr)
+        self.addCleanup(self._tmp.cleanup)
+        self.addCleanup(self.repo_locks_cleanup)
+
+    def repo_locks_cleanup(self) -> None:
+        key = repo_key(self.repo)
+        for tool in ("claude", "cursor"):
+            Path(f"/tmp/{tool}-write-agent-lock-{key}").unlink(missing_ok=True)
+
+    def cli(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(self.repo / "memory-bank" / "scripts" / "context.py"),
+             "--root", str(self.repo), *arguments],
+            text=True, capture_output=True, timeout=HOOK_TIMEOUT,
+        )
+
+    def run_dispatch(self, payload) -> subprocess.CompletedProcess[str]:
+        stdin = payload if isinstance(payload, str) else json.dumps(payload)
+        return subprocess.run(
+            [BASH, str(self.hook)], input=stdin, text=True,
+            capture_output=True, cwd=str(self.repo), timeout=HOOK_TIMEOUT,
+        )
+
+    def journal(self) -> list[dict[str, object]]:
+        result = self.cli("msg-read", "--task-id", "feat/demo", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_claude_payload_records_sanitized_completion(self) -> None:
+        result = self.run_dispatch({
+            "hook_event_name": "SubagentStop",
+            "agent_type": "coder",
+            "last_assistant_message": "Implemented handler.\nAll tests pass.",
+        })
+        self.assertEqual(0, result.returncode, result.stderr)
+        entries = self.journal()
+        self.assertEqual(1, len(entries))
+        self.assertEqual("completion", entries[0]["type"])
+        self.assertEqual("coder", entries[0]["from_actor"])
+        self.assertEqual(
+            "Implemented handler. All tests pass.", entries[0]["body"]
+        )
+
+    def test_cursor_payload_uses_subagent_type_and_status(self) -> None:
+        result = self.run_dispatch(
+            {"subagent_type": "code-reviewer", "status": "completed"}
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        entries = self.journal()
+        self.assertEqual("code-reviewer", entries[0]["from_actor"])
+        self.assertEqual("completed", entries[0]["body"])
+
+    def test_releases_only_the_holders_lock(self) -> None:
+        key = repo_key(self.repo)
+        mine = Path(f"/tmp/claude-write-agent-lock-{key}")
+        mine.write_text("coder")
+        other = Path(f"/tmp/cursor-write-agent-lock-{key}")
+        other.write_text("refactorer")
+        self.assertEqual(0, self.run_dispatch({"agent_type": "coder"}).returncode)
+        self.assertFalse(mine.exists())
+        self.assertTrue(other.exists())
+
+    def test_fails_open_without_agent_or_runtime(self) -> None:
+        self.assertEqual(0, self.run_dispatch({"status": "done"}).returncode)
+        self.assertEqual([], self.journal())
+        shutil.rmtree(self.repo / "memory-bank")
+        result = self.run_dispatch({"agent_type": "coder"})
+        self.assertEqual(0, result.returncode, result.stderr)
 
 
 class MirrorConsistencyTest(unittest.TestCase):

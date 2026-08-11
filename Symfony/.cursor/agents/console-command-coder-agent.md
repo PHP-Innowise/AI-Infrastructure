@@ -1,6 +1,7 @@
 ---
 name: console-command-coder
 description: "Use this agent to implement Symfony console commands that validate input, delegate to services, and return correct exit codes."
+writes: true
 ---
 
 # Console Command Coder Agent

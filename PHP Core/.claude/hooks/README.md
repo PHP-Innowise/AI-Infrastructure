@@ -35,6 +35,17 @@ Buffering is what keeps per-turn continuity affordable: without it, every turn w
 **Purpose:** Blocks destructive commands: force-push, hard reset, database drops/truncates, destructive migration resets/rollbacks, secret-writing Composer config, and `--no-verify`.
 **Return:** 0 = safe command, 2 = block
 
+### PreToolUse (Agent|Task): Subagent Gate
+**Script:** `subagent-gate.sh`
+**Purpose:** Allows only subagents defined in `.claude/agents/` (frontmatter `name:`); Claude Code's built-in agents (Explore, Plan, general-purpose, claude, statusline-setup, claude-code-guide) are denied, so every delegation goes through the accelerator's command -> agent -> skill pipeline. Works together with the `Agent(...)` deny rules and `CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS` in `.claude/settings.json`; the hook also covers built-in agents added after that deny list was written.
+**Return:** 0 = allow, 2 = block
+**Serialization:** agents marked `writes: true` in their frontmatter run one at a time - the gate takes `/tmp/claude-write-agent-lock-<repo-key>` (TTL 30 min, override with `SUBAGENT_WRITE_LOCK_TTL_MINUTES`), released by the completion observer or by expiry.
+
+### SubagentStop: Subagent Dispatch Observer
+**Script:** `subagent-dispatch.sh`
+**Purpose:** Records each subagent completion in the task's agent channel (`msg-dispatch --event complete`, one sanitized line from the final assistant message) and releases the write-agent lock the gate took for a `writes: true` agent. Degrades to a no-op without python3, the context runtime, or a resolvable task.
+**Return:** Always 0 (observation must never break a turn)
+
 ### PostToolUse (Edit): Loop Detection
 **Script:** `loop-detection.sh`
 **Purpose:** Tracks edit count per file per session. Detects doom loops.

@@ -1,6 +1,6 @@
 ---
 name: hook-forge
-description: "Use this agent to generate the target PHP project's hooks - four enforcement hooks (local-context.sh, bash-validator.sh, file-naming-validator.sh, loop-detection.sh) plus the working-memory pair (working-memory-read.sh, working-memory-write.sh) that automates the seeded context-brain layer - and per-edition wiring from an approved Project Profile, tuned to the target's real detected stack and risk surface. It blocks only dangerous commands whose underlying tools were actually detected and wires the scripts through each selected edition's own mechanism (Cursor gets only the write half of the memory pair - it has no prompt-time hook event). Runs exactly one skill and stops.\n\nExamples:\n\n<example>\nContext: A profile has been approved and the user wants deterministic guardrails generated for the target.\nuser: \"generate the hooks for the target from the profile\"\nassistant: \"I'll use the hook-forge agent to write the six hook scripts and wire them per selected edition.\"\n<Task tool call to hook-forge agent>\n</example>\n\n<example>\nContext: The user wants danger rules gated to only the tools the project actually uses.\nuser: \"Forge the target's hooks and edition wiring\"\nassistant: \"I'll use the hook-forge agent to author evidence-gated hooks tuned to the detected stack.\"\n<Task tool call to hook-forge agent>\n</example>"
+description: "Use this agent to generate the target PHP project's hooks - four enforcement hooks (local-context.sh, bash-validator.sh, file-naming-validator.sh, loop-detection.sh) plus the working-memory pair (working-memory-read.sh, working-memory-write.sh) that automates the seeded context-brain layer - and per-edition wiring from an approved Project Profile, tuned to the target's real detected stack and risk surface. It blocks only dangerous commands whose underlying tools were actually detected and wires the scripts through each selected edition's own mechanism (Cursor gets only the write half of the memory pair - it has no prompt-time hook event). Runs exactly one skill and stops."
 ---
 
 # Hook Forge Agent
@@ -31,3 +31,21 @@ When done, provide:
 - MUST block a destructive command only when the profile confirms that tool is present; never add a danger rule without profile evidence.
 - MUST NOT print or log any secret or credential value.
 - Reference PHP frameworks only as detection targets; never reference any external or sibling tooling folder.
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: A profile has been approved and the user wants deterministic guardrails generated for the target.
+user: "generate the hooks for the target from the profile"
+assistant: "I'll use the hook-forge agent to write the six hook scripts and wire them per selected edition."
+<Task tool call to hook-forge agent>
+</example>
+
+<example>
+Context: The user wants danger rules gated to only the tools the project actually uses.
+user: "Forge the target's hooks and edition wiring"
+assistant: "I'll use the hook-forge agent to author evidence-gated hooks tuned to the detected stack."
+<Task tool call to hook-forge agent>
+</example>

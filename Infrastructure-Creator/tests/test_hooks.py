@@ -402,6 +402,112 @@ class LocalContextTest(FakeRepoMixin, unittest.TestCase):
         self.assertEqual(len(counter_files(dir_b)), 1)
 
 
+class SubagentGateTest(unittest.TestCase):
+    """Tool-owned subagent gates: only roster agents spawn, built-ins deny.
+
+    subagent-gate.sh is deliberately NOT byte-identical across the mirrors
+    (each host has a different gate contract), hence its absence from
+    HOOK_NAMES and the mirror-identity test.
+    """
+
+    @staticmethod
+    def run_gate(mirror: str, payload):
+        stdin = payload if isinstance(payload, str) else json.dumps(payload)
+        return subprocess.run(
+            [BASH, str(EDITION_ROOT / mirror / "subagent-gate.sh")],
+            input=stdin,
+            capture_output=True,
+            text=True,
+            cwd=str(EDITION_ROOT),
+            timeout=HOOK_TIMEOUT,
+        )
+
+    @staticmethod
+    def roster(agents_dir: str) -> list[str]:
+        names = []
+        for path in sorted((EDITION_ROOT / agents_dir).glob("*.md")):
+            if path.name == "README.md":
+                continue
+            in_frontmatter = False
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if line == "---":
+                    if in_frontmatter:
+                        break
+                    in_frontmatter = True
+                    continue
+                if in_frontmatter and line.startswith("name:"):
+                    names.append(line.split(":", 1)[1].strip().strip('"'))
+                    break
+        return names
+
+    def test_claude_blocks_builtins_and_allows_roster(self) -> None:
+        for builtin in ("Explore", "Plan", "general-purpose", "claude"):
+            with self.subTest(agent=builtin):
+                result = self.run_gate(
+                    ".claude/hooks",
+                    {"tool_name": "Agent", "tool_input": {"subagent_type": builtin}},
+                )
+                self.assertEqual(2, result.returncode)
+                self.assertIn("BLOCKED", result.stderr)
+        names = self.roster(".claude/agents")
+        self.assertTrue(names)
+        for name in names:
+            with self.subTest(agent=name):
+                result = self.run_gate(
+                    ".claude/hooks",
+                    {"tool_name": "Agent", "tool_input": {"subagent_type": name}},
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_claude_ignores_other_tools_and_typeless_payloads(self) -> None:
+        for payload in (
+            {"tool_name": "Bash", "tool_input": {"command": "ls"}},
+            {"tool_name": "Agent", "tool_input": {}},
+            "not json",
+            "",
+        ):
+            with self.subTest(payload=payload):
+                self.assertEqual(
+                    0, self.run_gate(".claude/hooks", payload).returncode
+                )
+
+    def test_cursor_denies_builtins_and_allows_roster(self) -> None:
+        for builtin in ("explore", "shell", "bash", "browser", "generalPurpose"):
+            with self.subTest(agent=builtin):
+                result = self.run_gate(
+                    ".cursor/hooks", {"subagent_type": builtin}
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual(
+                    "deny", json.loads(result.stdout)["permission"]
+                )
+        names = self.roster(".cursor/agents")
+        self.assertTrue(names)
+        for name in names:
+            with self.subTest(agent=name):
+                result = self.run_gate(
+                    ".cursor/hooks", {"subagent_type": name}
+                )
+                self.assertEqual(
+                    "allow", json.loads(result.stdout)["permission"]
+                )
+
+    def test_codex_blocks_the_multi_agent_tool_family(self) -> None:
+        for tool in ("spawn_agent", "Agent", "send_input", "wait_agent"):
+            with self.subTest(tool=tool):
+                result = self.run_gate(
+                    ".codex/hooks", {"tool_name": tool, "tool_input": {}}
+                )
+                self.assertEqual(2, result.returncode)
+        self.assertEqual(
+            0,
+            self.run_gate(
+                ".codex/hooks",
+                {"tool_name": "Shell", "tool_input": {"command": "ls"}},
+            ).returncode,
+        )
+
+
 class MirrorConsistencyTest(unittest.TestCase):
     def test_all_hooks_byte_identical_across_mirrors(self) -> None:
         # Documented invariant: the .claude/.cursor/.codex editions of every

@@ -1,6 +1,6 @@
 ---
 name: browser-verify
-description: "Use this agent to visually verify UI changes in a running Symfony app. Opens the app with the available browser tooling, observes behavior, catches errors, and reports evidence.\n\nExamples:\n\n<example>\nContext: The user implemented a frontend feature and wants to verify it visually.\nuser: \"Check if the login form looks correct in the browser\"\nassistant: \"I'll use the browser-verify agent to visually verify the UI.\"\n<Task tool call to browser-verify agent>\n</example>\n\n<example>\nContext: The user wants to verify a UI fix works.\nuser: \"Open the app and check if the button alignment is fixed\"\nassistant: \"I'll use the browser-verify agent to verify the fix in the browser.\"\n<Task tool call to browser-verify agent>\n</example>"
+description: "Use this agent to visually verify UI changes in a running Symfony app. Opens the app with the available browser tooling, observes behavior, catches errors, and reports evidence."
 model: sonnet
 invokes: browser-verify
 phase: execution
@@ -39,3 +39,21 @@ When done, provide:
 - DO NOT chain to other skills automatically
 - DO NOT make workflow decisions
 - STOP after skill completion and output suggestions
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: The user implemented a frontend feature and wants to verify it visually.
+user: "Check if the login form looks correct in the browser"
+assistant: "I'll use the browser-verify agent to visually verify the UI."
+<Task tool call to browser-verify agent>
+</example>
+
+<example>
+Context: The user wants to verify a UI fix works.
+user: "Open the app and check if the button alignment is fixed"
+assistant: "I'll use the browser-verify agent to verify the fix in the browser."
+<Task tool call to browser-verify agent>
+</example>

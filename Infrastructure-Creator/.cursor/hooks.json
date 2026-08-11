@@ -4,6 +4,9 @@
     "sessionStart": [
       { "command": ".cursor/hooks/local-context.sh", "timeout": 10 }
     ],
+    "subagentStart": [
+      { "command": ".cursor/hooks/subagent-gate.sh", "timeout": 5, "failClosed": true }
+    ],
     "beforeShellExecution": [
       { "command": ".cursor/hooks/bash-validator.sh", "timeout": 5 }
     ],

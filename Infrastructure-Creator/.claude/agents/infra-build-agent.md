@@ -1,6 +1,6 @@
 ---
 name: infra-build
-description: "Use this agent for the one-shot path: it chains infra-scan then infra-generate against a target PHP project, pausing at the profile checkpoint only when a blocking ambiguity or a collision is detected. Use when the user wants the whole build in one step and trusts the scan.\n\nExamples:\n\n<example>\nContext: The user wants to scan and generate in a single command.\nuser: \"infra-build ../acme-billing\"\nassistant: \"I'll use the infra-build agent to run the scan and then generation end to end, pausing only if something blocking comes up.\"\n<Task tool call to infra-build agent>\n</example>\n\n<example>\nContext: The user trusts the scan and wants the finished accelerator immediately.\nuser: \"Just build my accelerator end to end for this project\"\nassistant: \"I'll use the infra-build agent to chain infra-scan and infra-generate, honoring the checkpoint and collision guards.\"\n<Task tool call to infra-build agent>\n</example>"
+description: "Use this agent for the one-shot path: it chains infra-scan then infra-generate against a target PHP project, pausing at the profile checkpoint only when a blocking ambiguity or a collision is detected. Use when the user wants the whole build in one step and trusts the scan."
 model: opus
 invokes: infra-build
 phase: orchestration
@@ -31,3 +31,21 @@ When done, provide:
 - MUST enforce the checkpoint when blocking ambiguity exists - ease of use never overrides safety.
 - MUST honor the collision guard; MUST NOT auto-overwrite a pre-existing accelerator.
 - MUST generate only the selected edition(s) and MUST NOT report success while verification is failing.
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: The user wants to scan and generate in a single command.
+user: "infra-build ../acme-billing"
+assistant: "I'll use the infra-build agent to run the scan and then generation end to end, pausing only if something blocking comes up."
+<Task tool call to infra-build agent>
+</example>
+
+<example>
+Context: The user trusts the scan and wants the finished accelerator immediately.
+user: "Just build my accelerator end to end for this project"
+assistant: "I'll use the infra-build agent to chain infra-scan and infra-generate, honoring the checkpoint and collision guards."
+<Task tool call to infra-build agent>
+</example>

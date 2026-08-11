@@ -1,6 +1,6 @@
 ---
 name: bootstrap-verifier
-description: "Use this agent to run the final QA gate for a freshly generated accelerator before success is reported - it validates frontmatter across every generated skill/agent/command, checks that every cross-reference resolves to a real generated skill, checks every hook's syntax and executable bit plus the per-edition hook set and wiring (every wired script must exist and be executable), runs the seeded memory-bank validator, smoke-runs the context-brain runtime (context.py status/validate), and scans for leftover template placeholders, for the selected edition(s) only. It requires a target-project-path argument and treats any unresolved failure as generation-not-done. Runs exactly one skill and stops.\n\nExamples:\n\n<example>\nContext: All forges have run and the user wants the generated accelerator verified before declaring success.\nuser: \"verify the generated accelerator for ../acme-billing\"\nassistant: \"I'll use the bootstrap-verifier agent to run the QA gate across the selected editions.\"\n<Task tool call to bootstrap-verifier agent>\n</example>\n\n<example>\nContext: The user wants to confirm what generation produced is internally consistent and usable.\nuser: \"Run the QA gate on what infra-generate produced\"\nassistant: \"I'll use the bootstrap-verifier agent to validate frontmatter, cross-references, hooks, memory, and placeholders.\"\n<Task tool call to bootstrap-verifier agent>\n</example>"
+description: "Use this agent to run the final QA gate for a freshly generated accelerator before success is reported - it validates frontmatter across every generated skill/agent/command, checks that every cross-reference resolves to a real generated skill, checks every hook's syntax and executable bit plus the per-edition hook set and wiring (every wired script must exist and be executable), runs the seeded memory-bank validator, smoke-runs the context-brain runtime (context.py status/validate), and scans for leftover template placeholders, for the selected edition(s) only. It requires a target-project-path argument and treats any unresolved failure as generation-not-done. Runs exactly one skill and stops."
 model: sonnet
 invokes: bootstrap-verifier
 phase: verification
@@ -34,3 +34,21 @@ When done, provide:
 - MUST NOT auto-fix anything ambiguous - escalate instead - and MUST confirm no unselected edition was generated.
 - MUST NOT include any secret or credential value.
 - Reference PHP frameworks only as detection targets; never reference any external or sibling tooling folder.
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: All forges have run and the user wants the generated accelerator verified before declaring success.
+user: "verify the generated accelerator for ../acme-billing"
+assistant: "I'll use the bootstrap-verifier agent to run the QA gate across the selected editions."
+<Task tool call to bootstrap-verifier agent>
+</example>
+
+<example>
+Context: The user wants to confirm what generation produced is internally consistent and usable.
+user: "Run the QA gate on what infra-generate produced"
+assistant: "I'll use the bootstrap-verifier agent to validate frontmatter, cross-references, hooks, memory, and placeholders."
+<Task tool call to bootstrap-verifier agent>
+</example>

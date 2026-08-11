@@ -1,6 +1,6 @@
 ---
 name: architect
-description: "Use this agent for native PHP architecture decisions. Helps choose entry points/handlers, request DTOs, domain entities/value objects, use-case classes, repository boundaries, PDO persistence, queues, DI, authorization, scalability, and security patterns.\n\nExamples:\n\n<example>\nContext: The user needs architecture guidance for a new feature.\nuser: \"Should this registration flow use a service, a use-case class, or a queue job?\"\nassistant: \"I'll use the architect agent to evaluate the native PHP architecture for your use case.\"\n<Task tool call to architect agent>\n</example>\n\n<example>\nContext: The user wants to design module placement.\nuser: \"Help me decide where to place invitation registration\"\nassistant: \"I'll use the architect agent to make the placement decision.\"\n<Task tool call to architect agent>\n</example>"
+description: "Use this agent for native PHP architecture decisions. Helps choose entry points/handlers, request DTOs, domain entities/value objects, use-case classes, repository boundaries, PDO persistence, queues, DI, authorization, scalability, and security patterns."
 model: opus
 invokes: architect
 phase: planning
@@ -39,3 +39,21 @@ When done, provide:
 - DO NOT chain to other skills automatically
 - DO NOT make workflow decisions
 - STOP after skill completion and output suggestions
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: The user needs architecture guidance for a new feature.
+user: "Should this registration flow use a service, a use-case class, or a queue job?"
+assistant: "I'll use the architect agent to evaluate the native PHP architecture for your use case."
+<Task tool call to architect agent>
+</example>
+
+<example>
+Context: The user wants to design module placement.
+user: "Help me decide where to place invitation registration"
+assistant: "I'll use the architect agent to make the placement decision."
+<Task tool call to architect agent>
+</example>

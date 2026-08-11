@@ -1,0 +1,26 @@
+[project]
+name = "ai-infrastructure-harness"
+version = "0.1.0"
+description = "External LangGraph batch harness for the AI-Infrastructure accelerators: unattended multi-stage pipelines over headless coding-agent hosts, with the project's own project-brain as the blackboard."
+requires-python = ">=3.10"
+dependencies = [
+    "langgraph>=1.2,<2",
+    "langgraph-checkpoint-sqlite>=3,<4",
+]
+
+[project.optional-dependencies]
+sdk = ["claude-agent-sdk"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+harness = "harness.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
