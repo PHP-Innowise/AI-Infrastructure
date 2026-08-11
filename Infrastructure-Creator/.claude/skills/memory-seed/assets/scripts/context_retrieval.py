@@ -8,6 +8,7 @@ import json
 import re
 import sqlite3
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -42,6 +43,8 @@ BUDGETS = {
 TARGET_BUDGET = 8000
 HARD_BUDGET = 12000
 MAX_SNIPPET_CHARS = 1200
+CAPSULE_PROCEDURAL_LIMIT = 2
+CAPSULE_SEMANTIC_LIMIT = 3
 SKILL_EDITIONS = (".agents", ".claude", ".cursor", ".codex")
 # Skills whose body documents the host tool itself rather than a workflow this
 # repository owns. `skill-creator` instructs the agent to drive its own product
@@ -129,6 +132,139 @@ _HOOK_PATH_EXTRACT_CODEX = (
     " | head -1)\nfi\n"
 )
 
+# Working-memory delivery: Claude and Codex receive the Task Capsule at
+# prompt time through working-memory-read.sh (UserPromptSubmit); Cursor has
+# no equivalent event, so its mirrors of the Stop and sessionStart hooks
+# render the freshest capsule into .cursor/rules/working-memory.mdc - an
+# alwaysApply rule Cursor attaches to every prompt. The rendered file is one
+# turn stale by design, says so in its header, and lives in ignored local
+# state (the edition .gitignore lists it). The canonical hooks carry the
+# short marker comments below; the Cursor mirror swaps in the render steps.
+# The render is silent on stdout, degrades to a no-op on any failure, and
+# replaces the previous rule only when a fresh render succeeds.
+#
+# The rule is the one surface in this product that is re-sent on every prompt,
+# so its content must vary only when the context genuinely varies. Two former
+# sources of gratuitous per-turn variation are therefore excluded by design:
+#   - no render timestamp. The header already states the rule is as of the end
+#     of the previous turn; a clock reading added nothing and changed every
+#     turn.
+#   - the capsule is rendered, not serialized (`hook-context` without --json).
+#     The JSON form embeds `manifest`, a fresh UUID path per call, and carries
+#     the same documents in four parallel views (categories / procedural /
+#     semantic / selected). Both were re-sent every turn. The rendered form is
+#     what Claude and Codex already receive, so all three clients now agree.
+# Anything added here is paid once per turn for the life of the session -
+# weigh it against that, not against a single prompt.
+_WM_DELIVERY_STOP = r'''# Capsule delivery: this client receives the Task Capsule at prompt time
+# through working-memory-read.sh, so the turn checkpoint above is all that
+# runs here.
+'''
+_WM_DELIVERY_STOP_CURSOR = r'''# Capsule delivery: Cursor has no UserPromptSubmit-equivalent event, so
+# working-memory-read.sh is not shipped in .cursor/hooks. The read path is
+# served here instead: after the turn checkpoint, the freshest Task Capsule
+# is rendered into an alwaysApply Cursor rule, which Cursor attaches to
+# every prompt of the next turn. The file is ignored local state, one turn
+# stale by design, and replaced only when a fresh render succeeds.
+RULES_DIR="$ROOT_DIR/.cursor/rules"
+RULE_FILE="$RULES_DIR/working-memory.mdc"
+CAPSULE_STATUS=1
+if command -v timeout > /dev/null 2>&1; then
+  CAPSULE=$(timeout "$BUDGET_SECONDS" python3 "$CONTEXT_CLI" hook-context \
+    --task-id "$TASK_ID" 2>/dev/null)
+  CAPSULE_STATUS=$?
+else
+  CAPSULE=$(python3 "$CONTEXT_CLI" hook-context \
+    --task-id "$TASK_ID" 2>/dev/null)
+  CAPSULE_STATUS=$?
+fi
+# The rendered capsule always opens with the working line. Anything else is a
+# broken render and must not replace a good rule. This guard replaces the JSON
+# parse that protected the --json form.
+if [ "$CAPSULE_STATUS" -eq 0 ]; then
+  case "$CAPSULE" in
+    working:*) ;;
+    *) CAPSULE_STATUS=1 ;;
+  esac
+fi
+if [ "$CAPSULE_STATUS" -eq 3 ]; then
+  rm -f "$RULE_FILE" 2>/dev/null
+elif [ "$CAPSULE_STATUS" -eq 0 ] && [ -n "$CAPSULE" ] && mkdir -p "$RULES_DIR" 2>/dev/null; then
+  TMP_RULE=$(mktemp "$RULES_DIR/.working-memory.XXXXXX" 2>/dev/null || true)
+  if [ -n "$TMP_RULE" ]; then
+    {
+      printf -- '---\n'
+      printf 'description: Working memory - current-branch session context\n'
+      printf 'alwaysApply: true\n'
+      printf -- '---\n\n'
+      printf '# Working Memory (auto-rendered)\n\n'
+      printf 'Session context as of end of previous turn (task: %s).\n' "$TASK_ID"
+      printf 'Retrieved context is not authoritative - verify the source.\n\n'
+      printf '%s\n' '```'
+      printf '%s\n' "$CAPSULE"
+      printf '%s\n' '```'
+    } > "$TMP_RULE" 2>/dev/null && mv -f "$TMP_RULE" "$RULE_FILE" 2>/dev/null
+    rm -f "$TMP_RULE" 2>/dev/null
+  fi
+fi
+'''
+_WM_DELIVERY_SESSION = r'''# Capsule delivery: this client receives the Task Capsule at prompt time
+# through working-memory-read.sh; session start reports metadata only.
+'''
+_WM_DELIVERY_SESSION_CURSOR = r'''# Capsule delivery: Cursor has no UserPromptSubmit-equivalent event; the
+# stop hook maintains .cursor/rules/working-memory.mdc instead (the
+# documented exception to the metadata-only session banner - see
+# docs/TOOL-INTEGRATIONS.md). Re-render it here so a fresh session or a
+# branch switch does not serve the previous session's capsule. Nothing is
+# printed: the rule file is the only output.
+CAPSULE_BUDGET_SECONDS="${CONTEXT_HOOK_BUDGET:-5}"
+CAPSULE_TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$ROOT_DIR" branch --show-current 2>/dev/null)}"
+RULES_DIR="$ROOT_DIR/.cursor/rules"
+RULE_FILE="$RULES_DIR/working-memory.mdc"
+CAPSULE=""
+CAPSULE_STATUS=3
+if command -v python3 > /dev/null 2>&1 && [ -f "$CONTEXT_CLI" ] && [ -n "$CAPSULE_TASK_ID" ]; then
+  if command -v timeout > /dev/null 2>&1; then
+    CAPSULE=$(timeout "$CAPSULE_BUDGET_SECONDS" python3 "$CONTEXT_CLI" hook-context \
+      --task-id "$CAPSULE_TASK_ID" 2>/dev/null)
+    CAPSULE_STATUS=$?
+  else
+    CAPSULE=$(python3 "$CONTEXT_CLI" hook-context \
+      --task-id "$CAPSULE_TASK_ID" 2>/dev/null)
+    CAPSULE_STATUS=$?
+  fi
+fi
+# See the stop hook: the working line is the render marker that replaces the
+# JSON parse.
+if [ "$CAPSULE_STATUS" -eq 0 ]; then
+  case "$CAPSULE" in
+    working:*) ;;
+    *) CAPSULE_STATUS=1 ;;
+  esac
+fi
+if [ "$CAPSULE_STATUS" -eq 3 ]; then
+  rm -f "$RULE_FILE" 2>/dev/null
+elif [ "$CAPSULE_STATUS" -eq 0 ] && [ -n "$CAPSULE" ] && mkdir -p "$RULES_DIR" 2>/dev/null; then
+  TMP_RULE=$(mktemp "$RULES_DIR/.working-memory.XXXXXX" 2>/dev/null || true)
+  if [ -n "$TMP_RULE" ]; then
+    {
+      printf -- '---\n'
+      printf 'description: Working memory - current-branch session context\n'
+      printf 'alwaysApply: true\n'
+      printf -- '---\n\n'
+      printf '# Working Memory (auto-rendered)\n\n'
+      printf 'Session context as of end of previous turn (task: %s).\n' \
+        "$CAPSULE_TASK_ID"
+      printf 'Retrieved context is not authoritative - verify the source.\n\n'
+      printf '%s\n' '```'
+      printf '%s\n' "$CAPSULE"
+      printf '%s\n' '```'
+    } > "$TMP_RULE" 2>/dev/null && mv -f "$TMP_RULE" "$RULE_FILE" 2>/dev/null
+    rm -f "$TMP_RULE" 2>/dev/null
+  fi
+fi
+'''
+
 MIRROR_RULES: dict[str, Any] = {
     "version": 1,
     "classes": [
@@ -193,6 +329,12 @@ MIRROR_RULES: dict[str, Any] = {
                             "SKILLS_DIR=\"$ROOT_DIR/.cursor/skills\"",
                         ],
                         [" .claude; do", " .cursor; do"],
+                        # Cursor's read path: the Stop and sessionStart
+                        # mirrors render the capsule into the alwaysApply
+                        # rule .cursor/rules/working-memory.mdc (see the
+                        # _WM_DELIVERY_* constants above).
+                        [_WM_DELIVERY_STOP, _WM_DELIVERY_STOP_CURSOR],
+                        [_WM_DELIVERY_SESSION, _WM_DELIVERY_SESSION_CURSOR],
                     ],
                     # Cursor has no UserPromptSubmit-equivalent hook event, so
                     # the read half of automatic memory is deliberately absent
@@ -233,9 +375,18 @@ MIRROR_RULES: dict[str, Any] = {
                     ],
                 },
             },
-            # Each tool documents its own registration model (settings.json vs
-            # hooks.json vs config.toml), so every hooks README is mirror-owned.
-            "skip": ["README.md"],
+            "skip": [
+                # Each tool documents its own registration model (settings.json
+                # vs hooks.json vs config.toml), so every hooks README is
+                # mirror-owned.
+                "README.md",
+                # Tool-owned: each host exposes a different subagent-gate
+                # contract (Claude PreToolUse exit codes, Cursor subagentStart
+                # permission JSON, Codex spawn_agent deny) and reads a
+                # different roster source, so the three copies are separate
+                # generations by design.
+                "subagent-gate.sh",
+            ],
         },
         {
             # Slash commands: Claude's orchestration frontmatter is reduced to
@@ -364,10 +515,28 @@ DELETE_CHUNK = 500
 INDEX_CONFIG_KEY = "config-fingerprint"
 INDEX_SKILL_KEY = "skill-tree-fingerprint"
 INDEX_PARITY_KEY = "skill-parity-drift"
+# A fresh value is stamped whenever index_documents rewrites the tables, so
+# anything derived from index content (the token-frequency cache below) can
+# tell at a glance whether it still describes the current index.
+INDEX_GENERATION_KEY = "index-generation"
+TOKEN_FREQUENCY_KEY = "token-frequency-cache"
+TOKEN_FREQUENCY_LIMIT = 4096
 
 # Column weights for bm25(): path, layer, kind, title, summary, content.
 # What a document declares itself to be about outranks what its body mentions.
 BM25_WEIGHTS = (1.0, 1.0, 1.0, 2.0, 8.0, 1.0)
+
+# Ranking multipliers applied over BM25 relevance in governed retrieval.
+# BM25 knows lexical fit only; provenance quality and age are metadata the
+# index already stores, so a candidate's relevance is scaled — never zeroed —
+# by how trustworthy and how current its record claims to be.
+RECENCY_HALF_LIFE_DAYS = 30.0
+# Floors keep the multipliers from ever hiding a lexical match outright: an
+# old observed record still ranks, it just yields to a fresh verified one.
+RECENCY_WEIGHT_FLOOR = 0.5
+CONFIDENCE_WEIGHT_FLOOR = 0.7
+AUTHORITY_WEIGHTS = {"verified": 1.0, "observed": 0.85}
+AUTHORITY_WEIGHT_DEFAULT = 0.85
 
 DocumentRow = tuple[str, str, str, str, str, str]
 SourceState = dict[str, tuple[int, int]]
@@ -390,7 +559,9 @@ def ensure_metadata_tables(connection: sqlite3.Connection) -> None:
             source_hash TEXT NOT NULL,
             record_id TEXT,
             conflicts TEXT NOT NULL,
-            source_fingerprints TEXT NOT NULL DEFAULT '[]'
+            source_fingerprints TEXT NOT NULL DEFAULT '[]',
+            updated_at TEXT NOT NULL DEFAULT '',
+            confidence REAL NOT NULL DEFAULT 1.0
         )
         """
     )
@@ -404,6 +575,19 @@ def ensure_metadata_tables(connection: sqlite3.Connection) -> None:
             ALTER TABLE document_metadata
             ADD COLUMN source_fingerprints TEXT NOT NULL DEFAULT '[]'
             """
+        )
+    # Ranking provenance added later than the table: an old row simply has no
+    # recorded freshness ('' — never decayed) and full confidence, which is
+    # exactly what it asserted before the columns existed.
+    if "updated_at" not in metadata_columns:
+        connection.execute(
+            "ALTER TABLE document_metadata "
+            "ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''"
+        )
+    if "confidence" not in metadata_columns:
+        connection.execute(
+            "ALTER TABLE document_metadata "
+            "ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0"
         )
     connection.execute(
         """
@@ -513,38 +697,70 @@ def config_fingerprint(repository: Path) -> str:
         return "absent"
 
 
-def skill_tree_fingerprint(repository: Path) -> str:
+SkillStat = tuple[str, str, int, int]
+
+
+def skill_tree_fingerprint(
+    repository: Path, skill_stats: Optional[Iterable[SkillStat]] = None
+) -> str:
     """Fingerprint every mirrored skill file from stat metadata alone.
 
     Parity compares all editions, but only the first discovered copy of a skill
     reaches the index, so the per-document stat cache cannot notice a drifting
     mirror. This fingerprint can, without reading any file.
+
+    ``skill_stats`` — (edition, path-under-skills, mtime_ns, size) tuples — lets
+    a caller that already walked the skill trees (document discovery stats the
+    same files) reuse that work instead of statting every mirror a second time.
+    Entries are canonically sorted so both computations produce one digest.
     """
-    digest = hashlib.sha256()
-    for edition in SKILL_EDITIONS:
-        root = repository / edition / "skills"
-        if not root.is_dir():
-            continue
-        for path in sorted(root.glob("**/*.md")):
-            if not path.is_file() or path.is_symlink():
+    if skill_stats is None:
+        entries: list[SkillStat] = []
+        for edition in SKILL_EDITIONS:
+            root = repository / edition / "skills"
+            if not root.is_dir():
                 continue
-            status = path.stat()
-            digest.update(
-                f"{edition}\0{path.relative_to(root).as_posix()}\0"
-                f"{status.st_mtime_ns}\0{status.st_size}\n".encode("utf-8")
-            )
+            for path in sorted(root.glob("**/*.md")):
+                if not path.is_file() or path.is_symlink():
+                    continue
+                status = path.stat()
+                entries.append(
+                    (
+                        edition,
+                        path.relative_to(root).as_posix(),
+                        status.st_mtime_ns,
+                        status.st_size,
+                    )
+                )
+    else:
+        entries = list(skill_stats)
+    digest = hashlib.sha256()
+    for edition, relative, mtime_ns, size in sorted(entries):
+        digest.update(
+            f"{edition}\0{relative}\0{mtime_ns}\0{size}\n".encode("utf-8")
+        )
     return digest.hexdigest()
 
 
+def index_fingerprints(
+    repository: Path, skill_stats: Optional[Iterable[SkillStat]] = None
+) -> dict[str, str]:
+    """The fingerprints that decide whether cached index state is current."""
+    return {
+        INDEX_CONFIG_KEY: config_fingerprint(repository),
+        INDEX_SKILL_KEY: skill_tree_fingerprint(repository, skill_stats),
+    }
+
+
 def reusable_source_state(
-    connection: sqlite3.Connection, repository: Path
+    connection: sqlite3.Connection,
+    repository: Path,
+    fingerprints: Optional[dict[str, str]] = None,
 ) -> tuple[SourceState, dict[str, str]]:
     """Return the retainable stat cache plus the fingerprints that gate it."""
     ensure_metadata_tables(connection)
-    fingerprints = {
-        INDEX_CONFIG_KEY: config_fingerprint(repository),
-        INDEX_SKILL_KEY: skill_tree_fingerprint(repository),
-    }
+    if fingerprints is None:
+        fingerprints = index_fingerprints(repository)
     stored = load_index_state(connection)
     if stored.get(INDEX_CONFIG_KEY) != fingerprints[INDEX_CONFIG_KEY]:
         # Runtime configuration decides eligibility for every indexed record,
@@ -907,9 +1123,11 @@ def format_cross_edition_drift(drift: list[dict[str, object]]) -> str:
 
 
 def _legacy_metadata(path: str, kind: str, content: str) -> tuple[object, ...]:
+    # Repository documents carry no provenance timestamp or confidence of
+    # their own: '' means "never decayed" and 1.0 keeps them rank-neutral.
     return (
         path, category_for(kind), "public", "*", "verified", "active",
-        _content_hash(content), None, "[]", "[]",
+        _content_hash(content), None, "[]", "[]", "", 1.0,
     )
 
 
@@ -949,6 +1167,8 @@ def _brain_documents(
                 record["id"],
                 json.dumps(record["conflicts"], sort_keys=True),
                 json.dumps(record["source_fingerprints"], sort_keys=True),
+                str(record.get("updated_at") or ""),
+                float(record.get("confidence", 1.0)),
             )
         )
     handoffs = brain_root(repository) / "control" / "handoffs"
@@ -977,6 +1197,8 @@ def _brain_documents(
                     handoff["id"],
                     "[]",
                     json.dumps(task["source_fingerprints"], sort_keys=True),
+                    str(handoff.get("updated_at") or ""),
+                    float(task.get("confidence", 1.0)),
                 )
             )
     return documents, metadata_rows, excluded
@@ -1099,8 +1321,8 @@ def index_documents(
             """
             INSERT INTO document_metadata(
                 path, category, privacy, owner, authority, lifecycle, source_hash,
-                record_id, conflicts, source_fingerprints
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                record_id, conflicts, source_fingerprints, updated_at, confidence
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             metadata,
         )
@@ -1111,10 +1333,13 @@ def index_documents(
         store_index_state(
             connection,
             {
-                INDEX_CONFIG_KEY: config_fingerprint(repository),
-                INDEX_SKILL_KEY: skill_tree_fingerprint(repository),
-                **(fingerprints or {}),
+                # A caller that walked the sources already computed these; only
+                # a full rebuild without one re-derives them from disk.
+                **(fingerprints or index_fingerprints(repository)),
                 INDEX_PARITY_KEY: json.dumps(parity_drift, sort_keys=True),
+                # The index content changed, so every cache derived from it
+                # (token frequencies) is invalid from this point on.
+                INDEX_GENERATION_KEY: new_uuid(),
             },
         )
         total, layers = _layer_counts(connection)
@@ -1158,6 +1383,70 @@ def _document_frequency(connection: sqlite3.Connection, token: str) -> Optional[
         return None
 
 
+def token_document_frequencies(
+    connection: sqlite3.Connection, tokens: Iterable[str]
+) -> dict[str, Optional[int]]:
+    """Document frequency per token, cached against the current index.
+
+    Stop-word filtering and prompt distillation both need one COUNT query per
+    token, on every prompt, and the answers only change when the index is
+    rewritten. The cache lives in ``index_state`` keyed by the index
+    generation, so a rebuilt index invalidates every stored frequency at once
+    while an unchanged index answers from a single row. FTS matching is
+    case-insensitive, so frequencies are cached under the casefolded token.
+    """
+    ensure_metadata_tables(connection)
+    state = load_index_state(connection)
+    generation = state.get(INDEX_GENERATION_KEY, "")
+    cached: dict[str, int] = {}
+    try:
+        stored = json.loads(state.get(TOKEN_FREQUENCY_KEY, ""))
+    except (TypeError, ValueError):
+        stored = None
+    if isinstance(stored, dict) and stored.get("generation") == generation:
+        frequencies = stored.get("frequencies")
+        if isinstance(frequencies, dict):
+            cached = {
+                key: value
+                for key, value in frequencies.items()
+                if isinstance(key, str) and isinstance(value, int)
+            }
+    result: dict[str, Optional[int]] = {}
+    learned = False
+    for token in tokens:
+        folded = token.casefold()
+        if folded in cached:
+            result[token] = cached[folded]
+            continue
+        count = _document_frequency(connection, token)
+        result[token] = count
+        if count is not None:
+            cached[folded] = count
+            learned = True
+    if learned:
+        if len(cached) > TOKEN_FREQUENCY_LIMIT:
+            # Novel prompts would grow the cache without bound; restarting
+            # from this query's tokens is cheaper than per-token recency.
+            cached = {
+                token.casefold(): count
+                for token, count in result.items()
+                if count is not None
+            }
+        payload = json.dumps(
+            {"generation": generation, "frequencies": cached}, sort_keys=True
+        )
+        try:
+            # Persisting the cache is an optimisation, never an obligation: a
+            # caller mid-transaction or a read-only database keeps its answer
+            # and simply recomputes next time.
+            if not connection.in_transaction:
+                with connection:
+                    store_index_state(connection, {TOKEN_FREQUENCY_KEY: payload})
+        except sqlite3.Error:
+            pass
+    return result
+
+
 def informative_tokens(
     connection: sqlite3.Connection, tokens: list[str]
 ) -> list[str]:
@@ -1172,10 +1461,10 @@ def informative_tokens(
     total = connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
     if not total:
         return tokens
-    frequencies = [
-        (token, _document_frequency(connection, token)) for token in tokens
+    frequencies = token_document_frequencies(connection, tokens)
+    matched = [
+        (token, frequencies[token]) for token in tokens if frequencies[token]
     ]
-    matched = [(token, count) for token, count in frequencies if count]
     informative = [
         token for token, count in matched if count <= total * STOPWORD_DOCUMENT_RATIO
     ]
@@ -1239,6 +1528,43 @@ def _estimate_tokens(value: str) -> int:
     return max(1, (len(value) + 3) // 4)
 
 
+def ranking_weight(
+    authority: object, confidence: object, updated_at: object
+) -> float:
+    """How much of its BM25 relevance a candidate keeps.
+
+    Verified evidence outranks observed at equal lexical fit, declared
+    confidence scales linearly, and freshness decays with a half-life over the
+    record's ``updated_at``. Every factor is floored: metadata modulates
+    ranking, it never erases a lexical match. A document without a timestamp
+    (repository files) keeps full freshness — its currency is already policed
+    by the source-hash staleness check, not by age.
+    """
+    weight = AUTHORITY_WEIGHTS.get(str(authority), AUTHORITY_WEIGHT_DEFAULT)
+    try:
+        declared = float(confidence)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        declared = 1.0
+    declared = min(1.0, max(0.0, declared))
+    weight *= CONFIDENCE_WEIGHT_FLOOR + (1.0 - CONFIDENCE_WEIGHT_FLOOR) * declared
+    timestamp = str(updated_at or "")
+    if timestamp:
+        try:
+            written = datetime.fromisoformat(timestamp)
+        except ValueError:
+            written = None
+        if written is not None:
+            if written.tzinfo is None:
+                written = written.replace(tzinfo=timezone.utc)
+            age_days = max(
+                0.0,
+                (datetime.now(timezone.utc) - written).total_seconds() / 86400.0,
+            )
+            decay = 0.5 ** (age_days / RECENCY_HALF_LIFE_DAYS)
+            weight *= RECENCY_WEIGHT_FLOOR + (1.0 - RECENCY_WEIGHT_FLOOR) * decay
+    return weight
+
+
 def _candidates(
     connection: sqlite3.Connection, query: str, limit: int = 100
 ) -> list[dict[str, Any]]:
@@ -1253,7 +1579,7 @@ def _candidates(
             snippet(documents, 5, '[', ']', ' … ', 32) AS snippet,
             m.category, m.privacy, m.owner, m.authority, m.lifecycle,
             m.source_hash, m.record_id, m.conflicts,
-            m.source_fingerprints,
+            m.source_fingerprints, m.updated_at, m.confidence,
             bm25(documents, ?, ?, ?, ?, ?, ?) AS score
         FROM documents AS d
         JOIN document_metadata AS m ON m.path = d.path
@@ -1272,7 +1598,16 @@ def _candidates(
         item["conflicts"] = json.loads(item["conflicts"])
         item["source_fingerprints"] = json.loads(item["source_fingerprints"])
         item["estimated_tokens"] = _estimate_tokens(item["title"] + item["snippet"])
+        # bm25() reports better matches as more negative, so relevance is its
+        # negation; provenance quality and freshness then scale it.
+        relevance = max(0.0, -float(item["score"]))
+        item["adjusted_score"] = relevance * ranking_weight(
+            item["authority"], item["confidence"], item["updated_at"]
+        )
         result.append(item)
+    # Re-rank the BM25 window: the raw score breaks adjusted ties so the
+    # ordering stays deterministic even when every weight is neutral.
+    result.sort(key=lambda item: (-item["adjusted_score"], item["score"], item["path"]))
     return result
 
 
@@ -1289,7 +1624,7 @@ def _conflict_candidates(
             substr(d.content, 1, ?) AS snippet,
             m.category, m.privacy, m.owner, m.authority, m.lifecycle,
             m.source_hash, m.record_id, m.conflicts,
-            m.source_fingerprints,
+            m.source_fingerprints, m.updated_at, m.confidence,
             0.0 AS score
         FROM documents AS d
         JOIN document_metadata AS m ON m.path = d.path
@@ -1500,6 +1835,29 @@ def retrieve(
             if conflict_id not in known_ids
         }
     selected, budget_excluded, usage, escalation_reason = _apply_budgets(filtered)
+    procedural_ranked = [
+        item for item in selected if item["category"] == "policy"
+    ]
+    semantic_ranked = [
+        item for item in selected if item["category"] != "policy"
+    ]
+    capsule_selected = [
+        *procedural_ranked[:CAPSULE_PROCEDURAL_LIMIT],
+        *semantic_ranked[:CAPSULE_SEMANTIC_LIMIT],
+    ]
+    capsule_paths = {item["path"] for item in capsule_selected}
+    layer_excluded = [
+        {"path": item["path"], "reason": "layer-limit"}
+        for item in selected
+        if item["path"] not in capsule_paths
+    ]
+    selected = capsule_selected
+    usage = {category: 0 for category in BUDGETS}
+    for item in selected:
+        usage[item["category"]] += item["estimated_tokens"]
+    usage["total"] = sum(usage.values())
+    usage["target"] = TARGET_BUDGET
+    usage["hard"] = HARD_BUDGET
     manifest_id = new_uuid()
     manifest = {
         "schema_version": 1,
@@ -1522,7 +1880,7 @@ def retrieve(
             }
             for item in selected
         ],
-        "excluded": [*filter_excluded, *budget_excluded],
+        "excluded": [*filter_excluded, *budget_excluded, *layer_excluded],
         "token_estimates": usage,
         "provider": provider or config["provider"],
         "escalation_reason": escalation_reason,
@@ -1553,10 +1911,10 @@ def retrieve(
             )
         }
         groups[item["category"]].append(public)
-    procedural = groups["policy"][:limit]
+    procedural = groups["policy"][:CAPSULE_PROCEDURAL_LIMIT]
     semantic = [
         *groups["handoff"], *groups["durable"], *groups["dynamic"], *groups["evidence"]
-    ][:limit]
+    ][:CAPSULE_SEMANTIC_LIMIT]
     return {
         "query": query,
         "task_id": task["external_id"],
@@ -1564,6 +1922,7 @@ def retrieve(
         "task_revision": task["revision"],
         "working": {
             "task_id": task["external_id"], "goal": task["goal"],
+            "phase": task.get("phase"),
             # Manual progress first, the automatic checkpoint as a labelled
             # supplement; a task without a checkpoint renders as it always did.
             "progress": render_current_state(
@@ -1576,7 +1935,16 @@ def retrieve(
         "procedural": procedural,
         "semantic": semantic,
         "episodic": [],
-        "selected": selected,
+        "selected": [
+            {
+                key: item[key]
+                for key in (
+                    "path", "layer", "kind", "title", "snippet", "category",
+                    "estimated_tokens", "record_id", "conflicts",
+                )
+            }
+            for item in selected
+        ],
         "token_estimates": usage,
         "manifest": manifest_path.relative_to(repository).as_posix(),
         "manifest_scope": manifest_scope,

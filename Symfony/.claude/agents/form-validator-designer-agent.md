@@ -4,6 +4,7 @@ description: "Use this agent to design Symfony Forms, request DTOs, Validator co
 model: sonnet
 invokes: form-validator-designer
 phase: planning
+writes: true
 ---
 
 # Form Validator Designer Agent

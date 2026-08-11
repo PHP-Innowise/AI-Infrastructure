@@ -1,0 +1,16 @@
+#!/bin/sh
+# Shorthand for scripts/collect_context.py, so collecting a context bundle is
+# `./collect <scope> [options]` from the repository root. Every argument is
+# passed through unchanged, and the exit status is the script's own.
+#
+#   ./collect                                   # list the scopes
+#   ./collect skills --edition Laravel --dry-run
+#   ./collect diff --base origin/main --stdout
+#
+# See scripts/README.md and docs/TOOL-INTEGRATIONS.md. Inside Claude Code the
+# same tool is /collect, from .claude/commands/collect.md.
+#
+# Run this from the checkout. A symlink to it placed on PATH will not work:
+# "$0" would then resolve to the symlink's directory rather than to the
+# repository, and the script would not be found.
+exec "$(dirname "$0")/scripts/collect_context.py" "$@"

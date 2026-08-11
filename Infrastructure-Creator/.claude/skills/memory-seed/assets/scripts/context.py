@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import sqlite3
+import stat as stat_module
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -17,7 +20,11 @@ from typing import Optional
 from brain_runtime import (
     BrainError,
     LIFECYCLES,
-    TASK_PHASES,
+    MESSAGE_BODY_LIMIT,
+    MESSAGE_TYPES,
+    TASK_PHASE_INPUTS,
+    TERMINAL_STATES,
+    append_message,
     atomic_json,
     auto_compact,
     auto_promote,
@@ -33,6 +40,8 @@ from brain_runtime import (
     get_task,
     load_config,
     mutation_lock,
+    read_messages,
+    reindex_bank,
     render_current_state,
     rollback_created_record,
     review_promotion,
@@ -41,13 +50,17 @@ from brain_runtime import (
     snapshot_record_state,
     update_record,
     update_task,
+    validate_actor,
     validate_repository,
 )
 from context_retrieval import (
     DocumentRow,
     RetrievalError,
+    STOPWORD_DOCUMENT_RATIO,
     SourceState,
+    index_fingerprints,
     informative_tokens,
+    token_document_frequencies,
     assert_skill_mirror_parity,
     cross_edition_drift,
     format_cross_edition_drift,
@@ -93,7 +106,9 @@ SOURCE_PATTERNS = (
     ("semantic", "codebase", "codebase/*.md"),
     ("semantic", "memory", "memory-bank/chunks/*.md"),
     ("semantic", "task", "tasks/**/*.md"),
-    ("semantic", "capability", "Task/Epics/**/*.md"),
+    # Task/ (client product specifications and design references) is
+    # deliberately not a retrieval source: its prose is foreign to this
+    # repository's own documentation and competed with it in BM25 ranking.
     ("episodic", "changelog", "CHANGELOG.md"),
 )
 DOCUMENT_LAYERS = ("procedural", "semantic", "episodic")
@@ -103,6 +118,10 @@ CAPSULE_LAYER_LIMITS = {
     "episodic": 1,
 }
 CAPSULE_QUERY_TOKEN_LIMIT = 32
+# How many prompt terms survive distillation into the retrieval query. Rarity
+# in the index decides which ones, so the cap bounds cost without deciding
+# relevance by position the way the old first-N-words hook extraction did.
+CAPSULE_PROMPT_TERM_LIMIT = 24
 CAPSULE_CHARACTER_LIMIT = 8000
 CAPSULE_WORKING_FILE_LIMIT = 8
 CAPSULE_WORKING_SOURCE_LIMIT = 4
@@ -359,8 +378,46 @@ def git_ignored_paths(repository: Path, paths: list[str]) -> set[bytes]:
     return set(result.stdout.split(b"\0")) - {b""}
 
 
+# One discovered source file: layer, kind, absolute path, repository-relative
+# path, and the (mtime_ns, size) stat pair every downstream consumer needs.
+SourceCandidate = tuple[str, str, Path, str, tuple[int, int]]
+
+
+def collect_source_candidates(repository: Path) -> list[SourceCandidate]:
+    """Walk SOURCE_PATTERNS once, statting each candidate exactly once.
+
+    Document discovery and the skill-tree fingerprint used to walk and stat
+    the same trees independently — hundreds of mirrored skill files statted
+    twice on every prompt. Everything a consumer needs from the filesystem is
+    captured here, so both derive from a single pass. One lstat per file also
+    answers regular-vs-symlink: a symlink is excluded as before, only without
+    the extra stat calls `is_file()`/`is_symlink()` would each spend.
+    """
+    candidates: list[SourceCandidate] = []
+    for layer, kind, pattern in SOURCE_PATTERNS:
+        for path in sorted(repository.glob(pattern)):
+            try:
+                status = os.lstat(path)
+            except OSError:
+                continue
+            if not stat_module.S_ISREG(status.st_mode):
+                continue
+            candidates.append(
+                (
+                    layer,
+                    kind,
+                    path,
+                    path.relative_to(repository).as_posix(),
+                    (status.st_mtime_ns, status.st_size),
+                )
+            )
+    return candidates
+
+
 def discover_documents(
-    repository: Path, reusable: Optional[SourceState] = None
+    repository: Path,
+    reusable: Optional[SourceState] = None,
+    candidates: Optional[list[SourceCandidate]] = None,
 ) -> tuple[list[DocumentRow], SourceState, SourceState]:
     """Return changed documents, the retained cache subset, and the new cache.
 
@@ -370,26 +427,24 @@ def discover_documents(
     secret scanning dominates a full pass. A modification that somehow reuses
     its predecessor's stat is still not served as truth — governed retrieval
     re-hashes every candidate and excludes the mismatch as stale.
+
+    ``candidates`` accepts an already-collected source walk so a caller that
+    also needs the stats elsewhere (the skill-tree fingerprint) pays for the
+    filesystem pass once.
     """
     documents: list[DocumentRow] = []
     retained: SourceState = {}
     state: SourceState = {}
     skill_keys: set[str] = set()
     claimed: set[str] = set()
-    candidates: list[tuple[str, str, Path, str]] = []
-    for layer, kind, pattern in SOURCE_PATTERNS:
-        for path in sorted(repository.glob(pattern)):
-            if not path.is_file() or path.is_symlink():
-                continue
-            candidates.append(
-                (layer, kind, path, path.relative_to(repository).as_posix())
-            )
+    if candidates is None:
+        candidates = collect_source_candidates(repository)
 
     cache = reusable or {}
     ignored_paths = git_ignored_paths(
-        repository, [relative_path for _, _, _, relative_path in candidates]
+        repository, [relative_path for _, _, _, relative_path, _ in candidates]
     )
-    for layer, kind, path, relative_path in candidates:
+    for layer, kind, path, relative_path, current in candidates:
         if os.fsencode(relative_path) in ignored_paths:
             continue
         if relative_path in claimed:
@@ -406,11 +461,6 @@ def discover_documents(
             # passes validation claims the key, so a later copy can never win
             # it and never needs to be read or scanned.
             continue
-        try:
-            status = path.stat()
-        except OSError:
-            continue
-        current = (status.st_mtime_ns, status.st_size)
         if cache.get(relative_path) == current:
             # Unchanged since the last successful index, so it already passed
             # secret and active-memory validation; keep the existing row.
@@ -454,11 +504,35 @@ def discover_documents(
 def index_repository(
     connection: sqlite3.Connection, repository: Path, *, incremental: bool = False
 ) -> dict[str, object]:
+    """Index the repository, reporting how long each phase took.
+
+    ``phase_seconds`` separates the filesystem walk (``stat``) from the
+    database rebuild (``index``): the per-prompt hook runs under a hard
+    budget, and a caller that only sees the total cannot tell which side is
+    approaching it.
+    """
+    scan_seconds = 0.0
+    phase_started = time.monotonic()
+    candidates = collect_source_candidates(repository)
+    # The candidate walk already statted every mirrored skill file, so the
+    # skill-tree fingerprint is derived from it instead of a second tree walk.
+    skill_stats = [
+        (relative.split("/", 1)[0], relative.split("/skills/", 1)[1], mtime_ns, size)
+        for _, kind, _, relative, (mtime_ns, size) in candidates
+        if kind == "skill"
+    ]
+    fingerprints = index_fingerprints(repository, skill_stats)
     if incremental:
-        reusable, fingerprints = reusable_source_state(connection, repository)
-        documents, retained, state = discover_documents(repository, reusable)
+        reusable, fingerprints = reusable_source_state(
+            connection, repository, fingerprints
+        )
+        documents, retained, state = discover_documents(
+            repository, reusable, candidates=candidates
+        )
+        scan_seconds += time.monotonic() - phase_started
+        index_started = time.monotonic()
         try:
-            return index_documents(
+            result = index_documents(
                 connection,
                 repository,
                 documents,
@@ -467,9 +541,26 @@ def index_repository(
                 fingerprints=fingerprints,
             )
         except RetrievalError:
-            pass  # The cache disagreed with the index; fall through and rebuild.
-    documents, _, state = discover_documents(repository)
-    return index_documents(connection, repository, documents, source_state=state)
+            # The cache disagreed with the index; fall through and rebuild.
+            phase_started = time.monotonic()
+        else:
+            result["phase_seconds"] = {
+                "stat": round(scan_seconds, 6),
+                "index": round(time.monotonic() - index_started, 6),
+            }
+            return result
+    documents, _, state = discover_documents(repository, candidates=candidates)
+    scan_seconds += time.monotonic() - phase_started
+    index_started = time.monotonic()
+    result = index_documents(
+        connection, repository, documents, source_state=state,
+        fingerprints=fingerprints,
+    )
+    result["phase_seconds"] = {
+        "stat": round(scan_seconds, 6),
+        "index": round(time.monotonic() - index_started, 6),
+    }
+    return result
 
 
 def fts_query(query: str) -> str:
@@ -599,6 +690,59 @@ def build_capsule_query(
     return " ".join(tokens)
 
 
+def distill_capsule_query(connection: sqlite3.Connection, prompt: str) -> str:
+    """Reduce a raw prompt to its most informative retrieval terms.
+
+    The read hook used to keep the first 24 words of the prompt, so a long
+    request whose actual subject arrives at the end retrieved on its preamble.
+    Instead the whole prompt is tokenized, terms the index has never seen or
+    that match most of the corpus are dropped — the same adaptive stop-word
+    rule retrieval itself applies — and the rarest terms win the slots. Rarity
+    in this repository's own index decides relevance, not position.
+
+    The fallback ladder mirrors ``informative_tokens``: rare terms first, any
+    indexed term next, and the prompt head as a last resort, so a prompt made
+    only of unknown words still produces the query it always did. Selected
+    terms keep their prompt order — FTS ignores order, a human reading the
+    manifest should not have to.
+    """
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for token in re.findall(r"\w+", prompt, flags=re.UNICODE):
+        folded = token.casefold()
+        if folded in seen:
+            continue
+        seen.add(folded)
+        tokens.append(token)
+    if not tokens:
+        # Empty and wordless prompts keep the canonical downstream error
+        # ("Search query must contain a word") instead of inventing one here.
+        return prompt
+    try:
+        total = connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+    except sqlite3.Error:
+        total = 0
+    if not total:
+        return " ".join(tokens[:CAPSULE_PROMPT_TERM_LIMIT])
+    frequencies = token_document_frequencies(connection, tokens)
+    ranked = [
+        (position, token, frequencies.get(token))
+        for position, token in enumerate(tokens)
+    ]
+    matched = [item for item in ranked if item[2]]
+    informative = [
+        item
+        for item in matched
+        if item[2] <= total * STOPWORD_DOCUMENT_RATIO  # type: ignore[operator]
+    ]
+    pool = informative or matched
+    if not pool:
+        return " ".join(tokens[:CAPSULE_PROMPT_TERM_LIMIT])
+    rarest = sorted(pool, key=lambda item: (item[2], item[0]))
+    kept = sorted(rarest[:CAPSULE_PROMPT_TERM_LIMIT])
+    return " ".join(token for _, token, _ in kept)
+
+
 def reject_capsule_privacy(
     label: str,
     prose: list[str],
@@ -613,6 +757,20 @@ def reject_capsule_privacy(
             f"{label} contains private or raw data; "
             "replace it with a sanitized summary"
         )
+
+
+def validate_direct_query_request(arguments: argparse.Namespace) -> None:
+    """Reject unsafe direct queries before opening or mutating local state."""
+    if arguments.command in {"context", "retrieve"}:
+        query = arguments.query
+    elif arguments.command == "refresh":
+        query = arguments.query
+    else:
+        return
+    if query is None:
+        return
+    reject_secrets("Task Capsule", [query])
+    reject_capsule_privacy("Task Capsule request", [query])
 
 
 def project_working_task(
@@ -833,6 +991,113 @@ def enforce_capsule_budget(capsule: dict[str, object]) -> dict[str, object]:
     return compacted
 
 
+def enforce_governed_capsule_contract(
+    capsule: dict[str, object],
+) -> dict[str, object]:
+    """Apply the shared 2/3/1 and 8,000-character contract to governed output."""
+    compacted = json.loads(serialize_capsule(capsule))
+    compacted["procedural"] = compacted.get("procedural", [])[
+        :CAPSULE_LAYER_LIMITS["procedural"]
+    ]
+    compacted["semantic"] = compacted.get("semantic", [])[
+        :CAPSULE_LAYER_LIMITS["semantic"]
+    ]
+    compacted["episodic"] = compacted.get("episodic", [])[
+        :CAPSULE_LAYER_LIMITS["episodic"]
+    ]
+    compacted["omitted"] = {
+        "procedural": max(
+            0,
+            len(capsule.get("procedural", []))
+            - CAPSULE_LAYER_LIMITS["procedural"],
+        ),
+        "semantic": max(
+            0,
+            len(capsule.get("semantic", [])) - CAPSULE_LAYER_LIMITS["semantic"],
+        ),
+        "episodic": max(
+            0,
+            len(capsule.get("episodic", [])) - CAPSULE_LAYER_LIMITS["episodic"],
+        ),
+    }
+
+    working = compacted.get("working")
+    if isinstance(working, dict):
+        working["next_steps"] = list(working.get("next_steps", []))[-1:]
+        working["files"] = list(working.get("files", []))[
+            :CAPSULE_WORKING_FILE_LIMIT
+        ]
+        working["sources"] = list(working.get("sources", []))[
+            :CAPSULE_WORKING_SOURCE_LIMIT
+        ]
+
+    def synchronize_views() -> None:
+        selected_paths = {
+            item["path"]
+            for layer in ("procedural", "semantic")
+            for item in compacted[layer]
+            if isinstance(item, dict) and isinstance(item.get("path"), str)
+        }
+        compacted["selected"] = [
+            item
+            for item in compacted.get("selected", [])
+            if isinstance(item, dict) and item.get("path") in selected_paths
+        ]
+        categories = compacted.get("categories")
+        if isinstance(categories, dict):
+            for category, items in categories.items():
+                categories[category] = [
+                    item
+                    for item in items
+                    if isinstance(item, dict) and item.get("path") in selected_paths
+                ]
+
+    # Snippets are discovery aids. Bounding each rendered copy leaves the full
+    # source and its hash in the auditable manifest while avoiding duplicated
+    # aliases consuming the entire capsule.
+    for collection in (
+        compacted["procedural"],
+        compacted["semantic"],
+        compacted["episodic"],
+        compacted.get("selected", []),
+        *(
+            compacted.get("categories", {}).values()
+            if isinstance(compacted.get("categories"), dict)
+            else []
+        ),
+    ):
+        for item in collection:
+            if isinstance(item, dict) and isinstance(item.get("snippet"), str):
+                item["snippet"] = item["snippet"][:320]
+    synchronize_views()
+
+    while capsule_character_count(compacted) > CAPSULE_CHARACTER_LIMIT:
+        if compacted.get("last_turn"):
+            compacted["last_turn"] = None
+            continue
+        dropped = False
+        for layer in ("episodic", "semantic", "procedural"):
+            if compacted[layer]:
+                compacted[layer].pop()
+                compacted["omitted"][layer] += 1
+                synchronize_views()
+                dropped = True
+                break
+        if dropped:
+            continue
+        if isinstance(working, dict) and working.get("progress"):
+            excess = capsule_character_count(compacted) - CAPSULE_CHARACTER_LIMIT
+            keep = max(0, len(working["progress"]) - excess - 1)
+            if keep:
+                working["progress"] = f"…{working['progress'][-keep:]}"
+                continue
+        raise ContextError(
+            "mandatory Task Capsule content exceeds "
+            f"{CAPSULE_CHARACTER_LIMIT} characters"
+        )
+    return compacted
+
+
 def validate_task_id(task_id: str) -> str:
     normalized = task_id.strip()
     if TASK_ID_PATTERN.fullmatch(normalized) is None:
@@ -864,6 +1129,47 @@ def reject_secrets(record_type: str, values: list[str]) -> None:
     for label, pattern in SECRET_PATTERNS.items():
         if pattern.search(candidate):
             raise ContextError(f"possible {label} detected; {record_type} not stored")
+
+
+# The mandatory sections of a delegation capsule - the payload an orchestrating
+# flow hands each spawned agent. Matching is a case-insensitive substring so
+# headings, bold list items, and plain labels all satisfy the contract.
+CAPSULE_SECTIONS = (
+    "objective",
+    "output format",
+    "tool and source guidance",
+    "boundaries",
+    "decisions and assumptions",
+)
+
+
+def validate_capsule_text(content: str) -> list[str]:
+    """Return every problem that makes a delegation capsule under-specified."""
+    if not content.strip():
+        return ["capsule is empty"]
+    problems: list[str] = []
+    if len(content) > MESSAGE_BODY_LIMIT:
+        problems.append(
+            f"capsule exceeds {MESSAGE_BODY_LIMIT} characters ({len(content)})"
+        )
+    lowered = content.lower()
+    for section in CAPSULE_SECTIONS:
+        if section not in lowered:
+            problems.append(f"missing mandatory section: {section}")
+    try:
+        reject_secrets("delegation capsule", [content])
+    except ContextError as error:
+        problems.append(str(error))
+    return problems
+
+
+def read_capsule_source(value: str) -> str:
+    if value == "-":
+        return sys.stdin.read()
+    path = Path(value)
+    if not path.is_file():
+        raise ContextError(f"Capsule file not found: {value}")
+    return path.read_text(encoding="utf-8")
 
 
 def insert_episode(
@@ -1389,6 +1695,12 @@ def summarize_last_turn(report: dict[str, object]) -> Optional[str]:
         return value if isinstance(value, int) and value > 0 else 0
 
     parts: list[str] = []
+    # A turn that failed outright leads everything else: its report carries
+    # the error instead of counters, and without this line a broken flush
+    # loop (for example an unresolvable binding) would stay invisible forever.
+    error = report.get("error")
+    if isinstance(error, str) and error:
+        parts.append(f"turn failed: {error}")
     for label, key in (
         ("promotion blocked", "promotion_blocked"),
         ("promotion failed", "promotion_failed"),
@@ -1407,9 +1719,12 @@ def summarize_last_turn(report: dict[str, object]) -> Optional[str]:
             + ", ".join(shown)
             + (f" (+{more} more)" if more else "")
         )
-    closed = strings("closed_on_merge")
-    if closed:
-        parts.append("closed on merge: " + ", ".join(closed))
+    completion_candidates = strings("completion_candidates")
+    if completion_candidates:
+        parts.append(
+            "completion candidate (explicit complete required): "
+            + ", ".join(completion_candidates)
+        )
     promoted = entries("promoted")
     if promoted:
         parts.append(f"promoted: {len(promoted)} record(s)")
@@ -1427,6 +1742,11 @@ def summarize_last_turn(report: dict[str, object]) -> Optional[str]:
             flushed += f" ({count('files_omitted')} beyond the per-flush limit)"
         if report.get("provisioned"):
             flushed += ", task auto-provisioned"
+        if report.get("rebound"):
+            # A second machine reconnected to the existing governed record
+            # instead of failing on a duplicate; worth one clause because it
+            # confirms the work landed in the task Git already knows.
+            flushed += ", binding restored to the existing task"
         parts.append(flushed)
     if not parts:
         return None
@@ -1479,9 +1799,6 @@ def assemble_capsule(
             warnings=warnings,
         )
         result["last_turn"] = last_turn
-        # Character budget applies only here: retrieve() below runs its own
-        # token budget (TARGET_BUDGET/HARD_BUDGET) and its payload legitimately
-        # exceeds CAPSULE_CHARACTER_LIMIT.
         return enforce_capsule_budget(result)
     if task_id is None:
         raise ContextError("Governed retrieval requires --task-id")
@@ -1490,30 +1807,104 @@ def assemble_capsule(
     reject_secrets("Task Capsule", [query])
     reject_capsule_privacy("Task Capsule request", [query])
     binding = governed_binding(connection, task_id)
+    request_query = build_capsule_query(query, None)
     result = retrieve(
         connection,
         repository,
-        query,
+        request_query,
         binding["task_uuid"],
         limit=limit,
         manifest_scope="local" if ephemeral else "governed",
     )
     result["episodic"] = (
-        search_documents(connection, query, limit, "episodic", relevant_only=True)
-        + search_episodes(connection, query, limit)
-    )[:limit]
+        search_documents(
+            connection,
+            request_query,
+            CAPSULE_LAYER_LIMITS["episodic"],
+            "episodic",
+            relevant_only=True,
+        )
+        + search_episodes(
+            connection, request_query, CAPSULE_LAYER_LIMITS["episodic"]
+        )
+    )[:CAPSULE_LAYER_LIMITS["episodic"]]
     # The print tail dereferences result["warnings"]; retrieve() has no such key.
     result["warnings"] = warnings
     result["last_turn"] = last_turn
-    return result
+    return enforce_governed_capsule_contract(result)
+
+
+def assemble_hook_context(
+    connection: sqlite3.Connection,
+    repository: Path,
+    *,
+    mode: str,
+    task_id: str,
+) -> Optional[dict[str, object]]:
+    """Return a governed capsule or a sanitized pre-provision warming capsule."""
+    task_id = validate_task_id(task_id)
+    reject_capsule_privacy("Task Capsule request", [], [task_id])
+    if mode == "lightweight":
+        if find_working_task(connection, task_id) is not None:
+            return assemble_capsule(
+                connection,
+                repository,
+                mode=mode,
+                query=task_id,
+                task_id=task_id,
+                limit=3,
+                ephemeral=True,
+            )
+    else:
+        try:
+            governed_binding(connection, task_id)
+        except ContextError:
+            pass
+        else:
+            return assemble_capsule(
+                connection,
+                repository,
+                mode=mode,
+                query=task_id,
+                task_id=task_id,
+                limit=3,
+                ephemeral=True,
+            )
+
+    files, excluded = changed_paths(repository)
+    if not files:
+        return None
+    pending = len(pending_turn_deltas(connection, task_id))
+    return {
+        "kind": "warming",
+        "task_id": task_id,
+        "working": None,
+        "procedural": [],
+        "semantic": [],
+        "episodic": [],
+        "changed_files": len(files),
+        "excluded_files": len(excluded),
+        "pending_turns": pending,
+        "warnings": [
+            "Governed task not provisioned yet; authoritative persistence "
+            f"starts at the {DEFAULT_TURN_FLUSH_AFTER}-turn boundary."
+        ],
+    }
 
 
 def print_capsule(capsule: dict[str, object]) -> None:
+    # The first line is the render marker: the Cursor hooks accept a capsule
+    # only if it starts with "working:", which is how a broken render is kept
+    # from replacing a good rule now that they no longer parse JSON.
     working = capsule["working"]
     if working is None:
         print("working: unavailable")
     else:
         print(f"working: {working['task_id']} — {working['goal']}")
+    if capsule.get("kind") == "warming":
+        # Pre-provision progress is the one field the serialized form carried
+        # that the warning text does not: how far along the boundary is.
+        print(f"warming: {capsule['pending_turns']} turn(s) pending")
     for warning in capsule["warnings"]:
         print(f"warning: {warning}")
     if capsule.get("last_turn"):
@@ -1574,6 +1965,7 @@ def apply_governed_update(
     owner: str,
     phase: Optional[str] = None,
     auto_checkpoint: Optional[str] = None,
+    allow_phase_regression: bool = False,
 ) -> dict[str, object]:
     """Update the authoritative Brain task and its local compatibility binding."""
     with mutation_lock(repository):
@@ -1593,6 +1985,7 @@ def apply_governed_update(
                 actor=owner,
                 phase=phase,
                 auto_checkpoint=auto_checkpoint,
+                allow_phase_regression=allow_phase_regression,
             )
             refresh_governed_binding(
                 connection,
@@ -1673,35 +2066,111 @@ def create_governed_task(
     return task
 
 
+def rebind_governed_task(
+    connection: sqlite3.Connection,
+    repository: Path,
+    task_id: str,
+    record_id: Optional[str] = None,
+) -> dict[str, object]:
+    """Restore the machine-local binding for an existing governed task.
+
+    The Brain record is authoritative and travels through Git; the binding
+    that resolves compatibility commands lives in the ignored ``context.db``
+    and does not. A second machine or a fresh clone therefore holds the task
+    but cannot address it, and recreating it is rejected as a duplicate.
+    Rebinding is a pointer repair, not a mutation: the record is never
+    touched, so no revision is consumed and no owner check applies.
+
+    ``record_id`` is an optional explicit target; the record's own
+    ``external_id`` must equal ``task_id`` either way, so the command can only
+    reconnect a task to its own identity, never repoint one task at another.
+    An intact identical binding is reported rather than recreated; a binding
+    that points elsewhere is refused, because silently overwriting local state
+    an operator may be relying on is exactly the failure this repairs.
+    """
+    task_id = validate_task_id(task_id)
+    with mutation_lock(repository):
+        try:
+            record = get_record(repository, record_id or task_id)
+        except BrainError as error:
+            raise ContextError(str(error)) from error
+        if record.get("type") != "task":
+            raise ContextError(
+                f"Rebind requires a task record; {record['id']} is a "
+                f"{record.get('type')} record"
+            )
+        if record.get("external_id") != task_id:
+            raise ContextError(
+                f"Rebind target mismatch: record {record['id']} belongs to "
+                f"task id {record.get('external_id')!r}, not {task_id!r}"
+            )
+        if record.get("status") in TERMINAL_STATES:
+            raise ContextError(
+                f"Cannot rebind {task_id}: task {record['id']} is "
+                f"{record['status']}; start new work under a new task id"
+            )
+        existing = connection.execute(
+            "SELECT task_uuid FROM task_bindings WHERE external_id = ?",
+            (task_id,),
+        ).fetchone()
+        if existing is not None:
+            if existing["task_uuid"] == record["id"]:
+                return {**governed_task_view(record), "already_bound": True}
+            raise ContextError(
+                f"Working task {task_id} is already bound to "
+                f"{existing['task_uuid']}; refusing to repoint an existing "
+                "binding"
+            )
+        bind_governed_task(
+            connection, task_id, str(record["id"]), int(record["revision"])
+        )
+    return {**governed_task_view(record), "already_bound": False}
+
+
 def ensure_working_task(
     connection: sqlite3.Connection,
     repository: Path,
     task_id: str,
     mode: str,
     owner: str,
-) -> bool:
-    """Create the working task the first time a turn has something to record.
+) -> dict[str, object]:
+    """Create or reconnect the working task when a turn has something to record.
 
     Automated continuity is worthless if it buffers into a task nobody created.
     Provisioning happens at flush time rather than at session start, so merely
     visiting a branch does not mint a record; only accumulated real work does.
 
-    Returns whether a task was created.
+    Returns ``{"provisioned": bool, "rebound": Optional[str]}``: whether a task
+    was created, and — when the governed record already existed but the local
+    binding did not (a second machine or fresh clone) — the UUID of the record
+    the binding was restored to. Without that restoration the flush would fail
+    on a duplicate-record error every turn, invisibly, and the second machine's
+    work would never reach the authoritative task.
     """
     goal = derive_goal(task_id)
     reject_secrets("working task", [task_id, goal])
     reject_capsule_privacy("Working task", [goal], [task_id])
     if mode == "lightweight":
         if find_working_task(connection, task_id) is not None:
-            return False
+            return {"provisioned": False, "rebound": None}
         start_working_task(connection, task_id, goal, [], [])
-        return True
+        return {"provisioned": True, "rebound": None}
     try:
         governed_binding(connection, task_id)
-        return False
+        return {"provisioned": False, "rebound": None}
     except ContextError:
+        pass
+    try:
+        task = rebind_governed_task(connection, repository, task_id)
+    except ContextError as error:
+        # Only a genuinely absent record means "first flush on this branch";
+        # every other rebind refusal (terminal task, ambiguous identifier)
+        # would also fail creation and is clearer stated as what it is.
+        if "not found" not in str(error):
+            raise
         create_governed_task(connection, repository, task_id, goal, [], [], owner)
-        return True
+        return {"provisioned": True, "rebound": None}
+    return {"provisioned": False, "rebound": str(task["task_uuid"])}
 
 
 def complete_governed_task(
@@ -1907,13 +2376,14 @@ def resolve_task_reference(
     return None
 
 
-def close_merged_tasks(
-    connection: sqlite3.Connection, repository: Path, owner: str
+def merge_completion_candidates(
+    connection: sqlite3.Connection, repository: Path
 ) -> list[dict[str, object]]:
-    """Complete governed tasks whose branch has landed in the default branch.
+    """Report active tasks whose branch has landed in the default branch.
 
-    The scan covers every active task rather than the current one: a merge is
-    observed after the branch is left, not while it is being worked on.
+    Merge evidence is advisory only. Completion remains an explicit,
+    revision-checked user action after verification; this probe never mutates
+    a task, handoff, episode, or binding.
 
     A branch counts as merged only when it is an ancestor of the target *and*
     the target has moved ahead of it, which is what a merge does. Ancestry
@@ -1931,9 +2401,6 @@ def close_merged_tasks(
     listing, one reachability listing, one target probe — instead of up to
     four processes per active task.
     """
-    config = load_config(repository)
-    if not config.get("automatic_completion"):
-        return []
     candidates = [
         record
         for _, record, _ in iter_records(repository)
@@ -1958,7 +2425,7 @@ def close_merged_tasks(
         return []
     references = repository_references(repository)
     reachable = merged_reference_names(repository, target)
-    closed: list[dict[str, object]] = []
+    completion_candidates: list[dict[str, object]] = []
     for record in candidates:
         branch = str(record["external_id"])
         # A branch is its own ancestor, so the default branch would close
@@ -1972,57 +2439,16 @@ def close_merged_tasks(
         # moved ahead: the never-diverged and fast-forward cases.
         if references[reference] == target_commit:
             continue
-        # State the fact that was actually verified — the merge — rather than
-        # a claim about the work being correct, which nothing here checked.
-        # The last recorded state combines the operator's progress with the
-        # automatic checkpoint: an auto-provisioned task may only ever have
-        # been checkpointed, and that trail is still worth closing with.
-        last_state = render_current_state(
-            str(record["progress"]), record.get("auto_checkpoint")
-        )
-        outcome = (
-            f"Branch {branch} merged into {target}. "
-            f"Last recorded progress: {last_state or 'none recorded'}"
-        )
-        verification = [f"{branch} is an ancestor of {target}"]
-        try:
-            binding = governed_binding(connection, branch)
-        except ContextError:
-            # Bound on another machine: close the shared record without
-            # inventing a local episode for work this machine did not do.
-            with mutation_lock(repository):
-                completed = close_task(
-                    repository,
-                    str(record["id"]),
-                    outcome,
-                    verification,
-                    expected_revision=record["revision"],
-                    actor=owner,
-                )
-            closed.append(
-                {"task_id": branch, "task_uuid": completed["id"], "episode_id": None}
-            )
-            continue
-        result = complete_governed_task(
-            connection,
-            repository,
-            binding,
-            outcome=outcome,
-            summary=None,
-            files=[],
-            verification=verification,
-            sources=[],
-            expected_revision=AUTO_REVISION,
-            owner=owner,
-        )
-        closed.append(
+        completion_candidates.append(
             {
                 "task_id": branch,
-                "task_uuid": result["task_uuid"],
-                "episode_id": result["episode_id"],
+                "task_uuid": record["id"],
+                "revision": record["revision"],
+                "target": target,
+                "evidence": "branch is an ancestor of the merge target",
             }
         )
-    return closed
+    return completion_candidates
 
 
 def changed_paths(repository: Path) -> tuple[list[str], list[str]]:
@@ -2130,7 +2556,7 @@ def flush_turn_deltas(
     if omitted:
         checkpoint += f" {omitted} path(s) beyond the per-flush limit are not listed."
     files = files[:file_limit]
-    provisioned = ensure_working_task(connection, repository, task_id, mode, owner)
+    ensured = ensure_working_task(connection, repository, task_id, mode, owner)
     if mode == "lightweight":
         result = update_working_task(
             connection, task_id, None, [], files, [],
@@ -2154,7 +2580,161 @@ def flush_turn_deltas(
             "DELETE FROM turn_deltas WHERE id = ?",
             [(row["id"],) for row in pending],
         )
-    return {**result, "files_omitted": omitted, "provisioned": provisioned}
+    return {**result, "files_omitted": omitted, **ensured}
+
+
+def run_turn(
+    connection: sqlite3.Connection,
+    repository: Path,
+    arguments: argparse.Namespace,
+    mode: str,
+    owner: str,
+) -> int:
+    """The `turn` command body: buffer, flush on the boundary, then report."""
+    if arguments.flush_after < 1:
+        raise ContextError("--flush-after must be a positive integer")
+    if arguments.max_files < 1:
+        raise ContextError("--max-files must be a positive integer")
+    task_id = validate_task_id(arguments.task_id)
+    files, path_excluded = changed_paths(repository)
+    delta_id = (
+        append_turn_delta(connection, task_id, files) if files else None
+    )
+    buffered = len(pending_turn_deltas(connection, task_id))
+    flushed = None
+    if buffered and (arguments.flush or buffered >= arguments.flush_after):
+        flushed = flush_turn_deltas(
+            connection,
+            repository,
+            task_id,
+            mode,
+            owner,
+            file_limit=arguments.max_files,
+        )
+    # Maintenance runs only on the boundary where a flush actually
+    # happened. The Stop hook drives this command under a hard
+    # timeout on every turn, so an ordinary turn must stay at one
+    # git status probe plus a local buffer write — a SIGTERM there
+    # interrupts nothing mid-mutation.
+    completion_candidates: list[dict[str, object]] = []
+    promotion = {
+        "enabled": False, "promoted": [], "failed": [],
+        "blocked": [], "skipped": 0,
+    }
+    compaction = {"enabled": False, "moved": 0, "pending": 0, "error": None}
+    if flushed is not None and mode != "lightweight":
+        # Merge evidence is advisory. It may suggest an explicit completion,
+        # but this unattended path never changes task lifecycle state.
+        try:
+            completion_candidates = merge_completion_candidates(
+                connection, repository
+            )
+        except (BrainError, OSError) as error:
+            raise ContextError(
+                f"Merge completion-candidate detection failed: {error}"
+            ) from error
+        # Durable memory is promoted on the same boundary as the
+        # working-memory flush, so the whole pipeline runs
+        # unattended.
+        try:
+            promotion = auto_promote(repository, owner=owner)
+        except (BrainError, OSError) as error:
+            raise ContextError(
+                f"Automatic promotion failed: {error}"
+            ) from error
+        # Archiving runs last: a record must be promoted before it
+        # is moved, and compaction batches so Git history is not
+        # churned one terminal record at a time.
+        compaction = auto_compact(repository, owner=owner)
+    result = {
+        "task_id": task_id,
+        "delta_id": delta_id,
+        "files": len(files),
+        "excluded": path_excluded,
+        "pending": 0 if flushed else buffered,
+        "flushed": flushed is not None,
+        "revision": flushed.get("revision") if flushed else None,
+        "files_omitted": flushed.get("files_omitted") if flushed else 0,
+        "provisioned": bool(flushed and flushed.get("provisioned")),
+        # The UUID of the pre-existing record the flush restored the local
+        # binding to — the second-machine signal. None on an ordinary flush.
+        "rebound": flushed.get("rebound") if flushed else None,
+        "completion_candidates": completion_candidates,
+        "promoted": promotion["promoted"],
+        "promotion_failed": promotion["failed"],
+        "promotion_blocked": promotion["blocked"],
+        "promotion_skipped": promotion["skipped"],
+        "archived": compaction["moved"],
+        "archivable_pending": compaction["pending"],
+    }
+    # The Stop hook silences this command's stdout, so the same
+    # outcome is written to ignored local state for the next
+    # refresh to fold into its Task Capsule.
+    write_last_turn_report(
+        repository,
+        {
+            "schema_version": 1,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "task_id": task_id,
+            "flushed": result["flushed"],
+            "files": result["files"],
+            "files_omitted": result["files_omitted"],
+            "pending": result["pending"],
+            "provisioned": result["provisioned"],
+            "rebound": result["rebound"],
+            "completion_candidates": [
+                str(item["task_id"]) for item in completion_candidates
+            ],
+            "promoted": promotion["promoted"],
+            "promotion_failed": promotion["failed"],
+            "promotion_blocked": promotion["blocked"],
+            "promotion_skipped": promotion["skipped"],
+            "excluded_paths": path_excluded,
+            "archived": compaction["moved"],
+            "compaction_errors": (
+                [compaction["error"]] if compaction["error"] else []
+            ),
+        },
+    )
+    if arguments.json:
+        print(json.dumps(result, ensure_ascii=False))
+    elif flushed:
+        print(
+            f"Turn buffer flushed to {task_id}: "
+            f"{result['files']} file(s) in this turn."
+        )
+    else:
+        print(
+            f"Turn buffered for {task_id}: {result['pending']} pending, "
+            f"{result['files']} file(s) in this turn."
+        )
+    if not arguments.json:
+        if result["rebound"]:
+            print(f"binding restored to existing task: {result['rebound']}")
+        for item in completion_candidates:
+            print(
+                "completion candidate (explicit complete required): "
+                f"{item['task_id']} at revision {item['revision']}"
+            )
+        for item in promotion["promoted"]:
+            print(
+                f"promoted without review: {item['type']} -> "
+                f"{item['memory_id']}"
+            )
+        for item in promotion["failed"]:
+            print(f"promotion failed: {item['reason']}")
+        for item in promotion["blocked"]:
+            print(f"promotion blocked: {item['reason']}")
+        if compaction["moved"]:
+            print(f"archived: {compaction['moved']} terminal record(s)")
+        if compaction["error"]:
+            print(f"compaction failed: {compaction['error']}")
+        if promotion["skipped"]:
+            print(
+                f"promotion deferred: {promotion['skipped']} more "
+                "eligible record(s) this run"
+            )
+    return 0
 
 
 EXPORT_SCHEMA_VERSION = 1
@@ -2402,6 +2982,13 @@ def build_parser() -> argparse.ArgumentParser:
     retrieve_command.add_argument("--limit", type=int, default=3)
     retrieve_command.add_argument("--json", action="store_true")
 
+    hook_context = commands.add_parser(
+        "hook-context",
+        help="render a governed or pre-provision warming capsule for host hooks",
+    )
+    hook_context.add_argument("--task-id", required=True)
+    hook_context.add_argument("--json", action="store_true")
+
     for retrieval_parser in (context, retrieve_command):
         retrieval_parser.add_argument(
             "--ephemeral",
@@ -2419,7 +3006,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     refresh.add_argument(
         "--query",
-        help="also assemble a Task Capsule for this request (requires --task-id)",
+        help=(
+            "also assemble a Task Capsule for this request (requires "
+            "--task-id); accepts the raw prompt, which is distilled to its "
+            "most informative terms against the index"
+        ),
     )
     refresh.add_argument("--task-id")
     refresh.add_argument("--limit", type=int, default=3)
@@ -2456,6 +3047,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     turn.add_argument("--json", action="store_true")
 
+    rebind = commands.add_parser(
+        "rebind",
+        help="restore the local binding for an existing governed task",
+    )
+    rebind.add_argument("--task-id", required=True)
+    rebind.add_argument(
+        "--record",
+        help="task record UUID to bind; defaults to resolving --task-id",
+    )
+    rebind.add_argument("--json", action="store_true")
+
     record = commands.add_parser("record", help="store a local completed-task episode")
     record.add_argument("--summary", required=True)
     record.add_argument("--outcome", required=True)
@@ -2477,8 +3079,27 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--next-step", action="append", default=[])
     update.add_argument("--file", action="append", default=[])
     update.add_argument("--source", action="append", default=[])
-    update.add_argument("--phase", choices=TASK_PHASES)
+    update.add_argument(
+        "--phase",
+        choices=TASK_PHASE_INPUTS,
+        help=(
+            "delivery phase; aliases implementing/execution/review are stored "
+            "as implementation/implementation/verification"
+        ),
+    )
     update.add_argument("--revision", type=revision_argument)
+    update.add_argument(
+        "--actor",
+        help=(
+            "roster agent recording this update; the slug prefixes the "
+            "progress line for attribution"
+        ),
+    )
+    update.add_argument(
+        "--allow-phase-regression",
+        action="store_true",
+        help="permit moving the task phase backward deliberately",
+    )
     update.add_argument("--json", action="store_true")
 
     get = commands.add_parser("get", help="show an active task")
@@ -2498,6 +3119,77 @@ def build_parser() -> argparse.ArgumentParser:
     complete.add_argument("--source", action="append", default=[])
     complete.add_argument("--revision", type=revision_argument)
     complete.add_argument("--json", action="store_true")
+
+    msg_send = commands.add_parser(
+        "msg-send", help="append a message to the task's agent channel"
+    )
+    msg_send.add_argument("--task-id", required=True)
+    msg_send.add_argument(
+        "--from",
+        dest="from_actor",
+        required=True,
+        help="sending agent slug, or 'main' for the orchestrating conversation",
+    )
+    msg_send.add_argument(
+        "--to",
+        dest="to_actor",
+        required=True,
+        help="receiving agent slug, 'main', or '*' to broadcast",
+    )
+    msg_send.add_argument(
+        "--type", choices=("finding", "question", "handoff"), required=True
+    )
+    msg_send.add_argument("--body")
+    msg_send.add_argument("--body-file")
+    msg_send.add_argument("--ref", action="append", default=[])
+    msg_send.add_argument("--json", action="store_true")
+
+    msg_read = commands.add_parser(
+        "msg-read", help="read the task's agent channel"
+    )
+    msg_read.add_argument("--task-id", required=True)
+    msg_read.add_argument(
+        "--for",
+        dest="for_actor",
+        help="return only messages addressed to this actor (or broadcast)",
+    )
+    msg_read.add_argument(
+        "--since",
+        type=int,
+        default=0,
+        help="return only messages with seq greater than this",
+    )
+    msg_read.add_argument("--type", choices=MESSAGE_TYPES)
+    msg_read.add_argument("--json", action="store_true")
+
+    msg_dispatch = commands.add_parser(
+        "msg-dispatch",
+        help="record an orchestration dispatch or completion event",
+    )
+    msg_dispatch.add_argument("--task-id", required=True)
+    msg_dispatch.add_argument("--agent", required=True)
+    msg_dispatch.add_argument(
+        "--event", choices=("spawn", "complete"), required=True
+    )
+    msg_dispatch.add_argument("--note")
+    msg_dispatch.add_argument(
+        "--capsule-file",
+        help=(
+            "delegation capsule to fingerprint; a spawn refuses a capsule "
+            "that fails validation"
+        ),
+    )
+    msg_dispatch.add_argument("--json", action="store_true")
+
+    capsule = commands.add_parser(
+        "capsule",
+        help="validate a delegation capsule against the mandatory sections",
+    )
+    capsule.add_argument("--validate", action="store_true", required=True)
+    capsule.add_argument(
+        "--file", required=True, help="capsule path, or '-' for stdin"
+    )
+    capsule.add_argument("--json", action="store_true")
 
     create_brain = commands.add_parser(
         "brain-create", help="create a governed dynamic Brain record"
@@ -2530,7 +3222,14 @@ def build_parser() -> argparse.ArgumentParser:
     update_brain.add_argument("--file", action="append", default=[])
     update_brain.add_argument("--source", action="append", default=[])
     update_brain.add_argument("--conflict", action="append", default=[])
-    update_brain.add_argument("--phase", choices=TASK_PHASES)
+    update_brain.add_argument(
+        "--phase",
+        choices=TASK_PHASE_INPUTS,
+        help=(
+            "task delivery phase; compatibility aliases are normalized before "
+            "persistence"
+        ),
+    )
     update_brain.add_argument("--transition")
     update_brain.add_argument(
         "--authority",
@@ -2577,6 +3276,13 @@ def build_parser() -> argparse.ArgumentParser:
         "compact", help="archive terminal and superseded Brain records"
     )
     compact_command.add_argument("--json", action="store_true")
+
+    reindex_bank_command = commands.add_parser(
+        "reindex-bank",
+        help="regenerate memory-bank/INDEX.md deterministically from chunk "
+        "frontmatter (the legacy .memory-counter is ignored)",
+    )
+    reindex_bank_command.add_argument("--json", action="store_true")
 
     propose = commands.add_parser("promote-propose", help="propose durable-memory promotion")
     propose.add_argument("--source-id", action="append", required=True)
@@ -2627,6 +3333,11 @@ def main() -> int:
             raise ContextError(
                 f"Repository root must be an existing directory: {repository}"
             )
+        # Direct query commands have a strict CLI contract: reject the original
+        # value before connect() can create a database or an index/manifest can
+        # be refreshed. Host hooks remain fail-safe by swallowing this nonzero
+        # result outside the CLI.
+        validate_direct_query_request(arguments)
         database = (arguments.db or default_database(repository)).resolve()
         mode = configured_mode(repository, arguments.mode)
         owner = arguments.owner or os.environ.get("PROJECT_BRAIN_OWNER", "local")
@@ -2720,17 +3431,23 @@ def main() -> int:
                         "working task",
                         ([progress] if progress else []) + next_steps + files + sources,
                     )
+                    progress = progress.strip() if progress else None
+                    if arguments.actor:
+                        actor_slug = validate_actor(arguments.actor)
+                        if progress:
+                            progress = f"[{actor_slug}] {progress}"
                     result = apply_governed_update(
                         connection,
                         repository,
                         binding,
                         expected_revision=arguments.revision,
-                        progress=progress.strip() if progress else None,
+                        progress=progress,
                         next_steps=next_steps,
                         files=files,
                         sources=sources,
                         owner=owner,
                         phase=arguments.phase,
+                        allow_phase_regression=arguments.allow_phase_regression,
                     )
                 if arguments.json:
                     print(json.dumps(result, ensure_ascii=False))
@@ -2797,6 +3514,11 @@ def main() -> int:
                     )
                     result = {"episode_id": episode_id}
                 else:
+                    if arguments.revision in (None, AUTO_REVISION):
+                        raise ContextError(
+                            "Governed completion requires the current numeric "
+                            "--revision"
+                        )
                     result = complete_governed_task(
                         connection,
                         repository,
@@ -2817,6 +3539,135 @@ def main() -> int:
                 else:
                     print(f"Working task completed as episode: {episode_id}.")
                 return 0
+
+            if arguments.command in {"msg-send", "msg-read", "msg-dispatch"}:
+                if mode == "lightweight":
+                    raise ContextError(
+                        "Agent messages require governed mode"
+                    )
+                # The audit trail outlives the local binding: a completed or
+                # archived task has no binding, but its journal must stay
+                # readable (and refuse writes with the honest terminal error),
+                # so fall back to resolving by the Brain identifier itself.
+                try:
+                    binding = governed_binding(connection, arguments.task_id)
+                    task_reference = str(binding["task_uuid"])
+                except ContextError:
+                    task_reference = validate_task_id(arguments.task_id)
+                if arguments.command == "msg-send":
+                    body = arguments.body
+                    if arguments.body_file:
+                        if body is not None:
+                            raise ContextError(
+                                "Pass --body or --body-file, not both"
+                            )
+                        body_path = Path(arguments.body_file)
+                        if not body_path.is_file():
+                            raise ContextError(
+                                f"Message body file not found: {arguments.body_file}"
+                            )
+                        body = body_path.read_text(encoding="utf-8")
+                    if body is None or not body.strip():
+                        raise ContextError(
+                            "Message body must not be empty (--body or --body-file)"
+                        )
+                    refs = validate_paths("Message ref", arguments.ref)
+                    reject_secrets("message", [body, *refs])
+                    message = append_message(
+                        repository,
+                        task_reference,
+                        from_actor=arguments.from_actor,
+                        to_actor=arguments.to_actor,
+                        message_type=arguments.type,
+                        body=body.strip(),
+                        refs=refs,
+                    )
+                    if arguments.json:
+                        print(json.dumps(message, ensure_ascii=False))
+                    else:
+                        print(
+                            f"Message {message['seq']} sent: "
+                            f"{message['from_actor']} -> {message['to_actor']} "
+                            f"[{message['type']}]."
+                        )
+                    return 0
+                if arguments.command == "msg-read":
+                    messages = read_messages(
+                        repository,
+                        task_reference,
+                        for_actor=arguments.for_actor,
+                        since_seq=arguments.since,
+                        message_type=arguments.type,
+                    )
+                    if arguments.json:
+                        print(json.dumps(messages, ensure_ascii=False))
+                    else:
+                        if not messages:
+                            print("No messages.")
+                        for message in messages:
+                            summary = " ".join(message["body"].split())
+                            if len(summary) > 100:
+                                summary = summary[:97] + "..."
+                            print(
+                                f"{message['seq']:>4} {message['created_at']} "
+                                f"[{message['type']}] {message['from_actor']} -> "
+                                f"{message['to_actor']}: {summary}"
+                            )
+                    return 0
+                agent = validate_actor(arguments.agent)
+                capsule_digest = None
+                if arguments.capsule_file:
+                    content = read_capsule_source(arguments.capsule_file)
+                    problems = validate_capsule_text(content)
+                    if problems and arguments.event == "spawn":
+                        raise ContextError(
+                            "Delegation capsule is under-specified: "
+                            + "; ".join(problems)
+                        )
+                    capsule_digest = hashlib.sha256(
+                        content.encode("utf-8")
+                    ).hexdigest()
+                note = arguments.note or f"{arguments.event}: {agent}"
+                reject_secrets("dispatch note", [note])
+                if arguments.event == "spawn":
+                    from_actor, to_actor, message_type = "main", agent, "dispatch"
+                else:
+                    from_actor, to_actor, message_type = agent, "main", "completion"
+                message = append_message(
+                    repository,
+                    task_reference,
+                    from_actor=from_actor,
+                    to_actor=to_actor,
+                    message_type=message_type,
+                    body=note.strip(),
+                    capsule_digest=capsule_digest,
+                )
+                if arguments.json:
+                    print(json.dumps(message, ensure_ascii=False))
+                else:
+                    print(
+                        f"Dispatch {message['seq']} recorded: "
+                        f"{arguments.event} {agent}."
+                    )
+                return 0
+
+            if arguments.command == "capsule":
+                content = read_capsule_source(arguments.file)
+                problems = validate_capsule_text(content)
+                result = {
+                    "valid": not problems,
+                    "length": len(content),
+                    "problems": problems,
+                }
+                if arguments.json:
+                    print(json.dumps(result, ensure_ascii=False))
+                elif problems:
+                    print("Delegation capsule is under-specified:")
+                    for problem in problems:
+                        print(f"  - {problem}")
+                else:
+                    print(f"Delegation capsule is valid ({len(content)} characters).")
+                return 0 if not problems else 1
 
             if arguments.command == "brain-create":
                 external_id = validate_task_id(arguments.external_id)
@@ -3001,6 +3852,24 @@ def main() -> int:
                     print_capsule(result)
                 return 0
 
+            if arguments.command == "hook-context":
+                result = assemble_hook_context(
+                    connection,
+                    repository,
+                    mode=mode,
+                    task_id=arguments.task_id,
+                )
+                if result is None:
+                    # A valid current branch with no meaningful change has no
+                    # context. Cursor uses this distinct code to remove a
+                    # foreign branch's stale rule; real failures remain code 1.
+                    return 3
+                if arguments.json:
+                    print(serialize_capsule(result))
+                else:
+                    print_capsule(result)
+                return 0
+
             if arguments.command == "refresh":
                 if arguments.limit < 1:
                     raise ContextError("--limit must be a positive integer")
@@ -3010,13 +3879,22 @@ def main() -> int:
                     connection, repository
                 )
                 capsule = None
+                retrieval_seconds = 0.0
                 if arguments.query is not None:
+                    retrieval_started = time.monotonic()
                     try:
+                        # --query accepts the raw prompt: the hook passes it
+                        # as-is and distillation to informative terms happens
+                        # here. The raw text is screened before any of it can
+                        # reach a query or a manifest.
+                        reject_secrets("Task Capsule", [arguments.query])
                         capsule = assemble_capsule(
                             connection,
                             repository,
                             mode=mode,
-                            query=arguments.query,
+                            query=distill_capsule_query(
+                                connection, arguments.query
+                            ),
                             task_id=arguments.task_id,
                             limit=arguments.limit,
                             ephemeral=arguments.ephemeral,
@@ -3026,7 +3904,14 @@ def main() -> int:
                         # A capsule needs an active task; the layer refresh
                         # above stands on its own and is already done.
                         warnings.append(f"Capsule unavailable: {error}")
+                    retrieval_seconds = time.monotonic() - retrieval_started
                 codebase = codebase_map_status(connection, repository)
+                phases = {
+                    "stat": 0.0,
+                    "index": 0.0,
+                    **dict(index_result.get("phase_seconds") or {}),
+                    "retrieval": round(retrieval_seconds, 6),
+                }
                 result = {
                     "mode": mode,
                     **layers,
@@ -3040,6 +3925,9 @@ def main() -> int:
                     "reused": index_result.get("reused", 0),
                     "counts": index_result.get("layers", {}),
                     "parity_drift": index_result.get("parity_drift", []),
+                    # Wall-clock seconds per phase, so an operator can see
+                    # which side of the work approaches the hook budget.
+                    "phases": phases,
                     "warnings": warnings,
                     "capsule": capsule,
                 }
@@ -3078,138 +3966,45 @@ def main() -> int:
                 ) else 1
 
             if arguments.command == "turn":
-                if arguments.flush_after < 1:
-                    raise ContextError("--flush-after must be a positive integer")
-                if arguments.max_files < 1:
-                    raise ContextError("--max-files must be a positive integer")
-                task_id = validate_task_id(arguments.task_id)
-                files, path_excluded = changed_paths(repository)
-                delta_id = (
-                    append_turn_delta(connection, task_id, files) if files else None
-                )
-                buffered = len(pending_turn_deltas(connection, task_id))
-                flushed = None
-                if buffered and (arguments.flush or buffered >= arguments.flush_after):
-                    flushed = flush_turn_deltas(
-                        connection,
+                # A failed turn writes a report too: the Stop hook discards
+                # stderr along with stdout, so an error that only printed
+                # would leave the operator believing the flush landed. The
+                # raw --task-id argv is deliberately absent from the failure
+                # report — validation may have rejected it as secret-bearing,
+                # and the report must not preserve what the run refused.
+                try:
+                    return run_turn(connection, repository, arguments, mode, owner)
+                except (ContextError, BrainError, OSError, sqlite3.Error) as error:
+                    write_last_turn_report(
                         repository,
-                        task_id,
-                        mode,
-                        owner,
-                        file_limit=arguments.max_files,
+                        {
+                            "schema_version": 1,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "flushed": False,
+                            "error": str(error),
+                        },
                     )
-                # Maintenance runs only on the boundary where a flush actually
-                # happened. The Stop hook drives this command under a hard
-                # timeout on every turn, so an ordinary turn must stay at one
-                # git status probe plus a local buffer write — a SIGTERM there
-                # interrupts nothing mid-mutation.
-                closed: list[dict[str, object]] = []
-                promotion = {
-                    "enabled": False, "promoted": [], "failed": [],
-                    "blocked": [], "skipped": 0,
-                }
-                compaction = {"enabled": False, "moved": 0, "pending": 0, "error": None}
-                if flushed is not None and mode != "lightweight":
-                    # A merge is observed after the branch is left, so this
-                    # scans every active task rather than only the current one.
-                    try:
-                        closed = close_merged_tasks(connection, repository, owner)
-                    except (BrainError, OSError) as error:
-                        raise ContextError(
-                            f"Automatic completion failed: {error}"
-                        ) from error
-                    # Durable memory is promoted on the same boundary as the
-                    # working-memory flush, so the whole pipeline runs
-                    # unattended.
-                    try:
-                        promotion = auto_promote(repository, owner=owner)
-                    except (BrainError, OSError) as error:
-                        raise ContextError(
-                            f"Automatic promotion failed: {error}"
-                        ) from error
-                    # Archiving runs last: a record must be promoted before it
-                    # is moved, and compaction batches so Git history is not
-                    # churned one terminal record at a time.
-                    compaction = auto_compact(repository, owner=owner)
-                result = {
-                    "task_id": task_id,
-                    "delta_id": delta_id,
-                    "files": len(files),
-                    "excluded": path_excluded,
-                    "pending": 0 if flushed else buffered,
-                    "flushed": flushed is not None,
-                    "revision": flushed.get("revision") if flushed else None,
-                    "files_omitted": flushed.get("files_omitted") if flushed else 0,
-                    "provisioned": bool(flushed and flushed.get("provisioned")),
-                    "closed": closed,
-                    "promoted": promotion["promoted"],
-                    "promotion_failed": promotion["failed"],
-                    "promotion_blocked": promotion["blocked"],
-                    "promotion_skipped": promotion["skipped"],
-                    "archived": compaction["moved"],
-                    "archivable_pending": compaction["pending"],
-                }
-                # The Stop hook silences this command's stdout, so the same
-                # outcome is written to ignored local state for the next
-                # refresh to fold into its Task Capsule.
-                write_last_turn_report(
-                    repository,
-                    {
-                        "schema_version": 1,
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "task_id": task_id,
-                        "flushed": result["flushed"],
-                        "files": result["files"],
-                        "files_omitted": result["files_omitted"],
-                        "pending": result["pending"],
-                        "provisioned": result["provisioned"],
-                        "closed_on_merge": [
-                            item["task_id"] for item in closed
-                        ],
-                        "promoted": promotion["promoted"],
-                        "promotion_failed": promotion["failed"],
-                        "promotion_blocked": promotion["blocked"],
-                        "promotion_skipped": promotion["skipped"],
-                        "excluded_paths": path_excluded,
-                        "archived": compaction["moved"],
-                        "compaction_errors": (
-                            [compaction["error"]] if compaction["error"] else []
-                        ),
-                    },
+                    raise
+
+            if arguments.command == "rebind":
+                if mode == "lightweight":
+                    raise ContextError(
+                        "rebind requires governed mode: lightweight tasks are "
+                        "machine-local and have no Brain record to rebind"
+                    )
+                result = rebind_governed_task(
+                    connection, repository, arguments.task_id, arguments.record
                 )
                 if arguments.json:
                     print(json.dumps(result, ensure_ascii=False))
-                elif flushed:
-                    print(
-                        f"Turn buffer flushed to {task_id}: "
-                        f"{result['files']} file(s) in this turn."
-                    )
                 else:
-                    print(
-                        f"Turn buffered for {task_id}: {result['pending']} pending, "
-                        f"{result['files']} file(s) in this turn."
+                    verb = (
+                        "already bound" if result["already_bound"] else "rebound"
                     )
-                if not arguments.json:
-                    for item in closed:
-                        print(f"task completed on merge: {item['task_id']}")
-                    for item in promotion["promoted"]:
-                        print(
-                            f"promoted without review: {item['type']} -> "
-                            f"{item['memory_id']}"
-                        )
-                    for item in promotion["failed"]:
-                        print(f"promotion failed: {item['reason']}")
-                    for item in promotion["blocked"]:
-                        print(f"promotion blocked: {item['reason']}")
-                    if compaction["moved"]:
-                        print(f"archived: {compaction['moved']} terminal record(s)")
-                    if compaction["error"]:
-                        print(f"compaction failed: {compaction['error']}")
-                    if promotion["skipped"]:
-                        print(
-                            f"promotion deferred: {promotion['skipped']} more "
-                            "eligible record(s) this run"
-                        )
+                    print(
+                        f"Working task {verb}: {result['task_id']} -> "
+                        f"{result['task_uuid']} (revision {result['revision']})."
+                    )
                 return 0
 
             if arguments.command == "validate":
@@ -3292,6 +4087,18 @@ def main() -> int:
                     print(json.dumps(result))
                 else:
                     print(f"Project Brain compacted: {result['moved']} record(s) archived.")
+                return 0
+
+            if arguments.command == "reindex-bank":
+                result = reindex_bank(repository)
+                if arguments.json:
+                    print(json.dumps(result))
+                else:
+                    state = "regenerated" if result["changed"] else "already up to date"
+                    print(
+                        f"Memory bank index {state}: "
+                        f"{result['chunks']} chunk row(s)."
+                    )
                 return 0
 
             if arguments.command == "export":

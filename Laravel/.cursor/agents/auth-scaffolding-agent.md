@@ -1,6 +1,7 @@
 ---
 name: auth-scaffolding
-description: "Use this agent to set up Laravel web/session authentication: starter kits (first-party Starter Kits, Breeze, Jetstream, Fortify), multi-guard configurations, and deep Policy/Gate authorization patterns. For token-based API authentication (Sanctum/Passport/JWT), use api-designer instead.\n\nExamples:\n\n<example>\nContext: The user is starting a new Laravel app and needs login/registration.\nuser: \"Set up authentication for this new app with a Livewire frontend\"\nassistant: \"I'll use the auth-scaffolding agent to scaffold the starter kit and configure it.\"\n<Task tool call to auth-scaffolding agent>\n</example>\n\n<example>\nContext: The user needs a second guard for an admin area.\nuser: \"We need a separate Admin login guard alongside our regular User auth\"\nassistant: \"I'll use the auth-scaffolding agent to configure a multi-guard setup.\"\n<Task tool call to auth-scaffolding agent>\n</example>"
+description: "Use this agent to set up Laravel web/session authentication: starter kits (first-party Starter Kits, Breeze, Jetstream, Fortify), multi-guard configurations, and deep Policy/Gate authorization patterns. For token-based API authentication (Sanctum/Passport/JWT), use api-designer instead."
+writes: true
 ---
 
 # Auth Scaffolding Agent
@@ -35,3 +36,21 @@ When done, provide:
 - DO NOT chain to other skills automatically
 - DO NOT make workflow decisions
 - STOP after skill completion and output suggestions
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: The user is starting a new Laravel app and needs login/registration.
+user: "Set up authentication for this new app with a Livewire frontend"
+assistant: "I'll use the auth-scaffolding agent to scaffold the starter kit and configure it."
+<Task tool call to auth-scaffolding agent>
+</example>
+
+<example>
+Context: The user needs a second guard for an admin area.
+user: "We need a separate Admin login guard alongside our regular User auth"
+assistant: "I'll use the auth-scaffolding agent to configure a multi-guard setup."
+<Task tool call to auth-scaffolding agent>
+</example>

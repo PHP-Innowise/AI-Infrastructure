@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -19,8 +20,11 @@ from typing import Optional
 from brain_runtime import (
     BrainError,
     LIFECYCLES,
+    MESSAGE_BODY_LIMIT,
+    MESSAGE_TYPES,
     TASK_PHASE_INPUTS,
     TERMINAL_STATES,
+    append_message,
     atomic_json,
     auto_compact,
     auto_promote,
@@ -36,6 +40,7 @@ from brain_runtime import (
     get_task,
     load_config,
     mutation_lock,
+    read_messages,
     reindex_bank,
     render_current_state,
     rollback_created_record,
@@ -45,6 +50,7 @@ from brain_runtime import (
     snapshot_record_state,
     update_record,
     update_task,
+    validate_actor,
     validate_repository,
 )
 from context_retrieval import (
@@ -1125,6 +1131,47 @@ def reject_secrets(record_type: str, values: list[str]) -> None:
             raise ContextError(f"possible {label} detected; {record_type} not stored")
 
 
+# The mandatory sections of a delegation capsule - the payload an orchestrating
+# flow hands each spawned agent. Matching is a case-insensitive substring so
+# headings, bold list items, and plain labels all satisfy the contract.
+CAPSULE_SECTIONS = (
+    "objective",
+    "output format",
+    "tool and source guidance",
+    "boundaries",
+    "decisions and assumptions",
+)
+
+
+def validate_capsule_text(content: str) -> list[str]:
+    """Return every problem that makes a delegation capsule under-specified."""
+    if not content.strip():
+        return ["capsule is empty"]
+    problems: list[str] = []
+    if len(content) > MESSAGE_BODY_LIMIT:
+        problems.append(
+            f"capsule exceeds {MESSAGE_BODY_LIMIT} characters ({len(content)})"
+        )
+    lowered = content.lower()
+    for section in CAPSULE_SECTIONS:
+        if section not in lowered:
+            problems.append(f"missing mandatory section: {section}")
+    try:
+        reject_secrets("delegation capsule", [content])
+    except ContextError as error:
+        problems.append(str(error))
+    return problems
+
+
+def read_capsule_source(value: str) -> str:
+    if value == "-":
+        return sys.stdin.read()
+    path = Path(value)
+    if not path.is_file():
+        raise ContextError(f"Capsule file not found: {value}")
+    return path.read_text(encoding="utf-8")
+
+
 def insert_episode(
     connection: sqlite3.Connection,
     summary: str,
@@ -1846,11 +1893,18 @@ def assemble_hook_context(
 
 
 def print_capsule(capsule: dict[str, object]) -> None:
+    # The first line is the render marker: the Cursor hooks accept a capsule
+    # only if it starts with "working:", which is how a broken render is kept
+    # from replacing a good rule now that they no longer parse JSON.
     working = capsule["working"]
     if working is None:
         print("working: unavailable")
     else:
         print(f"working: {working['task_id']} — {working['goal']}")
+    if capsule.get("kind") == "warming":
+        # Pre-provision progress is the one field the serialized form carried
+        # that the warning text does not: how far along the boundary is.
+        print(f"warming: {capsule['pending_turns']} turn(s) pending")
     for warning in capsule["warnings"]:
         print(f"warning: {warning}")
     if capsule.get("last_turn"):
@@ -1911,6 +1965,7 @@ def apply_governed_update(
     owner: str,
     phase: Optional[str] = None,
     auto_checkpoint: Optional[str] = None,
+    allow_phase_regression: bool = False,
 ) -> dict[str, object]:
     """Update the authoritative Brain task and its local compatibility binding."""
     with mutation_lock(repository):
@@ -1930,6 +1985,7 @@ def apply_governed_update(
                 actor=owner,
                 phase=phase,
                 auto_checkpoint=auto_checkpoint,
+                allow_phase_regression=allow_phase_regression,
             )
             refresh_governed_binding(
                 connection,
@@ -3032,6 +3088,18 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     update.add_argument("--revision", type=revision_argument)
+    update.add_argument(
+        "--actor",
+        help=(
+            "roster agent recording this update; the slug prefixes the "
+            "progress line for attribution"
+        ),
+    )
+    update.add_argument(
+        "--allow-phase-regression",
+        action="store_true",
+        help="permit moving the task phase backward deliberately",
+    )
     update.add_argument("--json", action="store_true")
 
     get = commands.add_parser("get", help="show an active task")
@@ -3051,6 +3119,77 @@ def build_parser() -> argparse.ArgumentParser:
     complete.add_argument("--source", action="append", default=[])
     complete.add_argument("--revision", type=revision_argument)
     complete.add_argument("--json", action="store_true")
+
+    msg_send = commands.add_parser(
+        "msg-send", help="append a message to the task's agent channel"
+    )
+    msg_send.add_argument("--task-id", required=True)
+    msg_send.add_argument(
+        "--from",
+        dest="from_actor",
+        required=True,
+        help="sending agent slug, or 'main' for the orchestrating conversation",
+    )
+    msg_send.add_argument(
+        "--to",
+        dest="to_actor",
+        required=True,
+        help="receiving agent slug, 'main', or '*' to broadcast",
+    )
+    msg_send.add_argument(
+        "--type", choices=("finding", "question", "handoff"), required=True
+    )
+    msg_send.add_argument("--body")
+    msg_send.add_argument("--body-file")
+    msg_send.add_argument("--ref", action="append", default=[])
+    msg_send.add_argument("--json", action="store_true")
+
+    msg_read = commands.add_parser(
+        "msg-read", help="read the task's agent channel"
+    )
+    msg_read.add_argument("--task-id", required=True)
+    msg_read.add_argument(
+        "--for",
+        dest="for_actor",
+        help="return only messages addressed to this actor (or broadcast)",
+    )
+    msg_read.add_argument(
+        "--since",
+        type=int,
+        default=0,
+        help="return only messages with seq greater than this",
+    )
+    msg_read.add_argument("--type", choices=MESSAGE_TYPES)
+    msg_read.add_argument("--json", action="store_true")
+
+    msg_dispatch = commands.add_parser(
+        "msg-dispatch",
+        help="record an orchestration dispatch or completion event",
+    )
+    msg_dispatch.add_argument("--task-id", required=True)
+    msg_dispatch.add_argument("--agent", required=True)
+    msg_dispatch.add_argument(
+        "--event", choices=("spawn", "complete"), required=True
+    )
+    msg_dispatch.add_argument("--note")
+    msg_dispatch.add_argument(
+        "--capsule-file",
+        help=(
+            "delegation capsule to fingerprint; a spawn refuses a capsule "
+            "that fails validation"
+        ),
+    )
+    msg_dispatch.add_argument("--json", action="store_true")
+
+    capsule = commands.add_parser(
+        "capsule",
+        help="validate a delegation capsule against the mandatory sections",
+    )
+    capsule.add_argument("--validate", action="store_true", required=True)
+    capsule.add_argument(
+        "--file", required=True, help="capsule path, or '-' for stdin"
+    )
+    capsule.add_argument("--json", action="store_true")
 
     create_brain = commands.add_parser(
         "brain-create", help="create a governed dynamic Brain record"
@@ -3292,17 +3431,23 @@ def main() -> int:
                         "working task",
                         ([progress] if progress else []) + next_steps + files + sources,
                     )
+                    progress = progress.strip() if progress else None
+                    if arguments.actor:
+                        actor_slug = validate_actor(arguments.actor)
+                        if progress:
+                            progress = f"[{actor_slug}] {progress}"
                     result = apply_governed_update(
                         connection,
                         repository,
                         binding,
                         expected_revision=arguments.revision,
-                        progress=progress.strip() if progress else None,
+                        progress=progress,
                         next_steps=next_steps,
                         files=files,
                         sources=sources,
                         owner=owner,
                         phase=arguments.phase,
+                        allow_phase_regression=arguments.allow_phase_regression,
                     )
                 if arguments.json:
                     print(json.dumps(result, ensure_ascii=False))
@@ -3394,6 +3539,135 @@ def main() -> int:
                 else:
                     print(f"Working task completed as episode: {episode_id}.")
                 return 0
+
+            if arguments.command in {"msg-send", "msg-read", "msg-dispatch"}:
+                if mode == "lightweight":
+                    raise ContextError(
+                        "Agent messages require governed mode"
+                    )
+                # The audit trail outlives the local binding: a completed or
+                # archived task has no binding, but its journal must stay
+                # readable (and refuse writes with the honest terminal error),
+                # so fall back to resolving by the Brain identifier itself.
+                try:
+                    binding = governed_binding(connection, arguments.task_id)
+                    task_reference = str(binding["task_uuid"])
+                except ContextError:
+                    task_reference = validate_task_id(arguments.task_id)
+                if arguments.command == "msg-send":
+                    body = arguments.body
+                    if arguments.body_file:
+                        if body is not None:
+                            raise ContextError(
+                                "Pass --body or --body-file, not both"
+                            )
+                        body_path = Path(arguments.body_file)
+                        if not body_path.is_file():
+                            raise ContextError(
+                                f"Message body file not found: {arguments.body_file}"
+                            )
+                        body = body_path.read_text(encoding="utf-8")
+                    if body is None or not body.strip():
+                        raise ContextError(
+                            "Message body must not be empty (--body or --body-file)"
+                        )
+                    refs = validate_paths("Message ref", arguments.ref)
+                    reject_secrets("message", [body, *refs])
+                    message = append_message(
+                        repository,
+                        task_reference,
+                        from_actor=arguments.from_actor,
+                        to_actor=arguments.to_actor,
+                        message_type=arguments.type,
+                        body=body.strip(),
+                        refs=refs,
+                    )
+                    if arguments.json:
+                        print(json.dumps(message, ensure_ascii=False))
+                    else:
+                        print(
+                            f"Message {message['seq']} sent: "
+                            f"{message['from_actor']} -> {message['to_actor']} "
+                            f"[{message['type']}]."
+                        )
+                    return 0
+                if arguments.command == "msg-read":
+                    messages = read_messages(
+                        repository,
+                        task_reference,
+                        for_actor=arguments.for_actor,
+                        since_seq=arguments.since,
+                        message_type=arguments.type,
+                    )
+                    if arguments.json:
+                        print(json.dumps(messages, ensure_ascii=False))
+                    else:
+                        if not messages:
+                            print("No messages.")
+                        for message in messages:
+                            summary = " ".join(message["body"].split())
+                            if len(summary) > 100:
+                                summary = summary[:97] + "..."
+                            print(
+                                f"{message['seq']:>4} {message['created_at']} "
+                                f"[{message['type']}] {message['from_actor']} -> "
+                                f"{message['to_actor']}: {summary}"
+                            )
+                    return 0
+                agent = validate_actor(arguments.agent)
+                capsule_digest = None
+                if arguments.capsule_file:
+                    content = read_capsule_source(arguments.capsule_file)
+                    problems = validate_capsule_text(content)
+                    if problems and arguments.event == "spawn":
+                        raise ContextError(
+                            "Delegation capsule is under-specified: "
+                            + "; ".join(problems)
+                        )
+                    capsule_digest = hashlib.sha256(
+                        content.encode("utf-8")
+                    ).hexdigest()
+                note = arguments.note or f"{arguments.event}: {agent}"
+                reject_secrets("dispatch note", [note])
+                if arguments.event == "spawn":
+                    from_actor, to_actor, message_type = "main", agent, "dispatch"
+                else:
+                    from_actor, to_actor, message_type = agent, "main", "completion"
+                message = append_message(
+                    repository,
+                    task_reference,
+                    from_actor=from_actor,
+                    to_actor=to_actor,
+                    message_type=message_type,
+                    body=note.strip(),
+                    capsule_digest=capsule_digest,
+                )
+                if arguments.json:
+                    print(json.dumps(message, ensure_ascii=False))
+                else:
+                    print(
+                        f"Dispatch {message['seq']} recorded: "
+                        f"{arguments.event} {agent}."
+                    )
+                return 0
+
+            if arguments.command == "capsule":
+                content = read_capsule_source(arguments.file)
+                problems = validate_capsule_text(content)
+                result = {
+                    "valid": not problems,
+                    "length": len(content),
+                    "problems": problems,
+                }
+                if arguments.json:
+                    print(json.dumps(result, ensure_ascii=False))
+                elif problems:
+                    print("Delegation capsule is under-specified:")
+                    for problem in problems:
+                        print(f"  - {problem}")
+                else:
+                    print(f"Delegation capsule is valid ({len(content)} characters).")
+                return 0 if not problems else 1
 
             if arguments.command == "brain-create":
                 external_id = validate_task_id(arguments.external_id)

@@ -1,6 +1,6 @@
 ---
 name: codebase-mapper
-description: "Use this agent to map an existing Laravel codebase into `codebase/` documents that later requests read instead of the source.\n\nExamples:\n\n<example>\nContext: The user joins an unfamiliar project.\nuser: \"Help me get oriented in this codebase\"\nassistant: \"I'll use the codebase-mapper agent to map the project.\"\n<Task tool call to codebase-mapper agent>\n</example>\n\n<example>\nContext: Retrieval reported the map is behind the code.\nuser: \"The codebase map is 40 commits stale\"\nassistant: \"I'll use the codebase-mapper agent to regenerate it.\"\n<Task tool call to codebase-mapper agent>\n</example>"
+description: "Use this agent to map an existing Laravel codebase into `codebase/` documents that later requests read instead of the source."
 ---
 
 # Codebase Mapper Agent
@@ -37,3 +37,21 @@ which areas were deliberately not covered]
 - DO NOT chain to other skills automatically
 - DO NOT edit application code
 - STOP after skill completion and output suggestions
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: The user joins an unfamiliar project.
+user: "Help me get oriented in this codebase"
+assistant: "I'll use the codebase-mapper agent to map the project."
+<Task tool call to codebase-mapper agent>
+</example>
+
+<example>
+Context: Retrieval reported the map is behind the code.
+user: "The codebase map is 40 commits stale"
+assistant: "I'll use the codebase-mapper agent to regenerate it."
+<Task tool call to codebase-mapper agent>
+</example>

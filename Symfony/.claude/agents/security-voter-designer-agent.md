@@ -4,6 +4,7 @@ description: "Use this agent to design Symfony voters, access-control rules, fir
 model: sonnet
 invokes: security-voter-designer
 phase: planning
+writes: true
 ---
 
 # Security Voter Designer Agent

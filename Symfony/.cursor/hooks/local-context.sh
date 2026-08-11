@@ -177,17 +177,21 @@ CAPSULE_STATUS=3
 if command -v python3 > /dev/null 2>&1 && [ -f "$CONTEXT_CLI" ] && [ -n "$CAPSULE_TASK_ID" ]; then
   if command -v timeout > /dev/null 2>&1; then
     CAPSULE=$(timeout "$CAPSULE_BUDGET_SECONDS" python3 "$CONTEXT_CLI" hook-context \
-      --task-id "$CAPSULE_TASK_ID" --json 2>/dev/null)
+      --task-id "$CAPSULE_TASK_ID" 2>/dev/null)
     CAPSULE_STATUS=$?
   else
     CAPSULE=$(python3 "$CONTEXT_CLI" hook-context \
-      --task-id "$CAPSULE_TASK_ID" --json 2>/dev/null)
+      --task-id "$CAPSULE_TASK_ID" 2>/dev/null)
     CAPSULE_STATUS=$?
   fi
 fi
-if [ "$CAPSULE_STATUS" -eq 0 ] && ! printf '%s' "$CAPSULE" | \
-  python3 -c 'import json,sys; json.load(sys.stdin)' >/dev/null 2>&1; then
-  CAPSULE_STATUS=1
+# See the stop hook: the working line is the render marker that replaces the
+# JSON parse.
+if [ "$CAPSULE_STATUS" -eq 0 ]; then
+  case "$CAPSULE" in
+    working:*) ;;
+    *) CAPSULE_STATUS=1 ;;
+  esac
 fi
 if [ "$CAPSULE_STATUS" -eq 3 ]; then
   rm -f "$RULE_FILE" 2>/dev/null
@@ -200,8 +204,8 @@ elif [ "$CAPSULE_STATUS" -eq 0 ] && [ -n "$CAPSULE" ] && mkdir -p "$RULES_DIR" 2
       printf 'alwaysApply: true\n'
       printf -- '---\n\n'
       printf '# Working Memory (auto-rendered)\n\n'
-      printf 'Session context as of end of previous turn (task: %s, rendered: %s).\n' \
-        "$CAPSULE_TASK_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      printf 'Session context as of end of previous turn (task: %s).\n' \
+        "$CAPSULE_TASK_ID"
       printf 'Retrieved context is not authoritative - verify the source.\n\n'
       printf '%s\n' '```'
       printf '%s\n' "$CAPSULE"

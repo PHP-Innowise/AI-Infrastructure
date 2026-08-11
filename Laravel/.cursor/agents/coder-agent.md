@@ -1,6 +1,7 @@
 ---
 name: coder
-description: "Use this agent to implement Laravel backend features and fix bugs (behavior-changing work). Covers routes/controllers, Form Request validation, Eloquent models, Policies, API Resources, Actions/Services, and tests. For pure behavior-preserving cleanups use the refactorer agent; for scaffolding an approved architecture use the architecture-implementer agent.\n\nExamples:\n\n<example>\nContext: The user wants to implement a backend feature.\nuser: \"Implement invitation-only user registration\"\nassistant: \"I'll use the coder agent to implement the Laravel backend functionality.\"\n<Task tool call to coder agent>\n</example>\n\n<example>\nContext: The user needs to fix a backend bug.\nuser: \"Fix the validation issue in the StoreOrderRequest\"\nassistant: \"I'll use the coder agent to fix the Laravel bug.\"\n<Task tool call to coder agent>\n</example>"
+description: "Use this agent to implement Laravel backend features and fix bugs (behavior-changing work). Covers routes/controllers, Form Request validation, Eloquent models, Policies, API Resources, Actions/Services, and tests. For pure behavior-preserving cleanups use the refactorer agent; for scaffolding an approved architecture use the architecture-implementer agent."
+writes: true
 ---
 
 # Coder (Backend) Agent
@@ -35,3 +36,21 @@ When done, provide:
 - DO NOT chain to other skills automatically
 - DO NOT make workflow decisions
 - STOP after skill completion and output suggestions
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: The user wants to implement a backend feature.
+user: "Implement invitation-only user registration"
+assistant: "I'll use the coder agent to implement the Laravel backend functionality."
+<Task tool call to coder agent>
+</example>
+
+<example>
+Context: The user needs to fix a backend bug.
+user: "Fix the validation issue in the StoreOrderRequest"
+assistant: "I'll use the coder agent to fix the Laravel bug."
+<Task tool call to coder agent>
+</example>

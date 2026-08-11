@@ -22,6 +22,18 @@ These hooks are registered in `.cursor/hooks.json` (schema `version: 1`). Each i
 **Input key:** `.command` (Cursor supplies the full command string).
 **Return:** `0` = safe, `2` = block.
 
+### subagentStart: Subagent Gate
+**Script:** `subagent-gate.sh`
+**Purpose:** Allows only subagents defined in `.cursor/agents/` (frontmatter `name:`); Cursor's built-in subagents (explore, bash/shell, browser, general-purpose) are denied. Cursor has no setting that disables its built-ins, so this hook is the enforcement point; `.cursor/rules/subagent-policy.mdc` is the steering layer on top.
+**Contract:** JSON on stdout - `{"permission": "allow"}` or `{"permission": "deny", "user_message": "..."}` - always exit `0`; registered with `failClosed: true`.
+**Serialization:** agents marked `writes: true` in their frontmatter run one at a time - the gate takes `/tmp/cursor-write-agent-lock-<repo-key>` (TTL 30 min, override with `SUBAGENT_WRITE_LOCK_TTL_MINUTES`), released by the completion observer or by expiry.
+**Caveat:** before Cursor 3.4 the payload reported every subagent as `general-purpose`, which would deny project agents too; on such versions remove this entry from `hooks.json` and rely on the rule.
+
+### subagentStop: Subagent Dispatch Observer
+**Script:** `subagent-dispatch.sh`
+**Purpose:** Records each subagent completion in the task's agent channel (`msg-dispatch --event complete`; uses `subagent_type` and `status` - the documented `summary` field is unreliable in current Cursor builds) and releases the write-agent lock the gate took for a `writes: true` agent. Degrades to a no-op without python3 or the context runtime.
+**Return:** Always exit 0, no JSON output (observation only)
+
 ### afterFileEdit: File Naming Validator
 **Script:** `file-naming-validator.sh`
 **Purpose:** Flags `.md` files in `tasks/` and `specs/` that do not follow the skill-prefix naming convention.
@@ -44,6 +56,8 @@ These hooks are registered in `.cursor/hooks.json` (schema `version: 1`). Each i
 | `PreToolUse` matcher `Bash` | `beforeShellExecution` |
 | `PreToolUse` matcher `Write\|Edit` | `afterFileEdit` (post-edit; warns rather than blocks pre-write) |
 | `PostToolUse` matcher `Edit` | `afterFileEdit` |
+| `PreToolUse` matcher `Agent\|Task` | `subagentStart` |
+| `SubagentStop` | `subagentStop` |
 | `Notification` | No direct equivalent (closest: `permission: "ask"` on `beforeShellExecution`) |
 
 Notes:

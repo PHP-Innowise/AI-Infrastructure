@@ -1,6 +1,6 @@
 ---
 name: agent-forge
-description: "Use this agent to generate one agent wrapper per skill that skill-forge produced, into the selected edition(s) that carry an agent layer (Claude with full frontmatter, Cursor with reduced frontmatter), skipping Codex. It authors strictly from the skill-forge log so each generated skill gets exactly one single-purpose agent that invokes it and stops. Runs exactly one skill and stops.\n\nExamples:\n\n<example>\nContext: skill-forge has produced its log and the user wants each skill wrapped as an agent.\nuser: \"forge the agents for the target\"\nassistant: \"I'll use the agent-forge agent to write one agent wrapper per generated skill into the agent-carrying editions.\"\n<Task tool call to agent-forge agent>\n</example>\n\n<example>\nContext: The user wants the target's skills exposed as single-purpose agents.\nuser: \"Wrap the target's skills as agents\"\nassistant: \"I'll use the agent-forge agent to generate the per-skill agent files from the skill-forge log.\"\n<Task tool call to agent-forge agent>\n</example>"
+description: "Use this agent to generate one agent wrapper per skill that skill-forge produced, into the selected edition(s) that carry an agent layer (Claude with full frontmatter, Cursor with reduced frontmatter), skipping Codex. It authors strictly from the skill-forge log so each generated skill gets exactly one single-purpose agent that invokes it and stops. Runs exactly one skill and stops."
 ---
 
 # Agent Forge Agent
@@ -31,3 +31,21 @@ When done, provide:
 - MUST write agents only into selected editions among Claude and Cursor, and never into Codex.
 - MUST NOT include any secret or credential value.
 - Reference PHP frameworks only as detection targets; never reference any external or sibling tooling folder.
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: skill-forge has produced its log and the user wants each skill wrapped as an agent.
+user: "forge the agents for the target"
+assistant: "I'll use the agent-forge agent to write one agent wrapper per generated skill into the agent-carrying editions."
+<Task tool call to agent-forge agent>
+</example>
+
+<example>
+Context: The user wants the target's skills exposed as single-purpose agents.
+user: "Wrap the target's skills as agents"
+assistant: "I'll use the agent-forge agent to generate the per-skill agent files from the skill-forge log."
+<Task tool call to agent-forge agent>
+</example>

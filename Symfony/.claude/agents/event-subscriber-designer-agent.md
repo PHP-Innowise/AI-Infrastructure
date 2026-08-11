@@ -4,6 +4,7 @@ description: "Use this agent to design Symfony event subscribers/listeners as th
 model: sonnet
 invokes: event-subscriber-designer
 phase: planning
+writes: true
 ---
 
 # Event Subscriber Designer Agent

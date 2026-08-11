@@ -163,6 +163,76 @@ The generator has no `memory-bank/` or `project-brain/` of its own - it seeds bo
 - Internet access for `stack-researcher`'s web-research pass (falls back to internal-only findings and flags the gap if unavailable).
 - Python 3 (dependency-free) for `bootstrap-verifier`'s structural checks and the seeded `memory-bank/scripts/validate.py`.
 
+## Optional MCP Integrations
+
+MCP servers are optional external integrations. This accelerator requires
+none. Enable only the servers that correspond to systems this project actually
+uses: a small, relevant toolset consumes less context and creates a smaller
+security boundary than installing every available server.
+
+Commonly useful for a PHP project:
+
+- [Context7](https://github.com/upstash/context7) — current, version-specific
+  framework and package documentation. Most valuable when the installed
+  framework or library version differs from the model's built-in knowledge,
+  which is the one gap no repository-local index can close.
+- [GitHub MCP Server](https://github.com/github/github-mcp-server) —
+  repository, pull-request, issue, and workflow context. Prefer the official
+  server with repository-scoped, least-privilege access.
+- [Sentry](https://mcp.sentry.dev/) or
+  [Datadog](https://docs.datadoghq.com/mcp_server/) — production errors,
+  traces, and incident evidence. Pick the platform this project already uses;
+  do not connect both without a concrete need.
+- [Playwright MCP](https://github.com/microsoft/playwright-mcp) — browser
+  interaction and UI-flow verification. Only for a browser-facing surface.
+- [Linear](https://linear.app/docs/mcp) or
+  [Atlassian Rovo](https://github.com/atlassian/atlassian-mcp-server) —
+  requirements and issue context. Prefer read-only access.
+- A database-specific MCP server — schema inspection and query diagnostics
+  when repository evidence is insufficient. Use a dedicated read-only account
+  and never point one at an unrestricted production database by default.
+
+### Security rules
+
+1. Prefer first-party servers and official documentation.
+2. Start with read-only scopes, the smallest toolset, and one project or
+   organization boundary.
+3. Keep tokens, connection strings, and credentials outside the repository.
+4. Require human confirmation for writes, deployments, issue transitions, and
+   other consequential actions.
+5. Treat MCP output as external evidence: verify important claims against
+   canonical project sources before changing code.
+6. Do not add generic filesystem or memory MCP servers merely to duplicate the
+   repository access, Memory Bank, Project Brain, or Local Context Engine this
+   accelerator already supplies.
+
+### Context rules
+
+Tool definitions are not free and are not paid once. They sit at the front of
+the model's context and are re-read on every turn of the session, so a server
+you never call still costs you on every prompt.
+
+7. Scope every server to the smallest toolset it needs. `github-mcp-server`
+   defaults to five toolsets (`context, repos, issues, pull_requests, users`)
+   and `--toolsets all` is substantially larger; do not use `all`. Run with
+   `--read-only` (`GITHUB_READ_ONLY=1`) unless a workflow needs writes — which
+   also satisfies rule 4. Run `playwright-mcp` without `--caps` unless a
+   capability is genuinely required. A server left at its widest setting can
+   occupy several times the context of this accelerator's own `AGENTS.md` and
+   all of its skill descriptions combined.
+8. Decide the server set before starting a session. Tool definitions are the
+   first tier of the prompt cache, ahead of the system prompt and the
+   conversation, so adding or removing a server mid-session invalidates that
+   cache and the accumulated context is re-established at full price.
+9. What a server returns usually costs more than what it declares, because a
+   large result stays in context and is re-read for the rest of the session.
+   Prefer bounded, structured output, and constrain at the call site anything
+   that can return a page, a log stream, or a query result set. Where an API
+   exposes no size parameter, the only lever is a narrower request.
+
+Verify rather than estimate: `/context` reports the MCP tools row for the
+current session.
+
 ## Verification
 
 `bootstrap-verifier` runs automatically at the end of `infra-generate` (and `infra-update`) and checks manifest-owned frontmatter/cross-references, hooks and wiring, the generated memory/runtime surface, every manifest member's existence and hash, a tracked `AGENTS.md` stamp, and placeholders across every manifest-owned text file. Unmanifested team files are ignored in both full and merge modes. Treat a failed `bootstrap-verifier` run as generation not being done yet.

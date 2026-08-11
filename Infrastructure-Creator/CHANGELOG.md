@@ -4,6 +4,72 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Changed
+
+- **Generated accelerators reach orchestration parity with the hand-built
+  editions.** The seeded context-brain runtime was a stale fork — no agent
+  channel at all, no `hook-context`/`rebind`/`reindex-bank`, and a
+  four-value phase vocabulary the engine stopped using — so
+  `memory-seed`'s bundled `scripts/` and `project-brain/` skeleton are
+  re-synced from the canonical runtime, gaining `msg-send` / `msg-read` /
+  `msg-dispatch`, `capsule --validate`, `update --actor`, the forward-only
+  phase guard, `message.schema.json`, and `control/messages/`. On top of
+  that: `agent-forge` emits `writes: true` for write-capable agents in both
+  editions (without it the generated gate's serialization never engages),
+  `command-forge` generates `flow-feature` and `flow-review` composed only
+  of agents the run actually produced, `hook-forge` adds
+  `subagent-dispatch.sh` with its `SubagentStop`/`subagentStop` wiring
+  (shipped unregistered on Codex) plus the gate's write serialization,
+  `policy-forge` writes an Orchestration section into the generated
+  AGENTS.md, and `bootstrap-verifier` / `validate_generated.py` enforce the
+  eight-hook contract and the flow contract — stages naming generated
+  agents, at most one write-capable agent per parallel stage, a checkpoint
+  in every multi-stage flow.
+
+- **Generated accelerators now restrict subagents to their own roster.**
+  `hook-forge` produces a seventh hook, `subagent-gate.sh` - three
+  tool-owned variants (Claude PreToolUse exit codes against the generated
+  `.claude/agents` roster, Cursor `subagentStart` permission JSON with
+  `failClosed`, Codex spawn_agent-family deny) - and wires the
+  configuration half per edition: `Agent(...)` deny rules plus the
+  built-in-agent env keys in `.claude/settings.json`, `subagentStart` in
+  `.cursor/hooks.json`, `multi_agent = false` and `[agents] enabled =
+  false` in `.codex/config.toml`. `policy-forge` adds a Subagents section
+  to the generated `AGENTS.md`; `bootstrap-verifier` and
+  `validate_generated.py` enforce the seven-hook contract (the gate is
+  exempt from byte-identity by design).
+
+- `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` joins `.claude/settings.json`:
+  the generator's flows orchestrate from the main conversation, so nested
+  subagent trees add cost without oversight. The tool-owned
+  `subagent-gate.sh` copies are refreshed to the monorepo's Stage C
+  versions; the new write-serialization logic is dormant here until an
+  agent declares `writes: true`.
+
+### Added
+
+- Agent `<example>` blocks moved out of `description:` frontmatter into a
+  `## Selection examples` body section, and `agent-forge` now requires the
+  same of every accelerator it generates. A description is loaded into the
+  orchestrator's context on every session whether or not the agent is spawned,
+  and the embedded examples were about two thirds of those bytes; the forge
+  previously prescribed embedding them, so each generated accelerator
+  inherited the cost. The generator's own 23 agents shed 15,866 bytes of
+  description. Nothing is lost - the blocks move verbatim into the body.
+
+- **The generator's own tool configs now restrict subagent spawning to the
+  project roster.** A tool-owned `subagent-gate.sh` joins each hooks
+  directory — the one deliberate exception to the byte-identical hooks
+  invariant, skipped in `mirror_rules.py`, because each host exposes a
+  different gate contract (Claude PreToolUse exit codes, Cursor
+  `subagentStart` permission JSON, Codex `spawn_agent` deny). Configuration
+  backs the hooks: `Agent(...)` deny rules and
+  `CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS=1` in `.claude/settings.json`,
+  `[features] multi_agent = false` plus `[agents] enabled = false` in
+  `.codex/config.toml`, a `subagentStart` entry in `.cursor/hooks.json`, the
+  `subagent-policy.mdc` Cursor rule, and an AGENTS.md "Subagents" section.
+  Covered by `SubagentGateTest` in `tests/test_hooks.py`.
+
 ## [2.0.0] - 2026-08-07
 
 ### Changed

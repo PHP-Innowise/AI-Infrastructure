@@ -11,6 +11,51 @@ it at the top of every session.
 
 ## Unreleased
 
+### Added
+
+- Agent `<example>` blocks moved out of `description:` frontmatter into a
+  `## Selection examples` body section. An agent's description is loaded into
+  the orchestrator's context on every session, spawned or not, and the
+  examples were about two thirds of those bytes while teaching the selector
+  what the surrounding prose already says. Nothing was deleted - the blocks
+  sit verbatim in the body, where a reader still finds them and a session no
+  longer pays for them. Measured with cl100k: the agent listing drops from
+  5262 t to 1489 t per session, and the edition's whole startup surface
+  from 11101 t to 7322 t.
+
+- Spec-driven development: the `sdd` skill and the `/sdd` flow command.
+  `/sdd` runs specify -> design -> **checkpoint** -> task breakdown ->
+  **checkpoint** -> execute task by task -> tests -> parallel review ->
+  verify, spawning roster agents from the main conversation like the other
+  flows. What makes it spec-driven rather than a second feature flow is that
+  no stage completes without its artifact: the spec and the design land in
+  `specs/` and are registered in `specs/MANIFEST.md`, the task breakdown lands
+  in `tasks/<TASK-ID>/writing-plans-plan.md` as a checkbox list, and execution
+  marks a box and records a `context.py update` per task. The spec carries
+  user scenarios, numbered acceptance criteria and an edge-case table; every
+  task cites the criteria it serves, each coder capsule carries those criteria
+  verbatim rather than just the spec's path, and tests are written per
+  criterion. Where a criterion cannot be met as written the flow stops and
+  amends the spec instead of quietly redefining done. That citation chain is
+  what keeps implementation tied to the spec, and the artifacts are what make a
+  run resumable - `/sdd` reads the artifacts, works out which phase is done,
+  and continues at the first gap instead of restarting. It drives the
+  previously inert `specs/MANIFEST.md` scaffold, adds no new agent, and does
+  not integrate: `/finishing-branch` stays a separate step. `/sdd` is listed
+  among the sanctioned flow commands in AGENTS.md, so the subagent gate
+  treats it as one.
+
+- Opt-in orchestration flows: `/flow-feature` (requirements -> architecture
+  -> plan -> checkpoint -> code -> tests -> parallel review -> verify ->
+  checkpoint -> finishing-branch) and `/flow-review` (three read-only review
+  agents in parallel, one synthesized report). The main conversation is the
+  orchestrator: it spawns only roster agents, passes each a bounded
+  delegation capsule, and pauses at declared checkpoints. AGENTS.md gains
+  the "Orchestration (Flows, SCOPED)" section; SKILL FLOW.md documents the
+  flows. Cursor mirrors are generated; Codex keeps its sequential skill
+  flow by design.
+
+
 ## 2.0.0 - 2026-08-07
 
 ### Shared context runtime

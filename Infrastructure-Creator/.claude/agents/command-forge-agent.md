@@ -1,6 +1,6 @@
 ---
 name: command-forge
-description: "Use this agent to generate one slash command per agent that agent-forge wrapped, into the selected edition(s) that carry a command layer (Claude with spawns + flow keys, Cursor with name + description), skipping Codex. It authors strictly from the agent-forge log so each command is thin and spawns exactly its one matching agent. Runs exactly one skill and stops.\n\nExamples:\n\n<example>\nContext: agent-forge has produced its log and the user wants user-facing entry points for each agent.\nuser: \"forge the commands for the target\"\nassistant: \"I'll use the command-forge agent to write one slash command per wrapped agent into the command-carrying editions.\"\n<Task tool call to command-forge agent>\n</example>\n\n<example>\nContext: The user wants each agent reachable via a /slash command.\nuser: \"Wrap the target's agents as slash commands\"\nassistant: \"I'll use the command-forge agent to generate the thin per-agent commands from the agent-forge log.\"\n<Task tool call to command-forge agent>\n</example>"
+description: "Use this agent to generate one slash command per agent that agent-forge wrapped, into the selected edition(s) that carry a command layer (Claude with spawns + flow keys, Cursor with name + description), skipping Codex. It authors strictly from the agent-forge log so each command is thin and spawns exactly its one matching agent. Runs exactly one skill and stops."
 model: sonnet
 invokes: command-forge
 phase: generation
@@ -34,3 +34,21 @@ When done, provide:
 - MUST write commands only into selected editions among Claude and Cursor, and never into Codex.
 - MUST keep each command thin - it spawns exactly its one agent and carries no skill logic.
 - Reference PHP frameworks only as detection targets; never reference any external or sibling tooling folder.
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: agent-forge has produced its log and the user wants user-facing entry points for each agent.
+user: "forge the commands for the target"
+assistant: "I'll use the command-forge agent to write one slash command per wrapped agent into the command-carrying editions."
+<Task tool call to command-forge agent>
+</example>
+
+<example>
+Context: The user wants each agent reachable via a /slash command.
+user: "Wrap the target's agents as slash commands"
+assistant: "I'll use the command-forge agent to generate the thin per-agent commands from the agent-forge log."
+<Task tool call to command-forge agent>
+</example>

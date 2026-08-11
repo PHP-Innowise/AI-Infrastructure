@@ -1,6 +1,6 @@
 ---
 name: stack-researcher
-description: "Use this agent to run grounded, source-cited web research against the OFFICIAL documentation for each significant detected dependency/integration plus the primary PHP framework/version, so generated skills reflect accurate, current, version-appropriate practice. Runs in the research phase after the discovery scans; read-only on the target.\n\nExamples:\n\n<example>\nContext: The scans are done and the user wants current best practice grounded in official docs.\nuser: \"stack-researcher ../acme-billing\"\nassistant: \"I'll use the stack-researcher agent to research the detected framework and significant dependencies against their official docs for the resolved versions.\"\n<Task tool call to stack-researcher agent>\n</example>\n\n<example>\nContext: The user wants to verify current best practice for detected packages before generating.\nuser: \"Verify current best practice for these packages against the official docs\"\nassistant: \"I'll use the stack-researcher agent to ground each significant dependency and the primary framework version in official documentation.\"\n<Task tool call to stack-researcher agent>\n</example>"
+description: "Use this agent to run grounded, source-cited web research against the OFFICIAL documentation for each significant detected dependency/integration plus the primary PHP framework/version, so generated skills reflect accurate, current, version-appropriate practice. Runs in the research phase after the discovery scans; read-only on the target."
 model: sonnet
 invokes: stack-researcher
 phase: research
@@ -31,3 +31,21 @@ When done, provide:
 - DO NOT chain to other skills automatically.
 - STOP after the skill completes.
 - MUST base each note on OFFICIAL docs matched to the resolved version, MUST operate read-only on the target, and MUST NOT read `.env`/secrets.
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: The scans are done and the user wants current best practice grounded in official docs.
+user: "stack-researcher ../acme-billing"
+assistant: "I'll use the stack-researcher agent to research the detected framework and significant dependencies against their official docs for the resolved versions."
+<Task tool call to stack-researcher agent>
+</example>
+
+<example>
+Context: The user wants to verify current best practice for detected packages before generating.
+user: "Verify current best practice for these packages against the official docs"
+assistant: "I'll use the stack-researcher agent to ground each significant dependency and the primary framework version in official documentation."
+<Task tool call to stack-researcher agent>
+</example>

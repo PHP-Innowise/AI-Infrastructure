@@ -213,6 +213,29 @@ key is absent, so a schema mismatch may become a no-op rather than blocking the
 turn. After a Codex upgrade, test each safety hook with a benign representative
 operation and inspect hook diagnostics before relying on enforcement.
 
+## Optional External Companion: Batch Harness
+
+Unattended multi-stage pipelines (nightly fleet review, mass migrations)
+live outside the editions, in the repo-root `harness/` directory — a
+LangGraph-based runner that drives headless host sessions
+(`claude -p --output-format json`, `codex exec --json`) as workers. It has
+its own venv and dependencies and is never shipped by the installer or
+listed in the inventories. It
+follows the same rule as MCP servers: **optional, external, opt-in per
+team; the accelerator does not require, ship, or depend on it**, and the
+shipped runtime stays standard-library-only.
+
+Two properties make the companion composable rather than parallel
+infrastructure: workers run in the project directory *without* `--bare`, so
+the project's `.claude/` world — permission deny rules, the subagent gate,
+skills, the SubagentStop observer — applies inside every worker; and all
+durable state flows through the project's own `context.py` (task lifecycle,
+capsule validation, the `msg-dispatch` journal), so interactive sessions
+and unattended runs share one audit trail. LangGraph's checkpointer holds
+only graph position. See `docs/AGENT-ORCHESTRATION-DESIGN.md` (Stage D)
+for the decision record, including when a plain Agent SDK script is the
+better tool.
+
 ## Version Caveats
 
 - **Codex:** the edition follows the skill-based model used after custom
@@ -227,6 +250,82 @@ operation and inspect hook diagnostics before relying on enforcement.
   Code documentation before adopting new event types or permission syntax.
 - **All tools:** a file being present does not prove that the client loaded it.
   Re-run the activation checks after client upgrades or integration changes.
+
+## Optional Developer Tooling: Context Collection
+
+`scripts/collect_context.py` packages a chosen slice of this repository into
+one bundle for pasting into an external model — a code review in a chat
+window, a second opinion on the memory core, a diff explained to a model that
+cannot see the checkout. It wraps the
+[`code2prompt`](https://code2prompt.dev/docs/how_to/cli/) CLI (verified on
+4.3.0) and follows the same rule as MCP servers and the batch harness:
+**optional, external, opt-in per developer; the accelerator does not require,
+ship, or depend on it.** It saves zero runtime tokens — it spends the
+maintainer's, to produce a bundle scoped on purpose.
+
+```bash
+./collect                                   # list the scopes
+./collect skills --edition Laravel --dry-run
+./collect core --edition Symfony            # -> .c2p/
+./collect diff --base origin/main --stdout
+```
+
+`./collect` is a one-line `exec` wrapper at the repository root, so arguments
+and the exit status pass through unchanged; `scripts/collect_context.py` is
+executable and behaves identically. The wrapper carries no `.sh` extension, so
+the `lint` job lists it by name alongside `*.sh` — see [CI](CI.md) — keeping
+every tracked shell file inside `bash -n` and `shellcheck`.
+
+Inside Claude Code the same thing is `/collect <scope> [options]`, from
+`.claude/commands/collect.md` at the **repository root** — outside every
+edition, so an installed accelerator never carries a command for a tool it
+does not ship, and `build_mirrors.py`, which walks only the four edition
+directories, never sees it. The command runs the script through bash
+injection, caps the injected output, and instructs the model to report the
+summary without opening the bundle: the bundle exists for a model that cannot
+see the checkout, and reading it in the session that produced it would spend
+exactly the context it was built to move elsewhere.
+
+Scopes: `edition`, `skills`, `core`, `hooks` (all take `--edition`), plus
+`tooling`, `docs`, `harness`, `diff` and `custom`. Bundles land in the
+ignored `/.c2p/` alongside a manifest recording the exact patterns, counts
+and binary version. Nothing is written without a scope, and a run whose
+patterns match nothing fails loudly.
+
+The wrapper exists because the bare CLI is unsafe in *this* repository, in
+four specific ways it absorbs:
+
+| Guard | Unguarded behaviour on 4.3.0 |
+|---|---|
+| `.git` always excluded | The root with `--hidden` and no `-i` reads 2,213 files, `.git/config` (remote URLs) and `.git/COMMIT_EDITMSG` among them. |
+| `Task/` excluded by default | `Laravel/Task/Epics/Epic-0*_*_SPEC.md` is named-client product specification. Collecting `Laravel/**/*.md` without the exclude adds 10 files and ~87k tokens of it. `--with-task` opts in and prints a warning. |
+| Mirrors excluded by default | `.claude/`, `.cursor/` and `.codex/` are generated from canon by `build_mirrors.py`; including them triples a bundle for no added information. `--with-mirrors`, or the `hooks` scope, opts in. |
+| Every run is config-isolated | A `.c2pconfig` in the working directory is auto-loaded and silently injects settings such as `line_numbers`, with no flag to disable it. Runs execute in an empty temporary directory with `XDG_CONFIG_HOME` pointed at it. |
+
+Two upstream behaviours are worth knowing before writing custom patterns.
+Patterns that match nothing exit 0 with an empty bundle and no warning — the
+wrapper turns that into an error. And `code2prompt`'s `*` **crosses directory
+separators**: `-i "*.md"` at the repository root reads 419 files, not the four
+at the top level, and `-i "CHANGELOG.md"` matches five, one per edition. Only
+a `./`-prefixed literal anchors. Scopes declare top-level wants separately and
+the wrapper expands them with Python's own non-recursive glob.
+
+Token counts come from cl100k (OpenAI BPE, the tokenizer `code2prompt`
+carries). **That is not a count of Claude tokens** — it is a calibrated
+relative unit, good for comparing two bundles, not for predicting a bill. An
+exact Anthropic count needs `/v1/messages/count_tokens`, a network call with
+an API key, which is a separate decision under [Security](SECURITY.md).
+
+Not adopted: the `code2prompt-mcp` server and the `code2prompt-rs` Python SDK.
+The MCP server is recorded as a decision rather than a silence — the shipped
+Codex configuration deliberately requires no MCP server (see above and
+[Security](SECURITY.md)), and the server exposes one `get_context` tool that
+is strictly poorer than this wrapper. The SDK's latest release trails the CLI
+by a full major version and ships a single wheel; a `subprocess` call is
+better. The CLI is never a blocking CI gate: CI has no Rust toolchain, so
+`tests/test_collect_context.py` skips its live checks and runs its contract
+checks — including `test_containment`, which fails if `code2prompt` is ever
+referenced from an edition or the installer.
 
 ## Shared Context Activation
 

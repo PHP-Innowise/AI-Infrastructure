@@ -1,6 +1,6 @@
 ---
 name: review-pr
-description: "Review a GitHub pull request using gh CLI, analyze the diff for bugs, security issues, and code quality problems, then offer to fix issues locally via the debugger or post review comments to the PR on GitHub.\n\nExamples:\n\n<example>\nContext: The user wants to review a specific PR.\nuser: \"Review PR #42\"\nassistant: \"I'll use the review-pr agent to analyze the pull request.\"\n<Task tool call to review-pr agent>\n</example>\n\n<example>\nContext: The user provides a GitHub PR URL.\nuser: \"Look at this PR https://github.com/org/repo/pull/123\"\nassistant: \"I'll use the review-pr agent to review that pull request.\"\n<Task tool call to review-pr agent>\n</example>\n\n<example>\nContext: The user wants to review and comment on a PR.\nuser: \"Review the latest PR and leave comments\"\nassistant: \"I'll use the review-pr agent to review and post feedback.\"\n<Task tool call to review-pr agent>\n</example>"
+description: "Review a GitHub pull request using gh CLI, analyze the diff for bugs, security issues, and code quality problems, then offer to fix issues locally via the debugger or post review comments to the PR on GitHub."
 model: opus
 invokes: review-pr
 phase: execution
@@ -39,3 +39,28 @@ When done, provide:
 - DO NOT chain to other skills automatically
 - DO NOT make workflow decisions
 - STOP after skill completion and output suggestions
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: The user wants to review a specific PR.
+user: "Review PR #42"
+assistant: "I'll use the review-pr agent to analyze the pull request."
+<Task tool call to review-pr agent>
+</example>
+
+<example>
+Context: The user provides a GitHub PR URL.
+user: "Look at this PR https://github.com/org/repo/pull/123"
+assistant: "I'll use the review-pr agent to review that pull request."
+<Task tool call to review-pr agent>
+</example>
+
+<example>
+Context: The user wants to review and comment on a PR.
+user: "Review the latest PR and leave comments"
+assistant: "I'll use the review-pr agent to review and post feedback."
+<Task tool call to review-pr agent>
+</example>

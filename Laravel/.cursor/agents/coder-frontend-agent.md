@@ -1,6 +1,7 @@
 ---
 name: coder-frontend
-description: "Use this agent to implement frontend features in Laravel projects using Blade templates/components, Livewire components, or Inertia.js pages (Vue/React/Svelte), with Vite for asset compilation and Alpine.js for lightweight interactivity.\n\nExamples:\n\n<example>\nContext: The user wants to implement a frontend component.\nuser: \"Create the invitation form with validation feedback\"\nassistant: \"I'll use the coder-frontend agent to implement the server-rendered form.\"\n<Task tool call to coder-frontend agent>\n</example>\n\n<example>\nContext: The user needs frontend state behavior.\nuser: \"Implement loading and empty states for the invitation list\"\nassistant: \"I'll use the coder-frontend agent to implement the frontend state behavior.\"\n<Task tool call to coder-frontend agent>\n</example>"
+description: "Use this agent to implement frontend features in Laravel projects using Blade templates/components, Livewire components, or Inertia.js pages (Vue/React/Svelte), with Vite for asset compilation and Alpine.js for lightweight interactivity."
+writes: true
 ---
 
 # Coder (Frontend) Agent
@@ -35,3 +36,21 @@ When done, provide:
 - DO NOT chain to other skills automatically
 - DO NOT make workflow decisions
 - STOP after skill completion and output suggestions
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: The user wants to implement a frontend component.
+user: "Create the invitation form with validation feedback"
+assistant: "I'll use the coder-frontend agent to implement the server-rendered form."
+<Task tool call to coder-frontend agent>
+</example>
+
+<example>
+Context: The user needs frontend state behavior.
+user: "Implement loading and empty states for the invitation list"
+assistant: "I'll use the coder-frontend agent to implement the frontend state behavior."
+<Task tool call to coder-frontend agent>
+</example>

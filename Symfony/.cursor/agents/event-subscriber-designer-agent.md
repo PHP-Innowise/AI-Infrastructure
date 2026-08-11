@@ -1,6 +1,7 @@
 ---
 name: event-subscriber-designer
 description: "Use this agent to design Symfony event subscribers/listeners as thin adapters that delegate business workflows to services."
+writes: true
 ---
 
 # Event Subscriber Designer Agent

@@ -26,6 +26,305 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Added
+
+- **A context-collection command for external models
+  (`scripts/collect_context.py`), wrapping the optional `code2prompt`
+  CLI.** Invoked as `/collect <scope> [options]` in Claude Code, from a
+  new repository-root `.claude/commands/collect.md`, or as `./collect` in
+  a shell — a one-line `exec` wrapper over the now-executable
+  `scripts/collect_context.py`, so arguments and exit status pass through
+  unchanged. A bare invocation lists the scopes. Both entry points sit at
+  the repository root, outside every edition, so an installed accelerator
+  never carries a command for a tool it does not ship, and
+  `build_mirrors.py` — which walks only the four edition directories —
+  never sees them. The slash command caps its injected output and tells
+  the model to report the summary without opening the bundle, which
+  exists for a model that cannot see the checkout. Because `collect`
+  carries no `.sh` extension, the `lint` job now lists it by name
+  alongside `*.sh`, keeping every tracked shell file inside `bash -n` and
+  `shellcheck`. Nine scopes — `edition`, `skills`, `core`, `hooks`, `tooling`,
+  `docs`, `harness`, `diff`, `custom` — package a chosen slice of the
+  repository into one bundle in the ignored `/.c2p/`, with a manifest
+  recording the exact patterns, counts and binary version. Phase 1 of
+  `docs/CODE2PROMPT-INTEGRATION-PLAN.md`, and deliberately the whole of
+  it: developer-local, zero runtime tokens saved, never a blocking gate.
+  The wrapper exists because the bare CLI is unsafe in this checkout,
+  and each guard answers a behaviour verified on 4.3.0: `.git` is always
+  excluded (the root with `--hidden` and no include reads 2,213 files,
+  `.git/config` among them); the client-owned `Task/` specifications are
+  excluded unless `--with-task` (collecting `Laravel/**/*.md` without it
+  adds ~87k tokens of named-client material); the generated
+  `.claude`/`.cursor`/`.codex` mirrors are excluded unless
+  `--with-mirrors`; every run executes in an empty directory with
+  `XDG_CONFIG_HOME` redirected, because a `.c2pconfig` in the working
+  directory is auto-loaded with no opt-out; and a pattern matching
+  nothing becomes an error instead of upstream's silent empty bundle.
+  Two upstream traits are absorbed rather than documented away: `*`
+  crosses directory separators there, so scopes declare top-level wants
+  separately and the wrapper expands them with Python's own glob.
+  `tests/test_collect_context.py` runs in CI without the binary; its
+  `test_containment` fails if `code2prompt` is ever referenced from an
+  edition or the installer. Token counts are cl100k (OpenAI BPE) and are
+  labelled everywhere as not a count of Claude tokens.
+
+- **Stage D — the external batch harness joins the monorepo as a
+  repo-root companion (`harness/`).** A LangGraph-based runner for
+  unattended pipelines: the fleet-review graph (Send fan-out of review
+  lenses -> durable interrupt approval gate -> report) over headless host
+  workers (`claude -p --output-format json` without `--bare`, so the
+  project's `.claude` world applies inside every worker; `codex exec
+  --json`; an offline `dry-run` worker), with SQLite checkpointing, hard
+  cost ceilings, and all durable state flowing through the target
+  project's own `context.py` blackboard. Deliberately OUTSIDE the
+  editions: never shipped by the installer, never listed in inventories,
+  own venv — the shipped runtime stays stdlib-only. First real run
+  reviewed the accelerator's own Stage C hooks ($1.68, 10 findings).
+- **Host-native orchestration enhancers — Stage C of
+  `docs/AGENT-ORCHESTRATION-DESIGN.md`.** A new canonical hook,
+  `subagent-dispatch.sh` (registered on Claude Code's `SubagentStop` and
+  Cursor's `subagentStop`; the Codex mirror exists but stays unregistered
+  while multi-agent is off), records every subagent completion in the Stage B
+  channel automatically — one sanitized line from the final assistant message
+  (Cursor: `status`, since its documented `summary` field is unreliable) —
+  and releases the write-agent lock. Write-capable agents are now declared
+  with `writes: true` frontmatter (13 core agents plus each edition's
+  framework implementers; the Cursor mirrors carry the key) and the
+  subagent gates serialize them: one write-capable agent at a time per
+  repository via a TTL lock (`/tmp/<tool>-write-agent-lock-<repo-key>`,
+  30 min default, `SUBAGENT_WRITE_LOCK_TTL_MINUTES` override), released on
+  completion or expiry; read-only agents keep running in parallel.
+  `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` lands in every edition's
+  settings.json — the orchestrator is the main conversation, nested trees
+  add cost without oversight. The Codex decision point is resolved:
+  multi-agent stays off (the edition delegates through skills by design;
+  hooks there are a guardrail, not a boundary). Flow commands drop the
+  manual completion recording (the observer covers it) and prefer resuming
+  an agent over respawning. Regression coverage: `SubagentWriteLockTest`
+  and `SubagentDispatchTest` in `memory-bank/tests/test_hooks.py`.
+- **Agent communication substrate — Stage B of
+  `docs/AGENT-ORCHESTRATION-DESIGN.md`.** The context runtime gains a
+  task-scoped agent channel: an append-only JSONL journal per task under
+  `project-brain/control/messages/`, written under the global mutation lock
+  and validated line-by-line (in-code rules plus the new
+  `message.schema.json`) — `msg-send` / `msg-read` (recipient, `--since`, and
+  type filters; no read cursor by design) and `msg-dispatch`, the
+  orchestration log that fingerprints each delegation capsule (SHA-256) and
+  refuses a spawn whose capsule fails the mandatory-section check exposed
+  standalone as `capsule --validate` (objective, output format, tool and
+  source guidance, boundaries, decisions and assumptions). Bodies are capped
+  at the 8,000-character capsule bound and screened by the existing secret
+  patterns; a terminal task refuses new messages but its journal stays
+  readable after the binding is gone. `update` gains `--actor` (roster-slug
+  attribution prefixed to progress) and a phase-order guard: phases move
+  only forward unless `--allow-phase-regression` states the regression is
+  deliberate. PROTOCOL.md documents the channel; the flow commands record
+  their spawns and completions through it; regression coverage in the new
+  `memory-bank/tests/test_channel.py` (12 tests, byte-identical across the
+  PHP editions).
+- **Opt-in orchestration flows — Stage A of
+  `docs/AGENT-ORCHESTRATION-DESIGN.md`.** Each PHP edition ships
+  `/flow-feature` and `/flow-review`: commands whose `stages:` frontmatter
+  declares the agent sequence, executed by the MAIN conversation as
+  orchestrator — roster agents only, one bounded delegation capsule per spawn
+  (objective, output format, tool/source guidance, boundaries,
+  decisions-and-assumptions), parallel stages restricted to read-only agents,
+  and a mandatory pause at every declared checkpoint. AGENTS.md gains the
+  "Orchestration (Flows, SCOPED)" section; SKILL FLOW.md documents the flows;
+  Cursor command mirrors are generated, Codex deliberately keeps its
+  sequential skill flow. The `agents_md_bytes` ceilings in
+  `scripts/token_budget.json` rise to the new observed values + 5% — the
+  growth is the two policy sections, per the ceiling file's stated policy.
+- **Subagent spawning is now restricted to the accelerator's own roster.**
+  Each edition ships a tool-owned `subagent-gate.sh` in all three hooks
+  directories — a `MIRROR_RULES` `skip` entry, since each host exposes a
+  different gate contract. The Claude Code gate (PreToolUse, matcher
+  `Agent|Task`) allows only the frontmatter `name:`s defined in
+  `.claude/agents/` and blocks the built-in agents (Explore, Plan,
+  general-purpose, claude, ...); the Cursor gate (`subagentStart`, registered
+  with `failClosed`) answers `{"permission": "allow"|"deny"}` against the
+  `.cursor/agents/` roster, since Cursor has no setting that disables its
+  built-ins; the Codex gate denies the `spawn_agent` multi-agent tool family
+  outright, as the Codex edition delegates through skills only. Configuration
+  backs the hooks: `Agent(...)` deny rules and
+  `CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS=1` in `.claude/settings.json`,
+  `[features] multi_agent = false` plus `[agents] enabled = false` in
+  `.codex/config.toml`, the `subagent-policy.mdc` Cursor rule, and an
+  AGENTS.md "Subagents" section as the steering layer. Regression coverage:
+  `SubagentGateTest` in `memory-bank/tests/test_hooks.py`.
+- `scripts/build_mirrors.py` now generates and verifies a per-edition
+  `.gitattributes` marking every file it produces as
+  `-diff linguist-generated=true`. A generated mirror carries no information
+  its canon does not, so it collapses to a stub in review diffs; measured on
+  PR #11, the diff falls from 941,788 to 688,674 bytes (225,470 to 166,671
+  cl100k tokens, -26.1%). The list is derived from `MIRROR_RULES`, not
+  globbed: the tool directories also hold canonical files — hooks, commands,
+  agents, settings, Cursor rules, `config.toml` — which are deliberately
+  excluded and keep their diffs. Listed in each edition's install inventory
+  as a `shared` component. `git diff --name-only` is unaffected, so
+  `check_core_changelog.sh` and other name-based gates still see these files.
+- `scripts/cost_attribution.py`: developer-local counterpart to
+  `context_budget.py`. Reads the transcripts Claude Code writes under
+  `~/.claude/projects` and reports spend weighted by billing tier, grouped by
+  stratum, project, skill, MCP server, MCP tool, plugin and agent. No
+  exporter, no network, no configuration; never invoked by a hook, a skill,
+  or CI.
+
+### Changed
+
+- **The context budget now gates the whole startup surface, not the half of
+  it that was easy to measure.** `scripts/context_budget.py` grew two
+  categories, `command_bytes` and `agent_bytes`, because a measurement of what
+  a session actually pays found that commands and the agent roster were
+  **62 % of Laravel's startup cost and gated nowhere**: the agent listing
+  alone was 7,405 t against 2,455 t for the skill descriptors the gate did
+  watch. Both listings are `name` + `description`, derived from the first body
+  paragraph when frontmatter declares none, exactly as Claude Code derives it;
+  that derivation was validated against this repository's own mirror
+  generator, which implements the same rule for Cursor - 43 of 45 Laravel
+  commands byte-identical, the two exceptions being the pinned
+  `description_overrides`. The new bytes-per-token ratios, 5.11 and 5.16, were
+  measured with real cl100k rather than estimated. `startup_tokens()` now sums
+  the four startup categories instead of `AGENTS.md` + full frontmatter, which
+  over-stated the listing surface by roughly 1.5x, and a skill declaring
+  `disable-model-invocation: true` is excluded from `descriptor_bytes` because
+  Claude Code does not put its description in context - closing the
+  over-statement noted when `/sdd` took that flag.
+
+  Both listings are measured on the `.claude` tree, the richest of the three
+  tool surfaces, so gating it bounds the others rather than tracking each.
+  Cursor carries the same files with a few deliberately condensed for it;
+  **Codex carries neither** - `.codex/` holds only `config.toml`, the
+  governance documents, `hooks/` and `hooks.json`, and `agent-forge` forbids
+  writing an agent there - so for a Codex session these two categories
+  over-state the cost by their whole value, leaving `AGENTS.md` plus the skill
+  descriptors. Recorded in the script, in the ceiling file and in
+  [`docs/CI.md`](docs/CI.md) rather than left for a reader to rediscover.
+
+  **Every startup category now counts what a tool renders, not what the file
+  says.** A frontmatter field contributes its value with the key, the colon,
+  surrounding quotes and their backslash escapes removed and wrapped lines
+  folded, which is how the model receives it; `frontmatter_bytes` stays the
+  deliberate exception as a file fact. This started as a noticed wart - the
+  old code counted the whole `description: "..."` entry, some 14 bytes per
+  file above the rendered text - and comparing the Claude and Cursor listings
+  made it visible as a phantom 645-byte "difference" that was only Cursor's
+  generated `description:` keys. Fixing it moves `descriptor_bytes` too, which
+  had counted `name:` and `description:` entries since it was written. All
+  three listing ratios were re-measured on the rendered text (descriptor
+  4.99 -> 4.91, command 5.11 -> 5.10, agent 5.16 -> 5.14; the 4.99 came from
+  research taken on key-inclusive text and no longer described what is
+  counted), and the three ceilings were refit to observed + 5 % - keeping them
+  would have handed out phantom headroom created by changing the ruler. The
+  report's estimate now lands within 0.1 % of a direct cl100k count of the
+  same payload.
+
+- **`sdd` is user-invoked only (`disable-model-invocation: true`).** Claude
+  Code documents that this keeps a skill's description *out of context
+  entirely* rather than merely blocking automatic loading, which turns the
+  startup cost of a rarely-used skill from "halved by a shorter description"
+  into zero. The description stays short anyway - it is what the `/` menu
+  shows - and now also states how to invoke it, since the model will no longer
+  surface the skill on its own. The second effect is the reason to want this
+  independently of bytes: a multi-agent, multi-session flow should not begin
+  because a prompt looked spec-shaped. Note the consequence for the gate:
+  `scripts/context_budget.py` measures files, not runtime behaviour, so it
+  still counts these 172 bytes per edition against `descriptor_bytes` even
+  though Claude Code no longer loads them. The gated figure now over-states
+  the real startup cost by exactly this skill's descriptor. Cursor and Codex
+  receive the key through the mirrors and may ignore it; the flow is driven by
+  the `/sdd` command in every tool regardless.
+
+- **Body-size ceilings refit again after the `sdd` skill, and only those.**
+  `scripts/token_budget.json` `body_bytes` moves to observed + 5 % — Laravel
+  370,217, Symfony 181,612, PHP Core 208,474 — while the descriptor and
+  frontmatter ceilings stay where they are. The two categories are paid at
+  different times, and `/sdd` is the case that makes the difference visible:
+  its body is 6,031 B (~1,426 t) charged only when the flow runs, perhaps once
+  in a project's life, but its descriptor is charged on **every** session of
+  that edition, whether or not the flow is ever used. At the measured
+  descriptor ratio that is ~68 t per session against ~1,426 t once, so the
+  descriptor overtakes the body after about 20 sessions: a rarely-invoked
+  skill is the *worst* case for the startup surface, not a cheap one. Raising
+  the body ceiling therefore costs approximately nothing, and raising the
+  descriptor ceiling would buy a permanent startup tax in every consuming
+  project — so instead the `sdd` description was cut from ~330 B to 172 B by
+  dropping the trigger phrases, which exist to win automatic skill selection
+  that a deliberately typed `/sdd` does not need. That returns 158 B per
+  edition per session and leaves the descriptor headroom at 426 B (Laravel),
+  328 B (Symfony) and 292 B (PHP Core) without moving a ceiling. Skill-count
+  ceilings are also untouched: 36 × 1.05 rounds to PHP Core's existing 37, so
+  its single remaining slot is what the policy prescribes rather than an
+  accounting artefact.
+
+- Body-size ceilings in `scripts/token_budget.json` refit to observed + 5 %
+  after the branch's final content edits (browser-verify bounds and the
+  Infrastructure-Creator forge instructions), per the ceiling file's own
+  policy.
+- **`context_budget.py` now measures what is actually paid.** Token
+  estimates use per-class bytes-per-token ratios measured with cl100k on
+  this repository's own files instead of a flat `bytes / 4`, which runs
+  19–25 % high on exactly these files; the calibration reproduces the
+  research's independent figures to 0.1 % (Laravel bodies 81,639 vs 81,719
+  cl100k t). The gated surface is now `descriptor_bytes` (`name` +
+  `description` — the text skill selection matches against) rather than the
+  whole frontmatter, and skill **bodies are budgeted for the first time**:
+  they are an order of magnitude above the startup surface (Laravel ~81.6k
+  vs ~4.0k t) and were previously unmeasured, so the gate covered about a
+  twentieth of the cost. The monorepo row is relabelled — it is what a
+  monorepo checkout exposes, not a price any consuming project pays.
+  Ceilings regenerated for the new categories; skill-count ceilings kept
+  where they were, since tightening those is a separate decision.
+- **browser-verify gained mandatory payload bounds.** Full-page snapshots
+  and screenshots are the heaviest payloads in these workflows and are
+  carried for the rest of the session; the skill now caps screenshots,
+  prefers targeted reads over full snapshots, forbids pasting raw
+  snapshot/DOM payloads into reports or Brain records, and requires closing
+  the session. Roughly 1 KB of skill body, paid once per invocation, in
+  front of payloads measured in tens of KB.
+- **Two subagent-gate fixes from the harness self-review.** The write-agent
+  lock is now taken under `flock`, so two write-capable agents spawned in
+  one message can no longer both observe an unlocked state (covered by a
+  concurrent regression test); and the roster parser reads only the first
+  frontmatter block, so a `---` rule inside an agent's body can no longer
+  declare `writes:` and change the gate's decision. Both degrade to the
+  previous behaviour where `flock` or a writable guard path is missing,
+  never failing closed.
+- CI gains a lint step that fails when a per-turn invalidator (`date`,
+  `$RANDOM`, `uuidgen`) reappears in the Cursor rule render — the cheap
+  textual net in front of the behavioural test that already covers it.
+- The Cursor working-memory rule no longer varies between turns when the
+  context does not. `.cursor/rules/working-memory.mdc` is `alwaysApply`, so it
+  is re-sent on every prompt; it previously embedded a render timestamp and
+  the serialized capsule, whose `manifest` key is a fresh UUID path per call.
+  Both changed every turn regardless of content. The Cursor hooks now render
+  the capsule (`hook-context` without `--json`) exactly as the Claude and
+  Codex hooks already did, so all three clients agree on one form. The
+  JSON-parse guard that protected the serialized form is replaced by a render
+  marker: a capsule is accepted only if it opens with the `working:` line, so
+  a broken render still cannot replace a good rule.
+- `print_capsule` reports pre-provision progress (`warming: N turn(s)
+  pending`) — the one field the serialized form carried that the warning text
+  did not. Emitted only while a task is unprovisioned.
+- The `review-pr` skill diffs the PR locally against its merge base instead of
+  calling `gh pr diff`, which renders server-side, accepts no pathspec, and
+  therefore cannot apply the generated-file markers. Triages on
+  `--name-only` first, and states that a stub is not a gap: review the canon
+  the file was generated from, and treat a stub whose canonical source is
+  absent from the diff as drift worth flagging.
+- Per-edition `README.md` files gained the "Optional MCP Integrations"
+  section, which previously existed only in the repository-root
+  `README_EN.md` / `README_RU.md` — neither of which ships to a consuming
+  project. Both root READMEs gained context rules 7-9: scope every server to
+  the smallest toolset, fix the server set before a session starts because
+  tool definitions are the first tier of the prompt cache, and bound what a
+  server returns because a large result is re-read for the rest of the
+  session.
+- `docs/OPERATIONS.md` gained a Context Economy subsection under Operating
+  Rules: delegate to a subagent only when it displaces roughly seven or more
+  main-session turns, and compact deliberately near ~400k of context. Both
+  thresholds are derived from local transcripts and are marked as such.
+
 ## 2.0.0 - 2026-08-07
 
 ### 2026-08-06 hook and installation hardening

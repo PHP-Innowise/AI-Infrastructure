@@ -4,6 +4,7 @@ description: "Use this agent to generate Symfony fixtures, Foundry factories, ob
 model: sonnet
 invokes: fixture-factory-generator
 phase: execution
+writes: true
 ---
 
 # Fixture Factory Generator Agent

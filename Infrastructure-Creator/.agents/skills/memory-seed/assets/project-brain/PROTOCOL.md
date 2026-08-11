@@ -18,6 +18,13 @@ Engine is a disposable lexical index and local binding/cache.
   indexes. Conflicts are retained explicitly.
 - Terminal records are moved, never deleted. Active and archived records are
   held to the same validation contract.
+- Task phases are stored only as `understanding`, `planning`,
+  `implementation`, `verification`, or `finalization`. Input compatibility
+  aliases normalize at the mutation boundary: `implementing` and `execution`
+  become `implementation`; `review` becomes `verification`.
+- Completion is always explicit and requires the caller's current numeric
+  revision. Turn maintenance may report sanitized branch-merge evidence as a
+  completion candidate, but it never closes the task or creates an episode.
 - Durable-memory promotion has two modes, and the record always states which
   one produced it. Automatic promotion is the default: the turn-end hook
   promotes eligible knowledge unattended, and the runtime never dresses it up
@@ -31,7 +38,9 @@ Engine is a disposable lexical index and local binding/cache.
   knowledge. The source type, path, ID, and revision are rechecked at apply
   time in both modes; partial writes, including promotion status, roll back.
 - Telemetry is disabled and metadata-only. Prompts, responses, source bodies,
-  tool payloads, secrets, customer data, and raw logs are prohibited.
+  tool payloads, secrets, customer data, and raw logs are prohibited. The
+  optional local event adapter writes nothing unless both telemetry switches
+  are enabled and records unavailable host metrics explicitly as `N/A`.
 
 ## Modes
 
@@ -82,9 +91,12 @@ python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID
 
 `context` is an alias. Retrieval uses SQLite FTS5/BM25 and bounded snippets.
 Category budgets are policy 1,200; handoff 1,500; durable 3,500; dynamic 1,500;
-evidence 2,000 estimated tokens. The target is 8,000 and the hard ceiling is
-12,000. Every governed retrieval writes a committed manifest under
-`control/retrieval-manifests/`.
+evidence 2,000 estimated tokens. Internal candidate selection may escalate to
+its 12,000-token conflict ceiling, but the delivered capsule is always capped
+after ranking/filtering at 2 procedural, 3 semantic, 1 episodic item and 8,000
+serialized characters. Every governed retrieval writes a manifest under
+`control/retrieval-manifests/`; automated `--ephemeral` retrieval writes the
+same metadata contract to ignored local state.
 
 If one conflict side matches lexically, eligible linked records are fetched by
 UUID even when they do not match the query. Conflict pairs may exceed normal
@@ -93,3 +105,23 @@ reason; privacy, owner, authority, lifecycle, and freshness filters still win.
 
 No network service, MCP server, embedding store, or automatic prompt injection
 is part of this runtime.
+
+## Messages
+
+Orchestrated agents communicate through an append-only channel: one JSONL
+journal per task under `control/messages/{task_uuid}.jsonl`, written under the
+same mutation lock as every other Brain write and never rewritten — the git
+history of the journal is the audit trail. An entry carries `seq`,
+`from_actor`, `to_actor` (an agent slug, `main` for the orchestrating
+conversation, or `*` to broadcast), a type from `finding`, `question`,
+`handoff`, `dispatch`, `completion`, a body capped at 8,000 characters that
+passes the same secret screening as task fields, optional path refs, and — for
+dispatch events — the SHA-256 digest of the delegation capsule. `msg-dispatch`
+refuses to record a spawn whose capsule fails the mandatory-section check
+(objective, output format, tool and source guidance, boundaries, decisions and
+assumptions; `capsule --validate` runs the same check standalone). The journal
+keeps no read cursor: consumers filter with `msg-read --for ACTOR --since SEQ`
+and track their own position. A terminal task refuses new messages but stays
+readable; `validate` checks every journal line against the schema, its task,
+and strict `seq` ordering. Task phases move only forward along the stored
+vocabulary; `--allow-phase-regression` states a backward move is deliberate.
