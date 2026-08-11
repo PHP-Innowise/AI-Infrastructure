@@ -1,5 +1,7 @@
 English | [Русский](README_RU.md)
 
+**Installation:** [ready-made editions and Infrastructure-Creator](install/README.md)
+
 # PHP AI Accelerators
 
 A collection of ready-to-use accelerators for AI agents working in PHP

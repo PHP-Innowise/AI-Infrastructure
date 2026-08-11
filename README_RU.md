@@ -1,5 +1,7 @@
 [English](README_EN.md) | Русский
 
+**Установка:** [готовые редакции и Infrastructure-Creator](install/README.md)
+
 # PHP AI Accelerators
 
 Набор готовых акселераторов для AI-агентов в PHP-проектах и генератор для
