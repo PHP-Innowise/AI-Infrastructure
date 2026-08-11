@@ -1,6 +1,6 @@
 ---
 name: policy-forge
-description: "Use this agent to generate target governance from an approved Project Profile: one shared AGENTS.md plus per-edition DOD, principles, and stabilization files. Rules use confirmed stack/architecture/security/convention evidence and only high-value confirmed behavioral authority, invariants, permissions, audit duties, and critical scenarios from section 8. Runs exactly one skill and stops.\n\nExamples:\n\n<example>\nContext: A profile has been approved.\nuser: \"generate policy for the target from the profile\"\nassistant: \"I'll author shared policy and selected-edition companions from confirmed technical and behavioral evidence.\"\n<Task tool call to policy-forge agent>\n</example>\n\n<example>\nContext: The user needs behavior-aware DOD checks.\nuser: \"Forge the AGENTS.md and DOD for this project\"\nassistant: \"I'll add affected invariant, denied-path, transition, and audit checks only where section 8 confirms them.\"\n<Task tool call to policy-forge agent>\n</example>"
+description: "Use this agent to generate target governance from an approved Project Profile: one shared AGENTS.md plus per-edition DOD, principles, and stabilization files. Rules use confirmed stack/architecture/security/convention evidence and only high-value confirmed behavioral authority, invariants, permissions, audit duties, and critical scenarios from section 8. Runs exactly one skill and stops."
 model: opus
 invokes: policy-forge
 phase: generation
@@ -35,3 +35,21 @@ When done, provide:
 - MUST NOT promote implementation/interview evidence beyond its authority or invent owners, severity, approvals, legal obligations, or complete workflow/permission matrices.
 - MUST NOT include any secret or credential value.
 - Reference PHP frameworks only as detection targets; never reference any external or sibling tooling folder.
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: A profile has been approved.
+user: "generate policy for the target from the profile"
+assistant: "I'll author shared policy and selected-edition companions from confirmed technical and behavioral evidence."
+<Task tool call to policy-forge agent>
+</example>
+
+<example>
+Context: The user needs behavior-aware DOD checks.
+user: "Forge the AGENTS.md and DOD for this project"
+assistant: "I'll add affected invariant, denied-path, transition, and audit checks only where section 8 confirms them."
+<Task tool call to policy-forge agent>
+</example>

@@ -142,6 +142,20 @@ _HOOK_PATH_EXTRACT_CODEX = (
 # short marker comments below; the Cursor mirror swaps in the render steps.
 # The render is silent on stdout, degrades to a no-op on any failure, and
 # replaces the previous rule only when a fresh render succeeds.
+#
+# The rule is the one surface in this product that is re-sent on every prompt,
+# so its content must vary only when the context genuinely varies. Two former
+# sources of gratuitous per-turn variation are therefore excluded by design:
+#   - no render timestamp. The header already states the rule is as of the end
+#     of the previous turn; a clock reading added nothing and changed every
+#     turn.
+#   - the capsule is rendered, not serialized (`hook-context` without --json).
+#     The JSON form embeds `manifest`, a fresh UUID path per call, and carries
+#     the same documents in four parallel views (categories / procedural /
+#     semantic / selected). Both were re-sent every turn. The rendered form is
+#     what Claude and Codex already receive, so all three clients now agree.
+# Anything added here is paid once per turn for the life of the session -
+# weigh it against that, not against a single prompt.
 _WM_DELIVERY_STOP = r'''# Capsule delivery: this client receives the Task Capsule at prompt time
 # through working-memory-read.sh, so the turn checkpoint above is all that
 # runs here.
@@ -157,16 +171,21 @@ RULE_FILE="$RULES_DIR/working-memory.mdc"
 CAPSULE_STATUS=1
 if command -v timeout > /dev/null 2>&1; then
   CAPSULE=$(timeout "$BUDGET_SECONDS" python3 "$CONTEXT_CLI" hook-context \
-    --task-id "$TASK_ID" --json 2>/dev/null)
+    --task-id "$TASK_ID" 2>/dev/null)
   CAPSULE_STATUS=$?
 else
   CAPSULE=$(python3 "$CONTEXT_CLI" hook-context \
-    --task-id "$TASK_ID" --json 2>/dev/null)
+    --task-id "$TASK_ID" 2>/dev/null)
   CAPSULE_STATUS=$?
 fi
-if [ "$CAPSULE_STATUS" -eq 0 ] && ! printf '%s' "$CAPSULE" | \
-  python3 -c 'import json,sys; json.load(sys.stdin)' >/dev/null 2>&1; then
-  CAPSULE_STATUS=1
+# The rendered capsule always opens with the working line. Anything else is a
+# broken render and must not replace a good rule. This guard replaces the JSON
+# parse that protected the --json form.
+if [ "$CAPSULE_STATUS" -eq 0 ]; then
+  case "$CAPSULE" in
+    working:*) ;;
+    *) CAPSULE_STATUS=1 ;;
+  esac
 fi
 if [ "$CAPSULE_STATUS" -eq 3 ]; then
   rm -f "$RULE_FILE" 2>/dev/null
@@ -179,8 +198,7 @@ elif [ "$CAPSULE_STATUS" -eq 0 ] && [ -n "$CAPSULE" ] && mkdir -p "$RULES_DIR" 2
       printf 'alwaysApply: true\n'
       printf -- '---\n\n'
       printf '# Working Memory (auto-rendered)\n\n'
-      printf 'Session context as of end of previous turn (task: %s, rendered: %s).\n' \
-        "$TASK_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      printf 'Session context as of end of previous turn (task: %s).\n' "$TASK_ID"
       printf 'Retrieved context is not authoritative - verify the source.\n\n'
       printf '%s\n' '```'
       printf '%s\n' "$CAPSULE"
@@ -208,17 +226,21 @@ CAPSULE_STATUS=3
 if command -v python3 > /dev/null 2>&1 && [ -f "$CONTEXT_CLI" ] && [ -n "$CAPSULE_TASK_ID" ]; then
   if command -v timeout > /dev/null 2>&1; then
     CAPSULE=$(timeout "$CAPSULE_BUDGET_SECONDS" python3 "$CONTEXT_CLI" hook-context \
-      --task-id "$CAPSULE_TASK_ID" --json 2>/dev/null)
+      --task-id "$CAPSULE_TASK_ID" 2>/dev/null)
     CAPSULE_STATUS=$?
   else
     CAPSULE=$(python3 "$CONTEXT_CLI" hook-context \
-      --task-id "$CAPSULE_TASK_ID" --json 2>/dev/null)
+      --task-id "$CAPSULE_TASK_ID" 2>/dev/null)
     CAPSULE_STATUS=$?
   fi
 fi
-if [ "$CAPSULE_STATUS" -eq 0 ] && ! printf '%s' "$CAPSULE" | \
-  python3 -c 'import json,sys; json.load(sys.stdin)' >/dev/null 2>&1; then
-  CAPSULE_STATUS=1
+# See the stop hook: the working line is the render marker that replaces the
+# JSON parse.
+if [ "$CAPSULE_STATUS" -eq 0 ]; then
+  case "$CAPSULE" in
+    working:*) ;;
+    *) CAPSULE_STATUS=1 ;;
+  esac
 fi
 if [ "$CAPSULE_STATUS" -eq 3 ]; then
   rm -f "$RULE_FILE" 2>/dev/null
@@ -231,8 +253,8 @@ elif [ "$CAPSULE_STATUS" -eq 0 ] && [ -n "$CAPSULE" ] && mkdir -p "$RULES_DIR" 2
       printf 'alwaysApply: true\n'
       printf -- '---\n\n'
       printf '# Working Memory (auto-rendered)\n\n'
-      printf 'Session context as of end of previous turn (task: %s, rendered: %s).\n' \
-        "$CAPSULE_TASK_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      printf 'Session context as of end of previous turn (task: %s).\n' \
+        "$CAPSULE_TASK_ID"
       printf 'Retrieved context is not authoritative - verify the source.\n\n'
       printf '%s\n' '```'
       printf '%s\n' "$CAPSULE"
@@ -353,9 +375,18 @@ MIRROR_RULES: dict[str, Any] = {
                     ],
                 },
             },
-            # Each tool documents its own registration model (settings.json vs
-            # hooks.json vs config.toml), so every hooks README is mirror-owned.
-            "skip": ["README.md"],
+            "skip": [
+                # Each tool documents its own registration model (settings.json
+                # vs hooks.json vs config.toml), so every hooks README is
+                # mirror-owned.
+                "README.md",
+                # Tool-owned: each host exposes a different subagent-gate
+                # contract (Claude PreToolUse exit codes, Cursor subagentStart
+                # permission JSON, Codex spawn_agent deny) and reads a
+                # different roster source, so the three copies are separate
+                # generations by design.
+                "subagent-gate.sh",
+            ],
         },
         {
             # Slash commands: Claude's orchestration frontmatter is reduced to

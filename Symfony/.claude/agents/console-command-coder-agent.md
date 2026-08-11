@@ -4,6 +4,7 @@ description: "Use this agent to implement Symfony console commands that validate
 model: sonnet
 invokes: console-command-coder
 phase: execution
+writes: true
 ---
 
 # Console Command Coder Agent

@@ -4,6 +4,7 @@ description: "Use this agent when a Symfony project uses API Platform and needs 
 model: sonnet
 invokes: api-platform-designer
 phase: planning
+writes: true
 ---
 
 # API Platform Designer Agent

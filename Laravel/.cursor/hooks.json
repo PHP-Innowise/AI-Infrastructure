@@ -7,6 +7,19 @@
         "timeout": 15
       }
     ],
+    "subagentStart": [
+      {
+        "command": ".cursor/hooks/subagent-gate.sh",
+        "timeout": 5,
+        "failClosed": true
+      }
+    ],
+    "subagentStop": [
+      {
+        "command": ".cursor/hooks/subagent-dispatch.sh",
+        "timeout": 8
+      }
+    ],
     "beforeShellExecution": [
       {
         "command": ".cursor/hooks/bash-validator.sh",

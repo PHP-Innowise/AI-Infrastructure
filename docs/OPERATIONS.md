@@ -73,6 +73,37 @@ worked task, see the [User Task Workflow Example](examples/USER-TASK-WORKFLOW-EX
 - Do not stage runtime changes automatically. Review all Git-tracked Project
   Brain or Memory Bank writes before staging them.
 
+### Context Economy
+
+The cost of a token depends on how long it stays resident, not on when it was
+read: the whole context is re-read on every turn, so anything placed in context
+early is paid again on each subsequent turn of the session. Two operating
+consequences follow. Both thresholds were derived from local transcripts with
+`scripts/cost_attribution.py`; re-derive them on your own corpus before
+treating them as settled, and see
+[docs/TOKEN-ECONOMY-RESEARCH.md](TOKEN-ECONOMY-RESEARCH.md) for the method.
+
+- **Delegate to a subagent only when it displaces roughly seven or more turns
+  of the main session.** A subagent run is cheaper per turn than a main-session
+  turn, but it pays its own context setup and returns a result the main session
+  then carries. Below that break-even, fanning out costs more than doing the
+  work inline. Fan out for genuinely parallel or genuinely disposable work -
+  broad searches, independent reviews, anything whose intermediate context the
+  main session must not inherit - not to keep the main transcript tidy.
+- **Compact deliberately once the context approaches ~400k tokens.** Turns
+  above that line are a minority of turns but a majority of main-session spend,
+  because every one of them re-reads everything below it. Compacting at a
+  natural boundary costs one summarization; drifting past it costs the full
+  context on every remaining turn.
+
+Two related facts worth knowing before optimizing anything here. A file under
+`.claude/`, `.cursor/` or `.codex/` that `scripts/build_mirrors.py --check`
+regenerates is not canon: edit the canonical source, or the change is silently
+discarded on the next `--write`. Each edition's `.gitattributes` lists exactly
+those generated files so they collapse to a stub in review diffs; the
+canonical files living in the same directories are deliberately absent from it
+and keep their diffs.
+
 ## Typical Prompt and Task Lifecycle
 
 The user normally supplies intent and a stable task ID:
@@ -542,6 +573,38 @@ Operational policy requires `--revision` in governed mode even though the
 compatibility parser permits omission. In lightweight mode, the command
 atomically converts the local working task into an episode and deletes the
 working row.
+
+### `msg-send`, `msg-read`, `msg-dispatch`, and `capsule`
+
+```bash
+python3 memory-bank/scripts/context.py msg-send --task-id ID \
+  --from AGENT --to AGENT|main|'*' --type finding|question|handoff \
+  (--body TEXT | --body-file PATH) [--ref PATH]... [--json]
+python3 memory-bank/scripts/context.py msg-read --task-id ID \
+  [--for ACTOR] [--since SEQ] [--type TYPE] [--json]
+python3 memory-bank/scripts/context.py msg-dispatch --task-id ID \
+  --agent AGENT --event spawn|complete [--note TEXT] \
+  [--capsule-file PATH] [--json]
+python3 memory-bank/scripts/context.py capsule --validate --file PATH|- [--json]
+```
+
+The agent message channel behind orchestrated flows (governed mode only):
+one append-only JSONL journal per task under
+`project-brain/control/messages/`, written under the global mutation lock and
+never rewritten, so its git history is the audit trail. Bodies are capped at
+8,000 characters and screened by the same secret patterns as task fields;
+actors are lowercase slugs plus the reserved `main`, and `*` broadcasts.
+`msg-dispatch` records the orchestration log — who was spawned with which
+delegation capsule (SHA-256 digest) and who completed — and refuses a spawn
+whose capsule fails the mandatory-section check that `capsule --validate`
+runs standalone (objective, output format, tool and source guidance,
+boundaries, decisions and assumptions). The journal keeps no read cursor:
+consumers pass `--for` and `--since` and track their own position. A
+terminal task refuses new messages but its journal stays readable, and
+`validate` checks every line. Related guard: `update --phase` moves only
+forward through the stored phase order unless `--allow-phase-regression`
+states the backward move is deliberate, and `update --actor` prefixes the
+progress line with the recording agent's slug.
 
 ### `record`
 

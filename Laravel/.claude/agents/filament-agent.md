@@ -1,9 +1,10 @@
 ---
 name: filament
-description: "Use this agent to build or extend Filament admin panels on Laravel: Resources, Schemas (Forms/Infolists), Tables, Relation Managers, Actions, and Widgets backed by Eloquent models and Policies. For customer-facing UI (not an admin panel) use coder-frontend instead.\n\nExamples:\n\n<example>\nContext: The user wants an admin CRUD screen for a model.\nuser: \"Add a Filament resource for managing invitations\"\nassistant: \"I'll use the filament agent to build the Resource, form schema, and table.\"\n<Task tool call to filament agent>\n</example>\n\n<example>\nContext: The user wants a dashboard widget.\nuser: \"Add a stats widget showing pending invitations on the admin dashboard\"\nassistant: \"I'll use the filament agent to build the dashboard widget.\"\n<Task tool call to filament agent>\n</example>"
+description: "Use this agent to build or extend Filament admin panels on Laravel: Resources, Schemas (Forms/Infolists), Tables, Relation Managers, Actions, and Widgets backed by Eloquent models and Policies. For customer-facing UI (not an admin panel) use coder-frontend instead."
 model: sonnet
 invokes: filament
 phase: execution
+writes: true
 ---
 
 # Filament Agent
@@ -38,3 +39,21 @@ When done, provide:
 - DO NOT chain to other skills automatically
 - DO NOT make workflow decisions
 - STOP after skill completion and output suggestions
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: The user wants an admin CRUD screen for a model.
+user: "Add a Filament resource for managing invitations"
+assistant: "I'll use the filament agent to build the Resource, form schema, and table."
+<Task tool call to filament agent>
+</example>
+
+<example>
+Context: The user wants a dashboard widget.
+user: "Add a stats widget showing pending invitations on the admin dashboard"
+assistant: "I'll use the filament agent to build the dashboard widget."
+<Task tool call to filament agent>
+</example>

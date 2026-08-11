@@ -1,9 +1,10 @@
 ---
 name: eloquent
-description: "Use this agent to implement or review deep Eloquent ORM patterns on Laravel: polymorphic relationships, accessors/mutators via Attribute casts, custom cast classes, local/global query scopes, model events and Observers, mass-assignment protection, and advanced eager loading/large-dataset iteration. Use when the model-layer behavior itself is the non-trivial part of the task, not schema design (database-designer) or a full feature slice (coder).\n\nExamples:\n\n<example>\nContext: The user needs a comment system attachable to multiple model types.\nuser: \"Add polymorphic comments that can attach to both Post and Video models\"\nassistant: \"I'll use the eloquent agent to implement the morphTo/morphMany relationship with a MorphMap.\"\n<Task tool call to eloquent agent>\n</example>\n\n<example>\nContext: The user has a slow report because a scope is loading full relations just to count them.\nuser: \"This dashboard query loads every comment just to show a count and a has-pinned-comment flag\"\nassistant: \"I'll use the eloquent agent to replace that with withCount()/withExists() and review the eager loading.\"\n<Task tool call to eloquent agent>\n</example>"
+description: "Use this agent to implement or review deep Eloquent ORM patterns on Laravel: polymorphic relationships, accessors/mutators via Attribute casts, custom cast classes, local/global query scopes, model events and Observers, mass-assignment protection, and advanced eager loading/large-dataset iteration. Use when the model-layer behavior itself is the non-trivial part of the task, not schema design (database-designer) or a full feature slice (coder)."
 model: sonnet
 invokes: eloquent
 phase: execution
+writes: true
 ---
 
 # Eloquent Agent
@@ -38,3 +39,21 @@ When done, provide:
 - DO NOT chain to other skills automatically
 - DO NOT make workflow decisions
 - STOP after skill completion and output suggestions
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: The user needs a comment system attachable to multiple model types.
+user: "Add polymorphic comments that can attach to both Post and Video models"
+assistant: "I'll use the eloquent agent to implement the morphTo/morphMany relationship with a MorphMap."
+<Task tool call to eloquent agent>
+</example>
+
+<example>
+Context: The user has a slow report because a scope is loading full relations just to count them.
+user: "This dashboard query loads every comment just to show a count and a has-pinned-comment flag"
+assistant: "I'll use the eloquent agent to replace that with withCount()/withExists() and review the eager loading."
+<Task tool call to eloquent agent>
+</example>

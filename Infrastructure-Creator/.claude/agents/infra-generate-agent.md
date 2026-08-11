@@ -1,6 +1,6 @@
 ---
 name: infra-generate
-description: "Use this agent to run Phase 2 generation against a target PHP project after infra-scan has produced and the user has reviewed the Project Profile: it consumes the approved profile, fans out the forge skills (policy, skills, agents, commands, hooks, memory), composes the flow, and runs a final verification pass - writing only the selected AI-tool edition(s). This is the only agent that writes into the target.\n\nExamples:\n\n<example>\nContext: The user has reviewed the Project Profile and wants to generate the accelerator.\nuser: \"infra-generate ../acme-billing\"\nassistant: \"I'll use the infra-generate agent to turn the approved profile into a working accelerator inside ../acme-billing.\"\n<Task tool call to infra-generate agent>\n</example>\n\n<example>\nContext: The user approves the profile and wants Phase 2 to run.\nuser: \"The profile looks good, build the infrastructure for my project now\"\nassistant: \"I'll use the infra-generate agent to fan out the forges, wrap the skills, compose the flow, and verify - for the selected edition(s) only.\"\n<Task tool call to infra-generate agent>\n</example>"
+description: "Use this agent to run Phase 2 generation against a target PHP project after infra-scan has produced and the user has reviewed the Project Profile: it consumes the approved profile, fans out the forge skills (policy, skills, agents, commands, hooks, memory), composes the flow, and runs a final verification pass - writing only the selected AI-tool edition(s). This is the only agent that writes into the target."
 model: opus
 invokes: infra-generate
 phase: orchestration
@@ -31,3 +31,21 @@ When done, provide:
 - MUST NOT write into the target until the collision guard passes (explicit overwrite/merge/abort).
 - MUST generate ONLY the selected edition(s); never an unselected edition, never skip a selected one.
 - MUST NOT report success while `bootstrap-verifier` has unresolved failures.
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: The user has reviewed the Project Profile and wants to generate the accelerator.
+user: "infra-generate ../acme-billing"
+assistant: "I'll use the infra-generate agent to turn the approved profile into a working accelerator inside ../acme-billing."
+<Task tool call to infra-generate agent>
+</example>
+
+<example>
+Context: The user approves the profile and wants Phase 2 to run.
+user: "The profile looks good, build the infrastructure for my project now"
+assistant: "I'll use the infra-generate agent to fan out the forges, wrap the skills, compose the flow, and verify - for the selected edition(s) only."
+<Task tool call to infra-generate agent>
+</example>

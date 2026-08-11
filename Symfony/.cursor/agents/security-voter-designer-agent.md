@@ -1,6 +1,7 @@
 ---
 name: security-voter-designer
 description: "Use this agent to design Symfony voters, access-control rules, firewalls, role hierarchy, and authorization tests."
+writes: true
 ---
 
 # Security Voter Designer Agent

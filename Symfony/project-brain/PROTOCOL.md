@@ -105,3 +105,23 @@ reason; privacy, owner, authority, lifecycle, and freshness filters still win.
 
 No network service, MCP server, embedding store, or automatic prompt injection
 is part of this runtime.
+
+## Messages
+
+Orchestrated agents communicate through an append-only channel: one JSONL
+journal per task under `control/messages/{task_uuid}.jsonl`, written under the
+same mutation lock as every other Brain write and never rewritten — the git
+history of the journal is the audit trail. An entry carries `seq`,
+`from_actor`, `to_actor` (an agent slug, `main` for the orchestrating
+conversation, or `*` to broadcast), a type from `finding`, `question`,
+`handoff`, `dispatch`, `completion`, a body capped at 8,000 characters that
+passes the same secret screening as task fields, optional path refs, and — for
+dispatch events — the SHA-256 digest of the delegation capsule. `msg-dispatch`
+refuses to record a spawn whose capsule fails the mandatory-section check
+(objective, output format, tool and source guidance, boundaries, decisions and
+assumptions; `capsule --validate` runs the same check standalone). The journal
+keeps no read cursor: consumers filter with `msg-read --for ACTOR --since SEQ`
+and track their own position. A terminal task refuses new messages but stays
+readable; `validate` checks every journal line against the schema, its task,
+and strict `seq` ordering. Task phases move only forward along the stored
+vocabulary; `--allow-phase-regression` states a backward move is deliberate.

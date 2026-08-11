@@ -83,6 +83,10 @@ jobs:
         run: python3 -m unittest tests.test_installation
       - name: Preserve framework-specific skill semantics
         run: python3 -m unittest tests.test_framework_semantics
+      - name: Optional developer tooling stays out of the editions
+        # The live code2prompt checks skip themselves here (no Rust toolchain);
+        # what runs is the containment contract and the argv/exclude pins.
+        run: python3 -m unittest tests.test_collect_context
 
   lint:
     name: lint
@@ -94,17 +98,33 @@ jobs:
         with:
           python-version: "3.x"
       - name: Bash syntax check (bash -n)
-        run: git ls-files -z -- '*.sh' | xargs -0 -r -n1 bash -n
+        # 'collect' carries no .sh extension but is a shell script; listing it
+        # explicitly keeps every tracked shell file inside the gate.
+        run: git ls-files -z -- '*.sh' 'collect' | xargs -0 -r -n1 bash -n
       - name: ShellCheck (severity gate error)
         run: |
           shellcheck --version
-          git ls-files -z -- '*.sh' | xargs -0 -r shellcheck -S error
+          git ls-files -z -- '*.sh' 'collect' | xargs -0 -r shellcheck -S error
       - name: Validate JSON
         run: |
           git ls-files -z -- '*.json' | while IFS= read -r -d '' f; do
             python3 -m json.tool "$f" > /dev/null || { echo "Invalid JSON: $f" >&2; exit 1; }
           done
-      - name: Startup context budget
+      - name: Cursor rule render carries no per-turn invalidator
+        run: |
+          # .cursor/rules/working-memory.mdc is alwaysApply: it is re-sent on
+          # every prompt, so a clock or a per-call identifier inside it makes
+          # each turn's prefix unique and is billed on a T^2/2 curve
+          # (docs/TOKEN-ECONOMY-RESEARCH.md). The behavioural guard is
+          # test_render_carries_no_per_turn_invalidator in each edition's
+          # test_hooks.py; this is the cheap textual net in front of it.
+          if git ls-files -z -- '*/.cursor/hooks/working-memory-write.sh' \
+                                '*/.cursor/hooks/local-context.sh' \
+            | xargs -0 -r grep -nE '\bdate[[:space:]]+[-+]|\$\(date|\$RANDOM|uuidgen'; then
+            echo "Per-turn invalidator in the Cursor rule render (above)." >&2
+            exit 1
+          fi
+      - name: Context budget
         run: python3 scripts/context_budget.py --check
 
   changelog:

@@ -4,6 +4,7 @@ description: "Use this agent to design safe Doctrine migrations, backfills, inde
 model: sonnet
 invokes: doctrine-migration-designer
 phase: planning
+writes: true
 ---
 
 # Doctrine Migration Designer Agent

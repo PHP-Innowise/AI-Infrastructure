@@ -96,6 +96,105 @@ class InventoryTest(unittest.TestCase):
             self.assertEqual("project-owned\n", collision.read_text(encoding="utf-8"))
             self.assertFalse((target / "memory-bank").exists())
 
+    def test_merge_existing_handles_standard_root_files_and_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="install merge ") as raw:
+            target = Path(raw).resolve()
+            originals = {
+                ".gitattributes": "*.lock binary\n",
+                ".gitignore": ".env\n/vendor/\n",
+                "AGENTS.md": "# Project policy\n\nKeep project behavior.\n",
+                "README.md": "# Existing application\n",
+            }
+            for path, content in originals.items():
+                (target / path).write_text(content, encoding="utf-8")
+
+            command = (
+                sys.executable,
+                str(INSTALLER),
+                "--edition",
+                "PHP Core",
+                "--target",
+                str(target),
+                "--tool",
+                "cursor",
+                "--merge-existing",
+            )
+            preview = run(*command, "--dry-run")
+            self.assertEqual(0, preview.returncode, preview.stderr)
+            self.assertIn("WOULD_MERGE\tshared\t.gitignore\t.gitignore", preview.stdout)
+            self.assertIn(
+                "WOULD_MERGE\tshared\t.gitattributes\t.gitattributes",
+                preview.stdout,
+            )
+            self.assertIn("WOULD_MERGE\tshared\tAGENTS.md\tAGENTS.md", preview.stdout)
+            self.assertIn(
+                "WOULD_COPY_AS\tshared\tREADME.md\tACCELERATOR.md",
+                preview.stdout,
+            )
+            for path, content in originals.items():
+                self.assertEqual(content, (target / path).read_text(encoding="utf-8"))
+            self.assertFalse((target / "ACCELERATOR.md").exists())
+            self.assertFalse((target / "memory-bank").exists())
+
+            installed = run(*command)
+            self.assertEqual(0, installed.returncode, installed.stderr)
+            self.assertEqual(
+                originals["README.md"],
+                (target / "README.md").read_text(encoding="utf-8"),
+            )
+            self.assertEqual(
+                (ROOT / "PHP Core" / "README.md").read_bytes(),
+                (target / "ACCELERATOR.md").read_bytes(),
+            )
+            agents = (target / "AGENTS.md").read_text(encoding="utf-8")
+            self.assertTrue(agents.startswith(originals["AGENTS.md"].rstrip()))
+            self.assertIn("BEGIN ACCELERATOR MANAGED POLICY", agents)
+            self.assertIn("# AGENTS.md - Policy Rules", agents)
+            gitignore = (target / ".gitignore").read_text(encoding="utf-8")
+            self.assertIn(".env\n", gitignore)
+            self.assertIn("memory-bank/local/\n", gitignore)
+            attributes = (target / ".gitattributes").read_text(encoding="utf-8")
+            self.assertIn("*.lock binary\n", attributes)
+            self.assertIn(".cursor/skills/", attributes)
+
+            merged_digests = {
+                path: hashlib.sha256((target / path).read_bytes()).hexdigest()
+                for path in (*originals, "ACCELERATOR.md")
+            }
+            repeated = run(*command)
+            self.assertEqual(0, repeated.returncode, repeated.stderr)
+            self.assertIn("UNCHANGED\tshared\tAGENTS.md", repeated.stdout)
+            self.assertIn("UNCHANGED\tshared\tREADME.md", repeated.stdout)
+            for path, digest in merged_digests.items():
+                self.assertEqual(digest, hashlib.sha256((target / path).read_bytes()).hexdigest())
+
+    def test_merge_existing_still_refuses_unsupported_collision_atomically(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="install unsupported merge ") as raw:
+            target = Path(raw).resolve()
+            collision = target / "memory-bank" / "README.md"
+            collision.parent.mkdir()
+            collision.write_text("project-owned memory\n", encoding="utf-8")
+            result = run(
+                sys.executable,
+                str(INSTALLER),
+                "--edition",
+                "PHP Core",
+                "--target",
+                str(target),
+                "--tool",
+                "cursor",
+                "--merge-existing",
+            )
+            self.assertEqual(2, result.returncode)
+            self.assertIn(
+                "COLLISION\tshared\tmemory-bank/README.md\texisting-file",
+                result.stderr,
+            )
+            self.assertEqual(
+                "project-owned memory\n", collision.read_text(encoding="utf-8")
+            )
+            self.assertFalse((target / "AGENTS.md").exists())
+
     def test_parent_obstruction_is_preflighted_before_copy(self) -> None:
         with tempfile.TemporaryDirectory(prefix="install obstruction ") as raw:
             target = Path(raw).resolve()

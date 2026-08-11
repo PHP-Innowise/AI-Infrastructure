@@ -1,22 +1,7 @@
 ---
 name: release
-description: "Use this agent to create GitHub releases with automated changelog generation. For version tagging, changelog updates, and GitHub release publication.
-
-Examples:
-
-<example>
-Context: The user wants to create a new release.
-user: \"Create a new release with a changelog\"
-assistant: \"I'll use the release agent to create a GitHub release with generated changelog.\"
-<Task tool call to release agent>
-</example>
-
-<example>
-Context: The user needs to publish a new version.
-user: \"Publish version 2.0.0 to GitHub\"
-assistant: \"I'll use the release agent to tag and publish the release.\"
-<Task tool call to release agent>
-</example>"
+description: "Use this agent to create GitHub releases with automated changelog generation. For version tagging, changelog updates, and GitHub release publication."
+writes: true
 ---
 
 # Release Agent
@@ -51,3 +36,21 @@ When done, provide:
 - DO NOT chain to other skills automatically
 - DO NOT make workflow decisions
 - STOP after skill completion and output suggestions
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: The user wants to create a new release.
+user: "Create a new release with a changelog"
+assistant: "I'll use the release agent to create a GitHub release with generated changelog."
+<Task tool call to release agent>
+</example>
+
+<example>
+Context: The user needs to publish a new version.
+user: "Publish version 2.0.0 to GitHub"
+assistant: "I'll use the release agent to tag and publish the release."
+<Task tool call to release agent>
+</example>

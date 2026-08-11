@@ -1,6 +1,6 @@
 ---
 name: integration-scanner
-description: "Use this agent to detect a PHP target's third-party integrations from composer.json require plus runtime config wiring, categorized (payment, messaging/queue, search, cache, object storage, email/SMS, auth/identity, observability, feature flags, CDN, ML/AI, secondary database) with per-item confidence. Phase 1 discovery, strictly read-only on the target.\n\nExamples:\n\n<example>\nContext: The user wants to know which external services a project depends on.\nuser: \"integration-scanner ../acme-billing\"\nassistant: \"I'll use the integration-scanner agent to enumerate and categorize the third-party integrations of ../acme-billing with confidence levels.\"\n<Task tool call to integration-scanner agent>\n</example>\n\n<example>\nContext: The user asks which payment or queue provider a codebase uses.\nuser: \"What payment and queue providers does this app integrate with?\"\nassistant: \"I'll use the integration-scanner agent to cross-reference composer require with runtime wiring and report the providers.\"\n<Task tool call to integration-scanner agent>\n</example>"
+description: "Use this agent to detect a PHP target's third-party integrations from composer.json require plus runtime config wiring, categorized (payment, messaging/queue, search, cache, object storage, email/SMS, auth/identity, observability, feature flags, CDN, ML/AI, secondary database) with per-item confidence. Phase 1 discovery, strictly read-only on the target."
 model: sonnet
 invokes: integration-scanner
 phase: discovery
@@ -31,3 +31,21 @@ When done, provide:
 - DO NOT chain to other skills automatically.
 - STOP after the skill completes.
 - MUST operate read-only on the target and MUST NOT read `.env`/secrets (env-var names only, never values).
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: The user wants to know which external services a project depends on.
+user: "integration-scanner ../acme-billing"
+assistant: "I'll use the integration-scanner agent to enumerate and categorize the third-party integrations of ../acme-billing with confidence levels."
+<Task tool call to integration-scanner agent>
+</example>
+
+<example>
+Context: The user asks which payment or queue provider a codebase uses.
+user: "What payment and queue providers does this app integrate with?"
+assistant: "I'll use the integration-scanner agent to cross-reference composer require with runtime wiring and report the providers."
+<Task tool call to integration-scanner agent>
+</example>

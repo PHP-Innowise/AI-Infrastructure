@@ -4,6 +4,7 @@ description: "Use this agent to design Symfony Messenger messages, handlers, tra
 model: sonnet
 invokes: messenger-designer
 phase: planning
+writes: true
 ---
 
 # Messenger Designer Agent

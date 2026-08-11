@@ -1,9 +1,10 @@
 ---
 name: queues-jobs
-description: "Use this agent to design and implement Laravel queued Jobs: job class anatomy, job middleware (WithoutOverlapping, RateLimited, ThrottlesExceptions), unique jobs, batching, chaining, failed-job handling and retries, and Horizon supervisor configuration. Use once the decision to go async is already made and the job's own behavior is the non-trivial part.\n\nExamples:\n\n<example>\nContext: The user needs a job that must not run twice concurrently for the same entity and should back off on repeated external API failures.\nuser: \"Build a queued job to sync inventory per warehouse that won't overlap and backs off if the supplier API keeps failing\"\nassistant: \"I'll use the queues-jobs agent to implement the job with WithoutOverlapping and ThrottlesExceptions middleware.\"\n<Task tool call to queues-jobs agent>\n</example>\n\n<example>\nContext: The user has several independent report-generation jobs that need a single completion callback.\nuser: \"Generate these five report exports in parallel and email the user once all of them finish\"\nassistant: \"I'll use the queues-jobs agent to implement this with Bus::batch() and a then() callback.\"\n<Task tool call to queues-jobs agent>\n</example>"
+description: "Use this agent to design and implement Laravel queued Jobs: job class anatomy, job middleware (WithoutOverlapping, RateLimited, ThrottlesExceptions), unique jobs, batching, chaining, failed-job handling and retries, and Horizon supervisor configuration. Use once the decision to go async is already made and the job's own behavior is the non-trivial part."
 model: sonnet
 invokes: queues-jobs
 phase: execution
+writes: true
 ---
 
 # Queues & Jobs Agent
@@ -38,3 +39,21 @@ When done, provide:
 - DO NOT chain to other skills automatically
 - DO NOT make workflow decisions
 - STOP after skill completion and output suggestions
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: The user needs a job that must not run twice concurrently for the same entity and should back off on repeated external API failures.
+user: "Build a queued job to sync inventory per warehouse that won't overlap and backs off if the supplier API keeps failing"
+assistant: "I'll use the queues-jobs agent to implement the job with WithoutOverlapping and ThrottlesExceptions middleware."
+<Task tool call to queues-jobs agent>
+</example>
+
+<example>
+Context: The user has several independent report-generation jobs that need a single completion callback.
+user: "Generate these five report exports in parallel and email the user once all of them finish"
+assistant: "I'll use the queues-jobs agent to implement this with Bus::batch() and a then() callback."
+<Task tool call to queues-jobs agent>
+</example>

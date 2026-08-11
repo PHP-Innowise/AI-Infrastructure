@@ -1,6 +1,7 @@
 ---
 name: fixture-factory-generator
 description: "Use this agent to generate Symfony fixtures, Foundry factories, object mothers, and deterministic test data builders."
+writes: true
 ---
 
 # Fixture Factory Generator Agent

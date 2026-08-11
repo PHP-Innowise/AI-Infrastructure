@@ -1,6 +1,6 @@
 ---
 name: clarifying-interview
-description: "Use this agent to turn the genuinely ambiguous or unverifiable items left by the seven scanners and stack-researcher into a short, concrete question set for the user, always including the mandatory AI-tool-selection question, then record answers with interview provenance. Runs before profile-synthesizer; read-only on the target.\n\nExamples:\n\n<example>\nContext: Research is done and some findings are still inferred/unknown.\nuser: \"clarifying-interview ../acme-billing\"\nassistant: \"I'll use the clarifying-interview agent to ask only the open questions that can change generation, plus the mandatory AI-tool-selection question.\"\n<Task tool call to clarifying-interview agent>\n</example>\n\n<example>\nContext: Statuses exist but legal transitions were not proven.\nuser: \"Can the scanner clarify the invoice workflow?\"\nassistant: \"I'll use the clarifying-interview agent only if that unresolved transition materially changes generated policy, skills, memory, or tests, and will preserve the answer as interview evidence.\"\n<Task tool call to clarifying-interview agent>\n</example>"
+description: "Use this agent to turn the genuinely ambiguous or unverifiable items left by the seven scanners and stack-researcher into a short, concrete question set for the user, always including the mandatory AI-tool-selection question, then record answers with interview provenance. Runs before profile-synthesizer; read-only on the target."
 model: sonnet
 invokes: clarifying-interview
 phase: synthesis
@@ -32,3 +32,21 @@ When done, provide:
 - STOP after the skill completes.
 - MUST always ask and record the AI-tool-selection question (never assume it), MUST keep the question set minimal, and MUST NOT ask for secrets or credentials.
 - MUST NOT launder an interview answer into repository evidence or invent owners, severity, approvals, legal obligations, or complete workflow/permission matrices.
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: Research is done and some findings are still inferred/unknown.
+user: "clarifying-interview ../acme-billing"
+assistant: "I'll use the clarifying-interview agent to ask only the open questions that can change generation, plus the mandatory AI-tool-selection question."
+<Task tool call to clarifying-interview agent>
+</example>
+
+<example>
+Context: Statuses exist but legal transitions were not proven.
+user: "Can the scanner clarify the invoice workflow?"
+assistant: "I'll use the clarifying-interview agent only if that unresolved transition materially changes generated policy, skills, memory, or tests, and will preserve the answer as interview evidence."
+<Task tool call to clarifying-interview agent>
+</example>

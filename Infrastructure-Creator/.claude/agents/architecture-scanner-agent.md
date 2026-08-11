@@ -1,6 +1,6 @@
 ---
 name: architecture-scanner
-description: "Use this agent to detect a PHP target's architectural shape from real evidence: monolith vs modular-monolith vs microservices vs event-driven, layering/DDD approach (layered, hexagonal/ports-and-adapters, DDD, or none), module/service boundaries, and communication style. Phase 1 discovery, strictly read-only on the target.\n\nExamples:\n\n<example>\nContext: The user wants to understand how a PHP project is structured.\nuser: \"architecture-scanner ../acme-billing\"\nassistant: \"I'll use the architecture-scanner agent to classify the architecture style, layering, and boundaries of ../acme-billing from real evidence.\"\n<Task tool call to architecture-scanner agent>\n</example>\n\n<example>\nContext: The user asks whether a codebase is a monolith or microservices.\nuser: \"Is this project a monolith or microservices, and how is it layered?\"\nassistant: \"I'll use the architecture-scanner agent to map the directory tree, PSR-4 map, and message-bus wiring and report the architecture with confidence.\"\n<Task tool call to architecture-scanner agent>\n</example>"
+description: "Use this agent to detect a PHP target's architectural shape from real evidence: monolith vs modular-monolith vs microservices vs event-driven, layering/DDD approach (layered, hexagonal/ports-and-adapters, DDD, or none), module/service boundaries, and communication style. Phase 1 discovery, strictly read-only on the target."
 model: opus
 invokes: architecture-scanner
 phase: discovery
@@ -31,3 +31,21 @@ When done, provide:
 - DO NOT chain to other skills automatically.
 - STOP after the skill completes.
 - MUST operate read-only on the target and MUST NOT read `.env`/secrets.
+
+## Selection examples
+
+Kept for the reader, not for the selector: these were in this agent's `description:`, which is loaded into the orchestrator's context on every session. The description's prose is what routes work here now.
+
+<example>
+Context: The user wants to understand how a PHP project is structured.
+user: "architecture-scanner ../acme-billing"
+assistant: "I'll use the architecture-scanner agent to classify the architecture style, layering, and boundaries of ../acme-billing from real evidence."
+<Task tool call to architecture-scanner agent>
+</example>
+
+<example>
+Context: The user asks whether a codebase is a monolith or microservices.
+user: "Is this project a monolith or microservices, and how is it layered?"
+assistant: "I'll use the architecture-scanner agent to map the directory tree, PSR-4 map, and message-bus wiring and report the architecture with confidence."
+<Task tool call to architecture-scanner agent>
+</example>

@@ -1,6 +1,7 @@
 ---
 name: messenger-designer
 description: "Use this agent to design Symfony Messenger messages, handlers, transports, retries, failure handling, idempotency, and tests."
+writes: true
 ---
 
 # Messenger Designer Agent
