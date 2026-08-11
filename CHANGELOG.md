@@ -26,6 +26,22 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### 2026-08-10 installation inventories exclude project work
+
+- `scripts/install_accelerator.py` no longer requires an inventory entry for
+  files an edition accumulates while a project is built inside it: `Task/app/`,
+  `codebase/`, derived `specs/`, project memory chunks, and the governed brain
+  runtime under `project-brain/control/` and `project-brain/dynamic/`. The
+  inventory's own scope already read "excludes runtime, local, and user state";
+  the discovery step now matches it. Listing such files instead would make the
+  installer copy one project's application into every consumer's tree.
+- A path in those areas is skipped only when the inventory does not list it, so
+  the seeds that genuinely ship — `specs/MANIFEST.md`, the `.gitkeep`
+  placeholders, the starter memory chunk, the empty brain indexes — stay
+  verified, deleting one still fails, and an unlisted file outside those areas
+  is still reported. The trade-off is recorded in the module: a distribution
+  file mistakenly placed under one of those prefixes is no longer caught here.
+
 ## 2.0.0 - 2026-08-07
 
 ### 2026-08-06 hook and installation hardening
