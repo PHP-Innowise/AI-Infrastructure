@@ -14,11 +14,20 @@
 
         <p><a href="{{ path('administration_event_master_export') }}">Export CSV</a></p>
 
+        {# AC-07-26: sort by date (either direction), trainer, or capacity. #}
+        <nav aria-label="Sort">
+            <a href="{{ path('administration_event_master_index', app.request.query.all|merge({sort: 'date_asc'})) }}" aria-current="{{ sort == 'date_asc' ? 'true' }}">Date ↑</a>
+            <a href="{{ path('administration_event_master_index', app.request.query.all|merge({sort: 'date_desc'})) }}" aria-current="{{ sort == 'date_desc' ? 'true' }}">Date ↓</a>
+            <a href="{{ path('administration_event_master_index', app.request.query.all|merge({sort: 'trainer'})) }}" aria-current="{{ sort == 'trainer' ? 'true' }}">Trainer</a>
+            <a href="{{ path('administration_event_master_index', app.request.query.all|merge({sort: 'capacity'})) }}" aria-current="{{ sort == 'capacity' ? 'true' }}">Capacity</a>
+        </nav>
+
         {% if items is empty %}
             <p>No events found.</p>
         {% else %}
+            {# AC-07-23: title, trainer, date & time, type, capacity ("held / capacity"), status, assigned coach. #}
             <table>
-                <thead><tr><th>Title</th><th>Trainer</th><th>Type</th><th>Start</th><th>Location</th><th>Status</th><th></th></tr></thead>
+                <thead><tr><th>Title</th><th>Trainer</th><th>Type</th><th>Start</th><th>Location</th><th>Capacity</th><th>Status</th><th>Coach</th><th></th></tr></thead>
                 <tbody>
                     {% for row in items %}
                         <tr>
@@ -27,7 +36,9 @@
                             <td>{{ row.event_type }}</td>
                             <td>{{ row.starts_at }}</td>
                             <td>{{ row.location }}</td>
+                            <td>{{ row.held_count }} / {{ row.capacity }}</td>
                             <td>{{ row.display_status }}</td>
+                            <td>{{ row.coach_name ?: '—' }}</td>
                             <td><a href="{{ path('administration_event_master_show', {event: row.id}) }}">View</a></td>
                         </tr>
                     {% endfor %}

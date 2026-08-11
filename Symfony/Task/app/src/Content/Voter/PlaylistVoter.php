@@ -9,7 +9,11 @@ use App\Identity\Entity\Account;
 use App\Identity\Entity\AccountRole;
 use App\Identity\Repository\PlayerTrainerMembershipRepository;
 use App\Identity\Service\PlayerContextResolver;
+use App\Platform\Entity\FeatureToggle;
+use App\Platform\Entity\Trainer;
+use App\Platform\Service\FeatureGate;
 use App\Platform\Tenancy\TenantContext;
+use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\HttpFoundation\RequestStack;
 use Symfony\Component\Security\Core\Authentication\Token\TokenInterface;
 use Symfony\Component\Security\Core\Authorization\Voter\Voter;
@@ -38,9 +42,17 @@ use Symfony\Component\Security\Core\Authorization\Voter\Voter;
  * never through this voter (security-voter-designer-design.md "Content
  * module": "a natural absence, not an unresolved mechanism").
  *
- * `FeatureGate::isEnabled($trainer, 'lppp')` is NOT checked here — see the
- * coder's final report: `FeatureToggle`/`FeatureGate` (Administration/
- * Epic-07) do not exist in this codebase yet.
+ * **Feature gate**: every attribute here ANDs a
+ * `FeatureGate::isEnabled($trainer, 'lppp')` check (BR-07-1: "LPPP disabled
+ * removes trainer access to the LPPP section and players see no content";
+ * security-voter-designer-design.md Decisions, "`FeatureGate` consulted by
+ * Content-module voters for the LPPP toggle"). Evaluated against the
+ * ACTING trainer's own current tenant — never the subject `Playlist`'s
+ * owning trainer — because the rule is about whether *this* trainer's LPPP
+ * section exists at all, including their own ability to browse another
+ * trainer's published content through it; it is not a per-content-item
+ * distinction. `PLAYLIST_CREATE` has no subject to read a trainer from at
+ * all, so the current tenant is the only source either way.
  *
  * @see specs/security-voter-designer-design.md "Content module"
  * @see specs/requirements-analyst-epic-04-lp-content-spec.md
@@ -68,6 +80,8 @@ final class PlaylistVoter extends Voter
         private readonly RequestStack $requestStack,
         private readonly PlayerContextResolver $playerContext,
         private readonly PlayerTrainerMembershipRepository $memberships,
+        private readonly FeatureGate $featureGate,
+        private readonly EntityManagerInterface $entityManager,
     ) {
     }
 
@@ -88,6 +102,10 @@ final class PlaylistVoter extends Voter
         $actor = $token->getUser();
 
         if (!$actor instanceof Account) {
+            return false;
+        }
+
+        if (!$this->lpppEnabledForCurrentTenant()) {
             return false;
         }
 
@@ -173,6 +191,39 @@ final class PlaylistVoter extends Voter
     private function isOwnTenant(Playlist $playlist): bool
     {
         return $playlist->getTrainer()->getId() === $this->tenantContext->getTrainerIdOrNull();
+    }
+
+    /**
+     * BR-07-1: gated on the ACTING trainer's own current tenant, not the
+     * subject `Playlist`'s owning trainer — see this class's own docblock.
+     * No active tenant resolved (Super Admin, or a request too early in
+     * resolution) has nothing to gate against, so this stays neutral
+     * (`true`) and leaves the decision to the ordinary role/ownership
+     * checks, matching how `isOwnTenant()` already degrades gracefully.
+     */
+    private function lpppEnabledForCurrentTenant(): bool
+    {
+        $tenant = $this->currentTenantReference();
+
+        return null === $tenant || $this->featureGate->isEnabled($tenant, FeatureToggle::FEATURE_LPPP);
+    }
+
+    /**
+     * A lazy proxy reference, not a query — matches
+     * `ContentItemVoter::currentTenantReference()`'s own precedent exactly.
+     */
+    private function currentTenantReference(): ?Trainer
+    {
+        $tenantId = $this->tenantContext->getTrainerIdOrNull();
+
+        if (null === $tenantId) {
+            return null;
+        }
+
+        /** @var Trainer $trainer */
+        $trainer = $this->entityManager->getReference(Trainer::class, $tenantId);
+
+        return $trainer;
     }
 
     private function hasActiveMembership(Playlist $playlist, Account $actor): bool

@@ -13,7 +13,9 @@ use App\Growth\Service\CouponAnalyticsService;
 use App\Growth\Service\CouponService;
 use App\Growth\Voter\CouponVoter;
 use App\Identity\Entity\Account;
+use App\Platform\Entity\FeatureToggle;
 use App\Platform\Entity\Trainer;
+use App\Platform\Service\FeatureGate;
 use App\Platform\Tenancy\TenantContext;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
@@ -27,7 +29,17 @@ use Symfony\Component\Security\Http\Attribute\IsGranted;
  * US-06.05/06.07: coupon creation, edit, deactivation, deletion, and
  * analytics — "Marketing" -> "Coupons".
  *
+ * **The index route is feature-gated** (`specs/api-designer-spec.md:656`) —
+ * see `TrainerReferralDashboardController`'s own docblock for the full
+ * reasoning (Epic-06's own recorded gap, why this is a controller guard
+ * rather than a new voter). The sub-routes below it (create/edit/
+ * deactivate/delete/usage) are intentionally left as they were: Epic-06's
+ * own commit names exactly two routes as left ungated, this and the
+ * referral dashboard, and widening the gate to every coupon action here
+ * would be scope this task's own boundaries do not ask for.
+ *
  * @see specs/requirements-analyst-epic-06-marketing-growth-spec.md AC-06-17..19, AC-06-26..28
+ * @see specs/requirements-analyst-epic-07-super-admin-spec.md BR-07-1
  */
 #[IsGranted('ROLE_TRAINER')]
 final class TrainerCouponController extends AbstractController
@@ -38,6 +50,7 @@ final class TrainerCouponController extends AbstractController
         private readonly CouponRedemptionRepository $redemptions,
         private readonly TenantContext $tenantContext,
         private readonly EntityManagerInterface $entityManager,
+        private readonly FeatureGate $featureGate,
     ) {
     }
 
@@ -50,6 +63,11 @@ final class TrainerCouponController extends AbstractController
     public function index(): Response
     {
         $trainer = $this->currentTrainer();
+
+        if (!$this->featureGate->isEnabled($trainer, FeatureToggle::FEATURE_MARKETING)) {
+            throw $this->createAccessDeniedException('Marketing tools are disabled for this trainer.');
+        }
+
         $now = new \DateTimeImmutable();
         $monthStart = $now->modify('first day of this month')->setTime(0, 0);
         $monthEnd = $monthStart->modify('+1 month');

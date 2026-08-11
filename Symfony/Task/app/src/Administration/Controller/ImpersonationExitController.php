@@ -32,10 +32,10 @@ final class ImpersonationExitController extends AbstractController
             throw $this->createAccessDeniedException('Invalid CSRF token.');
         }
 
-        // No dedicated Administration dashboard route exists yet (Epic-07);
-        // app_dashboard already renders correctly for every role, including
-        // the Super Admin this always lands on once switch_user restores the
-        // original token.
-        return $this->redirectToRoute('app_dashboard', ['_switch_user' => '_exit']);
+        // specs/api-designer-spec.md:691: "Redirect to administration_dashboard"
+        // — Epic-07 now provides that route (it did not exist when this
+        // controller was first built in Epic-01, hence app_dashboard as a
+        // stand-in then).
+        return $this->redirectToRoute('administration_dashboard', ['_switch_user' => '_exit']);
     }
 }

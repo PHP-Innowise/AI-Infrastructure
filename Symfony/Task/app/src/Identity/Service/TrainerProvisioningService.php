@@ -14,6 +14,7 @@ use App\Identity\Repository\PasswordResetTokenRepository;
 use App\Platform\Entity\AccountTrainerLink;
 use App\Platform\Entity\Trainer;
 use App\Platform\Repository\AccountTrainerLinkRepository;
+use App\Platform\Repository\FeatureToggleRepository;
 use App\Platform\Repository\TrainerRepository;
 use App\Platform\Service\AuditLogger;
 use App\Platform\Service\SecureTokenFactory;
@@ -48,6 +49,7 @@ final readonly class TrainerProvisioningService
         private ShareLinkService $shareLinkService,
         private IdentityMailer $mailer,
         private AuditLogger $auditLogger,
+        private FeatureToggleRepository $featureToggles,
     ) {
     }
 
@@ -105,6 +107,17 @@ final readonly class TrainerProvisioningService
             // day one. Trainer-scoped, so the tenant must be active first.
             $this->tenantContext->activateFor($trainer);
             $this->shareLinkService->issueStaticPlayerLink($trainer, $account);
+
+            // BR-07-2: "All three features default to enabled for new
+            // trainers" — seeded here so FeatureGate never has to treat "no
+            // row" as a third state for a trainer created through the
+            // normal path (database-designer-schema.md "`feature_toggle`").
+            // `FeatureToggle` lives in `Platform`, not `Administration` —
+            // see its own docblock — so this is Identity writing directly
+            // to a Platform-owned repository, the same precedent
+            // `$this->accountTrainerLinks->add()` two lines above already
+            // sets in this exact method.
+            $this->featureToggles->seedDefaultsForTrainer($trainer, $actingSuperAdmin);
 
             $this->auditLogger->record(
                 $actingSuperAdmin,

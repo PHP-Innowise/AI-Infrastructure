@@ -127,9 +127,18 @@ final readonly class EventService
      * below the current confirmed RSVP count; date/time, location and price
      * changes fan out targeted notifications.
      *
+     * `$overrideConflicts` is AC-07-27/28's own mechanism: Event Master
+     * passes `true` so a coach-assignment conflict never surfaces as a
+     * warning to Super Admin and the event always saves — see
+     * `assignCoachIfRequested()`'s own docblock for exactly how the
+     * override is still captured for the audit log even though nothing is
+     * ever shown. The trainer's own `TrainerEventController` never sets
+     * this, so its existing conflict-warning round-trip (AC-02-9/10) is
+     * completely unchanged.
+     *
      * @throws CapacityBelowRsvpCountException
      */
-    public function update(Event $event, Account $actor, EventInput $input): void
+    public function update(Event $event, Account $actor, EventInput $input, bool $overrideConflicts = false): void
     {
         // Snapshotted BEFORE the transaction below mutates $event in place
         // (EventRepository::lockForUpdate() returns the same managed
@@ -173,7 +182,7 @@ final readonly class EventService
 
         $this->notifyOfChanges($event, $before, $input);
         $this->syncInvitationsIfPrivate($event, $input, $actor);
-        $this->assignCoachIfRequested($event, $input, $actor);
+        $this->assignCoachIfRequested($event, $input, $actor, $overrideConflicts);
     }
 
     /**
@@ -380,7 +389,25 @@ final readonly class EventService
         $this->entityManager->flush();
     }
 
-    private function assignCoachIfRequested(Event $event, EventInput $input, Account $actor): void
+    /**
+     * AC-07-27/28: when `$overrideConflicts` is true (Event Master only),
+     * `CoachAssignmentService::detectConflict()` — a read-only pre-check,
+     * see its own docblock for exactly why it must never throw — decides
+     * up front whether a conflict exists, and `assign()` is then called
+     * EXACTLY ONCE, already carrying `skipConflictChecks: true` and
+     * (only when a conflict genuinely was found) an auto-generated
+     * override reason. This is deliberately NOT "attempt, catch
+     * CoachAssignmentConflictException, retry with the override": Doctrine's
+     * `EntityManager::wrapInTransaction()` (which `assign()` uses) closes
+     * the EntityManager on any exception escaping its callback, so a
+     * second `assign()` call after catching the first attempt's exception
+     * would fail every subsequent Doctrine operation in the request with
+     * "The EntityManager is closed" — reproduced directly while building
+     * this feature, not a theoretical concern. A conflict-free assignment
+     * still calls `assign()` once, with a null reason, so no audit entry
+     * is manufactured for an override that never happened.
+     */
+    private function assignCoachIfRequested(Event $event, EventInput $input, Account $actor, bool $overrideConflicts = false): void
     {
         if (null === $input->coachMembershipId) {
             return;
@@ -389,7 +416,25 @@ final readonly class EventService
         $coach = $this->coachMemberships->find($input->coachMembershipId)
             ?? throw new \InvalidArgumentException('Unknown coach.');
 
-        $this->coachAssignmentService->assign($event, $coach, $actor, $input->coachOverrideReason);
+        if (!$overrideConflicts) {
+            $this->coachAssignmentService->assign($event, $coach, $actor, $input->coachOverrideReason);
+
+            return;
+        }
+
+        $conflict = $this->coachAssignmentService->detectConflict($event, $coach);
+
+        // AC-07-28: "Super Admin overrode conflict: [details]" — logged by
+        // CoachAssignmentService::assign() itself under
+        // 'event.coach_conflict_override' the moment a non-empty override
+        // reason is supplied, the same single audit path a trainer's own
+        // confirmed override already uses (never a second, parallel
+        // logging mechanism for the same fact).
+        $reason = null !== $conflict
+            ? sprintf('Super Admin overrode conflict via Event Master: %s', $conflict->getMessage())
+            : null;
+
+        $this->coachAssignmentService->assign($event, $coach, $actor, $reason, skipConflictChecks: true);
     }
 
     /**

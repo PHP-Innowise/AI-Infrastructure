@@ -24,18 +24,29 @@
             <button type="submit" class="button">Filter</button>
         </form>
 
+        {# AC-07-10: name, email, role, associated trainer, status, registration date, last login. #}
         <table>
-            <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th></tr></thead>
+            <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Trainer</th><th>Status</th><th>Registered</th><th>Last login</th></tr></thead>
             <tbody>
             {% for account in accounts %}
                 <tr class="{{ account.status.value != 'active' ? 'is-inactive' }}">
                     <td><a href="{{ path('administration_user_show', {account: account.id}) }}">{{ account.profile ? account.profile.fullName : '—' }}</a></td>
                     <td>{{ account.email }}</td>
                     <td>{{ account.role.label }}</td>
+                    <td>{{ associatedTrainers[account.id] is defined ? associatedTrainers[account.id]|default('—') : '—' }}</td>
                     <td>{{ account.status.value }}</td>
+                    <td>{{ account.createdAt|date('Y-m-d') }}</td>
+                    <td>{{ account.lastLoginAt ? account.lastLoginAt|date('Y-m-d H:i') : 'Never' }}</td>
                 </tr>
             {% endfor %}
             </tbody>
         </table>
+
+        {# AC-07-12: 50 users per page with page navigation. #}
+        <nav>
+            {% if page > 1 %}<a href="{{ path('administration_users_index', app.request.query.all|merge({page: page - 1})) }}">Previous</a>{% endif %}
+            <span>Page {{ page }} of {{ (total / perPage)|round(0, 'ceil')|default(1) }}</span>
+            {% if page * perPage < total %}<a href="{{ path('administration_users_index', app.request.query.all|merge({page: page + 1})) }}">Next</a>{% endif %}
+        </nav>
     </div>
 {% endblock %}

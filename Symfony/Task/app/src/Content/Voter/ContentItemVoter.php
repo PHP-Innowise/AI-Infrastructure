@@ -13,7 +13,9 @@ use App\Identity\Entity\AccountRole;
 use App\Identity\Entity\PlayerProfile;
 use App\Identity\Repository\PlayerTrainerMembershipRepository;
 use App\Identity\Service\PlayerContextResolver;
+use App\Platform\Entity\FeatureToggle;
 use App\Platform\Entity\Trainer;
+use App\Platform\Service\FeatureGate;
 use App\Platform\Tenancy\TenantContext;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\HttpFoundation\RequestStack;
@@ -35,6 +37,13 @@ use Symfony\Component\Security\Core\Authorization\Voter\Voter;
  * Same non-widened-write rule as `PlaylistVoter`: `_EDIT`/`_DELETE`/
  * `_PUBLISH_TOGGLE` are trainer-only, own-tenant-only, never granted merely
  * because the item is published.
+ *
+ * **Feature gate**: same treatment as `PlaylistVoter` — every attribute
+ * ANDs `FeatureGate::isEnabled($trainer, 'lppp')` against the ACTING
+ * trainer's own current tenant (BR-07-1; security-voter-designer-design.md
+ * Decisions, "`FeatureGate` consulted by Content-module voters"). See that
+ * class's own docblock for why the current tenant, not the subject's
+ * owning trainer, is what gets checked.
  *
  * @see specs/security-voter-designer-design.md "Content module"
  * @see specs/requirements-analyst-epic-04-lp-content-spec.md
@@ -63,6 +72,7 @@ final class ContentItemVoter extends Voter
         private readonly PlayerTrainerMembershipRepository $memberships,
         private readonly PlaylistItemRepository $playlistItems,
         private readonly PlaylistAccessGrantRepository $accessGrants,
+        private readonly FeatureGate $featureGate,
     ) {
     }
 
@@ -82,6 +92,10 @@ final class ContentItemVoter extends Voter
         $actor = $token->getUser();
 
         if (!$actor instanceof Account) {
+            return false;
+        }
+
+        if (!$this->lpppEnabledForCurrentTenant()) {
             return false;
         }
 
@@ -171,6 +185,19 @@ final class ContentItemVoter extends Voter
     private function isOwnCreation(ContentItem $item): bool
     {
         return $item->getTrainer()->getId() === $this->tenantContext->getTrainerIdOrNull();
+    }
+
+    /**
+     * BR-07-1, mirroring `PlaylistVoter::lpppEnabledForCurrentTenant()`
+     * exactly, current-tenant-scoped for the same reason. No active tenant
+     * stays neutral rather than denying — the role/reach checks already
+     * handle that case on their own.
+     */
+    private function lpppEnabledForCurrentTenant(): bool
+    {
+        $tenant = $this->currentTenantReference();
+
+        return null === $tenant || $this->featureGate->isEnabled($tenant, FeatureToggle::FEATURE_LPPP);
     }
 
     /**

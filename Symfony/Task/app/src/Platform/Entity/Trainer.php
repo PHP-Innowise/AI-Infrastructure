@@ -103,6 +103,14 @@ class Trainer
         return new \DateTimeZone($this->timezone);
     }
 
+    /**
+     * AC-07-38: the Trainers list' own "Created" column.
+     */
+    public function getCreatedAt(): \DateTimeImmutable
+    {
+        return $this->createdAt;
+    }
+
     public function getOrganizationAddress(): ?string
     {
         return $this->organizationAddress;

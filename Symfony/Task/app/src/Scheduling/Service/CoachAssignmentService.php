@@ -112,12 +112,21 @@ final readonly class CoachAssignmentService
     }
 
     /**
-     * @throws CoachAssignmentConflictException
+     * AC-07-27: a read-only pre-check — never throws, never runs inside
+     * `wrapInTransaction()` — so a caller can decide what to do about a
+     * conflict BEFORE calling `assign()`, rather than attempting-and-
+     * catching around it. This distinction is load-bearing, not
+     * stylistic: Doctrine's own `EntityManager::wrapInTransaction()` closes
+     * the EntityManager on ANY exception escaping its callback (its own
+     * implementation — `close()` before `rollback()`), which makes a
+     * same-request retry after catching `CoachAssignmentConflictException`
+     * from a first `assign()` attempt permanently break every later
+     * Doctrine call in that request. `EventMasterController`'s Super Admin
+     * override path calls this method first for exactly that reason — see
+     * `EventService::assignCoachIfRequested()`'s own docblock.
      */
-    private function guardNoConflict(Event $event, CoachMembership $coach, ?string $overrideReason): void
+    public function detectConflict(Event $event, CoachMembership $coach): ?CoachAssignmentConflictException
     {
-        $hasOverride = null !== $overrideReason && '' !== trim($overrideReason);
-
         // Explicitly normalized to PHP's own runtime-default timezone (NOT
         // the trainer's) before deriving day-of-week/time-of-day:
         // AvailabilityWindow (Epic-01) carries no timezone of its own —
@@ -144,14 +153,29 @@ final readonly class CoachAssignmentService
 
         $declared = $this->availabilityWindows->findForCoach($coach);
 
-        if ($this->conflictChecker->conflictsWith($declared, $dayOfWeek, $timeStart, $timeEnd) && !$hasOverride) {
-            throw CoachAssignmentConflictException::availabilityConflict($this->coachDisplayName($coach));
+        if ($this->conflictChecker->conflictsWith($declared, $dayOfWeek, $timeStart, $timeEnd)) {
+            return CoachAssignmentConflictException::availabilityConflict($this->coachDisplayName($coach));
         }
 
         $overlapping = $this->assignments->findOverlappingForCoach($coach, $event->getStartsAt(), $event->getEndsAt(), $event);
 
-        if ([] !== $overlapping && !$hasOverride) {
-            throw CoachAssignmentConflictException::overlappingAssignment($this->coachDisplayName($coach));
+        if ([] !== $overlapping) {
+            return CoachAssignmentConflictException::overlappingAssignment($this->coachDisplayName($coach));
+        }
+
+        return null;
+    }
+
+    /**
+     * @throws CoachAssignmentConflictException
+     */
+    private function guardNoConflict(Event $event, CoachMembership $coach, ?string $overrideReason): void
+    {
+        $hasOverride = null !== $overrideReason && '' !== trim($overrideReason);
+        $conflict = $this->detectConflict($event, $coach);
+
+        if (null !== $conflict && !$hasOverride) {
+            throw $conflict;
         }
     }
 

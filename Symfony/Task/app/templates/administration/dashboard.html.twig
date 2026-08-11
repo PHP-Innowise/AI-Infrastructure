@@ -1,0 +1,87 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Dashboard — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Super Admin Dashboard</h1>
+
+        <p>
+            <a class="button button--primary" href="{{ path('administration_trainer_create') }}">+ Create Trainer</a>
+            <a class="button" href="{{ path('administration_stripe_dashboard_link') }}" target="_blank" rel="noopener">View Financial Reports in Stripe</a>
+        </p>
+
+        {# AC-07-5: date-range selector — Session Metrics only, see DashboardController's own docblock. #}
+        <form method="get">
+            <label for="range">Date range</label>
+            <select id="range" name="range" onchange="this.form.submit()">
+                {% for option in allowedRanges %}
+                    <option value="{{ option }}" {{ option == range ? 'selected' }}>Last {{ option }} days</option>
+                {% endfor %}
+            </select>
+            <noscript><button type="submit">Apply</button></noscript>
+        </form>
+
+        <section>
+            <h2>User Metrics</h2>
+            <dl>
+                <dt>Active trainers</dt><dd>{{ totalTrainers }}</dd>
+                <dt>Total players</dt><dd>{{ totalPlayers }}</dd>
+                <dt>Total coaches</dt><dd>{{ totalCoaches }}</dd>
+                <dt>New users this week</dt><dd>{{ newUsersThisWeek }}</dd>
+                <dt>New users this month</dt><dd>{{ newUsersThisMonth }}</dd>
+                <dt>Growth trend (week over week)</dt>
+                <dd>{{ growthTrendPercent is not null ? growthTrendPercent ~ '%' : 'N/A' }}</dd>
+            </dl>
+
+            <h3>30-day user growth</h3>
+            <table>
+                <thead><tr><th>Date</th><th>New users</th></tr></thead>
+                <tbody>
+                    {% for point in growthChart %}
+                        <tr><td>{{ point.date }}</td><td>{{ point.count }}</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </section>
+
+        <section>
+            <h2>Session Metrics (last {{ range }} days)</h2>
+            <dl>
+                {% for type, count in sessionMetrics.sessionsByType %}
+                    <dt>Sessions — {{ type }}</dt><dd>{{ count }}</dd>
+                {% endfor %}
+                <dt>RSVPs</dt><dd>{{ sessionMetrics.rsvpsThisWeek }}</dd>
+                <dt>Attendance rate</dt><dd>{{ sessionMetrics.attendanceRate is not null ? sessionMetrics.attendanceRate ~ '%' : 'N/A' }}</dd>
+                <dt>No-show rate</dt><dd>{{ sessionMetrics.noShowRate is not null ? sessionMetrics.noShowRate ~ '%' : 'N/A' }}</dd>
+            </dl>
+        </section>
+
+        <section>
+            <h2>Top Performers</h2>
+            <h3>Most active trainers</h3>
+            <table>
+                <thead><tr><th>Trainer</th><th>Sessions (30d)</th><th>Players</th></tr></thead>
+                <tbody>
+                    {% for row in mostActiveTrainers %}
+                        <tr>
+                            <td><a href="{{ path('administration_trainer_show', {trainer: row.trainerId}) }}">{{ row.trainerName }}</a></td>
+                            <td>{{ row.sessionCount }}</td>
+                            <td>{{ row.playerCount }}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+
+            <h3>Top players</h3>
+            <table>
+                <thead><tr><th>Player</th><th>Trainer</th><th>Attendance (30d)</th></tr></thead>
+                <tbody>
+                    {% for row in topPlayers %}
+                        <tr><td>{{ row.name }}</td><td>{{ row.trainerName }}</td><td>{{ row.sessionCount }}</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </section>
+    </div>
+{% endblock %}

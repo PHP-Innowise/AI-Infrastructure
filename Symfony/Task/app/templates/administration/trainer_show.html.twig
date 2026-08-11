@@ -1,0 +1,30 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}{{ trainer.businessName }} — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>{{ trainer.businessName }}</h1>
+        <p>
+            Owner: {{ trainer.ownerAccount.email }} ·
+            Subscription: <strong>{{ subscription ? subscription.status : 'pending' }}</strong> ·
+            Created {{ trainer.createdAt|date('Y-m-d') }}
+        </p>
+
+        <p>
+            <a href="{{ path('administration_user_show', {account: trainer.ownerAccount.id}) }}">View / Edit account</a>
+            · <a href="{{ path('administration_trainer_features_edit', {trainer: trainer.id}) }}">Feature Settings</a>
+            · <a href="{{ path('administration_trainer_fee_edit', {trainer: trainer.id}) }}">Edit Pricing</a>
+            · <a href="{{ path('administration_trainer_stripe_dashboard_link', {trainer: trainer.id}) }}">View {{ trainer.businessName }}'s Stripe Account</a>
+        </p>
+
+        {% if trainer.ownerAccount.status.value == 'active' %}
+            <p><a class="button" href="{{ path('administration_user_deactivate', {account: trainer.ownerAccount.id}) }}">Deactivate trainer</a></p>
+        {% elseif trainer.ownerAccount.status.value == 'inactive' %}
+            <form method="post" action="{{ path('administration_user_reactivate', {account: trainer.ownerAccount.id}) }}">
+                <input type="hidden" name="_token" value="{{ csrf_token('reactivate' ~ trainer.ownerAccount.id) }}">
+                <button type="submit" class="button">Reactivate trainer</button>
+            </form>
+        {% endif %}
+    </div>
+{% endblock %}

@@ -37,6 +37,19 @@ final readonly class CrossTenantReadService
     }
 
     /**
+     * AC-07-26's own allowed values: `date_asc`, `date_desc` (default,
+     * unchanged from before this parameter existed), `trainer`, `capacity`.
+     *
+     * @var array<string, string>
+     */
+    private const EVENT_SORTS = [
+        'date_asc' => 'e.starts_at ASC',
+        'date_desc' => 'e.starts_at DESC',
+        'trainer' => 't.business_name ASC, e.starts_at DESC',
+        'capacity' => 'e.capacity DESC, e.starts_at DESC',
+    ];
+
+    /**
      * AC-02-55/56: every trainer's events, with tool-specific search
      * (title, trainer name, location, date) and filters (trainer, location,
      * date range, type, status), 50 per page.
@@ -57,6 +70,7 @@ final readonly class CrossTenantReadService
         ?string $status,
         int $page,
         int $perPage = 50,
+        ?string $sort = null,
     ): array {
         $conditions = [];
         $params = [];
@@ -98,6 +112,7 @@ final readonly class CrossTenantReadService
 
         $where = [] === $conditions ? '' : 'WHERE '.implode(' AND ', $conditions);
         $offset = max(0, $page - 1) * $perPage;
+        $orderBy = self::EVENT_SORTS[$sort ?? ''] ?? self::EVENT_SORTS['date_desc'];
 
         $items = $this->crossing->fetchAllAssociative(
             <<<SQL
@@ -105,11 +120,27 @@ final readonly class CrossTenantReadService
                     e.id, e.title, e.event_type, e.starts_at, e.ends_at, e.location,
                     e.capacity, e.visibility,
                     (CASE WHEN e.status = 'active' AND e.starts_at <= NOW() THEN 'completed' ELSE e.status END) AS display_status,
-                    e.trainer_id, t.business_name AS trainer_name
+                    e.trainer_id, t.business_name AS trainer_name,
+                    -- AC-07-23: capacity is displayed as "held / capacity".
+                    (SELECT COUNT(*) FROM rsvp r WHERE r.event_id = e.id AND r.status IN ('pending_parent_approval', 'pending_payment', 'confirmed')) AS held_count,
+                    -- AC-07-23: the assigned coach, if any — the most
+                    -- recent non-declined assignment, matching
+                    -- CoachAssignmentRepository::findCurrentForEvent()'s
+                    -- own definition exactly.
+                    (
+                        SELECT COALESCE(ap.first_name || ' ' || ap.last_name, acc.email::text)
+                        FROM coach_assignment ca
+                        JOIN coach_membership cm ON cm.id = ca.coach_membership_id
+                        JOIN account acc ON acc.id = cm.account_id
+                        LEFT JOIN account_profile ap ON ap.account_id = acc.id
+                        WHERE ca.event_id = e.id AND ca.status != 'declined'
+                        ORDER BY ca.assigned_at DESC
+                        LIMIT 1
+                    ) AS coach_name
                 FROM event e
                 JOIN trainer t ON t.id = e.trainer_id
                 {$where}
-                ORDER BY e.starts_at DESC
+                ORDER BY {$orderBy}
                 LIMIT :limit OFFSET :offset
                 SQL,
             [...$params, 'limit' => $perPage, 'offset' => $offset],
@@ -322,16 +353,19 @@ final readonly class CrossTenantReadService
     }
 
     /**
-     * AC-03-57: system-wide Top Players — the most active players across
-     * the WHOLE platform, same BR-03-16/17 definition (90-day window,
-     * Present/Late only, alphabetical tie-break) as each trainer's own Top
-     * Players, just without the `trainer_id` predicate.
+     * AC-03-57/AC-07-4: system-wide Top Players — the most active players
+     * across the WHOLE platform, Present/Late only, alphabetical tie-break.
+     * `$windowDays` defaults to 90 to preserve AC-03-57's own Quick View
+     * definition (BR-03-16/17) unchanged for its existing caller; Epic-07's
+     * dashboard passes 30 explicitly (BR-07-9: "top-players ranking uses
+     * attendance count in the last 30 days" — a different window from
+     * Epic-03's Top Players, restated here rather than silently reused).
      *
      * @return list<array{playerId: int, name: string, trainerName: string, sessionCount: int}>
      */
-    public function topPlayersSystemWide(int $limit = 10, ?\DateTimeImmutable $now = null): array
+    public function topPlayersSystemWide(int $limit = 10, ?\DateTimeImmutable $now = null, int $windowDays = 90): array
     {
-        $since = ($now ?? new \DateTimeImmutable())->modify('-90 days');
+        $since = ($now ?? new \DateTimeImmutable())->modify(sprintf('-%d days', $windowDays));
 
         $rows = $this->crossing->fetchAllAssociative(
             <<<'SQL'
@@ -353,6 +387,104 @@ final readonly class CrossTenantReadService
                 'name' => (string) $row['name'],
                 'trainerName' => (string) $row['trainer_name'],
                 'sessionCount' => (int) $row['session_count'],
+            ],
+            $rows,
+        );
+    }
+
+    /**
+     * AC-07-3: Session Metrics — sessions this week by event type, RSVPs
+     * this week, attendance rate, no-show rate, across every trainer.
+     * "Sessions"/"attendance rate"/"no-show rate" mirror
+     * `EventRepository::countStartingBetween()` and
+     * `QuickViewDashboardService`'s own `rate()`/`noShowRate()` formulas
+     * exactly (attended = present+late; no-show = absent; both over total
+     * recorded), just without the per-trainer predicate — "Epic-03...
+     * Super Admin dashboard in this epic (US-07.01) shows a system-wide
+     * version of similar metrics" (requirements-analyst-epic-07-super-admin-spec.md
+     * "Integration Points"). Event-type vocabulary is this codebase's own
+     * three real `Event::TYPE_*` values (training_session, private_session,
+     * small_group) — see this method's own caller for the recorded
+     * discrepancy against the epic's literal "training, private, camps"
+     * wording (no `Event` row is ever typed "camp" anywhere in this schema).
+     *
+     * @return array{sessionsByType: array<string, int>, rsvpsThisWeek: int, attendanceRate: ?float, noShowRate: ?float}
+     */
+    public function dashboardSessionMetrics(Account $actor, \DateTimeImmutable $from, \DateTimeImmutable $to): array
+    {
+        $sessionRows = $this->crossing->fetchAllAssociative(
+            'SELECT event_type, COUNT(*) AS cnt FROM event WHERE starts_at >= :from AND starts_at < :to GROUP BY event_type',
+            ['from' => $from->format('Y-m-d H:i:sP'), 'to' => $to->format('Y-m-d H:i:sP')],
+        );
+        $sessionsByType = [];
+        foreach ($sessionRows as $row) {
+            $sessionsByType[(string) $row['event_type']] = (int) $row['cnt'];
+        }
+
+        $rsvpsThisWeek = (int) $this->crossing->fetchOne(
+            'SELECT COUNT(*) FROM rsvp WHERE requested_at >= :from AND requested_at < :to',
+            ['from' => $from->format('Y-m-d H:i:sP'), 'to' => $to->format('Y-m-d H:i:sP')],
+        );
+
+        $tally = $this->crossing->fetchAssociative(
+            <<<'SQL'
+                SELECT
+                    COUNT(*) FILTER (WHERE status IN ('present','late')) AS attended,
+                    COUNT(*) FILTER (WHERE status = 'absent') AS absent,
+                    COUNT(*) AS total
+                FROM attendance_record
+                WHERE recorded_at >= :from AND recorded_at < :to
+                SQL,
+            ['from' => $from->format('Y-m-d H:i:sP'), 'to' => $to->format('Y-m-d H:i:sP')],
+        );
+        $total = false !== $tally ? (int) $tally['total'] : 0;
+        $attendanceRate = $total > 0 ? round(100 * (int) $tally['attended'] / $total, 1) : null;
+        $noShowRate = $total > 0 ? round(100 * (int) $tally['absent'] / $total, 1) : null;
+
+        $this->auditLogger->record($actor, 'cross_tenant_read.dashboard_session_metrics', 'Event', null, null, []);
+        $this->entityManager->flush();
+
+        return [
+            'sessionsByType' => $sessionsByType,
+            'rsvpsThisWeek' => $rsvpsThisWeek,
+            'attendanceRate' => $attendanceRate,
+            'noShowRate' => $noShowRate,
+        ];
+    }
+
+    /**
+     * AC-07-4: "most active trainers (name, session count, player count)."
+     * BR-07-9: "most-active-trainers ranking uses session count in the last
+     * 30 days."
+     *
+     * @return list<array{trainerId: int, trainerName: string, sessionCount: int, playerCount: int}>
+     */
+    public function mostActiveTrainers(Account $actor, int $limit = 10, ?\DateTimeImmutable $now = null): array
+    {
+        $since = ($now ?? new \DateTimeImmutable())->modify('-30 days');
+
+        $rows = $this->crossing->fetchAllAssociative(
+            <<<'SQL'
+                SELECT
+                    t.id, t.business_name,
+                    (SELECT COUNT(*) FROM event e WHERE e.trainer_id = t.id AND e.starts_at >= :since) AS session_count,
+                    (SELECT COUNT(*) FROM player_trainer_membership ptm WHERE ptm.trainer_id = t.id AND ptm.status = 'active') AS player_count
+                FROM trainer t
+                ORDER BY session_count DESC, t.business_name ASC
+                LIMIT :limit
+                SQL,
+            ['since' => $since->format('Y-m-d H:i:sP'), 'limit' => $limit],
+        );
+
+        $this->auditLogger->record($actor, 'cross_tenant_read.dashboard_most_active_trainers', 'Trainer', null, null, []);
+        $this->entityManager->flush();
+
+        return array_map(
+            static fn (array $row): array => [
+                'trainerId' => (int) $row['id'],
+                'trainerName' => (string) $row['business_name'],
+                'sessionCount' => (int) $row['session_count'],
+                'playerCount' => (int) $row['player_count'],
             ],
             $rows,
         );

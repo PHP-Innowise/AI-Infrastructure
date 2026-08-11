@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace App\Administration\Controller;
 
 use App\Identity\Entity\Account;
+use App\Identity\Entity\CoachMembership;
+use App\Identity\Repository\CoachMembershipRepository;
 use App\Platform\Repository\TrainerRepository;
 use App\Platform\Service\CrossTenantReadService;
 use App\Platform\Tenancy\AdministrativeScope;
@@ -14,6 +16,7 @@ use App\Scheduling\Entity\Rsvp;
 use App\Scheduling\Form\CancelEventType;
 use App\Scheduling\Form\EventType;
 use App\Scheduling\Repository\AttendanceRecordRepository;
+use App\Scheduling\Repository\CoachAssignmentRepository;
 use App\Scheduling\Repository\EventRepository;
 use App\Scheduling\Repository\RsvpRepository;
 use App\Scheduling\Service\EventService;
@@ -54,12 +57,14 @@ final class EventMasterController extends AbstractController
         private readonly RsvpRepository $rsvps,
         private readonly EventService $eventService,
         private readonly AttendanceRecordRepository $attendanceRecords,
+        private readonly CoachMembershipRepository $coachMemberships,
+        private readonly CoachAssignmentRepository $coachAssignments,
     ) {
     }
 
     /**
-     * AC-02-55/56: search + filters (trainer, location, date range, type,
-     * status), 50/page.
+     * AC-07-22..24: search + filters (trainer, location, date range, type,
+     * status). AC-07-26: sort (date/trainer/capacity) + 50/page.
      */
     #[Route('/super-admin/events', name: 'administration_event_master_index', methods: ['GET'])]
     public function index(Request $request): Response
@@ -78,6 +83,7 @@ final class EventMasterController extends AbstractController
             eventType: $this->stringOrNull($request->query->get('type')),
             status: $this->stringOrNull($request->query->get('status')),
             page: max(1, (int) $request->query->get('page', 1)),
+            sort: $this->stringOrNull($request->query->get('sort')),
         );
 
         return $this->render('administration/event_master_index.html.twig', [
@@ -85,6 +91,7 @@ final class EventMasterController extends AbstractController
             'total' => $result['total'],
             'page' => max(1, (int) $request->query->get('page', 1)),
             'perPage' => 50,
+            'sort' => $this->stringOrNull($request->query->get('sort')) ?? 'date_desc',
         ]);
     }
 
@@ -140,12 +147,14 @@ final class EventMasterController extends AbstractController
     }
 
     /**
-     * AC-02-57: edits as if they had created it, overriding
-     * scheduling-conflict warnings without a shown warning (AC-07-27/28's
-     * framing, restated for Epic-02's own AC-02-57 "override scheduling
-     * conflicts without warnings") — EventService::update()'s own coach
-     * conflict path is passed skipConflictChecks via a required override
-     * reason supplied automatically for the audit trail.
+     * AC-02-57/AC-07-25: edits as if they had created it. AC-07-27/28: a
+     * coach-assignment scheduling conflict — a double-booked coach, or an
+     * unavailable-at-this-time coach — never shows a warning and never
+     * blocks the save; `EventService::update(..., overrideConflicts:
+     * true)` is what makes that true, and is what still writes the
+     * `event.coach_conflict_override` audit entry when a conflict genuinely
+     * existed (see that method's own docblock — nothing is logged when
+     * there was no conflict to override).
      */
     #[Route('/super-admin/events/{event}/edit', name: 'administration_event_master_edit', methods: ['GET', 'POST'])]
     public function edit(Request $request, int $event): Response
@@ -167,6 +176,7 @@ final class EventMasterController extends AbstractController
             // the form's model_timezone is the trainer's own zone, so the
             // pre-filled value must already carry that exact timezone.
             $tz = $eventEntity->getTrainer()->getTimezone();
+            $currentAssignment = $this->coachAssignments->findCurrentForEvent($eventEntity);
 
             $form = $this->createForm(EventType::class, [
                 'title' => $eventEntity->getTitle(),
@@ -185,10 +195,15 @@ final class EventMasterController extends AbstractController
                 'usdPrice' => $eventEntity->getUsdPriceMinorUnits() / 100,
                 'tokenPricingEnabled' => $eventEntity->isTokenPricingEnabled(),
                 'tokenPrice' => $eventEntity->getTokenPrice(),
+                'coach' => $currentAssignment?->getCoachMembership(),
             ], [
                 'timezone' => $eventEntity->getTrainer()->getTimezone(),
                 'invitablePlayers' => [],
-                'assignableCoaches' => [],
+                // AC-07-27: the trainer's own active coaches, reachable now
+                // that withScope() has an AdministrativeScope open for this
+                // event's trainer — the same ordinary, RLS-bound query
+                // TrainerEventController's own assignableCoaches() runs.
+                'assignableCoaches' => $this->assignableCoaches(),
                 'submitLabel' => 'Save (Super Admin)',
                 'skipPastCheck' => true,
             ]);
@@ -200,6 +215,9 @@ final class EventMasterController extends AbstractController
 
                 $skillLevels = $this->parseCommaList($data['skillLevels'] ?? null);
                 $genders = $this->parseCommaList($data['genders'] ?? null);
+
+                /** @var CoachMembership|null $coach */
+                $coach = $data['coach'] ?? null;
 
                 $input = new EventInput(
                     title: (string) $data['title'],
@@ -218,9 +236,14 @@ final class EventMasterController extends AbstractController
                     usdPriceMinorUnits: (int) round((float) ($data['usdPrice'] ?? 0) * 100),
                     tokenPricingEnabled: (bool) ($data['tokenPricingEnabled'] ?? false),
                     tokenPrice: max(1, (int) ($data['tokenPrice'] ?? 1)),
+                    coachMembershipId: $coach?->getId(),
                 );
 
-                $this->eventService->update($eventEntity, $this->actor(), $input);
+                // AC-07-27: overrideConflicts is unconditional here — Super
+                // Admin never sees the "Continue anyway?" round-trip
+                // TrainerEventController's own catch(CoachAssignmentConflictException)
+                // block shows a trainer.
+                $this->eventService->update($eventEntity, $this->actor(), $input, overrideConflicts: true);
                 $this->addFlash('success', 'Event updated (Super Admin).');
 
                 return $this->redirectToRoute('administration_event_master_show', ['event' => $eventEntity->getId()]);
@@ -317,6 +340,29 @@ final class EventMasterController extends AbstractController
         } finally {
             $this->administrativeScope->close();
         }
+    }
+
+    /**
+     * AC-07-27: the active tenant's own active coaches — only ever called
+     * from inside withScope()'s open AdministrativeScope, so this ordinary,
+     * RLS-bound query sees exactly this event's own trainer's coaches.
+     * Unlike `TrainerEventController::assignableCoaches()`, no "self as
+     * coach" entry is prepended: that convenience is for a trainer editing
+     * their own events, not the administrative-override use case here.
+     *
+     * @return array<int, CoachMembership>
+     */
+    private function assignableCoaches(): array
+    {
+        $coaches = [];
+
+        foreach ($this->coachMemberships->findAllForActiveTenant() as $membership) {
+            if ($membership->isActive()) {
+                $coaches[(int) $membership->getId()] = $membership;
+            }
+        }
+
+        return $coaches;
     }
 
     private function stringOrNull(mixed $value): ?string

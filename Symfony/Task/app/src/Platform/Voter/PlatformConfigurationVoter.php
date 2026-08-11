@@ -6,12 +6,14 @@ namespace App\Platform\Voter;
 
 use App\Identity\Entity\Account;
 use App\Identity\Entity\AccountRole;
+use App\Platform\Entity\FeatureToggle;
 use App\Platform\Entity\PlatformConfiguration;
 use Symfony\Component\Security\Core\Authentication\Token\TokenInterface;
 use Symfony\Component\Security\Core\Authorization\Voter\Voter;
 
 /**
  * BR-06-4, AC-06-29..31: Super Admin edits platform-wide configuration.
+ * BR-07-1..3, AC-07-18..21: Super Admin edits a trainer's feature toggles.
  *
  * `PlatformConfiguration` is global (`architect-architecture.md:357`) — no
  * tenant to leak, no `AdministrativeScope` needed. Placed in `Platform`
@@ -20,17 +22,13 @@ use Symfony\Component\Security\Core\Authorization\Voter\Voter;
  * `specs/api-designer-spec.md` names the voter and attribute but never a
  * module.
  *
- * `specs/security-voter-designer-design.md` also has this voter cover a
- * `FeatureToggle` subject for Epic-07's feature-toggle screen — that entity
- * does not exist in this codebase (Epic-07/Administration's feature-toggle
- * infrastructure has not been built), so this voter supports
- * `PlatformConfiguration` only. Widening `supports()` to a second subject
- * class is straightforward once `FeatureToggle` exists; adding it
- * speculatively now would be exactly the kind of invented requirement the
- * task's hard rules forbid.
+ * `FeatureToggle` is also global (see its own docblock for the module
+ * placement this required), so the same reasoning applies unchanged:
+ * `voteOnAttribute()` needs no subject-specific branch for it, only the
+ * bare `ROLE_SUPER_ADMIN` check every attribute here already performs.
  */
 /**
- * @extends Voter<string, PlatformConfiguration|null>
+ * @extends Voter<string, PlatformConfiguration|FeatureToggle|null>
  */
 final class PlatformConfigurationVoter extends Voter
 {
@@ -39,7 +37,7 @@ final class PlatformConfigurationVoter extends Voter
     protected function supports(string $attribute, mixed $subject): bool
     {
         return self::PLATFORM_CONFIG_EDIT === $attribute
-            && (null === $subject || $subject instanceof PlatformConfiguration);
+            && (null === $subject || $subject instanceof PlatformConfiguration || $subject instanceof FeatureToggle);
     }
 
     protected function voteOnAttribute(string $attribute, mixed $subject, TokenInterface $token): bool

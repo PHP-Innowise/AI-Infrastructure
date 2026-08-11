@@ -131,6 +131,23 @@ class Account implements UserInterface, PasswordAuthenticatedUserInterface
         return $this->status->canLogIn();
     }
 
+    /**
+     * AC-07-10: the Users tool's own "Last login" column. Null until the
+     * first successful login.
+     */
+    public function getLastLoginAt(): ?\DateTimeImmutable
+    {
+        return $this->lastLoginAt;
+    }
+
+    /**
+     * AC-07-10: the Users tool's own "Registration date" column.
+     */
+    public function getCreatedAt(): \DateTimeImmutable
+    {
+        return $this->createdAt;
+    }
+
     public function isEmailVerified(): bool
     {
         return null !== $this->emailVerifiedAt;
