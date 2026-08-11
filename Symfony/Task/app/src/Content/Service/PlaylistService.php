@@ -122,6 +122,12 @@ final readonly class PlaylistService
      * is keyed off ContentItem, never Playlist — BR-04-17 holds by
      * construction, not by anything this method does).
      *
+     * AC-05-18: $priceUsdMinorUnits/$priceTokens ride the same save —
+     * Playlist::updatePricing() is a separate entity method (so the two
+     * concerns stay independently callable/testable) but this service
+     * exposes one edit action, matching the one edit form
+     * (PlaylistEditType).
+     *
      * @param list<string>|null $filterSkillLevels
      * @param list<string>|null $filterPositions
      * @param list<string>|null $filterAgeLevels
@@ -133,9 +139,16 @@ final readonly class PlaylistService
         ?array $filterSkillLevels,
         ?array $filterPositions,
         ?array $filterAgeLevels,
+        ?int $priceUsdMinorUnits = null,
+        ?int $priceTokens = null,
     ): void {
-        $this->entityManager->wrapInTransaction(function () use ($playlist, $title, $description, $filterSkillLevels, $filterPositions, $filterAgeLevels): void {
+        $this->entityManager->wrapInTransaction(function () use ($playlist, $title, $description, $filterSkillLevels, $filterPositions, $filterAgeLevels, $priceUsdMinorUnits, $priceTokens): void {
             $playlist->updateDetails($title, $description, $filterSkillLevels, $filterPositions, $filterAgeLevels);
+
+            if (null !== $priceUsdMinorUnits && null !== $priceTokens) {
+                $playlist->updatePricing($priceUsdMinorUnits, $priceTokens);
+            }
+
             $this->entityManager->flush();
         });
     }

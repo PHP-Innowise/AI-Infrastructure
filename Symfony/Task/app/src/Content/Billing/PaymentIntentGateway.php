@@ -5,24 +5,19 @@ declare(strict_types=1);
 namespace App\Content\Billing;
 
 /**
- * The narrow seam between Content and Billing (Epic-05), which does not
- * exist yet — matching `App\Scheduling\Billing\PaymentIntentGateway`'s own
- * precedent exactly (architect-architecture.md "Module map": "Until Billing
- * exists, Content and Scheduling depend on a narrow payment-intent interface
- * that Billing later implements"). Content owns this interface; Billing will
- * implement it once it lands (Stripe for `usd`, `TokenLedgerService` for
- * `token`).
+ * The narrow seam between Content and Billing (Epic-05). Content owns this
+ * interface; `App\Billing\Service\ContentPaymentIntentGateway` is Epic-05's
+ * real implementation, registered in `config/services.yaml` in place of the
+ * Epic-04 shipped `NoopPaymentIntentGateway` (removed — see git history).
  *
- * Only `requestPayment()` — unlike Scheduling's version, no `requestRefund()`
- * — because no Epic-04 acceptance criterion or business rule describes a
- * content-purchase refund; adding an unused method here would be a seam wider
- * than anything in this epic actually calls.
+ * No `lockFundingForUpdate()` counterpart to
+ * `App\Scheduling\Billing\PaymentIntentGateway`'s own: a content purchase
+ * never locks a second, capacity-shaped row the way a paid RSVP locks the
+ * event row (`PlaylistAccessGrant` uniqueness is a plain unique index, not
+ * a manually-locked counter), so there is no second lock to sequence
+ * against — architecture's "lock ordering" rule has nothing to do here.
  *
- * `App\Content\Billing\NoopPaymentIntentGateway` is the only implementation
- * shipped with Epic-04 — it cannot move money and never claims to. This
- * interface exists so `PurchasePlaylistAccessService` is fully exercised by
- * tests against a real contract, without Content ever importing a Stripe
- * type or writing a token-ledger row.
+ * `PurchasePlaylistAccessService` is the only caller.
  */
 interface PaymentIntentGateway
 {
@@ -31,5 +26,5 @@ interface PaymentIntentGateway
      * playlist. Must not grant access itself — the caller does that only on
      * `PaymentIntentOutcome::Succeeded`.
      */
-    public function requestPayment(PaymentIntentRequest $request): PaymentIntentOutcome;
+    public function requestPayment(PaymentIntentRequest $request): PaymentIntentResult;
 }

@@ -79,6 +79,14 @@ final class ApprovalController extends AbstractController
             return $this->redirectToRoute($approving ? 'content_portal_purchase_approval_approve' : 'content_portal_purchase_approval_deny', ['approval' => $approval->getId()]);
         }
 
+        // Epic-05, same reasoning again: a token-purchase request needs
+        // Billing's own post-decision step (starting the Stripe Checkout
+        // session on approval, AC-05-6) — Identity must not call into
+        // Billing directly.
+        if (ChildApprovalRequest::ACTION_TOKEN_PURCHASE === $approval->getActionType()) {
+            return $this->redirectToRoute($approving ? 'billing_portal_token_purchase_approval_approve' : 'billing_portal_token_purchase_approval_deny', ['approval' => $approval->getId()]);
+        }
+
         $form = $this->createForm(ApprovalDecisionType::class, null, ['label' => $approving ? 'Approve' : 'Deny']);
         $form->handleRequest($request);
 

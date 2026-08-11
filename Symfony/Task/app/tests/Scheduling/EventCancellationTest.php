@@ -4,15 +4,18 @@ declare(strict_types=1);
 
 namespace App\Tests\Scheduling;
 
+use App\Identity\Entity\Account;
+use App\Platform\Entity\Trainer;
 use App\Scheduling\Billing\PaymentIntentGateway;
-use App\Scheduling\Billing\PaymentIntentOutcome;
 use App\Scheduling\Billing\PaymentIntentRequest;
+use App\Scheduling\Billing\PaymentIntentResult;
 use App\Scheduling\Entity\CoachAssignment;
 use App\Scheduling\Entity\Event;
 use App\Scheduling\Entity\Rsvp;
 use App\Scheduling\Repository\CoachAssignmentRepository;
 use App\Scheduling\Repository\EventRepository;
 use App\Scheduling\Repository\RsvpRepository;
+use App\Tests\Support\BillingFixtureHelpers;
 use App\Tests\Support\FixtureHelpers;
 use App\Tests\Support\SchedulingFixtureHelpers;
 use Symfony\Bundle\FrameworkBundle\KernelBrowser;
@@ -25,6 +28,7 @@ final class EventCancellationTest extends WebTestCase
 {
     use FixtureHelpers;
     use SchedulingFixtureHelpers;
+    use BillingFixtureHelpers;
 
     private KernelBrowser $client;
 
@@ -91,14 +95,18 @@ final class EventCancellationTest extends WebTestCase
 
         $this->client->disableReboot();
         self::getContainer()->set(PaymentIntentGateway::class, new class implements PaymentIntentGateway {
-            public function requestPayment(PaymentIntentRequest $request): PaymentIntentOutcome
+            public function lockFundingForUpdate(Trainer $trainer, Account $payer, string $paymentMethod): void
             {
-                return PaymentIntentOutcome::Succeeded;
             }
 
-            public function requestRefund(PaymentIntentRequest $request): PaymentIntentOutcome
+            public function requestPayment(PaymentIntentRequest $request): PaymentIntentResult
             {
-                return PaymentIntentOutcome::Succeeded;
+                return PaymentIntentResult::succeeded();
+            }
+
+            public function requestRefund(PaymentIntentRequest $request): PaymentIntentResult
+            {
+                return PaymentIntentResult::succeeded();
             }
         });
 
@@ -136,6 +144,55 @@ final class EventCancellationTest extends WebTestCase
         $assignment = $assignments->findOneByEventAndCoach($event, $coach);
         self::assertNotNull($assignment);
         self::assertSame(CoachAssignment::STATUS_DECLINED, $assignment->getStatus(), 'AC-02-47: the coach assignment is also canceled.');
+    }
+
+    /**
+     * AC-05-16/BR-02-12/BR-05-10: a trainer-initiated cancellation refunds
+     * every registered, paid player in full "regardless of how close to
+     * the event time" — distinct from a PLAYER's own 24-hour-gated
+     * cancellation (RsvpCancellationTest's own tests), so this specifically
+     * uses an event starting in under 24 hours, where a player-initiated
+     * cancellation would get NO refund, and proves the trainer-initiated
+     * one still refunds in full anyway. Uses the real Epic-05 token ledger
+     * (not a stub) for a direct, genuine balance proof.
+     */
+    public function testTrainerCancellationRefundsInFullEvenLessThan24HoursOut(): void
+    {
+        $trainer = $this->trainer('peak-performance');
+        $this->activateTenant($trainer);
+        $alex = $this->alexPlayer();
+        $this->ensureActivePlayerMembership($trainer, $alex);
+        $pat = $this->account('player@practiceperfect.test');
+        $this->giveTokens($trainer, $pat, 10);
+        $balanceBeforeRsvp = $this->tokenBalance($trainer, $pat);
+
+        $event = $this->createEvent($trainer, [
+            'title' => 'Imminent Token Session',
+            'startsAt' => new \DateTimeImmutable('+3 hours'),
+            'endsAt' => new \DateTimeImmutable('+4 hours'),
+            'tokenPricingEnabled' => true,
+            'tokenPrice' => 5,
+        ]);
+
+        $this->client->loginUser($pat);
+        $this->switchPlayerToTrainer($this->client, $trainer);
+        $crawler = $this->client->request('GET', sprintf('/portal/events/%d', $event->getId()));
+        $form = $crawler->selectButton('Register & Pay')->form(['rsvp[paymentMethod]' => Rsvp::METHOD_TOKEN]);
+        $this->client->submit($form);
+        self::assertResponseRedirects('/portal/reservations');
+
+        $this->activateTenant($trainer);
+        self::assertSame($balanceBeforeRsvp - 5, $this->tokenBalance($trainer, $pat), 'The RSVP spent 5 tokens.');
+
+        $this->client->loginUser($trainer->getOwnerAccount());
+        $crawler = $this->client->request('GET', sprintf('/trainer/events/%d/cancel', $event->getId()));
+        $form = $crawler->selectButton('Cancel event')->form(['cancel_event[reason]' => 'Imminent cancellation, still owed a refund.']);
+        $this->client->submit($form);
+
+        self::assertResponseRedirects('/trainer/events');
+
+        $this->activateTenant($trainer);
+        self::assertSame($balanceBeforeRsvp, $this->tokenBalance($trainer, $pat), 'AC-05-16: refunded in full despite starting in under 24 hours — timing never matters for a trainer-initiated cancellation.');
     }
 
     /**

@@ -32,3 +32,21 @@ services:
     App\Platform\Command\AcceptanceCoverageCommand:
         arguments:
             $projectDir: '%kernel.project_dir%'
+
+    # Epic-05: STRIPE_SECRET_KEY is deliberately blank in every environment
+    # this codebase runs in (env.example's own comment: "Leave blank until
+    # Epic-05... Never commit a real key" — still true post-Epic-05, since
+    # no real key has been issued). InMemoryStripeClient is therefore the
+    # active binding everywhere, matching NoopPaymentIntentGateway's own
+    # precedent of an honest, non-money-moving shipped implementation.
+    # Switching to HttpStripeClient for an actual deployment with a real key
+    # is this one line, not a code change.
+    App\Billing\Stripe\StripeClient: '@App\Billing\Stripe\InMemoryStripeClient'
+
+    App\Billing\Stripe\HttpStripeClient:
+        arguments:
+            $secretKey: '%env(STRIPE_SECRET_KEY)%'
+
+    App\Billing\Controller\WebhookController:
+        arguments:
+            $webhookSecret: '%env(STRIPE_WEBHOOK_SECRET)%'

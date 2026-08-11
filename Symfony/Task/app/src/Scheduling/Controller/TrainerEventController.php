@@ -19,6 +19,7 @@ use App\Scheduling\Entity\Rsvp;
 use App\Scheduling\Exception\AlreadyRegisteredException;
 use App\Scheduling\Exception\CapacityBelowRsvpCountException;
 use App\Scheduling\Exception\CoachAssignmentConflictException;
+use App\Scheduling\Exception\StripeNotConnectedException;
 use App\Scheduling\Form\CancelEventType;
 use App\Scheduling\Form\EventType;
 use App\Scheduling\Form\ManualAddPlayerType;
@@ -101,6 +102,12 @@ final class TrainerEventController extends AbstractController
                 $form->get('coach')->addError(new FormError($e->getMessage()));
 
                 return $this->render('scheduling/trainer_event_form.html.twig', ['form' => $form, 'mode' => 'create']);
+            } catch (StripeNotConnectedException $e) {
+                // AC-05-3: "Connect Stripe first" — a usd-priced event was
+                // attempted with no Connect account.
+                $form->get('usdPricingEnabled')->addError(new FormError($e->getMessage()));
+
+                return $this->render('scheduling/trainer_event_form.html.twig', ['form' => $form, 'mode' => 'create']);
             }
 
             $this->addFlash('success', 'Event created successfully.');
@@ -141,6 +148,10 @@ final class TrainerEventController extends AbstractController
                 return $this->render('scheduling/trainer_event_recurring_form.html.twig', ['form' => $form]);
             } catch (\InvalidArgumentException $e) {
                 $form->get('repeatUntil')->addError(new FormError($e->getMessage()));
+
+                return $this->render('scheduling/trainer_event_recurring_form.html.twig', ['form' => $form]);
+            } catch (StripeNotConnectedException $e) {
+                $form->get('usdPricingEnabled')->addError(new FormError($e->getMessage()));
 
                 return $this->render('scheduling/trainer_event_recurring_form.html.twig', ['form' => $form]);
             }
@@ -254,6 +265,10 @@ final class TrainerEventController extends AbstractController
                 return $this->render('scheduling/trainer_event_form.html.twig', ['form' => $form, 'mode' => 'duplicate', 'event' => $event]);
             } catch (CoachAssignmentConflictException $e) {
                 $form->get('coach')->addError(new FormError($e->getMessage()));
+
+                return $this->render('scheduling/trainer_event_form.html.twig', ['form' => $form, 'mode' => 'duplicate', 'event' => $event]);
+            } catch (StripeNotConnectedException $e) {
+                $form->get('usdPricingEnabled')->addError(new FormError($e->getMessage()));
 
                 return $this->render('scheduling/trainer_event_form.html.twig', ['form' => $form, 'mode' => 'duplicate', 'event' => $event]);
             }

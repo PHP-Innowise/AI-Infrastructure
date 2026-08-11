@@ -98,17 +98,23 @@ final class PortalEventController extends AbstractController
             return $this->redirectToRoute('scheduling_portal_event_show', ['event' => $event->getId()]);
         }
 
+        // AC-05-10: a card RSVP redirects straight to Stripe Checkout, in
+        // this same request — specs/api-designer-spec.md "Billing module":
+        // "no separate 'create checkout session' endpoint." Checked before
+        // the status match below since a Pending Payment RSVP with a
+        // redirect URL is exactly the "awaiting payment" case, just handled
+        // by leaving the platform instead of a flash message.
+        if (null !== $rsvpEntity->getPendingCheckoutUrl()) {
+            return $this->redirect($rsvpEntity->getPendingCheckoutUrl());
+        }
+
         match ($rsvpEntity->getStatus()) {
             // BR-02-10: pending parent approval.
             Rsvp::STATUS_PENDING_PARENT_APPROVAL => $this->addFlash('info', 'Your request is pending parent approval.'),
-            // AC-02-24/26: confirmed — free events immediately, paid events
-            // once payment succeeds.
+            // AC-02-24/26/AC-05-7: confirmed — free events immediately,
+            // token-paid events instantly (no processing delay), usd events
+            // once the Stripe webhook confirms payment.
             Rsvp::STATUS_CONFIRMED => $this->addFlash('success', "You're registered!"),
-            // AC-02-25: "redirected to payment" — with the shipped
-            // NoopPaymentIntentGateway this is where every paid RSVP
-            // honestly stays until Epic-05 exists (see that class's own
-            // docblock) — never claiming a confirmation that has not
-            // actually happened.
             default => $this->addFlash('info', 'Your registration is awaiting payment confirmation.'),
         };
 

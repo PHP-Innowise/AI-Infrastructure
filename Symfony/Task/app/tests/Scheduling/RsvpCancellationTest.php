@@ -4,13 +4,16 @@ declare(strict_types=1);
 
 namespace App\Tests\Scheduling;
 
+use App\Identity\Entity\Account;
 use App\Identity\Entity\ChildApprovalRequest;
 use App\Identity\Repository\ChildApprovalRequestRepository;
+use App\Platform\Entity\Trainer;
 use App\Scheduling\Billing\PaymentIntentGateway;
-use App\Scheduling\Billing\PaymentIntentOutcome;
 use App\Scheduling\Billing\PaymentIntentRequest;
+use App\Scheduling\Billing\PaymentIntentResult;
 use App\Scheduling\Entity\Rsvp;
 use App\Scheduling\Repository\RsvpRepository;
+use App\Tests\Support\BillingFixtureHelpers;
 use App\Tests\Support\FixtureHelpers;
 use App\Tests\Support\SchedulingFixtureHelpers;
 use Symfony\Bundle\FrameworkBundle\KernelBrowser;
@@ -25,6 +28,7 @@ final class RsvpCancellationTest extends WebTestCase
 {
     use FixtureHelpers;
     use SchedulingFixtureHelpers;
+    use BillingFixtureHelpers;
 
     private KernelBrowser $client;
 
@@ -91,11 +95,18 @@ final class RsvpCancellationTest extends WebTestCase
     }
 
     /**
-     * AC-02-31/32, BR-02-11: canceling a paid, confirmed RSVP >= 24 hours
-     * before the event start refunds automatically, and a refund
-     * confirmation email is sent — exercised against a stub gateway
-     * reporting Succeeded, same technique and rationale as
-     * RsvpTest::testPaidEventConfirmsOnceGatewayReportsSuccess().
+     * AC-02-31/32, BR-02-11, AC-05-14/17: canceling a paid, confirmed RSVP
+     * >= 24 hours before the event start refunds automatically ("Full
+     * refund processed" — a Stripe refund initiated for USD, tracked in
+     * transaction history via the new refund PaymentRecord row
+     * `PaymentRecord::forRefund()` creates), and a refund confirmation
+     * email is sent — exercised against a stub gateway reporting
+     * Succeeded, same technique and rationale as
+     * RsvpTest::testPaidEventConfirmsOnceGatewayReportsSuccess(). The
+     * TOKEN half of AC-05-14/17 ("tokens returned... instant") is proven
+     * separately, against the real Epic-05 ledger rather than a stub, by
+     * testPaidTokenCancellationAtLeast24HoursOutRefundsTokensInstantly()
+     * below.
      */
     public function testPaidCancellationAtLeast24HoursOutRefundsAndNotifies(): void
     {
@@ -112,14 +123,18 @@ final class RsvpCancellationTest extends WebTestCase
 
         $this->client->disableReboot();
         self::getContainer()->set(PaymentIntentGateway::class, new class implements PaymentIntentGateway {
-            public function requestPayment(PaymentIntentRequest $request): PaymentIntentOutcome
+            public function lockFundingForUpdate(Trainer $trainer, Account $payer, string $paymentMethod): void
             {
-                return PaymentIntentOutcome::Succeeded;
             }
 
-            public function requestRefund(PaymentIntentRequest $request): PaymentIntentOutcome
+            public function requestPayment(PaymentIntentRequest $request): PaymentIntentResult
             {
-                return PaymentIntentOutcome::Succeeded;
+                return PaymentIntentResult::succeeded();
+            }
+
+            public function requestRefund(PaymentIntentRequest $request): PaymentIntentResult
+            {
+                return PaymentIntentResult::succeeded();
             }
         });
 
@@ -150,11 +165,74 @@ final class RsvpCancellationTest extends WebTestCase
     }
 
     /**
-     * BR-02-11: canceling a paid, confirmed RSVP < 24 hours before the
-     * event start does NOT refund — only the cancellation email is sent,
-     * never a refund confirmation (NoopPaymentIntentGateway's refund
-     * endpoint is never even called, since RsvpService checks 24-hour
-     * eligibility first).
+     * AC-05-14/17: canceling a token-paid, confirmed RSVP >= 24 hours
+     * before the event start refunds the tokens to the parent-trainer
+     * balance INSTANTLY — proven against the real Epic-05 ledger (not a
+     * stub), in the same request as the cancellation itself, with the
+     * refund also showing up in transaction history as its own row
+     * (BR-05-5's "partial token refunds are possible" is not exercised
+     * separately — this RSVP's own full price is refunded in full, the
+     * only shape BR-02-11/BR-05-10's 24-hour rule ever produces).
+     */
+    public function testPaidTokenCancellationAtLeast24HoursOutRefundsTokensInstantly(): void
+    {
+        $trainer = $this->trainer('peak-performance');
+        $this->activateTenant($trainer);
+        $pat = $this->account('player@practiceperfect.test');
+        $this->giveTokens($trainer, $pat, 10);
+        $balanceBeforeRsvp = $this->tokenBalance($trainer, $pat);
+        $event = $this->createEvent($trainer, [
+            'title' => 'Far Out Token Session',
+            'startsAt' => new \DateTimeImmutable('+5 days'),
+            'endsAt' => new \DateTimeImmutable('+5 days +1 hour'),
+            'tokenPricingEnabled' => true,
+            'tokenPrice' => 4,
+        ]);
+
+        $this->client->loginUser($pat);
+        $this->switchPlayerToTrainer($this->client, $trainer);
+        $crawler = $this->client->request('GET', sprintf('/portal/events/%d', $event->getId()));
+        $form = $crawler->selectButton('Register & Pay')->form(['rsvp[paymentMethod]' => Rsvp::METHOD_TOKEN]);
+        $this->client->submit($form);
+        self::assertResponseRedirects('/portal/reservations');
+
+        $this->activateTenant($trainer);
+        self::assertSame($balanceBeforeRsvp - 4, $this->tokenBalance($trainer, $pat), 'The RSVP spent 4 tokens.');
+        /** @var RsvpRepository $rsvps */
+        $rsvps = self::getContainer()->get(RsvpRepository::class);
+        $rsvp = current($rsvps->findForEvent($event));
+        self::assertNotFalse($rsvp);
+
+        $crawler = $this->client->request('GET', '/portal/reservations');
+        $form = $this->cancelFormForEvent($crawler, 'Far Out Token Session');
+        $this->client->submit($form);
+
+        self::assertResponseRedirects('/portal/reservations');
+
+        $this->activateTenant($trainer);
+        self::assertSame($balanceBeforeRsvp, $this->tokenBalance($trainer, $pat), 'AC-05-14/17: the tokens are back INSTANTLY — same request, no async step.');
+
+        /** @var \App\Billing\Repository\PaymentRecordRepository $paymentRecords */
+        $paymentRecords = self::getContainer()->get(\App\Billing\Repository\PaymentRecordRepository::class);
+        $refundRow = current(array_filter(
+            $paymentRecords->findForPayerHistory($pat),
+            static fn ($p) => $p->isRefund() && $p->getRelatedRsvp()?->getId() === $rsvp->getId(),
+        ));
+        self::assertNotFalse($refundRow, 'AC-05-17: the refund is tracked in transaction history as its own row.');
+        self::assertSame(4, $refundRow->getAmountMinorUnits(), 'The full 4 tokens are refunded — this RSVP\'s own full price.');
+    }
+
+    /**
+     * BR-02-11, AC-05-15: canceling a paid, confirmed RSVP < 24 hours
+     * before the event start does NOT refund — a warning is shown first
+     * (`cancelFormForEvent()`'s own confirm-copy precedent covers the
+     * generic confirm step; the 24-hour-specific wording is US-05.05's own
+     * UI copy, not re-asserted here) and, on confirmation, only the
+     * cancellation email is sent, never a refund confirmation (the
+     * gateway's own refund endpoint is never even called, since
+     * RsvpService checks 24-hour eligibility first — exercised here
+     * against the REAL Epic-05 gateway, not a stub, since this path never
+     * reaches it at all).
      */
     public function testPaidCancellationLessThan24HoursOutDoesNotRefund(): void
     {

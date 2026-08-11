@@ -161,6 +161,19 @@ class ChildApprovalRequest
         return $this->requestedPlaylistId;
     }
 
+    /**
+     * The deferred-FK link to `token_package` (see this class's own
+     * docblock) — added by Epic-05's `TokenPurchaseService`, mirroring
+     * `getRsvpId()`/`getRequestedPlaylistId()`'s own precedent exactly.
+     * AC-05-6: this is how a token-purchase approval's own post-decision
+     * step (`PortalTokenController::purchaseApprovalApprove()`) knows which
+     * package to complete checkout for.
+     */
+    public function getRequestedTokenPackageId(): ?int
+    {
+        return $this->requestedTokenPackageId;
+    }
+
     public function getActionType(): string
     {
         return $this->actionType;

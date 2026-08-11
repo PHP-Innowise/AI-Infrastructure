@@ -28,9 +28,12 @@ final class DualPricingTest extends WebTestCase
     }
 
     /**
-     * AC-02-58: by default, token pricing is enabled at 1 token and USD
-     * pricing is disabled at $0 — verified against the real Create Event
-     * form's own pre-filled defaults, not a test helper's shortcut.
+     * AC-02-58, AC-05-30: by default, token pricing is enabled at 1 token
+     * and USD pricing is disabled at $0 — verified against the real
+     * Create Event form's own pre-filled defaults, not a test helper's
+     * shortcut. AC-05-30 restates AC-02-58's own default from Epic-05's
+     * "payment-method defaults" angle; the event-side toggle/display
+     * mechanics stay Epic-02's (that criterion's own cross-epic note).
      */
     public function testNewEventDefaultsToTokenPricingOnAndUsdOff(): void
     {
@@ -68,8 +71,9 @@ final class DualPricingTest extends WebTestCase
     }
 
     /**
-     * AC-02-58: both a USD price and a token price at once ("Dual
-     * Pricing") — the trainer toggles either on or off per event.
+     * AC-02-58, AC-05-30: both a USD price and a token price at once
+     * ("Dual Pricing") — the trainer toggles either on or off per event,
+     * independently.
      */
     public function testEventCanBeConfiguredWithBothUsdAndTokenPricingAtOnce(): void
     {
@@ -101,8 +105,9 @@ final class DualPricingTest extends WebTestCase
     }
 
     /**
-     * AC-02-59: token pricing is not fixed at 1:1 — trainer-configurable
-     * per event, e.g. a premium session at 2+ tokens.
+     * AC-02-59, AC-05-32: token pricing is not fixed at 1:1 — each
+     * trainer configures their own per-event token cost independently,
+     * e.g. a premium session at 2+ tokens.
      */
     public function testEventCanBePricedAtMoreThanOneToken(): void
     {

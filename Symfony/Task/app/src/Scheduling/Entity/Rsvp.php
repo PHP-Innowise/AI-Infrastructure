@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Scheduling\Entity;
 
+use App\Billing\Entity\PaymentRecord;
 use App\Identity\Entity\PlayerProfile;
 use App\Platform\Entity\Trainer;
 use App\Platform\Tenancy\TrainerScoped;
@@ -13,12 +14,21 @@ use Doctrine\ORM\Mapping as ORM;
 /**
  * One player's registration for one event.
  *
- * `paymentRecordId` is a deferred FK, matching the pattern
- * `ChildApprovalRequest` already established in Epic-01: `payment_record`
- * does not exist until Epic-05 (M4), so this stays a plain nullable `BIGINT`
- * column with no ORM relation until Billing's own migration attaches the
- * real constraint (specs/database-designer-schema.md "Migration ordering",
- * "M4 — Billing").
+ * `paymentRecord` was a deferred, nullable SCALAR FK before Epic-05 existed
+ * (see git history — matching the pattern `ChildApprovalRequest` still uses
+ * for its own two still-deferred columns). Epic-05's own migration
+ * (Version20260811100000) attaches the real constraint, and this entity is
+ * upgraded to a genuine `#[ORM\ManyToOne]` relation at the same time —
+ * NOT kept as a scalar id the way the schema doc's own "deferred FK, plain
+ * column" pattern would suggest, because Doctrine's fixture `ORMPurger`
+ * (`doctrine:fixtures:load`, which `make test`/`make seed` both depend on)
+ * computes table deletion order from ORM association metadata alone; a
+ * scalar column carrying a real, unmapped database-level FK is invisible to
+ * it, and purging failed outright once any fixture/test data actually
+ * populated this column (`SQLSTATE[23503]`, "still referenced from table
+ * rsvp") — discovered directly, not theoretical. `PlaylistAccessGrant`
+ * already made this same choice for its own `payment_record_id` column;
+ * this brings `Rsvp` in line with it, for the same reason.
  *
  * `status` intentionally excludes `attended`/`no_show` — attendance is its
  * own richer model, `AttendanceRecord` (BR-02-16/17) — see the schema's own
@@ -75,10 +85,23 @@ class Rsvp
     private string $paymentMethod;
 
     /**
-     * Deferred FK — see the class docblock.
+     * See the class docblock — a real ORM relation since Epic-05.
+     *
+     * `ON DELETE NO ACTION`, not `RESTRICT` — `payment_record.related_rsvp_id`
+     * points back at this table, so the migration DDL for this constraint is
+     * `DEFERRABLE INITIALLY DEFERRED` (hand-written; Doctrine's ORM
+     * attributes cannot express DEFERRABLE, so this mapping is
+     * documentation/schema-diff parity, not the source of truth). Postgres
+     * silently ignores DEFERRABLE for the delete-triggered check when the
+     * action is `RESTRICT` — only `NO ACTION` honors the deferred timing,
+     * confirmed directly when `ORMPurger`'s single-transaction purge still
+     * raised `SQLSTATE[23503]` synchronously under `RESTRICT` despite
+     * `condeferred = t`. See `PaymentRecord::$relatedRsvp`'s own docblock
+     * and Version20260811100000's docblock, point 3.
      */
-    #[ORM\Column(name: 'payment_record_id', type: 'bigint', nullable: true)]
-    private ?int $paymentRecordId = null;
+    #[ORM\ManyToOne(targetEntity: PaymentRecord::class)]
+    #[ORM\JoinColumn(name: 'payment_record_id', referencedColumnName: 'id', nullable: true, onDelete: 'NO ACTION')]
+    private ?PaymentRecord $paymentRecord = null;
 
     #[ORM\Column(name: 'requested_at', type: 'datetimetz_immutable')]
     private \DateTimeImmutable $requestedAt;
@@ -91,6 +114,19 @@ class Rsvp
 
     #[ORM\Column(name: 'cancellation_reason', type: 'text', nullable: true)]
     private ?string $cancellationReason = null;
+
+    /**
+     * Epic-05, deliberately NOT an ORM column (no `#[ORM\Column]`, so
+     * Doctrine never persists or selects it): the one-time Stripe Checkout
+     * URL a card RSVP's payment gateway call returns, carried from
+     * `RsvpService::rsvp()` back to `PortalEventController` for the
+     * same-request 303 redirect specs/api-designer-spec.md's "Billing
+     * module" requires ("no separate 'create checkout session'
+     * endpoint"). `PaymentRecord` itself has no such column (see its own
+     * docblock) — a Checkout URL is used once, in memory, for the
+     * duration of one request, never a durable fact about the RSVP.
+     */
+    private ?string $pendingCheckoutUrl = null;
 
     /**
      * BR-02-8: a free event RSVPs instantly, no payment step — the
@@ -154,9 +190,9 @@ class Rsvp
         return $this->paymentMethod;
     }
 
-    public function getPaymentRecordId(): ?int
+    public function getPaymentRecord(): ?PaymentRecord
     {
-        return $this->paymentRecordId;
+        return $this->paymentRecord;
     }
 
     public function getRequestedAt(): \DateTimeImmutable
@@ -261,9 +297,19 @@ class Rsvp
         }
     }
 
-    public function attachPaymentRecordId(int $paymentRecordId): void
+    public function attachPaymentRecord(PaymentRecord $paymentRecord): void
     {
-        $this->paymentRecordId = $paymentRecordId;
+        $this->paymentRecord = $paymentRecord;
+    }
+
+    public function getPendingCheckoutUrl(): ?string
+    {
+        return $this->pendingCheckoutUrl;
+    }
+
+    public function setPendingCheckoutUrl(?string $url): void
+    {
+        $this->pendingCheckoutUrl = $url;
     }
 
     /**
@@ -301,7 +347,7 @@ class Rsvp
         }
 
         $this->paymentMethod = $paymentMethod;
-        $this->paymentRecordId = null;
+        $this->paymentRecord = null;
         $this->requestedAt = $now;
         $this->canceledAt = null;
         $this->cancellationReason = null;

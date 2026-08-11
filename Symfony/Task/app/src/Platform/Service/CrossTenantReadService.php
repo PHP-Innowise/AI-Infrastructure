@@ -386,6 +386,96 @@ final readonly class CrossTenantReadService
     }
 
     /**
+     * Epic-05: which trainer a `payment_record` row belongs to — the same
+     * "resolve before opening the real scope" role `resolveTrainerIdForEvent()`
+     * plays for Event Master, needed here because
+     * `App\Billing\MessageHandler\ProcessStripeWebhookEventHandler` learns
+     * only a Stripe id from the webhook payload, with no tenant context yet
+     * active to read the trainer-scoped `payment_record` table through the
+     * ordinary RLS-bound connection. `$actor` is null (a system/webhook
+     * caller, not an authenticated Super Admin) — `AuditLogger::record()`
+     * accepts that.
+     */
+    public function resolveTrainerIdForPaymentRecord(int $paymentRecordId): ?int
+    {
+        $trainerId = $this->crossing->fetchOne('SELECT trainer_id FROM payment_record WHERE id = :id', ['id' => $paymentRecordId]);
+
+        $this->auditLogger->record(null, 'cross_tenant_read.webhook_resolve_payment_record', 'PaymentRecord', $paymentRecordId, null, []);
+        $this->entityManager->flush();
+
+        return false === $trainerId ? null : (int) $trainerId;
+    }
+
+    /**
+     * Epic-05: the same resolution, keyed by the Stripe PaymentIntent id —
+     * every `payment_intent.*` webhook event carries this, never the
+     * platform's own `payment_record.id`.
+     *
+     * @return array{id: int, trainerId: int}|null
+     */
+    public function resolvePaymentRecordByStripePaymentIntent(string $stripePaymentIntentId): ?array
+    {
+        $row = $this->crossing->fetchAssociative(
+            'SELECT id, trainer_id FROM payment_record WHERE stripe_payment_intent_id = :piId',
+            ['piId' => $stripePaymentIntentId],
+        );
+
+        $this->auditLogger->record(null, 'cross_tenant_read.webhook_resolve_payment_intent', 'PaymentRecord', false !== $row ? (int) $row['id'] : null, null, [
+            'stripePaymentIntentId' => $stripePaymentIntentId,
+        ]);
+        $this->entityManager->flush();
+
+        return false === $row ? null : ['id' => (int) $row['id'], 'trainerId' => (int) $row['trainer_id']];
+    }
+
+    /**
+     * Epic-05: the trainer owning a Stripe Connect account id — used by the
+     * `account.updated` webhook (AC-05-34), which carries only the
+     * connected account id.
+     */
+    public function resolveTrainerIdForStripeConnectAccount(string $stripeConnectAccountId): ?int
+    {
+        $trainerId = $this->crossing->fetchOne(
+            'SELECT trainer_id FROM trainer_billing_settings WHERE stripe_connect_account_id = :accountId',
+            ['accountId' => $stripeConnectAccountId],
+        );
+
+        $this->auditLogger->record(null, 'cross_tenant_read.webhook_resolve_connect_account', 'TrainerBillingSettings', null, null, [
+            'stripeConnectAccountId' => $stripeConnectAccountId,
+        ]);
+        $this->entityManager->flush();
+
+        return false === $trainerId ? null : (int) $trainerId;
+    }
+
+    /**
+     * Epic-05: which trainer a `subscription_entitlement` row belongs to —
+     * needed by `customer.subscription.deleted` (AC-05-34), which is looked
+     * up by `stripe_subscription_id` on `platform_subscription`
+     * (trainer-own-subscription-to-platform) OR, for a player subscription
+     * cancellation, has no local row keyed the same way; player
+     * subscriptions are entitlements, not Stripe Subscriptions at all
+     * (BR-05-14 — "not a separate Stripe subscription"), so
+     * `customer.subscription.deleted` only ever applies to a TRAINER's own
+     * platform subscription in this codebase's actual scope, resolved via
+     * `platform_subscription.stripe_subscription_id` instead.
+     */
+    public function resolveTrainerIdForPlatformStripeSubscription(string $stripeSubscriptionId): ?int
+    {
+        $trainerId = $this->crossing->fetchOne(
+            'SELECT trainer_id FROM platform_subscription WHERE stripe_subscription_id = :subId',
+            ['subId' => $stripeSubscriptionId],
+        );
+
+        $this->auditLogger->record(null, 'cross_tenant_read.webhook_resolve_platform_subscription', 'PlatformSubscription', null, null, [
+            'stripeSubscriptionId' => $stripeSubscriptionId,
+        ]);
+        $this->entityManager->flush();
+
+        return false === $trainerId ? null : (int) $trainerId;
+    }
+
+    /**
      * AC-04-37 "Content Stats": total playlists and drills across every
      * trainer, and the public-vs-private ratio (playlists and content items
      * combined — the epic states one ratio, not two separate ones).

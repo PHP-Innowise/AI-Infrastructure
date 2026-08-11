@@ -9,6 +9,11 @@
 
         {% if locked %}
             <p role="status">Locked</p>
+            <p>
+                {% if playlist.priceUsdMinorUnits > 0 %}${{ '%0.2f'|format(playlist.priceUsdMinorUnits / 100) }}{% endif %}
+                {% if playlist.priceUsdMinorUnits > 0 and playlist.priceTokens > 0 %} or {% endif %}
+                {% if playlist.priceTokens > 0 %}{{ playlist.priceTokens }} tokens{% endif %}
+            </p>
             <p><a class="button button--primary" href="{{ path('content_portal_playlist_checkout', {playlist: playlist.id}) }}">Purchase access</a></p>
         {% else %}
             {% if progress %}<p>{{ progress.completed }} of {{ progress.total }} items completed</p>{% endif %}

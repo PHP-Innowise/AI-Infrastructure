@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Tests\Support;
 
+use App\Billing\Entity\PaymentRecord;
 use App\Content\Entity\ContentItem;
 use App\Content\Entity\ContentProgress;
 use App\Content\Entity\Drill;
@@ -132,9 +133,32 @@ trait ContentFixtureHelpers
         return $playlistItem;
     }
 
+    /**
+     * Epic-05: `PlaylistAccessGrant` requires a real, persisted
+     * `PaymentRecord` (the schema's own NOT NULL tightening, once
+     * `payment_record` exists) — this builds a minimal, already-completed
+     * one (1 token, matching a fixture-typical free-form grant) so tests
+     * that only care about the ACCESS fact, not the purchase mechanics,
+     * do not need to hand-construct one themselves.
+     */
     protected function grantPlaylistAccess(Trainer $trainer, Playlist $playlist, PlayerProfile $player, Account $parentAccount): PlaylistAccessGrant
     {
-        $grant = new PlaylistAccessGrant($trainer, $playlist, $player, $parentAccount);
+        $paymentRecord = new PaymentRecord(
+            $trainer,
+            PaymentRecord::TYPE_CONTENT_PURCHASE,
+            PaymentRecord::METHOD_TOKEN,
+            1,
+            $parentAccount->getEmail(),
+            $parentAccount->getEmail(),
+            $parentAccount,
+        );
+        $paymentRecord->attachRelatedPlaylist($playlist);
+        $paymentRecord->applyFee(500, 0);
+        $paymentRecord->markCompleted();
+        $this->contentEntityManager()->persist($paymentRecord);
+        $this->contentEntityManager()->flush();
+
+        $grant = new PlaylistAccessGrant($trainer, $playlist, $player, $parentAccount, $paymentRecord);
         $this->contentEntityManager()->persist($grant);
         $this->contentEntityManager()->flush();
 

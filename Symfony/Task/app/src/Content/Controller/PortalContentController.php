@@ -125,12 +125,9 @@ final class PortalContentController extends AbstractController
     }
 
     /**
-     * AC-05-18/19, BR-04-6..9: token unlocks inline (subject to the No-op
-     * gateway's honest "always pending" outcome today — see
-     * `PurchasePlaylistAccessService`'s own docblock); card would 303 to
-     * Stripe Checkout once Epic-05 exists. Both stay locked in this
-     * codebase's current state, and the flash message says so rather than
-     * implying a successful purchase that did not happen.
+     * AC-05-18/19, BR-04-6..9: token unlocks inline; card 303s to Stripe
+     * Checkout in this SAME request (specs/api-designer-spec.md "Billing
+     * module": "there is no separate 'create checkout session' endpoint").
      */
     #[Route('/portal/content/playlists/{playlist}/checkout', name: 'content_portal_playlist_checkout', methods: ['GET', 'POST'])]
     public function checkout(Request $request, Playlist $playlist): Response
@@ -145,10 +142,20 @@ final class PortalContentController extends AbstractController
             /** @var array{method: string} $data */
             $data = $form->getData();
 
-            $grant = $this->purchaseService->purchase($playlist, $player, $this->actor(), $data['method']);
+            $outcome = $this->purchaseService->purchase($playlist, $player, $this->actor(), $data['method']);
 
-            if (null !== $grant) {
+            if (null !== $outcome->grant) {
                 $this->addFlash('success', sprintf('%s unlocked!', $playlist->getTitle()));
+
+                return $this->redirectToRoute('content_portal_playlist_show', ['playlist' => $playlist->getId()]);
+            }
+
+            if (null !== $outcome->redirectUrl) {
+                return $this->redirect($outcome->redirectUrl);
+            }
+
+            if ($outcome->failed) {
+                $this->addFlash('error', 'Your purchase could not be completed. Please try again.');
 
                 return $this->redirectToRoute('content_portal_playlist_show', ['playlist' => $playlist->getId()]);
             }

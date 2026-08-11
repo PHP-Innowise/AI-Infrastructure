@@ -19,6 +19,18 @@ security:
             pattern: ^/(_(profiler|wdt)|css|images|js)/
             security: false
 
+        # AC-05-34..36: no session, no cookie, no ambient browser authority
+        # to forge — the Stripe-Signature HMAC check inside
+        # BillingWebhookController IS the authorization. Must come before
+        # `main` (which carries no `pattern` and therefore matches
+        # everything) — Symfony uses the FIRST matching firewall, not the
+        # best one.
+        # @see specs/api-designer-spec.md "Stripe webhook contract" — "Firewall"
+        webhook:
+            pattern: ^/webhooks/
+            stateless: true
+            security: false
+
         main:
             lazy: true
             provider: accounts

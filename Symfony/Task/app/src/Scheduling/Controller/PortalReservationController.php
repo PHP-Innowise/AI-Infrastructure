@@ -112,8 +112,15 @@ final class PortalReservationController extends AbstractController
                 $this->childApprovalService->deny($approval, $data['note']);
             }
 
-            $this->applyDecisionToRsvp($approval, $approving);
+            $rsvp = $this->applyDecisionToRsvp($approval, $approving);
             $this->addFlash('success', $approving ? 'Request approved.' : 'Request denied.');
+
+            // AC-05-13: "on approval a Stripe Checkout opens for the
+            // parent" — same-request redirect, matching
+            // PortalEventController's own precedent for a direct attempt.
+            if (null !== $rsvp && null !== $rsvp->getPendingCheckoutUrl()) {
+                return $this->redirect($rsvp->getPendingCheckoutUrl());
+            }
 
             return $this->redirectToRoute('identity_portal_approvals_index');
         }
@@ -125,18 +132,18 @@ final class PortalReservationController extends AbstractController
         ]);
     }
 
-    private function applyDecisionToRsvp(ChildApprovalRequest $approval, bool $approving): void
+    private function applyDecisionToRsvp(ChildApprovalRequest $approval, bool $approving): ?Rsvp
     {
         $rsvpId = $approval->getRsvpId();
 
         if (null === $rsvpId) {
-            return;
+            return null;
         }
 
         $rsvp = $this->rsvps->find($rsvpId);
 
         if (null === $rsvp) {
-            return;
+            return null;
         }
 
         $payer = $this->playerAccounts->resolve($rsvp->getPlayer()) ?? $approval->getParentAccount();
@@ -149,6 +156,8 @@ final class PortalReservationController extends AbstractController
             // simply stays as it was.
             default => null,
         };
+
+        return $rsvp;
     }
 
     private function actor(): Account

@@ -47,6 +47,9 @@ psql -h "${DB_HOST:-db}" -p "${DB_PORT_INTERNAL:-5432}" \
         IF to_regclass('public.audit_log_entry') IS NOT NULL THEN
             EXECUTE format('REVOKE UPDATE, DELETE ON audit_log_entry FROM %I', '${APP_DB_USER}');
         END IF;
+        IF to_regclass('public.token_entry') IS NOT NULL THEN
+            EXECUTE format('REVOKE UPDATE, DELETE ON token_entry FROM %I', '${APP_DB_USER}');
+        END IF;
     END
     \$body\$;
 SQL

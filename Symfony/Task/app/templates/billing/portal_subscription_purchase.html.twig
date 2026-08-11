@@ -1,0 +1,13 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Unlimited Access Subscription — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Unlimited Access Subscription — {{ trainer.businessName }}</h1>
+
+        {{ form_start(form) }}
+            {{ form_widget(form) }}
+        {{ form_end(form) }}
+    </div>
+{% endblock %}

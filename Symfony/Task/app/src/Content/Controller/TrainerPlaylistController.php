@@ -182,6 +182,8 @@ final class TrainerPlaylistController extends AbstractController
             'filterSkillLevels' => null === $playlist->getFilterSkillLevels() ? null : implode(', ', $playlist->getFilterSkillLevels()),
             'filterPositions' => null === $playlist->getFilterPositions() ? null : implode(', ', $playlist->getFilterPositions()),
             'filterAgeLevels' => null === $playlist->getFilterAgeLevels() ? null : implode(', ', $playlist->getFilterAgeLevels()),
+            'priceUsdMinorUnits' => $playlist->getPriceUsdMinorUnits(),
+            'priceTokens' => $playlist->getPriceTokens(),
         ]);
         $form->handleRequest($request);
 
@@ -196,6 +198,8 @@ final class TrainerPlaylistController extends AbstractController
                 $this->parseCommaList($data['filterSkillLevels'] ?? null),
                 $this->parseCommaList($data['filterPositions'] ?? null),
                 $this->parseCommaList($data['filterAgeLevels'] ?? null),
+                (int) $data['priceUsdMinorUnits'],
+                (int) $data['priceTokens'],
             );
 
             $this->addFlash('success', 'Playlist updated!');

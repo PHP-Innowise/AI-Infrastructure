@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Scheduling\Service;
 
+use App\Billing\Entity\PaymentRecord;
 use App\Identity\Entity\Account;
 use App\Identity\Entity\ChildApprovalRequest;
 use App\Identity\Entity\PlayerProfile;
@@ -28,14 +29,21 @@ use Symfony\Bundle\SecurityBundle\Security;
 /**
  * US-02.07/08: registering for and canceling out of an event.
  *
- * Lock ordering (architect-architecture.md "Lock ordering"): the fixed
- * global order is the token balance row first, then the event row. Billing
- * does not exist yet, so there is no balance row to lock — but the CODE
- * SHAPE here still resolves funding/child-approval (where a future balance
- * lock would happen, inside the payment-intent gateway call) BEFORE ever
- * locking the event row, so the ordering is already correct the moment
- * Epic-05 wires a real gateway behind PaymentIntentGateway. The event lock
- * is always the LAST lock taken in this sequence.
+ * **Lock ordering (architect-architecture.md "Lock ordering"), now real**:
+ * the fixed global order is the token balance row first, then the event
+ * row. `rsvp()` calls `PaymentIntentGateway::lockFundingForUpdate()` — a
+ * no-op for `usd`/`free`, a real `SELECT ... FOR UPDATE` on the token
+ * balance row for `token` — as the FIRST statement inside its transaction,
+ * strictly before `EventRepository::lockForUpdate()`. A bypass-granted
+ * TOKEN payment then completes fully inside that same transaction
+ * (`completeTokenPaymentWithinTransaction()`): the spend and the RSVP's own
+ * confirmation commit atomically, so there is never a confirmed RSVP with
+ * no tokens taken, or tokens taken with no RSVP. A `usd` payment never
+ * holds either lock while talking to Stripe — Checkout Session creation
+ * happens strictly AFTER this transaction commits
+ * (`completeConfirmationOrPayment()`), matching the architecture's own
+ * "no lock is ever held across a network call" reasoning for trainer
+ * cancellation's own refund fan-out.
  *
  * AC-02-67's unlocked-vs-locked split: RsvpVoter::RSVP_CREATE does a fast,
  * non-authoritative capacity pre-check for UX; the count taken here, after
@@ -44,6 +52,7 @@ use Symfony\Bundle\SecurityBundle\Security;
  * inside the transaction is the one that decides" (architect-architecture.md).
  *
  * @see specs/requirements-analyst-epic-02-event-management-spec.md BR-02-7..11, AC-02-23..33
+ * @see specs/requirements-analyst-epic-05-payments-tokens-spec.md AC-05-7..17, BR-05-2
  */
 final readonly class RsvpService
 {
@@ -79,7 +88,11 @@ final readonly class RsvpService
             new ChildActionAttempt($actor, $player, $fundingMethod),
         );
 
-        $rsvp = $this->entityManager->wrapInTransaction(function () use ($event, $player, $paymentMethod, $bypassGranted): Rsvp {
+        $rsvp = $this->entityManager->wrapInTransaction(function () use ($event, $player, $actor, $paymentMethod, $bypassGranted): Rsvp {
+            // Architecture "Lock ordering": the token balance row, always
+            // first — see the class docblock.
+            $this->paymentGateway->lockFundingForUpdate($event->getTrainer(), $actor, $paymentMethod);
+
             $now = new \DateTimeImmutable();
             $lockedEvent = $this->events->lockForUpdate((int) $event->getId())
                 ?? throw new \LogicException('Event no longer exists.');
@@ -117,6 +130,17 @@ final readonly class RsvpService
                 throw AlreadyRegisteredException::forEventId((int) $lockedEvent->getId());
             }
 
+            // AC-05-7/9: a bypass-granted token spend completes HERE —
+            // inside the same transaction and lock scope as the RSVP row
+            // and the event capacity check, "no payment-processing delay,"
+            // and atomic with the RSVP's own confirmation. usd/free are
+            // untouched by this branch (free auto-confirmed at
+            // construction already; usd is handled after this transaction
+            // commits, in completeConfirmationOrPayment()).
+            if ($bypassGranted && Event::PAYMENT_TOKEN === $paymentMethod && Rsvp::STATUS_CONFIRMED !== $rsvp->getStatus()) {
+                $this->completeTokenPaymentWithinTransaction($rsvp, $actor);
+            }
+
             return $rsvp;
         });
 
@@ -127,6 +151,18 @@ final readonly class RsvpService
                 ChildApprovalRequest::ACTION_RSVP,
                 (int) $rsvp->getId(),
             );
+
+            return $rsvp;
+        }
+
+        if (Event::PAYMENT_TOKEN === $paymentMethod) {
+            // Already resolved (Succeeded or, on an insufficient-balance
+            // race, still Pending Payment) inside the transaction above —
+            // only the notification (a side effect that must never run
+            // inside an open DB transaction) happens out here.
+            if (Rsvp::STATUS_CONFIRMED === $rsvp->getStatus()) {
+                $this->mailer->sendRsvpConfirmed($rsvp);
+            }
 
             return $rsvp;
         }
@@ -265,6 +301,47 @@ final readonly class RsvpService
     }
 
     /**
+     * AC-05-34: the async webhook handler
+     * (App\Billing\MessageHandler\ProcessStripeWebhookEventHandler, via
+     * App\Scheduling\EventSubscriber\PaymentOutcomeSubscriber) calls this
+     * once `payment_intent.succeeded` confirms a `usd` RSVP that stayed
+     * Pending Payment when rsvp()/completeAfterParentApproval() first ran.
+     * A no-op if the RSVP is somehow already confirmed (redelivery safety —
+     * the webhook receipt's own unique constraint is the primary guard, this
+     * is a second, cheap one).
+     */
+    public function confirmAfterAsyncPayment(Rsvp $rsvp): void
+    {
+        if (Rsvp::STATUS_CONFIRMED === $rsvp->getStatus()) {
+            return;
+        }
+
+        $this->entityManager->wrapInTransaction(function () use ($rsvp): void {
+            $rsvp->confirm(new \DateTimeImmutable());
+            $this->entityManager->flush();
+        });
+
+        $this->mailer->sendRsvpConfirmed($rsvp);
+    }
+
+    /**
+     * BR-05-8/BR-05-9: the async webhook handler calls this once
+     * `payment_intent.payment_failed` arrives (or the 7-day pending-payment
+     * sweep gives up) for a `usd` RSVP — "the RSVP is not confirmed and the
+     * spot remains available." Cancels rather than leaving it stuck at
+     * Pending Payment forever (which would otherwise go on holding a spot —
+     * see `Rsvp::CAPACITY_HOLDING_STATUSES`).
+     */
+    public function failAfterAsyncPayment(Rsvp $rsvp): void
+    {
+        if (Rsvp::STATUS_CONFIRMED === $rsvp->getStatus() || Rsvp::STATUS_CANCELED === $rsvp->getStatus()) {
+            return;
+        }
+
+        $this->markCanceledAndNotify($rsvp, 'Payment failed or was not completed in time.');
+    }
+
+    /**
      * Q-02.09's resolved default (per the task brief, matching
      * specs/requirements-analyst-open-questions.md): a trainer may manually
      * add a player to a full event; the override is recorded in the audit
@@ -339,8 +416,42 @@ final readonly class RsvpService
     }
 
     /**
+     * AC-05-7: called only from WITHIN rsvp()'s own open transaction (see
+     * that method's own docblock on lock ordering) — the token balance row
+     * is already locked by the time this runs. Confirms the RSVP in the
+     * same commit as the ledger spend on success; on Failed (an
+     * insufficient-balance race the caller's own pre-check did not catch)
+     * leaves the RSVP at Pending Payment, matching BR-05-8's "not confirmed,
+     * spot remains available" — except a token RSVP's spot genuinely does
+     * NOT remain available under this codebase's own capacity model (Pending
+     * Payment still holds a spot, see Rsvp::CAPACITY_HOLDING_STATUSES) — an
+     * acknowledged, narrow gap recorded in the coder's final report.
+     */
+    private function completeTokenPaymentWithinTransaction(Rsvp $rsvp, Account $payer): void
+    {
+        $event = $rsvp->getEvent();
+        $amount = $event->priceForMethod($rsvp->getPaymentMethod());
+        $request = new PaymentIntentRequest($rsvp->getTrainer(), $rsvp, $payer, $rsvp->getPaymentMethod(), $amount);
+        $result = $this->paymentGateway->requestPayment($request);
+        $this->attachPaymentRecordIfPresent($rsvp, $result->paymentRecordId);
+
+        if (PaymentIntentOutcome::Succeeded === $result->outcome) {
+            $rsvp->confirm(new \DateTimeImmutable());
+        }
+
+        $this->entityManager->flush();
+    }
+
+    /**
      * BR-02-8/free events confirm at construction already; a paid RSVP that
-     * bypassed child approval still needs its payment step.
+     * bypassed child approval still needs its payment step. Reached for
+     * `usd` (always) and, defensively, `token` (never in practice — the
+     * bypass-granted token path is fully resolved inside rsvp()'s own
+     * transaction before this method could ever be reached for it, per the
+     * class docblock's lock-ordering reasoning) — kept general rather than
+     * usd-only so `completeAfterParentApproval()`'s own token path (a
+     * parent-approved child's token purchase, which does NOT go through
+     * rsvp()'s inline branch) still resolves correctly.
      */
     private function completeConfirmationOrPayment(Rsvp $rsvp, Account $payer): void
     {
@@ -353,16 +464,21 @@ final readonly class RsvpService
         $event = $rsvp->getEvent();
         $amount = $event->priceForMethod($rsvp->getPaymentMethod());
         $request = new PaymentIntentRequest($rsvp->getTrainer(), $rsvp, $payer, $rsvp->getPaymentMethod(), $amount);
-        $outcome = $this->paymentGateway->requestPayment($request);
+        $result = $this->paymentGateway->requestPayment($request);
 
-        // AC-02-25: shown the price and "redirected to payment" — with the
-        // shipped NoopPaymentIntentGateway this always stays Pending, which
-        // is the honest, correct state until Epic-05 exists (see that
-        // class's own docblock). AC-02-26's confirm-on-success path is
-        // still fully exercised — by tests supplying a stub gateway that
-        // returns Succeeded, proving this branch — even though production
-        // never reaches it today.
-        if (PaymentIntentOutcome::Succeeded === $outcome) {
+        if (null !== $result->paymentRecordId) {
+            $this->attachPaymentRecordIfPresent($rsvp, $result->paymentRecordId);
+            $this->entityManager->flush();
+        }
+
+        // AC-05-10: "redirected to Stripe Checkout" — carried back to the
+        // controller via the entity's own transient property (never
+        // persisted — see Rsvp::$pendingCheckoutUrl's own docblock).
+        if (null !== $result->redirectUrl) {
+            $rsvp->setPendingCheckoutUrl($result->redirectUrl);
+        }
+
+        if (PaymentIntentOutcome::Succeeded === $result->outcome) {
             $rsvp->confirm(new \DateTimeImmutable());
             $this->entityManager->flush();
             $this->mailer->sendRsvpConfirmed($rsvp);
@@ -371,12 +487,12 @@ final readonly class RsvpService
 
     /**
      * Shared by cancel(), remove(), and completeCancellationAfterApproval()
-     * / cancelAfterParentDenial(): mark the row canceled and send the one
-     * notification every one of those callers needs. Refund-eligibility
-     * decisions stay in each caller, since they differ (24-hour policy for
-     * a player-initiated cancellation vs. unconditional for a
-     * trainer-initiated one) — this only owns the mechanics common to all
-     * of them.
+     * / cancelAfterParentDenial() / failAfterAsyncPayment(): mark the row
+     * canceled and send the one notification every one of those callers
+     * needs. Refund-eligibility decisions stay in each caller, since they
+     * differ (24-hour policy for a player-initiated cancellation vs.
+     * unconditional for a trainer-initiated one, none for a payment
+     * failure) — this only owns the mechanics common to all of them.
      */
     private function markCanceledAndNotify(Rsvp $rsvp, ?string $reason): void
     {
@@ -386,6 +502,23 @@ final readonly class RsvpService
         });
 
         $this->mailer->sendRsvpCanceled($rsvp);
+    }
+
+    /**
+     * `Rsvp::$paymentRecord` is a real ORM relation (see that entity's own
+     * docblock for why it stopped being a deferred scalar column) — the
+     * gateway only ever hands back an id, so this resolves the actual
+     * managed entity via a reference (no extra SELECT) before attaching it.
+     */
+    private function attachPaymentRecordIfPresent(Rsvp $rsvp, ?int $paymentRecordId): void
+    {
+        if (null === $paymentRecordId) {
+            return;
+        }
+
+        /** @var PaymentRecord $paymentRecord */
+        $paymentRecord = $this->entityManager->getReference(PaymentRecord::class, $paymentRecordId);
+        $rsvp->attachPaymentRecord($paymentRecord);
     }
 
     private function fundingMethodForPaymentMethod(string $paymentMethod): FundingMethod
@@ -418,12 +551,11 @@ final readonly class RsvpService
         $event = $rsvp->getEvent();
         $amount = $event->priceForMethod($rsvp->getPaymentMethod());
         $request = new PaymentIntentRequest($rsvp->getTrainer(), $rsvp, $payer, $rsvp->getPaymentMethod(), $amount);
-        $outcome = $this->paymentGateway->requestRefund($request);
+        $result = $this->paymentGateway->requestRefund($request);
 
-        // AC-02-32: the confirmation email is sent only once the gateway
-        // actually reports success — see NoopPaymentIntentGateway's own
-        // docblock for why production never reaches this today.
-        if (PaymentIntentOutcome::Succeeded === $outcome) {
+        // AC-05-14/16/17: the confirmation email is sent only once the
+        // gateway actually reports success.
+        if (PaymentIntentOutcome::Succeeded === $result->outcome) {
             $this->mailer->sendRefundConfirmation($rsvp);
         }
     }

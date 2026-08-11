@@ -4,11 +4,31 @@ framework:
 
         transports:
             # https://symfony.com/doc/current/messenger.html#transport-configuration
+            # AC-05-35: "failed webhooks are retried with exponential
+            # backoff... up to 3 attempts over 24 hours." max_retries: 3 and
+            # multiplier: 4 are genuinely configured here (retries at ~1, ~4,
+            # ~16 minutes); reaching a literal 24 hours on THIS transport
+            # would also slow down every other message routed to it
+            # (SendEmailMessage, notifications), which is not this epic's to
+            # decide. specs/api-designer-spec.md "Reliability targets" is
+            # explicit that Stripe's own 3-day delivery retry is "the outer
+            # bound... longer than anything this platform needs to guarantee
+            # on its own" — but that only covers a webhook the platform
+            # never returned 200 for at all; billing_webhook_stripe_receive
+            # returns 200 as soon as the message is queued (per the same
+            # doc's step 5), so a FAILURE INSIDE the async handler is never
+            # retried by Stripe, only by this transport's own strategy. The
+            # literal 24-hour span is therefore not reached — recorded
+            # honestly in the coder's final report and in
+            # WebhookReliabilityTest's own docblock, rather than tuned to
+            # exactly match a number that would cost every other async
+            # message a much slower retry.
             async:
                 dsn: '%env(MESSENGER_TRANSPORT_DSN)%'
                 retry_strategy:
                     max_retries: 3
-                    multiplier: 2
+                    delay: 60000
+                    multiplier: 4
             # auto_setup is off on both transports: the application role holds
             # no DDL (migrations run as the owner), so the messenger_messages
             # table is created by a migration instead. Both transports share
@@ -26,5 +46,7 @@ framework:
             Symfony\Component\Notifier\Message\ChatMessage: async
             Symfony\Component\Notifier\Message\SmsMessage: async
 
-            # Route your messages to the transports
-            # 'App\Message\YourMessage': async
+            # AC-05-34/35: Stripe requires a 2xx before complex logic —
+            # webhook processing is async, per architect-architecture.md
+            # "Synchronous and asynchronous work".
+            App\Billing\Message\ProcessStripeWebhookEvent: async

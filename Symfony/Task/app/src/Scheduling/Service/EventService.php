@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Scheduling\Service;
 
+use App\Billing\Repository\TrainerBillingSettingsRepository;
 use App\Identity\Entity\Account;
 use App\Identity\Entity\PlayerProfile;
 use App\Identity\Repository\AvailabilityWindowRepository;
@@ -20,6 +21,7 @@ use App\Scheduling\Entity\EventInvitation;
 use App\Scheduling\Entity\Rsvp;
 use App\Scheduling\Exception\CapacityBelowRsvpCountException;
 use App\Scheduling\Exception\CoachAssignmentConflictException;
+use App\Scheduling\Exception\StripeNotConnectedException;
 use App\Scheduling\Repository\CoachAssignmentRepository;
 use App\Scheduling\Repository\EventDuplicationRecordRepository;
 use App\Scheduling\Repository\EventInvitationRepository;
@@ -59,6 +61,7 @@ final readonly class EventService
         private CoachAssignmentService $coachAssignmentService,
         private RsvpService $rsvpService,
         private SchedulingMailer $mailer,
+        private TrainerBillingSettingsRepository $billingSettings,
     ) {
     }
 
@@ -322,6 +325,13 @@ final readonly class EventService
 
     private function buildEvent(Trainer $trainer, EventInput $input): Event
     {
+        // AC-05-3: "cannot create paid events" until Stripe is connected —
+        // scoped to `usd` pricing only, see StripeNotConnectedException's
+        // own docblock for why token pricing is unaffected.
+        if ($input->usdPricingEnabled && !$this->billingSettings->getOrCreateForTrainer($trainer)->isStripeConnected()) {
+            throw new StripeNotConnectedException();
+        }
+
         $event = new Event(
             $trainer,
             $input->title,

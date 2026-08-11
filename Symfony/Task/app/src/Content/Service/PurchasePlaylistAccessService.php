@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Content\Service;
 
+use App\Billing\Repository\PaymentRecordRepository;
 use App\Content\Billing\PaymentIntentGateway;
 use App\Content\Billing\PaymentIntentOutcome;
 use App\Content\Billing\PaymentIntentRequest;
@@ -24,20 +25,16 @@ use Symfony\Bundle\SecurityBundle\Security;
  * US-04.07 (paywall)/BR-04-6..9, A8, A11: the one-time-purchase checkout
  * flow. Mirrors `App\Scheduling\Service\RsvpService`'s own paid-flow shape
  * closely — same child-approval bypass check before ever attempting
- * payment, same "the shipped Noop gateway always stalls at Pending, tests
- * prove the Succeeded branch with a stub" honesty.
+ * payment.
  *
- * `paymentMethod` is a request-time-only value: `PlaylistAccessGrant` has no
- * column for it (see that entity's own docblock — the schema stores WHAT
- * was bought, not how). A child's attempt that is queued for parent
- * approval therefore cannot carry the originally-chosen method through the
- * approval window the way `Rsvp::paymentMethod` (a real column) does for
- * RSVPs; `completeAfterParentApproval()` defaults to `token`
- * (BR-04-6's primary-named option) — documented here rather than silently
- * assumed, and immaterial to today's actual behavior since
- * `NoopPaymentIntentGateway` ignores the method entirely regardless.
+ * Epic-05 (real Stripe/token gateway wired behind `PaymentIntentGateway`)
+ * replaces the Epic-04 no-op: `attemptGrant()` now handles all three real
+ * outcomes (Succeeded/Pending/Failed) via `PlaylistPurchaseOutcome`, since
+ * a card payment needs a Checkout redirect URL a bare grant-or-null return
+ * cannot carry.
  *
  * @see specs/requirements-analyst-epic-04-lp-content-spec.md BR-04-6..9, AC-04-22
+ * @see specs/requirements-analyst-epic-05-payments-tokens-spec.md AC-05-18, AC-05-19
  */
 final readonly class PurchasePlaylistAccessService
 {
@@ -51,6 +48,7 @@ final readonly class PurchasePlaylistAccessService
         private ChildApprovalService $childApprovalService,
         private PaymentIntentGateway $paymentGateway,
         private PlayerAccountResolver $playerAccounts,
+        private PaymentRecordRepository $paymentRecords,
     ) {
     }
 
@@ -62,19 +60,16 @@ final readonly class PurchasePlaylistAccessService
         return [self::METHOD_TOKEN, self::METHOD_USD];
     }
 
-    /**
-     * Returns the grant once access is unlocked, or null when the attempt
-     * is still pending (parent approval queued, or the payment gateway has
-     * not yet confirmed — always true today, see the class docblock).
-     * AC-05-18-style idempotency: an already-purchased playlist returns its
-     * existing grant immediately, without a second gateway call.
-     */
-    public function purchase(Playlist $playlist, PlayerProfile $player, Account $actor, string $paymentMethod): ?PlaylistAccessGrant
+    public function purchase(Playlist $playlist, PlayerProfile $player, Account $actor, string $paymentMethod): PlaylistPurchaseOutcome
     {
         $existing = $this->grants->findOneByPlaylistAndPlayer($playlist, $player);
 
         if (null !== $existing) {
-            return $existing;
+            return PlaylistPurchaseOutcome::granted($existing);
+        }
+
+        if ($playlist->priceForMethod($paymentMethod) <= 0) {
+            throw new \DomainException('This content has no price set for the chosen payment method.');
         }
 
         $fundingMethod = self::METHOD_USD === $paymentMethod ? FundingMethod::Usd : FundingMethod::Token;
@@ -92,7 +87,7 @@ final readonly class PurchasePlaylistAccessService
                 requestedPlaylistId: (int) $playlist->getId(),
             );
 
-            return null;
+            return PlaylistPurchaseOutcome::pendingApproval();
         }
 
         return $this->attemptGrant($playlist, $player, $actor, $paymentMethod);
@@ -101,44 +96,64 @@ final readonly class PurchasePlaylistAccessService
     /**
      * AC-01-26-style: the parent approved a pending ACTION_CONTENT_PURCHASE
      * request — proceeds exactly where purchase() would have gone had the
-     * bypass been granted immediately. Called by the Content-owned
-     * post-decision route this module's own `ApprovalController` branch
-     * redirects to (Identity must never call into Content directly).
+     * bypass been granted immediately. A child's original method choice is
+     * not preserved through the approval window (see this method's own
+     * historical note in git blame: `PlaylistAccessGrant` carries no such
+     * column) — defaults to token, BR-04-6's primary-named option.
      */
-    public function completeAfterParentApproval(Playlist $playlist, PlayerProfile $player, Account $payer): ?PlaylistAccessGrant
+    public function completeAfterParentApproval(Playlist $playlist, PlayerProfile $player, Account $payer): PlaylistPurchaseOutcome
     {
         $existing = $this->grants->findOneByPlaylistAndPlayer($playlist, $player);
 
         if (null !== $existing) {
-            return $existing;
+            return PlaylistPurchaseOutcome::granted($existing);
         }
 
         return $this->attemptGrant($playlist, $player, $payer, self::METHOD_TOKEN);
     }
 
-    private function attemptGrant(Playlist $playlist, PlayerProfile $player, Account $actor, string $paymentMethod): ?PlaylistAccessGrant
+    private function attemptGrant(Playlist $playlist, PlayerProfile $player, Account $actor, string $paymentMethod): PlaylistPurchaseOutcome
     {
         $payer = $this->playerAccounts->resolve($player) ?? $actor;
-        // BR-04-8: no real price is modeled yet (D-SCOPE-011 is unresolved
-        // in the source, and specs/database-designer-schema.md stores no
-        // price column on `playlist`) — see PaymentIntentRequest's own
-        // docblock for why `0` is a structural placeholder, not a claim
-        // about actual cost.
-        $request = new PaymentIntentRequest($playlist->getTrainer(), $playlist, $player, $payer, $paymentMethod, 0);
-        $outcome = $this->paymentGateway->requestPayment($request);
+        $amount = $playlist->priceForMethod($paymentMethod);
+        $request = new PaymentIntentRequest($playlist->getTrainer(), $playlist, $player, $payer, $paymentMethod, $amount);
+        $result = $this->paymentGateway->requestPayment($request);
 
-        if (PaymentIntentOutcome::Succeeded !== $outcome) {
-            // AC-04-22: "opens the purchase/payment flow" — with the shipped
-            // NoopPaymentIntentGateway this always stays locked/pending,
-            // which is the honest, correct state until Epic-05 exists (see
-            // NoopPaymentIntentGateway's own docblock). The Succeeded branch
-            // below is still fully exercised by tests supplying a stub
-            // gateway.
-            return null;
+        if (PaymentIntentOutcome::Failed === $result->outcome) {
+            return PlaylistPurchaseOutcome::failed();
         }
 
-        return $this->entityManager->wrapInTransaction(function () use ($playlist, $player, $payer): PlaylistAccessGrant {
-            $grant = new PlaylistAccessGrant($playlist->getTrainer(), $playlist, $player, $payer);
+        if (PaymentIntentOutcome::Pending === $result->outcome) {
+            // AC-05-18: "Card: 303 to Stripe Checkout" — access stays
+            // locked until the webhook confirms payment
+            // (App\Content\EventSubscriber\PaymentOutcomeSubscriber).
+            return PlaylistPurchaseOutcome::redirect((string) $result->redirectUrl);
+        }
+
+        \assert(null !== $result->paymentRecordId);
+
+        return PlaylistPurchaseOutcome::granted($this->grantFor($playlist, $player, $payer, $result->paymentRecordId));
+    }
+
+    /**
+     * Also the entry point `App\Content\EventSubscriber\PaymentOutcomeSubscriber`
+     * calls once a card purchase's webhook confirms success — grant
+     * issuance is identical either way, only how the payment resolved
+     * differs.
+     */
+    public function grantFor(Playlist $playlist, PlayerProfile $player, Account $payer, int $paymentRecordId): PlaylistAccessGrant
+    {
+        return $this->entityManager->wrapInTransaction(function () use ($playlist, $player, $payer, $paymentRecordId): PlaylistAccessGrant {
+            $existing = $this->grants->findOneByPlaylistAndPlayer($playlist, $player);
+
+            if (null !== $existing) {
+                return $existing;
+            }
+
+            $paymentRecord = $this->paymentRecords->find($paymentRecordId)
+                ?? throw new \LogicException(sprintf('Payment record %d not found while granting playlist access.', $paymentRecordId));
+
+            $grant = new PlaylistAccessGrant($playlist->getTrainer(), $playlist, $player, $payer, $paymentRecord);
             $this->grants->add($grant);
             $this->entityManager->flush();
 

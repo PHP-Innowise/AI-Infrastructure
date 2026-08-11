@@ -103,6 +103,23 @@ class Playlist
     #[ORM\Column(name: 'filter_age_levels', type: 'text_array', nullable: true)]
     private ?array $filterAgeLevels = null;
 
+    /**
+     * AC-05-18: "$50 one-time or 5 tokens" — added by Epic-05's own
+     * migration (Version20260811110000), since specs/database-designer-schema.md's
+     * own `playlist` table entry (written for Epic-04, before this epic
+     * settled the mechanics) names no price column at all — see that
+     * migration's own docblock. `0` in either unit means "not offered in
+     * that unit" (both `0` means free — BR-04-9), matching
+     * `Event::$usdPriceMinorUnits`'s own `>= 0` shape for the identical
+     * reason, deliberately without a separate per-unit enabled toggle — see
+     * the migration's own docblock for why.
+     */
+    #[ORM\Column(name: 'price_usd_minor_units', type: 'integer', options: ['default' => 0])]
+    private int $priceUsdMinorUnits = 0;
+
+    #[ORM\Column(name: 'price_tokens', type: 'integer', options: ['default' => 0])]
+    private int $priceTokens = 0;
+
     #[ORM\Column(name: 'created_at', type: 'datetimetz_immutable')]
     private \DateTimeImmutable $createdAt;
 
@@ -234,6 +251,38 @@ class Playlist
         return $this->filterAgeLevels;
     }
 
+    public function getPriceUsdMinorUnits(): int
+    {
+        return $this->priceUsdMinorUnits;
+    }
+
+    public function getPriceTokens(): int
+    {
+        return $this->priceTokens;
+    }
+
+    /**
+     * AC-05-18: free content requires no payment step at all (BR-04-9) —
+     * both prices at 0.
+     */
+    public function isFree(): bool
+    {
+        return 0 === $this->priceUsdMinorUnits && 0 === $this->priceTokens;
+    }
+
+    /**
+     * The amount due for a given, already-validated payment method —
+     * mirrors `Event::priceForMethod()`'s own shape exactly.
+     */
+    public function priceForMethod(string $paymentMethod): int
+    {
+        return match ($paymentMethod) {
+            'usd', 'card' => $this->priceUsdMinorUnits,
+            'token' => $this->priceTokens,
+            default => throw new \InvalidArgumentException(sprintf('Unknown payment method "%s".', $paymentMethod)),
+        };
+    }
+
     public function getCreatedAt(): \DateTimeImmutable
     {
         return $this->createdAt;
@@ -278,6 +327,25 @@ class Playlist
         $this->filterSkillLevels = $filterSkillLevels;
         $this->filterPositions = $filterPositions;
         $this->filterAgeLevels = $filterAgeLevels;
+        $this->touch();
+    }
+
+    /**
+     * AC-05-18/BR-05-1: the trainer's own price for this playlist, in
+     * either or both units. Kept as its own method, separate from
+     * updateDetails(), so Epic-04's own edit flow and Epic-05's pricing
+     * concern stay independently callable — see this class's own docblock
+     * on the two price columns for why 0/0 means free rather than a
+     * separate boolean.
+     */
+    public function updatePricing(int $priceUsdMinorUnits, int $priceTokens): void
+    {
+        if ($priceUsdMinorUnits < 0 || $priceTokens < 0) {
+            throw new \InvalidArgumentException('A playlist price cannot be negative.');
+        }
+
+        $this->priceUsdMinorUnits = $priceUsdMinorUnits;
+        $this->priceTokens = $priceTokens;
         $this->touch();
     }
 

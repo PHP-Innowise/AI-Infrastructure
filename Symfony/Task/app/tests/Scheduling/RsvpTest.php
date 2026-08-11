@@ -4,10 +4,12 @@ declare(strict_types=1);
 
 namespace App\Tests\Scheduling;
 
+use App\Identity\Entity\Account;
 use App\Identity\Repository\ChildApprovalRequestRepository;
+use App\Platform\Entity\Trainer;
 use App\Scheduling\Billing\PaymentIntentGateway;
-use App\Scheduling\Billing\PaymentIntentOutcome;
 use App\Scheduling\Billing\PaymentIntentRequest;
+use App\Scheduling\Billing\PaymentIntentResult;
 use App\Scheduling\Entity\Event;
 use App\Scheduling\Entity\Rsvp;
 use App\Scheduling\Repository\RsvpRepository;
@@ -32,9 +34,14 @@ final class RsvpTest extends WebTestCase
     }
 
     /**
-     * AC-02-24: a free event RSVP is instantly confirmed — status
+     * AC-02-24, AC-05-31: a free event (both usdPricingEnabled and
+     * tokenPricingEnabled off — createEvent()'s own defaults) RSVP is
+     * instantly confirmed with no payment step of any kind — status
      * "Registered," added to "My Reservations," a "You're registered!"
-     * message, and a confirmation email.
+     * message, and a confirmation email. The RSVP-side "no payment step"
+     * mechanics are Epic-02's own BR-02-8 (AC-05-31's own cross-epic
+     * note); this is the same underlying fact from Epic-05's "free events
+     * are a payment-method category" angle.
      */
     public function testFreeEventRsvpConfirmsInstantlyAndAddsToReservations(): void
     {
@@ -107,12 +114,14 @@ final class RsvpTest extends WebTestCase
     }
 
     /**
-     * AC-02-25/60: a paid event shows the price(s) and, with the shipped
-     * no-op payment gateway, honestly stays "awaiting payment
-     * confirmation" rather than claiming a confirmation that never
-     * happened — see NoopPaymentIntentGateway's own docblock.
+     * AC-02-25/60, AC-05-10: a paid event shows the price(s) and, choosing
+     * card, redirects straight to Stripe Checkout in the SAME request
+     * (specs/api-designer-spec.md "Billing module": "no separate 'create
+     * checkout session' endpoint") — the RSVP itself stays Pending Payment
+     * until the webhook confirms it, never claiming a confirmation that has
+     * not happened.
      */
-    public function testPaidEventShowsPriceAndAwaitsPaymentConfirmation(): void
+    public function testPaidEventShowsPriceAndRedirectsToStripeCheckout(): void
     {
         $trainer = $this->trainer('peak-performance');
         $this->activateTenant($trainer);
@@ -135,9 +144,9 @@ final class RsvpTest extends WebTestCase
         $form = $crawler->selectButton('Register & Pay')->form(['rsvp[paymentMethod]' => Event::PAYMENT_USD]);
         $this->client->submit($form);
 
-        self::assertResponseRedirects('/portal/reservations');
-        $this->client->followRedirect();
-        self::assertSelectorTextContains('body', 'awaiting payment confirmation');
+        self::assertTrue($this->client->getResponse()->isRedirect(), 'AC-05-10: redirected to Stripe Checkout.');
+        $location = (string) $this->client->getResponse()->headers->get('Location');
+        self::assertStringContainsString('checkout.stripe.test', $location);
 
         $this->activateTenant($trainer);
         /** @var RsvpRepository $rsvps */
@@ -145,18 +154,20 @@ final class RsvpTest extends WebTestCase
         $rsvp = current($rsvps->findForEvent($event));
         self::assertNotFalse($rsvp);
         self::assertSame(Rsvp::STATUS_PENDING_PAYMENT, $rsvp->getStatus());
+        self::assertNotNull($rsvp->getPaymentRecord(), 'AC-05-36: a payment record backs the Checkout Session, idempotency-key-bearing.');
     }
 
     /**
      * AC-02-26: once payment succeeds, the RSVP is confirmed, "My
-     * Reservations" reflects it, and a confirmation email (the MVP-level
-     * stand-in for "a receipt is provided" — Billing/Epic-05 owns real
-     * receipts) is sent. The shipped NoopPaymentIntentGateway always
-     * stays Pending (by design — see its own docblock), so this
-     * exercises the confirm-on-success branch with the container's
-     * PaymentIntentGateway swapped for a stub that reports Succeeded —
-     * proving RsvpService's own handling of that outcome against the
-     * real interface, not fabricating a payment gateway.
+     * Reservations" reflects it, and a confirmation email is sent. The
+     * shipped Epic-05 gateway always returns Pending for a `usd` payment
+     * (Stripe Checkout is genuinely asynchronous — see
+     * SchedulingPaymentIntentGateway's own docblock), so this exercises the
+     * confirm-on-success branch with the container's PaymentIntentGateway
+     * swapped for a stub that reports Succeeded — proving RsvpService's own
+     * handling of that outcome against the real interface, matching the
+     * exact shape a `token` payment (which DOES resolve Succeeded
+     * synchronously) produces in production.
      */
     public function testPaidEventConfirmsOnceGatewayReportsSuccess(): void
     {
@@ -172,18 +183,22 @@ final class RsvpTest extends WebTestCase
         // request by default — disableReboot() keeps this same container,
         // and this override, alive for every request in this method. Must
         // be set before the client's very first request, or a fresh,
-        // rebooted container would fall right back to the real
-        // NoopPaymentIntentGateway.
+        // rebooted container would fall right back to the real,
+        // Epic-05-wired gateway.
         $this->client->disableReboot();
         self::getContainer()->set(PaymentIntentGateway::class, new class implements PaymentIntentGateway {
-            public function requestPayment(PaymentIntentRequest $request): PaymentIntentOutcome
+            public function lockFundingForUpdate(Trainer $trainer, Account $payer, string $paymentMethod): void
             {
-                return PaymentIntentOutcome::Succeeded;
             }
 
-            public function requestRefund(PaymentIntentRequest $request): PaymentIntentOutcome
+            public function requestPayment(PaymentIntentRequest $request): PaymentIntentResult
             {
-                return PaymentIntentOutcome::Succeeded;
+                return PaymentIntentResult::succeeded();
+            }
+
+            public function requestRefund(PaymentIntentRequest $request): PaymentIntentResult
+            {
+                return PaymentIntentResult::succeeded();
             }
         });
 
@@ -204,6 +219,71 @@ final class RsvpTest extends WebTestCase
         self::assertNotFalse($rsvp);
         self::assertSame(Rsvp::STATUS_CONFIRMED, $rsvp->getStatus(), 'AC-02-26: confirmed once payment succeeds.');
         self::assertNotNull($rsvp->getConfirmedAt());
+    }
+
+    /**
+     * AC-05-13: a child's RSVP that requires payment is held "Pending
+     * Parent Approval"; on approval a Stripe Checkout opens for the
+     * parent — the same-request redirect
+     * `PortalReservationController::decideApproval()`'s own docblock
+     * documents, proven here end to end through the real approval flow
+     * rather than assumed from that docblock alone.
+     */
+    public function testChildsPaidRsvpAwaitsParentApprovalThenOpensStripeCheckoutForTheParent(): void
+    {
+        $trainer = $this->trainer('peak-performance');
+        $this->activateTenant($trainer);
+        $alex = $this->alexPlayer();
+        $this->ensureActivePlayerMembership($trainer, $alex);
+        $childAccount = $this->giveChildOwnLogin($alex, 'alex-paid-rsvp-login@practiceperfect.test', $trainer);
+        $event = $this->createEvent($trainer, [
+            'title' => 'Child Paid Session Needs Approval',
+            'usdPricingEnabled' => true,
+            'usdPriceMinorUnits' => 1500,
+        ]);
+
+        $this->client->loginUser($childAccount);
+        $crawler = $this->client->request('GET', sprintf('/portal/events/%d', $event->getId()));
+        $form = $crawler->selectButton('Register & Pay')->form(['rsvp[paymentMethod]' => Event::PAYMENT_USD]);
+        $this->client->submit($form);
+
+        self::assertResponseRedirects('/portal/approvals');
+
+        $this->activateTenant($trainer);
+        /** @var RsvpRepository $rsvps */
+        $rsvps = self::getContainer()->get(RsvpRepository::class);
+        $rsvp = current($rsvps->findForEvent($event));
+        self::assertNotFalse($rsvp);
+        self::assertSame(Rsvp::STATUS_PENDING_PARENT_APPROVAL, $rsvp->getStatus(), 'AC-05-13: held Pending Parent Approval.');
+
+        /** @var ChildApprovalRequestRepository $requests */
+        $requests = self::getContainer()->get(ChildApprovalRequestRepository::class);
+        // Matched on THIS rsvp's own id, not merely "any pending rsvp-type
+        // request for Pat" — testChildRsvpRequiresParentApprovalRegardlessOfPrice()
+        // above deliberately leaves its own pending 'rsvp' request
+        // unresolved for the rest of this process (no per-test database
+        // reset), so a looser filter could grab that stale one instead of
+        // this test's own fresh one.
+        $pending = current(array_filter(
+            $requests->findForParent($this->account('player@practiceperfect.test')),
+            static fn ($r) => $r->isPending() && 'rsvp' === $r->getActionType() && $r->getRsvpId() === (int) $rsvp->getId(),
+        ));
+        self::assertNotFalse($pending, 'AC-05-13: the parent is notified via a pending approval request.');
+
+        $this->client->loginUser($this->account('player@practiceperfect.test'));
+        $this->switchPlayerToTrainer($this->client, $trainer);
+        $crawler = $this->client->request('GET', sprintf('/portal/rsvps/approvals/%d/approve', $pending->getId()));
+        $form = $crawler->selectButton('Approve')->form();
+        $this->client->submit($form);
+
+        self::assertTrue($this->client->getResponse()->isRedirect(), 'AC-05-13: approval opens a Stripe Checkout for the parent.');
+        self::assertStringContainsString('checkout.stripe.test', (string) $this->client->getResponse()->headers->get('Location'));
+
+        $this->activateTenant($trainer);
+        $rsvps2 = self::getContainer()->get(RsvpRepository::class);
+        $reloaded = $rsvps2->find($rsvp->getId());
+        self::assertNotNull($reloaded);
+        self::assertSame(Rsvp::STATUS_PENDING_PAYMENT, $reloaded->getStatus(), 'AC-05-13: awaiting the parent\'s own Checkout completion — not yet registered.');
     }
 
     /**

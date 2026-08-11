@@ -17,11 +17,18 @@ use Symfony\Component\Mime\Email;
 /**
  * US-01.05 — Child Purchase Requires Parent Approval.
  *
- * The trigger for creating a request — a child selecting a paid event — is
- * Epic-02/05's own RSVP/purchase workflow, which does not exist yet (see
- * ChildApprovalService's own docblock). These tests exercise the primitive
- * that workflow will call (requestApproval()) directly, and fully cover the
- * decision lifecycle and toggle Epic-01 owns outright.
+ * These tests exercise the generic decision lifecycle and toggle Epic-01
+ * owns outright — `requestApproval()` directly, never through a real
+ * RSVP/purchase HTTP flow (Epic-02's RsvpTest/Epic-05's TokenPurchaseTest
+ * exercise those triggers end to end instead). The fixture request used
+ * here is created with `ChildApprovalRequest::ACTION_TOKEN_PURCHASE` but no
+ * `requestedTokenPackageId` — Epic-05's `PortalTokenController` now owns
+ * real post-decision handling for that action type
+ * (`ApprovalController::decide()`'s own redirect), which the two
+ * decision tests below follow through to, exactly as a real browser
+ * clicking the approvals-index link would; `completePurchaseAfterApproval()`
+ * no-ops for a request with no package id, so the underlying decision
+ * mechanics these tests actually assert on are unaffected.
  */
 final class ChildApprovalTest extends WebTestCase
 {
@@ -63,7 +70,11 @@ final class ChildApprovalTest extends WebTestCase
         self::assertResponseIsSuccessful();
         self::assertSelectorTextContains('body', 'pending');
 
-        $approveCrawler = $this->client->request('GET', sprintf('/portal/approvals/%d/approve', $requestId));
+        // The generic route redirects to Billing's own type-specific one
+        // for an ACTION_TOKEN_PURCHASE request (see this class's own
+        // docblock) — followed here exactly as a real browser would.
+        $this->client->request('GET', sprintf('/portal/approvals/%d/approve', $requestId));
+        $approveCrawler = $this->client->followRedirect();
         $form = $approveCrawler->selectButton('Approve')->form(['approval_decision[note]' => 'Sounds good!']);
         $this->client->submit($form);
 
@@ -87,7 +98,10 @@ final class ChildApprovalTest extends WebTestCase
         $parent = $this->account('player@practiceperfect.test');
         $this->client->loginUser($parent);
 
-        $denyCrawler = $this->client->request('GET', sprintf('/portal/approvals/%d/deny', $requestId));
+        // See testParentApprovesAPendingRequest()'s own comment on why this
+        // follows a redirect first.
+        $this->client->request('GET', sprintf('/portal/approvals/%d/deny', $requestId));
+        $denyCrawler = $this->client->followRedirect();
         $form = $denyCrawler->selectButton('Deny')->form();
         $this->client->submit($form);
 

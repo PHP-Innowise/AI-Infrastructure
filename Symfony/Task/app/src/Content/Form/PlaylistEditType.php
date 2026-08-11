@@ -6,11 +6,13 @@ namespace App\Content\Form;
 
 use App\Content\Entity\Playlist;
 use Symfony\Component\Form\AbstractType;
+use Symfony\Component\Form\Extension\Core\Type\IntegerType;
 use Symfony\Component\Form\Extension\Core\Type\SubmitType;
 use Symfony\Component\Form\Extension\Core\Type\TextareaType;
 use Symfony\Component\Form\Extension\Core\Type\TextType;
 use Symfony\Component\Form\FormBuilderInterface;
 use Symfony\Component\OptionsResolver\OptionsResolver;
+use Symfony\Component\Validator\Constraints\GreaterThanOrEqual;
 use Symfony\Component\Validator\Constraints\Length;
 use Symfony\Component\Validator\Constraints\NotBlank;
 
@@ -29,6 +31,11 @@ use Symfony\Component\Validator\Constraints\NotBlank;
  * `PlaylistItem` rows with no stable correlation key, solving the same
  * problem those three routes already solve, worse. Recorded in the coder's
  * final report as a deliberate deviation from the literal route table.
+ *
+ * `priceUsdMinorUnits`/`priceTokens` (AC-05-18, Epic-05) are added to this
+ * same edit form, matching how `Event`'s own dual pricing lives on its one
+ * create/edit form (Epic-02) rather than a separate Billing-owned screen —
+ * one playlist, edited in one place, price included.
  */
 /**
  * @extends AbstractType<array<string, mixed>>
@@ -43,6 +50,8 @@ final class PlaylistEditType extends AbstractType
             ->add('filterSkillLevels', TextType::class, ['required' => false, 'help' => 'Comma-separated'])
             ->add('filterPositions', TextType::class, ['required' => false, 'help' => 'Comma-separated'])
             ->add('filterAgeLevels', TextType::class, ['required' => false, 'help' => 'Comma-separated'])
+            ->add('priceUsdMinorUnits', IntegerType::class, ['label' => 'Price (USD cents)', 'constraints' => [new GreaterThanOrEqual(0)]])
+            ->add('priceTokens', IntegerType::class, ['label' => 'Price (tokens)', 'constraints' => [new GreaterThanOrEqual(0)]])
             ->add('submit', SubmitType::class, ['label' => 'Save changes']);
     }
 
