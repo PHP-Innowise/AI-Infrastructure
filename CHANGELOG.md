@@ -347,6 +347,28 @@ edition's own files remain in that edition's changelog.
   main-session turns, and compact deliberately near ~400k of context. Both
   thresholds are derived from local transcripts and are marked as such.
 
+- **Browser verification now walks journeys, and reports defects instead of
+  repairing them.** Three rounds of manual testing on a completed application
+  found 15 defects that a 419-of-419 acceptance-criteria suite and the
+  agent's own browser pass had both stayed green through, and the skill's
+  shape explains why: every checklist item asked "on this page, does X work",
+  while every one of the 15 needed a role walked from its first action. A
+  parent with a zero balance pressing "Register & Pay" got an HTTP 500; the
+  page it sat on loaded perfectly. `browser-verify/SKILL.md` gained a
+  mandatory `What To Walk` section - roles enumerated, each role's first
+  action named, ordered by blast radius rather than by proximity to the diff,
+  each journey walked empty as well as populated - and calls out the two
+  classes a page check cannot see: the feature that saves and never renders,
+  and the mechanism behind the button. It also gained a `Defect Report` output
+  contract, because the previous "verified flows, evidence, blockers" had
+  nowhere for "the feature works and is invisible" to land. The screenshot
+  bound became per-journey rather than per-verification, and exhausting the
+  budget now requires naming the journeys left unwalked. In
+  `browser-verify-agent.md`, the instruction "If issues found: fix code, wait
+  for hot-reload, re-verify (max 3 attempts)" is gone: a verifier that repairs
+  what it finds hands back a green report and no list, and the list is the
+  deliverable.
+
 - **`docs/SECURITY.md` states what the write-agent gate does not guarantee.**
   The policy-versus-enforcement table gained a row for it: an advisory,
   machine-local `/tmp` lock that does not serialize two containers on the same
