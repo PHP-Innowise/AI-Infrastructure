@@ -182,6 +182,7 @@ For new backend behavior, cover:
   - Avoid over-mocking: mocking everything tests your mocks, not your code. Prefer real Eloquent models and built-in fakes at boundaries.
 - **Data providers** for the same logic across many inputs (Pest `->with([...])` or PHPUnit `@dataProvider`), instead of copy-pasted tests.
 - **Determinism:** freeze time with `Date::setTestNow()`/`$this->travelTo()`, seed factory randomness (`fake()->seed()`), and fake network/queue/mail — never depend on real external calls or execution order.
+- **Own your subject:** a seeded fixture is a read-only prop. Any record the test authenticates as or mutates (password, soft delete, a counter it owns) is built by the test itself. Borrowing a shared record makes the result depend on which other test ran first, and the failure then surfaces as an unrelated assertion.
 - **Coverage that matters:** target meaningful branch coverage of business logic (a pragmatic ~80% on core code), not 100% everywhere. Every bug fix gets a regression test first.
 - **Mutation testing:** if configured, run Infection (`vendor/bin/infection`, Pest has a `--mutate` profile) to check tests actually catch changes; a high MSI beats a high line-coverage number.
 - **Keep them fast:** prefer `RefreshDatabase` with an in-memory SQLite connection for unit-level feature tests; reserve slower MySQL/Postgres-backed suites for behavior that depends on database-specific features.

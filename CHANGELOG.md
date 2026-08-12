@@ -382,6 +382,18 @@ edition's own files remain in that edition's changelog.
   `Same Shape Elsewhere` and `Guard` sections so the sweep and the regression
   test survive in the record; an empty sweep section means the search ran.
 
+- **The Definition of Done and the test-data skills now name the
+  order-dependence a green suite hides.** A new test signed in as a seeded
+  fixture account and failed, because an earlier password-reset test had
+  permanently changed that fixture's password - a result that depended on
+  suite order and surfaced as an unrelated assertion. Each edition's
+  `.claude/DOD.md` now requires the whole suite in one run, states that a
+  `--filter`/`--group` run is a debugging aid to be reported as filtered, and
+  adds an item requiring tests to own the rows they assert on. The
+  `test-generator` skills and Symfony's `fixture-factory-generator` carry the
+  same rule where the test is written: a seeded fixture is a read-only prop,
+  and anything a test authenticates as or mutates is minted by that test.
+
 - **`docs/SECURITY.md` states what the write-agent gate does not guarantee.**
   The policy-versus-enforcement table gained a row for it: an advisory,
   machine-local `/tmp` lock that does not serialize two containers on the same
