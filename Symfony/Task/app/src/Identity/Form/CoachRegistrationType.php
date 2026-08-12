@@ -25,7 +25,13 @@ final class CoachRegistrationType extends AbstractType
             ->add('firstName', TextType::class, ['constraints' => [new NotBlank()]])
             ->add('lastName', TextType::class, ['constraints' => [new NotBlank()]])
             ->add('email', EmailType::class, ['constraints' => [new NotBlank()]])
-            ->add('plainPassword', PasswordType::class, ['constraints' => [new NotBlank(), new Length(min: 8)]])
+            // See PlayerRegistrationType: the derived label reads
+            // "Plain password" to the invited coach.
+            ->add('plainPassword', PasswordType::class, [
+                'label' => 'Password',
+                'help' => 'At least 8 characters.',
+                'constraints' => [new NotBlank(), new Length(min: 8)],
+            ])
             ->add('submit', SubmitType::class, ['label' => 'Accept invitation & register']);
     }
 

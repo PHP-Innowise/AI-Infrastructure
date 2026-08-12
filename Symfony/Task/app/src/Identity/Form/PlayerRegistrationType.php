@@ -32,7 +32,16 @@ final class PlayerRegistrationType extends AbstractType
             ->add('accountFirstName', TextType::class, ['label' => 'Your first name', 'constraints' => [new NotBlank()]])
             ->add('accountLastName', TextType::class, ['label' => 'Your last name', 'constraints' => [new NotBlank()]])
             ->add('email', EmailType::class, ['constraints' => [new NotBlank()]])
-            ->add('plainPassword', PasswordType::class, ['constraints' => [new NotBlank(), new Length(min: 8)]])
+            // Labelled explicitly: without this Symfony derives the label from
+            // the property and a first-time visitor is asked for a
+            // "Plain password" on the very first screen they ever see. The
+            // minimum is stated up front rather than only after a failed
+            // submission, since the constraint below already enforces it.
+            ->add('plainPassword', PasswordType::class, [
+                'label' => 'Password',
+                'help' => 'At least 8 characters.',
+                'constraints' => [new NotBlank(), new Length(min: 8)],
+            ])
             ->add('parentPhone', TelType::class, [
                 'required' => false,
                 'label' => 'Phone',

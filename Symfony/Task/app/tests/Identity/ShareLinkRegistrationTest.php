@@ -43,6 +43,34 @@ final class ShareLinkRegistrationTest extends WebTestCase
     }
 
     /**
+     * AC-01-10, regression. Symfony derives a field label from the property
+     * when none is given, so `plainPassword` rendered as "Plain password" —
+     * developer vocabulary on the first screen a prospective customer ever
+     * sees. Every visible label here is asserted to be language a parent would
+     * use, not a property name.
+     */
+    public function testTheRegistrationFormUsesHumanLabels(): void
+    {
+        $crawler = $this->client->request('GET', '/join/join-peak-performance');
+
+        self::assertResponseIsSuccessful();
+
+        $labels = $crawler->filter('form[name="player_registration"] label')->each(
+            static fn ($node): string => trim($node->text()),
+        );
+
+        self::assertContains('Password', $labels, 'The password field must be labelled for a human.');
+
+        foreach ($labels as $label) {
+            self::assertStringNotContainsStringIgnoringCase(
+                'plain',
+                $label,
+                sprintf('Label "%s" leaks the property name into the public registration form.', $label),
+            );
+        }
+    }
+
+    /**
      * AC-01-9: clicking it while already logged in redirects straight to the
      * association step (an "instant association" for a single-trainer actor).
      */

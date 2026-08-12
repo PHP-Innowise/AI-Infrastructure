@@ -150,18 +150,26 @@ final class DashboardNavigationTest extends WebTestCase
 
         $this->disableFeature($trainer->getId(), FeatureToggle::FEATURE_MARKETING);
 
-        $disabled = $this->navigationHrefs($this->client->request('GET', '/dashboard'));
+        try {
+            $disabled = $this->navigationHrefs($this->client->request('GET', '/dashboard'));
 
-        self::assertNotContains(
-            '/trainer/marketing/coupons',
-            $disabled,
-            'A disabled feature must vanish from the navigation, not offer a link into a 403.',
-        );
-        self::assertContains(
-            '/trainer/events',
-            $disabled,
-            'Disabling one feature must not take unrelated navigation with it.',
-        );
+            self::assertNotContains(
+                '/trainer/marketing/coupons',
+                $disabled,
+                'A disabled feature must vanish from the navigation, not offer a link into a 403.',
+            );
+            self::assertContains(
+                '/trainer/events',
+                $disabled,
+                'Disabling one feature must not take unrelated navigation with it.',
+            );
+        } finally {
+            // The suite shares one database without per-test rollback, so a
+            // toggle left off here would disable marketing for every later
+            // test that touches this trainer. Restored in a finally block so a
+            // failed assertion above still cleans up after itself.
+            $this->removeFeatureOverride($trainer->getId(), FeatureToggle::FEATURE_MARKETING);
+        }
     }
 
     /**
@@ -192,6 +200,24 @@ final class DashboardNavigationTest extends WebTestCase
              VALUES (?, ?, false, now(), ?)
              ON CONFLICT (trainer_id, feature_name) DO UPDATE SET is_enabled = false',
             [$trainerId, $feature, $actorId],
+        );
+    }
+
+    /**
+     * Deletes the override rather than setting it back to true: FeatureGate
+     * defaults to enabled when no row exists, so removing it restores the
+     * original state exactly instead of merely approximating it.
+     */
+    private function removeFeatureOverride(?int $trainerId, string $feature): void
+    {
+        self::assertNotNull($trainerId);
+
+        /** @var \Doctrine\DBAL\Connection $connection */
+        $connection = self::getContainer()->get('doctrine.dbal.default_connection');
+
+        $connection->executeStatement(
+            'DELETE FROM feature_toggle WHERE trainer_id = ? AND feature_name = ?',
+            [$trainerId, $feature],
         );
     }
 

@@ -64,8 +64,12 @@ final class DashboardTest extends WebTestCase
 
         self::assertResponseIsSuccessful();
         self::assertSelectorTextContains('body', (string) $after, 'AC-07-2: the active-trainers figure (BR-07-7) is shown.');
-        self::assertSelectorTextContains('body', 'Total players');
-        self::assertSelectorTextContains('body', 'Total coaches');
+        // The labels name what they count. "Players" alone means the roster
+        // elsewhere in this product — under decision A1 a child has a player
+        // profile and usually no account — so an unqualified "Total players"
+        // here reads as a contradiction of the CRM dashboard's larger figure.
+        self::assertSelectorTextContains('body', 'Player accounts (registered)');
+        self::assertSelectorTextContains('body', 'Coach accounts (registered)');
         self::assertSelectorTextContains('body', 'New users this week');
         self::assertSelectorTextContains('body', 'New users this month');
         self::assertSelectorTextContains('body', '30-day user growth');

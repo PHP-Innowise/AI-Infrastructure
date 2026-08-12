@@ -24,10 +24,23 @@
 
         <section>
             <h2>User Metrics</h2>
+            {#
+                These three count *accounts*, which is what AC-07-2 asks for
+                ("registered") and what the epic's own User Count Logic fixes:
+                trainers with an active Stripe subscription, player accounts
+                with status active, coach accounts with status active.
+
+                The labels say so explicitly because the plain word "players"
+                means something different elsewhere in this product. Owner
+                decision A1 makes every under-18 player parent-managed, so
+                children have a player profile and usually no account at all —
+                the CRM's roster count is legitimately larger, and a Super Admin
+                comparing the two screens must not conclude one is broken.
+            #}
             <dl>
-                <dt>Active trainers</dt><dd>{{ totalTrainers }}</dd>
-                <dt>Total players</dt><dd>{{ totalPlayers }}</dd>
-                <dt>Total coaches</dt><dd>{{ totalCoaches }}</dd>
+                <dt>Trainers with an active subscription</dt><dd>{{ totalTrainers }}</dd>
+                <dt>Player accounts (registered)</dt><dd>{{ totalPlayers }}</dd>
+                <dt>Coach accounts (registered)</dt><dd>{{ totalCoaches }}</dd>
                 <dt>New users this week</dt><dd>{{ newUsersThisWeek }}</dd>
                 <dt>New users this month</dt><dd>{{ newUsersThisMonth }}</dd>
                 <dt>Growth trend (week over week)</dt>
