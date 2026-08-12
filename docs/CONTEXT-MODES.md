@@ -27,7 +27,8 @@ Project Brain
     incidents, decisions, events, manifests, and promotions
 
 Memory Bank
-  → reviewed reusable knowledge
+  → durable reusable knowledge, independently reviewed or explicitly
+    auto-promoted according to runtime configuration
 
 memory-bank/local/context.db
   → disposable search index, local task binding/cache,
@@ -42,6 +43,8 @@ memory-bank/local/context.db
 - `update` uses owner authorization and optimistic revision checks.
 - `retrieve` assembles privacy-filtered, freshness-checked, bounded context.
 - `complete` advances the shared Brain lifecycle after verification.
+- `rebind` restores a missing machine-local binding from a Git-tracked task;
+  an automated turn flush performs the same restoration when needed.
 - `checkpoint` does not derive an authoritative task from the Git branch.
 - `memory` validates Project Brain and refreshes the disposable index without
   creating competing task state.
@@ -75,7 +78,8 @@ Project Brain
   → not used as the authority for the lightweight task
 
 Memory Bank
-  → unchanged; still stores only reviewed durable knowledge
+  → unchanged; stores durable knowledge under the configured reviewed or
+    automatic promotion policy, with automatic entries labeled `auto-promoted`
 ```
 
 ### Behavior
@@ -118,7 +122,9 @@ Both modes also:
 - fail safely on invalid UTF-8 without replacing the previous index;
 - treat retrieved content as a discovery aid rather than canonical truth;
 - require explicit completion;
-- keep hooks metadata-only and avoid automatic prompt injection.
+- keep session-start banners metadata-only;
+- deliver bounded context automatically when supported: fresh prompt capsules
+  on Claude Code/Codex and a one-turn-stale `alwaysApply` rule on Cursor.
 
 The difference is the Working layer:
 
@@ -200,8 +206,9 @@ Changing the mode does not migrate task state automatically.
 ## Recommendation
 
 Use **governed mode** for normal accelerator work. It provides shared task
-authority, handoffs, revision safety, evidence, retrieval manifests, archival,
-and reviewed promotion.
+authority, recoverable local bindings, handoffs, revision safety, evidence,
+retrieval manifests, archival, and reviewed or explicitly configured automatic
+promotion.
 
 Use **lightweight mode** only when local convenience is more important than
 shared continuity and governed history.

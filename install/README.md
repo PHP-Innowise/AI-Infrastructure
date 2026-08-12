@@ -1,9 +1,9 @@
 # Accelerator Installer
 
 `scripts/install_accelerator.py` installs a ready-made Laravel, Symfony, or PHP
-Core accelerator into an existing project from a versioned file inventory. It
-copies the contents of the selected edition into the target root and refuses
-collisions before writing anything.
+Core accelerator into an existing project from a versioned production
+inventory. It copies the selected production payload into the target root and
+refuses unsupported collisions before writing anything.
 
 Use this installer for ready-made editions. For projects with substantial
 custom architecture, integrations, or internal conventions, use
@@ -41,6 +41,34 @@ The command must report `VERIFIED` for Laravel, Symfony, and PHP Core. An
 inventory mismatch means the source checkout is incomplete or its distribution
 files changed without an inventory update.
 
+The inventories are the executable boundary between the source editions and
+the production payload. They may record source files that are deliberately
+excluded from installation and may apply production-specific selection rules;
+the installer, inventory verifier, and tests must agree on that resolved
+payload. Treat the inventory as versioned data and review it when its schema
+changes. Do not infer the installed file set by counting every tracked file in
+an edition directory.
+
+The production payload keeps the files required to operate and adapt the
+accelerator: policies, native tool integrations, runtime scripts, workflow
+documentation, templates, Memory Bank, Project Brain, living-spec and
+lowercase `tasks/` scaffolds. Source-only research, test suites, worked
+examples, and bundled uppercase `Task/` product/design material remain useful
+in this repository but are not copied into a consuming project.
+
+`Task/` and `tasks/` are intentionally different:
+
+- uppercase `Task/` is optional client-input space. A consuming project or
+  generation workflow may create and populate it when actual client
+  requirements or design assets exist; the ready-made package does not seed it
+  with this repository's material;
+- lowercase `tasks/` is the installed operational scaffold for temporary,
+  skill-prefixed `TASK-NNN/` work artifacts.
+
+Exact payload counts are reported by the verifier and the install transcript.
+They can change as the inventory evolves, so documentation does not pin a
+hand-maintained total.
+
 ## 3. Run a Dry Run
 
 ```bash
@@ -62,7 +90,8 @@ Available tool values are:
 
 Repeat `--tool` to select multiple integrations. Omit it to install all three.
 Shared policy, workflow, Memory Bank, and Project Brain files are included with
-every selection.
+every selection. Tool selection narrows native integration trees; it does not
+re-add source-only files excluded from the production payload.
 
 `--merge-existing` handles the standard root files commonly present in an
 existing project:
@@ -99,6 +128,7 @@ After obtaining a collision-free dry run, repeat the same command without
 `--dry-run`:
 
 ```bash
+set -o pipefail
 python3 scripts/install_accelerator.py \
   --edition "PHP Core" \
   --target "$TARGET" \
@@ -108,9 +138,15 @@ python3 scripts/install_accelerator.py \
 ```
 
 Keep the complete transcript, including `COPY`, `MERGE`, `COPY_AS`, and
-`UNCHANGED` records. It identifies installer actions and is required for safe
-rollback. A final `COMPLETE` line reports the edition, selected tools, and
-selected file count.
+`UNCHANGED` records. It is an action log, not a restorable backup and not a
+hash-based uninstall manifest. Pair it with the pre-install Git commit or
+backup for safe rollback. A final `COMPLETE` line reports the edition, selected
+tools, and number of selected inventory entries; that number includes
+`UNCHANGED` entries and must not be interpreted as the number of files created.
+
+When piping through `tee`, preserve the installer's exit status. In shells
+without pipeline failure propagation, inspect the final status explicitly;
+otherwise `tee` can succeed after the installer failed.
 
 ## 6. Validate the Installation
 
@@ -371,13 +407,18 @@ for the complete scan, generation, collision, ownership, and update contracts.
 
 ## Ready-made Installer Rollback
 
-Use the saved transcript and Git diff:
+Use the saved transcript, the pre-install recovery point, and Git diff:
 
 - remove paths recorded as `COPY` or `COPY_AS` only when they were created by
   that installation and have not since become project-owned;
-- for `MERGE` records, review and remove only the marked accelerator block or
-  restore the pre-install version from the project's recovery point;
+- for `MERGE` records, restore the pre-install file when exact rollback is
+  required. Removing only an installer-managed block is safe only after review:
+  additive merges can omit accelerator directives that already existed in the
+  project, and those project-owned lines must remain;
 - do nothing for `UNCHANGED` records.
+
+The installer has no automatic rollback command. A transcript records what the
+successful run reported, but it does not contain previous file contents.
 
 Never delete whole `.claude/`, `.cursor/`, `.agents/`, `.codex/`,
 `memory-bank/`, or `project-brain/` directories because they may contain

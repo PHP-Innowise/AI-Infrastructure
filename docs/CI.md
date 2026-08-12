@@ -2,9 +2,11 @@
 
 The repository is checked by GitHub Actions:
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml). The workflow runs
-on every push to `main` and on every pull request. It uses only
-`actions/checkout` and `actions/setup-python`, needs no dependencies beyond
-the Python standard library, and never uses `sudo`.
+on every push to `main` and on every pull request. Workflow actions are limited
+to `actions/checkout` and `actions/setup-python`, and the Python test/runtime
+gates use the standard library. The lint job additionally depends on the
+runner-provided `bash` and `shellcheck`; Git is used throughout. The workflow
+does not install project packages or use `sudo`.
 
 | Job | What it verifies |
 |---|---|
@@ -12,7 +14,7 @@ the Python standard library, and never uses `sudo`.
 | `parity` | Mirror parity and cross-edition core parity for Laravel, Symfony, and PHP Core. |
 | `mirrors` | Every per-tool mirror matches its canon (`scripts/build_mirrors.py --check`). |
 | `installation` | Exact versioned inventories match the repository, and every Laravel/Symfony/PHP Core × Claude/Cursor/Codex selected-tool install passes isolated validate/status/index smoke tests without application, `.env`, or application-database access. Also that framework-specific skill semantics survive, and that the optional context-collection tool stays out of the editions and the installer. |
-| `lint` | `bash -n` and `shellcheck -S error` on all tracked `.sh`; `python3 -m json.tool` on all tracked `.json`; startup context budget within ceilings (`scripts/context_budget.py --check`). |
+| `lint` | `bash -n` and `shellcheck -S error` on all tracked shell scripts (including root `collect`); `python3 -m json.tool` on tracked JSON; no clock/random invalidator in Cursor working-memory render hooks; startup context budget within ceilings (`scripts/context_budget.py --check`). |
 | `changelog` | Pull requests only: a diff that touches shared-core files (memory/context core, Project Brain, hooks, `scripts/`) must also change the root `CHANGELOG.md` (`scripts/check_core_changelog.sh`). |
 | `links` | All relative markdown links in tracked `.md` files resolve (`scripts/check_links.py`). |
 
@@ -39,6 +41,22 @@ The explicit file loop is intentional: some distribution test directories are
 not importable Python packages because their parent path contains a hyphen.
 Plain `unittest discover` can report a misleading successful zero-test run
 there.
+
+### External orchestration harness
+
+The optional LangGraph harness is intentionally outside the edition test
+matrix and is not a current release gate. It has separate dependencies and a
+separate offline test suite:
+
+```bash
+python3 -m venv harness/.venv
+harness/.venv/bin/pip install -e "harness[dev]"
+harness/.venv/bin/python -m pytest harness/tests
+```
+
+Run this suite manually when changing `harness/` or its orchestration contract.
+Its exclusion from the standard-library-only CI jobs must not be interpreted as
+automatic validation or a pass.
 
 ### parity
 
@@ -94,6 +112,13 @@ git ls-files -z -- '*.sh' 'collect' | xargs -0 -r shellcheck -S error
 git ls-files -z -- '*.json' | while IFS= read -r -d '' f; do
   python3 -m json.tool "$f" > /dev/null || { echo "Invalid JSON: $f" >&2; exit 1; }
 done
+
+if git ls-files -z -- '*/.cursor/hooks/working-memory-write.sh' \
+                          '*/.cursor/hooks/local-context.sh' \
+  | xargs -0 -r grep -nE '\bdate[[:space:]]+[-+]|\$\(date|\$RANDOM|uuidgen'; then
+  echo "Per-turn invalidator in the Cursor rule render (above)." >&2
+  exit 1
+fi
 
 python3 scripts/context_budget.py --check
 ```
@@ -154,8 +179,9 @@ the script reports why and exits 0 instead of guessing.
 python3 scripts/check_links.py
 ```
 
-`check_links.py` walks the `.md` files tracked by git, so newly created
-markdown files are checked once they are added to the index. An optional
-allowlist (`scripts/check_links_ignore.txt`, `fnmatch` patterns, `#`
-comments) can exempt known-external targets; the file is absent while the
-allowlist is empty.
+`check_links.py` walks the `.md` files tracked by Git, so newly created
+Markdown files are checked once they are added to the index. The committed
+allowlist, `scripts/check_links_ignore.txt`, uses `fnmatch` patterns and `#`
+comments. It currently exempts only unresolved links into client-owned
+`*/Task/*` material; keep that exception narrow rather than using it for
+ordinary documentation drift.

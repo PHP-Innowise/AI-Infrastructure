@@ -2,7 +2,7 @@
 
 These are enforceable rules for the native PHP accelerator. Wishes are ignored; constraints are enforced.
 
-This is the `PHP Core/` folder of the `accelerator-php` monorepo: the universal, framework-agnostic base. It assumes plain PHP (Composer + PSR standards). Framework-specific behavior (Laravel, Symfony, etc.) lives in the sibling `Laravel/` and `Symfony/` folders, not here. If the working project is built on a framework, prefer that matching sibling folder — see the [repository root README](../README.md) for the full comparison.
+This is the `PHP Core/` folder of the `accelerator-php` monorepo: the universal, framework-agnostic base. It assumes plain PHP (Composer + PSR standards). Framework-specific behavior (Laravel, Symfony, etc.) lives in the sibling `Laravel/` and `Symfony/` folders, not here. If the working project is built on a framework, prefer that matching sibling folder — see the [repository root README](https://github.com/PHP-Innowise/AI-Infrastructure/blob/main/README.md) for the full comparison.
 
 This policy is shared across editions. The same accelerator is mirrored for **Claude Code** (`.claude/`), **Cursor** (`.cursor/`), and **Codex** (`.agents/skills` + `.codex/`). Below, paths like `<edition>/hooks` and `<edition>/skills` refer to whichever edition is active.
 

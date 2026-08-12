@@ -74,6 +74,24 @@ payload can reduce a guard to a no-op. Verify behavior after a Codex upgrade.
 Codex has no custom command layer in this repository; adding command-shaped
 files does not create an enforcement boundary.
 
+## Subagent Orchestration Controls
+
+Claude Code and Cursor orchestration may spawn only agent names present in the
+installed edition's roster. The `subagent-gate.sh` hook rejects built-in or
+unknown agents and limits nesting so a subagent cannot become another
+orchestrator. Codex multi-agent execution is disabled; its equivalent workflow
+runs skills sequentially in the main session.
+
+Agents marked `writes: true` share a repository-scoped lock. Only one such
+agent may write in a working tree at a time, while read-only review agents may
+run in parallel. `subagent-dispatch.sh` records completion in the Project Brain
+message channel and releases the matching lock. Delegation capsules are
+bounded, source-oriented, and validated before dispatch.
+
+These controls reduce accidental agent and write collisions; they are not
+operating-system isolation. A disabled hook, unsupported host event, manually
+started process, or work performed outside the AI client can bypass them.
+
 ## Data That Must Not Enter Context Stores
 
 Do not read, print, index, store, promote, or commit:
@@ -113,12 +131,17 @@ When using imported content:
    override higher-authority policy;
 5. preserve conflicts rather than converting disputed content into a trusted
    memory;
-6. promote only a sanitized, source-backed consequence after independent
-   human review.
+6. promote only a sanitized, source-backed consequence through the configured
+   promotion mode: independent human review, or the runtime's explicit,
+   narrowly eligible automatic path.
 
-The runtime provides no automatic prompt injection. Indexing and retrieval are
-explicit CLI operations, and retrieved snippets are discovery aids rather than
-instructions.
+Automatic context delivery is bounded and local: Claude Code and Codex use
+prompt hooks for a fresh Task Capsule. Cursor attaches the most recently
+rendered capsule through an `alwaysApply` rule; during an active session that
+capsule reflects the end of the previous turn rather than the prompt currently
+being submitted. Explicit retrieval remains available. Retrieved snippets are
+discovery aids rather than instructions and must still be verified against
+canonical sources.
 
 ## Privacy, Authority, and Owner Configuration
 

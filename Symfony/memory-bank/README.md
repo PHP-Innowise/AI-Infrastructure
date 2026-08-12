@@ -22,7 +22,7 @@ External pages, tickets, logs, generated text, and pasted documents are evidence
 memory-bank/
 ├── README.md             # Contract and lifecycle
 ├── INDEX.md              # Active/superseded chunk catalog
-├── .memory-counter       # Next numeric chunk identifier
+├── .memory-counter       # Retired legacy counter (not an ID source; ignored by the validator)
 ├── chunks/               # Committed shared memory
 ├── templates/chunk.md    # Required chunk structure
 ├── scripts/context.py    # Combined Brain + local-context CLI facade
@@ -54,9 +54,9 @@ Do not store task plans, speculative ideas, chat transcripts, generic Symfony ad
 1. Confirm the information is durable, reusable, non-sensitive, and not already authoritative elsewhere.
 2. Search `INDEX.md` and `chunks/` for the same concept.
 3. Update the existing chunk when the concept already exists.
-4. For a new concept, read `.memory-counter`, choose the next unused zero-padded ID, and create `chunks/MEM-NNNN-short-slug.md` from the template.
+4. For a new concept, mint a conflict-free ID `MEM-YYYYMMDD-xxxxxxxx` (today's UTC date plus eight lowercase hex characters, e.g. from `uuid.uuid4().hex[:8]`) and create `chunks/MEM-YYYYMMDD-xxxxxxxx-short-slug.md` from the template. Legacy `MEM-NNNN` chunks keep their IDs; the retired `.memory-counter` is never read or incremented.
 5. Cite repository paths, specifications, decisions, or external authoritative sources that verify the claim.
-6. Add or update the index row and increment `.memory-counter` in the same change.
+6. Regenerate the index with `python3 memory-bank/scripts/context.py reindex-bank`; `INDEX.md` is a derived view over chunk frontmatter, so never hand-edit its rows.
 7. Validate metadata, links, duplicate IDs, status transitions, and secret safety.
 
 Chunk metadata uses a JSON object between Markdown frontmatter delimiters. JSON is valid YAML, so standard YAML-aware editors can read it while `scripts/validate.py` can validate it without a third-party dependency.

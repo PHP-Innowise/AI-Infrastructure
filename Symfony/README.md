@@ -8,7 +8,7 @@ A Symfony-first workflow accelerator for AI coding agents. It provides focused c
 Controller -> Service -> Repository
 ```
 
-This is the `Symfony/` folder of the `accelerator-php` monorepo. The framework-neutral PHP base lives in the sibling `PHP Core/` folder; `Laravel/` is the equivalent Laravel specialization — see the [repository root README](../README.md) for the full comparison and usage instructions.
+This is the `Symfony/` folder of the `accelerator-php` monorepo. The framework-neutral PHP base lives in the sibling `PHP Core/` folder; `Laravel/` is the equivalent Laravel specialization — see the [repository root README](https://github.com/PHP-Innowise/AI-Infrastructure/blob/main/README.md) for the full comparison and usage instructions.
 
 ## What This Is
 
@@ -43,7 +43,7 @@ The root `AGENTS.md` policy is shared. Each tool keeps its native integration mo
 
 Do not enable Cursor's optional Claude-file loading when using the self-contained `.cursor` edition. Codex does not use duplicated `.codex/skills`, command, or wrapper trees.
 
-## Directory Structure
+## Source Edition Structure
 
 ```text
 AGENTS.md                 # Shared enforceable policy
@@ -62,12 +62,35 @@ CHANGELOG.md              # Versioned accelerator changes
 .cursor/                  # Cursor-native mirror and adapters
 .agents/skills/           # Canonical shared skills; Codex discovery
 .codex/                   # Codex config, hooks, and references
-tasks/TASK-N/             # Temporary prefixed task artifacts
+Task/                     # Source-only sample/client material; not installed
+tasks/                    # Installed temporary-task scaffold
 specs/                    # Permanent living specifications
 memory-bank/              # Indexed durable cross-session project memory
 project-brain/            # Shared governed task and control records
-examples/                 # Workflow output examples
+examples/                 # Runtime reference plus source-only examples
 ```
+
+## Installed Production Payload
+
+The source edition contains maintainer and validation material that does not
+belong in a consuming Symfony application. The production inventory retains
+the operational accelerator: shared policy, selected native tool integrations,
+runtime scripts, hooks, skills, workflow documentation, templates,
+`memory-bank/`, `project-brain/`, `specs/`, and the lowercase `tasks/`
+scaffold.
+
+Source-only research, test suites, source-only worked examples, and this
+repository's bundled uppercase `Task/` product/design material are not
+installed. The Symfony clean-code patterns remain because active workflow
+documentation references them. A client project may create and populate
+uppercase `Task/` when real requirements or design inputs exist. Lowercase
+`tasks/` has a separate role: it remains the temporary, skill-prefixed
+`TASK-NNN/` workspace used by accelerator workflows.
+
+The versioned inventory is responsible for resolving source exclusions and
+production-specific overrides. Verify it and review an installer dry run for
+the actual payload rather than maintaining an exact file-count claim in this
+README.
 
 ## Workflow Model
 
@@ -159,7 +182,7 @@ Frontend workflows cover semantic HTML, accessible form errors, focus management
 - Symfony Profiler, Web Debug Toolbar, Monolog, Blackfire when available, Doctrine query profiling, explain plans, cache, Messenger throughput, memory, and OPcache.
 - Composer/Flex recipe review, dependency audits, deprecations, upgrades, releases, changelogs, migrations, cache warmup, worker restart/drain, rollback limitations, and living documentation.
 - Indexed cross-session memory with selective retrieval, source verification, review dates, supersession, privacy controls, and deterministic validation.
-- Governed shared tasks, revision-safe handoffs and records, explicit conflicts, retrieval manifests, compaction, and human-reviewed promotion.
+- Governed shared tasks, revision-safe handoffs and records, explicit conflicts, retrieval manifests, compaction, and clearly labeled automatic or independently reviewed promotion.
 
 ## Prerequisites
 
@@ -192,6 +215,10 @@ Do not install Symfony CLI, bundles, npm packages, or analysis tools without app
 | `api-designer` | Design routes, DTOs, validation, errors, pagination, and OpenAPI |
 | `api-platform-designer` | Design API Platform resources, providers, processors, and security |
 | `database-designer` | Design Doctrine entities, constraints, indexes, and queries |
+| `codebase-mapper` | Map an unfamiliar Symfony codebase into source-cited, commit-stamped `codebase/` documents |
+| `flow-feature` | Orchestrate a complete feature with planning, approval, implementation, review, and verification |
+| `flow-review` | Run parallel code, security, and performance review and synthesize one report |
+| `sdd` | Run resumable spec-driven development with durable specs, tasks, and checkpoints |
 | `doctrine-migration-designer` | Plan safe schema rollout, backfills, and recovery |
 | `form-validator-designer` | Design Forms, request DTOs, constraints, and error behavior |
 | `security-voter-designer` | Design voters, firewalls, access rules, and authorization tests |
@@ -220,6 +247,9 @@ Do not install Symfony CLI, bundles, npm packages, or analysis tools without app
 | `memory-bank` | Retrieve, capture, audit, supersede/archive durable memory, or apply a governed automatic/independently reviewed promotion |
 | `finishing-branch` | Present merge, PR, or cleanup alternatives |
 | `release` | Prepare versioning, changelog, tag, and release notes |
+
+See [Orchestrator Commands](https://github.com/PHP-Innowise/AI-Infrastructure/blob/main/docs/ORCHESTRATOR-COMMANDS.md) for flow examples,
+approval points, parallel-review limits, and write serialization.
 
 Example flow:
 
@@ -250,7 +280,7 @@ Use the one public task-aware retrieval command:
 python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID
 ```
 
-Canonical policy, specs, current code, configuration, migrations, and tests always outrank Project Brain, memory, retrieval packets, and local indexes. Retrieval and indexing are explicit; the accelerator does not inject context into prompts automatically. Use `--mode lightweight` only explicitly for machine-local work that does not need shared continuity or governed records.
+Canonical policy, specs, current code, configuration, migrations, and tests always outrank Project Brain, memory, retrieval packets, and local indexes. Automatic delivery is bounded: Claude Code and Codex retrieve a fresh Task Capsule at prompt time, while Cursor uses an `alwaysApply` rule rendered at the previous turn boundary. Explicit `context.py retrieve` remains available for every tool. Use `--mode lightweight` only explicitly for machine-local work that does not need shared continuity or governed records.
 
 ### Task Capsule
 
@@ -267,7 +297,7 @@ research-to-planning, planning-to-implementation,
 implementation-to-independent-verification, and recovery after compaction.
 `memory`, `checkpoint`, and explicit `complete` keep their existing roles.
 
-Each committed chunk uses `memory-bank/chunks/MEM-NNNN-short-slug.md`, is cataloged in `INDEX.md`, and cites its authoritative sources. The session-start hooks report counts only; they never inject chunk contents into logs or context automatically.
+New chunks use conflict-free names such as `memory-bank/chunks/MEM-YYYYMMDD-xxxxxxxx-short-slug.md`; legacy `MEM-NNNN` chunks keep their IDs. Rebuild the derived `INDEX.md` with `python3 memory-bank/scripts/context.py reindex-bank` instead of editing a shared counter. Automatic promotions are tagged `auto-promoted` and are explicitly unreviewed; disable `automatic_promotion` for the independent-review workflow. Session-start banners remain metadata-only even though separate prompt/turn hooks deliver bounded working context.
 
 ## Optional MCP Integrations
 

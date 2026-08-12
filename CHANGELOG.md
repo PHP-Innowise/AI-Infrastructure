@@ -182,6 +182,18 @@ edition's own files remain in that edition's changelog.
   adoption guides document preview, transcript, and rollback behavior, with
   tests covering safe merging, idempotence, and unsupported conflicts.
 
+- **Ready-made installations now have an explicit production boundary.**
+  Schema-v2 inventories classify every tracked edition file as installed or
+  source-only, reject unclassified/stale/overlapping metadata, and use a
+  declared source override to install a clean Memory Bank index. Client
+  `Task/` specifications, maintainer changelogs and memory, regression suites,
+  retired counters, and generic examples remain available in the source
+  repository but no longer enter consuming projects. Standalone payload tests
+  now validate their own Markdown links without repository allowlists. The
+  installation, operations, context/memory, orchestration, CI, troubleshooting,
+  token-research, edition, and scripts documentation was reconciled with the
+  implemented runtime and current production contract.
+
 - **The context budget now gates the whole startup surface, not the half of
   it that was easy to measure.** `scripts/context_budget.py` grew two
   categories, `command_bytes` and `agent_bytes`, because a measurement of what
@@ -335,21 +347,27 @@ edition's own files remain in that edition's changelog.
   main-session turns, and compact deliberately near ~400k of context. Both
   thresholds are derived from local transcripts and are marked as such.
 
-### 2026-08-10 installation inventories exclude project work
+### 2026-08-12 the Symfony inventory, regenerated under schema 2
 
-- `scripts/install_accelerator.py` no longer requires an inventory entry for
-  files an edition accumulates while a project is built inside it: `Task/app/`,
-  `codebase/`, derived `specs/`, project memory chunks, and the governed brain
-  runtime under `project-brain/control/` and `project-brain/dynamic/`. The
-  inventory's own scope already read "excludes runtime, local, and user state";
-  the discovery step now matches it. Listing such files instead would make the
-  installer copy one project's application into every consumer's tree.
-- A path in those areas is skipped only when the inventory does not list it, so
-  the seeds that genuinely ship — `specs/MANIFEST.md`, the `.gitkeep`
-  placeholders, the starter memory chunk, the empty brain indexes — stay
-  verified, deleting one still fails, and an unlisted file outside those areas
-  is still reported. The trade-off is recorded in the module: a distribution
-  file mistakenly placed under one of those prefixes is no longer caught here.
+- `scripts/install_accelerator.py` reverts to `main`'s version. The
+  `PROJECT_WORK_AREAS` prefix list this branch added on 2026-08-10 solved the
+  same problem — a project built inside an edition should not have to be
+  listed as a distribution file — and `main`'s `excluded_tracked_paths` solves
+  it better: the exclusions are recorded in the inventory itself and validated
+  on load, rather than implied by a tuple in the script, and `Task/**` covers
+  what `Task/app/` covered. Two mechanisms for one rule would be worse than
+  either, so the earlier one is removed rather than merged alongside.
+- `install/inventories/symfony.json` regenerated for this branch's tree: 645
+  installed, 800 excluded. The 760 files of `Task/app/` land in
+  `excluded_tracked_paths`, which is what the 2026-08-10 entry was after.
+- Left as `main` classifies them, and flagged rather than changed here: the
+  derived `specs/`, `codebase/`, `memory-bank/chunks/` and the governed brain
+  runtime under `project-brain/control/` and `project-brain/dynamic/` match no
+  exclusion pattern, so they are recorded as installed — 35 files of one
+  project's own output that an installation would copy into a consumer's tree.
+  Extending `EXCLUDED_PATH_PATTERNS` would fix it in one line, but that is
+  shared-core policy belonging to whoever reworked this module, not to a pull
+  request about the Symfony application.
 
 ## 2.0.0 - 2026-08-07
 

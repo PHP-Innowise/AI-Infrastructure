@@ -20,7 +20,20 @@
 > со своим venv (MCP-shape: опционально, редакции от него не зависят);
 > см. раздел в TOOL-INTEGRATIONS.md.
 
-# Agent orchestration & communication layer — design proposal
+# Agent orchestration & communication layer — historical proposal and status
+
+## Current implementation status
+
+Stages A-D are implemented. Stages A-C are part of the maintained accelerator:
+flow commands, the governed message channel and capsule validation, phase/actor
+guards, the SubagentStop observer, and write-agent serialization. Stage D is
+the optional repo-root `harness/` companion and is not shipped in editions or
+installer inventories. The remainder of this document preserves the design
+reasoning recorded before and during implementation; statements labeled as
+gaps or proposed work describe that historical point, not missing current
+functionality.
+
+## Historical proposal
 
 **Question.** Can the accelerator gain an orchestration/communication layer so
 that multi-step work (feature flow, review flow, research fan-out) runs as a
@@ -28,14 +41,12 @@ coordinated set of roster agents instead of the user typing every next
 command — without breaking the isolation policy, the subagent gate, or the
 three-tool parity model?
 
-**Verdict.** Yes, and most of the foundation already exists. The repo already
-ships four proto-orchestration layers (a declarative flow graph in command
-frontmatter, SKILL FLOW's phase map, the Task Capsule handoff discipline, and
-the governed project-brain state store). What is missing is (1) an executor
-for the flow graph, (2) a message/mailbox primitive with per-agent identity,
-and (3) completion signaling. All three can be added incrementally on the
-existing substrate — markdown + hooks + the stdlib CLI — without a daemon,
-a broker, or a graph engine.
+**Verdict at proposal time.** Yes. The repository already had four
+proto-orchestration layers (a declarative flow graph in command frontmatter,
+SKILL FLOW's phase map, the Task Capsule handoff discipline, and the governed
+project-brain state store). The proposed executor, message channel with
+per-agent identity, and completion signaling were subsequently implemented in
+Stages A-C on the existing markdown, hook, and stdlib CLI substrate.
 
 Everything below rests on facts verified this session (2026-08-08) against
 official docs of the three hosts and the repo itself; the research transcripts
@@ -43,14 +54,14 @@ carry the citations.
 
 ---
 
-## 1. What already exists (and its gaps)
+## 1. Baseline before implementation
 
-| Layer | What it is | Gap |
+| Layer | What it was | Gap at proposal time |
 |---|---|---|
-| Flow graph | Every spawning Claude command carries `spawns` / `phase` / `flow-next` / `flow-alternatives` frontmatter — a machine-readable suggested-next-command graph | No executor: all 31 spawning commands are single-agent wrappers; the user is the scheduler. No vocabulary for fan-out, join, or conditions |
-| Phase map | `SKILL FLOW.md` Main Flow / Phase Map | Presentation-only; transitions typed by the user. Phase names inconsistent with PROTOCOL.md's five-value enum (alias table exists in `brain_runtime.normalize_phase`) |
-| Handoff discipline | Task Capsule (8,000 chars, 2 procedural / 3 semantic / 1 episodic) + one schema-validated, CAS-guarded handoff file per task | Exactly one rewritten handoff per task; no mailbox, no per-agent identity (`owner` is per-installation), no completion signal (poll-only), no parallel-writer awareness (concurrent writers get stale-revision errors) |
-| State store | project-brain: locked, revisioned records; retrieval manifests already give who-read-what-when auditing | State-based, not message-based — two agents in one task can communicate only by rewriting/reading the same handoff |
+| Flow graph | Every spawning Claude command carried `spawns` / `phase` / `flow-next` / `flow-alternatives` frontmatter — a machine-readable suggested-next-command graph | There was no executor: all 31 spawning commands were single-agent wrappers and the user was the scheduler. Fan-out, join, and condition vocabulary had not been added. |
+| Phase map | `SKILL FLOW.md` Main Flow / Phase Map | It was presentation-only and transitions were user-driven. Phase names differed from PROTOCOL.md's five-value enum (an alias table existed in `brain_runtime.normalize_phase`). |
+| Handoff discipline | Task Capsule (8,000 chars, 2 procedural / 3 semantic / 1 episodic) + one schema-validated, CAS-guarded handoff file per task | The baseline had one rewritten handoff per task, no mailbox or per-agent identity, poll-only completion, and no parallel-writer awareness beyond stale-revision errors. |
+| State store | project-brain: locked, revisioned records; retrieval manifests already gave who-read-what-when auditing | It was state-based rather than message-based; two agents in one task communicated by rewriting and reading the same handoff. |
 
 Precedent inside the repo: Infrastructure-Creator's **Orchestration
 Exception** already lets five named skills fan out (infra-scan runs seven
@@ -139,8 +150,8 @@ the spawn prompt; results return as each agent's final message plus its
 
 ### Stage B — communication substrate (context.py extensions)
 
-Adds the missing primitives on the existing machinery (schema validation,
-CAS, lock, atomic writes, retrieval budgets — all already built):
+This stage added the then-missing primitives on the existing machinery (schema
+validation, CAS, lock, atomic writes, and retrieval budgets were already built):
 
 1. **`context.py msg`** — append-only, task-scoped mailbox
    (`send --task-id ID --from coder --to code-reviewer --type
@@ -152,7 +163,8 @@ CAS, lock, atomic writes, retrieval budgets — all already built):
    name), distinct from the installation-level `owner`.
 3. **Dispatch log** — reuse the retrieval-manifest pattern: one record per
    spawn (who, whom, capsule digest, task revision) and per completion. This
-   is the observability layer and the completion signal that is missing today.
+   supplied the observability layer and completion signal absent in the
+   proposal baseline.
 4. **Delegation-capsule schema** — the four mandatory fields + assumptions
    section, validated by the CLI (`context.py capsule --validate`), so a flow
    cannot dispatch an under-specified task.
@@ -227,21 +239,20 @@ Stage C-Codex replaces deny-all with roster-allowlist (config switches
 the write-serialization guardrail extends the same gate script rather than
 adding a new hook.
 
-## 8. Implementation checklist (repo conventions)
+## 8. Implemented checklist (repo conventions)
 
-1. AGENTS.md: Orchestration Exception section (4 editions).
-2. `.claude/commands/flow-feature.md`, `flow-review.md` (+ Cursor mirrors via
-   `cursor-command` transform — automatic; Codex: none).
-3. Stage B: `context.py msg` / capsule validation / dispatch log —
-   byte-identical across PHP editions, parity-checked; schemas under
-   `project-brain/schemas/`; tests.
-4. `subagent-dispatch.sh` (Claude/Codex SubagentStop) + gate extension —
-   hooks class in MIRROR_RULES (dispatch script mirrors with event-name
-   substitutions; gate stays tool-owned/skip).
-5. settings.json env knobs; `.gitattributes`/inventories regeneration;
-   root + IC CHANGELOG entries; SKILL FLOW.md new "Flows" section.
-6. Later: Infrastructure-Creator forges (`command-forge`, `hook-forge`)
-   learn to generate flows for target projects.
+1. AGENTS.md carries the Orchestration Exception.
+2. `/flow-feature` and `/flow-review` exist for Claude and Cursor; Codex keeps
+   sequential skills.
+3. Stage B ships `msg-send`, `msg-read`, `msg-dispatch`, capsule validation,
+   actor-aware updates, phase guards, schema, parity checks, and tests.
+4. Stage C ships the SubagentStop observer and write-capable-agent
+   serialization; Codex multi-agent remains disabled by decision.
+5. Settings, generated mirrors/inventories, flow catalogs, and release records
+   were updated with the implementation.
+6. Infrastructure-Creator propagation of the full hand-built flow/channel
+   surface remains separate follow-up work; the base subagent gate is already
+   generated.
 
 ## 9. LangChain / LangGraph evaluation (2026-08-08)
 
@@ -284,15 +295,15 @@ flaky (staff-confirmed hangs). LangChain proper adds nothing on top — its
    visible in the ignored `.venv/`) was already built beside this repo and
    never admitted into the tree.
 
-**Where it has real prospects: an external, opt-in batch harness (the "MCP
+**Where it had real prospects: an external, opt-in batch harness (the "MCP
 shape": optional, separate, never required).** For unattended flows —
 nightly fleet review, mass migrations, scheduled research — where durable
 resume, retries and `interrupt()` gates genuinely pay and no interactive
 session exists:
 
-- Lives in its own repository/venv (as the deleted prototype did); never
-  enters inventories, mirrors, or the installer, so the README statement
-  stays true — the accelerator does not *provide* it.
+- Lives outside editions in its own venv and never enters inventories, mirrors,
+  or the installer. The implemented companion is the repo-root `harness/`
+  project; editions do not provide or depend on it.
 - Nodes drive hosts headlessly: Claude Agent SDK (preferred for Python — by
   default it loads the project's `.claude/` world, so settings.json deny
   rules and `subagent-gate.sh` still apply *inside* every worker) or
@@ -308,11 +319,10 @@ session exists:
   alone (fewer moving parts); long resumable multi-stage or multi-host
   flows with human gates → LangGraph earns its 39 packages.
 
-**Verdict.** Stages A/B stand as designed (in-session, stdlib). LangGraph is
-rejected as the core layer but named the default candidate for a future
-**Stage D — external batch harness**, to be built only when an unattended
-pipeline need actually materializes, as a separate companion project.
-LangChain as such: not applicable.
+**Implemented verdict.** Stages A-C remain in-session and stdlib-based.
+LangGraph was rejected as the core layer and used only for the optional
+**Stage D external batch harness** now present under repo-root `harness/`.
+LangChain as such remains not applicable.
 
 ## 10. Open decisions
 
@@ -321,10 +331,8 @@ LangChain as such: not applicable.
    guardrail, not a boundary", and the roster surface a selective allowlist
    would require does not exist. Revisit only if a real Codex multi-agent
    need appears; the selective-gate recipe stays documented in §4 Stage C.
-2. **Mailbox storage**: governed records (full CAS/audit, heavier) vs local
-   JSONL under ignored state (cheap, no history)? Recommendation: governed,
-   reusing existing machinery — audit is the point.
-3. **Flow definition location**: frontmatter `stages:` inside the flow
-   command (self-contained, mirrors cleanly) vs a separate
-   `.claude/flows/*.md` manifest (reusable across tools)? Recommendation:
-   frontmatter first; extract a manifest only if Codex ever consumes flows.
+2. **Mailbox storage** — *resolved with Stage B*: the message channel is
+   Git-tracked under Project Brain control state and validated as an
+   append-only sequence; it is not ignored local JSONL.
+3. **Flow definition location** — *resolved with Stage A*: flow commands carry
+   their orchestration contract directly; no separate flow manifest was added.

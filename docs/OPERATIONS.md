@@ -26,14 +26,20 @@ python3 scripts/install_accelerator.py \
   --edition Laravel \
   --target "/path/with spaces/project" \
   --tool claude \
+  --merge-existing \
   --dry-run
 ```
 
 The verifier fails for an unlisted or stale distribution path. The installer
-preflights every destination and refuses the entire operation on any collision,
-unless an operator explicitly requests overwrite; normal adoption does not use
-that option. Its tab-separated `WOULD_COPY`, `COPY`, `COLLISION`, and `COMPLETE`
-lines are deterministic for a given inventory and tool selection. Retain the
+preflights every destination. Standard adoption keeps `--merge-existing`: it
+leaves byte-identical files unchanged, conservatively merges marked accelerator
+blocks into `.gitignore`, `.gitattributes`, and `AGENTS.md`, and preserves an
+existing root `README.md` while installing accelerator documentation as
+`ACCELERATOR.md`. Every unsupported collision still aborts the whole operation
+without writes. `--overwrite` is an explicit exceptional mode, not the normal
+recovery for a collision. The tab-separated `WOULD_COPY`, `WOULD_MERGE`,
+`WOULD_COPY_AS`, `COPY`, `MERGE`, `COPY_AS`, `COLLISION`, and `COMPLETE` lines
+are deterministic for a given inventory and tool selection. Retain the
 successful copy transcript outside the target as the rollback manifest.
 
 Inventories identify files shipped by Laravel, Symfony, and PHP Core, grouped
@@ -80,8 +86,7 @@ read: the whole context is re-read on every turn, so anything placed in context
 early is paid again on each subsequent turn of the session. Two operating
 consequences follow. Both thresholds were derived from local transcripts with
 `scripts/cost_attribution.py`; re-derive them on your own corpus before
-treating them as settled, and see
-[docs/TOKEN-ECONOMY-RESEARCH.md](TOKEN-ECONOMY-RESEARCH.md) for the method.
+treating them as settled.
 
 - **Delegate to a subagent only when it displaces roughly seven or more turns
   of the main session.** A subagent run is cheaper per turn than a main-session

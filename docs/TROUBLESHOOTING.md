@@ -393,8 +393,12 @@ Confirm:
 
 - the proposal exists under `project-brain/control/promotions/`;
 - source IDs, paths, types, and revisions still match;
-- an independent human reviewer is recorded;
-- the outcome is approved rather than merely proposed;
+- `review_mode` matches the configured path:
+  - `human` requires an independent recorded reviewer and an approved outcome;
+  - `automatic` requires `reviewer: null`, outcome
+    `approved-without-review`, and an eligible verified terminal source;
+- `promote-review` is not being used on an automatic proposal, because the
+  runtime deliberately refuses to attach a human signature after the fact;
 - destination memory does not duplicate or conflict with an active chunk;
 - privacy and sensitivity rules permit promotion.
 
@@ -411,8 +415,10 @@ Do not hand-edit promotion status, Memory Bank counters, or destination
 revision fields. Supported apply operations are transactional: on failure,
 partial Memory Bank and promotion writes should roll back. Preserve the error,
 verify both stores, correct the underlying source/revision/privacy/conflict
-problem through supported operations, and retry only after human approval
-still applies to the current content.
+problem through supported operations, and retry only when the recorded mode
+still applies to the current content. For reviewed mode, reconfirm the human
+approval; for automatic mode, reconfirm eligibility and do not invent a
+reviewer.
 
 If validation indicates partial state, stop promotion work, preserve the diff
 and local database, and escalate for manual review. Do not claim promotion

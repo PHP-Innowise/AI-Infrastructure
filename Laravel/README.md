@@ -4,7 +4,7 @@
 
 A Laravel-first accelerator framework for AI coding agents. It provides structured slash-command workflows, isolated agents, reusable skills, quality gates, and documentation conventions for PHP teams building Laravel applications — usable from **Claude Code**, **Cursor**, and **OpenAI Codex** out of the same repository.
 
-This is the `Laravel/` folder of the `accelerator-php` monorepo: it specializes the accelerator for Laravel. The framework-agnostic native-PHP base lives in the sibling `PHP Core/` folder; other frameworks (Symfony, etc.) get their own sibling folder — see the [repository root README](../README.md) for the full comparison and usage instructions.
+This is the `Laravel/` folder of the `accelerator-php` monorepo: it specializes the accelerator for Laravel. The framework-agnostic native-PHP base lives in the sibling `PHP Core/` folder; other frameworks (Symfony, etc.) get their own sibling folder — see the [repository root README](https://github.com/PHP-Innowise/AI-Infrastructure/blob/main/README.md) for the full comparison and usage instructions.
 
 ## What This Is
 
@@ -30,7 +30,7 @@ The same accelerator is mirrored for three agents. Each tool reads its own direc
 
 When you change a skill, mirror the edit across the editions you support (or regenerate).
 
-## Directory Structure
+## Source Edition Structure
 
 ```
 AGENTS.md                # Shared, enforceable policy (all tools)
@@ -49,13 +49,34 @@ AGENTS.md                # Shared, enforceable policy (all tools)
 .agents/skills/          # Codex skills (shared .agents convention)
 .codex/                  # Codex config.toml, hooks.json, hooks/, docs
 
-Task/                    # Product/domain planning material and design references (not a retrieval source)
-tasks/                   # Temporary task documentation
+Task/                    # Source-only sample/client material; not installed
+tasks/                   # Installed temporary-task scaffold
 specs/                   # Permanent living specifications
 memory-bank/             # Indexed durable cross-session project memory
 project-brain/           # Shared governed task and control records
-examples/                # Workflow output examples
+examples/                # Source-only worked examples
 ```
+
+## Installed Production Payload
+
+The source edition is intentionally broader than the ready-made installation.
+Production inventories keep the runtime needed by a consuming Laravel project:
+`AGENTS.md`, selected native tool integrations, policies, hooks, skills,
+workflow documentation, templates, `memory-bank/`, `project-brain/`, `specs/`,
+and the lowercase `tasks/` operational scaffold.
+
+Source-only research, tests, worked examples, and this repository's bundled
+uppercase `Task/` product/design material remain available to maintainers but
+are not copied into client projects. Uppercase `Task/` is optional client-input
+space: create and populate it only when the consuming project actually has
+requirements or design assets to place there. It is distinct from lowercase
+`tasks/`, which remains available for temporary, skill-prefixed `TASK-NNN/`
+artifacts.
+
+The versioned inventory resolves these exclusions and any production
+overrides. Use the inventory verifier and installer dry run to inspect the
+actual payload; do not derive or freeze an exact file count from this source
+tree.
 
 ## Architecture: Command -> Agent -> Skill
 
@@ -142,6 +163,10 @@ Use slash commands to move through the workflow:
 
 | Command | Purpose |
 | --- | --- |
+| `/flow-feature` | Orchestrate a complete feature with planning, approval, implementation, review, and verification |
+| `/flow-review` | Run parallel code, security, and performance review and synthesize one report |
+| `/sdd` | Run resumable spec-driven development with durable specs, tasks, and checkpoints |
+| `/codebase-mapper` | Map an unfamiliar Laravel codebase into source-cited, commit-stamped `codebase/` documents |
 | `/requirements-analyst` | Clarify and decompose requirements |
 | `/brainstorm` | Explore solution options |
 | `/researcher` | Evaluate packages and compare approaches |
@@ -175,6 +200,9 @@ Use slash commands to move through the workflow:
 | `/review-pr` | Review a GitHub pull request |
 | `/finishing-branch` | Prepare branch completion or PR |
 | `/release` | Prepare release notes and changelog |
+
+See [Orchestrator Commands](https://github.com/PHP-Innowise/AI-Infrastructure/blob/main/docs/ORCHESTRATOR-COMMANDS.md) for flow examples,
+approval points, parallel-review limits, and write serialization.
 
 Example:
 
@@ -232,7 +260,7 @@ Use the one public task-aware retrieval command:
 python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID
 ```
 
-Canonical policy, specs, current code, configuration, migrations, and tests always outrank Project Brain, memory, retrieval packets, and local indexes. Retrieval and indexing are explicit; the accelerator does not inject context into prompts automatically. Use `--mode lightweight` only explicitly for machine-local work that does not need shared continuity or governed records.
+Canonical policy, specs, current code, configuration, migrations, and tests always outrank Project Brain, memory, retrieval packets, and local indexes. Automatic delivery is bounded: Claude Code and Codex retrieve a fresh Task Capsule at prompt time, while Cursor uses an `alwaysApply` rule rendered at the previous turn boundary. Explicit `context.py retrieve` remains available for every tool. Use `--mode lightweight` only explicitly for machine-local work that does not need shared continuity or governed records.
 
 ### Task Capsule
 
@@ -249,7 +277,7 @@ research-to-planning, planning-to-implementation,
 implementation-to-independent-verification, and recovery after compaction.
 `memory`, `checkpoint`, and explicit `complete` keep their existing roles.
 
-Each committed chunk uses `memory-bank/chunks/MEM-NNNN-short-slug.md`, is cataloged in `INDEX.md`, and cites its authoritative sources. The session-start hooks report counts only; they never inject chunk contents into logs or context automatically.
+New chunks use conflict-free names such as `memory-bank/chunks/MEM-YYYYMMDD-xxxxxxxx-short-slug.md`; legacy `MEM-NNNN` chunks keep their IDs. Rebuild the derived `INDEX.md` with `python3 memory-bank/scripts/context.py reindex-bank` instead of editing a shared counter. Automatic promotions are tagged `auto-promoted` and are explicitly unreviewed; disable `automatic_promotion` for the independent-review workflow. Session-start banners remain metadata-only even though separate prompt/turn hooks deliver bounded working context.
 
 ## Optional MCP Integrations
 

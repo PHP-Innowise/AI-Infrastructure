@@ -158,16 +158,25 @@ documents and its skill trees to be byte-identical where specified.
 
 When changing hooks:
 
-1. update the script in every supported edition;
+1. edit the canonical hook/runtime source identified by
+   `scripts/build_mirrors.py` rather than a generated `.cursor/` or other
+   mirror; for shared runtime templates this may require the byte-identical
+   canonical file in each maintained edition;
 2. update native wiring (`settings.json`, `hooks.json`, or `config.toml`);
 3. preserve executable bits and run `bash -n` on shell scripts;
 4. test allowed, warned, blocked, missing-key, crash, and timeout paths;
 5. update the edition's hook README;
-6. verify that session hooks remain metadata-only.
+6. regenerate mirrors with `python3 scripts/build_mirrors.py --write`, review
+   the generated diff, and verify it with `--check`;
+7. verify that session banners remain metadata-only.
 
 Current session hooks may report mode, index health/staleness, active binding
 count, and validation status. They must not automatically index, retrieve,
-print, or inject Project Brain or Memory Bank record content.
+print, or inject Project Brain or Memory Bank record content into the session
+banner. Cursor's `sessionStart` hook may silently refresh the ignored
+`.cursor/rules/working-memory.mdc` file from the most recently available
+capsule; that file-only refresh is permitted, but its contents must not be
+printed as banner output.
 
 ## Protocols, Schemas, Runtime, and Context Parity
 

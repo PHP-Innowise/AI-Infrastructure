@@ -34,9 +34,9 @@ Execute only the selected mode, then stop. Do not turn every Context Summary int
 1. Confirm the candidate is durable, reusable, project-specific, and safe to commit. Reject transient status, speculative reasoning, generic framework advice, and duplicated spec content.
 2. Search the index and chunks by concept, scope, tags, sources, and synonyms. Update an existing chunk instead of creating a near duplicate.
 3. Verify the candidate from current authoritative sources. If it cannot be verified, use `needs-review` and clearly state that agents must not rely on it as fact.
-4. For a new chunk, read `.memory-counter`, select the next unused ID, and write `memory-bank/chunks/MEM-NNNN-short-slug.md` using `templates/chunk.md`.
+4. For a new chunk, mint a conflict-free ID `MEM-YYYYMMDD-xxxxxxxx` — today's UTC date plus eight lowercase hex characters (for example from `python3 -c 'import uuid; print(uuid.uuid4().hex[:8])'`) — and write `memory-bank/chunks/MEM-YYYYMMDD-xxxxxxxx-short-slug.md` using `templates/chunk.md`. Never read or increment the legacy `.memory-counter`; existing `MEM-NNNN` chunks keep their IDs and are never renamed.
 5. Keep one cohesive concept per chunk. Include consequences, source paths, verification date, review trigger/date, and replacement links where applicable.
-6. Update `INDEX.md` and increment `.memory-counter` in the same change. Never advance the counter for an update.
+6. Regenerate the index with `python3 memory-bank/scripts/context.py reindex-bank` after creating or updating a chunk. Do not hand-edit `INDEX.md` rows and do not touch `.memory-counter`.
 7. Validate the bank before reporting completion.
 
 ## Governed Promotion Application
@@ -90,7 +90,7 @@ Memory can point to a living spec but must not replace one when architecture, AP
 - Run `python3 memory-bank/scripts/validate.py`.
 - Parse chunk YAML frontmatter with an installed parser when available.
 - Confirm chunk ID, filename ID, and index ID match.
-- Confirm `.memory-counter` is greater than every allocated numeric ID.
+- Treat `.memory-counter` as retired: it is not an ID source, may be absent, and the validator deliberately ignores it. Do not create or restore it.
 - Verify indexed paths and cited local sources exist.
 - Check active chunks for duplicate concepts and contradictory statements.
 - Search the changed memory for secret-like material without printing suspected values.

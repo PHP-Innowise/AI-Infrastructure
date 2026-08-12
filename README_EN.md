@@ -66,6 +66,18 @@ Opening this monorepository's root does not activate a nested edition by
 itself. Claude Code, Cursor, and Codex do not automatically search
 `Laravel/`, `Symfony/`, or `PHP Core/` for configuration.
 
+## Main Folder Structure
+
+- `Laravel/` — ready-made Laravel edition.
+- `Symfony/` — ready-made Symfony edition.
+- `PHP Core/` — ready-made native PHP edition.
+- `Infrastructure-Creator/` — project-specific accelerator generator.
+- `install/` — installation documentation and inventories.
+- `scripts/` — installation and maintenance scripts.
+- `tests/` — repository-level tests.
+- `docs/` — shared documentation.
+- `harness/` — optional orchestration harness.
+
 ## Shared Architecture: Command → Agent → Skill
 
 All three editions use the same workflow model, adapted to their stack:
@@ -92,9 +104,26 @@ In every edition, `tasks/` contains temporary, skill-prefixed task documents,
 while `specs/` contains durable living specifications registered in
 `specs/MANIFEST.md`.
 
+For an unfamiliar or drifting brownfield project, run
+`/codebase-mapper [optional-scope]` in Claude Code/Cursor, or invoke the
+`codebase-mapper` skill in Codex. It creates source-cited, commit-stamped
+documents under `codebase/` for the stack, architecture, structure,
+integrations, conventions, testing, and concerns. The map is indexed for
+orientation but never replaces verification against current source code.
+
 Claude Code and Cursor normally route a command to an agent. Codex has no
 separate command layer: a skill is invoked by name or selected by Codex from
 `.agents/skills/`.
+
+### Orchestrated Workflows
+
+Claude Code and Cursor provide `/flow-feature` for full feature delivery,
+`/flow-review` for parallel code/security/performance review, and `/sdd` for
+resumable spec-driven development. The main conversation remains the
+orchestrator, approval checkpoints stop for the user, and write-capable agents
+run sequentially. See [Orchestrator Commands](docs/ORCHESTRATOR-COMMANDS.md).
+The optional [external harness](harness/README.md) is for long-running,
+headless batch workflows and is not installed with an edition.
 
 ## Supported AI Tools
 
@@ -104,7 +133,7 @@ conflict:
 | Tool | Reads | Practical meaning |
 | --- | --- | --- |
 | Claude Code | `.claude/` | The source edition with agents, commands, hooks, skills, and settings. |
-| Cursor | `.cursor/` | A self-contained mirror with skills, commands, agents, rules, and hooks. Disable optional Claude-file loading in Cursor to avoid loading policies twice. One capability differs: Cursor cannot add context to a prompt, so no Task Capsule is delivered automatically there and retrieval stays explicit. |
+| Cursor | `.cursor/` | A self-contained mirror with skills, commands, agents, rules, and hooks. Disable optional Claude-file loading in Cursor to avoid loading policies twice. Cursor receives the previous turn's Task Capsule through an auto-rendered `alwaysApply` rule; explicit retrieval remains available when fresher context is required. |
 | Codex | `.agents/skills/` and `.codex/` | Skills live in `.agents/skills/`; `.codex/` contains configuration, hooks, and references. There is no separate command layer. |
 
 The selected edition's `AGENTS.md` is executable policy for that stack. Its
@@ -145,8 +174,9 @@ Every edition combines three separate components:
   SQLite. Retrieval uses FTS5/BM25, privacy/authority/freshness filtering,
   bounded snippets, token budgets, and retrieval manifests.
 - **Memory Bank — what is remembered permanently.** It stores small,
-  Git-tracked, reviewed chunks of reusable constraints, decisions, domain
-  knowledge, integration contracts, and operational lessons.
+  Git-tracked chunks of reusable constraints, decisions, domain knowledge,
+  integration contracts, and operational lessons. Independently reviewed
+  chunks and automatic unreviewed promotions are labeled distinctly.
 
 Governed mode is the default. Project Brain owns shared active-work state;
 `memory-bank/local/context.db` is only a disposable index plus local
@@ -160,8 +190,9 @@ sources. Branch-derived local Working Memory exists only when
 Enforcement, policy, current specifications, code, configuration, migrations,
 and tests remain canonical and outrank all retrieved context. Project Brain
 coordinates current work but does not override those sources. Memory Bank is
-reviewed durable knowledge, not a competing source of truth. Retrieved snippets
-are discovery aids and must be verified against the cited current source.
+durable knowledge, not a competing source of truth; an `auto-promoted` chunk
+explicitly has no independent review. Retrieved snippets are discovery aids
+and must be verified against the cited current source.
 
 Raw conversations, prompts, responses, hidden reasoning, logs, credentials,
 secrets, customer or personal data, and unredacted incident payloads do not
@@ -292,8 +323,10 @@ approves it before atomic application. Lightweight mode retains the older local
 which are non-authoritative and lost when its SQLite database is deleted.
 
 The implementation is local, dependency-free Python with SQLite FTS5. It does
-not provide embeddings, vector search, MCP, LangGraph, a central memory
-service, or automatic per-request context injection.
+not provide embeddings, vector search, MCP, LangGraph, or a central memory
+service. Claude Code and Codex receive a fresh bounded Task Capsule through
+prompt hooks; Cursor receives the previous turn's capsule through an
+auto-rendered local rule.
 
 A three-scenario Task Capsule pressure test measured 96.4%, 97.2%, and 97.2%
 fewer transferred characters while retaining each exact Working file set and

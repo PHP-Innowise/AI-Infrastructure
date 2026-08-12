@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import shutil
@@ -17,6 +18,41 @@ TOOLS = ("claude", "cursor", "codex")
 COMPONENTS = ("shared", *TOOLS)
 INVENTORY_DIR = ROOT / "install" / "inventories"
 ADDITIVE_FILES = {".gitattributes", ".gitignore"}
+PRODUCTION_SOURCE_OVERRIDES = {
+    "memory-bank/INDEX.md": "memory-bank/.install/INDEX.md",
+}
+EXCLUDED_EXACT_PATHS = {
+    "CHANGELOG.md",
+    "examples/context-summary.md",
+    "examples/pr-description.md",
+    "memory-bank/.install/INDEX.md",
+    "memory-bank/.memory-counter",
+    "memory-bank/chunks/MEM-0001-cross-edition-sync.md",
+}
+EXCLUDED_PATH_PATTERNS = (
+    "Task/**",
+    "examples/completed-task/**",
+    "memory-bank/tests/**",
+    # Durable memory captured while building one project. The production
+    # index override (memory-bank/.install/INDEX.md) ships an empty table, so
+    # a clean install is meant to carry no chunks at all — MEM-0001 was listed
+    # exactly above because it was the only chunk that existed when this list
+    # was written. Installing a project's own chunks fails validation twice
+    # over: they are absent from the shipped INDEX.md, and their cited sources
+    # (Task/app/...) are not installed.
+    "memory-bank/chunks/**",
+    "project-brain/tests/**",
+    # Governed task runtime written while working on one project. The shipped
+    # project-brain/indexes/active.json is `[]`, so installing another
+    # project's tasks makes that index stale on arrival. Matched by file type
+    # rather than by directory so the .gitkeep placeholders that create the
+    # runtime's directory structure still ship.
+    "project-brain/control/handoffs/*.md",
+    "project-brain/control/messages/*.jsonl",
+    "project-brain/control/retrieval-manifests/*.json",
+    "project-brain/dynamic/*/*.md",
+    "*/skills/skill-creator/tests/**",
+)
 AGENTS_BEGIN = "<!-- BEGIN ACCELERATOR MANAGED POLICY -->"
 AGENTS_END = "<!-- END ACCELERATOR MANAGED POLICY -->"
 ENTRIES_BEGIN = "# BEGIN ACCELERATOR MANAGED ENTRIES"
@@ -49,27 +85,70 @@ def load_inventory(edition: str, root: Path = ROOT) -> dict:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
         raise InventoryError(f"cannot load {path}: {error}") from error
-    if data.get("schema_version") != 1 or data.get("edition") != edition:
+    if data.get("schema_version") != 2 or data.get("edition") != edition:
         raise InventoryError(f"{path}: unsupported schema or edition")
-    components = data.get("components")
+    if tuple(data) != (
+        "schema_version",
+        "inventory_version",
+        "edition",
+        "release",
+        "scope",
+        "installed",
+        "excluded_tracked_paths",
+        "source_overrides",
+    ):
+        raise InventoryError(f"{path}: unsupported or unordered inventory fields")
+    components = data.get("installed")
     if not isinstance(components, dict) or tuple(components) != COMPONENTS:
-        raise InventoryError(f"{path}: components must be ordered as {COMPONENTS}")
+        raise InventoryError(f"{path}: installed components must be ordered as {COMPONENTS}")
     seen: set[str] = set()
     for component, paths in components.items():
         if not isinstance(paths, list) or paths != sorted(paths) or len(paths) != len(set(paths)):
             raise InventoryError(f"{path}: {component} paths must be sorted and unique")
         for value in paths:
-            pure = PurePosixPath(value)
-            if (
-                not isinstance(value, str)
-                or not value
-                or pure.is_absolute()
-                or ".." in pure.parts
-                or value in seen
-            ):
+            if not is_safe_relative_path(value) or value in seen:
                 raise InventoryError(f"{path}: invalid or duplicate path: {value!r}")
             seen.add(value)
+
+    excluded = data.get("excluded_tracked_paths")
+    if (
+        not isinstance(excluded, list)
+        or excluded != sorted(excluded)
+        or len(excluded) != len(set(excluded))
+    ):
+        raise InventoryError(f"{path}: excluded paths must be sorted and unique")
+    for value in excluded:
+        if not is_safe_relative_path(value) or value in seen:
+            raise InventoryError(f"{path}: invalid or overlapping exclusion: {value!r}")
+
+    overrides = data.get("source_overrides")
+    if not isinstance(overrides, dict) or list(overrides) != sorted(overrides):
+        raise InventoryError(f"{path}: source overrides must be an ordered object")
+    excluded_set = set(excluded)
+    for destination, source in overrides.items():
+        if (
+            not is_safe_relative_path(destination)
+            or not is_safe_relative_path(source)
+            or destination not in seen
+            or source not in excluded_set
+            or destination == source
+        ):
+            raise InventoryError(
+                f"{path}: invalid source override: {destination!r} -> {source!r}"
+            )
     return data
+
+
+def is_safe_relative_path(value: object) -> bool:
+    if not isinstance(value, str) or not value or "\\" in value:
+        return False
+    pure = PurePosixPath(value)
+    return (
+        not pure.is_absolute()
+        and ".." not in pure.parts
+        and value == pure.as_posix()
+        and value not in {".", ""}
+    )
 
 
 def selected_files(data: dict, tools: list[str]) -> list[tuple[str, str]]:
@@ -78,7 +157,7 @@ def selected_files(data: dict, tools: list[str]) -> list[tuple[str, str]]:
         (component, path)
         for component in COMPONENTS
         if component in selected
-        for path in data["components"][component]
+        for path in data["installed"][component]
     ]
 
 
@@ -160,47 +239,6 @@ def discover_distribution_files(root: Path, edition: str) -> list[str]:
     )
 
 
-# Areas inside an edition that hold work produced *by* the accelerator for one
-# specific project, rather than files the installer distributes. The inventory's
-# own scope already reads "excludes runtime, local, and user state"; these rules
-# are what make that true for the areas the tooling actually writes into.
-#
-# A path in one of these areas is skipped only when the inventory does not list
-# it, so the seeds that genuinely ship — specs/MANIFEST.md, the .gitkeep
-# placeholders, the starter memory chunk, the empty brain indexes — stay
-# verified exactly as before, and deleting one still fails the check.
-#
-# The trade-off is deliberate and worth stating: a real distribution file
-# mistakenly placed under one of these prefixes would no longer be caught here.
-# Everything outside them is still accounted for file by file.
-PROJECT_WORK_AREAS = (
-    "Task/app/",  # an application built with the accelerator
-    "codebase/",  # a codebase map produced by codebase-mapper
-    "specs/",  # specifications derived for one project
-    "memory-bank/chunks/",  # durable memory captured for one project
-    "project-brain/control/",  # governed task runtime: handoffs, messages
-    "project-brain/dynamic/",  # governed task runtime: tasks, findings, bugs
-)
-
-
-def is_project_work(path: str, distributed: frozenset[str]) -> bool:
-    """Return True when `path` is per-project output, not a distribution file."""
-    if path in distributed:
-        return False
-    return any(path.startswith(area) for area in PROJECT_WORK_AREAS)
-
-
-def distributed_paths(edition: str, root: Path) -> frozenset[str]:
-    """Paths the current inventory claims to distribute, or empty when absent."""
-    try:
-        data = load_inventory(edition, root)
-    except (InventoryError, FileNotFoundError, json.JSONDecodeError):
-        return frozenset()
-    return frozenset(
-        path for paths in data["components"].values() for path in paths
-    )
-
-
 def component_for(path: str) -> str:
     # Cross-tool layout documentation is cited by shared durable memory and is
     # therefore installed with every tool selection. It describes distribution
@@ -221,22 +259,31 @@ def component_for(path: str) -> str:
     return "shared"
 
 
+def is_source_only(path: str) -> bool:
+    return path in EXCLUDED_EXACT_PATHS or any(
+        fnmatch.fnmatchcase(path, pattern) for pattern in EXCLUDED_PATH_PATTERNS
+    )
+
+
 def build_inventory(root: Path, edition: str) -> dict:
     components = {component: [] for component in COMPONENTS}
-    distributed = distributed_paths(edition, root)
+    excluded: list[str] = []
     for path in discover_distribution_files(root, edition):
-        if is_project_work(path, distributed):
-            continue
-        components[component_for(path)].append(path)
+        if is_source_only(path):
+            excluded.append(path)
+        else:
+            components[component_for(path)].append(path)
     version_file = root / edition / "VERSION"
     release = version_file.read_text(encoding="utf-8").strip()
     return {
-        "schema_version": 1,
-        "inventory_version": 1,
+        "schema_version": 2,
+        "inventory_version": 2,
         "edition": edition,
         "release": release,
-        "scope": "repository distribution files; excludes runtime, local, and user state",
-        "components": components,
+        "scope": "closed tracked-file contract for production installation",
+        "installed": components,
+        "excluded_tracked_paths": excluded,
+        "source_overrides": dict(sorted(PRODUCTION_SOURCE_OVERRIDES.items())),
     }
 
 
@@ -254,28 +301,38 @@ def write_inventories(root: Path) -> None:
 
 def verify_inventory(root: Path, edition: str) -> None:
     data = load_inventory(edition, root)
+    actual = discover_distribution_files(root, edition)
     expected = sorted(
-        path for paths in data["components"].values() for path in paths
+        path for paths in data["installed"].values() for path in paths
     )
-    distributed = frozenset(expected)
-    actual = [
-        path
-        for path in discover_distribution_files(root, edition)
-        if not is_project_work(path, distributed)
-    ]
+    excluded = data["excluded_tracked_paths"]
+    classified = sorted((*expected, *excluded))
     missing_sources = [
         path for path in expected if not (root / edition / path).is_file()
     ]
-    if actual != expected or missing_sources:
-        missing = sorted(set(actual) - set(expected))
-        stale = sorted(set(expected) - set(actual))
+    override_sources = sorted(set(data["source_overrides"].values()))
+    missing_override_sources = [
+        path for path in override_sources if not (root / edition / path).is_file()
+    ]
+    if actual != classified or missing_sources or missing_override_sources:
+        unclassified = sorted(set(actual) - set(classified))
+        stale_installed = sorted(set(expected) - set(actual))
+        stale_excluded = sorted(set(excluded) - set(actual))
         details = [
-            *(f"UNLISTED\t{edition}/{path}" for path in missing),
-            *(f"STALE\t{edition}/{path}" for path in stale),
+            *(f"UNCLASSIFIED\t{edition}/{path}" for path in unclassified),
+            *(f"STALE_INSTALLED\t{edition}/{path}" for path in stale_installed),
+            *(f"STALE_EXCLUSION\t{edition}/{path}" for path in stale_excluded),
             *(f"MISSING_SOURCE\t{edition}/{path}" for path in missing_sources),
+            *(
+                f"MISSING_OVERRIDE_SOURCE\t{edition}/{path}"
+                for path in missing_override_sources
+            ),
         ]
         raise InventoryError("\n".join(details) or f"{edition}: inventory mismatch")
-    print(f"VERIFIED\t{edition}\t{len(expected)} files")
+    print(
+        f"VERIFIED\t{edition}\tinstalled={len(expected)}"
+        f"\texcluded={len(excluded)}"
+    )
 
 
 def install(
@@ -292,7 +349,8 @@ def install(
     collisions: list[tuple[str, str, str]] = []
     resolutions: dict[str, tuple[str, Path, bytes | None]] = {}
     for component, path in files:
-        source = root / edition / PurePosixPath(path)
+        source_path = data["source_overrides"].get(path, path)
+        source = root / edition / PurePosixPath(source_path)
         destination = target / PurePosixPath(path)
         if destination.is_symlink():
             collisions.append((component, path, "symlink"))
@@ -364,7 +422,8 @@ def install(
     overwrite_paths = {path for _, path, _ in collisions}
     action = "WOULD_COPY" if dry_run else "COPY"
     for component, path in files:
-        source = root / edition / PurePosixPath(path)
+        source_path = data["source_overrides"].get(path, path)
+        source = root / edition / PurePosixPath(source_path)
         destination = target / PurePosixPath(path)
         if not source.is_file():
             raise InventoryError(f"source file missing: {source}")

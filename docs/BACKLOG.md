@@ -17,6 +17,9 @@ economy-правки, harness). Не «всё подряд», а то, что е
 - Context economy: `.gitattributes` на зеркала, Cursor capsule без per-turn
   invalidators, MCP-секция в edition README, `cost_attribution.py`, пороги в
   [OPERATIONS.md](OPERATIONS.md)
+- Лимиты payload для browser verification; калиброванные категории
+  context-budget; lint-регрессия против Cursor invalidators; атомарный захват
+  write-lock; разбор только первого блока frontmatter в subagent gate
 - Subagent gate в форджах Infrastructure-Creator (hook-forge генерирует семь
   хуков с полным вайрингом; см. §2 — что ещё НЕ прокинуто)
 
@@ -24,20 +27,14 @@ economy-правки, harness). Не «всё подряд», а то, что е
 
 | Что | Зачем |
 |---|---|
-| browser-verify + bounding | Playwright/browser MCP — тяжёлый tail payload; skill до сих пор tool-agnostic, без лимитов snapshot/screenshot. Ограничения в skill (и, при желании, в README) — дешёвый способ резать carry-cost. |
-| `context_budget.py`: реализм вместо bytes/4 | Ошибка +11…28 %; CI гейтит frontmatter (~4k t), а тела skill'ов — десятки k. Цель: gate name+description, skill-body budget, убрать фиктивный monorepo total. **Ограничение: cl100k = tiktoken = зависимость, а CI контрактно stdlib-only.** Варианты, не ломающие контракт: калиброванная эвристика (пер-классовые коэффициенты уже измерены в [TOKEN-ECONOMY-RESEARCH.md](TOKEN-ECONOMY-RESEARCH.md)), вендоринг компактного BPE, либо статус dev-local-метра по прецеденту `cost_attribution.py`. |
-| Регрессия lint: `date -u` в Cursor hooks | Зафиксировать, что invalidators не вернутся (из SEQUENCE research). |
 | Документировать OTel env vars в OPERATIONS.md | Опциональный measurement layer; primary attribution уже в transcript'ах. |
 | Интерактивная калибровка /context + /doctor | Уточнить unit skill-listing budget (chars vs tokens) и фактический MCP-prefix — влияет на все бюджеты. |
 
-## 1b. Находки боевого ревью (harness run, $1.68 — единственный список замечаний, полученный измерением на собственном коде)
+## 1b. Находки боевого ревью
 
-Дешёвые stdlib-правки, кандидаты в тот же PR, что и §1:
-
-| Что | Где / зачем |
-|---|---|
-| Атомарный захват write-замка | `subagent-gate.sh` (Claude/Cursor): test-then-write без атомарности; параллельные PreToolUse двух пишущих агентов могут оба пройти. Лечится `flock`-обёрткой вокруг проверки+записи. |
-| Sed-диапазон фронтматтера ростера | `subagent-gate.sh`: `/^---$/,/^---$/` перезапускается на каждой паре `---` в теле агент-файла — секция в теле может пометить read-only агента как `writes: true`; тестовый парсер строже, расхождение не ловится. Заякорить на первый блок (как в тестах). |
+Две подтверждённые находки — атомарный захват write-замка и разбор только
+первого блока фронтматтера — уже исправлены и перенесены в список закрытого
+выше. Открыты только принятые условные риски:
 
 Условные (по требованию, TTL страхует; не чинить без нужды):
 
@@ -86,7 +83,7 @@ Codex multi-agent — только если появится реальная н
 | Local embeddings / hybrid search | Только если golden-query покажет, что FTS5 recall недостаточен. Сейчас snippet 32 FTS-токена, summary 8× vs content — «богатая карта» почти не доезжает. |
 | MCP-адаптер к context.py | Только если клиентам нужен protocol discovery, а не CLI через skill. |
 | context.py memory native | Отложено: либо дубль orchestration, либо model integration. |
-| Automatic semantic/procedural authoring | Вне scope: durable knowledge остаётся review-gated. |
+| Automatic semantic/procedural authoring | Вне scope: runtime умеет узкую, явно настроенную auto-promotion терминальных verified records, но не свободное автоматическое авторство semantic/procedural knowledge. |
 | Hooks/background sync unattended | Когда реально понадобится capture без сессии. |
 
 Mailbox: **аудит уже есть** — журнал в `control/` (git-tracked), пишется под
@@ -102,9 +99,6 @@ append-only файла и есть аудит-трейл. Governed CAS на со
   не «потому что модно».
 - Council / multi-perspective review как flow (уже есть council agent —
   связать в `/flow-*`).
-- Task capsule delivery для Cursor — в docs отмечено как единственный
-  tool-gap; если sessionStart injection подтвердится, capsule туда лучше,
-  чем alwaysApply rule.
 - Economy 2 measurement: cost_attribution на потребляющем PHP-проекте с
   установленной edition — сейчас вся экономика измерена на monorepo.
 - Per-skill cost → prune/merge skills: research: 7 % skill-attributed,
@@ -142,10 +136,8 @@ append-only файла и есть аудит-трейл. Governed CAS на со
 
 ## Рекомендуемый порядок (если выбирать 1–2 спринта)
 
-1. **Measurement PR**: browser-verify bounds + budget realism (§1) + две
-   дешёвые правки из §1b (flock, sed-диапазон) + lint против
-   re-invalidation — один PR, эффект меряется одним прогоном
-   `cost_attribution.py` до/после.
+1. Документировать optional OTel env vars и выполнить интерактивную
+   калибровку `/context` + `/doctor`.
 2. 1–2 новых flow + IC forges под Stage A–C — product parity generated vs
    hand-built.
 3. Economy-2 attribution на реальном PHP-проекте → prune skills.

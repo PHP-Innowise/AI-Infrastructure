@@ -14,6 +14,7 @@ your situation.
 - **Understand security boundaries:** [Security and Trust Boundaries](SECURITY.md)
 - **Diagnose installation or runtime problems:** [Troubleshooting](TROUBLESHOOTING.md)
 - **Add or change accelerator behavior:** [Extending the Accelerator](EXTENDING.md)
+- **Run orchestrated workflows:** [Orchestrator Commands](ORCHESTRATOR-COMMANDS.md)
 - **See a complete task lifecycle:** [User Task Workflow Example](examples/USER-TASK-WORKFLOW-EXAMPLE.md)
 - **Compare the repository in English or Russian:** [English overview](../README_EN.md) · [Russian overview](../README_RU.md)
 
@@ -37,10 +38,11 @@ project root; tools do not discover an edition nested elsewhere.
 
 - **Claude Code:** `.claude/` provides commands, agent wrappers, skills,
   settings, and hooks.
-- **Cursor:** `.cursor/` is a self-contained native edition, except that it
-  cannot receive a Task Capsule automatically - see the
-  [tool capability matrix](TOOL-INTEGRATIONS.md). It provides commands,
-  agents, skills, rules, and hooks.
+- **Cursor:** `.cursor/` is a self-contained native edition. It receives the
+  most recently rendered, one-turn-stale Task Capsule through an `alwaysApply`
+  rule rather than receiving a fresh capsule at prompt submission; see the
+  [tool capability matrix](TOOL-INTEGRATIONS.md). It provides commands, agents,
+  skills, rules, and hooks.
 - **Codex:** `.agents/skills/` provides discovered skills; `.codex/` provides
   trusted project configuration, hooks, and reference documents.
 

@@ -67,14 +67,30 @@ or in an approved VCS commit. At minimum inspect:
 - `AGENTS.md` and `CLAUDE.md`;
 - `.claude/`, `.cursor/`, `.agents/`, and `.codex/`;
 - `memory-bank/` and `project-brain/`;
-- `tasks/`, `specs/`, `examples/`, `.gitignore`, and root documentation.
+- `tasks/`, `specs/`, optional client-owned `Task/`, `.gitignore`, and root
+  documentation.
 
-The supported installer uses the versioned inventory under
-`install/inventories/` and emits one transcript line for every file. Save that
-exact transcript as the install manifest. It is required for safe rollback
-because a merged directory may contain pre-existing project files that must
-never be removed. The inventory describes repository distribution files only;
-it does not claim machine-local, runtime, or user state.
+The supported installer uses the versioned inventories under
+`install/inventories/`. Those inventories define the resolved production
+payload, including conceptual source exclusions and any production-specific
+selection needed by the current inventory schema. Do not assume every tracked
+edition file is installed, and do not couple adoption automation to an
+undocumented inventory field name.
+
+The production payload retains runtime scripts, policies, workflow
+documentation, templates, Memory Bank, Project Brain, living-spec scaffolding,
+and lowercase `tasks/`. Repository research, test suites, worked examples, and
+bundled uppercase `Task/` material are source-only and are not installed.
+Uppercase `Task/` may be created and populated later when real client
+requirements or design assets exist; lowercase `tasks/` remains the operational
+temporary-work scaffold.
+
+The installer emits one transcript line for every selected inventory entry.
+Save that exact transcript as an action log and pair it with a pre-install
+backup or VCS recovery point. It is not a content backup: it records actions
+but not previous bytes, and its final selected-entry count includes
+`UNCHANGED` files. The inventory likewise does not claim machine-local runtime
+or user state.
 
 ## 4. Dry-Run Before Copying
 
@@ -108,6 +124,7 @@ Once the dry run has no unsupported collisions, run the same command without
 `--dry-run` and retain its exact transcript:
 
 ```bash
+set -o pipefail
 python3 scripts/install_accelerator.py \
   --edition "PHP Core" \
   --target "$TARGET" \
@@ -115,6 +132,10 @@ python3 scripts/install_accelerator.py \
   --merge-existing |
   tee "/safe/backup/path/accelerator-install-transcript.txt"
 ```
+
+`pipefail` is important when using Bash: without pipeline failure propagation,
+`tee` can return success even when the installer failed. In another shell,
+use its equivalent or inspect the installer's status separately.
 
 The installer refuses overwrite by default and performs a complete collision
 preflight, so a late collision cannot leave a partially copied installation.
@@ -157,10 +178,11 @@ requires an explicit merge/add-only or abort decision before writing.
 ## 6. Choose Tool Scope
 
 All installations need the shared root policy and context/workflow support
-used by the chosen edition. Preserve the selected edition's non-tool
-directories and files, including `AGENTS.md`, `memory-bank/`,
-`project-brain/`, `tasks/`, `specs/`, and the relevant documentation and
-examples.
+used by the chosen edition. Preserve the selected production payload's
+non-tool directories and files, including `AGENTS.md`, `memory-bank/`,
+`project-brain/`, lowercase `tasks/`, `specs/`, and installed runtime
+documentation and templates. Do not manually copy source-only tests, research,
+worked examples, or bundled uppercase `Task/` material around the inventory.
 
 Then install only the native integration trees the team uses:
 
@@ -214,7 +236,7 @@ Then:
    [Tool Integrations](TOOL-INTEGRATIONS.md).
 4. Run the consuming project's normal Composer validation, tests, formatter,
    static analysis, and framework checks. Use project scripts first.
-5. Review `git diff` and the install manifest. Only intended accelerator
+5. Review `git diff` and the saved install transcript. Only intended accelerator
    additions and reviewed merges should remain.
 
 Missing optional project tooling is reported as unavailable; adoption must
@@ -224,14 +246,22 @@ not install it silently or claim that it passed.
 
 Close active AI-tool sessions before changing integration files.
 
-1. Use the install manifest to remove only paths created by this adoption.
-2. Restore only files that this adoption changed from the verified backup or
-   VCS state.
+1. Use the transcript to identify `COPY` and `COPY_AS` candidates, and remove
+   only paths created by this adoption that have not since become
+   project-owned.
+2. Restore `MERGE` or `OVERWRITE` files from the verified backup or VCS state
+   when exact rollback is required. The transcript does not contain their old
+   contents.
 3. Never delete an entire merged directory such as `.cursor/`, `.claude/`,
    `.agents/`, `.codex/`, `memory-bank/`, or `project-brain/`.
 4. The ignored `memory-bank/local/context.db` is disposable and may be removed
    after confirming no needed lightweight-only local state remains.
 5. Re-run project checks and `git status --short`.
+
+There is no automatic installer rollback command. For a `MERGE`, do not blindly
+delete every line that resembles accelerator content: `.gitignore` or
+`.gitattributes` directives already present before adoption remain
+project-owned, while installer-added directives are kept in a marked block.
 
 Deleting the SQLite database does not remove governed Project Brain records or
 reviewed Memory Bank chunks. In lightweight mode, however, local working tasks

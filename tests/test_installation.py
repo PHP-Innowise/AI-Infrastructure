@@ -32,6 +32,16 @@ REQUIRED_TOOLS = {
     "cursor": (".cursor/hooks/bash-validator.sh", ".cursor/skills/memory-bank/SKILL.md"),
     "codex": (".codex/hooks/bash-validator.sh", ".agents/skills/memory-bank/SKILL.md"),
 }
+REQUIRED_SOURCE_EXCLUSIONS = (
+    "CHANGELOG.md",
+    "examples/completed-task/writing-plans-plan.md",
+    "examples/context-summary.md",
+    "examples/pr-description.md",
+    "memory-bank/.memory-counter",
+    "memory-bank/chunks/MEM-0001-cross-edition-sync.md",
+    "memory-bank/tests/test_validate.py",
+    "project-brain/tests/test_runtime.py",
+)
 
 
 def run(*args: str, cwd: Path = ROOT, env: dict[str, str] | None = None):
@@ -52,10 +62,11 @@ def inventory(edition: str) -> dict:
 
 def source_digest(edition: str, data: dict) -> str:
     digest = hashlib.sha256()
-    for path in sorted(path for values in data["components"].values() for path in values):
+    for path in sorted(path for values in data["installed"].values() for path in values):
+        source = data["source_overrides"].get(path, path)
         digest.update(path.encode())
         digest.update(b"\0")
-        digest.update((ROOT / edition / path).read_bytes())
+        digest.update((ROOT / edition / source).read_bytes())
         digest.update(b"\0")
     return digest.hexdigest()
 
@@ -73,6 +84,122 @@ class InventoryTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         for edition in EDITIONS:
             self.assertIn("VERIFIED\t{}".format(edition), result.stdout)
+
+    def test_source_only_files_remain_in_repository_contract(self) -> None:
+        for edition in EDITIONS:
+            data = inventory(edition)
+            excluded = set(data["excluded_tracked_paths"])
+            tracked_result = run("git", "ls-files", "-z", "--", edition)
+            self.assertEqual(0, tracked_result.returncode, tracked_result.stderr)
+            prefix = edition + "/"
+            tracked = {
+                path[len(prefix) :]
+                for path in tracked_result.stdout.split("\0")
+                if path.startswith(prefix)
+            }
+            for path in REQUIRED_SOURCE_EXCLUSIONS:
+                with self.subTest(edition=edition, path=path):
+                    self.assertIn(path, excluded)
+                    self.assertTrue((ROOT / edition / path).is_file())
+                    self.assertIn(path, tracked)
+            self.assertTrue(any(path.startswith("Task/") for path in excluded))
+
+    def test_inventory_metadata_is_deterministic(self) -> None:
+        inventory_paths = tuple(
+            ROOT
+            / "install"
+            / "inventories"
+            / (edition.lower().replace(" ", "-") + ".json")
+            for edition in EDITIONS
+        )
+        before = {path: path.read_bytes() for path in inventory_paths}
+        generated = run(sys.executable, str(INSTALLER), "--write-inventories")
+        self.assertEqual(0, generated.returncode, generated.stderr)
+        self.assertEqual(before, {path: path.read_bytes() for path in inventory_paths})
+
+        for edition in EDITIONS:
+            data = inventory(edition)
+            installed = [
+                path for component in data["installed"].values() for path in component
+            ]
+            excluded = data["excluded_tracked_paths"]
+            self.assertEqual(len(installed), len(set(installed)))
+            self.assertEqual(excluded, sorted(set(excluded)))
+            self.assertTrue(set(installed).isdisjoint(excluded))
+            self.assertEqual(
+                {"memory-bank/INDEX.md": "memory-bank/.install/INDEX.md"},
+                data["source_overrides"],
+            )
+
+    def test_malformed_exclusion_and_override_metadata_is_rejected(self) -> None:
+        mutations = {
+            "unsafe exclusion": lambda data: data["excluded_tracked_paths"].append(
+                "../outside"
+            ),
+            "overlapping exclusion": lambda data: data[
+                "excluded_tracked_paths"
+            ].append("AGENTS.md"),
+            "unknown override destination": lambda data: data[
+                "source_overrides"
+            ].update({"not-installed.md": "CHANGELOG.md"}),
+            "installed override source": lambda data: data[
+                "source_overrides"
+            ].update({"memory-bank/INDEX.md": "README.md"}),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory(
+                prefix="malformed inventory "
+            ) as raw:
+                source_root = Path(raw)
+                inventory_dir = source_root / "install" / "inventories"
+                inventory_dir.mkdir(parents=True)
+                data = inventory("PHP Core")
+                mutate(data)
+                if label in {"unsafe exclusion", "overlapping exclusion"}:
+                    data["excluded_tracked_paths"].sort()
+                (inventory_dir / "php-core.json").write_text(
+                    json.dumps(data), encoding="utf-8"
+                )
+                result = run(
+                    sys.executable,
+                    str(INSTALLER),
+                    "--source-root",
+                    str(source_root),
+                    "--edition",
+                    "PHP Core",
+                    "--target",
+                    str(source_root / "target"),
+                )
+                self.assertEqual(1, result.returncode)
+                self.assertIn("install-accelerator:", result.stderr)
+
+    def test_excluded_paths_are_absent_after_clean_install(self) -> None:
+        for edition in EDITIONS:
+            with self.subTest(edition=edition), tempfile.TemporaryDirectory(
+                prefix="production boundary "
+            ) as raw:
+                target = Path(raw).resolve()
+                data = inventory(edition)
+                result = run(
+                    sys.executable,
+                    str(INSTALLER),
+                    "--edition",
+                    edition,
+                    "--target",
+                    str(target),
+                    "--tool",
+                    "cursor",
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                for path in data["excluded_tracked_paths"]:
+                    self.assertFalse((target / path).exists(), path)
+                links = run(
+                    sys.executable,
+                    str(ROOT / "scripts" / "check_links.py"),
+                    "--root",
+                    str(target),
+                )
+                self.assertEqual(0, links.returncode, links.stdout + links.stderr)
 
     def test_dry_run_reports_collision_and_refuses_all_writes(self) -> None:
         with tempfile.TemporaryDirectory(prefix="install collision ") as raw:
@@ -298,8 +425,8 @@ class InventoryTest(unittest.TestCase):
 
     def test_paths_with_spaces_and_exact_dry_run_transcript(self) -> None:
         data = inventory("PHP Core")
-        expected = len(data["components"]["shared"]) + len(
-            data["components"]["cursor"]
+        expected = len(data["installed"]["shared"]) + len(
+            data["installed"]["cursor"]
         )
         with tempfile.TemporaryDirectory(prefix="target with spaces ") as raw:
             target = Path(raw).resolve()
@@ -357,6 +484,8 @@ class CleanInstallTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            changelog = target / "CHANGELOG.md"
+            changelog.write_text("# Existing project history\n", encoding="utf-8")
             initialized = run(
                 "git",
                 "-c",
@@ -381,8 +510,8 @@ class CleanInstallTest(unittest.TestCase):
                     tool,
                 )
                 self.assertEqual(0, result.returncode, result.stderr)
-                expected = len(data["components"]["shared"]) + len(
-                    data["components"][tool]
+                expected = len(data["installed"]["shared"]) + len(
+                    data["installed"][tool]
                 )
                 copies = [
                     line for line in result.stdout.splitlines() if line.startswith("COPY\t")
@@ -397,10 +526,19 @@ class CleanInstallTest(unittest.TestCase):
                 for path in (*REQUIRED_SHARED, *REQUIRED_TOOLS[tool]):
                     self.assertTrue((target / path).is_file(), path)
 
-                counter_source = ROOT / edition / "memory-bank" / ".memory-counter"
+                for path in data["excluded_tracked_paths"]:
+                    if path == "CHANGELOG.md":
+                        continue
+                    self.assertFalse((target / path).exists(), path)
+                self.assertFalse((target / "memory-bank" / ".memory-counter").exists())
+                installed_index = (target / "memory-bank" / "INDEX.md").read_text(
+                    encoding="utf-8"
+                )
+                self.assertNotIn("MEM-0001", installed_index)
+                self.assertNotIn("chunks/", installed_index)
                 self.assertEqual(
-                    counter_source.is_file(),
-                    (target / "memory-bank" / ".memory-counter").is_file(),
+                    "# Existing project history\n",
+                    changelog.read_text(encoding="utf-8"),
                 )
 
                 command_env = dict(os.environ)
