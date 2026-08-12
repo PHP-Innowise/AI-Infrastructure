@@ -141,9 +141,36 @@ class PlayerProfile
         return $this->dateOfBirth;
     }
 
+    /**
+     * Signed, because `DateInterval::$y` is not.
+     *
+     * `diff()` reports the magnitude of the gap and puts its direction in
+     * `$invert`, so reading `->y` alone made a date of birth in the future
+     * come back as a positive age: a child entered as born in 2030 displayed
+     * as "Age 3" and would have passed a minimum-age restriction on an event.
+     * Manual testing found exactly that. A negative age is the honest answer
+     * — visibly wrong on screen, and failing every `>= minAge` check rather
+     * than sneaking past one.
+     *
+     * The forms reject a future date of birth outright (ChildProfileType,
+     * PlayerRegistrationType), so this is the second line, not the first.
+     */
     public function ageOn(\DateTimeImmutable $on): int
     {
-        return $this->dateOfBirth->diff($on)->y;
+        return self::ageInYears($this->dateOfBirth, $on);
+    }
+
+    /**
+     * The same calculation before a profile exists — `ChildProfileService`
+     * checks AC-01-21's 1-18 range against a submitted date, and had its own
+     * copy of the `->y` reading, which is why a child "born" in 2030 passed a
+     * range check that was working as written.
+     */
+    public static function ageInYears(\DateTimeImmutable $dateOfBirth, \DateTimeImmutable $on): int
+    {
+        $difference = $dateOfBirth->diff($on);
+
+        return 1 === $difference->invert ? -$difference->y : $difference->y;
     }
 
     public function getGender(): ?string

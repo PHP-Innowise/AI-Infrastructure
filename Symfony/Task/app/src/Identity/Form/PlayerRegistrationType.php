@@ -16,6 +16,7 @@ use Symfony\Component\Form\FormBuilderInterface;
 use Symfony\Component\OptionsResolver\OptionsResolver;
 use Symfony\Component\Validator\Constraints\Email;
 use Symfony\Component\Validator\Constraints\Length;
+use Symfony\Component\Validator\Constraints\LessThanOrEqual;
 use Symfony\Component\Validator\Constraints\NotBlank;
 use Symfony\Component\Validator\Constraints\Regex;
 
@@ -49,10 +50,19 @@ final class PlayerRegistrationType extends AbstractType
                 'constraints' => [new Regex(pattern: '/^[0-9()+\-.\s]{7,32}$/', message: 'Enter a valid phone number.')],
             ])
             ->add('playerFirstName', TextType::class, ['label' => 'Player first name', 'constraints' => [new NotBlank()]])
+            // No 1-18 range here, deliberately: US-01.03 scopes that to child
+            // profiles ("adults use own accounts") and the same section notes
+            // that "the parent account is treated as a player account (parent
+            // can train themselves)" — so the player being registered may be
+            // any age. A date of birth in the future is a different matter and
+            // is nobody's age.
             ->add('playerDateOfBirth', DateType::class, [
                 'label' => 'Player date of birth',
                 'widget' => 'single_text',
-                'constraints' => [new NotBlank()],
+                'constraints' => [
+                    new NotBlank(),
+                    new LessThanOrEqual(value: 'today', message: 'A date of birth cannot be in the future.'),
+                ],
             ])
             ->add('playerGender', ChoiceType::class, [
                 'required' => false,

@@ -48,6 +48,12 @@ final readonly class ChildProfileService
      * join immediately (possibly none), matching the "otherwise the child
      * profile is created without a trainer association" branch.
      *
+     * US-01.03 § Validation, "Age: 1-18 years (children only, adults use
+     * their own accounts)". The range check below is the invariant — a
+     * service cannot assume a form ran in front of it — while
+     * `ChildProfileType` carries the same rule as field constraints so the
+     * message lands on the date field rather than at the top of the page.
+     *
      * @param list<Trainer> $trainersToJoin
      */
     public function createChild(
@@ -58,7 +64,11 @@ final readonly class ChildProfileService
         ?string $schoolOrTeam,
         array $trainersToJoin = [],
     ): PlayerProfile {
-        $age = $dateOfBirth->diff(new \DateTimeImmutable())->y;
+        // Through PlayerProfile's own calculation, which is signed. Reading
+        // DateInterval::$y directly — as this did — made a date of birth in
+        // the future arrive as a small positive number, so "born 2030" passed
+        // a 1-18 check that was otherwise working exactly as written.
+        $age = PlayerProfile::ageInYears($dateOfBirth, new \DateTimeImmutable());
 
         if ($age < 1 || $age > 18) {
             throw new \InvalidArgumentException('A child profile requires an age between 1 and 18.');
