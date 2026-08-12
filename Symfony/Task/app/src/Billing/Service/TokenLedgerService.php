@@ -202,11 +202,16 @@ final readonly class TokenLedgerService
      * every concurrent refund attempt against it, so the sum read
      * immediately afterward is safe even though unlocked.
      *
+     * Returned-then-thrown like `spend()` above: nothing in this codebase
+     * catches an over-refund yet, and the point of doing it here anyway is
+     * that the first caller to try must not inherit a closed EntityManager
+     * for handling a rejection the ledger raised deliberately.
+     *
      * @throws RefundExceedsSpendException
      */
     public function refund(Trainer $trainer, TokenEntry $spend, int $tokenCount, string $description): TokenEntry
     {
-        return $this->entityManager->wrapInTransaction(function () use ($trainer, $spend, $tokenCount, $description): TokenEntry {
+        $outcome = $this->entityManager->wrapInTransaction(function () use ($trainer, $spend, $tokenCount, $description): TokenEntry|RefundExceedsSpendException {
             $lockedSpend = $this->entries->lockSpendEntryForUpdate((int) $spend->getId())
                 ?? throw new \LogicException('The spend entry being refunded no longer exists.');
 
@@ -214,7 +219,7 @@ final readonly class TokenLedgerService
             $originalAmount = abs($lockedSpend->getAmount());
 
             if ($alreadyRefunded + $tokenCount > $originalAmount) {
-                throw RefundExceedsSpendException::forAttempt($originalAmount, $alreadyRefunded, $tokenCount);
+                return RefundExceedsSpendException::forAttempt($originalAmount, $alreadyRefunded, $tokenCount);
             }
 
             $balance = $this->balances->lockForUpdate($trainer, $lockedSpend->getParentAccount());
@@ -225,6 +230,12 @@ final readonly class TokenLedgerService
 
             return $entry;
         });
+
+        if ($outcome instanceof RefundExceedsSpendException) {
+            throw $outcome;
+        }
+
+        return $outcome;
     }
 
     /**

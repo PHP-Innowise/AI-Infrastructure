@@ -90,7 +90,7 @@ final readonly class EventService
      */
     public function duplicate(Event $original, Account $actor, EventInput $input): Event
     {
-        return $this->entityManager->wrapInTransaction(function () use ($original, $actor, $input): Event {
+        $outcome = $this->entityManager->wrapInTransaction(function () use ($original, $actor, $input): Event|\InvalidArgumentException {
             // AC-02-15: compared to minute precision in a single common
             // timezone, matching what the datetime-local widget can
             // actually express — $input carries the trainer's own
@@ -105,7 +105,7 @@ final readonly class EventService
                 && $input->endsAt->setTimezone($tz)->format('Y-m-d H:i') === $original->getEndsAt()->setTimezone($tz)->format('Y-m-d H:i');
 
             if ($unchanged) {
-                throw new \InvalidArgumentException('The date/time must be changed when duplicating an event.');
+                return new \InvalidArgumentException('The date/time must be changed when duplicating an event.');
             }
 
             $new = $this->buildEvent($original->getTrainer(), $input);
@@ -120,6 +120,12 @@ final readonly class EventService
 
             return $new;
         });
+
+        if ($outcome instanceof \InvalidArgumentException) {
+            throw $outcome;
+        }
+
+        return $outcome;
     }
 
     /**
@@ -146,7 +152,7 @@ final readonly class EventService
         // the pre-edit values to diff against, not the post-edit ones.
         $before = EventSnapshot::from($event);
 
-        $this->entityManager->wrapInTransaction(function () use ($event, $input): void {
+        $outcome = $this->entityManager->wrapInTransaction(function () use ($event, $input): ?CapacityBelowRsvpCountException {
             $now = new \DateTimeImmutable();
 
             if (!$event->isEditable($now)) {
@@ -159,7 +165,7 @@ final readonly class EventService
             $confirmedCount = $this->rsvps->countHeld($lockedEvent);
 
             if (!$lockedEvent->canReduceCapacityTo($input->capacity, $confirmedCount)) {
-                throw CapacityBelowRsvpCountException::forEventId((int) $lockedEvent->getId(), $input->capacity, $confirmedCount);
+                return CapacityBelowRsvpCountException::forEventId((int) $lockedEvent->getId(), $input->capacity, $confirmedCount);
             }
 
             $lockedEvent->update(
@@ -178,7 +184,13 @@ final readonly class EventService
             );
 
             $this->entityManager->flush();
+
+            return null;
         });
+
+        if ($outcome instanceof CapacityBelowRsvpCountException) {
+            throw $outcome;
+        }
 
         $this->notifyOfChanges($event, $before, $input);
         $this->syncInvitationsIfPrivate($event, $input, $actor);
@@ -218,7 +230,7 @@ final readonly class EventService
             throw new \InvalidArgumentException('The "repeat until" date must be on or after the first occurrence.');
         }
 
-        return $this->entityManager->wrapInTransaction(function () use ($trainer, $actor, $input, $repeatUntil): array {
+        $outcome = $this->entityManager->wrapInTransaction(function () use ($trainer, $actor, $input, $repeatUntil): array|\InvalidArgumentException {
             $created = [];
             $occurrence = $input;
             $count = 0;
@@ -226,7 +238,7 @@ final readonly class EventService
 
             do {
                 if (++$count > self::MAX_RECURRING_OCCURRENCES) {
-                    throw new \InvalidArgumentException(sprintf('A recurring pattern cannot generate more than %d occurrences.', self::MAX_RECURRING_OCCURRENCES));
+                    return new \InvalidArgumentException(sprintf('A recurring pattern cannot generate more than %d occurrences.', self::MAX_RECURRING_OCCURRENCES));
                 }
 
                 $event = $this->buildEvent($trainer, $occurrence);
@@ -246,6 +258,12 @@ final readonly class EventService
 
             return $created;
         });
+
+        if ($outcome instanceof \InvalidArgumentException) {
+            throw $outcome;
+        }
+
+        return $outcome;
     }
 
     /**

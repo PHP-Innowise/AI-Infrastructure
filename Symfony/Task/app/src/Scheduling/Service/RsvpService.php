@@ -115,61 +115,81 @@ final readonly class RsvpService
             }
         }
 
-        $rsvp = $this->entityManager->wrapInTransaction(function () use ($event, $player, $actor, $paymentMethod, $bypassGranted): Rsvp {
-            // Architecture "Lock ordering": the token balance row, always
-            // first — see the class docblock.
-            $this->paymentGateway->lockFundingForUpdate($event->getTrainer(), $actor, $paymentMethod);
+        // The full-event rejection is returned rather than thrown: an
+        // exception crossing wrapInTransaction() closes the EntityManager,
+        // and PortalEventController catches this one to re-render the event
+        // page — see TokenLedgerService::spend() for what that cost when the
+        // page after the catch did read the database. The
+        // AlreadyRegisteredException below stays a throw on purpose: it is
+        // raised from a unique-constraint violation, which has already
+        // aborted the transaction at the database, so there is nothing left
+        // to commit either way.
+        try {
+            $outcome = $this->entityManager->wrapInTransaction(function () use ($event, $player, $actor, $paymentMethod, $bypassGranted): Rsvp|EventFullException {
+                // Architecture "Lock ordering": the token balance row, always
+                // first — see the class docblock.
+                $this->paymentGateway->lockFundingForUpdate($event->getTrainer(), $actor, $paymentMethod);
 
-            $now = new \DateTimeImmutable();
-            $lockedEvent = $this->events->lockForUpdate((int) $event->getId())
-                ?? throw new \LogicException('Event no longer exists.');
+                $now = new \DateTimeImmutable();
+                $lockedEvent = $this->events->lockForUpdate((int) $event->getId())
+                    ?? throw new \LogicException('Event no longer exists.');
 
-            if (Event::STATUS_ACTIVE !== $lockedEvent->getStatus() || $lockedEvent->hasStarted($now)) {
-                throw new \LogicException('Cannot RSVP to a past or canceled event.');
-            }
+                if (Event::STATUS_ACTIVE !== $lockedEvent->getStatus() || $lockedEvent->hasStarted($now)) {
+                    throw new \LogicException('Cannot RSVP to a past or canceled event.');
+                }
 
-            // AC-02-67: authoritative, locked capacity check.
-            if ($this->rsvps->countHeld($lockedEvent) >= $lockedEvent->getCapacity()) {
-                throw EventFullException::forEventId((int) $lockedEvent->getId());
-            }
+                // AC-02-67: authoritative, locked capacity check.
+                if ($this->rsvps->countHeld($lockedEvent) >= $lockedEvent->getCapacity()) {
+                    return EventFullException::forEventId((int) $lockedEvent->getId());
+                }
 
-            // BR-02-7's unique constraint has no status qualifier (see
-            // Rsvp::reactivate()'s own docblock): a previously-canceled row
-            // for this exact (event, player) pair is reused, never
-            // re-inserted — the DB would reject a second row outright.
-            $rsvp = $this->rsvps->findOneByEventAndPlayer($lockedEvent, $player);
+                // BR-02-7's unique constraint has no status qualifier (see
+                // Rsvp::reactivate()'s own docblock): a previously-canceled row
+                // for this exact (event, player) pair is reused, never
+                // re-inserted — the DB would reject a second row outright.
+                $rsvp = $this->rsvps->findOneByEventAndPlayer($lockedEvent, $player);
 
-            if (null !== $rsvp) {
-                $rsvp->reactivate($paymentMethod, $now);
-            } else {
-                $rsvp = new Rsvp($lockedEvent->getTrainer(), $lockedEvent, $player, $paymentMethod, $now);
-                $this->rsvps->add($rsvp);
-            }
+                if (null !== $rsvp) {
+                    $rsvp->reactivate($paymentMethod, $now);
+                } else {
+                    $rsvp = new Rsvp($lockedEvent->getTrainer(), $lockedEvent, $player, $paymentMethod, $now);
+                    $this->rsvps->add($rsvp);
+                }
 
-            if (!$bypassGranted) {
-                // BR-02-10: pending parent approval regardless of price.
-                $rsvp->markPendingParentApproval();
-            }
+                if (!$bypassGranted) {
+                    // BR-02-10: pending parent approval regardless of price.
+                    $rsvp->markPendingParentApproval();
+                }
 
-            try {
                 $this->entityManager->flush();
-            } catch (UniqueConstraintViolationException) {
-                throw AlreadyRegisteredException::forEventId((int) $lockedEvent->getId());
-            }
 
-            // AC-05-7/9: a bypass-granted token spend completes HERE —
-            // inside the same transaction and lock scope as the RSVP row
-            // and the event capacity check, "no payment-processing delay,"
-            // and atomic with the RSVP's own confirmation. usd/free are
-            // untouched by this branch (free auto-confirmed at
-            // construction already; usd is handled after this transaction
-            // commits, in completeConfirmationOrPayment()).
-            if ($bypassGranted && Event::PAYMENT_TOKEN === $paymentMethod && Rsvp::STATUS_CONFIRMED !== $rsvp->getStatus()) {
-                $this->completeTokenPaymentWithinTransaction($rsvp, $actor);
-            }
+                // AC-05-7/9: a bypass-granted token spend completes HERE —
+                // inside the same transaction and lock scope as the RSVP row
+                // and the event capacity check, "no payment-processing delay,"
+                // and atomic with the RSVP's own confirmation. usd/free are
+                // untouched by this branch (free auto-confirmed at
+                // construction already; usd is handled after this transaction
+                // commits, in completeConfirmationOrPayment()).
+                if ($bypassGranted && Event::PAYMENT_TOKEN === $paymentMethod && Rsvp::STATUS_CONFIRMED !== $rsvp->getStatus()) {
+                    $this->completeTokenPaymentWithinTransaction($rsvp, $actor);
+                }
 
-            return $rsvp;
-        });
+                return $rsvp;
+            });
+        } catch (UniqueConstraintViolationException) {
+            // A second row for this (event, player) pair: the database has
+            // already aborted the transaction, so unlike the capacity
+            // rejection above this one cannot be a clean return — translated
+            // out here rather than inside the closure to keep the two cases
+            // visibly different.
+            throw AlreadyRegisteredException::forEventId((int) $event->getId());
+        }
+
+        if ($outcome instanceof EventFullException) {
+            throw $outcome;
+        }
+
+        $rsvp = $outcome;
 
         if (!$bypassGranted) {
             $this->childApprovalService->requestApproval(
@@ -384,42 +404,45 @@ final readonly class RsvpService
             throw AlreadyRegisteredException::forEventId((int) $event->getId());
         }
 
-        $rsvp = $this->entityManager->wrapInTransaction(function () use ($event, $player, $trainerActor): Rsvp {
-            $now = new \DateTimeImmutable();
-            $lockedEvent = $this->events->lockForUpdate((int) $event->getId())
-                ?? throw new \LogicException('Event no longer exists.');
+        // The constraint translation sits outside the transaction for the
+        // same reason it does in rsvp(): by the time PostgreSQL rejects the
+        // row the transaction is aborted, and pretending otherwise inside
+        // the closure hides which rejections are clean and which are not.
+        try {
+            $rsvp = $this->entityManager->wrapInTransaction(function () use ($event, $player, $trainerActor): Rsvp {
+                $now = new \DateTimeImmutable();
+                $lockedEvent = $this->events->lockForUpdate((int) $event->getId())
+                    ?? throw new \LogicException('Event no longer exists.');
 
-            $wasFull = $this->rsvps->countHeld($lockedEvent) >= $lockedEvent->getCapacity();
+                $wasFull = $this->rsvps->countHeld($lockedEvent) >= $lockedEvent->getCapacity();
 
-            // See rsvp()'s own comment: reuse a previously-canceled row for
-            // this (event, player) pair rather than re-inserting.
-            $rsvp = $this->rsvps->findOneByEventAndPlayer($lockedEvent, $player);
+                // See rsvp()'s own comment: reuse a previously-canceled row for
+                // this (event, player) pair rather than re-inserting.
+                $rsvp = $this->rsvps->findOneByEventAndPlayer($lockedEvent, $player);
 
-            if (null !== $rsvp) {
-                $rsvp->reactivate(Rsvp::METHOD_FREE, $now);
-            } else {
-                $rsvp = new Rsvp($lockedEvent->getTrainer(), $lockedEvent, $player, Rsvp::METHOD_FREE, $now);
-                $this->rsvps->add($rsvp);
-            }
+                if (null !== $rsvp) {
+                    $rsvp->reactivate(Rsvp::METHOD_FREE, $now);
+                } else {
+                    $rsvp = new Rsvp($lockedEvent->getTrainer(), $lockedEvent, $player, Rsvp::METHOD_FREE, $now);
+                    $this->rsvps->add($rsvp);
+                }
 
-            $rsvp->confirm($now);
-
-            try {
+                $rsvp->confirm($now);
                 $this->entityManager->flush();
-            } catch (UniqueConstraintViolationException) {
-                throw AlreadyRegisteredException::forEventId((int) $lockedEvent->getId());
-            }
 
-            if ($wasFull) {
-                $this->auditLogger->record($trainerActor, 'event.manual_add_over_capacity', 'Event', $lockedEvent->getId(), $lockedEvent->getTrainer(), [
-                    'playerId' => $player->getId(),
-                    'capacity' => $lockedEvent->getCapacity(),
-                ]);
-                $this->entityManager->flush();
-            }
+                if ($wasFull) {
+                    $this->auditLogger->record($trainerActor, 'event.manual_add_over_capacity', 'Event', $lockedEvent->getId(), $lockedEvent->getTrainer(), [
+                        'playerId' => $player->getId(),
+                        'capacity' => $lockedEvent->getCapacity(),
+                    ]);
+                    $this->entityManager->flush();
+                }
 
-            return $rsvp;
-        });
+                return $rsvp;
+            });
+        } catch (UniqueConstraintViolationException) {
+            throw AlreadyRegisteredException::forEventId((int) $event->getId());
+        }
 
         $this->mailer->sendRsvpConfirmed($rsvp);
 

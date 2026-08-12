@@ -132,6 +132,16 @@ final readonly class MembershipService
      * RLS-hidden tenants by construction — into
      * `CoachAlreadyActiveElsewhereException`.
      *
+     * Unlike every other rejection in this codebase, this one cannot be a
+     * clean in-transaction return: the conflicting membership may live in a
+     * tenant RLS hides from this session, so there is no pre-check to run —
+     * the unique index, which is enforced below RLS, is the only thing that
+     * can see it. By the time PostgreSQL reports the violation the
+     * transaction is aborted, so `wrapInTransaction()` closing the
+     * EntityManager is correct rather than accidental. Translated out here
+     * rather than inside the closure to keep that distinction visible; see
+     * `LabelService::create()`, which has both branches side by side.
+     *
      * @throws CoachAlreadyActiveElsewhereException
      */
     public function acceptCoachInvite(
@@ -140,27 +150,26 @@ final readonly class MembershipService
         ShareLink $invite,
         string $status = CoachMembership::STATUS_ACTIVE,
     ): CoachMembership {
-        return $this->entityManager->wrapInTransaction(function () use ($trainer, $coachAccount, $invite, $status): CoachMembership {
-            $this->tenantContext->activateFor($trainer);
+        try {
+            return $this->entityManager->wrapInTransaction(function () use ($trainer, $coachAccount, $invite, $status): CoachMembership {
+                $this->tenantContext->activateFor($trainer);
 
-            $membership = new CoachMembership($trainer, $coachAccount, $status, $invite);
-            $this->coachMemberships->add($membership);
-
-            try {
+                $membership = new CoachMembership($trainer, $coachAccount, $status, $invite);
+                $this->coachMemberships->add($membership);
                 $this->entityManager->flush();
-            } catch (UniqueConstraintViolationException) {
-                throw CoachAlreadyActiveElsewhereException::forAccountId((int) $coachAccount->getId());
-            }
 
-            if (CoachMembership::STATUS_ACTIVE === $status) {
-                // wrapInTransaction() flushes again once this closure
-                // returns, which picks up this persist alongside the
-                // membership already flushed above — both commit together.
-                $this->syncAccountTrainerLink($coachAccount, $trainer, AccountRole::Coach->value);
-            }
+                if (CoachMembership::STATUS_ACTIVE === $status) {
+                    // wrapInTransaction() flushes again once this closure
+                    // returns, which picks up this persist alongside the
+                    // membership already flushed above — both commit together.
+                    $this->syncAccountTrainerLink($coachAccount, $trainer, AccountRole::Coach->value);
+                }
 
-            return $membership;
-        });
+                return $membership;
+            });
+        } catch (UniqueConstraintViolationException) {
+            throw CoachAlreadyActiveElsewhereException::forAccountId((int) $coachAccount->getId());
+        }
     }
 
     /**

@@ -28,29 +28,41 @@ final readonly class PlayerFlagService
     }
 
     /**
+     * The pre-check rejection leaves the closure as a return value and is
+     * thrown outside it, so a flag the trainer already has open stays an
+     * ordinary form error instead of closing the caller's EntityManager —
+     * `LabelService::create()` carries the full reasoning, including why the
+     * unique-index race below is the one branch that legitimately does not
+     * get the same treatment.
+     *
      * @throws DuplicateActiveFlagException
      */
     public function apply(PlayerTrainerMembership $membership, string $flagType, Account $actor, ?string $note): PlayerFlag
     {
-        return $this->entityManager->wrapInTransaction(function () use ($membership, $flagType, $actor, $note): PlayerFlag {
-            // BR-03-8 pre-check: reapplication is only legitimate once the
-            // earlier instance is resolved. uniq_player_flag_active_type is
-            // the authoritative backstop under concurrency, caught below.
-            if (null !== $this->flags->findOneActiveByPlayerAndType($membership->getPlayer(), $flagType)) {
-                throw DuplicateActiveFlagException::forType($flagType);
-            }
+        try {
+            $outcome = $this->entityManager->wrapInTransaction(function () use ($membership, $flagType, $actor, $note): PlayerFlag|DuplicateActiveFlagException {
+                // BR-03-8 pre-check: reapplication is only legitimate once the
+                // earlier instance is resolved. uniq_player_flag_active_type is
+                // the authoritative backstop under concurrency, caught below.
+                if (null !== $this->flags->findOneActiveByPlayerAndType($membership->getPlayer(), $flagType)) {
+                    return DuplicateActiveFlagException::forType($flagType);
+                }
 
-            $flag = new PlayerFlag($membership->getTrainer(), $membership->getPlayer(), $flagType, $actor, $note);
-            $this->flags->add($flag);
-
-            try {
+                $flag = new PlayerFlag($membership->getTrainer(), $membership->getPlayer(), $flagType, $actor, $note);
+                $this->flags->add($flag);
                 $this->entityManager->flush();
-            } catch (UniqueConstraintViolationException) {
-                throw DuplicateActiveFlagException::forType($flagType);
-            }
 
-            return $flag;
-        });
+                return $flag;
+            });
+        } catch (UniqueConstraintViolationException) {
+            throw DuplicateActiveFlagException::forType($flagType);
+        }
+
+        if ($outcome instanceof DuplicateActiveFlagException) {
+            throw $outcome;
+        }
+
+        return $outcome;
     }
 
     /**

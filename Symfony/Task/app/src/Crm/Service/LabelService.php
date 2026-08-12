@@ -32,29 +32,47 @@ final readonly class LabelService
     }
 
     /**
+     * The pre-check rejection is RETURNED out of the closure and thrown
+     * outside it: `wrapInTransaction()` closes the EntityManager on any
+     * exception, and a name a trainer has already used is an ordinary form
+     * error the controller re-renders a page after — see
+     * `TokenLedgerService::spend()` for the 500 this pattern cost when the
+     * page after the catch did touch the database.
+     *
+     * The unique-index race below is genuinely different and is left
+     * throwing: PostgreSQL has aborted the transaction by then, so there is
+     * nothing left to commit and closing the manager is the correct
+     * response, not an accident. Translating it outside `wrapInTransaction`
+     * rather than inside keeps that distinction visible.
+     *
      * @throws DuplicateLabelNameException
      */
     public function create(Trainer $trainer, string $name, string $colorHex): Label
     {
-        return $this->entityManager->wrapInTransaction(function () use ($trainer, $name, $colorHex): Label {
-            // BR-03-3: case-insensitive pre-check for a clean form error; the
-            // database's own unique index is the authoritative backstop under
-            // concurrency, caught below.
-            if (null !== $this->labels->findOneByTrainerAndNameCaseInsensitive($trainer, $name)) {
-                throw DuplicateLabelNameException::forName($name);
-            }
+        try {
+            $outcome = $this->entityManager->wrapInTransaction(function () use ($trainer, $name, $colorHex): Label|DuplicateLabelNameException {
+                // BR-03-3: case-insensitive pre-check for a clean form error;
+                // the database's own unique index is the authoritative
+                // backstop under concurrency, caught below.
+                if (null !== $this->labels->findOneByTrainerAndNameCaseInsensitive($trainer, $name)) {
+                    return DuplicateLabelNameException::forName($name);
+                }
 
-            $label = new Label($trainer, $name, $colorHex);
-            $this->labels->add($label);
-
-            try {
+                $label = new Label($trainer, $name, $colorHex);
+                $this->labels->add($label);
                 $this->entityManager->flush();
-            } catch (UniqueConstraintViolationException) {
-                throw DuplicateLabelNameException::forName($name);
-            }
 
-            return $label;
-        });
+                return $label;
+            });
+        } catch (UniqueConstraintViolationException) {
+            throw DuplicateLabelNameException::forName($name);
+        }
+
+        if ($outcome instanceof DuplicateLabelNameException) {
+            throw $outcome;
+        }
+
+        return $outcome;
     }
 
     /**
@@ -64,21 +82,26 @@ final readonly class LabelService
      */
     public function rename(Label $label, string $name, string $colorHex): void
     {
-        $this->entityManager->wrapInTransaction(function () use ($label, $name, $colorHex): void {
-            $existing = $this->labels->findOneByTrainerAndNameCaseInsensitive($label->getTrainer(), $name, excluding: $label);
+        try {
+            $outcome = $this->entityManager->wrapInTransaction(function () use ($label, $name, $colorHex): ?DuplicateLabelNameException {
+                $existing = $this->labels->findOneByTrainerAndNameCaseInsensitive($label->getTrainer(), $name, excluding: $label);
 
-            if (null !== $existing) {
-                throw DuplicateLabelNameException::forName($name);
-            }
+                if (null !== $existing) {
+                    return DuplicateLabelNameException::forName($name);
+                }
 
-            $label->rename($name, $colorHex);
-
-            try {
+                $label->rename($name, $colorHex);
                 $this->entityManager->flush();
-            } catch (UniqueConstraintViolationException) {
-                throw DuplicateLabelNameException::forName($name);
-            }
-        });
+
+                return null;
+            });
+        } catch (UniqueConstraintViolationException) {
+            throw DuplicateLabelNameException::forName($name);
+        }
+
+        if ($outcome instanceof DuplicateLabelNameException) {
+            throw $outcome;
+        }
     }
 
     /**
