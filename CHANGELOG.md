@@ -419,6 +419,18 @@ edition's own files remain in that edition's changelog.
   `test_a_second_instance_of_the_same_agent_is_blocked` in each edition's
   `memory-bank/tests/test_hooks.py` covers it.
 
+- **Inventory generation no longer reads the working tree.**
+  `--write-inventories` discovered tracked *and* non-ignored untracked files,
+  the same permissive walk `--verify-inventories` uses; one local run absorbed
+  8586 untracked `vendor/` paths from a built application into an edition's
+  distribution list, and the installer copies what the inventory names.
+  Generation is now tracked-only, verification stays permissive - warning
+  about a file not yet committed is the point there - and each written
+  inventory reports its path count with the added and removed paths, so a
+  wrong inventory is visible before it is committed rather than as an
+  unreadable diff. Regenerating produces byte-identical output.
+  `test_generation_ignores_untracked_working_tree_files` covers it.
+
 ## 2.0.0 - 2026-08-07
 
 ### 2026-08-06 hook and installation hardening

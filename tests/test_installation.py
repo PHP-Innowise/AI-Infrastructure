@@ -131,6 +131,41 @@ class InventoryTest(unittest.TestCase):
                 data["source_overrides"],
             )
 
+    def test_generation_ignores_untracked_working_tree_files(self) -> None:
+        # An inventory is a committed contract that the installer copies
+        # verbatim, so anything the generator picks up ships to consumers.
+        # Generating from the working tree once absorbed 8586 untracked
+        # `vendor/` paths from a locally built app into an edition's
+        # distribution list. Verification stays permissive on purpose - it is
+        # meant to warn about a file not committed yet - but generation reads
+        # tracked files only.
+        probe = ROOT / "Symfony" / ".claude" / "untracked-generation-probe.md"
+        self.assertFalse(probe.exists(), "probe path is already in use")
+        inventory_paths = tuple(
+            ROOT
+            / "install"
+            / "inventories"
+            / (edition.lower().replace(" ", "-") + ".json")
+            for edition in EDITIONS
+        )
+        before = {path: path.read_bytes() for path in inventory_paths}
+        probe.write_text("untracked\n", encoding="utf-8")
+        try:
+            generated = run(sys.executable, str(INSTALLER), "--write-inventories")
+            self.assertEqual(0, generated.returncode, generated.stderr)
+            self.assertEqual(
+                before, {path: path.read_bytes() for path in inventory_paths}
+            )
+            self.assertNotIn(
+                probe.name, json.dumps(inventory("Symfony"))
+            )
+            # The delta is what makes a wrong inventory visible before it is
+            # committed, so an unchanged run has to say so rather than stay
+            # silent.
+            self.assertIn("\t+0\t-0", generated.stdout)
+        finally:
+            probe.unlink()
+
     def test_malformed_exclusion_and_override_metadata_is_rejected(self) -> None:
         mutations = {
             "unsafe exclusion": lambda data: data["excluded_tracked_paths"].append(

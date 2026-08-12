@@ -193,23 +193,28 @@ def merge_agents_file(existing: str, source: str) -> str:
     return prefix + AGENTS_BEGIN + "\n" + source.rstrip() + "\n" + AGENTS_END + "\n"
 
 
-def discover_distribution_files(root: Path, edition: str) -> list[str]:
+def discover_distribution_files(
+    root: Path, edition: str, *, tracked_only: bool = False
+) -> list[str]:
     """Return tracked plus non-ignored pending distribution files.
 
     Including non-ignored pending files makes local verification useful before
     the user stages a change. In CI, the same command resolves to tracked files.
+
+    `tracked_only` drops the pending half, and generation uses it. An inventory
+    is a committed contract that the installer copies verbatim, so building one
+    from the working tree bakes in whatever happens to be lying around: one
+    local `--write-inventories` run absorbed 8586 untracked `vendor/` paths
+    into an edition's distribution list. Verification stays permissive - the
+    point there is to warn about a file you have not committed yet - but
+    nothing unstaged may enter the artifact.
     """
+    command = ["git", "ls-files", "-z", "--cached"]
+    if not tracked_only:
+        command += ["--others", "--exclude-standard"]
+    command += ["--", edition]
     result = subprocess.run(
-        [
-            "git",
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "--",
-            edition,
-        ],
+        command,
         cwd=root,
         capture_output=True,
         check=True,
@@ -248,10 +253,10 @@ def is_source_only(path: str) -> bool:
     )
 
 
-def build_inventory(root: Path, edition: str) -> dict:
+def build_inventory(root: Path, edition: str, *, tracked_only: bool = False) -> dict:
     components = {component: [] for component in COMPONENTS}
     excluded: list[str] = []
-    for path in discover_distribution_files(root, edition):
+    for path in discover_distribution_files(root, edition, tracked_only=tracked_only):
         if is_source_only(path):
             excluded.append(path)
         else:
@@ -270,16 +275,53 @@ def build_inventory(root: Path, edition: str) -> dict:
     }
 
 
+def inventory_paths(data: dict) -> set[str]:
+    return {
+        *(path for paths in data["installed"].values() for path in paths),
+        *data["excluded_tracked_paths"],
+    }
+
+
+DELTA_SAMPLE = 10
+
+
+def report_delta(label: str, paths: set[str]) -> None:
+    """Name what changed, so a wrong inventory is visible before it is committed."""
+    if not paths:
+        return
+    listed = sorted(paths)
+    for path in listed[:DELTA_SAMPLE]:
+        print(f"\t{label}\t{path}")
+    if len(listed) > DELTA_SAMPLE:
+        print(f"\t{label}\t... and {len(listed) - DELTA_SAMPLE} more")
+
+
 def write_inventories(root: Path) -> None:
     destination = root / "install" / "inventories"
     destination.mkdir(parents=True, exist_ok=True)
     for edition in EDITIONS:
         path = destination / inventory_path(edition).name
+        previous: set[str] = set()
+        if path.is_file():
+            try:
+                previous = inventory_paths(json.loads(path.read_text(encoding="utf-8")))
+            except (ValueError, KeyError, AttributeError, TypeError):
+                # An unreadable predecessor is not a reason to refuse to write
+                # a correct successor; it only costs the delta.
+                previous = set()
+        data = build_inventory(root, edition, tracked_only=True)
         path.write_text(
-            json.dumps(build_inventory(root, edition), indent=2, ensure_ascii=False) + "\n",
+            json.dumps(data, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
-        print(f"WROTE\t{path.relative_to(root).as_posix()}")
+        current = inventory_paths(data)
+        added, removed = current - previous, previous - current
+        print(
+            f"WROTE\t{path.relative_to(root).as_posix()}"
+            f"\t{len(current)} path(s)\t+{len(added)}\t-{len(removed)}"
+        )
+        report_delta("+", added)
+        report_delta("-", removed)
 
 
 def verify_inventory(root: Path, edition: str) -> None:
