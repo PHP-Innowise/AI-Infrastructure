@@ -236,6 +236,81 @@ a {
   object-fit: contain;
 }
 
+.brand-bar__home {
+  display: inline-flex;
+  line-height: 0;
+}
+
+/* Below 48rem the navigation is a closed <details>: a phone opens the page on
+   its content, not on 275px of links. The toggle is a real <summary>, so it
+   works with no JavaScript and announces its state to a screen reader by
+   itself. */
+.main-nav-disclosure__toggle {
+  padding: var(--space-sm) var(--space-lg);
+  background: var(--color-surface-sunken);
+  border-bottom: 1px solid var(--color-border);
+  font-size: var(--text-caption-size);
+  font-weight: var(--text-card-title-weight);
+  cursor: pointer;
+}
+
+/* Hidden explicitly, not by the browser's own <details> behaviour: giving
+   .main-nav a `display` of its own is exactly what defeats that behaviour, so
+   the closed state has to be stated. */
+.main-nav-disclosure:not([open]) > .main-nav {
+  display: none;
+}
+
+/* From 48rem up the nav is simply always there: the content is forced visible
+   regardless of the disclosure's open state, and the toggle disappears, so a
+   desktop user never has to open anything to navigate. */
+@media (min-width: 48rem) {
+  .main-nav-disclosure__toggle {
+    display: none;
+  }
+
+  .main-nav-disclosure:not([open]) > .main-nav {
+    display: flex;
+  }
+}
+
+/* The navigation, on every page. Laid out as a horizontal band of grouped
+   link lists so it stays out of the way of the page's own content, and wraps
+   rather than scrolling on a narrow screen. */
+.main-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-md) var(--space-lg);
+  padding: var(--space-sm) var(--space-lg);
+  background: var(--color-surface-sunken);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.main-nav__group {
+  font-size: var(--text-eyebrow-size);
+  line-height: var(--text-eyebrow-line);
+  font-weight: var(--text-eyebrow-weight);
+  letter-spacing: var(--text-eyebrow-tracking);
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+  margin: 0;
+  align-self: center;
+}
+
+.main-nav ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.main-nav a {
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line);
+}
+
 /* Focus must remain visible for every interactive element: WCAG 2.2 SC 2.4.11.
    :focus-visible only, so pointer users do not see a ring on click. */
 :focus-visible {

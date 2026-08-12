@@ -88,13 +88,36 @@
             satisfy any test that only asks whether the name appears
             somewhere on a page.
         #}
+        {#
+            The navigation lives here, beside the logo, because it has to be
+            on every page rather than on the one screen that happened to
+            build it. Its own partial carries the reasoning.
+
+            The logo doubles as the way home once there is a home to go to;
+            an anonymous visitor on a landing page gets the mark without a
+            link. The alt text stays the plain business name — that is the
+            link's accessible name, and "logo, link" reading as "home" is the
+            convention. The literal way home is the nav's own Dashboard link,
+            which is what makes this an affordance rather than the only route.
+        #}
         {% block header %}
             <header class="brand-bar">
-                <img class="brand-bar__logo"
-                     src="{{ brand.logoPath ?? asset('images/default_logo.svg') }}"
-                     alt="{{ brand.businessName }}"
-                     height="32">
+                {% if app.user %}
+                    <a class="brand-bar__home" href="{{ path('app_dashboard') }}">
+                        <img class="brand-bar__logo"
+                             src="{{ brand.logoPath ?? asset('images/default_logo.svg') }}"
+                             alt="{{ brand.businessName }}"
+                             height="32">
+                    </a>
+                {% else %}
+                    <img class="brand-bar__logo"
+                         src="{{ brand.logoPath ?? asset('images/default_logo.svg') }}"
+                         alt="{{ brand.businessName }}"
+                         height="32">
+                {% endif %}
             </header>
+
+            {{ include('platform/_navigation.html.twig') }}
         {% endblock %}
 
         <main id="main" tabindex="-1">
