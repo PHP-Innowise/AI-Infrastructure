@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Identity\Form;
 
+use App\Identity\Entity\Gender;
 use Symfony\Component\Form\AbstractType;
 use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
 use Symfony\Component\Form\Extension\Core\Type\DateType;
@@ -66,7 +67,7 @@ final class PlayerRegistrationType extends AbstractType
             ])
             ->add('playerGender', ChoiceType::class, [
                 'required' => false,
-                'choices' => ['Female' => 'female', 'Male' => 'male', 'Prefer not to say' => 'unspecified'],
+                'choices' => Gender::choices(),
             ])
             ->add('submit', SubmitType::class, ['label' => 'Register']);
     }

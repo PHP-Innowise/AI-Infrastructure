@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Administration\Form;
 
+use App\Identity\Entity\Gender;
 use Symfony\Component\Form\AbstractType;
 use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
 use Symfony\Component\Form\Extension\Core\Type\EmailType;
@@ -57,7 +58,7 @@ final class AdminEditAccountType extends AbstractType
                 ->add('playerGender', ChoiceType::class, [
                     'required' => false,
                     'label' => 'Gender',
-                    'choices' => ['Female' => 'female', 'Male' => 'male', 'Prefer not to say' => 'unspecified'],
+                    'choices' => Gender::choices(),
                 ])
                 ->add('playerSchoolOrTeam', TextType::class, ['required' => false, 'label' => 'School / Team']);
         }

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Scheduling\Service;
 
+use App\Identity\Entity\Gender;
 use App\Identity\Entity\PlayerTrainerMembership;
 use App\Identity\Entity\SkillLevel;
 use App\Scheduling\Entity\Event;
@@ -95,6 +96,13 @@ final readonly class EventEligibilityChecker
         return false;
     }
 
+    /**
+     * Through `Gender::matches()`, for the reason `matchesSkillLevel()` above
+     * uses `SkillLevel::matches()`: this restriction was free text compared
+     * strictly against a value the player picks from a list, so an event
+     * restricted to "Female" excluded every player, whose profile says
+     * `female`.
+     */
     private function matchesGender(Event $event, PlayerTrainerMembership $membership): bool
     {
         $restriction = $event->getGenders();
@@ -105,6 +113,12 @@ final readonly class EventEligibilityChecker
 
         $playerGender = $membership->getPlayer()->getGender();
 
-        return null !== $playerGender && \in_array($playerGender, $restriction, true);
+        foreach ($restriction as $allowed) {
+            if (Gender::matches($playerGender, $allowed)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

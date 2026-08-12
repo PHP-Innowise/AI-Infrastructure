@@ -660,7 +660,7 @@ final class TrainerEventController extends AbstractController
             'minAge' => $event->getMinAge(),
             'maxAge' => $event->getMaxAge(),
             'skillLevels' => $event->getSkillLevels() ?? [],
-            'genders' => null === $event->getGenders() ? null : implode(', ', $event->getGenders()),
+            'genders' => $event->getGenders() ?? [],
             'usdPricingEnabled' => $event->isUsdPricingEnabled(),
             'usdPrice' => $event->getUsdPriceMinorUnits() / 100,
             'tokenPricingEnabled' => $event->isTokenPricingEnabled(),
@@ -673,12 +673,8 @@ final class TrainerEventController extends AbstractController
      */
     private function toEventInput(array $data): EventInput
     {
-        // skillLevels arrives as a list from a multiple ChoiceType now, not
-        // as a comma-separated string; an empty selection means "no
-        // restriction", which the entity stores as null rather than [].
-        $selectedSkillLevels = $data['skillLevels'] ?? [];
-        $skillLevels = \is_array($selectedSkillLevels) && [] !== $selectedSkillLevels ? array_values($selectedSkillLevels) : null;
-        $genders = $this->parseCommaList($data['genders'] ?? null);
+        $skillLevels = $this->selectedList($data['skillLevels'] ?? null);
+        $genders = $this->selectedList($data['genders'] ?? null);
 
         // EntityType with 'multiple' => true submits a Doctrine Collection
         // (ArrayCollection), even on this array-mapped (no data_class) form
@@ -716,17 +712,20 @@ final class TrainerEventController extends AbstractController
     }
 
     /**
+     * Both eligibility axes are `multiple` ChoiceTypes now, so each arrives
+     * as a list rather than a comma-separated string. An empty selection
+     * means "no restriction", which the entity stores as null rather than an
+     * empty array.
+     *
      * @return list<string>|null
      */
-    private function parseCommaList(mixed $raw): ?array
+    private function selectedList(mixed $raw): ?array
     {
-        if (!\is_string($raw) || '' === trim($raw)) {
+        if (!\is_array($raw) || [] === $raw) {
             return null;
         }
 
-        $items = array_values(array_filter(array_map('trim', explode(',', $raw)), static fn (string $v): bool => '' !== $v));
-
-        return [] === $items ? null : $items;
+        return array_values(array_map(strval(...), $raw));
     }
 
     private function currentTrainer(): Trainer

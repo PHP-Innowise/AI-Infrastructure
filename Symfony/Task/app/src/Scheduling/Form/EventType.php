@@ -6,6 +6,7 @@ namespace App\Scheduling\Form;
 
 use App\Identity\Entity\CoachMembership;
 use App\Identity\Entity\PlayerProfile;
+use App\Identity\Entity\Gender;
 use App\Identity\Entity\SkillLevel;
 use App\Scheduling\Entity\Event;
 use Symfony\Bridge\Doctrine\Form\Type\EntityType;
@@ -39,10 +40,11 @@ use Symfony\Component\Validator\Constraints\Range;
  * restrict an event to "intermediate" and exclude every player whose profile
  * said "Intermediate". It is now the same closed list the profile offers.
  *
- * `genders` remains free text, and the same mismatch is likely there: a
- * player's own gender comes from a fixed female/male/unspecified choice while
- * this field accepts anything. Left as found — it was not what this change
- * set out to fix, and it deserves its own look rather than being swept in.
+ * `genders` had the same mismatch and was fixed the same way once it had
+ * been looked at on its own: a player's gender comes from a fixed
+ * female/male/unspecified choice, so a restriction typed as "Female" matched
+ * nobody at all. Both axes are now closed lists over the vocabulary the
+ * profile itself uses.
  */
 /**
  * @extends AbstractType<array<string, mixed>>
@@ -95,7 +97,18 @@ final class EventType extends AbstractType
                 'label' => 'Skill levels',
                 'help' => 'Leave all unchecked to open the event to every skill level.',
             ])
-            ->add('genders', TextType::class, ['required' => false, 'help' => 'Comma-separated'])
+            // BR-02-5's other eligibility axis, and the same story as
+            // skillLevels above: typed free-hand, it was compared exactly
+            // against a value the player never types — their profile stores
+            // `female`, so an event restricted to "Female" matched nobody.
+            ->add('genders', ChoiceType::class, [
+                'required' => false,
+                'multiple' => true,
+                'expanded' => true,
+                'choices' => Gender::choices(),
+                'label' => 'Genders',
+                'help' => 'Leave all unchecked to open the event to everyone.',
+            ])
             ->add('usdPricingEnabled', CheckboxType::class, ['required' => false])
             ->add('usdPrice', NumberType::class, ['required' => false, 'scale' => 2, 'html5' => true])
             ->add('tokenPricingEnabled', CheckboxType::class, ['required' => false])

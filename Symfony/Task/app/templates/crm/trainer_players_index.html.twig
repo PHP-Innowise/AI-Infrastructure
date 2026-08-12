@@ -39,12 +39,16 @@
             <label>Age min <input type="number" name="minAge" value="{{ criteria.minAge }}"></label>
             <label>Age max <input type="number" name="maxAge" value="{{ criteria.maxAge }}"></label>
 
+            {# Built from Gender, like the skill-level filter above it. Its
+               third option used to submit "other" — a value no form in the
+               product can write — so filtering by it returned nobody, every
+               time, without ever looking wrong. #}
             <label>Gender
                 <select name="gender">
                     <option value="">All</option>
-                    <option value="male" {{ criteria.gender == 'male' ? 'selected' }}>Male</option>
-                    <option value="female" {{ criteria.gender == 'female' ? 'selected' }}>Female</option>
-                    <option value="other" {{ criteria.gender == 'other' ? 'selected' }}>Other</option>
+                    {% for value, label in constant('App\\Identity\\Entity\\Gender::LABELS') %}
+                        <option value="{{ value }}" {{ criteria.gender == value ? 'selected' }}>{{ label }}</option>
+                    {% endfor %}
                 </select>
             </label>
 

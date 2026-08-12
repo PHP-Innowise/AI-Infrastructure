@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Forms\Form;
 
+use App\Identity\Entity\Gender;
 use Symfony\Component\Form\AbstractType;
 use Symfony\Component\Form\Extension\Core\Type\CheckboxType;
 use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
@@ -61,7 +62,7 @@ final class ConvertSubmissionToAccountType extends AbstractType
             ->add('gender', ChoiceType::class, [
                 'label' => 'Gender',
                 'required' => false,
-                'choices' => ['Female' => 'female', 'Male' => 'male', 'Prefer not to say' => 'unspecified'],
+                'choices' => Gender::choices(),
             ])
             ->add('acceptTerms', CheckboxType::class, [
                 'label' => 'I accept the terms of service',

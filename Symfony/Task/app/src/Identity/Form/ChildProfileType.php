@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Identity\Form;
 
+use App\Identity\Entity\Gender;
 use Symfony\Component\Form\AbstractType;
 use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
 use Symfony\Component\Form\Extension\Core\Type\DateType;
@@ -60,7 +61,7 @@ final class ChildProfileType extends AbstractType
             ])
             ->add('gender', ChoiceType::class, [
                 'required' => false,
-                'choices' => ['Female' => 'female', 'Male' => 'male', 'Prefer not to say' => 'unspecified'],
+                'choices' => Gender::choices(),
             ])
             ->add('schoolOrTeam', TextType::class, ['required' => false, 'label' => 'School (optional)'])
             ->add('submit', SubmitType::class, ['label' => 'Save child profile']);
