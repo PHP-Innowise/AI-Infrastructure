@@ -144,7 +144,7 @@ final class TrainerFormController extends AbstractController
      * AC-08-6/11: reachable pre-publish — renders the same template
      * `forms_public_show` uses, read-only.
      */
-    #[Route('/trainer/forms/{form}/preview', name: 'forms_trainer_form_preview', methods: ['GET'])]
+    #[Route('/trainer/forms/{form<\d+>}/preview', name: 'forms_trainer_form_preview', methods: ['GET'])]
     public function preview(Form $form): Response
     {
         $this->denyAccessUnlessGranted(FormVoter::FORM_EDIT, $form);
@@ -161,7 +161,7 @@ final class TrainerFormController extends AbstractController
     /**
      * AC-08-28/30.
      */
-    #[Route('/trainer/forms/{form}/edit', name: 'forms_trainer_form_edit', methods: ['GET', 'POST'])]
+    #[Route('/trainer/forms/{form<\d+>}/edit', name: 'forms_trainer_form_edit', methods: ['GET', 'POST'])]
     public function edit(Request $request, Form $form): Response
     {
         $this->denyAccessUnlessGranted(FormVoter::FORM_EDIT, $form);
@@ -227,7 +227,7 @@ final class TrainerFormController extends AbstractController
     /**
      * AC-08-7: generates the shareable link on first publish.
      */
-    #[Route('/trainer/forms/{form}/publish', name: 'forms_trainer_form_publish', methods: ['POST'])]
+    #[Route('/trainer/forms/{form<\d+>}/publish', name: 'forms_trainer_form_publish', methods: ['POST'])]
     public function publish(Request $request, Form $form): Response
     {
         $this->denyAccessUnlessGranted(FormVoter::FORM_EDIT, $form);
@@ -242,7 +242,7 @@ final class TrainerFormController extends AbstractController
     /**
      * AC-08-8/29: camps only.
      */
-    #[Route('/trainer/forms/{form}/toggle', name: 'forms_trainer_form_toggle', methods: ['POST'])]
+    #[Route('/trainer/forms/{form<\d+>}/toggle', name: 'forms_trainer_form_toggle', methods: ['POST'])]
     public function toggle(Request $request, Form $form): Response
     {
         $this->denyAccessUnlessGranted(FormVoter::FORM_TOGGLE, $form);
@@ -257,7 +257,7 @@ final class TrainerFormController extends AbstractController
     /**
      * AC-08-31.
      */
-    #[Route('/trainer/forms/{form}/delete', name: 'forms_trainer_form_delete', methods: ['POST'])]
+    #[Route('/trainer/forms/{form<\d+>}/delete', name: 'forms_trainer_form_delete', methods: ['POST'])]
     public function delete(Request $request, Form $form): Response
     {
         $this->denyAccessUnlessGranted(FormVoter::FORM_DELETE, $form);

@@ -61,7 +61,7 @@ final class TrainerFormSubmissionController extends AbstractController
      * recorded here and in the coder's final report as the resolution
      * chosen, not silently picked.
      */
-    #[Route('/trainer/forms/{form}/submissions', name: 'forms_trainer_submissions_index', methods: ['GET'])]
+    #[Route('/trainer/forms/{form<\d+>}/submissions', name: 'forms_trainer_submissions_index', methods: ['GET'])]
     public function index(Request $request, Form $form): Response
     {
         $this->denyAccessUnlessGranted(FormVoter::FORM_VIEW_SUBMISSIONS, $form);
@@ -78,7 +78,7 @@ final class TrainerFormSubmissionController extends AbstractController
     /**
      * AC-08-19.
      */
-    #[Route('/trainer/forms/{form}/submissions/export', name: 'forms_trainer_submissions_export', methods: ['GET'])]
+    #[Route('/trainer/forms/{form<\d+>}/submissions/export', name: 'forms_trainer_submissions_export', methods: ['GET'])]
     public function export(Request $request, Form $form): StreamedResponse
     {
         $this->denyAccessUnlessGranted(FormVoter::FORM_EXPORT, $form);
@@ -114,7 +114,7 @@ final class TrainerFormSubmissionController extends AbstractController
     /**
      * AC-08-20.
      */
-    #[Route('/trainer/forms/{form}/submissions/attendance', name: 'forms_trainer_submission_attendance', methods: ['GET', 'POST'])]
+    #[Route('/trainer/forms/{form<\d+>}/submissions/attendance', name: 'forms_trainer_submission_attendance', methods: ['GET', 'POST'])]
     public function attendance(Request $request, Form $form): Response
     {
         $this->denyAccessUnlessGranted(FormVoter::FORM_MARK_ATTENDANCE, $form);
@@ -145,7 +145,7 @@ final class TrainerFormSubmissionController extends AbstractController
     /**
      * AC-08-21.
      */
-    #[Route('/trainer/forms/{form}/submissions/bulk-email', name: 'forms_trainer_submissions_bulk_email', methods: ['GET', 'POST'])]
+    #[Route('/trainer/forms/{form<\d+>}/submissions/bulk-email', name: 'forms_trainer_submissions_bulk_email', methods: ['GET', 'POST'])]
     public function bulkEmail(Request $request, Form $form): Response
     {
         $this->denyAccessUnlessGranted(FormVoter::FORM_SEND_BULK_EMAIL, $form);

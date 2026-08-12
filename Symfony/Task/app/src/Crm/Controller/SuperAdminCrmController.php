@@ -116,7 +116,7 @@ final class SuperAdminCrmController extends AbstractController
      * `PlayerTrainerMembership` is one row per (player, trainer) pair
      * (BR-03-2).
      */
-    #[Route('/super-admin/crm/players/{membership}', name: 'crm_super_admin_player_show', methods: ['GET'])]
+    #[Route('/super-admin/crm/players/{membership<\d+>}', name: 'crm_super_admin_player_show', methods: ['GET'])]
     public function show(int $membership): Response
     {
         return $this->withScope($membership, function (PlayerTrainerMembership $membershipEntity): Response {
@@ -158,7 +158,7 @@ final class SuperAdminCrmController extends AbstractController
     /**
      * AC-03-56/58: apply a flag across trainers.
      */
-    #[Route('/super-admin/crm/players/{membership}/flags', name: 'crm_super_admin_player_flag_add', methods: ['POST'])]
+    #[Route('/super-admin/crm/players/{membership<\d+>}/flags', name: 'crm_super_admin_player_flag_add', methods: ['POST'])]
     public function flagAdd(Request $request, int $membership): Response
     {
         return $this->withScope($membership, function (PlayerTrainerMembership $membershipEntity) use ($request): Response {
@@ -186,7 +186,7 @@ final class SuperAdminCrmController extends AbstractController
     /**
      * AC-03-56/58: remove (resolve) a flag across trainers.
      */
-    #[Route('/super-admin/crm/players/{membership}/flags/{flag}/resolve', name: 'crm_super_admin_player_flag_resolve', methods: ['POST'])]
+    #[Route('/super-admin/crm/players/{membership<\d+>}/flags/{flag<\d+>}/resolve', name: 'crm_super_admin_player_flag_resolve', methods: ['POST'])]
     public function flagResolve(Request $request, int $membership, int $flag): Response
     {
         return $this->withScope($membership, function (PlayerTrainerMembership $membershipEntity) use ($request, $flag): Response {

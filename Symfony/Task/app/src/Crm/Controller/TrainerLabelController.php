@@ -81,7 +81,7 @@ final class TrainerLabelController extends AbstractController
         return $this->render('crm/trainer_label_form.html.twig', ['form' => $form, 'mode' => 'create']);
     }
 
-    #[Route('/trainer/labels/{label}/edit', name: 'crm_trainer_label_edit', methods: ['GET', 'POST'])]
+    #[Route('/trainer/labels/{label<\d+>}/edit', name: 'crm_trainer_label_edit', methods: ['GET', 'POST'])]
     public function edit(Request $request, Label $label): Response
     {
         $this->denyAccessUnlessGranted(LabelVoter::LABEL_MANAGE, $label);
@@ -109,7 +109,7 @@ final class TrainerLabelController extends AbstractController
     /**
      * AC-03-13/BR-03-5: "Remove [Label] from [N] players?" confirmation.
      */
-    #[Route('/trainer/labels/{label}/delete', name: 'crm_trainer_label_delete', methods: ['GET', 'POST'])]
+    #[Route('/trainer/labels/{label<\d+>}/delete', name: 'crm_trainer_label_delete', methods: ['GET', 'POST'])]
     public function delete(Request $request, Label $label): Response
     {
         $this->denyAccessUnlessGranted(LabelVoter::LABEL_MANAGE, $label);

@@ -101,7 +101,7 @@ final class TrainerShareLinkController extends AbstractController
      * why a CoachMembership cannot back this action for an invite nobody has
      * accepted yet.
      */
-    #[Route('/trainer/sharelinks/{shareLink}/resend', name: 'identity_trainer_sharelink_resend', methods: ['POST'])]
+    #[Route('/trainer/sharelinks/{shareLink<\d+>}/resend', name: 'identity_trainer_sharelink_resend', methods: ['POST'])]
     public function resend(Request $request, ShareLink $shareLink): Response
     {
         $this->denyAccessUnlessGranted(CoachMembershipVoter::COACH_INVITE, null);

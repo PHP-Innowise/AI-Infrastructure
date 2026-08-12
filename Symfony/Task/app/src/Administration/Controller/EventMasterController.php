@@ -129,7 +129,7 @@ final class EventMasterController extends AbstractController
      * projection) — EventVoter::EVENT_VIEW then grants via
      * AdministrativeScope::isOpenFor().
      */
-    #[Route('/super-admin/events/{event}', name: 'administration_event_master_show', methods: ['GET'])]
+    #[Route('/super-admin/events/{event<\d+>}', name: 'administration_event_master_show', methods: ['GET'])]
     public function show(int $event): Response
     {
         return $this->withScope($event, function (Event $eventEntity): Response {
@@ -156,7 +156,7 @@ final class EventMasterController extends AbstractController
      * existed (see that method's own docblock — nothing is logged when
      * there was no conflict to override).
      */
-    #[Route('/super-admin/events/{event}/edit', name: 'administration_event_master_edit', methods: ['GET', 'POST'])]
+    #[Route('/super-admin/events/{event<\d+>}/edit', name: 'administration_event_master_edit', methods: ['GET', 'POST'])]
     public function edit(Request $request, int $event): Response
     {
         return $this->withScope($event, function (Event $eventEntity) use ($request): Response {
@@ -263,7 +263,7 @@ final class EventMasterController extends AbstractController
      * policy — it stays universal, Super Admin included, matching
      * EventService::cancel()'s single, un-role-qualified guard.
      */
-    #[Route('/super-admin/events/{event}/cancel', name: 'administration_event_master_cancel', methods: ['GET', 'POST'])]
+    #[Route('/super-admin/events/{event<\d+>}/cancel', name: 'administration_event_master_cancel', methods: ['GET', 'POST'])]
     public function cancel(Request $request, int $event): Response
     {
         return $this->withScope($event, function (Event $eventEntity) use ($request): Response {
@@ -291,7 +291,7 @@ final class EventMasterController extends AbstractController
         });
     }
 
-    #[Route('/super-admin/events/{event}/rsvps', name: 'administration_event_master_rsvps', methods: ['GET'])]
+    #[Route('/super-admin/events/{event<\d+>}/rsvps', name: 'administration_event_master_rsvps', methods: ['GET'])]
     public function rsvps(int $event): Response
     {
         return $this->withScope($event, function (Event $eventEntity): Response {

@@ -136,13 +136,13 @@ final class PortalTokenController extends AbstractController
      * there unconditionally, with no `?->getPendingCheckoutUrl()` shape to
      * check first.
      */
-    #[Route('/portal/tokens/purchase-approvals/{approval}/approve', name: 'billing_portal_token_purchase_approval_approve', methods: ['GET', 'POST'])]
+    #[Route('/portal/tokens/purchase-approvals/{approval<\d+>}/approve', name: 'billing_portal_token_purchase_approval_approve', methods: ['GET', 'POST'])]
     public function purchaseApprovalApprove(Request $request, ChildApprovalRequest $approval): Response
     {
         return $this->decidePurchaseApproval($request, $approval, true);
     }
 
-    #[Route('/portal/tokens/purchase-approvals/{approval}/deny', name: 'billing_portal_token_purchase_approval_deny', methods: ['GET', 'POST'])]
+    #[Route('/portal/tokens/purchase-approvals/{approval<\d+>}/deny', name: 'billing_portal_token_purchase_approval_deny', methods: ['GET', 'POST'])]
     public function purchaseApprovalDeny(Request $request, ChildApprovalRequest $approval): Response
     {
         return $this->decidePurchaseApproval($request, $approval, false);

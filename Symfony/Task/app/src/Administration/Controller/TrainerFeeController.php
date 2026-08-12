@@ -40,7 +40,7 @@ final class TrainerFeeController extends AbstractController
     ) {
     }
 
-    #[Route('/super-admin/trainers/{trainer}/fees', name: 'administration_trainer_fee_edit', methods: ['GET', 'POST'])]
+    #[Route('/super-admin/trainers/{trainer<\d+>}/fees', name: 'administration_trainer_fee_edit', methods: ['GET', 'POST'])]
     public function edit(Request $request, Trainer $trainer): Response
     {
         // AdministrativeScope opens BEFORE the voter check, not after: the

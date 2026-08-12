@@ -98,7 +98,7 @@ final class TrainerPlayerController extends AbstractController
     /**
      * AC-03-27..33: the full player detail.
      */
-    #[Route('/trainer/players/{membership}', name: 'crm_trainer_player_show', methods: ['GET'])]
+    #[Route('/trainer/players/{membership<\d+>}', name: 'crm_trainer_player_show', methods: ['GET'])]
     public function show(PlayerTrainerMembership $membership): Response
     {
         $this->denyAccessUnlessGranted(PlayerVoter::PLAYER_VIEW, $membership);
@@ -109,7 +109,7 @@ final class TrainerPlayerController extends AbstractController
     /**
      * AC-03-33: skill level and the other limited fields.
      */
-    #[Route('/trainer/players/{membership}/edit', name: 'crm_trainer_player_edit', methods: ['POST'])]
+    #[Route('/trainer/players/{membership<\d+>}/edit', name: 'crm_trainer_player_edit', methods: ['POST'])]
     public function edit(Request $request, PlayerTrainerMembership $membership): Response
     {
         $this->denyAccessUnlessGranted(PlayerVoter::PLAYER_EDIT, $membership);
@@ -133,7 +133,7 @@ final class TrainerPlayerController extends AbstractController
     /**
      * AC-03-12: multi-select apply.
      */
-    #[Route('/trainer/players/{membership}/labels', name: 'crm_trainer_player_label_add', methods: ['POST'])]
+    #[Route('/trainer/players/{membership<\d+>}/labels', name: 'crm_trainer_player_label_add', methods: ['POST'])]
     public function labelAdd(Request $request, PlayerTrainerMembership $membership): Response
     {
         $this->denyAccessUnlessGranted(PlayerVoter::PLAYER_LABEL_MANAGE, $membership);
@@ -162,7 +162,7 @@ final class TrainerPlayerController extends AbstractController
     /**
      * AC-03-28: click-to-remove.
      */
-    #[Route('/trainer/players/{membership}/labels/{label}/remove', name: 'crm_trainer_player_label_remove', methods: ['POST'])]
+    #[Route('/trainer/players/{membership<\d+>}/labels/{label<\d+>}/remove', name: 'crm_trainer_player_label_remove', methods: ['POST'])]
     public function labelRemove(Request $request, PlayerTrainerMembership $membership, Label $label): Response
     {
         $this->denyAccessUnlessGranted(PlayerVoter::PLAYER_LABEL_MANAGE, $membership);
@@ -182,7 +182,7 @@ final class TrainerPlayerController extends AbstractController
     /**
      * AC-03-15: one of the 8 system flags, with an optional note.
      */
-    #[Route('/trainer/players/{membership}/flags', name: 'crm_trainer_player_flag_add', methods: ['POST'])]
+    #[Route('/trainer/players/{membership<\d+>}/flags', name: 'crm_trainer_player_flag_add', methods: ['POST'])]
     public function flagAdd(Request $request, PlayerTrainerMembership $membership): Response
     {
         $this->denyAccessUnlessGranted(PlayerVoter::PLAYER_FLAG_MANAGE, $membership);
@@ -213,7 +213,7 @@ final class TrainerPlayerController extends AbstractController
      * AC-03-17: "Mark as resolved?" — hides from the active view, keeps
      * history.
      */
-    #[Route('/trainer/players/{membership}/flags/{flag}/resolve', name: 'crm_trainer_player_flag_resolve', methods: ['POST'])]
+    #[Route('/trainer/players/{membership<\d+>}/flags/{flag<\d+>}/resolve', name: 'crm_trainer_player_flag_resolve', methods: ['POST'])]
     public function flagResolve(Request $request, PlayerTrainerMembership $membership, PlayerFlag $flag): Response
     {
         $this->denyAccessUnlessGranted(PlayerVoter::PLAYER_FLAG_MANAGE, $membership);
@@ -230,7 +230,7 @@ final class TrainerPlayerController extends AbstractController
     /**
      * AC-03-19 (general) and AC-03-20 (per-event, when an event is selected).
      */
-    #[Route('/trainer/players/{membership}/notes', name: 'crm_trainer_player_note_add', methods: ['POST'])]
+    #[Route('/trainer/players/{membership<\d+>}/notes', name: 'crm_trainer_player_note_add', methods: ['POST'])]
     public function noteAdd(Request $request, PlayerTrainerMembership $membership): Response
     {
         $this->denyAccessUnlessGranted(PlayerVoter::PLAYER_NOTE_MANAGE, $membership);
@@ -263,7 +263,7 @@ final class TrainerPlayerController extends AbstractController
      * AC-03-21/BR-03-12: within 24 hours of creation, and never on a
      * coach-authored note (PlayerVoter denies that outright).
      */
-    #[Route('/trainer/players/{membership}/notes/{note}/edit', name: 'crm_trainer_player_note_edit', methods: ['POST'])]
+    #[Route('/trainer/players/{membership<\d+>}/notes/{note<\d+>}/edit', name: 'crm_trainer_player_note_edit', methods: ['POST'])]
     public function noteEdit(Request $request, PlayerTrainerMembership $membership, PlayerNote $note): Response
     {
         $this->denyAccessUnlessGranted(PlayerVoter::PLAYER_NOTE_MANAGE, $note);
@@ -291,7 +291,7 @@ final class TrainerPlayerController extends AbstractController
     /**
      * AC-03-21: at any time, for the trainer's own notes.
      */
-    #[Route('/trainer/players/{membership}/notes/{note}/delete', name: 'crm_trainer_player_note_delete', methods: ['POST'])]
+    #[Route('/trainer/players/{membership<\d+>}/notes/{note<\d+>}/delete', name: 'crm_trainer_player_note_delete', methods: ['POST'])]
     public function noteDelete(Request $request, PlayerTrainerMembership $membership, PlayerNote $note): Response
     {
         $this->denyAccessUnlessGranted(PlayerVoter::PLAYER_NOTE_MANAGE, $note);

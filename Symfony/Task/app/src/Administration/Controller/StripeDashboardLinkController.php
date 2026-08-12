@@ -72,7 +72,7 @@ final class StripeDashboardLinkController extends AbstractController
      * first — the same `AdministrativeScope` mechanism
      * `TrainerFeeController` already opens for this exact reason.
      */
-    #[Route('/super-admin/trainers/{trainer}/stripe', name: 'administration_trainer_stripe_dashboard_link', methods: ['GET'])]
+    #[Route('/super-admin/trainers/{trainer<\d+>}/stripe', name: 'administration_trainer_stripe_dashboard_link', methods: ['GET'])]
     public function trainer(Trainer $trainer): RedirectResponse
     {
         $this->administrativeScope->openFor($trainer, $this->actor());

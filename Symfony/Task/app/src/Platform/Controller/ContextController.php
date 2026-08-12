@@ -27,7 +27,7 @@ final class ContextController extends AbstractController
     ) {
     }
 
-    #[Route('/context/trainer/{trainer}', name: 'platform_context_trainer_switch', methods: ['POST'])]
+    #[Route('/context/trainer/{trainer<\d+>}', name: 'platform_context_trainer_switch', methods: ['POST'])]
     public function __invoke(Request $request, int $trainer): Response
     {
         /** @var Account $account */

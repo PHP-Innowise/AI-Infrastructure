@@ -116,7 +116,7 @@ final class TrainerCouponController extends AbstractController
         return $this->render('growth/trainer_coupon_form.html.twig', ['form' => $form, 'mode' => 'create']);
     }
 
-    #[Route('/trainer/marketing/coupons/{coupon}/edit', name: 'growth_trainer_coupon_edit', methods: ['GET', 'POST'])]
+    #[Route('/trainer/marketing/coupons/{coupon<\d+>}/edit', name: 'growth_trainer_coupon_edit', methods: ['GET', 'POST'])]
     public function edit(Request $request, Coupon $coupon): Response
     {
         $this->denyAccessUnlessGranted(CouponVoter::COUPON_EDIT, $coupon);
@@ -152,7 +152,7 @@ final class TrainerCouponController extends AbstractController
         return $this->render('growth/trainer_coupon_form.html.twig', ['form' => $form, 'mode' => 'edit', 'coupon' => $coupon]);
     }
 
-    #[Route('/trainer/marketing/coupons/{coupon}/deactivate', name: 'growth_trainer_coupon_deactivate', methods: ['POST'])]
+    #[Route('/trainer/marketing/coupons/{coupon<\d+>}/deactivate', name: 'growth_trainer_coupon_deactivate', methods: ['POST'])]
     public function deactivate(Request $request, Coupon $coupon): Response
     {
         $this->denyAccessUnlessGranted(CouponVoter::COUPON_DEACTIVATE, $coupon);
@@ -167,7 +167,7 @@ final class TrainerCouponController extends AbstractController
         return $this->redirectToRoute('growth_trainer_coupons_index');
     }
 
-    #[Route('/trainer/marketing/coupons/{coupon}/delete', name: 'growth_trainer_coupon_delete', methods: ['POST'])]
+    #[Route('/trainer/marketing/coupons/{coupon<\d+>}/delete', name: 'growth_trainer_coupon_delete', methods: ['POST'])]
     public function delete(Request $request, Coupon $coupon): Response
     {
         $this->denyAccessUnlessGranted(CouponVoter::COUPON_DELETE, $coupon);
@@ -190,7 +190,7 @@ final class TrainerCouponController extends AbstractController
     /**
      * AC-06-27: "view usage details (the list of players who used it)."
      */
-    #[Route('/trainer/marketing/coupons/{coupon}/usage', name: 'growth_trainer_coupon_usage', methods: ['GET'])]
+    #[Route('/trainer/marketing/coupons/{coupon<\d+>}/usage', name: 'growth_trainer_coupon_usage', methods: ['GET'])]
     public function usage(Coupon $coupon): Response
     {
         $this->denyAccessUnlessGranted(CouponVoter::COUPON_VIEW_ANALYTICS, $coupon);

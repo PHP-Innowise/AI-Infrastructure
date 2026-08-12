@@ -43,7 +43,7 @@ final class PortalEventController extends AbstractController
      * the Doctrine filter/RLS, or a genuine 403 for a same-tenant
      * non-invited/ineligible attempt) exactly as AC-02-7 states.
      */
-    #[Route('/portal/events/{event}', name: 'scheduling_portal_event_show', methods: ['GET'])]
+    #[Route('/portal/events/{event<\d+>}', name: 'scheduling_portal_event_show', methods: ['GET'])]
     public function show(Request $request, Event $event): Response
     {
         $this->denyAccessUnlessGranted(EventVoter::EVENT_VIEW, $event);
@@ -68,7 +68,7 @@ final class PortalEventController extends AbstractController
     /**
      * AC-02-23..28, BR-02-7..10.
      */
-    #[Route('/portal/events/{event}/rsvp', name: 'scheduling_portal_event_rsvp', methods: ['POST'])]
+    #[Route('/portal/events/{event<\d+>}/rsvp', name: 'scheduling_portal_event_rsvp', methods: ['POST'])]
     public function rsvp(Request $request, Event $event): Response
     {
         $this->denyAccessUnlessGranted(RsvpVoter::RSVP_CREATE, $event);

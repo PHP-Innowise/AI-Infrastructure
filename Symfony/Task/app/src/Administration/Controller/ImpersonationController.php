@@ -33,7 +33,7 @@ use Symfony\Component\Security\Http\Attribute\IsGranted;
 #[IsGranted('ROLE_SUPER_ADMIN')]
 final class ImpersonationController extends AbstractController
 {
-    #[Route('/super-admin/users/{account}/impersonate', name: 'administration_impersonation_start', methods: ['POST'])]
+    #[Route('/super-admin/users/{account<\d+>}/impersonate', name: 'administration_impersonation_start', methods: ['POST'])]
     public function start(Request $request, Account $account): Response
     {
         // BR-01-21/AC-01-37: denies targeting another Super Admin.

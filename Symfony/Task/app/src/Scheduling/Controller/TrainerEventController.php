@@ -176,7 +176,7 @@ final class TrainerEventController extends AbstractController
         return $this->json($this->eventService->availabilityCount($trainer, $at));
     }
 
-    #[Route('/trainer/events/{event}', name: 'scheduling_trainer_event_show', methods: ['GET'])]
+    #[Route('/trainer/events/{event<\d+>}', name: 'scheduling_trainer_event_show', methods: ['GET'])]
     public function show(Event $event): Response
     {
         $this->denyAccessUnlessGranted(EventVoter::EVENT_VIEW, $event);
@@ -194,7 +194,7 @@ final class TrainerEventController extends AbstractController
     /**
      * AC-02-50..54.
      */
-    #[Route('/trainer/events/{event}/edit', name: 'scheduling_trainer_event_edit', methods: ['GET', 'POST'])]
+    #[Route('/trainer/events/{event<\d+>}/edit', name: 'scheduling_trainer_event_edit', methods: ['GET', 'POST'])]
     public function edit(Request $request, Event $event): Response
     {
         $this->denyAccessUnlessGranted(EventVoter::EVENT_EDIT, $event);
@@ -242,7 +242,7 @@ final class TrainerEventController extends AbstractController
     /**
      * AC-02-14..17.
      */
-    #[Route('/trainer/events/{event}/duplicate', name: 'scheduling_trainer_event_duplicate', methods: ['GET', 'POST'])]
+    #[Route('/trainer/events/{event<\d+>}/duplicate', name: 'scheduling_trainer_event_duplicate', methods: ['GET', 'POST'])]
     public function duplicate(Request $request, Event $event): Response
     {
         $this->denyAccessUnlessGranted(EventVoter::EVENT_DUPLICATE, $event);
@@ -284,7 +284,7 @@ final class TrainerEventController extends AbstractController
     /**
      * AC-02-46..49.
      */
-    #[Route('/trainer/events/{event}/cancel', name: 'scheduling_trainer_event_cancel', methods: ['GET', 'POST'])]
+    #[Route('/trainer/events/{event<\d+>}/cancel', name: 'scheduling_trainer_event_cancel', methods: ['GET', 'POST'])]
     public function cancel(Request $request, Event $event): Response
     {
         $this->denyAccessUnlessGranted(EventVoter::EVENT_CANCEL, $event);
@@ -321,7 +321,7 @@ final class TrainerEventController extends AbstractController
     /**
      * AC-02-43/44.
      */
-    #[Route('/trainer/events/{event}/rsvps', name: 'scheduling_trainer_event_rsvps', methods: ['GET'])]
+    #[Route('/trainer/events/{event<\d+>}/rsvps', name: 'scheduling_trainer_event_rsvps', methods: ['GET'])]
     public function rsvps(Event $event): Response
     {
         $this->denyAccessUnlessGranted(EventVoter::EVENT_VIEW_RSVP_LIST, $event);
@@ -335,7 +335,7 @@ final class TrainerEventController extends AbstractController
     /**
      * AC-02-45.
      */
-    #[Route('/trainer/events/{event}/rsvps/export', name: 'scheduling_trainer_event_rsvps_export', methods: ['GET'])]
+    #[Route('/trainer/events/{event<\d+>}/rsvps/export', name: 'scheduling_trainer_event_rsvps_export', methods: ['GET'])]
     public function rsvpsExport(Event $event): StreamedResponse
     {
         $this->denyAccessUnlessGranted(EventVoter::EVENT_EXPORT_RSVPS, $event);
@@ -361,7 +361,7 @@ final class TrainerEventController extends AbstractController
     /**
      * AC-02-45/Q-02.09.
      */
-    #[Route('/trainer/events/{event}/rsvps/add', name: 'scheduling_trainer_event_rsvp_add', methods: ['GET', 'POST'])]
+    #[Route('/trainer/events/{event<\d+>}/rsvps/add', name: 'scheduling_trainer_event_rsvp_add', methods: ['GET', 'POST'])]
     public function rsvpAdd(Request $request, Event $event): Response
     {
         $this->denyAccessUnlessGranted(EventVoter::EVENT_MANUAL_ADD_PLAYER, $event);
@@ -393,7 +393,7 @@ final class TrainerEventController extends AbstractController
     /**
      * AC-02-45.
      */
-    #[Route('/trainer/events/{event}/rsvps/{rsvp}/remove', name: 'scheduling_trainer_event_rsvp_remove', methods: ['POST'])]
+    #[Route('/trainer/events/{event<\d+>}/rsvps/{rsvp<\d+>}/remove', name: 'scheduling_trainer_event_rsvp_remove', methods: ['POST'])]
     public function rsvpRemove(Request $request, Event $event, Rsvp $rsvp): Response
     {
         $this->denyAccessUnlessGranted(RsvpVoter::RSVP_REMOVE, $rsvp);
@@ -411,7 +411,7 @@ final class TrainerEventController extends AbstractController
     /**
      * AC-02-41/BR-02-18: trainer branch — any time, overrides the coach.
      */
-    #[Route('/trainer/events/{event}/attendance', name: 'scheduling_trainer_event_attendance', methods: ['GET', 'POST'])]
+    #[Route('/trainer/events/{event<\d+>}/attendance', name: 'scheduling_trainer_event_attendance', methods: ['GET', 'POST'])]
     public function attendance(Request $request, Event $event): Response
     {
         $this->denyAccessUnlessGranted(AttendanceVoter::ATTENDANCE_RECORD, $event);

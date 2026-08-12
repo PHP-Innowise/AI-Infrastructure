@@ -41,7 +41,7 @@ final class CoachContentController extends AbstractController
     ) {
     }
 
-    #[Route('/coach/content/playlists/{playlist}', name: 'content_coach_playlist_show', methods: ['GET'])]
+    #[Route('/coach/content/playlists/{playlist<\d+>}', name: 'content_coach_playlist_show', methods: ['GET'])]
     public function playlistShow(Playlist $playlist): Response
     {
         $this->denyAccessUnlessGranted(PlaylistVoter::PLAYLIST_VIEW, $playlist);
@@ -54,7 +54,7 @@ final class CoachContentController extends AbstractController
         ]);
     }
 
-    #[Route('/coach/content/drills/{drill}', name: 'content_coach_drill_show', methods: ['GET'])]
+    #[Route('/coach/content/drills/{drill<\d+>}', name: 'content_coach_drill_show', methods: ['GET'])]
     public function drillShow(Drill $drill): Response
     {
         $this->denyAccessUnlessGranted(ContentItemVoter::CONTENT_ITEM_VIEW, $drill);

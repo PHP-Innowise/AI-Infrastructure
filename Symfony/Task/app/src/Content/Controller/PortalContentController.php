@@ -108,7 +108,7 @@ final class PortalContentController extends AbstractController
      * AC-04-21/22/23: locked (price + purchase CTA) or unlocked (item list
      * with completion checkmarks).
      */
-    #[Route('/portal/content/playlists/{playlist}', name: 'content_portal_playlist_show', methods: ['GET'])]
+    #[Route('/portal/content/playlists/{playlist<\d+>}', name: 'content_portal_playlist_show', methods: ['GET'])]
     public function playlistShow(Request $request, Playlist $playlist): Response
     {
         $this->denyAccessUnlessGranted(PlaylistVoter::PLAYLIST_VIEW, $playlist);
@@ -131,7 +131,7 @@ final class PortalContentController extends AbstractController
      * Checkout in this SAME request (specs/api-designer-spec.md "Billing
      * module": "there is no separate 'create checkout session' endpoint").
      */
-    #[Route('/portal/content/playlists/{playlist}/checkout', name: 'content_portal_playlist_checkout', methods: ['GET', 'POST'])]
+    #[Route('/portal/content/playlists/{playlist<\d+>}/checkout', name: 'content_portal_playlist_checkout', methods: ['GET', 'POST'])]
     public function checkout(Request $request, Playlist $playlist): Response
     {
         $this->denyAccessUnlessGranted(PlaylistVoter::PLAYLIST_PURCHASE, $playlist);
@@ -182,7 +182,7 @@ final class PortalContentController extends AbstractController
      * AC-04-24: embedded YouTube player, title, controls, and the Text
      * Instructions section.
      */
-    #[Route('/portal/content/items/{item}/play', name: 'content_portal_item_play', methods: ['GET'])]
+    #[Route('/portal/content/items/{item<\d+>}/play', name: 'content_portal_item_play', methods: ['GET'])]
     public function itemPlay(Request $request, ContentItem $item): Response
     {
         $this->denyAccessUnlessGranted(ContentItemVoter::CONTENT_ITEM_VIEW, $item);
@@ -234,7 +234,7 @@ final class PortalContentController extends AbstractController
      * (PLAYING) — a widget event, not a page navigation. JSON in (empty
      * body), JSON out, per "JSON vs. HTML §2".
      */
-    #[Route('/portal/content/items/{item}/complete', name: 'content_portal_item_complete', methods: ['POST'])]
+    #[Route('/portal/content/items/{item<\d+>}/complete', name: 'content_portal_item_complete', methods: ['POST'])]
     public function itemComplete(Request $request, ContentItem $item): Response
     {
         $this->denyAccessUnlessGranted(ContentItemVoter::CONTENT_ITEM_VIEW, $item);
@@ -332,13 +332,13 @@ final class PortalContentController extends AbstractController
      * `PortalReservationController::decideApproval()`'s own precedent
      * exactly.
      */
-    #[Route('/portal/content/purchase-approvals/{approval}/approve', name: 'content_portal_purchase_approval_approve', methods: ['GET', 'POST'])]
+    #[Route('/portal/content/purchase-approvals/{approval<\d+>}/approve', name: 'content_portal_purchase_approval_approve', methods: ['GET', 'POST'])]
     public function purchaseApprovalApprove(Request $request, ChildApprovalRequest $approval): Response
     {
         return $this->decidePurchaseApproval($request, $approval, true);
     }
 
-    #[Route('/portal/content/purchase-approvals/{approval}/deny', name: 'content_portal_purchase_approval_deny', methods: ['GET', 'POST'])]
+    #[Route('/portal/content/purchase-approvals/{approval<\d+>}/deny', name: 'content_portal_purchase_approval_deny', methods: ['GET', 'POST'])]
     public function purchaseApprovalDeny(Request $request, ChildApprovalRequest $approval): Response
     {
         return $this->decidePurchaseApproval($request, $approval, false);

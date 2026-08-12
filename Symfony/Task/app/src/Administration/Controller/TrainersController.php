@@ -69,7 +69,7 @@ final class TrainersController extends AbstractController
      * to `administration_trainer_stripe_dashboard_link` for the actual
      * Stripe-side detail.
      */
-    #[Route('/super-admin/trainers/{trainer}', name: 'administration_trainer_show', methods: ['GET'])]
+    #[Route('/super-admin/trainers/{trainer<\d+>}', name: 'administration_trainer_show', methods: ['GET'])]
     public function show(Trainer $trainer): Response
     {
         return $this->render('administration/trainer_show.html.twig', [

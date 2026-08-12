@@ -108,7 +108,7 @@ final class FamilyController extends AbstractController
         return $this->render('identity/child_create.html.twig', ['form' => $form, 'duplicates' => $duplicates]);
     }
 
-    #[Route('/portal/family/children/{child}/edit', name: 'identity_portal_child_edit', methods: ['GET', 'POST'])]
+    #[Route('/portal/family/children/{child<\d+>}/edit', name: 'identity_portal_child_edit', methods: ['GET', 'POST'])]
     public function edit(Request $request, PlayerProfile $child): Response
     {
         $this->denyAccessUnlessGranted(ChildProfileVoter::CHILD_PROFILE_EDIT, $child);
@@ -137,7 +137,7 @@ final class FamilyController extends AbstractController
     /**
      * AC-01-23: by manually-entered code, or by picking from "My Trainers".
      */
-    #[Route('/portal/family/children/{child}/trainers/add', name: 'identity_portal_child_trainer_add', methods: ['GET', 'POST'])]
+    #[Route('/portal/family/children/{child<\d+>}/trainers/add', name: 'identity_portal_child_trainer_add', methods: ['GET', 'POST'])]
     public function addTrainer(Request $request, PlayerProfile $child): Response
     {
         $this->denyAccessUnlessGranted(ChildProfileVoter::CHILD_TRAINER_ADD, $child);
@@ -183,7 +183,7 @@ final class FamilyController extends AbstractController
      * AC-01-24: soft-removal, with a confirmation step rendered before this
      * POST is reachable.
      */
-    #[Route('/portal/family/children/{child}/trainers/{trainer}/remove', name: 'identity_portal_child_trainer_remove', methods: ['GET', 'POST'])]
+    #[Route('/portal/family/children/{child<\d+>}/trainers/{trainer<\d+>}/remove', name: 'identity_portal_child_trainer_remove', methods: ['GET', 'POST'])]
     public function removeTrainer(Request $request, PlayerProfile $child, int $trainer): Response
     {
         $this->denyAccessUnlessGranted(ChildProfileVoter::CHILD_TRAINER_REMOVE, $child);
@@ -216,7 +216,7 @@ final class FamilyController extends AbstractController
     /**
      * AC-01-27/28.
      */
-    #[Route('/portal/family/children/{child}/token-approval', name: 'identity_portal_child_token_approval', methods: ['GET', 'POST'])]
+    #[Route('/portal/family/children/{child<\d+>}/token-approval', name: 'identity_portal_child_token_approval', methods: ['GET', 'POST'])]
     public function tokenApproval(Request $request, PlayerProfile $child): Response
     {
         $this->denyAccessUnlessGranted(ChildProfileVoter::CHILD_TOKEN_APPROVAL_EDIT, $child);
@@ -242,7 +242,7 @@ final class FamilyController extends AbstractController
     /**
      * AC-01-18: the child context switcher.
      */
-    #[Route('/portal/context/child/{child}', name: 'identity_portal_context_child_switch', methods: ['POST'])]
+    #[Route('/portal/context/child/{child<\d+>}', name: 'identity_portal_context_child_switch', methods: ['POST'])]
     public function switchChildContext(Request $request, PlayerProfile $child): Response
     {
         $this->denyAccessUnlessGranted(ChildProfileVoter::CHILD_PROFILE_VIEW, $child);

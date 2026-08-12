@@ -85,7 +85,7 @@ final class CoachPlayerController extends AbstractController
      * limited to this coach's own shared history, all read-only except
      * feedback.
      */
-    #[Route('/coach/players/{membership}', name: 'crm_coach_player_show', requirements: ['membership' => '\d+'], methods: ['GET'])]
+    #[Route('/coach/players/{membership<\d+>}', name: 'crm_coach_player_show', methods: ['GET'])]
     public function show(PlayerTrainerMembership $membership): Response
     {
         $this->denyAccessUnlessGranted(PlayerVoter::PLAYER_VIEW, $membership);
@@ -117,7 +117,7 @@ final class CoachPlayerController extends AbstractController
      * AC-03-46: up to 500 characters, tied to one of this coach's own recent
      * shared sessions with the player.
      */
-    #[Route('/coach/players/{membership}/feedback', name: 'crm_coach_player_feedback_add', methods: ['POST'])]
+    #[Route('/coach/players/{membership<\d+>}/feedback', name: 'crm_coach_player_feedback_add', methods: ['POST'])]
     public function feedbackAdd(Request $request, PlayerTrainerMembership $membership): Response
     {
         $this->denyAccessUnlessGranted(PlayerVoter::PLAYER_FEEDBACK_ADD, $membership);
@@ -140,7 +140,7 @@ final class CoachPlayerController extends AbstractController
     /**
      * AC-03-49: own feedback only, within 24 hours.
      */
-    #[Route('/coach/players/{membership}/feedback/{feedback}/edit', name: 'crm_coach_player_feedback_edit', methods: ['POST'])]
+    #[Route('/coach/players/{membership<\d+>}/feedback/{feedback<\d+>}/edit', name: 'crm_coach_player_feedback_edit', methods: ['POST'])]
     public function feedbackEdit(Request $request, PlayerTrainerMembership $membership, PlayerNote $feedback): Response
     {
         $this->denyAccessUnlessGranted(PlayerVoter::PLAYER_FEEDBACK_EDIT, $feedback);
@@ -173,7 +173,7 @@ final class CoachPlayerController extends AbstractController
      * (`crm_trainer_player_note_delete`). Recorded in the coder's final
      * report.
      */
-    #[Route('/coach/players/{membership}/feedback/{feedback}/delete', name: 'crm_coach_player_feedback_delete', methods: ['POST'])]
+    #[Route('/coach/players/{membership<\d+>}/feedback/{feedback<\d+>}/delete', name: 'crm_coach_player_feedback_delete', methods: ['POST'])]
     public function feedbackDelete(Request $request, PlayerTrainerMembership $membership, PlayerNote $feedback): Response
     {
         $this->denyAccessUnlessGranted(PlayerVoter::PLAYER_FEEDBACK_EDIT, $feedback);

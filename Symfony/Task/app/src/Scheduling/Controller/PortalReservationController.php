@@ -54,7 +54,7 @@ final class PortalReservationController extends AbstractController
     /**
      * AC-02-29..33, BR-02-11.
      */
-    #[Route('/portal/rsvps/{rsvp}/cancel', name: 'scheduling_portal_rsvp_cancel', methods: ['POST'])]
+    #[Route('/portal/rsvps/{rsvp<\d+>}/cancel', name: 'scheduling_portal_rsvp_cancel', methods: ['POST'])]
     public function cancel(Request $request, Rsvp $rsvp): Response
     {
         $this->denyAccessUnlessGranted(RsvpVoter::RSVP_CANCEL, $rsvp);
@@ -79,13 +79,13 @@ final class PortalReservationController extends AbstractController
      * ChildApprovalService/ApprovalDecisionType/the approval_decide template
      * as-is; only the post-decision step differs from ApprovalController's.
      */
-    #[Route('/portal/rsvps/approvals/{approval}/approve', name: 'scheduling_portal_rsvp_approval_approve', methods: ['GET', 'POST'])]
+    #[Route('/portal/rsvps/approvals/{approval<\d+>}/approve', name: 'scheduling_portal_rsvp_approval_approve', methods: ['GET', 'POST'])]
     public function approveApproval(Request $request, ChildApprovalRequest $approval): Response
     {
         return $this->decideApproval($request, $approval, true);
     }
 
-    #[Route('/portal/rsvps/approvals/{approval}/deny', name: 'scheduling_portal_rsvp_approval_deny', methods: ['GET', 'POST'])]
+    #[Route('/portal/rsvps/approvals/{approval<\d+>}/deny', name: 'scheduling_portal_rsvp_approval_deny', methods: ['GET', 'POST'])]
     public function denyApproval(Request $request, ChildApprovalRequest $approval): Response
     {
         return $this->decideApproval($request, $approval, false);

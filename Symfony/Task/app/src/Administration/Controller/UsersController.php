@@ -84,7 +84,7 @@ final class UsersController extends AbstractController
         ]);
     }
 
-    #[Route('/super-admin/users/{account}', name: 'administration_user_show', methods: ['GET'])]
+    #[Route('/super-admin/users/{account<\d+>}', name: 'administration_user_show', methods: ['GET'])]
     public function show(Account $account): Response
     {
         $this->denyAccessUnlessGranted(AccountVoter::ACCOUNT_VIEW, $account);
@@ -95,7 +95,7 @@ final class UsersController extends AbstractController
     /**
      * AC-01-71, AC-07-13..15.
      */
-    #[Route('/super-admin/users/{account}/edit', name: 'administration_user_edit', methods: ['GET', 'POST'])]
+    #[Route('/super-admin/users/{account<\d+>}/edit', name: 'administration_user_edit', methods: ['GET', 'POST'])]
     public function edit(Request $request, Account $account): Response
     {
         $this->denyAccessUnlessGranted(AccountVoter::ACCOUNT_EDIT, $account);
@@ -160,7 +160,7 @@ final class UsersController extends AbstractController
     /**
      * AC-01-52/53.
      */
-    #[Route('/super-admin/users/{account}/deactivate', name: 'administration_user_deactivate', methods: ['GET', 'POST'])]
+    #[Route('/super-admin/users/{account<\d+>}/deactivate', name: 'administration_user_deactivate', methods: ['GET', 'POST'])]
     public function deactivate(Request $request, Account $account): Response
     {
         $this->denyAccessUnlessGranted(AccountVoter::ACCOUNT_DEACTIVATE, $account);
@@ -184,7 +184,7 @@ final class UsersController extends AbstractController
     /**
      * AC-01-54.
      */
-    #[Route('/super-admin/users/{account}/reactivate', name: 'administration_user_reactivate', methods: ['POST'])]
+    #[Route('/super-admin/users/{account<\d+>}/reactivate', name: 'administration_user_reactivate', methods: ['POST'])]
     public function reactivate(Request $request, Account $account): Response
     {
         $this->denyAccessUnlessGranted(AccountVoter::ACCOUNT_REACTIVATE, $account);
@@ -204,7 +204,7 @@ final class UsersController extends AbstractController
     /**
      * AC-01-55..59.
      */
-    #[Route('/super-admin/users/{account}/delete', name: 'administration_user_delete', methods: ['GET', 'POST'])]
+    #[Route('/super-admin/users/{account<\d+>}/delete', name: 'administration_user_delete', methods: ['GET', 'POST'])]
     public function delete(Request $request, Account $account): Response
     {
         $this->denyAccessUnlessGranted(AccountVoter::ACCOUNT_DELETE_GDPR, $account);

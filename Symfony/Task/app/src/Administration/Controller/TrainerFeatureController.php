@@ -62,7 +62,7 @@ final class TrainerFeatureController extends AbstractController
      * confirmation step for that one feature instead (still a GET — no
      * state changes until the POST below).
      */
-    #[Route('/super-admin/trainers/{trainer}/features', name: 'administration_trainer_features_edit', methods: ['GET', 'POST'])]
+    #[Route('/super-admin/trainers/{trainer<\d+>}/features', name: 'administration_trainer_features_edit', methods: ['GET', 'POST'])]
     public function edit(Request $request, Trainer $trainer): Response
     {
         $this->denyAccessUnlessGranted(PlatformConfigurationVoter::PLATFORM_CONFIG_EDIT, $this->representativeToggle($trainer));

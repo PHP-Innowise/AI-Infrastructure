@@ -116,7 +116,7 @@ final class TrainerDrillController extends AbstractController
     /**
      * AC-04-8: preview — full details, embedded video, "Add to Playlist".
      */
-    #[Route('/trainer/content/drills/{drill}', name: 'content_trainer_drill_show', methods: ['GET'])]
+    #[Route('/trainer/content/drills/{drill<\d+>}', name: 'content_trainer_drill_show', methods: ['GET'])]
     public function show(Drill $drill): Response
     {
         $this->denyAccessUnlessGranted(ContentItemVoter::CONTENT_ITEM_VIEW, $drill);
@@ -124,7 +124,7 @@ final class TrainerDrillController extends AbstractController
         return $this->render('content/trainer_drill_show.html.twig', ['drill' => $drill]);
     }
 
-    #[Route('/trainer/content/drills/{drill}/edit', name: 'content_trainer_drill_edit', methods: ['GET', 'POST'])]
+    #[Route('/trainer/content/drills/{drill<\d+>}/edit', name: 'content_trainer_drill_edit', methods: ['GET', 'POST'])]
     public function edit(Request $request, Drill $drill): Response
     {
         $this->denyAccessUnlessGranted(ContentItemVoter::CONTENT_ITEM_EDIT, $drill);
@@ -175,7 +175,7 @@ final class TrainerDrillController extends AbstractController
     /**
      * AC-04-35: "This drill is used in [N] playlists. Delete anyway?"
      */
-    #[Route('/trainer/content/drills/{drill}/delete', name: 'content_trainer_drill_delete', methods: ['GET', 'POST'])]
+    #[Route('/trainer/content/drills/{drill<\d+>}/delete', name: 'content_trainer_drill_delete', methods: ['GET', 'POST'])]
     public function delete(Request $request, Drill $drill): Response
     {
         $this->denyAccessUnlessGranted(ContentItemVoter::CONTENT_ITEM_DELETE, $drill);
@@ -201,7 +201,7 @@ final class TrainerDrillController extends AbstractController
     /**
      * AC-04-17/18.
      */
-    #[Route('/trainer/content/drills/{drill}/visibility', name: 'content_trainer_drill_visibility', methods: ['GET', 'POST'])]
+    #[Route('/trainer/content/drills/{drill<\d+>}/visibility', name: 'content_trainer_drill_visibility', methods: ['GET', 'POST'])]
     public function visibility(Request $request, Drill $drill): Response
     {
         $this->denyAccessUnlessGranted(ContentItemVoter::CONTENT_ITEM_PUBLISH_TOGGLE, $drill);

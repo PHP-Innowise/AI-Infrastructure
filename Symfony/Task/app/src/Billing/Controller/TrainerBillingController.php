@@ -162,7 +162,7 @@ final class TrainerBillingController extends AbstractController
      * AC-05-33: "Trainer Can Gift Tokens" — audit-logged by
      * TokenLedgerService::gift() itself.
      */
-    #[Route('/trainer/players/{membership}/gift-tokens', name: 'billing_trainer_gift_tokens', methods: ['POST'])]
+    #[Route('/trainer/players/{membership<\d+>}/gift-tokens', name: 'billing_trainer_gift_tokens', methods: ['POST'])]
     public function giftTokens(Request $request, PlayerTrainerMembership $membership): Response
     {
         $this->denyAccessUnlessGranted(TokenVoter::TOKEN_GIFT, $membership);

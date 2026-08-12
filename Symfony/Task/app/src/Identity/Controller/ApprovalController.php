@@ -42,13 +42,13 @@ final class ApprovalController extends AbstractController
         ]);
     }
 
-    #[Route('/portal/approvals/{approval}/approve', name: 'identity_portal_approval_approve', methods: ['GET', 'POST'])]
+    #[Route('/portal/approvals/{approval<\d+>}/approve', name: 'identity_portal_approval_approve', methods: ['GET', 'POST'])]
     public function approve(Request $request, ChildApprovalRequest $approval): Response
     {
         return $this->decide($request, $approval, true);
     }
 
-    #[Route('/portal/approvals/{approval}/deny', name: 'identity_portal_approval_deny', methods: ['GET', 'POST'])]
+    #[Route('/portal/approvals/{approval<\d+>}/deny', name: 'identity_portal_approval_deny', methods: ['GET', 'POST'])]
     public function deny(Request $request, ChildApprovalRequest $approval): Response
     {
         return $this->decide($request, $approval, false);

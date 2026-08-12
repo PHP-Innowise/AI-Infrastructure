@@ -155,7 +155,7 @@ final class TrainerPlaylistController extends AbstractController
     /**
      * US-04.09 narrative.
      */
-    #[Route('/trainer/content/playlists/{playlist}', name: 'content_trainer_playlist_show', methods: ['GET'])]
+    #[Route('/trainer/content/playlists/{playlist<\d+>}', name: 'content_trainer_playlist_show', methods: ['GET'])]
     public function show(Playlist $playlist): Response
     {
         $this->denyAccessUnlessGranted(PlaylistVoter::PLAYLIST_VIEW, $playlist);
@@ -171,7 +171,7 @@ final class TrainerPlaylistController extends AbstractController
     /**
      * AC-04-31..33.
      */
-    #[Route('/trainer/content/playlists/{playlist}/edit', name: 'content_trainer_playlist_edit', methods: ['GET', 'POST'])]
+    #[Route('/trainer/content/playlists/{playlist<\d+>}/edit', name: 'content_trainer_playlist_edit', methods: ['GET', 'POST'])]
     public function edit(Request $request, Playlist $playlist): Response
     {
         $this->denyAccessUnlessGranted(PlaylistVoter::PLAYLIST_EDIT, $playlist);
@@ -214,7 +214,7 @@ final class TrainerPlaylistController extends AbstractController
      * AC-04-2/AC-04-12: drag-and-drop reorder — JSON in, 204 out. See
      * "JSON vs. HTML §2" in specs/api-designer-spec.md.
      */
-    #[Route('/trainer/content/playlists/{playlist}/items/reorder', name: 'content_trainer_playlist_items_reorder', methods: ['POST'])]
+    #[Route('/trainer/content/playlists/{playlist<\d+>}/items/reorder', name: 'content_trainer_playlist_items_reorder', methods: ['POST'])]
     public function itemsReorder(Request $request, Playlist $playlist): Response
     {
         $this->denyAccessUnlessGranted(PlaylistVoter::PLAYLIST_EDIT, $playlist);
@@ -237,7 +237,7 @@ final class TrainerPlaylistController extends AbstractController
      * `scheduling_trainer_event_rsvp_remove` shape (POST + CSRF, redirect
      * back with flash). Recorded in the coder's final report.
      */
-    #[Route('/trainer/content/playlists/{playlist}/items/{item}/remove', name: 'content_trainer_playlist_item_remove', methods: ['POST'])]
+    #[Route('/trainer/content/playlists/{playlist<\d+>}/items/{item<\d+>}/remove', name: 'content_trainer_playlist_item_remove', methods: ['POST'])]
     public function itemRemove(Request $request, Playlist $playlist, PlaylistItem $item): Response
     {
         $this->denyAccessUnlessGranted(PlaylistVoter::PLAYLIST_EDIT, $playlist);
@@ -259,7 +259,7 @@ final class TrainerPlaylistController extends AbstractController
     /**
      * AC-04-2: one more inline video appended to a Learn playlist.
      */
-    #[Route('/trainer/content/playlists/{playlist}/videos', name: 'content_trainer_playlist_video_add', methods: ['GET', 'POST'])]
+    #[Route('/trainer/content/playlists/{playlist<\d+>}/videos', name: 'content_trainer_playlist_video_add', methods: ['GET', 'POST'])]
     public function videoAdd(Request $request, Playlist $playlist): Response
     {
         $this->denyAccessUnlessGranted(PlaylistVoter::PLAYLIST_EDIT, $playlist);
@@ -290,7 +290,7 @@ final class TrainerPlaylistController extends AbstractController
     /**
      * AC-04-17/18/41, A9.
      */
-    #[Route('/trainer/content/playlists/{playlist}/visibility', name: 'content_trainer_playlist_visibility', methods: ['GET', 'POST'])]
+    #[Route('/trainer/content/playlists/{playlist<\d+>}/visibility', name: 'content_trainer_playlist_visibility', methods: ['GET', 'POST'])]
     public function visibility(Request $request, Playlist $playlist): Response
     {
         $this->denyAccessUnlessGranted(PlaylistVoter::PLAYLIST_PUBLISH_TOGGLE, $playlist);
@@ -314,7 +314,7 @@ final class TrainerPlaylistController extends AbstractController
     /**
      * AC-04-34, AC-04-36.
      */
-    #[Route('/trainer/content/playlists/{playlist}/delete', name: 'content_trainer_playlist_delete', methods: ['GET', 'POST'])]
+    #[Route('/trainer/content/playlists/{playlist<\d+>}/delete', name: 'content_trainer_playlist_delete', methods: ['GET', 'POST'])]
     public function delete(Request $request, Playlist $playlist): Response
     {
         $this->denyAccessUnlessGranted(PlaylistVoter::PLAYLIST_DELETE, $playlist);
@@ -336,7 +336,7 @@ final class TrainerPlaylistController extends AbstractController
     /**
      * AC-04-13..16, BR-04-13..15.
      */
-    #[Route('/trainer/content/playlists/{playlist}/assign', name: 'content_trainer_playlist_assign', methods: ['GET', 'POST'])]
+    #[Route('/trainer/content/playlists/{playlist<\d+>}/assign', name: 'content_trainer_playlist_assign', methods: ['GET', 'POST'])]
     public function assign(Request $request, Playlist $playlist): Response
     {
         $this->denyAccessUnlessGranted(PlaylistVoter::PLAYLIST_ASSIGN, $playlist);
@@ -365,7 +365,7 @@ final class TrainerPlaylistController extends AbstractController
      * AC-04-8/AC-04-12, BR-04-12: adds an existing drill (own or public) to
      * a Practice playlist by reference.
      */
-    #[Route('/trainer/content/playlists/{playlist}/drills', name: 'content_trainer_playlist_drill_add', methods: ['GET', 'POST'])]
+    #[Route('/trainer/content/playlists/{playlist<\d+>}/drills', name: 'content_trainer_playlist_drill_add', methods: ['GET', 'POST'])]
     public function drillAdd(Request $request, Playlist $playlist): Response
     {
         $this->denyAccessUnlessGranted(PlaylistVoter::PLAYLIST_EDIT, $playlist);

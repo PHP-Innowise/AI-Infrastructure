@@ -76,7 +76,7 @@ final class CoachActivityController extends AbstractController
     /**
      * AC-02-35.
      */
-    #[Route('/coach/assignments/{assignment}/confirm', name: 'scheduling_coach_assignment_confirm', methods: ['POST'])]
+    #[Route('/coach/assignments/{assignment<\d+>}/confirm', name: 'scheduling_coach_assignment_confirm', methods: ['POST'])]
     public function confirm(Request $request, CoachAssignment $assignment): Response
     {
         $this->denyAccessUnlessGranted(CoachAssignmentVoter::COACH_ASSIGNMENT_CONFIRM, $assignment);
@@ -94,7 +94,7 @@ final class CoachActivityController extends AbstractController
     /**
      * AC-02-36.
      */
-    #[Route('/coach/assignments/{assignment}/decline', name: 'scheduling_coach_assignment_decline', methods: ['GET', 'POST'])]
+    #[Route('/coach/assignments/{assignment<\d+>}/decline', name: 'scheduling_coach_assignment_decline', methods: ['GET', 'POST'])]
     public function decline(Request $request, CoachAssignment $assignment): Response
     {
         $this->denyAccessUnlessGranted(CoachAssignmentVoter::COACH_ASSIGNMENT_DECLINE, $assignment);
@@ -118,7 +118,7 @@ final class CoachActivityController extends AbstractController
      * AC-02-38..42/BR-02-16..18: coach branch — assigned, started,
      * same-day-only.
      */
-    #[Route('/coach/events/{event}/attendance', name: 'scheduling_coach_event_attendance', methods: ['GET', 'POST'])]
+    #[Route('/coach/events/{event<\d+>}/attendance', name: 'scheduling_coach_event_attendance', methods: ['GET', 'POST'])]
     public function attendance(Request $request, Event $event): Response
     {
         $this->denyAccessUnlessGranted(AttendanceVoter::ATTENDANCE_RECORD, $event);
