@@ -102,12 +102,13 @@ is a client capability limit, not an installation fault, and
 
 The read path on Cursor is served through a rule file instead: the Cursor
 mirrors of `working-memory-write.sh` (after the turn checkpoint) and
-`local-context.sh` (at session start, so a fresh session or a branch switch
-never serves the previous session's capsule) render the freshest capsule into
-`.cursor/rules/working-memory.mdc` - an `alwaysApply` rule Cursor attaches to
-every prompt. The file states its own staleness ("as of end of previous
-turn"), is replaced atomically and only when a fresh render succeeds, and is
-ignored local state (each edition's `.gitignore` lists it). This is a
+`local-context.sh` (at session start, so a fresh session or branch switch does
+not retain the previous session's render) put the most recently rendered
+capsule in `.cursor/rules/working-memory.mdc` - an `alwaysApply` rule Cursor
+attaches to every prompt. During an active session it is intentionally one turn
+stale; it is not a fresh prompt-submit capsule. The file states that staleness
+("as of end of previous turn"), is replaced atomically only when a render
+succeeds, and is ignored local state (each edition's `.gitignore` lists it). This is a
 declared MIRROR_RULES transformation of the canonical hooks (the
 `_WM_DELIVERY_*` constants in `memory-bank/scripts/context_retrieval.py`),
 not drift: `scripts/build_mirrors.py --check` verifies it.
@@ -257,8 +258,10 @@ better tool.
 one bundle for pasting into an external model — a code review in a chat
 window, a second opinion on the memory core, a diff explained to a model that
 cannot see the checkout. It wraps the
-[`code2prompt`](https://code2prompt.dev/docs/how_to/cli/) CLI (verified on
-4.3.0) and follows the same rule as MCP servers and the batch harness:
+[`code2prompt`](https://code2prompt.dev/docs/how_to/cli/) CLI. Repository
+contract tests pin the expected 4.3.0 argv and exclusion behavior; upstream
+behavior must be manually re-verified before changing that pin. It follows the
+same rule as MCP servers and the batch harness:
 **optional, external, opt-in per developer; the accelerator does not require,
 ship, or depend on it.** It saves zero runtime tokens — it spends the
 maintainer's, to produce a bundle scoped on purpose.
@@ -292,8 +295,9 @@ ignored `/.c2p/` alongside a manifest recording the exact patterns, counts
 and binary version. Nothing is written without a scope, and a run whose
 patterns match nothing fails loudly.
 
-The wrapper exists because the bare CLI is unsafe in *this* repository, in
-four specific ways it absorbs:
+The wrapper exists because a bare CLI run was unsafe in *this* repository in
+the measured 2026-08-08 snapshot. The counts below describe that snapshot and
+code2prompt 4.3.0; they are regression context, not current repository totals:
 
 | Guard | Unguarded behaviour on 4.3.0 |
 |---|---|
@@ -310,19 +314,20 @@ at the top level, and `-i "CHANGELOG.md"` matches five, one per edition. Only
 a `./`-prefixed literal anchors. Scopes declare top-level wants separately and
 the wrapper expands them with Python's own non-recursive glob.
 
-Token counts come from cl100k (OpenAI BPE, the tokenizer `code2prompt`
-carries). **That is not a count of Claude tokens** — it is a calibrated
-relative unit, good for comparing two bundles, not for predicting a bill. An
-exact Anthropic count needs `/v1/messages/count_tokens`, a network call with
-an API key, which is a separate decision under [Security](SECURITY.md).
+The snapshot token counts came from cl100k (OpenAI BPE, the tokenizer
+code2prompt 4.3.0 carried). **They are not counts of Claude tokens** — they are
+relative comparison units, not bill predictions. Current upstream tokenizer
+and API behavior are manual-verification claims. An exact Anthropic count may
+require a current vendor-supported counting API, network access, and an API key,
+which is a separate decision under [Security](SECURITY.md).
 
 Not adopted: the `code2prompt-mcp` server and the `code2prompt-rs` Python SDK.
 The MCP server is recorded as a decision rather than a silence — the shipped
 Codex configuration deliberately requires no MCP server (see above and
-[Security](SECURITY.md)), and the server exposes one `get_context` tool that
-is strictly poorer than this wrapper. The SDK's latest release trails the CLI
-by a full major version and ships a single wheel; a `subprocess` call is
-better. The CLI is never a blocking CI gate: CI has no Rust toolchain, so
+[Security](SECURITY.md)). The 2026-08-08 evaluation found the server surface
+poorer than this wrapper and the Python SDK unsuitable for the repository;
+re-check those upstream surfaces manually before relying on that comparison.
+The CLI is never a blocking CI gate: CI has no Rust toolchain, so
 `tests/test_collect_context.py` skips its live checks and runs its contract
 checks — including `test_containment`, which fails if `code2prompt` is ever
 referenced from an edition or the installer.

@@ -8,7 +8,7 @@ A Symfony-first workflow accelerator for AI coding agents. It provides focused c
 Controller -> Service -> Repository
 ```
 
-This is the `Symfony/` folder of the `accelerator-php` monorepo. The framework-neutral PHP base lives in the sibling `PHP Core/` folder; `Laravel/` is the equivalent Laravel specialization — see the [repository root README](../README.md) for the full comparison and usage instructions.
+This is the `Symfony/` folder of the `accelerator-php` monorepo. The framework-neutral PHP base lives in the sibling `PHP Core/` folder; `Laravel/` is the equivalent Laravel specialization — see the [repository root README](https://github.com/PHP-Innowise/AI-Infrastructure/blob/main/README.md) for the full comparison and usage instructions.
 
 ## What This Is
 
@@ -43,7 +43,7 @@ The root `AGENTS.md` policy is shared. Each tool keeps its native integration mo
 
 Do not enable Cursor's optional Claude-file loading when using the self-contained `.cursor` edition. Codex does not use duplicated `.codex/skills`, command, or wrapper trees.
 
-## Directory Structure
+## Source Edition Structure
 
 ```text
 AGENTS.md                 # Shared enforceable policy
@@ -62,12 +62,35 @@ CHANGELOG.md              # Versioned accelerator changes
 .cursor/                  # Cursor-native mirror and adapters
 .agents/skills/           # Canonical shared skills; Codex discovery
 .codex/                   # Codex config, hooks, and references
-tasks/TASK-N/             # Temporary prefixed task artifacts
+Task/                     # Source-only sample/client material; not installed
+tasks/                    # Installed temporary-task scaffold
 specs/                    # Permanent living specifications
 memory-bank/              # Indexed durable cross-session project memory
 project-brain/            # Shared governed task and control records
-examples/                 # Workflow output examples
+examples/                 # Runtime reference plus source-only examples
 ```
+
+## Installed Production Payload
+
+The source edition contains maintainer and validation material that does not
+belong in a consuming Symfony application. The production inventory retains
+the operational accelerator: shared policy, selected native tool integrations,
+runtime scripts, hooks, skills, workflow documentation, templates,
+`memory-bank/`, `project-brain/`, `specs/`, and the lowercase `tasks/`
+scaffold.
+
+Source-only research, test suites, source-only worked examples, and this
+repository's bundled uppercase `Task/` product/design material are not
+installed. The Symfony clean-code patterns remain because active workflow
+documentation references them. A client project may create and populate
+uppercase `Task/` when real requirements or design inputs exist. Lowercase
+`tasks/` has a separate role: it remains the temporary, skill-prefixed
+`TASK-NNN/` workspace used by accelerator workflows.
+
+The versioned inventory is responsible for resolving source exclusions and
+production-specific overrides. Verify it and review an installer dry run for
+the actual payload rather than maintaining an exact file-count claim in this
+README.
 
 ## Workflow Model
 
@@ -225,7 +248,7 @@ Do not install Symfony CLI, bundles, npm packages, or analysis tools without app
 | `finishing-branch` | Present merge, PR, or cleanup alternatives |
 | `release` | Prepare versioning, changelog, tag, and release notes |
 
-See [Orchestrator Commands](../docs/ORCHESTRATOR-COMMANDS.md) for flow examples,
+See [Orchestrator Commands](https://github.com/PHP-Innowise/AI-Infrastructure/blob/main/docs/ORCHESTRATOR-COMMANDS.md) for flow examples,
 approval points, parallel-review limits, and write serialization.
 
 Example flow:

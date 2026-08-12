@@ -4,7 +4,7 @@
 
 A native-PHP accelerator framework for AI coding agents. It provides structured slash-command workflows, isolated agents, reusable skills, quality gates, and documentation conventions for PHP teams — usable from **Claude Code**, **Cursor**, and **OpenAI Codex** out of the same repository.
 
-This is the `PHP Core/` folder of the `accelerator-php` monorepo: the universal, framework-agnostic base (Composer + PSR). Framework-specific behavior (Laravel, Symfony, etc.) belongs in the sibling `Laravel/` and `Symfony/` folders, not here — see the [repository root README](../README.md) for the full comparison and usage instructions.
+This is the `PHP Core/` folder of the `accelerator-php` monorepo: the universal, framework-agnostic base (Composer + PSR). Framework-specific behavior (Laravel, Symfony, etc.) belongs in the sibling `Laravel/` and `Symfony/` folders, not here — see the [repository root README](https://github.com/PHP-Innowise/AI-Infrastructure/blob/main/README.md) for the full comparison and usage instructions.
 
 ## What This Is
 
@@ -30,7 +30,7 @@ The same accelerator is mirrored for three agents. Each tool reads its own direc
 
 When you change a skill, mirror the edit across the editions you support (or regenerate).
 
-## Directory Structure
+## Source Edition Structure
 
 ```
 AGENTS.md                # Shared, enforceable policy (all tools)
@@ -49,13 +49,33 @@ AGENTS.md                # Shared, enforceable policy (all tools)
 .agents/skills/          # Codex skills (shared .agents convention)
 .codex/                  # Codex config.toml, hooks.json, hooks/, docs
 
-Task/                    # Product/domain planning material and design references (not a retrieval source)
-tasks/                   # Temporary task documentation
+Task/                    # Source-only sample/client material; not installed
+tasks/                   # Installed temporary-task scaffold
 specs/                   # Permanent living specifications
 memory-bank/             # Indexed durable cross-session project memory
 project-brain/           # Shared governed task and control records
-examples/                # Workflow output examples
+examples/                # Source-only worked examples
 ```
+
+## Installed Production Payload
+
+The source edition is a development and maintenance superset of the
+ready-made production package. Installation retains the files needed to run
+and adapt the accelerator: `AGENTS.md`, selected tool integrations, runtime
+scripts, policies, hooks, skills, workflow documentation, templates,
+`memory-bank/`, `project-brain/`, `specs/`, and the lowercase `tasks/`
+operational scaffold.
+
+Source-only research, tests, worked examples, and this repository's bundled
+uppercase `Task/` product/design material stay in the source repository and
+are not installed. A consuming project may create and populate uppercase
+`Task/` when real client input exists. Lowercase `tasks/` is separate and
+remains the temporary, skill-prefixed `TASK-NNN/` workspace used by normal
+accelerator workflows.
+
+The versioned inventory resolves these exclusions and any production
+overrides. Use inventory verification and an installer dry run to learn the
+actual payload; do not infer or pin exact counts from all tracked source files.
 
 ## Architecture: Command -> Agent -> Skill
 
@@ -137,7 +157,7 @@ Use slash commands (Claude Code / Cursor) to move through the workflow:
 | `/finishing-branch` | Prepare branch completion or PR |
 | `/release` | Prepare release notes and changelog |
 
-See [Orchestrator Commands](../docs/ORCHESTRATOR-COMMANDS.md) for flow examples,
+See [Orchestrator Commands](https://github.com/PHP-Innowise/AI-Infrastructure/blob/main/docs/ORCHESTRATOR-COMMANDS.md) for flow examples,
 approval points, parallel-review limits, and write serialization.
 
 Example:

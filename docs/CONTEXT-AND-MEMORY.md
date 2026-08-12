@@ -86,10 +86,11 @@ It provides:
 - machine-local task bindings in governed mode;
 - optional local working tasks and replay episodes in lightweight mode.
 
-The database is derived and disposable only in part. Its document index can be
-rebuilt from repository sources. Its lightweight tasks, local episodes, and
-governed compatibility bindings cannot be reconstructed by the current CLI
-after deletion.
+The database is derived and disposable only in part. Its document and metadata
+indexes can be rebuilt from repository sources. Governed compatibility bindings
+can be restored from Git-tracked task records with `rebind`, and the next
+automated turn flush performs the same restoration. Lightweight tasks and local
+episodes remain machine-local and cannot be reconstructed after deletion.
 
 The active provider is local `sqlite-fts5`: network access and embeddings are
 disabled. An external provider entry exists only as a disabled contract. The
@@ -97,9 +98,11 @@ runtime does not include automatic prompt injection.
 
 ### Memory Bank
 
-`memory-bank/` is reviewed, Git-tracked, durable project memory shared across
-supported agent editions. It stores cohesive, reusable, source-backed knowledge
-that will help more than one future task, for example:
+`memory-bank/` is Git-tracked, durable project memory shared across supported
+agent editions. Depending on `automatic_promotion` in `runtime.json`, entries
+arrive through independent human review or explicit automatic promotion; the
+latter are labeled `auto-promoted`. It stores cohesive, reusable, source-backed
+knowledge that will help more than one future task, for example:
 
 - stable project constraints and conventions;
 - accepted architectural consequences;
@@ -173,21 +176,21 @@ The default governed model is:
 
 ```text
 Shared active work       -> Project Brain
-Reviewed reusable memory -> Memory Bank
+Durable reusable memory  -> Memory Bank
 Search and local binding -> Local Context Engine
 Current behavior         -> canonical project sources
 ```
 
 Governed mode is appropriate when work crosses agents, sessions, or machines;
 concurrent updates matter; handoffs are required; or records may later support
-a reviewed promotion.
+reviewed or configured automatic promotion.
 
 The explicit lightweight model is:
 
 ```text
 Local active work        -> SQLite working_tasks
 Local completed replay   -> SQLite episodes
-Reviewed reusable memory -> Memory Bank
+Durable reusable memory  -> Memory Bank
 Current behavior         -> canonical project sources
 ```
 
@@ -668,7 +671,7 @@ Promotion is appropriate for a reusable consequence, not:
 - generic framework knowledge;
 - private/restricted or sensitive material;
 - content already owned by a living specification;
-- a local episode with no governed, reviewed source.
+- a local episode with no eligible governed source.
 
 The runtime's automatic promotion application currently creates a fixed
 `decision`-type, application-scoped memory chunk with predefined tags and a
@@ -793,14 +796,15 @@ SQLite binding + local index + episodes + lightweight state
 ```
 
 On a new machine, validate the pulled Brain, validate Memory Bank, rebuild the
-index, use the same authorized owner, and verify canonical sources. Plan
-explicitly for the current binding limitation described in the
+index, use the same authorized owner, and verify canonical sources. Restore a
+missing governed binding explicitly with `rebind`, or allow the next automated
+turn flush to reconnect it, as described in the
 [operations runbook](OPERATIONS.md#missing-governed-task-binding).
 
 If work must survive without special recovery, do not leave its only meaningful
 state in a lightweight task or local episode. Capture it in the appropriate
-governed record, task document, living specification, or independently reviewed
-Memory Bank chunk.
+governed record, task document, living specification, or durable Memory Bank
+chunk whose reviewed or automatic provenance is acceptable for the environment.
 
 ## Hooks and Explicit Actions
 
@@ -829,7 +833,7 @@ at the end of a turn, which is the right moment to *write*.
 
 Cursor has no `UserPromptSubmit` equivalent, so its read half is delivered
 differently: the Cursor mirrors of the `stop` and `sessionStart` hooks render
-the freshest capsule into the `alwaysApply` rule
+the most recently available capsule into the `alwaysApply` rule
 `.cursor/rules/working-memory.mdc` - ignored local state, one turn stale by
 design and labeled as such ("as of end of previous turn"). See
 `docs/TOOL-INTEGRATIONS.md` for the mechanism and its MIRROR_RULES

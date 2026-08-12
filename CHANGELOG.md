@@ -182,6 +182,18 @@ edition's own files remain in that edition's changelog.
   adoption guides document preview, transcript, and rollback behavior, with
   tests covering safe merging, idempotence, and unsupported conflicts.
 
+- **Ready-made installations now have an explicit production boundary.**
+  Schema-v2 inventories classify every tracked edition file as installed or
+  source-only, reject unclassified/stale/overlapping metadata, and use a
+  declared source override to install a clean Memory Bank index. Client
+  `Task/` specifications, maintainer changelogs and memory, regression suites,
+  retired counters, and generic examples remain available in the source
+  repository but no longer enter consuming projects. Standalone payload tests
+  now validate their own Markdown links without repository allowlists. The
+  installation, operations, context/memory, orchestration, CI, troubleshooting,
+  token-research, edition, and scripts documentation was reconciled with the
+  implemented runtime and current production contract.
+
 - **The context budget now gates the whole startup surface, not the half of
   it that was easy to measure.** `scripts/context_budget.py` grew two
   categories, `command_bytes` and `agent_bytes`, because a measurement of what

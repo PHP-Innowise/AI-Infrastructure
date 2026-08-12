@@ -2,7 +2,7 @@
 
 These are enforceable rules for the Laravel accelerator. Wishes are ignored; constraints are enforced.
 
-This is the `Laravel/` accelerator folder. It targets **Laravel** as the default backend framework: Composer + a current Laravel LTS release, Eloquent, Artisan, and the Laravel ecosystem's conventional packages. The framework-agnostic native-PHP base lives in the sibling `PHP Core/` folder; other frameworks (Symfony, etc.) get their own sibling folder — see the [repository root README](../README.md) for the full monorepo layout.
+This is the `Laravel/` accelerator folder. It targets **Laravel** as the default backend framework: Composer + a current Laravel LTS release, Eloquent, Artisan, and the Laravel ecosystem's conventional packages. The framework-agnostic native-PHP base lives in the sibling `PHP Core/` folder; other frameworks (Symfony, etc.) get their own sibling folder — see the [repository root README](https://github.com/PHP-Innowise/AI-Infrastructure/blob/main/README.md) for the full monorepo layout.
 
 This policy is shared across editions. The same accelerator is mirrored for **Claude Code** (`.claude/`), **Cursor** (`.cursor/`), and **Codex** (`.agents/skills` + `.codex/`). Below, paths like `<edition>/hooks` and `<edition>/skills` refer to whichever edition is active.
 

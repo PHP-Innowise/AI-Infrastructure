@@ -26,14 +26,20 @@ python3 scripts/install_accelerator.py \
   --edition Laravel \
   --target "/path/with spaces/project" \
   --tool claude \
+  --merge-existing \
   --dry-run
 ```
 
 The verifier fails for an unlisted or stale distribution path. The installer
-preflights every destination and refuses the entire operation on any collision,
-unless an operator explicitly requests overwrite; normal adoption does not use
-that option. Its tab-separated `WOULD_COPY`, `COPY`, `COLLISION`, and `COMPLETE`
-lines are deterministic for a given inventory and tool selection. Retain the
+preflights every destination. Standard adoption keeps `--merge-existing`: it
+leaves byte-identical files unchanged, conservatively merges marked accelerator
+blocks into `.gitignore`, `.gitattributes`, and `AGENTS.md`, and preserves an
+existing root `README.md` while installing accelerator documentation as
+`ACCELERATOR.md`. Every unsupported collision still aborts the whole operation
+without writes. `--overwrite` is an explicit exceptional mode, not the normal
+recovery for a collision. The tab-separated `WOULD_COPY`, `WOULD_MERGE`,
+`WOULD_COPY_AS`, `COPY`, `MERGE`, `COPY_AS`, `COLLISION`, and `COMPLETE` lines
+are deterministic for a given inventory and tool selection. Retain the
 successful copy transcript outside the target as the rollback manifest.
 
 Inventories identify files shipped by Laravel, Symfony, and PHP Core, grouped

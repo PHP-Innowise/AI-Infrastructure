@@ -4,7 +4,7 @@
 
 A Laravel-first accelerator framework for AI coding agents. It provides structured slash-command workflows, isolated agents, reusable skills, quality gates, and documentation conventions for PHP teams building Laravel applications — usable from **Claude Code**, **Cursor**, and **OpenAI Codex** out of the same repository.
 
-This is the `Laravel/` folder of the `accelerator-php` monorepo: it specializes the accelerator for Laravel. The framework-agnostic native-PHP base lives in the sibling `PHP Core/` folder; other frameworks (Symfony, etc.) get their own sibling folder — see the [repository root README](../README.md) for the full comparison and usage instructions.
+This is the `Laravel/` folder of the `accelerator-php` monorepo: it specializes the accelerator for Laravel. The framework-agnostic native-PHP base lives in the sibling `PHP Core/` folder; other frameworks (Symfony, etc.) get their own sibling folder — see the [repository root README](https://github.com/PHP-Innowise/AI-Infrastructure/blob/main/README.md) for the full comparison and usage instructions.
 
 ## What This Is
 
@@ -30,7 +30,7 @@ The same accelerator is mirrored for three agents. Each tool reads its own direc
 
 When you change a skill, mirror the edit across the editions you support (or regenerate).
 
-## Directory Structure
+## Source Edition Structure
 
 ```
 AGENTS.md                # Shared, enforceable policy (all tools)
@@ -49,13 +49,34 @@ AGENTS.md                # Shared, enforceable policy (all tools)
 .agents/skills/          # Codex skills (shared .agents convention)
 .codex/                  # Codex config.toml, hooks.json, hooks/, docs
 
-Task/                    # Product/domain planning material and design references (not a retrieval source)
-tasks/                   # Temporary task documentation
+Task/                    # Source-only sample/client material; not installed
+tasks/                   # Installed temporary-task scaffold
 specs/                   # Permanent living specifications
 memory-bank/             # Indexed durable cross-session project memory
 project-brain/           # Shared governed task and control records
-examples/                # Workflow output examples
+examples/                # Source-only worked examples
 ```
+
+## Installed Production Payload
+
+The source edition is intentionally broader than the ready-made installation.
+Production inventories keep the runtime needed by a consuming Laravel project:
+`AGENTS.md`, selected native tool integrations, policies, hooks, skills,
+workflow documentation, templates, `memory-bank/`, `project-brain/`, `specs/`,
+and the lowercase `tasks/` operational scaffold.
+
+Source-only research, tests, worked examples, and this repository's bundled
+uppercase `Task/` product/design material remain available to maintainers but
+are not copied into client projects. Uppercase `Task/` is optional client-input
+space: create and populate it only when the consuming project actually has
+requirements or design assets to place there. It is distinct from lowercase
+`tasks/`, which remains available for temporary, skill-prefixed `TASK-NNN/`
+artifacts.
+
+The versioned inventory resolves these exclusions and any production
+overrides. Use the inventory verifier and installer dry run to inspect the
+actual payload; do not derive or freeze an exact file count from this source
+tree.
 
 ## Architecture: Command -> Agent -> Skill
 
@@ -180,7 +201,7 @@ Use slash commands to move through the workflow:
 | `/finishing-branch` | Prepare branch completion or PR |
 | `/release` | Prepare release notes and changelog |
 
-See [Orchestrator Commands](../docs/ORCHESTRATOR-COMMANDS.md) for flow examples,
+See [Orchestrator Commands](https://github.com/PHP-Innowise/AI-Infrastructure/blob/main/docs/ORCHESTRATOR-COMMANDS.md) for flow examples,
 approval points, parallel-review limits, and write serialization.
 
 Example:

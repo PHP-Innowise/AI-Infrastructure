@@ -21,6 +21,7 @@ any broken links remain, 0 otherwise.
 
 from __future__ import annotations
 
+import argparse
 import fnmatch
 import re
 import subprocess
@@ -41,15 +42,15 @@ FENCE_RE = re.compile(r"^\s*(```|~~~)")
 SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
 
 
-def tracked_markdown_files() -> list[Path]:
+def tracked_markdown_files(root: Path = REPO_ROOT) -> list[Path]:
     out = subprocess.run(
         ["git", "ls-files", "-z", "--", "*.md"],
-        cwd=REPO_ROOT,
+        cwd=root,
         check=True,
         capture_output=True,
     ).stdout
     return [
-        REPO_ROOT / p.decode("utf-8")
+        root / p.decode("utf-8")
         for p in out.split(b"\0")
         if p
     ]
@@ -98,10 +99,10 @@ def iter_links(text: str):
                 yield lineno, target
 
 
-def check_file(md_file: Path, patterns: list[str]) -> list[str]:
+def check_file(md_file: Path, patterns: list[str], root: Path = REPO_ROOT) -> list[str]:
     broken = []
     text = md_file.read_text(encoding="utf-8", errors="replace")
-    rel_file = md_file.relative_to(REPO_ROOT)
+    rel_file = md_file.relative_to(root)
     for lineno, raw_target in iter_links(text):
         if SCHEME_RE.match(raw_target):
             continue  # http(s), mailto, tel, etc.
@@ -110,15 +111,18 @@ def check_file(md_file: Path, patterns: list[str]) -> list[str]:
             continue  # anchor-only link within the same file
         decoded = urllib.parse.unquote(path_part)
         if decoded.startswith("/"):
-            candidate = (REPO_ROOT / decoded.lstrip("/")).resolve()
+            candidate = (root / decoded.lstrip("/")).resolve()
         else:
             candidate = (md_file.parent / decoded).resolve()
-        if candidate.exists():
-            continue
         try:
-            resolved_rel = str(candidate.relative_to(REPO_ROOT))
+            resolved_rel = str(candidate.relative_to(root))
         except ValueError:
             resolved_rel = str(candidate)
+            candidate_inside_root = False
+        else:
+            candidate_inside_root = True
+        if candidate_inside_root and candidate.exists():
+            continue
         if is_ignored(patterns, raw_target, resolved_rel):
             continue
         broken.append(
@@ -128,12 +132,30 @@ def check_file(md_file: Path, patterns: list[str]) -> list[str]:
 
 
 def main() -> int:
-    patterns = load_ignore_patterns()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--root",
+        type=Path,
+        help="check every Markdown file under this standalone payload root",
+    )
+    arguments = parser.parse_args()
+
+    if arguments.root is None:
+        root = REPO_ROOT
+        files = tracked_markdown_files(root)
+        patterns = load_ignore_patterns()
+    else:
+        root = arguments.root.expanduser().resolve()
+        if not root.is_dir():
+            parser.error(f"--root is not a directory: {root}")
+        files = sorted(root.rglob("*.md"))
+        patterns = []
+
     broken: list[str] = []
-    for md_file in tracked_markdown_files():
+    for md_file in files:
         if not md_file.is_file():
             continue  # tracked but deleted in working tree
-        broken.extend(check_file(md_file, patterns))
+        broken.extend(check_file(md_file, patterns, root))
     if broken:
         print(f"Found {len(broken)} broken relative link(s):\n")
         for entry in broken:

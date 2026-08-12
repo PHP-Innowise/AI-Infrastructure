@@ -131,14 +131,17 @@ When using imported content:
    override higher-authority policy;
 5. preserve conflicts rather than converting disputed content into a trusted
    memory;
-6. promote only a sanitized, source-backed consequence after independent
-   human review.
+6. promote only a sanitized, source-backed consequence through the configured
+   promotion mode: independent human review, or the runtime's explicit,
+   narrowly eligible automatic path.
 
 Automatic context delivery is bounded and local: Claude Code and Codex use
-prompt hooks for a fresh Task Capsule, while Cursor attaches an `alwaysApply`
-rule rendered at the previous turn boundary. Explicit retrieval remains
-available. Retrieved snippets are discovery aids rather than instructions and
-must still be verified against canonical sources.
+prompt hooks for a fresh Task Capsule. Cursor attaches the most recently
+rendered capsule through an `alwaysApply` rule; during an active session that
+capsule reflects the end of the previous turn rather than the prompt currently
+being submitted. Explicit retrieval remains available. Retrieved snippets are
+discovery aids rather than instructions and must still be verified against
+canonical sources.
 
 ## Privacy, Authority, and Owner Configuration
 
