@@ -170,6 +170,18 @@ edition's own files remain in that edition's changelog.
   exporter, no network, no configuration; never invoked by a hook, a skill,
   or CI.
 
+- **CI now syntax-checks the PHP the accelerator actually ships.** The
+  repository tracks no `.php` file, so no job had ever parsed a line of PHP -
+  yet its skills, examples and DOD carry 363 fenced PHP blocks, and those
+  blocks are what an agent copies when it writes code. A broken one propagates
+  into generated applications while every existing job stays green. The new
+  `scripts/check_php_snippets.py`, wired into the `lint` job, extracts each
+  block from tracked Markdown and runs `php -l` over the 93 that begin with
+  `<?php` and therefore claim to be whole files; the remaining 270 fragments
+  are counted and reported rather than linted, so the step never overstates
+  its coverage. All 93 pass today. `--require-php` makes a runner that lost
+  its preinstalled `php` fail rather than report a silent pass.
+
 ### Changed
 
 - **The ready-made accelerator installer can now adopt standard existing
