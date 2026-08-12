@@ -86,8 +86,7 @@ read: the whole context is re-read on every turn, so anything placed in context
 early is paid again on each subsequent turn of the session. Two operating
 consequences follow. Both thresholds were derived from local transcripts with
 `scripts/cost_attribution.py`; re-derive them on your own corpus before
-treating them as settled, and see
-[docs/TOKEN-ECONOMY-RESEARCH.md](TOKEN-ECONOMY-RESEARCH.md) for the method.
+treating them as settled.
 
 - **Delegate to a subagent only when it displaces roughly seven or more turns
   of the main session.** A subagent run is cheaper per turn than a main-session
