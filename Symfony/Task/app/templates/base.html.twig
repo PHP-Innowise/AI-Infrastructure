@@ -1,3 +1,6 @@
+{# One resolution per render, shared by the <style> block below and the
+   brand bar in <body> — asking twice would read the same row twice. #}
+{% set brand = branding() %}
 <!DOCTYPE html>
 <html lang="{{ app.request.locale|default('en') }}">
     <head>
@@ -21,21 +24,28 @@
             See specs/architect-architecture.md § "White-label branding as a
             runtime value" and specs/frontend-design-spec.md § "Design tokens".
 
-            The values below are the platform defaults. Epic-01 replaces this
-            block's contents with BrandingProvider output resolved for the
-            active trainer (and adds the CSP nonce, once the security headers
-            land). Nothing else may be emitted inline, and nothing in
-            app.css may reference a trainer's raw hex except through these
-            five names.
+            BrandingProvider resolves the active tenant's colour — including
+            on public landing pages, where TenantFromPublicCode has already
+            resolved the trainer from the code in the URL — and derives the
+            ramp server-side. With no tenant it returns the platform default,
+            so this block is unconditionally present and app.css's own
+            var(--brand-primary-rgb) references never resolve to nothing.
+
+            Every value interpolated here is machine-derived from a hex the
+            entity validated as #RRGGBB; no free text reaches the stylesheet.
+            The CSP nonce attaches here once the security headers land.
+
+            Nothing else may be emitted inline, and nothing in app.css may
+            reference a trainer's raw hex except through these five names.
         #}
         {% block branding %}
         <style>
             :root {
-                --brand-primary: #00B300;
-                --brand-primary-soft: #33C233;
-                --brand-primary-deep: #008F00;
-                --brand-primary-rgb: 0, 179, 0;
-                --brand-on-primary: #0D0D0D;
+                --brand-primary: {{ brand.primaryHex }};
+                --brand-primary-soft: {{ brand.primarySoftHex }};
+                --brand-primary-deep: {{ brand.primaryDeepHex }};
+                --brand-primary-rgb: {{ brand.primaryRgb }};
+                --brand-on-primary: {{ brand.onPrimaryHex }};
             }
         </style>
         {% endblock %}
@@ -61,7 +71,31 @@
             </div>
         {% endif %}
 
-        {% block header %}{% endblock %}
+        {#
+            AC-01-60: "Logo visible to: Trainer's players, coaches, parents"
+            — so it belongs on every page they can reach, not only on the
+            trainer's own settings screen where it was previously the single
+            place a logo appeared at all.
+
+            Rendered through <img>, never inlined, so an uploaded SVG cannot
+            execute in this origin (architect-architecture.md). The platform's
+            own logo stands in until a trainer uploads theirs, which is why
+            BrandingProvider always resolves something.
+
+            The business name lives in the alt attribute rather than as page
+            copy: this bar is on every page, and a trainer's name repeated as
+            visible text on all of them would be noise — and would quietly
+            satisfy any test that only asks whether the name appears
+            somewhere on a page.
+        #}
+        {% block header %}
+            <header class="brand-bar">
+                <img class="brand-bar__logo"
+                     src="{{ brand.logoPath ?? asset('images/default_logo.svg') }}"
+                     alt="{{ brand.businessName }}"
+                     height="32">
+            </header>
+        {% endblock %}
 
         <main id="main" tabindex="-1">
             {# AC-01-49 and every other "...with a confirmation message"

@@ -109,6 +109,13 @@ services:
         condition: service_healthy
     volumes:
       - ./public:/app/public:ro
+      # Uploaded logos live on a volume, not in the image or the bind mount —
+      # so the container that SERVES public/ needs it too, or every trainer
+      # logo 404s while sitting safely on disk in `php`. Read-only here:
+      # nginx must never be able to write into an upload directory, and the
+      # `location /uploads/` block's own nosniff + sandbox CSP is what makes
+      # serving a trainer-uploaded SVG safe at all.
+      - uploads:/app/public/uploads:ro
       - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
     ports:
       - "${HTTP_PORT:-8080}:80"

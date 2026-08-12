@@ -55,6 +55,15 @@ final readonly class FormSubmissionService
      *                                       Symfony Form (honeypot field excluded by the caller before this
      *                                       is ever reached)
      *
+     * Both rejections are RETURNED out of the transactional closure and
+     * thrown outside it. `wrapInTransaction()` closes the EntityManager on
+     * any exception, so throwing a rejection the caller is expected to catch
+     * and re-render leaves that caller holding a dead manager — harmless
+     * only for as long as nothing after the catch reads the database, which
+     * stopped being true the moment the layout started resolving a trainer's
+     * branding on every page. Identical reasoning, and identical shape, to
+     * `TokenLedgerService::spend()`.
+     *
      * @throws DuplicateSubmissionException
      * @throws CampFullException
      */
@@ -67,18 +76,18 @@ final readonly class FormSubmissionService
         $contactEmail = $this->stringAnswer($answers, FormField::FIELD_PARTICIPANT_EMAIL);
 
         $submission = $this->entityManager->wrapInTransaction(
-            function () use ($formId, $answers, $contactEmail): FormSubmission {
+            function () use ($formId, $answers, $contactEmail): FormSubmission|DuplicateSubmissionException|CampFullException {
                 // "Risks & Mitigations — Capacity Overselling": the form row
                 // is locked first, so a concurrent submission serializes
                 // against the same count this transaction is about to read.
                 $lockedForm = $this->forms->lockForUpdate($formId) ?? throw new \LogicException('Form no longer exists.');
 
                 if (null !== $this->submissions->findOneByFormAndEmail($lockedForm, $contactEmail)) {
-                    throw DuplicateSubmissionException::forEmail($contactEmail);
+                    return DuplicateSubmissionException::forEmail($contactEmail);
                 }
 
                 if ($lockedForm->isFull($this->submissions->countConfirmedForForm($lockedForm))) {
-                    throw CampFullException::forForm($formId);
+                    return CampFullException::forForm($formId);
                 }
 
                 $status = $lockedForm->isFree() ? FormSubmission::STATUS_FREE : FormSubmission::STATUS_PENDING;
@@ -98,6 +107,10 @@ final readonly class FormSubmissionService
                 return $submission;
             },
         );
+
+        if ($submission instanceof DuplicateSubmissionException || $submission instanceof CampFullException) {
+            throw $submission;
+        }
 
         if (FormSubmission::STATUS_FREE === $submission->getPaymentStatus()) {
             return SubmissionOutcome::confirmed($submission);

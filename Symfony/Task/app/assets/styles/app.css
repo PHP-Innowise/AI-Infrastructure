@@ -218,6 +218,24 @@ a {
   left: var(--space-xs);
 }
 
+/* The trainer's logo, on every page their players/coaches/parents can reach
+   (AC-01-60). Deliberately quiet: a rule, the brand colour, and a fixed
+   height so a 596x596 upload and a wide wordmark both behave. */
+.brand-bar {
+  display: flex;
+  align-items: center;
+  padding: var(--space-sm) var(--space-lg);
+  background: var(--color-surface);
+  border-bottom: 2px solid var(--brand-primary);
+}
+
+.brand-bar__logo {
+  height: 32px;
+  width: auto;
+  max-width: 12rem;
+  object-fit: contain;
+}
+
 /* Focus must remain visible for every interactive element: WCAG 2.2 SC 2.4.11.
    :focus-visible only, so pointer users do not see a ring on click. */
 :focus-visible {
