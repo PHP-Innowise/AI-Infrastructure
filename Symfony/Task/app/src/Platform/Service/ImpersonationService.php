@@ -17,8 +17,10 @@ use Doctrine\ORM\EntityManagerInterface;
  * whom, when it started, when (and why) it ended.
  *
  * BR-01-21 ("cannot target another Super Admin") is `ImpersonationVoter`'s
- * job, checked by the controller before this service is ever called — see
- * that voter.
+ * job. That voter is now the `switch_user` firewall's own attribute, so it
+ * has already ruled by the time either method here is called — from
+ * `SwitchUserAuditSubscriber`, which reacts to the swap itself rather than
+ * to the one controller that politely asks for it.
  *
  * @see specs/requirements-analyst-epic-01-user-management-spec.md US-01.07, AC-01-33..38, BR-01-21/22
  */
@@ -50,6 +52,27 @@ final readonly class ImpersonationService
         $this->entityManager->flush();
 
         return $session;
+    }
+
+    /**
+     * AC-01-76: the end of a sensitive operation is logged too, not only its
+     * start. AC-01-38's automatic expiry and a manual "Exit Impersonation"
+     * arrive here identically, distinguished only by $reason.
+     */
+    public function end(ImpersonationSession $session, string $reason, ?\DateTimeImmutable $at = null): void
+    {
+        $session->end($reason, $at);
+
+        $this->auditLogger->record(
+            $session->getAdminAccount(),
+            'impersonation_end',
+            'account',
+            $session->getTargetAccount()->getId(),
+            null,
+            ['reason' => $reason, 'duration_seconds' => $session->durationSeconds()],
+        );
+
+        $this->entityManager->flush();
     }
 
     public function findOpenSessionForAdmin(Account $admin): ?ImpersonationSession

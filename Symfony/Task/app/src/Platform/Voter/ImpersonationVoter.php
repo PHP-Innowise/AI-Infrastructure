@@ -11,11 +11,17 @@ use Symfony\Component\Security\Core\Authentication\Token\TokenInterface;
 use Symfony\Component\Security\Core\Authorization\Voter\Voter;
 
 /**
- * `IMPERSONATION_START`'s `Account` subject is the TARGET, never the actor —
- * the actor's `ROLE_SUPER_ADMIN` is already proven by the coarse gate on
- * `administration_impersonation_start`; this voter re-checks it anyway
- * (defense in depth) and adds the one check the coarse gate cannot express:
- * BR-01-21/AC-01-37, a Super Admin may not target another Super Admin.
+ * `IMPERSONATION_START`'s `Account` subject is the TARGET, never the actor.
+ * It checks that the actor holds Super Admin, and adds the rule a role check
+ * cannot express: BR-01-21/AC-01-37, a Super Admin may not target another
+ * Super Admin.
+ *
+ * **This voter is the whole rule, on every path.** `security.yaml` names
+ * `IMPERSONATION_START` as the `switch_user` attribute, so Symfony's own
+ * firewall listener asks this same question with the same target before it
+ * swaps any token — not only `administration_impersonation_start` does. That
+ * matters because the query parameter reaches every URL in the application,
+ * and for a while it was the way around this class.
  *
  * `IMPERSONATION_END` has no subject: it is reachable from any prefix, and
  * grants whenever the current token is a `SwitchUserToken` — the identical
@@ -64,7 +70,12 @@ final class ImpersonationVoter extends Voter
             return false;
         }
 
-        if ($subject === $actor) {
+        // Compared by identifier, not by object identity: the firewall's own
+        // switch_user path loads the target through the user provider, which
+        // need not hand back the very instance sitting in the actor's token,
+        // so `$subject === $actor` would quietly stop recognising an admin
+        // targeting themselves.
+        if ($subject->getId() === $actor->getId()) {
             return false;
         }
 

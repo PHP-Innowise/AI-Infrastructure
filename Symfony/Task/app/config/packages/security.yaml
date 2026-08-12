@@ -49,16 +49,25 @@ security:
                 target: identity_auth_login
             # US-01.07: Symfony's native identity-swap mechanism
             # (specs/api-designer-spec.md "Impersonation — a whole session,
-            # one identity swap"). `role: ROLE_SUPER_ADMIN` directly, rather
-            # than the default ROLE_ALLOWED_TO_SWITCH, because there is no
-            # role_hierarchy to grant an alias role through (see AccountRole's
-            # own docblock) — the actor must hold ROLE_SUPER_ADMIN outright.
-            # `administration_impersonation_start` still runs
-            # ImpersonationVoter::IMPERSONATION_START first (BR-01-21/AC-01-37,
-            # which this role check alone cannot express) before ever
-            # redirecting to the `?_switch_user=` URL that triggers this.
+            # one identity swap").
+            #
+            # `role` here is not a role. SwitchUserListener passes it to the
+            # access decision manager as an ATTRIBUTE, with the TARGET user as
+            # the subject — `decide($actorToken, [$this->role], $targetUser)` —
+            # so naming the voter attribute makes the firewall ask
+            # ImpersonationVoter the same question the controller asks it, on
+            # exactly the same pair.
+            #
+            # It used to say ROLE_SUPER_ADMIN, which checked only who was
+            # asking and never who was being targeted. Manual testing found
+            # the consequence: appending `?_switch_user=<email>` to any URL
+            # impersonated another Super Admin — the one thing BR-01-21 and
+            # AC-01-37 forbid — because the voter that enforces it was only
+            # ever reached through the controller. The actor's own
+            # ROLE_SUPER_ADMIN is not lost by the change: the voter's first
+            # check is that the actor holds it.
             switch_user:
-                role: ROLE_SUPER_ADMIN
+                role: IMPERSONATION_START
                 parameter: _switch_user
 
     # Coarse gates on route prefixes only. These are never the real check:
