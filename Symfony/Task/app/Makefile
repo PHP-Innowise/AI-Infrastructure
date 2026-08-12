@@ -96,3 +96,8 @@ smoke: ## Prove the running stack answers over HTTP
 
 health: ## Show the health state of every service
 	@$(COMPOSE) ps --format 'table {{.Service}}\t{{.Status}}'
+	@echo
+	@$(PHP) php bin/console app:queue-health
+
+queue: ## Report queued, in-flight and failed async work (exit non-zero if stuck)
+	$(PHP) php bin/console app:queue-health --strict

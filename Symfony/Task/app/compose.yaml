@@ -153,6 +153,12 @@ services:
       - ../../specs:/specs:ro
     command: ["worker"]
     healthcheck:
+      # Liveness only, deliberately. A stalled queue is a different question
+      # from a dead process, and answering both here would either restart a
+      # healthy worker over a data condition or hide a dead one behind an
+      # empty queue. `app:queue-health` answers the other question, and the
+      # entrypoint runs it on every start — which is when a message left
+      # in-flight by a dead predecessor becomes visible.
       test: ["CMD-SHELL", "pgrep -f messenger:consume >/dev/null || exit 1"]
       interval: 15s
       timeout: 5s

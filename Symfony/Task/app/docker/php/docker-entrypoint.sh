@@ -143,6 +143,17 @@ case "${1:-php-fpm}" in
         done
         unset PGPASSWORD
 
+        # A worker restart is the one moment "the previous worker died holding
+        # a message" is knowable: a message keeps its delivered_at stamp when
+        # whoever picked it up goes away, and nothing releases it until the
+        # transport's redelivery timeout. Reported here rather than left for
+        # someone to discover by querying messenger_messages by hand, which is
+        # how it was found. Never fatal — a stalled queue must not stop the
+        # worker that is about to drain it.
+        log "queue state inherited from the previous worker:"
+        su-exec "${APP_UID}:${APP_GID}" php /app/bin/console app:queue-health 2>&1 | sed 's/^/[queue] /' || \
+            log "queue-health check could not run; continuing"
+
         log "starting messenger worker"
         # Symfony Scheduler joins this command as `scheduler_default` once the
         # first Schedule is defined; until then consuming it would fail because
