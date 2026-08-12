@@ -115,6 +115,13 @@ final readonly class RsvpService
             }
         }
 
+        // AC-06-23, for the same reason and in the same place: a code the
+        // platform will not accept must not leave a registration behind.
+        // The authoritative application still happens against the real
+        // charge in completeConfirmationOrPayment(); this only refuses the
+        // request before anything is written.
+        $this->guardCouponIsUsable($event, $player, $paymentMethod, $bypassGranted, $couponCode);
+
         // The full-event rejection is returned rather than thrown: an
         // exception crossing wrapInTransaction() closes the EntityManager,
         // and PortalEventController catches this one to re-render the event
@@ -544,6 +551,42 @@ final readonly class RsvpService
             $this->entityManager->flush();
             $this->mailer->sendRsvpConfirmed($rsvp);
         }
+    }
+
+    /**
+     * AC-06-23: refuses an unusable coupon BEFORE `rsvp()` opens its
+     * transaction, so a rejected code creates nothing.
+     *
+     * It used to be validated only in `completeConfirmationOrPayment()`,
+     * which runs after that transaction has committed — so a player who
+     * mistyped a code saw "Invalid or expired code" and was left registered
+     * anyway, in `pending_payment`, with no payment record behind it. That
+     * status is in `Rsvp::CAPACITY_HOLDING_STATUSES`, so the phantom row also
+     * held a seat: on a nearly-full event, one person's typo locked another
+     * person out. Manual testing reproduced it on an RSVP that had already
+     * been canceled AND refunded — one failed attempt silently reactivated
+     * it.
+     *
+     * `App\Content\Service\PurchasePlaylistAccessService::purchase()` has
+     * always validated first; this brings the RSVP path in line with it.
+     *
+     * Only guarded where the code will actually be used: a token RSVP
+     * ignores coupons entirely, and an unapproved child's request drops the
+     * code on its way to parent approval (see `completeConfirmationOrPayment()`).
+     * Rejecting a request over a code that was never going to be applied
+     * would invent a rule the epic does not state.
+     *
+     * @throws InvalidCouponException
+     */
+    private function guardCouponIsUsable(Event $event, PlayerProfile $player, string $paymentMethod, bool $bypassGranted, ?string $couponCode): void
+    {
+        if (!$bypassGranted || Event::PAYMENT_USD !== $paymentMethod) {
+            return;
+        }
+
+        // The quote is deliberately recomputed later against the real
+        // charge; this call is here for its refusal, not its number.
+        $this->applyCouponIfPresent($event, $player, $paymentMethod, $event->priceForMethod($paymentMethod), $couponCode);
     }
 
     /**
