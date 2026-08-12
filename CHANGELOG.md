@@ -347,6 +347,15 @@ edition's own files remain in that edition's changelog.
   main-session turns, and compact deliberately near ~400k of context. Both
   thresholds are derived from local transcripts and are marked as such.
 
+- **`docs/SECURITY.md` states what the write-agent gate does not guarantee.**
+  The policy-versus-enforcement table gained a row for it: an advisory,
+  machine-local `/tmp` lock that does not serialize two containers on the same
+  branch, expires after `SUBAGENT_WRITE_LOCK_TTL_MINUTES`, gates subagent
+  spawns rather than the main conversation's own edits, and fails open without
+  a JSON extractor, without a readable roster, or - for the check-and-take
+  race - without `flock`. Each `.claude`/`.cursor` hooks README carries the
+  same limits next to the serialization it already documented.
+
 ### Fixed
 
 - **The write-capable agent lock no longer exempts a second instance of the
