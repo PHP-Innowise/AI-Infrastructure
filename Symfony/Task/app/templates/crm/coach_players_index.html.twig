@@ -1,0 +1,32 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Players — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Players</h1>
+
+        {# AC-03-65: search limited to this coach's own assigned events. #}
+        <form method="get" action="{{ path('crm_coach_players_index') }}" role="search">
+            <input type="search" name="q" placeholder="Search your players...">
+            <button type="submit">Search</button>
+        </form>
+
+        {% if rows is empty %}
+            <p>No players yet — you are not assigned to any events with a player roster.</p>
+        {% else %}
+            <table>
+                <thead><tr><th>Name</th><th>Skill</th><th>Attendance with you</th></tr></thead>
+                <tbody>
+                    {% for row in rows %}
+                        <tr>
+                            <td><a href="{{ path('crm_coach_player_show', {membership: row.membership.id}) }}">{{ row.membership.player.firstName }}</a></td>
+                            <td>{{ row.membership.skillLevel }}</td>
+                            <td>{{ row.sessionsWithCoach }} event{{ row.sessionsWithCoach == 1 ? '' : 's' }} with you</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+{% endblock %}

@@ -1,0 +1,52 @@
+# yaml-language-server: $schema=../vendor/symfony/dependency-injection/Loader/schema/services.schema.json
+
+# This file is the entry point to configure your own services.
+# Files in the packages/ subdirectory configure your dependencies.
+# See also https://symfony.com/doc/current/service_container/import.html
+
+# Put parameters here that don't need to change on each machine where the app is deployed
+# https://symfony.com/doc/current/best_practices.html#use-parameters-for-application-configuration
+parameters:
+
+services:
+    # default configuration for services in *this* file
+    _defaults:
+        autowire: true      # Automatically injects dependencies in your services.
+        autoconfigure: true # Automatically registers your services as commands, event subscribers, etc.
+        bind:
+            # AC-01-49, AC-01-60: where an uploaded profile photo / trainer
+            # logo is written, and the public URL prefix it is served under.
+            # Bound globally so any service taking these exact parameter
+            # names is wired consistently, without a per-service argument.
+            string $uploadsDirectory: '%kernel.project_dir%/public/uploads'
+            string $uploadsPublicPath: '/uploads'
+
+    # makes classes in src/ available to be used as services
+    # this creates a service per class whose id is the fully-qualified class name
+    App\:
+        resource: '../src/'
+
+    # add more service definitions when explicit configuration is needed
+    # please note that last definitions always *replace* previous ones
+
+    App\Platform\Command\AcceptanceCoverageCommand:
+        arguments:
+            $projectDir: '%kernel.project_dir%'
+
+    # Epic-05: STRIPE_SECRET_KEY is deliberately blank in every environment
+    # this codebase runs in (env.example's own comment: "Leave blank until
+    # Epic-05... Never commit a real key" — still true post-Epic-05, since
+    # no real key has been issued). InMemoryStripeClient is therefore the
+    # active binding everywhere, matching NoopPaymentIntentGateway's own
+    # precedent of an honest, non-money-moving shipped implementation.
+    # Switching to HttpStripeClient for an actual deployment with a real key
+    # is this one line, not a code change.
+    App\Billing\Stripe\StripeClient: '@App\Billing\Stripe\InMemoryStripeClient'
+
+    App\Billing\Stripe\HttpStripeClient:
+        arguments:
+            $secretKey: '%env(STRIPE_SECRET_KEY)%'
+
+    App\Billing\Controller\WebhookController:
+        arguments:
+            $webhookSecret: '%env(STRIPE_WEBHOOK_SECRET)%'

@@ -1,0 +1,32 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Earnings — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Earnings</h1>
+
+        {% if error %}
+            <p role="alert">{{ error }}</p>
+        {% elseif summary %}
+            <dl>
+                <dt>Current period earnings</dt>
+                <dd>${{ '%0.2f'|format(summary.currentPeriodEarningsMinorUnits / 100) }}</dd>
+                {% if summary.nextPayoutDate is not null %}
+                    <dt>Next payout date</dt>
+                    <dd>{{ summary.nextPayoutDate|date('Y-m-d') }}</dd>
+                {% endif %}
+                {% if summary.lastPayoutAmountMinorUnits is not null %}
+                    <dt>Last payout</dt>
+                    <dd>${{ '%0.2f'|format(summary.lastPayoutAmountMinorUnits / 100) }}</dd>
+                {% endif %}
+                <dt>Lifetime earnings</dt>
+                <dd>${{ '%0.2f'|format(summary.lifetimeEarningsMinorUnits / 100) }}</dd>
+            </dl>
+        {% else %}
+            <p>Connect Stripe to see your earnings.</p>
+        {% endif %}
+
+        <p>For detailed transaction history, payout history, tax documents and fee breakdowns, see your <a href="https://dashboard.stripe.com" rel="noopener">Stripe Express Dashboard</a> — the source of truth for this data.</p>
+    </div>
+{% endblock %}

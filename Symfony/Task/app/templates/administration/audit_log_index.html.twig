@@ -1,0 +1,48 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Audit Log — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Audit Log</h1>
+        <p class="skeleton-caption">{{ total }} logged actions.</p>
+
+        <form method="get" action="{{ path('administration_audit_log_index') }}">
+            <input type="text" name="q" placeholder="Search by subject (user or trainer name)" value="{{ q }}">
+            <input type="text" name="actionType" placeholder="Action type" value="{{ actionType }}">
+            <label>From <input type="date" name="dateFrom" value="{{ dateFrom ? dateFrom|date('Y-m-d') : '' }}"></label>
+            <label>To <input type="date" name="dateTo" value="{{ dateTo ? dateTo|date('Y-m-d') : '' }}"></label>
+            <button type="submit" class="button">Filter</button>
+        </form>
+
+        <p><a href="{{ path('administration_audit_log_export', app.request.query.all) }}">Export CSV</a></p>
+
+        {% if entries is empty %}
+            <p>No audit log entries found.</p>
+        {% else %}
+            <table>
+                <thead>
+                    <tr><th>Timestamp</th><th>Action</th><th>Subject</th><th>Trainer</th><th>Admin</th><th>Details</th></tr>
+                </thead>
+                <tbody>
+                    {% for entry in entries %}
+                        <tr>
+                            <td>{{ entry.occurredAt|date('Y-m-d H:i:s') }}</td>
+                            <td>{{ entry.actionType }}</td>
+                            <td>{{ entry.subjectType }}{{ entry.subjectId ? ' #' ~ entry.subjectId }}</td>
+                            <td>{{ entry.relatedTrainer ? entry.relatedTrainer.businessName : '—' }}</td>
+                            <td>{{ entry.actorAccount ? entry.actorAccount.email : 'system' }}</td>
+                            <td>{{ entry.details|json_encode }}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+
+            <nav>
+                {% if page > 1 %}<a href="{{ path('administration_audit_log_index', app.request.query.all|merge({page: page - 1})) }}">Previous</a>{% endif %}
+                <span>Page {{ page }} of {{ (total / perPage)|round(0, 'ceil')|default(1) }}</span>
+                {% if page * perPage < total %}<a href="{{ path('administration_audit_log_index', app.request.query.all|merge({page: page + 1})) }}">Next</a>{% endif %}
+            </nav>
+        {% endif %}
+    </div>
+{% endblock %}

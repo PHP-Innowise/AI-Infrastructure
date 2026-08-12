@@ -1,0 +1,20 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Add a child — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Add a child</h1>
+
+        {% if duplicates is not empty %}
+            <p role="alert" class="form-error">
+                A similar profile already exists: {{ duplicates|map(d => d.childPlayer.firstName)|join(', ') }}.
+                You can still continue.
+            </p>
+        {% endif %}
+
+        {{ form_start(form) }}
+            {{ form_widget(form) }}
+        {{ form_end(form) }}
+    </div>
+{% endblock %}

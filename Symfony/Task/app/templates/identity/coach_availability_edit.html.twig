@@ -1,0 +1,22 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}My Times — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>My Times</h1>
+        <p>Set your recurring weekly schedule. Up to {{ slotsPerDay }} time ranges per day.</p>
+
+        {{ form_start(form) }}
+            {% for day in 0..6 %}
+                <fieldset>
+                    <legend>{{ dayLabels[day] }}</legend>
+                    {% for slot in 0..(slotsPerDay - 1) %}
+                        {{ form_widget(form['day' ~ day ~ '_slot' ~ slot]) }}
+                    {% endfor %}
+                </fieldset>
+            {% endfor %}
+            {{ form_widget(form.submit) }}
+        {{ form_end(form) }}
+    </div>
+{% endblock %}

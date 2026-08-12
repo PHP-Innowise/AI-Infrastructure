@@ -1,0 +1,80 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Referrals — Get the Assist — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Referrals — Get the Assist</h1>
+
+        {# AC-06-14: Overview Metrics #}
+        <section>
+            <h2>This month</h2>
+            <dl>
+                <dt>Total referrals</dt>
+                <dd>{{ metrics.totalReferralsThisMonth }}</dd>
+                <dt>Total conversions</dt>
+                <dd>{{ metrics.totalConversionsThisMonth }}</dd>
+                <dt>Conversion rate</dt>
+                <dd>{{ metrics.conversionRatePercent }}%</dd>
+                <dt>Total referral revenue</dt>
+                <dd>${{ '%0.2f'|format(metrics.totalReferralRevenueMinorUnits / 100) }}</dd>
+            </dl>
+        </section>
+
+        {# AC-06-15: Top Referrers leaderboard #}
+        <section>
+            <h2>Top Referrers</h2>
+            {% if topReferrers is empty %}
+                <p>No referrals yet.</p>
+            {% else %}
+                <table>
+                    <thead>
+                        <tr><th>Player</th><th>Referrals sent</th><th>Conversions</th><th>Conversion rate</th><th>Last referral</th></tr>
+                    </thead>
+                    <tbody>
+                        {% for row in topReferrers %}
+                            <tr>
+                                <td>{{ row.player.firstName }}</td>
+                                <td>{{ row.totalReferrals }}</td>
+                                <td>{{ row.totalConversions }}</td>
+                                <td>{{ row.conversionRatePercent }}%</td>
+                                <td>{{ row.lastReferralAt|date('Y-m-d') }}</td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            {% endif %}
+        </section>
+
+        {# AC-06-16: Referral Activity Log #}
+        <section>
+            <h2>Referral Activity Log</h2>
+            {% if activityLog is empty %}
+                <p>No referral activity yet.</p>
+            {% else %}
+                <table>
+                    <thead>
+                        <tr><th>Date</th><th>Referrer</th><th>Referee</th><th>Status</th><th>First purchase amount</th></tr>
+                    </thead>
+                    <tbody>
+                        {% for referral in activityLog %}
+                            <tr>
+                                <td>{{ referral.registeredAt|date('Y-m-d') }}</td>
+                                <td>{{ referral.referrerPlayer.firstName }}</td>
+                                <td>{{ referral.refereePlayer.firstName }}</td>
+                                <td>{{ referral.status|capitalize }}</td>
+                                <td>
+                                    {% if referral.firstPurchasePaymentRecord is not null %}
+                                        ${{ '%0.2f'|format(referral.firstPurchasePaymentRecord.amountMinorUnits / 100) }}
+                                    {% else %}
+                                        —
+                                    {% endif %}
+                                </td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            {% endif %}
+        </section>
+    </div>
+{% endblock %}

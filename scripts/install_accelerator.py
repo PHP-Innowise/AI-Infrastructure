@@ -33,7 +33,24 @@ EXCLUDED_PATH_PATTERNS = (
     "Task/**",
     "examples/completed-task/**",
     "memory-bank/tests/**",
+    # Durable memory captured while building one project. The production
+    # index override (memory-bank/.install/INDEX.md) ships an empty table, so
+    # a clean install is meant to carry no chunks at all — MEM-0001 was listed
+    # exactly above because it was the only chunk that existed when this list
+    # was written. Installing a project's own chunks fails validation twice
+    # over: they are absent from the shipped INDEX.md, and their cited sources
+    # (Task/app/...) are not installed.
+    "memory-bank/chunks/**",
     "project-brain/tests/**",
+    # Governed task runtime written while working on one project. The shipped
+    # project-brain/indexes/active.json is `[]`, so installing another
+    # project's tasks makes that index stale on arrival. Matched by file type
+    # rather than by directory so the .gitkeep placeholders that create the
+    # runtime's directory structure still ship.
+    "project-brain/control/handoffs/*.md",
+    "project-brain/control/messages/*.jsonl",
+    "project-brain/control/retrieval-manifests/*.json",
+    "project-brain/dynamic/*/*.md",
     "*/skills/skill-creator/tests/**",
 )
 AGENTS_BEGIN = "<!-- BEGIN ACCELERATOR MANAGED POLICY -->"

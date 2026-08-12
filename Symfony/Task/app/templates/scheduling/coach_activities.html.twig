@@ -1,0 +1,58 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}My Activities — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>My Activities</h1>
+
+        <h2>Events to Confirm</h2>
+        {% if toConfirm is empty %}
+            <p>Nothing pending.</p>
+        {% else %}
+            <table>
+                <thead><tr><th>Title</th><th>Date/Time</th><th>Location</th><th>Players RSVP'd</th><th></th></tr></thead>
+                <tbody>
+                    {% for assignment in toConfirm %}
+                        <tr>
+                            <td>{{ assignment.event.title }}</td>
+                            <td>{{ assignment.event.startsAt|date('Y-m-d H:i', assignment.event.trainer.timezone) }}</td>
+                            <td>{{ assignment.event.location }}</td>
+                            <td>{{ rsvpCounts[assignment.id] ?? 0 }}</td>
+                            <td>
+                                <form method="post" action="{{ path('scheduling_coach_assignment_confirm', {assignment: assignment.id}) }}" style="display:inline">
+                                    <input type="hidden" name="_token" value="{{ csrf_token('assignment-confirm' ~ assignment.id) }}">
+                                    <button type="submit">Confirm</button>
+                                </form>
+                                <a href="{{ path('scheduling_coach_assignment_decline', {assignment: assignment.id}) }}">Decline</a>
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+
+        <h2>Assigned Sessions</h2>
+        {% if assigned is empty %}
+            <p>No confirmed assignments yet.</p>
+        {% else %}
+            <table>
+                <thead><tr><th>Title</th><th>Date/Time</th><th>Location</th><th></th></tr></thead>
+                <tbody>
+                    {% for assignment in assigned %}
+                        <tr>
+                            <td>{{ assignment.event.title }}</td>
+                            <td>{{ assignment.event.startsAt|date('Y-m-d H:i', assignment.event.trainer.timezone) }}</td>
+                            <td>{{ assignment.event.location }}</td>
+                            <td>
+                                {% if assignment.event.hasStarted(now) %}
+                                    <a href="{{ path('scheduling_coach_event_attendance', {event: assignment.event.id}) }}">Take Attendance</a>
+                                {% endif %}
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+{% endblock %}

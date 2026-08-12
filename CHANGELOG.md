@@ -347,6 +347,28 @@ edition's own files remain in that edition's changelog.
   main-session turns, and compact deliberately near ~400k of context. Both
   thresholds are derived from local transcripts and are marked as such.
 
+### 2026-08-12 the Symfony inventory, regenerated under schema 2
+
+- `scripts/install_accelerator.py` reverts to `main`'s version. The
+  `PROJECT_WORK_AREAS` prefix list this branch added on 2026-08-10 solved the
+  same problem — a project built inside an edition should not have to be
+  listed as a distribution file — and `main`'s `excluded_tracked_paths` solves
+  it better: the exclusions are recorded in the inventory itself and validated
+  on load, rather than implied by a tuple in the script, and `Task/**` covers
+  what `Task/app/` covered. Two mechanisms for one rule would be worse than
+  either, so the earlier one is removed rather than merged alongside.
+- `install/inventories/symfony.json` regenerated for this branch's tree: 645
+  installed, 800 excluded. The 760 files of `Task/app/` land in
+  `excluded_tracked_paths`, which is what the 2026-08-10 entry was after.
+- Left as `main` classifies them, and flagged rather than changed here: the
+  derived `specs/`, `codebase/`, `memory-bank/chunks/` and the governed brain
+  runtime under `project-brain/control/` and `project-brain/dynamic/` match no
+  exclusion pattern, so they are recorded as installed — 35 files of one
+  project's own output that an installation would copy into a consumer's tree.
+  Extending `EXCLUDED_PATH_PATTERNS` would fix it in one line, but that is
+  shared-core policy belonging to whoever reworked this module, not to a pull
+  request about the Symfony application.
+
 ## 2.0.0 - 2026-08-07
 
 ### 2026-08-06 hook and installation hardening

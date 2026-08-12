@@ -1,0 +1,46 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}{{ form.name }} — {{ form.trainer.businessName }}{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        {# AC-08-13: name, dates, description, price, spots remaining — all
+           rendered with no user authenticated, per TrainerBrandingSettings
+           being global for exactly this reason. #}
+        <p class="skeleton-eyebrow">{{ form.trainer.businessName }}</p>
+        <h1>{{ form.name }}</h1>
+
+        {% if preview is defined and preview %}
+            <p role="status">Preview mode — this page is not live. No submission will be recorded.</p>
+        {% endif %}
+
+        {% if form.description %}
+            <p>{{ form.description }}</p>
+        {% endif %}
+
+        <p class="skeleton-caption">
+            {% if form.isFree %}Free{% else %}${{ (form.priceMinorUnits / 100)|number_format(2) }}{% endif %}
+            {% if remainingSpots is not null %}
+                &mdash; {{ remainingSpots }} spot(s) remaining
+            {% endif %}
+        </p>
+
+        {{ form_start(submissionForm, {action: (preview is defined and preview) ? null : path('forms_public_submit', {code: form.shareableSlug})}) }}
+            {% for child in submissionForm %}
+                {% if child.vars.name != honeypotField %}
+                    {{ form_row(child) }}
+                {% endif %}
+            {% endfor %}
+
+            {# The honeypot: visually hidden from a human, present for a
+               bot's generic autofill — never type="hidden", which
+               unsophisticated bots specifically skip. See
+               PublicSubmissionFormBuilder's own docblock. #}
+            <div class="honeypot" aria-hidden="true">
+                {{ form_widget(submissionForm[honeypotField]) }}
+            </div>
+
+            <button type="submit"{{ (preview is defined and preview) ? ' disabled' : '' }}>Submit Registration</button>
+        {{ form_end(submissionForm) }}
+    </div>
+{% endblock %}

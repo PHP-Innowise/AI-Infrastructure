@@ -1,0 +1,14 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Invite a coach — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Invite a coach</h1>
+        <p>We'll send a one-time invitation link that expires in 7 days.</p>
+
+        {{ form_start(form) }}
+            {{ form_widget(form) }}
+        {{ form_end(form) }}
+    </div>
+{% endblock %}

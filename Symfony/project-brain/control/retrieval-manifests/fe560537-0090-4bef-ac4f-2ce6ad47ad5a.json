@@ -1,0 +1,81 @@
+{
+  "created_at": "2026-08-09T12:12:27.718769+00:00",
+  "escalation_reason": null,
+  "excluded": [
+    {
+      "path": "project-brain/control/handoffs/d70199d2-b076-4970-8d73-04b2e2ef6800.md",
+      "reason": "lifecycle"
+    },
+    {
+      "path": ".agents/skills/wcag-accessibility/SKILL.md",
+      "reason": "layer-limit"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "reason": "layer-limit"
+    }
+  ],
+  "filters": {
+    "active_only": true,
+    "authority": [
+      "observed",
+      "verified"
+    ],
+    "freshness": true,
+    "owners": [
+      "*"
+    ],
+    "privacy": [
+      "public",
+      "team"
+    ]
+  },
+  "id": "fe560537-0090-4bef-ac4f-2ce6ad47ad5a",
+  "provider": "sqlite-fts5",
+  "query": "EPIC 00 foundation",
+  "schema_version": 1,
+  "selected": [
+    {
+      "category": "policy",
+      "estimated_tokens": 61,
+      "path": ".agents/skills/wcag-accessibility/rules/moc-semantic.md",
+      "source_hash": "c7eed34f877a5f50ba812fee3048d5e93bc63d308d337c1290c8a8984e27cfc0"
+    },
+    {
+      "category": "policy",
+      "estimated_tokens": 55,
+      "path": ".agents/skills/wcag-accessibility/rules/moc-forms.md",
+      "source_hash": "3322b778763ef35df3a41c7f1a5e4660583ea674e1bfc1649816b23c80621d8c"
+    },
+    {
+      "category": "dynamic",
+      "estimated_tokens": 70,
+      "path": "project-brain/dynamic/tasks/d70199d2-b076-4970-8d73-04b2e2ef6800.md",
+      "source_hash": "b616e18a397dd59ed4d8639a620828aabdce5fa4b88560e478890abe9d442e0f"
+    },
+    {
+      "category": "evidence",
+      "estimated_tokens": 67,
+      "path": "specs/requirements-analyst-epic-01-user-management-spec.md",
+      "source_hash": "b52814b7f9d679c1174744071bbcbe5c963c288bae6a312e0cda03613e47ece2"
+    },
+    {
+      "category": "evidence",
+      "estimated_tokens": 88,
+      "path": "specs/MANIFEST.md",
+      "source_hash": "817761a69f8b6637d8fd47ba955128565e1f9cde50168c45cbfcf85da7291fb4"
+    }
+  ],
+  "task_id": "d70199d2-b076-4970-8d73-04b2e2ef6800",
+  "task_revision": 2,
+  "token_estimates": {
+    "durable": 0,
+    "dynamic": 70,
+    "evidence": 155,
+    "handoff": 0,
+    "hard": 12000,
+    "policy": 116,
+    "target": 8000,
+    "total": 341
+  }
+}

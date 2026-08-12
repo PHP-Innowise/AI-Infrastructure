@@ -1,0 +1,55 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Transactions — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Transaction History</h1>
+
+        <form method="get">
+            <label>From <input type="date" name="from" value="{{ filters.from }}"></label>
+            <label>To <input type="date" name="to" value="{{ filters.to }}"></label>
+            <label>Type
+                <select name="type">
+                    <option value="">Any</option>
+                    <option value="token_purchase" {{ filters.type == 'token_purchase' ? 'selected' }}>Token Purchase</option>
+                    <option value="event_rsvp" {{ filters.type == 'event_rsvp' ? 'selected' }}>Event RSVP</option>
+                    <option value="content_purchase" {{ filters.type == 'content_purchase' ? 'selected' }}>Content Purchase</option>
+                    <option value="player_subscription" {{ filters.type == 'player_subscription' ? 'selected' }}>Subscription</option>
+                </select>
+            </label>
+            <label>Payment method
+                <select name="method">
+                    <option value="">Any</option>
+                    <option value="token" {{ filters.method == 'token' ? 'selected' }}>Token</option>
+                    <option value="card" {{ filters.method == 'card' ? 'selected' }}>Card</option>
+                </select>
+            </label>
+            <button type="submit">Filter</button>
+        </form>
+
+        <table>
+            <thead>
+                <tr><th>Date</th><th>Type</th><th>Amount</th><th>Method</th><th>Status</th></tr>
+            </thead>
+            <tbody>
+                {% for transaction in transactions %}
+                    <tr>
+                        <td>{{ transaction.createdAt|date('Y-m-d H:i') }}</td>
+                        <td>{{ transaction.type }}{{ transaction.refund ? ' (refund)' : '' }}</td>
+                        <td>{% if transaction.paymentMethod == 'card' %}${{ '%0.2f'|format(transaction.amountMinorUnits / 100) }}{% else %}{{ transaction.amountMinorUnits }} tokens{% endif %}</td>
+                        <td>{{ transaction.paymentMethod }}</td>
+                        <td>
+                            {{ transaction.status }}
+                            {% if transaction.stripeChargeId or transaction.paymentMethod == 'card' %}
+                                <a href="https://dashboard.stripe.com" rel="noopener">Receipt</a>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% else %}
+                    <tr><td colspan="5">No transactions yet.</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+{% endblock %}

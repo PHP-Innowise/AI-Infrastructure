@@ -1,0 +1,20 @@
+framework:
+    form:
+        csrf_protection:
+            token_id: submit
+
+    csrf_protection:
+        # Stateless CSRF renders the literal placeholder "csrf-token" and relies
+        # on a Stimulus controller to swap in a double-submit cookie value. That
+        # is fine for forms behind a login, but it makes the protected form
+        # unusable with JavaScript disabled — and this application is
+        # server-rendered Twig with progressive enhancement, not a SPA.
+        #
+        # `authenticate` and `logout` are therefore deliberately NOT stateless:
+        # a session-backed token is rendered server-side, so signing in works
+        # with no JavaScript at all. Sign-in is the one form that must never
+        # depend on it.
+        #
+        # See specs/architect-architecture.md "Approach".
+        stateless_token_ids:
+            - submit
