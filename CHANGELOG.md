@@ -347,6 +347,22 @@ edition's own files remain in that edition's changelog.
   main-session turns, and compact deliberately near ~400k of context. Both
   thresholds are derived from local transcripts and are marked as such.
 
+### Fixed
+
+- **The write-capable agent lock no longer exempts a second instance of the
+  same agent.** The gate blocked a different write-capable agent while one
+  held the lock but let a same-named one through, so N concurrent `coder`
+  runs all passed and each merely refreshed the lock - which is how three epic
+  builds once ran at the same time against one repository. Any live holder now
+  blocks. A genuine respawn is unaffected: `subagent-dispatch.sh` clears the
+  lock when the holder finishes, so a fresh lock means the holder is still
+  running, and a crashed run stays covered by `LOCK_TTL_MINUTES`. Applied to
+  all four editions' `.claude` and `.cursor` copies by hand, because
+  `subagent-gate.sh` is a documented `skip` in the hooks mirror class - the
+  Codex copies block multi-agent spawning outright and hold no lock.
+  `test_a_second_instance_of_the_same_agent_is_blocked` in each edition's
+  `memory-bank/tests/test_hooks.py` covers it.
+
 ## 2.0.0 - 2026-08-07
 
 ### 2026-08-06 hook and installation hardening
