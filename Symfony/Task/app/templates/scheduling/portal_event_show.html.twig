@@ -17,6 +17,16 @@
                 {% if event.usdPricingEnabled and event.tokenPricingEnabled %} OR {% endif %}
                 {% if event.tokenPricingEnabled %}{{ event.tokenPrice }} token{{ event.tokenPrice > 1 ? 's' : '' }}{% endif %}
             </p>
+            {# AC-05-8's first offer. Shown whenever the event takes tokens
+               rather than only after a rejected attempt: the player who
+               just read "You have 0 tokens, need 1" needs the way out on
+               the page they were sent back to, and a player who can see the
+               shortfall coming should not have to trigger it first. The
+               criterion's second offer, "Pay with Card Instead", is the usd
+               option in the payment-method choice below. #}
+            {% if event.tokenPricingEnabled %}
+                <p><a href="{{ path('billing_portal_tokens') }}">Buy More Tokens</a></p>
+            {% endif %}
         {% endif %}
 
         {% if existingRsvp %}

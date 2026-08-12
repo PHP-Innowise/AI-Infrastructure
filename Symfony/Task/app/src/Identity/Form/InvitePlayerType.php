@@ -9,6 +9,7 @@ use Symfony\Component\Form\Extension\Core\Type\EmailType;
 use Symfony\Component\Form\Extension\Core\Type\SubmitType;
 use Symfony\Component\Form\FormBuilderInterface;
 use Symfony\Component\OptionsResolver\OptionsResolver;
+use Symfony\Component\Validator\Constraints\Email;
 
 /**
  * AC-03-50/52: a coach's player invite — unlike `InviteCoachType`, the
@@ -24,7 +25,7 @@ final class InvitePlayerType extends AbstractType
     public function buildForm(FormBuilderInterface $builder, array $options): void
     {
         $builder
-            ->add('email', EmailType::class, ['required' => false])
+            ->add('email', EmailType::class, ['required' => false, 'constraints' => [new Email()]])
             ->add('submit', SubmitType::class, ['label' => 'Generate invite link']);
     }
 

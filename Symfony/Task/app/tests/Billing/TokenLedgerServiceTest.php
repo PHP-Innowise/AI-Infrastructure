@@ -90,6 +90,50 @@ final class TokenLedgerServiceTest extends KernelTestCase
     }
 
     /**
+     * The rejected spend must leave the caller's EntityManager USABLE.
+     *
+     * The test above proved the exception and the shortfall it carries, and
+     * passed for months while the product returned HTTP 500 on this exact
+     * path: the exception was thrown from inside `wrapInTransaction`, so
+     * Doctrine rolled back and closed the EntityManager, and both gateways —
+     * which catch this exception precisely so they can mark their payment
+     * record failed and flush — died on `EntityManagerClosed` instead.
+     *
+     * Asserting the exception is not enough. What the callers actually need
+     * is to keep working afterward, so that is what this asserts.
+     */
+    public function testARejectedSpendLeavesTheEntityManagerOpenForTheCaller(): void
+    {
+        self::bootKernel();
+        $trainer = $this->trainer('peak-performance');
+        $this->activateTenant($trainer);
+        $parent = $this->account('player@practiceperfect.test');
+        $pat = $this->patPlayer();
+
+        /** @var TokenLedgerService $ledger */
+        $ledger = self::getContainer()->get(TokenLedgerService::class);
+        /** @var EntityManagerInterface $entityManager */
+        $entityManager = self::getContainer()->get(EntityManagerInterface::class);
+
+        $before = $ledger->balanceFor($trainer, $parent);
+
+        try {
+            $ledger->spend($trainer, $parent, $before + 100, $pat, 'Closed-EM regression: over-spend attempt.');
+            self::fail('Expected InsufficientTokenBalanceException.');
+        } catch (InsufficientTokenBalanceException) {
+            // Exactly what SchedulingPaymentIntentGateway and
+            // ContentPaymentIntentGateway do in their own catch blocks.
+            self::assertTrue($entityManager->isOpen(), 'A rejected spend must not close the EntityManager.');
+            $entityManager->flush();
+        }
+
+        // And the same manager still writes: a gift after the rejection
+        // lands, proving the connection was not left rollback-only either.
+        $ledger->gift($trainer, $parent, 1, $trainer->getOwnerAccount(), 'Closed-EM regression: the ledger still works.');
+        self::assertSame($before + 1, $ledger->balanceFor($trainer, $parent));
+    }
+
+    /**
      * A7/I3: every spend records the beneficiary player, even though the
      * balance sits at the parent-trainer pair — a parent spending on
      * behalf of a child still names the CHILD as beneficiary, never the

@@ -11,6 +11,7 @@ use Symfony\Component\Form\Extension\Core\Type\SubmitType;
 use Symfony\Component\Form\Extension\Core\Type\TextType;
 use Symfony\Component\Form\FormBuilderInterface;
 use Symfony\Component\OptionsResolver\OptionsResolver;
+use Symfony\Component\Validator\Constraints\Email;
 use Symfony\Component\Validator\Constraints\Length;
 use Symfony\Component\Validator\Constraints\NotBlank;
 
@@ -24,7 +25,7 @@ final class CoachRegistrationType extends AbstractType
         $builder
             ->add('firstName', TextType::class, ['constraints' => [new NotBlank()]])
             ->add('lastName', TextType::class, ['constraints' => [new NotBlank()]])
-            ->add('email', EmailType::class, ['constraints' => [new NotBlank()]])
+            ->add('email', EmailType::class, ['constraints' => [new NotBlank(), new Email()]])
             // See PlayerRegistrationType: the derived label reads
             // "Plain password" to the invited coach.
             ->add('plainPassword', PasswordType::class, [

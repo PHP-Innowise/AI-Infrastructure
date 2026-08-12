@@ -11,6 +11,7 @@ use App\Scheduling\Entity\Event;
 use App\Scheduling\Entity\Rsvp;
 use App\Scheduling\Exception\AlreadyRegisteredException;
 use App\Scheduling\Exception\EventFullException;
+use App\Scheduling\Exception\InsufficientFundsException;
 use App\Scheduling\Form\RsvpType;
 use App\Scheduling\Repository\RsvpRepository;
 use App\Scheduling\Service\RsvpService;
@@ -95,6 +96,15 @@ final class PortalEventController extends AbstractController
             return $this->redirectToRoute('scheduling_portal_event_show', ['event' => $event->getId()]);
         } catch (AlreadyRegisteredException) {
             $this->addFlash('error', 'Already registered.');
+
+            return $this->redirectToRoute('scheduling_portal_event_show', ['event' => $event->getId()]);
+        } catch (InsufficientFundsException $e) {
+            // AC-05-8: the shortfall itself, not a generic failure. The two
+            // offers the criterion asks for are on the page this returns
+            // to: "Buy More Tokens" beside the price, and "Pay with Card
+            // Instead" as the usd option in the payment-method choice
+            // whenever the event carries one.
+            $this->addFlash('error', $e->getMessage());
 
             return $this->redirectToRoute('scheduling_portal_event_show', ['event' => $event->getId()]);
         } catch (InvalidCouponException $e) {

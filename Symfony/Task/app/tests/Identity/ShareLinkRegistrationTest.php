@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Tests\Identity;
 
 use App\Identity\Entity\PlayerTrainerMembership;
+use App\Identity\Repository\AccountRepository;
 use App\Identity\Repository\ParentChildLinkRepository;
 use App\Identity\Repository\PlayerProfileRepository;
 use App\Identity\Repository\PlayerTrainerMembershipRepository;
@@ -68,6 +69,47 @@ final class ShareLinkRegistrationTest extends WebTestCase
                 sprintf('Label "%s" leaks the property name into the public registration form.', $label),
             );
         }
+    }
+
+    /**
+     * Epic-01 § "Validation Rules": "Email format validation" — the line
+     * directly above "Phone number format validation", which this form has
+     * enforced since AC-01-50.
+     *
+     * Regression. `EmailType` only sets `type="email"` on the input; the
+     * checking is the browser's, and the browser is not the only client. A
+     * submission that skipped it reached the mailer, which threw
+     * `RfcComplianceException` — HTTP 500 on a public registration form,
+     * found by hand. The form is submitted here through the DOM crawler,
+     * which does not enforce HTML5 validation, exactly like the request a
+     * script or a non-conforming browser would send.
+     */
+    public function testAMalformedEmailIsRejectedByTheServerNotTheBrowser(): void
+    {
+        $crawler = $this->client->request('GET', '/join/join-peak-performance');
+        $form = $crawler->selectButton('Register')->form([
+            'player_registration[accountFirstName]' => 'Mal',
+            'player_registration[accountLastName]' => 'Formed',
+            'player_registration[email]' => 'definitely not an email',
+            'player_registration[plainPassword]' => 'correct-horse-battery',
+            'player_registration[playerFirstName]' => 'Mal',
+            'player_registration[playerDateOfBirth]' => sprintf('%d-06-15', ((int) date('Y')) - 12),
+            'player_registration[playerGender]' => 'unspecified',
+        ]);
+        $this->client->submit($form);
+
+        self::assertResponseStatusCodeSame(422, 'A malformed address is a rejected form, not a server error.');
+        self::assertSelectorExists(
+            '#player_registration_email[aria-invalid="true"]',
+            'The rejection must be attached to the email field, not shouted at the top of the page.',
+        );
+
+        /** @var AccountRepository $accounts */
+        $accounts = self::getContainer()->get(AccountRepository::class);
+        self::assertNull(
+            $accounts->findOneByEmail('definitely not an email'),
+            'Nothing is created for an address the platform can never write to.',
+        );
     }
 
     /**

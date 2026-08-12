@@ -12,6 +12,7 @@ use Symfony\Component\Form\Extension\Core\Type\TelType;
 use Symfony\Component\Form\Extension\Core\Type\TextType;
 use Symfony\Component\Form\FormBuilderInterface;
 use Symfony\Component\OptionsResolver\OptionsResolver;
+use Symfony\Component\Validator\Constraints\Email;
 use Symfony\Component\Validator\Constraints\NotBlank;
 use Symfony\Component\Validator\Constraints\Regex;
 
@@ -53,7 +54,7 @@ final class CreateTrainerType extends AbstractType
             ->add('businessName', TextType::class, ['constraints' => [new NotBlank()]])
             ->add('trainerFirstName', TextType::class, ['constraints' => [new NotBlank()]])
             ->add('trainerLastName', TextType::class, ['constraints' => [new NotBlank()]])
-            ->add('email', EmailType::class, ['constraints' => [new NotBlank()]])
+            ->add('email', EmailType::class, ['constraints' => [new NotBlank(), new Email()]])
             ->add('phone', TelType::class, [
                 'required' => false,
                 // AC-01-50: phone number format validation.

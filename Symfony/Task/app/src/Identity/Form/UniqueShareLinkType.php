@@ -10,6 +10,7 @@ use Symfony\Component\Form\Extension\Core\Type\SubmitType;
 use Symfony\Component\Form\Extension\Core\Type\TextType;
 use Symfony\Component\Form\FormBuilderInterface;
 use Symfony\Component\OptionsResolver\OptionsResolver;
+use Symfony\Component\Validator\Constraints\Email;
 
 /**
  * AC-03-61 (optional MVP): a trainer generates a unique, one-time link for
@@ -26,7 +27,7 @@ final class UniqueShareLinkType extends AbstractType
     {
         $builder
             ->add('recipientName', TextType::class, ['required' => false])
-            ->add('email', EmailType::class, ['required' => false])
+            ->add('email', EmailType::class, ['required' => false, 'constraints' => [new Email()]])
             ->add('submit', SubmitType::class, ['label' => 'Generate unique link']);
     }
 

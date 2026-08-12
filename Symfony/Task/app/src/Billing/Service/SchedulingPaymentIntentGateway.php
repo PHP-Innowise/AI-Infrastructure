@@ -11,6 +11,7 @@ use App\Billing\Repository\PaymentRecordRepository;
 use App\Billing\Repository\TokenEntryRepository;
 use App\Identity\Entity\Account;
 use App\Platform\Entity\Trainer;
+use App\Scheduling\Billing\FundingShortfall;
 use App\Scheduling\Billing\PaymentIntentGateway;
 use App\Scheduling\Billing\PaymentIntentRequest;
 use App\Scheduling\Billing\PaymentIntentResult;
@@ -49,6 +50,21 @@ final readonly class SchedulingPaymentIntentGateway implements PaymentIntentGate
         if (Rsvp::METHOD_TOKEN === $paymentMethod) {
             $this->tokenLedger->lockBalanceForUpdate($trainer, $payer);
         }
+    }
+
+    /**
+     * Only a token payment can be short: a card is funded at Stripe
+     * Checkout, and a free RSVP has nothing to fund.
+     */
+    public function findFundingShortfall(Trainer $trainer, Account $payer, string $paymentMethod, int $amount): ?FundingShortfall
+    {
+        if (Rsvp::METHOD_TOKEN !== $paymentMethod) {
+            return null;
+        }
+
+        $available = $this->tokenLedger->balanceFor($trainer, $payer);
+
+        return $available < $amount ? new FundingShortfall($available, $amount) : null;
     }
 
     public function requestPayment(PaymentIntentRequest $request): PaymentIntentResult

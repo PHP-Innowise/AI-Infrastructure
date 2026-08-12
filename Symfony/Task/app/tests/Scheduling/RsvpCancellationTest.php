@@ -8,6 +8,7 @@ use App\Identity\Entity\Account;
 use App\Identity\Entity\ChildApprovalRequest;
 use App\Identity\Repository\ChildApprovalRequestRepository;
 use App\Platform\Entity\Trainer;
+use App\Scheduling\Billing\FundingShortfall;
 use App\Scheduling\Billing\PaymentIntentGateway;
 use App\Scheduling\Billing\PaymentIntentRequest;
 use App\Scheduling\Billing\PaymentIntentResult;
@@ -125,6 +126,13 @@ final class RsvpCancellationTest extends WebTestCase
         self::getContainer()->set(PaymentIntentGateway::class, new class implements PaymentIntentGateway {
             public function lockFundingForUpdate(Trainer $trainer, Account $payer, string $paymentMethod): void
             {
+            }
+
+            // This double funds everything: the tests using it are about
+            // RSVP/cancellation flow, not about affordability.
+            public function findFundingShortfall(Trainer $trainer, Account $payer, string $paymentMethod, int $amount): ?FundingShortfall
+            {
+                return null;
             }
 
             public function requestPayment(PaymentIntentRequest $request): PaymentIntentResult

@@ -23,6 +23,7 @@ use App\Scheduling\Entity\Event;
 use App\Scheduling\Entity\Rsvp;
 use App\Scheduling\Exception\AlreadyRegisteredException;
 use App\Scheduling\Exception\EventFullException;
+use App\Scheduling\Exception\InsufficientFundsException;
 use App\Scheduling\Repository\EventRepository;
 use App\Scheduling\Repository\RsvpRepository;
 use Doctrine\DBAL\Exception\UniqueConstraintViolationException;
@@ -76,6 +77,7 @@ final readonly class RsvpService
     /**
      * @throws AlreadyRegisteredException
      * @throws EventFullException
+     * @throws InsufficientFundsException
      * @throws InvalidCouponException
      */
     public function rsvp(Event $event, PlayerProfile $player, Account $actor, string $paymentMethod, ?string $couponCode = null): Rsvp
@@ -92,6 +94,26 @@ final readonly class RsvpService
             ChildApprovalVoter::CHILD_APPROVAL_BYPASS,
             new ChildActionAttempt($actor, $player, $fundingMethod),
         );
+
+        // AC-05-8: asked before the transaction opens, so an unaffordable
+        // RSVP creates nothing at all — no row to reactivate later, no
+        // payment record, no half-registration the player has to wonder
+        // about. Only the bypass-granted token path pays here; a child's
+        // unapproved request pays at approval time
+        // (completeAfterParentApproval()), where the parent's balance is
+        // what matters and is checked then.
+        if ($bypassGranted && Event::PAYMENT_TOKEN === $paymentMethod) {
+            $shortfall = $this->paymentGateway->findFundingShortfall(
+                $event->getTrainer(),
+                $actor,
+                $paymentMethod,
+                $event->priceForMethod($paymentMethod),
+            );
+
+            if (null !== $shortfall) {
+                throw InsufficientFundsException::forShortfall($shortfall);
+            }
+        }
 
         $rsvp = $this->entityManager->wrapInTransaction(function () use ($event, $player, $actor, $paymentMethod, $bypassGranted): Rsvp {
             // Architecture "Lock ordering": the token balance row, always

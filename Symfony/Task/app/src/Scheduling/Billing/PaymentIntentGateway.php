@@ -35,6 +35,24 @@ interface PaymentIntentGateway
     public function lockFundingForUpdate(Trainer $trainer, Account $payer, string $paymentMethod): void;
 
     /**
+     * AC-05-8: whether the payer can fund $amount at all, asked BEFORE any
+     * RSVP row or payment record exists. Returns null when they can, or by
+     * how much they fall short when they cannot.
+     *
+     * Deliberately unlocked, and therefore non-authoritative — the same
+     * split AC-02-67 already draws for capacity: this is the fast check that
+     * gives the player an honest answer and leaves nothing half-created,
+     * while the locked check inside `requestPayment()` is the one that
+     * actually decides. A balance that empties between the two is a race the
+     * caller still handles (the RSVP stays Pending Payment), not a case this
+     * method has to win.
+     *
+     * Takes primitives for the same reason `lockFundingForUpdate()` does:
+     * it is called before the `Rsvp` exists.
+     */
+    public function findFundingShortfall(Trainer $trainer, Account $payer, string $paymentMethod, int $amount): ?FundingShortfall;
+
+    /**
      * BR-02-9: request that a charge (or token spend) be taken for a paid
      * RSVP. Must not confirm the RSVP itself — the caller does that only on
      * `PaymentIntentOutcome::Succeeded`.

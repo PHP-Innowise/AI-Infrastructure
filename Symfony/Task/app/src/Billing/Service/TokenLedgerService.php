@@ -141,6 +141,22 @@ final readonly class TokenLedgerService
      * database CHECK is the backstop, this is the fail-fast application
      * check.
      *
+     * **The shortfall is RETURNED out of the transactional closure and
+     * thrown outside it, never thrown from within.** An exception crossing
+     * `wrapInTransaction`'s boundary makes Doctrine roll back AND call
+     * `EntityManager::close()`, so every caller that then handles the
+     * shortfall — both gateways do, by marking their payment record failed
+     * and flushing — hits `EntityManagerClosed` instead. Manual testing
+     * found exactly that: a parent with no tokens got HTTP 500 on the most
+     * ordinary path in the product (every event defaults to 1 token, every
+     * new parent starts at 0), and AC-05-8's message was unreachable.
+     *
+     * An expected business outcome must not destroy the caller's
+     * EntityManager. Returning the exception keeps the locked, authoritative
+     * numbers it was built from — re-reading the balance after the
+     * transaction would report an unlocked, possibly different figure — and
+     * commits a transaction that wrote nothing.
+     *
      * @throws InsufficientTokenBalanceException
      */
     public function spend(
@@ -153,11 +169,11 @@ final readonly class TokenLedgerService
         ?Event $relatedEvent = null,
         ?int $relatedContentItemId = null,
     ): TokenEntry {
-        return $this->entityManager->wrapInTransaction(function () use ($trainer, $parentAccount, $tokenCount, $beneficiaryPlayer, $description, $paymentRecord, $relatedEvent, $relatedContentItemId): TokenEntry {
+        $outcome = $this->entityManager->wrapInTransaction(function () use ($trainer, $parentAccount, $tokenCount, $beneficiaryPlayer, $description, $paymentRecord, $relatedEvent, $relatedContentItemId): TokenEntry|InsufficientTokenBalanceException {
             $balance = $this->balances->lockForUpdate($trainer, $parentAccount);
 
             if ($balance->getBalance() < $tokenCount) {
-                throw InsufficientTokenBalanceException::forShortfall($balance->getBalance(), $tokenCount);
+                return InsufficientTokenBalanceException::forShortfall($balance->getBalance(), $tokenCount);
             }
 
             $entry = TokenEntry::spend($trainer, $parentAccount, $tokenCount, $beneficiaryPlayer, $description, $paymentRecord, $relatedEvent, $relatedContentItemId);
@@ -167,6 +183,12 @@ final readonly class TokenLedgerService
 
             return $entry;
         });
+
+        if ($outcome instanceof InsufficientTokenBalanceException) {
+            throw $outcome;
+        }
+
+        return $outcome;
     }
 
     /**
@@ -212,15 +234,20 @@ final readonly class TokenLedgerService
      * CHECK constraint is the final backstop against a negative adjustment
      * that would breach a zero balance; this method's own pre-check makes
      * that a clean exception rather than a caught constraint violation.
+     *
+     * The shortfall leaves the closure as a return value for the same
+     * reason it does in `spend()` above — no caller reaches this yet, and a
+     * future one must not inherit the closed-EntityManager trap that cost
+     * `spend()` a production 500.
      */
     public function adjustment(Trainer $trainer, Account $parentAccount, int $signedAmount, Account $superAdmin, string $reason): TokenEntry
     {
-        return $this->entityManager->wrapInTransaction(function () use ($trainer, $parentAccount, $signedAmount, $superAdmin, $reason): TokenEntry {
+        $outcome = $this->entityManager->wrapInTransaction(function () use ($trainer, $parentAccount, $signedAmount, $superAdmin, $reason): TokenEntry|InsufficientTokenBalanceException {
             $balance = $this->balances->lockForUpdate($trainer, $parentAccount);
             $newTotal = $balance->getBalance() + $signedAmount;
 
             if ($newTotal < 0) {
-                throw InsufficientTokenBalanceException::forShortfall($balance->getBalance(), -$signedAmount);
+                return InsufficientTokenBalanceException::forShortfall($balance->getBalance(), -$signedAmount);
             }
 
             $entry = TokenEntry::adjustment($trainer, $parentAccount, $signedAmount, $superAdmin, $reason);
@@ -237,6 +264,12 @@ final readonly class TokenLedgerService
 
             return $entry;
         });
+
+        if ($outcome instanceof InsufficientTokenBalanceException) {
+            throw $outcome;
+        }
+
+        return $outcome;
     }
 
     /**

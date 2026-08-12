@@ -14,6 +14,7 @@ use Symfony\Component\Form\Extension\Core\Type\TelType;
 use Symfony\Component\Form\Extension\Core\Type\TextType;
 use Symfony\Component\Form\FormBuilderInterface;
 use Symfony\Component\OptionsResolver\OptionsResolver;
+use Symfony\Component\Validator\Constraints\Email;
 use Symfony\Component\Validator\Constraints\Length;
 use Symfony\Component\Validator\Constraints\NotBlank;
 use Symfony\Component\Validator\Constraints\Regex;
@@ -31,7 +32,7 @@ final class PlayerRegistrationType extends AbstractType
         $builder
             ->add('accountFirstName', TextType::class, ['label' => 'Your first name', 'constraints' => [new NotBlank()]])
             ->add('accountLastName', TextType::class, ['label' => 'Your last name', 'constraints' => [new NotBlank()]])
-            ->add('email', EmailType::class, ['constraints' => [new NotBlank()]])
+            ->add('email', EmailType::class, ['constraints' => [new NotBlank(), new Email()]])
             // Labelled explicitly: without this Symfony derives the label from
             // the property and a first-time visitor is asked for a
             // "Plain password" on the very first screen they ever see. The

@@ -82,6 +82,38 @@ trait BillingFixtureHelpers
         $ledger->gift($trainer, $parentAccount, $amount, $grantedBy ?? $trainer->getOwnerAccount(), 'Test fixture grant.');
     }
 
+    /**
+     * Pins the balance to an exact figure, so a test can say "this player
+     * has one token and the event costs two" and mean it. The suite shares
+     * one mutable database across the whole run, so a balance is never
+     * whatever a fresh fixture would suggest — it has to be established.
+     *
+     * Goes through the ledger's own out-of-band correction (BR-05-12)
+     * rather than writing `TokenBalance`'s field, for the same reason
+     * `giveTokens()` uses `gift()`: I1 (the projection equals the sum of
+     * real entries) must hold for fixture data too, or every reconciliation
+     * assertion in the suite is measuring something the product would never
+     * produce.
+     */
+    protected function setTokenBalanceTo(Trainer $trainer, Account $parentAccount, int $target): void
+    {
+        /** @var TokenLedgerService $ledger */
+        $ledger = self::getContainer()->get(TokenLedgerService::class);
+        $delta = $target - $ledger->balanceFor($trainer, $parentAccount);
+
+        if (0 === $delta) {
+            return;
+        }
+
+        $ledger->adjustment(
+            $trainer,
+            $parentAccount,
+            $delta,
+            $this->account('admin@practiceperfect.test'),
+            'Test fixture: pinning the balance to a known figure.',
+        );
+    }
+
     protected function tokenBalance(Trainer $trainer, Account $parentAccount): int
     {
         /** @var TokenLedgerService $ledger */
