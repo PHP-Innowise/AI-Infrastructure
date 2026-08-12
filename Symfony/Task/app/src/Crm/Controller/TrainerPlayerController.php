@@ -29,6 +29,7 @@ use App\Content\Service\ContentProgressService;
 use App\Identity\Entity\Account;
 use App\Identity\Entity\AccountRole;
 use App\Identity\Entity\PlayerTrainerMembership;
+use App\Identity\Entity\SkillLevel;
 use App\Platform\Entity\Trainer;
 use App\Platform\Tenancy\TenantContext;
 use App\Scheduling\Entity\AttendanceRecord;
@@ -113,7 +114,7 @@ final class TrainerPlayerController extends AbstractController
     {
         $this->denyAccessUnlessGranted(PlayerVoter::PLAYER_EDIT, $membership);
 
-        $form = $this->createForm(PlayerCrmFieldsType::class, ['skillLevel' => $membership->getSkillLevel()]);
+        $form = $this->createForm(PlayerCrmFieldsType::class, ['skillLevel' => $this->displayableSkillLevel($membership)], ['currentSkillLevel' => $membership->getSkillLevel()]);
         $form->handleRequest($request);
 
         if ($form->isSubmitted() && $form->isValid()) {
@@ -354,7 +355,7 @@ final class TrainerPlayerController extends AbstractController
             'totalTrackedCount' => \count($attendance),
             'noShowCount' => $noShowCount,
             'lastEventAt' => $lastEventAt,
-            'editForm' => $this->createForm(PlayerCrmFieldsType::class, ['skillLevel' => $membership->getSkillLevel()]),
+            'editForm' => $this->createForm(PlayerCrmFieldsType::class, ['skillLevel' => $this->displayableSkillLevel($membership)], ['currentSkillLevel' => $membership->getSkillLevel()]),
             'applyLabelsForm' => $this->createForm(ApplyLabelsType::class, null, ['availableLabels' => $this->labels->findAllForActiveTenant()]),
             'flagForm' => $this->createForm(ApplyFlagType::class),
             'noteForm' => $this->createForm(AddNoteType::class, null, ['events' => $this->eventChoicesForPlayer($membership)]),
@@ -433,6 +434,19 @@ final class TrainerPlayerController extends AbstractController
             sort: (string) $request->query->get('sort', SegmentCriteria::SORT_NAME_ASC),
             page: max(1, $request->query->getInt('page', 1)),
         );
+    }
+
+    /**
+     * The stored value in its documented spelling, so a row written while
+     * this field was free text pre-selects the level it obviously means
+     * instead of showing "Not set". A value that is not one of the four at
+     * all passes through unchanged — PlayerCrmFieldsType offers it back.
+     */
+    private function displayableSkillLevel(PlayerTrainerMembership $membership): ?string
+    {
+        $stored = $membership->getSkillLevel();
+
+        return SkillLevel::canonicalize($stored) ?? $stored;
     }
 
     private function nullableString(mixed $value): ?string

@@ -6,6 +6,7 @@ namespace App\Tests\Content;
 
 use App\Content\Entity\ContentItem;
 use App\Content\Entity\Playlist;
+use App\Identity\Entity\SkillLevel;
 use App\Content\Repository\PlaylistItemRepository;
 use App\Content\Repository\PlaylistRepository;
 use App\Content\Service\PlaylistService;
@@ -46,7 +47,6 @@ final class LearnPlaylistCreationTest extends WebTestCase
         $form = $crawler->selectButton('Create Learn Playlist')->form([
             'learn_playlist[title]' => 'Ball Handling Fundamentals',
             'learn_playlist[description]' => 'Foundational dribbling skills.',
-            'learn_playlist[filterSkillLevels]' => 'Beginner, Intermediate',
             'learn_playlist[isPublic]' => false,
             'learn_playlist[audience]' => Playlist::AUDIENCE_PLAYERS_AND_COACHES,
             'learn_playlist[videos][0][youtubeUrl]' => 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
@@ -55,7 +55,13 @@ final class LearnPlaylistCreationTest extends WebTestCase
             'learn_playlist[videos][0][tags]' => 'dribbling, footwork',
             'learn_playlist[videos][0][durationSeconds]' => '180',
         ]);
-        $this->client->submit($form);
+
+        // Skill levels are checkboxes now, not a comma-separated text field
+        // (see SkillLevel): DomCrawler cannot assign to a compound field, so
+        // the selection is merged into the submitted values directly.
+        $values = $form->getPhpValues();
+        $values['learn_playlist']['filterSkillLevels'] = [SkillLevel::BEGINNER, SkillLevel::INTERMEDIATE];
+        $this->client->request($form->getMethod(), $form->getUri(), $values);
 
         self::assertResponseRedirects();
         $this->client->followRedirect();

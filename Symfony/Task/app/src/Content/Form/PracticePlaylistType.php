@@ -5,12 +5,13 @@ declare(strict_types=1);
 namespace App\Content\Form;
 
 use App\Content\Entity\Playlist;
+use App\Identity\Entity\SkillLevel;
 use Symfony\Component\Form\AbstractType;
 use Symfony\Component\Form\Extension\Core\Type\CheckboxType;
 use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
 use Symfony\Component\Form\Extension\Core\Type\SubmitType;
-use Symfony\Component\Form\Extension\Core\Type\TextareaType;
 use Symfony\Component\Form\Extension\Core\Type\TextType;
+use Symfony\Component\Form\Extension\Core\Type\TextareaType;
 use Symfony\Component\Form\FormBuilderInterface;
 use Symfony\Component\Form\FormError;
 use Symfony\Component\Form\FormEvent;
@@ -36,7 +37,13 @@ final class PracticePlaylistType extends AbstractType
         $builder
             ->add('title', TextType::class, ['constraints' => [new NotBlank(), new Length(max: Playlist::MAX_TITLE_LENGTH)]])
             ->add('description', TextareaType::class, ['required' => false])
-            ->add('filterSkillLevels', TextType::class, ['required' => false, 'help' => 'Comma-separated'])
+            ->add('filterSkillLevels', ChoiceType::class, [
+                'required' => false,
+                'multiple' => true,
+                'expanded' => true,
+                'choices' => SkillLevel::choices(),
+                'label' => 'Skill levels',
+            ])
             ->add('filterPositions', TextType::class, ['required' => false, 'help' => 'Comma-separated'])
             ->add('filterAgeLevels', TextType::class, ['required' => false, 'help' => 'Comma-separated'])
             ->add('isPublic', CheckboxType::class, ['required' => false, 'label' => 'Make Public'])

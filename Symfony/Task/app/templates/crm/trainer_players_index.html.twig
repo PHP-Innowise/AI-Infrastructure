@@ -24,10 +24,13 @@
         <form method="get" action="{{ path('crm_trainer_players_index') }}">
             <input type="hidden" name="q" value="{{ criteria.query }}">
 
+            {# The same four the profile form offers — read from SkillLevel
+               rather than restated here, which is how the two drifted apart
+               in the first place. #}
             <label>Skill Level
                 <select name="skillLevel">
                     <option value="">Any</option>
-                    {% for level in ['Beginner', 'Intermediate', 'Advanced', 'Elite'] %}
+                    {% for level in constant('App\\Identity\\Entity\\SkillLevel::ALL') %}
                         <option value="{{ level }}" {{ criteria.skillLevel == level ? 'selected' }}>{{ level }}</option>
                     {% endfor %}
                 </select>

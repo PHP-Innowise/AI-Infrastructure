@@ -98,7 +98,11 @@ final readonly class PlayerSegmentationRepository
         }
 
         if (null !== $criteria->skillLevel && '' !== $criteria->skillLevel) {
-            $innerConditions[] = 'ptm.skill_level = :skillLevel';
+            // Compared case-insensitively: the profile field is a choice list
+            // now, but rows written while it was free text still hold
+            // whatever a trainer typed, and "intermediate" is plainly the
+            // same answer as "Intermediate" — see SkillLevel.
+            $innerConditions[] = 'lower(btrim(ptm.skill_level)) = lower(btrim(:skillLevel))';
             $params['skillLevel'] = $criteria->skillLevel;
         }
 

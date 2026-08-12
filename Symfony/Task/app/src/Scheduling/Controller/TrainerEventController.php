@@ -659,7 +659,7 @@ final class TrainerEventController extends AbstractController
             'description' => $event->getDescription(),
             'minAge' => $event->getMinAge(),
             'maxAge' => $event->getMaxAge(),
-            'skillLevels' => null === $event->getSkillLevels() ? null : implode(', ', $event->getSkillLevels()),
+            'skillLevels' => $event->getSkillLevels() ?? [],
             'genders' => null === $event->getGenders() ? null : implode(', ', $event->getGenders()),
             'usdPricingEnabled' => $event->isUsdPricingEnabled(),
             'usdPrice' => $event->getUsdPriceMinorUnits() / 100,
@@ -673,7 +673,11 @@ final class TrainerEventController extends AbstractController
      */
     private function toEventInput(array $data): EventInput
     {
-        $skillLevels = $this->parseCommaList($data['skillLevels'] ?? null);
+        // skillLevels arrives as a list from a multiple ChoiceType now, not
+        // as a comma-separated string; an empty selection means "no
+        // restriction", which the entity stores as null rather than [].
+        $selectedSkillLevels = $data['skillLevels'] ?? [];
+        $skillLevels = \is_array($selectedSkillLevels) && [] !== $selectedSkillLevels ? array_values($selectedSkillLevels) : null;
         $genders = $this->parseCommaList($data['genders'] ?? null);
 
         // EntityType with 'multiple' => true submits a Doctrine Collection

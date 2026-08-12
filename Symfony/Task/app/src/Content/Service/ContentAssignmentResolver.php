@@ -9,6 +9,7 @@ use App\Content\Entity\PlaylistAssignment;
 use App\Content\Repository\PlaylistAssignmentRepository;
 use App\Crm\Repository\PlayerLabelRepository;
 use App\Identity\Entity\PlayerProfile;
+use App\Identity\Entity\SkillLevel;
 use App\Identity\Repository\PlayerTrainerMembershipRepository;
 use App\Platform\Entity\Trainer;
 
@@ -158,7 +159,7 @@ final readonly class ContentAssignmentResolver
 
         return null !== $membership
             && $membership->isActive()
-            && $membership->getSkillLevel() === $assignment->getTargetSkillLevel();
+            && SkillLevel::matches($membership->getSkillLevel(), $assignment->getTargetSkillLevel());
     }
 
     /**
@@ -185,8 +186,11 @@ final readonly class ContentAssignmentResolver
 
         $ids = [];
 
+        // Matched through SkillLevel, not with ===: a playlist assigned to
+        // "Intermediate" players must reach the profile that says
+        // "intermediate", which the free-text era made possible.
         foreach ($this->memberships->findActiveForActiveTenant() as $membership) {
-            if ($membership->getSkillLevel() === $skillLevel && $membership->getTrainer()->getId() === $trainer->getId()) {
+            if (SkillLevel::matches($membership->getSkillLevel(), $skillLevel) && $membership->getTrainer()->getId() === $trainer->getId()) {
                 $ids[] = (int) $membership->getPlayer()->getId();
             }
         }

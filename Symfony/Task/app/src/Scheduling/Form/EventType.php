@@ -6,6 +6,7 @@ namespace App\Scheduling\Form;
 
 use App\Identity\Entity\CoachMembership;
 use App\Identity\Entity\PlayerProfile;
+use App\Identity\Entity\SkillLevel;
 use App\Scheduling\Entity\Event;
 use Symfony\Bridge\Doctrine\Form\Type\EntityType;
 use Symfony\Component\Form\AbstractType;
@@ -29,11 +30,19 @@ use Symfony\Component\Validator\Constraints\Range;
 /**
  * AC-02-1/3, BR-02-1..4: Event Builder's create/edit/duplicate form — one
  * shape for all three (specs/api-designer-spec.md abbreviates its ~dozen
- * fields identically for create and edit). `skillLevels`/`genders` are
- * comma-separated free text, not a fixed Choice list: neither the schema
- * nor any epic names a canonical vocabulary for either (player_profile.
- * gender and player_trainer_membership.skill_level are both unconstrained
- * VARCHAR — genuinely trainer-defined free text).
+ * fields identically for create and edit).
+ *
+ * `skillLevels` was comma-separated free text on the grounds that no epic
+ * named a vocabulary. One does: Epic-03's own segmentation filter (US-03.06)
+ * fixes the four levels, and eligibility compares this field against a
+ * player's profile value exactly — so free text here meant a trainer could
+ * restrict an event to "intermediate" and exclude every player whose profile
+ * said "Intermediate". It is now the same closed list the profile offers.
+ *
+ * `genders` remains free text, and the same mismatch is likely there: a
+ * player's own gender comes from a fixed female/male/unspecified choice while
+ * this field accepts anything. Left as found — it was not what this change
+ * set out to fix, and it deserves its own look rather than being swept in.
  */
 /**
  * @extends AbstractType<array<string, mixed>>
@@ -74,7 +83,18 @@ final class EventType extends AbstractType
             ->add('description', TextareaType::class, ['required' => false])
             ->add('minAge', IntegerType::class, ['required' => false, 'constraints' => [new Range(min: 0, max: 120)]])
             ->add('maxAge', IntegerType::class, ['required' => false, 'constraints' => [new Range(min: 0, max: 120)]])
-            ->add('skillLevels', TextType::class, ['required' => false, 'help' => 'Comma-separated, e.g. Beginner, Intermediate'])
+            // BR-02-5's eligibility axis, chosen from the same four levels a
+            // player's profile can hold. Typed free-hand it silently excluded
+            // players whose profile said the same word with different
+            // capitalisation — see SkillLevel.
+            ->add('skillLevels', ChoiceType::class, [
+                'required' => false,
+                'multiple' => true,
+                'expanded' => true,
+                'choices' => SkillLevel::choices(),
+                'label' => 'Skill levels',
+                'help' => 'Leave all unchecked to open the event to every skill level.',
+            ])
             ->add('genders', TextType::class, ['required' => false, 'help' => 'Comma-separated'])
             ->add('usdPricingEnabled', CheckboxType::class, ['required' => false])
             ->add('usdPrice', NumberType::class, ['required' => false, 'scale' => 2, 'html5' => true])

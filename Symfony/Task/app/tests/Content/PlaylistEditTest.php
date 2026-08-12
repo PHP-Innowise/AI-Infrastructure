@@ -7,6 +7,7 @@ namespace App\Tests\Content;
 use App\Content\Repository\ContentProgressRepository;
 use App\Content\Repository\PlaylistItemRepository;
 use App\Content\Repository\PlaylistRepository;
+use App\Identity\Entity\SkillLevel;
 use App\Tests\Support\ContentFixtureHelpers;
 use App\Tests\Support\FixtureHelpers;
 use App\Tests\Support\SchedulingFixtureHelpers;
@@ -46,9 +47,14 @@ final class PlaylistEditTest extends WebTestCase
         $form = $crawler->selectButton('Save changes')->form([
             'playlist_edit[title]' => 'Updated Title',
             'playlist_edit[description]' => 'Updated description.',
-            'playlist_edit[filterSkillLevels]' => 'Advanced',
         ]);
-        $this->client->submit($form);
+
+        // Skill levels are checkboxes now, not a comma-separated text field
+        // (see SkillLevel): DomCrawler cannot assign to a compound field, so
+        // the selection is merged into the submitted values directly.
+        $values = $form->getPhpValues();
+        $values['playlist_edit']['filterSkillLevels'] = [SkillLevel::ADVANCED];
+        $this->client->request($form->getMethod(), $form->getUri(), $values);
 
         self::assertResponseRedirects();
         $this->client->followRedirect();
@@ -62,7 +68,7 @@ final class PlaylistEditTest extends WebTestCase
         self::assertNotNull($reloaded);
         self::assertSame('Updated Title', $reloaded->getTitle());
         self::assertSame('Updated description.', $reloaded->getDescription());
-        self::assertSame(['Advanced'], $reloaded->getFilterSkillLevels());
+        self::assertSame([SkillLevel::ADVANCED], $reloaded->getFilterSkillLevels());
     }
 
     /**

@@ -90,7 +90,7 @@ final class TrainerPlaylistController extends AbstractController
                 $this->currentTrainer(),
                 (string) $data['title'],
                 $this->blankToNull($data['description'] ?? null),
-                $this->parseCommaList($data['filterSkillLevels'] ?? null),
+                $this->selectedList($data['filterSkillLevels'] ?? null),
                 $this->parseCommaList($data['filterPositions'] ?? null),
                 $this->parseCommaList($data['filterAgeLevels'] ?? null),
                 (bool) ($data['isPublic'] ?? false),
@@ -137,7 +137,7 @@ final class TrainerPlaylistController extends AbstractController
                 $this->currentTrainer(),
                 (string) $data['title'],
                 $this->blankToNull($data['description'] ?? null),
-                $this->parseCommaList($data['filterSkillLevels'] ?? null),
+                $this->selectedList($data['filterSkillLevels'] ?? null),
                 $this->parseCommaList($data['filterPositions'] ?? null),
                 $this->parseCommaList($data['filterAgeLevels'] ?? null),
                 (bool) ($data['isPublic'] ?? false),
@@ -179,7 +179,7 @@ final class TrainerPlaylistController extends AbstractController
         $form = $this->createForm(PlaylistEditType::class, [
             'title' => $playlist->getTitle(),
             'description' => $playlist->getDescription(),
-            'filterSkillLevels' => null === $playlist->getFilterSkillLevels() ? null : implode(', ', $playlist->getFilterSkillLevels()),
+            'filterSkillLevels' => $playlist->getFilterSkillLevels() ?? [],
             'filterPositions' => null === $playlist->getFilterPositions() ? null : implode(', ', $playlist->getFilterPositions()),
             'filterAgeLevels' => null === $playlist->getFilterAgeLevels() ? null : implode(', ', $playlist->getFilterAgeLevels()),
             'priceUsdMinorUnits' => $playlist->getPriceUsdMinorUnits(),
@@ -195,7 +195,7 @@ final class TrainerPlaylistController extends AbstractController
                 $playlist,
                 (string) $data['title'],
                 $this->blankToNull($data['description'] ?? null),
-                $this->parseCommaList($data['filterSkillLevels'] ?? null),
+                $this->selectedList($data['filterSkillLevels'] ?? null),
                 $this->parseCommaList($data['filterPositions'] ?? null),
                 $this->parseCommaList($data['filterAgeLevels'] ?? null),
                 (int) $data['priceUsdMinorUnits'],
@@ -473,6 +473,22 @@ final class TrainerPlaylistController extends AbstractController
     private function defaultPracticeData(): array
     {
         return ['isPublic' => false, 'audience' => Playlist::AUDIENCE_PLAYERS_AND_COACHES];
+    }
+
+    /**
+     * A `multiple` ChoiceType submits a list, and an empty selection means
+     * "no filter" — stored as null, matching what the comma-separated field
+     * produced for an empty string.
+     *
+     * @return list<string>|null
+     */
+    private function selectedList(mixed $raw): ?array
+    {
+        if (!\is_array($raw) || [] === $raw) {
+            return null;
+        }
+
+        return array_values(array_map(strval(...), $raw));
     }
 
     /**

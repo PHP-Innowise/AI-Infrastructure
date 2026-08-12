@@ -7,13 +7,14 @@ namespace App\Content\Form;
 use App\Content\Entity\PlaylistAssignment;
 use App\Crm\Entity\Label;
 use App\Identity\Entity\PlayerProfile;
+use App\Identity\Entity\SkillLevel;
 use Symfony\Bridge\Doctrine\Form\Type\EntityType;
 use Symfony\Component\Form\AbstractType;
 use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
 use Symfony\Component\Form\Extension\Core\Type\DateType;
 use Symfony\Component\Form\Extension\Core\Type\SubmitType;
-use Symfony\Component\Form\Extension\Core\Type\TextareaType;
 use Symfony\Component\Form\Extension\Core\Type\TextType;
+use Symfony\Component\Form\Extension\Core\Type\TextareaType;
 use Symfony\Component\Form\FormBuilderInterface;
 use Symfony\Component\Form\FormError;
 use Symfony\Component\Form\FormEvent;
@@ -59,7 +60,15 @@ final class AssignPlaylistType extends AbstractType
                 'required' => false,
                 'placeholder' => 'Select a label',
             ])
-            ->add('targetSkillLevel', TextType::class, ['required' => false])
+            ->add('targetSkillLevel', ChoiceType::class, [
+                'required' => false,
+                'choices' => SkillLevel::choices(),
+                'placeholder' => 'Choose a skill level',
+                // AC-04-14 targets players BY skill level, so it has to name
+                // the same four a profile can hold. Typed free-hand it
+                // reached nobody whose profile spelled it differently.
+                'label' => 'Skill level',
+            ])
             ->add('dueDate', DateType::class, ['required' => false, 'widget' => 'single_text', 'input' => 'datetime_immutable'])
             ->add('note', TextareaType::class, ['required' => false, 'help' => 'Visible to the player'])
             ->add('submit', SubmitType::class, ['label' => 'Assign']);

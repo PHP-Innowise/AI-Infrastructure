@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Scheduling\Service;
 
 use App\Identity\Entity\PlayerTrainerMembership;
+use App\Identity\Entity\SkillLevel;
 use App\Scheduling\Entity\Event;
 use App\Scheduling\Repository\EventInvitationRepository;
 
@@ -68,6 +69,13 @@ final readonly class EventEligibilityChecker
         return true;
     }
 
+    /**
+     * Compared through `SkillLevel::matches()`, not with `in_array(...,
+     * true)`. Both sides are chosen from one list now, but rows written
+     * before that was true still hold whatever a trainer typed, and a player
+     * quietly missing from their own calendar because of one capital letter
+     * is the failure this method exists to avoid.
+     */
     private function matchesSkillLevel(Event $event, PlayerTrainerMembership $membership): bool
     {
         $restriction = $event->getSkillLevels();
@@ -78,7 +86,13 @@ final readonly class EventEligibilityChecker
 
         $playerSkill = $membership->getSkillLevel();
 
-        return null !== $playerSkill && \in_array($playerSkill, $restriction, true);
+        foreach ($restriction as $allowed) {
+            if (SkillLevel::matches($playerSkill, $allowed)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function matchesGender(Event $event, PlayerTrainerMembership $membership): bool
