@@ -40,6 +40,22 @@ not importable Python packages because their parent path contains a hyphen.
 Plain `unittest discover` can report a misleading successful zero-test run
 there.
 
+### External orchestration harness
+
+The optional LangGraph harness is intentionally outside the edition test
+matrix and is not a current release gate. It has separate dependencies and a
+separate offline test suite:
+
+```bash
+python3 -m venv harness/.venv
+harness/.venv/bin/pip install -e "harness[dev]"
+harness/.venv/bin/python -m pytest harness/tests
+```
+
+Run this suite manually when changing `harness/` or its orchestration contract.
+Its exclusion from the standard-library-only CI jobs must not be interpreted as
+automatic validation or a pass.
+
 ### parity
 
 ```bash

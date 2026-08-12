@@ -142,6 +142,10 @@ Use slash commands to move through the workflow:
 
 | Command | Purpose |
 | --- | --- |
+| `/flow-feature` | Orchestrate a complete feature with planning, approval, implementation, review, and verification |
+| `/flow-review` | Run parallel code, security, and performance review and synthesize one report |
+| `/sdd` | Run resumable spec-driven development with durable specs, tasks, and checkpoints |
+| `/codebase-mapper` | Map an unfamiliar Laravel codebase into source-cited, commit-stamped `codebase/` documents |
 | `/requirements-analyst` | Clarify and decompose requirements |
 | `/brainstorm` | Explore solution options |
 | `/researcher` | Evaluate packages and compare approaches |
@@ -175,6 +179,9 @@ Use slash commands to move through the workflow:
 | `/review-pr` | Review a GitHub pull request |
 | `/finishing-branch` | Prepare branch completion or PR |
 | `/release` | Prepare release notes and changelog |
+
+See [Orchestrator Commands](../docs/ORCHESTRATOR-COMMANDS.md) for flow examples,
+approval points, parallel-review limits, and write serialization.
 
 Example:
 
@@ -232,7 +239,7 @@ Use the one public task-aware retrieval command:
 python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID
 ```
 
-Canonical policy, specs, current code, configuration, migrations, and tests always outrank Project Brain, memory, retrieval packets, and local indexes. Retrieval and indexing are explicit; the accelerator does not inject context into prompts automatically. Use `--mode lightweight` only explicitly for machine-local work that does not need shared continuity or governed records.
+Canonical policy, specs, current code, configuration, migrations, and tests always outrank Project Brain, memory, retrieval packets, and local indexes. Automatic delivery is bounded: Claude Code and Codex retrieve a fresh Task Capsule at prompt time, while Cursor uses an `alwaysApply` rule rendered at the previous turn boundary. Explicit `context.py retrieve` remains available for every tool. Use `--mode lightweight` only explicitly for machine-local work that does not need shared continuity or governed records.
 
 ### Task Capsule
 
@@ -249,7 +256,7 @@ research-to-planning, planning-to-implementation,
 implementation-to-independent-verification, and recovery after compaction.
 `memory`, `checkpoint`, and explicit `complete` keep their existing roles.
 
-Each committed chunk uses `memory-bank/chunks/MEM-NNNN-short-slug.md`, is cataloged in `INDEX.md`, and cites its authoritative sources. The session-start hooks report counts only; they never inject chunk contents into logs or context automatically.
+New chunks use conflict-free names such as `memory-bank/chunks/MEM-YYYYMMDD-xxxxxxxx-short-slug.md`; legacy `MEM-NNNN` chunks keep their IDs. Rebuild the derived `INDEX.md` with `python3 memory-bank/scripts/context.py reindex-bank` instead of editing a shared counter. Automatic promotions are tagged `auto-promoted` and are explicitly unreviewed; disable `automatic_promotion` for the independent-review workflow. Session-start banners remain metadata-only even though separate prompt/turn hooks deliver bounded working context.
 
 ## Optional MCP Integrations
 

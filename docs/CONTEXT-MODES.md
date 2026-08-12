@@ -75,7 +75,8 @@ Project Brain
   → not used as the authority for the lightweight task
 
 Memory Bank
-  → unchanged; still stores only reviewed durable knowledge
+  → unchanged; stores durable knowledge, with automatic unreviewed
+    promotions labeled `auto-promoted`
 ```
 
 ### Behavior
@@ -118,7 +119,9 @@ Both modes also:
 - fail safely on invalid UTF-8 without replacing the previous index;
 - treat retrieved content as a discovery aid rather than canonical truth;
 - require explicit completion;
-- keep hooks metadata-only and avoid automatic prompt injection.
+- keep session-start banners metadata-only;
+- deliver bounded context automatically when supported: fresh prompt capsules
+  on Claude Code/Codex and a one-turn-stale `alwaysApply` rule on Cursor.
 
 The difference is the Working layer:
 
