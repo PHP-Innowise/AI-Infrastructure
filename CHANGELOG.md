@@ -369,6 +369,19 @@ edition's own files remain in that edition's changelog.
   what it finds hands back a green report and no list, and the list is the
   deliverable.
 
+- **The debugger sweeps the root cause across the codebase before calling a
+  bug fixed.** `EntityManager::wrapInTransaction()` closes the manager on any
+  exception, expected ones included, so six services handed their controller a
+  dead manager while reporting an ordinary rejection - one shape, six sites,
+  and fixing the reported one left five live. Phase 4 of
+  `systematic-debugger/SKILL.md` gained a `Sweep The Root Cause` step: search
+  for the mechanism rather than the symptom, report every other site with file
+  and line even when fixing it is out of scope, and treat that list as the
+  requester's scope decision rather than a "while I'm here" improvement the
+  same phase forbids. `project-brain/templates/bug.md` gained `Root Cause`,
+  `Same Shape Elsewhere` and `Guard` sections so the sweep and the regression
+  test survive in the record; an empty sweep section means the search ran.
+
 - **`docs/SECURITY.md` states what the write-agent gate does not guarantee.**
   The policy-versus-enforcement table gained a row for it: an advisory,
   machine-local `/tmp` lock that does not serialize two containers on the same
