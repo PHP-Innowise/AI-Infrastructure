@@ -14,7 +14,7 @@ The JSON top level MUST contain exactly these required members (extensions requi
 ```json
 {
   "schema_version": "1.0",
-  "catalog_version": "3.0.0",
+  "catalog_version": "2.5.0",
   "target_root": "/absolute/path/to/target",
   "profile": "tasks/TASK-001/infra-scan-project-profile.md",
   "evidence": [],

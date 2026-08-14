@@ -4,7 +4,7 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
-## [3.0.0] - 2026-08-14
+## [2.5.0] - 2026-08-14
 
 ### Added
 
@@ -42,7 +42,7 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Breaking
 
-- Profiles created before 3.0.0 do not contain per-skill generation contracts.
+- Profiles created before 2.5.0 do not contain per-skill generation contracts.
   Re-run `infra-scan` before generation/update instead of reconstructing
   authority from previously generated prose.
 

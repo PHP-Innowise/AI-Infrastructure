@@ -103,7 +103,7 @@ class SkillQualityFixture(unittest.TestCase):
             json.dumps(
                 {
                     "schema_version": "1.0",
-                    "catalog_version": "3.0.0",
+                    "catalog_version": "2.5.0",
                     "candidates": [
                         {
                             "id": "firebase-services",
@@ -159,7 +159,7 @@ class SkillQualityFixture(unittest.TestCase):
     def base_plan(self) -> dict:
         return {
             "schema_version": "1.0",
-            "catalog_version": "3.0.0",
+            "catalog_version": "2.5.0",
             "target_root": ".",
             "profile": "tasks/TASK-001/infra-scan-project-profile.md",
             "evidence": [
