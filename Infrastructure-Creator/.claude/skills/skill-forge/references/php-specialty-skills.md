@@ -31,6 +31,13 @@ For each row above whose signal in profile section 3.1 is `confirmed`/`inferred`
 
 Every selected specialty also needs evidence for concrete target usage, not package presence alone. Apply the contracts below independently.
 
+Before compiling a specialty contract:
+
+- Treat every “What it guides”/procedure concern as a review candidate, not a confirmed target capability. Keep unsupported items as questions or external requirements; do not assert deduplication, retention, locking, tenant scope, failure handling, audit, or similar behavior without a bounded target anchor.
+- Consume the target's real test topology and exact/resolved command definitions. Verification must select an applicable suite/focused command or a concrete manual assertion with expected results.
+- Map each intersecting high-priority invariant ID to a specialty procedure step and verification assertion; preserve explicit failure-state and forbidden-state expectations.
+- Carry path authority and every material adjacent owner into ownership/routing. Include positive, negative, ambiguous, and cross-domain routing cases rather than choosing one generic sibling.
+
 ## Enforceable Contracts
 
 ### `orm-patterns`

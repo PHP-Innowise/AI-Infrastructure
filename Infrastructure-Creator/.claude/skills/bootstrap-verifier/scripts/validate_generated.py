@@ -27,8 +27,9 @@ Checks:
     context_retrieval.py, validate.py under memory-bank/scripts/) and the
     project-brain/ skeleton is seeded with a substituted runtime.json whose
     canonical_edition points at a skills tree that actually exists.
-  - Smoke: `python3 memory-bank/scripts/context.py status` and `... validate`
-    both exit 0 inside the generated tree.
+  - Smoke: `python3 memory-bank/scripts/context.py status --json` and
+    `... validate` both exit 0 inside the generated tree; status exposes a
+    structurally valid active/retrieval-only/degraded automatic-memory report.
   - Every selected edition includes the memory quartet skills (memory-bank,
     project-brain, checkpoint, memory) and their agent/command wrappers where
     that edition carries those layers.
@@ -48,6 +49,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -65,6 +67,7 @@ from infra_ownership import (  # noqa: E402
     may_be_manifest_owned,
     resolve_target,
     sha256_file,
+    validate_decisions,
 )
 from validate_skill_quality import (  # noqa: E402
     DEFAULT_REGISTRY,
@@ -72,6 +75,7 @@ from validate_skill_quality import (  # noqa: E402
     validate_agent_routing,
     validate_flow_routing,
 )
+from validate_flow_contracts import validate as validate_compiled_flow_contracts  # noqa: E402
 
 PLACEHOLDER_PATTERNS = [
     re.compile(r"\{skill-name\}"),
@@ -83,6 +87,14 @@ PLACEHOLDER_PATTERNS = [
     re.compile(r"\bTASK-\{N\}"),
     re.compile(r"\{\{[A-Z_]+\}\}"),
 ]
+
+# These memory-seed assets are copied verbatim into generated targets and use
+# the ISO-date token as runtime guidance. Exemptions are keyed by the exact
+# manifest-relative path and placeholder regex so no file is exempt wholesale.
+APPROVED_VERBATIM_PLACEHOLDERS = {
+    ("memory-bank/templates/chunk.md", r"\bYYYY-MM-DD\b"),
+    ("memory-bank/scripts/validate.py", r"\bYYYY-MM-DD\b"),
+}
 
 # Always-generated skills that operate the shared memory layer; every selected
 # edition must carry all four (plus wrappers where the edition has those layers).
@@ -251,13 +263,20 @@ def owned_children(files: dict, directory: str, suffix: str) -> list[str]:
     )
 
 
-def check_placeholders(path: Path, errors: list) -> None:
+def check_placeholders(
+    path: Path,
+    errors: list,
+    manifest_relative_path: str | None = None,
+) -> None:
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return
     for pat in PLACEHOLDER_PATTERNS:
-        if pat.search(text):
+        for _match in pat.finditer(text):
+            declaration = (manifest_relative_path, pat.pattern)
+            if declaration in APPROVED_VERBATIM_PLACEHOLDERS:
+                continue
             errors.append(f"{path}: leftover placeholder matching /{pat.pattern}/")
 
 
@@ -266,7 +285,7 @@ def validate_owned_placeholders(target: Path, files: dict, errors: list) -> None
     for rel in sorted(files):
         path = target / rel
         if path.is_file():
-            check_placeholders(path, errors)
+            check_placeholders(path, errors, rel)
 
 
 def validate_edition(target: Path, edition: str, files: dict, errors: list) -> None:
@@ -504,6 +523,85 @@ def validate_hook_wiring(
             errors.append("[codex] .codex/config.toml does not enable hooks = true")
 
 
+def validate_memory_readiness(payload: object, errors: list) -> None:
+    """Validate the dependency-free readiness contract emitted by context.py."""
+    if not isinstance(payload, dict):
+        errors.append("context.py status JSON must be an object")
+        return
+    readiness = payload.get("automatic_memory")
+    if not isinstance(readiness, dict):
+        errors.append("context.py status missing automatic_memory readiness report")
+        return
+    allowed = {"active", "retrieval-only", "degraded"}
+    if readiness.get("status") not in allowed:
+        errors.append(
+            "context.py status automatic_memory.status must be active, "
+            "retrieval-only, or degraded"
+        )
+    component_statuses = {}
+    for component in ("task_identity", "git_metadata"):
+        report = readiness.get(component)
+        if not isinstance(report, dict):
+            errors.append(f"context.py status automatic_memory.{component} missing")
+            continue
+        component_statuses[component] = report.get("status")
+        if report.get("status") not in allowed:
+            errors.append(
+                f"context.py status automatic_memory.{component}.status "
+                "must be active, retrieval-only, or degraded"
+            )
+        if not isinstance(report.get("reason"), str) or not report["reason"].strip():
+            errors.append(
+                f"context.py status automatic_memory.{component}.reason "
+                "must be a non-empty string"
+            )
+        if "remediation" not in report:
+            errors.append(
+                f"context.py status automatic_memory.{component} missing remediation"
+            )
+        remediation = report.get("remediation")
+        if remediation is not None and (
+            not isinstance(remediation, str) or not remediation.strip()
+        ):
+            errors.append(
+                f"context.py status automatic_memory.{component}.remediation "
+                "must be null or a non-empty string"
+            )
+    if not isinstance(readiness.get("reason"), str) or not readiness["reason"].strip():
+        errors.append(
+            "context.py status automatic_memory.reason must be a non-empty string"
+        )
+    if "remediation" not in readiness:
+        errors.append("context.py status automatic_memory missing remediation")
+    remediation = readiness.get("remediation")
+    if remediation is not None and (
+        not isinstance(remediation, str) or not remediation.strip()
+    ):
+        errors.append(
+            "context.py status automatic_memory.remediation must be null or "
+            "a non-empty string"
+        )
+
+    expected_status = None
+    if component_statuses == {
+        "task_identity": "active",
+        "git_metadata": "active",
+    }:
+        expected_status = "active"
+    elif (
+        component_statuses.get("task_identity") == "active"
+        and component_statuses.get("git_metadata") == "degraded"
+    ):
+        expected_status = "retrieval-only"
+    elif len(component_statuses) == 2:
+        expected_status = "degraded"
+    if expected_status is not None and readiness.get("status") != expected_status:
+        errors.append(
+            "context.py status automatic_memory.status is inconsistent with "
+            f"task/Git readiness (expected {expected_status})"
+        )
+
+
 def validate_memory_runtime(target: Path, files: dict, errors: list) -> None:
     """The context-brain runtime and project-brain skeleton, plus smoke runs."""
     scripts_dir = target / "memory-bank" / "scripts"
@@ -571,13 +669,19 @@ def validate_memory_runtime(target: Path, files: dict, errors: list) -> None:
     if missing_runtime:
         return  # smoke runs cannot succeed without the runtime
     context_cli = scripts_dir / "context.py"
-    for arguments, label in ((["status"], "status"), (["validate"], "validate")):
+    for arguments, label in (
+        (["status", "--json"], "status"),
+        (["validate"], "validate"),
+    ):
         try:
+            environment = dict(os.environ)
+            environment.pop("CONTEXT_TASK_ID", None)
             result = subprocess.run(
                 [sys.executable, str(context_cli), *arguments],
                 capture_output=True,
                 text=True,
                 cwd=str(target),
+                env=environment,
                 timeout=120,
             )
         except (OSError, subprocess.TimeoutExpired) as error:
@@ -586,6 +690,14 @@ def validate_memory_runtime(target: Path, files: dict, errors: list) -> None:
         if result.returncode != 0:
             detail = (result.stderr.strip() or result.stdout.strip())[:400]
             errors.append(f"context.py {label} exited {result.returncode}: {detail}")
+            continue
+        if label == "status":
+            try:
+                status_payload = json.loads(result.stdout)
+            except (json.JSONDecodeError, TypeError) as error:
+                errors.append(f"context.py status did not emit valid JSON: {error}")
+                continue
+            validate_memory_readiness(status_payload, errors)
 
 
 def validate_manifest(target: Path, errors: list) -> dict:
@@ -654,29 +766,10 @@ def validate_manifest(target: Path, errors: list) -> dict:
     if not isinstance(decisions, dict):
         errors.append(f"{MANIFEST_NAME}: 'decisions' must be an object when present")
         decisions = {}
-    for rel, entry in decisions.items():
-        if rel not in files:
-            errors.append(
-                f"{MANIFEST_NAME}: decisions entry for untracked file: {rel}"
-            )
-        if not isinstance(entry, dict):
-            errors.append(f"{MANIFEST_NAME}: decisions[{rel!r}] must be an object")
-            continue
-        if entry.get("decision") not in ("kept", "merged"):
-            errors.append(
-                f"{MANIFEST_NAME}: decisions[{rel!r}].decision must be "
-                f"'kept' or 'merged', got {entry.get('decision')!r}"
-            )
-        if not re.fullmatch(r"[0-9a-f]{64}", str(entry.get("rejected_sha256", ""))):
-            errors.append(
-                f"{MANIFEST_NAME}: decisions[{rel!r}].rejected_sha256 must be "
-                "a sha256 hex digest of the declined staged version"
-            )
-        if not re.fullmatch(r"TASK-\d+", str(entry.get("task", ""))):
-            errors.append(
-                f"{MANIFEST_NAME}: decisions[{rel!r}].task must be a "
-                "TASK-<number> id"
-            )
+    try:
+        validate_decisions(decisions, files)
+    except OwnershipError as error:
+        errors.append(f"{MANIFEST_NAME}: {error}")
 
     for rel, expected_sha in files.items():
         if not isinstance(rel, str) or not rel or Path(rel).is_absolute() or ".." in Path(rel).parts:
@@ -881,6 +974,15 @@ def main() -> int:
                                 f"flow-routing[{edition}] {diagnostic.code}: "
                                 f"{diagnostic.message}"
                             )
+                    compiled_flow_errors = validate_compiled_flow_contracts(
+                        Path(args.skill_plan),
+                        skills_roots[edition] / "SKILL FLOW.md",
+                        command_roots[edition],
+                    )
+                    for flow_error in compiled_flow_errors:
+                        errors.append(
+                            f"flow-contract[{edition}] {flow_error}"
+                        )
 
     if errors:
         for e in errors:

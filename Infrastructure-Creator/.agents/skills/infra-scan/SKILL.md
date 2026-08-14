@@ -44,11 +44,18 @@ All output from this run lives under `tasks/TASK-{N}/` in Infrastructure-Creator
 5. **Fan out the seven scanners.**
    - **If your AI tool supports parallel subagents/tool calls:** spawn all seven in one batch so they run concurrently: `stack-scanner`, `architecture-scanner`, `integration-scanner`, `infra-ops-scanner`, `security-compliance-scanner`, `conventions-scanner`, `domain-behavior-scanner`, each given the target path and the task directory. Wait for all seven before continuing.
    - **If your AI tool is single-threaded:** invoke each scanner's logic sequentially in the same session. Output is identical; only mechanics differ. Say so in the Context Summary.
+   - Treat test topology, exact/resolved command definitions, stable high-priority invariant IDs, bounded evidence anchors, path authority/creatability, material adjacency, and routing cases as mandatory cross-scanner outputs. A scanner that omits its applicable portion is incomplete, not silently optional.
 6. **Run `stack-researcher`** once the scanners have written findings - it needs `integration-scanner-findings.md` (what to research) and `stack-scanner-findings.md` (the PHP framework/version to ground research in).
 7. **Run `clarifying-interview`** once research is done - it turns remaining `inferred`/`unknown` items into a short question set and always asks the mandatory AI-tool-selection question.
 8. **Run `profile-synthesizer`** last - it produces both handoff artifacts,
-   validates evidence paths and fingerprints, prunes unjustified/overlapping
-   skill proposals, and requires one complete contract per retained skill.
+   validates evidence paths and fingerprints, runs complete plan-level
+   operational-safety, ownership/write/routing/flow diagnostics, prunes
+   unjustified or conflicting skill proposals, and requires one complete schema
+   1.2 contract per retained skill. It maps every high-priority confirmed
+   invariant to a procedure and concrete verification assertion and compiles
+   runtime-fixed contracts from `memory-seed/assets/runtime-contract.json`.
+   Stop before approval on any blocking diagnostic; schema migration and
+   calibrated similarity warnings remain visible but non-blocking.
 9. **Stop.** Do not proceed to generation automatically - the profile is a human checkpoint by design.
 
 ## Output Template
@@ -89,6 +96,7 @@ routing. Correct anything wrong, then run `infra-generate`.
 - MUST NOT run the seven PHP scanners against a target that already failed the PHP-evidence check.
 - MUST NOT skip the interview's mandatory AI-tool-selection question, even if an edition folder already exists elsewhere - confirm explicitly.
 - MUST NOT let a slow/failed scanner silently drop from the profile - report it as a gap in the confidence summary.
+- MUST NOT approve synthesis with missing applicable test topology, command definitions, evidence anchors, path authority, invariant mapping, or material routing adjacency.
 - MUST NOT re-run scanners against an unchanged target just to double-check - one scan per invocation is the contract.
 
 ## Final Output

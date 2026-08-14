@@ -63,13 +63,33 @@ Infrastructure-Creator intentionally has no `memory-bank/` of its own: its job i
 - Every proposed skill MUST prove distinct selection, owned scope, procedure,
   output, evidence, and routing value. Catalog membership alone is not a reason
   to generate it; unsupported or overlapping skills are pruned or merged.
+- Plan approval MUST validate the complete selected inventory before any skill
+  is authored. Schema 1.1 uses stable ownership IDs/modes, normalized write
+  surfaces, and reciprocal sibling routing; schema 1.0 is migration-only.
+- New generation and publication require schema 1.2 operational contracts.
+  Legacy 1.0/1.1 plans remain readable for audit but MUST be re-synthesized;
+  missing verification, provider-safety, invariant, path, or routing facts are
+  never invented by a migration adapter.
 - Generated skills MUST cite canonical target-relative sources and contain
   project-specific procedures, decision points, verification, outputs, and
   failure handling. Generator task paths are provenance only and MUST NOT be a
   runtime evidence dependency of a generated target.
+- Every procedure step and verification assertion MUST be typed, evidence
+  anchored, capability-compatible, and explicit about expected/pass/fail/skip
+  outcomes. Verification commands MUST be non-mutating and non-networked unless
+  the contract classifies and explicitly authorizes the side effect.
+- Integration skills MUST default to static inspection, fakes, fixtures, or
+  local adapters. Credential-backed provider execution requires a named
+  approved environment, human authorization, rollback boundary, and sanitized
+  output.
+- Every high-priority confirmed invariant MUST map to a selected skill
+  procedure and regression assertion. Owned scope and outputs MUST NOT exceed
+  their claim-linked evidence.
 - Agents MUST remain thin wrappers but carry contract-derived positive/negative
   routing and sibling deferrals. Flows MUST select specialist agents by matching
   scope, never run every available specialist unconditionally.
+- `SKILL FLOW.md`, executable flow commands, and routing fixtures MUST compile
+  from one canonical plan graph; independent prose flow authoring is invalid.
 - Generated output is tool-selected: `policy-forge`, `skill-forge`, `agent-forge`, `command-forge`, and `hook-forge` produce ONLY the edition(s) the target team selected in `clarifying-interview` - never more editions than selected, never fewer.
 - The generator's version has exactly one source of truth: the root `VERSION` file. The Project Profile's metadata, the target's `AGENTS.md` stamp, and `.infra-manifest.json` all read it; nothing hardcodes or recalls a version from the changelog.
 - Generated output is upgradeable: every successful `infra-generate` run MUST
@@ -77,6 +97,10 @@ Infrastructure-Creator intentionally has no `memory-bank/` of its own: its job i
   stamped target `AGENTS.md` and `.infra-manifest.json`. `infra-update` MUST NOT
   overwrite any file whose hash differs from that manifest without an explicit
   per-file human decision, and MUST NOT touch files the manifest does not list.
+- Root `.gitignore` is a narrowly scoped shared-file exception: forges declare
+  exact requirements, only generation/update orchestration composes them, and
+  a pre-existing file is changed only by explicit append approval with
+  baseline/watch protection and structured decision metadata.
 
 ## Orchestration Exception (MANDATORY, SCOPED)
 
@@ -85,7 +109,8 @@ The general accelerator rule is "an agent executes exactly one skill, then stops
 - `infra-scan` MAY fan out to the seven scanner skills (including `domain-behavior-scanner`), `stack-researcher`, `clarifying-interview`, and `profile-synthesizer` in one run. It MAY also hand off to `stack-adapter` when a non-PHP stack is detected and the user opts in.
 - `infra-generate` MAY fan out evidence-independent forges into staging, but
   MUST generate skills in bounded contract-driven batches and pass semantic
-  validation before agent/command/flow generation, publication, or success.
+  validation in partial mode after each batch and complete mode before
+  agent/command/flow generation, publication, or success.
 - `infra-build` MAY chain `infra-scan` then `infra-generate` in one run, pausing at the profile checkpoint only when a blocking ambiguity or a collision is detected.
 - `infra-update` MAY re-validate the profile, fan out the forge skills into its staging directory, apply manifest-verified safe replacements, rewrite `.infra-manifest.json`, and run `bootstrap-verifier` in one run. It writes into the target only what the target's `.infra-manifest.json` proves untouched (sha256 match) or what the user explicitly approved per file; without that manifest it MUST abort.
 - `stack-adapter` MAY research, replicate, re-author, mirror, and self-verify an entire sibling generator in one run, after explicit user confirmation.

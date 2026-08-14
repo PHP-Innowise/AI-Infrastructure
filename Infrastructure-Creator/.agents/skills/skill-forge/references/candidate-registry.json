@@ -1,6 +1,23 @@
 {
   "schema_version": "1.0",
   "catalog_version": "2.5.0",
+  "runtime_contract": "../../memory-seed/assets/runtime-contract.json",
+  "compilation_requirements": {
+    "bounded_evidence_anchor_required": true,
+    "unsupported_claim_policy": "question-or-external-requirement",
+    "high_priority_invariant_mapping": {
+      "procedure_steps_minimum": 1,
+      "verification_assertions_minimum": 1
+    },
+    "material_adjacency_required": true,
+    "routing_case_kinds": [
+      "positive",
+      "negative",
+      "ambiguous",
+      "cross-domain"
+    ],
+    "runtime_fixed_source": "runtime_contract"
+  },
   "candidates": [
     {"id": "architecture-pattern", "catalog": "php-architecture-patterns.md#enforceable-architecture-skill-contract", "category": "architecture", "mode": "family"},
     {"id": "architecture-implementer", "catalog": "php-frameworks.md#architecture-implementer", "category": "design", "mode": "static"},

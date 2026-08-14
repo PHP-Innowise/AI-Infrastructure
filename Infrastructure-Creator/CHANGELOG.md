@@ -22,6 +22,17 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
   skills, paraphrased filler, invalid or irrelevant evidence, stale
   fingerprints, scope/routing collisions, reference stubs, merge preservation,
   and failed-publication rollback.
+- Early complete-inventory validation, safe partial skill-batch validation, and
+  schema 1.1 structured ownership/reciprocal routing with schema 1.0 migration.
+- Deterministic shared root `.gitignore` requirement composition, additive
+  decision metadata, and watch-only target drift protection.
+- Exact immutable-memory placeholder declarations and deterministic workflow,
+  parity, shared-file, publication, and rollback regression coverage.
+- Publication-gated schema 1.2 operational contracts for typed procedures,
+  concrete verification, provider safety, path authority, critical invariants,
+  evidence anchors, realistic routing cases, and canonical flow graphs.
+- Dependency-free command risk analysis for Composer/npm aliases and explicit
+  automatic-memory readiness reporting.
 
 ### Changed
 
@@ -36,6 +47,13 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
   available reviewer.
 - `infra-generate` and `infra-update` verify the complete staged bundle before
   publication and run the full gate again on the published target.
+- Forges declare root-ignore requirements instead of mutating `.gitignore`;
+  generation/update orchestration is the sole composer and requires explicit
+  approval when a pre-existing team file needs appended entries.
+- Legacy schema 1.0/1.1 plans remain audit-readable but require re-synthesis
+  before generation or publication; safety-critical fields are never guessed.
+- Skills, wrappers, `SKILL FLOW.md`, and executable flows compile from one
+  validated routing/flow contract and must preserve every material adjacency.
 - `stack-adapter` must carry the complete contract compiler, semantic/reference
   validators, staging/rollback helper, fixtures, and synthetic rehearsal into
   every future sibling generator.

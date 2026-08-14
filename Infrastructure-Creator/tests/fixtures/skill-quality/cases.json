@@ -54,5 +54,49 @@
   "deterministic-output": {
     "expected": "SKILL_SIMILARITY",
     "description": "Repeated runs emit byte-identical sorted JSON diagnostics."
+  },
+  "schema-1.2-valid": {
+    "expected": null,
+    "description": "A complete typed 1.2 plan passes plan-only and authored validation."
+  },
+  "legacy-publication-ineligible": {
+    "expected": "LEGACY_PLAN_PUBLICATION_INELIGIBLE",
+    "description": "Schema 1.0 and 1.1 remain auditable but cannot validate authored publication output."
+  },
+  "generic-verification": {
+    "expected": "GENERIC_VERIFICATION",
+    "description": "Verification must define a concrete command or manual assertion and explicit outcomes."
+  },
+  "provider-safety": {
+    "expected": "PROVIDER_AUTHORIZATION_REQUIRED",
+    "description": "Provider access requires a safe default and explicit authorization."
+  },
+  "read-only-mutation": {
+    "expected": "READ_ONLY_PROCEDURE_MUTATION",
+    "description": "Read-only contracts cannot use write-oriented procedure language."
+  },
+  "path-contract-classification": {
+    "expected": "PATH_EXISTING_MISSING",
+    "description": "Every path is normalized and classified as resolving, generated, or safely creatable."
+  },
+  "critical-invariant-coverage": {
+    "expected": "CRITICAL_INVARIANT_COVERAGE",
+    "description": "Every critical invariant reaches a selected skill procedure and verification assertion."
+  },
+  "claim-traceability": {
+    "expected": "CLAIM_TRACEABILITY_MISSING",
+    "description": "Evidence claims trace through scope, procedure, verification, and output."
+  },
+  "evidence-anchor": {
+    "expected": "EVIDENCE_ANCHOR_LOCATION",
+    "description": "Skill evidence carries a bounded canonical source anchor."
+  },
+  "routing-case-coverage": {
+    "expected": "ROUTING_CASE_COVERAGE",
+    "description": "Routing fixtures cover self-selection and every adjacent owner."
+  },
+  "flow-contract-shape": {
+    "expected": "FLOW_STAGE_INVALID",
+    "description": "Declared flows use typed stages and resolve every selected skill."
   }
 }

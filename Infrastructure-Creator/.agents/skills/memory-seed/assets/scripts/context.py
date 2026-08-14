@@ -2018,6 +2018,156 @@ def git_output(repository: Path, arguments: list[str], label: str) -> bytes:
     return result.stdout
 
 
+def _readiness_git_probe(
+    repository: Path, arguments: list[str]
+) -> tuple[Optional[str], Optional[str]]:
+    """Run a bounded Git metadata probe without making status fail."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repository), *arguments],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+            timeout=2,
+        )
+    except FileNotFoundError:
+        return None, "git-unavailable"
+    except (OSError, subprocess.TimeoutExpired):
+        return None, "git-probe-failed"
+    if result.returncode != 0:
+        return None, "not-a-worktree"
+    return result.stdout.strip(), None
+
+
+def automatic_memory_readiness(repository: Path) -> dict[str, object]:
+    """Report task identity and Git readiness without mutating runtime state."""
+    worktree, git_error = _readiness_git_probe(
+        repository, ["rev-parse", "--show-toplevel"]
+    )
+    branch: Optional[str] = None
+    git_state = git_error or "worktree"
+    if git_error is None:
+        branch, branch_error = _readiness_git_probe(
+            repository, ["symbolic-ref", "--quiet", "--short", "HEAD"]
+        )
+        if branch_error is not None:
+            head, head_error = _readiness_git_probe(
+                repository, ["rev-parse", "--verify", "HEAD"]
+            )
+            git_state = "detached-head" if head_error is None and head else "unborn-head"
+
+    if git_error is None:
+        git_metadata = {
+            "status": "active",
+            "state": git_state,
+            "worktree": worktree,
+            "branch": branch,
+            "reason": (
+                "Git changed-path metadata is available."
+                if git_state == "worktree"
+                else "Git changed-path metadata is available, but HEAD is detached "
+                "and cannot supply task identity."
+            ),
+            "remediation": (
+                None
+                if git_state == "worktree"
+                else "Set CONTEXT_TASK_ID for task-aware automation while HEAD is detached."
+            ),
+        }
+    else:
+        git_metadata = {
+            "status": "degraded",
+            "state": git_state,
+            "worktree": None,
+            "branch": None,
+            "reason": "Git changed-path metadata is unavailable; turn checkpointing cannot run.",
+            "remediation": "Run the accelerator inside its Git worktree.",
+        }
+
+    explicit_identity = os.environ.get("CONTEXT_TASK_ID", "").strip()
+    if explicit_identity:
+        try:
+            identity = validate_task_id(explicit_identity)
+        except ContextError:
+            task_identity = {
+                "status": "degraded",
+                "source": "environment",
+                "task_id": None,
+                "reason": "CONTEXT_TASK_ID is present but invalid.",
+                "remediation": "Set CONTEXT_TASK_ID to a valid task identifier.",
+            }
+        else:
+            task_identity = {
+                "status": "active",
+                "source": "environment",
+                "task_id": identity,
+                "reason": "Explicit task identity is available for retrieval and dispatch.",
+                "remediation": None,
+            }
+    elif branch:
+        try:
+            identity = validate_task_id(branch)
+        except ContextError:
+            task_identity = {
+                "status": "degraded",
+                "source": "git-branch",
+                "task_id": None,
+                "reason": "The current Git branch is not a valid task identifier.",
+                "remediation": "Set CONTEXT_TASK_ID to a valid task identifier.",
+            }
+        else:
+            task_identity = {
+                "status": "active",
+                "source": "git-branch",
+                "task_id": identity,
+                "reason": "The current Git branch supplies task identity.",
+                "remediation": None,
+            }
+    else:
+        task_identity = {
+            "status": "degraded",
+            "source": None,
+            "task_id": None,
+            "reason": "No task identity is available for task-aware retrieval, writes, or dispatch.",
+            "remediation": (
+                "Set CONTEXT_TASK_ID explicitly."
+                if git_error is None
+                else "Set CONTEXT_TASK_ID, and use a Git worktree to enable turn checkpointing."
+            ),
+        }
+
+    identity_active = task_identity["status"] == "active"
+    git_active = git_metadata["status"] == "active"
+    if identity_active and git_active:
+        overall = {
+            "status": "active",
+            "reason": "Task identity and Git metadata are available; automatic memory is active.",
+            "remediation": None,
+        }
+    elif identity_active:
+        overall = {
+            "status": "retrieval-only",
+            "reason": (
+                "Task identity supports retrieval and dispatch, but Git metadata is "
+                "unavailable so turn checkpointing is disabled."
+            ),
+            "remediation": "Run the accelerator inside its Git worktree.",
+        }
+    else:
+        overall = {
+            "status": "degraded",
+            "reason": (
+                "Automatic task-aware memory is degraded because no usable task "
+                "identity is available."
+            ),
+            "remediation": task_identity["remediation"],
+        }
+    overall["task_identity"] = task_identity
+    overall["git_metadata"] = git_metadata
+    return overall
+
+
 def derive_goal(task_id: str) -> str:
     """Build a task goal from a branch name.
 
@@ -3794,6 +3944,7 @@ def main() -> int:
                     ),
                     "layers": layers,
                     "database": str(database),
+                    "automatic_memory": automatic_memory_readiness(repository),
                 }
                 if arguments.json:
                     print(json.dumps(result, ensure_ascii=False))
@@ -3804,6 +3955,13 @@ def main() -> int:
                         f"({', '.join(f'{layer}: {count}' for layer, count in layers.items())}; "
                         f"{result['database']})."
                     )
+                    readiness = result["automatic_memory"]
+                    print(
+                        f"Automatic memory: {readiness['status']} — "
+                        f"{readiness['reason']}"
+                    )
+                    if readiness["remediation"]:
+                        print(f"Remediation: {readiness['remediation']}")
                 return 0
 
             if arguments.command == "search":

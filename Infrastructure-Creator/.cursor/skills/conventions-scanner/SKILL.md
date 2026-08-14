@@ -27,8 +27,9 @@ Write exactly one findings file into the current run's task directory: `tasks/TA
 4. **Detect editor config:** `.editorconfig` and its key settings (indent style/size, end-of-line, final-newline). Cite path:line.
 5. **Detect commit conventions:** Conventional Commits config (`commitlint.config.*`, `.commitlintrc*`), `.gitmessage` templates, or a documented commit policy in `CONTRIBUTING.md`. Cite the evidence.
 6. **Detect docs/ADRs:** `docs/`, `adr/`, `decisions/`, or `doc/adr/` directories and any ADR index; note count and location. Cite paths.
-7. **Detect contribution governance:** `CONTRIBUTING.md`, `CODEOWNERS`, PR/issue templates under `.github/`. Cite paths.
-8. **Mark confidence** per finding: `confirmed` (config file present), `inferred` (indirect signal, e.g. consistent style with no config), or `unknown`. Never present a guess as fact.
+7. **Detect contribution governance and path authority:** `CONTRIBUTING.md`, `CODEOWNERS`, PR/issue templates under `.github/`, generated-file notices, canonical/source-of-truth declarations, and documented creatable output locations. For each governed path/glob, cite the bounded authority anchor and classify it `required-existing`, `generated-runtime`, `creatable`, or `unknown`; Git history or directory presence alone does not grant write authority.
+8. **Cross-check command behavior.** For documented lint/test/check commands, reference stack-scanner's resolved definition and record whether documentation conflicts with actual mutation/network behavior (for example, a `lint` alias that invokes `--fix`).
+9. **Mark confidence** per finding: `confirmed` (config file present), `inferred` (indirect signal, e.g. consistent style with no config), or `unknown`. Never present a guess as fact.
 
 ## Output Template
 
@@ -58,6 +59,10 @@ Write exactly one findings file into the current run's task directory: `tasks/TA
 ## Contribution Governance
 - [CONTRIBUTING.md, CODEOWNERS, .github templates] (confirmed - path)
 
+## Path Authority & Documented Commands
+- [path/glob -> required-existing | generated-runtime | creatable | unknown -> bounded authority anchor]
+- [documented command -> resolved definition/effect class -> conflict or none]
+
 ## Confidence Summary
 [X confirmed, Y inferred, Z unknown]
 ```
@@ -68,6 +73,8 @@ Write exactly one findings file into the current run's task directory: `tasks/TA
 - MUST operate read-only on the target; MUST NOT read `.env`/secrets.
 - MUST focus on style + governance and REFERENCE `stack-scanner` for static-analysis/test/lint tooling rather than duplicating it.
 - MUST report absent config as `N/A - not configured` rather than assuming a default style.
+- MUST NOT infer path ownership or creatability from Git history, directory shape, or a catalog recommendation.
+- MUST flag documented verification commands whose resolved definitions mutate files, use the network, or perform external side effects.
 - MUST NOT deep-dive stack identity, architecture, integrations, infra, or security - those belong to their own scanners.
 
 ## Final Output

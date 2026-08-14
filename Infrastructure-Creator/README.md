@@ -69,12 +69,17 @@ infra-scan <path-to-php-project>          (read-only; never writes into the targ
    <-- REVIEW THE PROFILE (what you read here is what infra-generate will build) -->
 
 infra-generate <path-to-php-project>
-   -> validates evidence, contracts, and skill necessity
+   -> validates complete schema 1.2 evidence, operational safety, ownership,
+      routing, invariants, path authority, and necessity
    -> builds policy/hooks/memory and evidence-scoped skill batches in staging
-   -> semantic gate: project evidence, procedures, outputs, scope, distinctness
+      (partial batches are allowed; the final complete gate is mandatory)
+   -> semantic gate: evidence-anchored procedures, concrete safe verification,
+      provider policy, capabilities, outputs, scope, distinctness, flow parity
    -> only then generates agents, commands, and adaptive flows
    -> verifies the complete staged bundle
-   -> publishes explicit paths with rollback, manifest last, and verifies again
+   -> centrally composes approved shared .gitignore requirements
+   -> publishes explicit write/watch paths with rollback, manifest last,
+      and verifies again
    -> Target now has its own working AGENTS.md + selected edition(s) + memory-bank/
       + .infra-manifest.json (so a later `infra-update <path>` can upgrade it safely)
 ```
@@ -108,6 +113,10 @@ only the native integration directories selected during `clarifying-interview`:
 
 - `AGENTS.md`, `DOD.md`, `GOLDEN-PRINCIPLES.md`, `STABILIZATION.md` - policy tailored to what was found.
 - An evidence-gated custom PHP skill set: catalog names are candidates, not quotas. A skill is generated only when it has distinct project-backed selection, scope, procedure, output, and routing value.
+  Every selected skill also carries concrete non-mutating verification (or a
+  bounded manual assertion), expected pass/fail/skip behavior, exact local
+  evidence anchors, capability and path contracts, and claim-linked critical
+  invariants. Provider skills are non-networked by default.
   - **Architecture, design, and frontend** skills exist only where the detected structure and UI surface justify a separate operational workflow.
   - **Process and universal PHP** skills are selected and adapted to the target's actual conventions/tooling instead of being emitted as a fixed list. The memory quartet (`memory-bank`, `project-brain`, `checkpoint`, `memory`) remains because the generator always installs that runtime.
   - **Framework-specialty** (evidence-gated, one per confirmed pattern) - e.g. ORM patterns, migration safety, async/queue jobs, event-boundary review, caching strategy, file storage, auth scaffolding, form/validator design, admin panel, console commands, test-data factories - generated only where the scan found real evidence, never speculatively.
@@ -126,6 +135,11 @@ evidence, ownership, procedure, verification, output, and routing contract.
 Each selected skill carries satisfied claim-backed selection conditions;
 rejected catalog candidates record their reason and missing evidence.
 Unsupported or overlapping candidates are pruned before generation.
+Schema 1.0/1.1 plans remain readable for audit and migration diagnostics but
+cannot be generated or published: operational safety data cannot be inferred.
+New profiles use schema 1.2 with typed procedures and verification, provider
+safety, path authority, critical invariant coverage, evidence anchors, routing
+fixtures, and one canonical flow graph.
 
 ## Upgrading A Generated Accelerator
 
@@ -137,7 +151,7 @@ infra-update ../my-php-app
 
 How it stays safe:
 
-1. Every `infra-generate` run builds and validates the complete accelerator in task staging, rechecks target baseline hashes, then publishes an explicit path plan with rollback. `.infra-manifest.json` is copied last and `AGENTS.md` is stamped only when generated.
+1. Every `infra-generate` run builds and validates the complete accelerator in task staging, rechecks target publication and watch-only baseline hashes, then publishes an explicit path plan with rollback. `.infra-manifest.json` is copied last and `AGENTS.md` is stamped only when generated.
 2. `infra-update` re-validates the profile, regenerates everything into a staging area (never into your project), then compares each file three ways: manifest hash vs. what's in your project vs. what would be generated now.
    - Hash unchanged since generation -> your team never touched it -> safely replaced with the new version.
    - Hash differs (or the file was deleted) -> it's yours now -> it goes into a "requires decision" report showing all three sides; nothing is overwritten without your explicit per-file answer.
@@ -241,4 +255,12 @@ current session.
 
 ## Verification
 
-`bootstrap-verifier` runs automatically at the end of `infra-generate` (and `infra-update`) and checks manifest-owned frontmatter/cross-references, hooks and wiring, the generated memory/runtime surface, every manifest member's existence and hash, a tracked `AGENTS.md` stamp, and placeholders across every manifest-owned text file. Unmanifested team files are ignored in both full and merge modes. Treat a failed `bootstrap-verifier` run as generation not being done yet.
+`bootstrap-verifier` runs automatically at the end of `infra-generate` (and
+`infra-update`) and checks plan-level inventory conflicts before authoring,
+manifest-owned frontmatter/cross-references, hooks and wiring, the generated
+memory/runtime surface, every manifest member's existence and hash, a tracked
+`AGENTS.md` stamp, and placeholders across generated text. The immutable
+`memory-bank/templates/chunk.md` and `memory-bank/scripts/validate.py` may carry
+only their exact ISO-date format token. A shared root `.gitignore` is validated
+through its declared managed requirements rather than unrelated team comments.
+Unmanifested team files are ignored in both full and merge modes.

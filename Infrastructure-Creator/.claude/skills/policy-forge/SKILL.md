@@ -38,11 +38,32 @@ Append a generation log to `tasks/TASK-{N}/policy-forge-log.md` listing every fi
    **Orchestration** section requires contract-based specialist selection,
    read-only parallelism, serialized writers, bounded capsules, checkpoints,
    and stop-on-failure behavior.
-3. **Author `DOD.md`** as the Definition of Done: exact tests/format/static-analysis commands plus affected confirmed critical scenarios, denied paths, transitions, and audit checks when a change touches their scope. Report absent tooling as `N/A - not configured`.
+3. **Author `DOD.md`** as the Definition of Done: exact non-mutating
+   test/lint-check/format-check/static-analysis commands plus affected confirmed
+   critical scenarios, denied paths, transitions, and audit checks when a
+   change touches their scope. Never prescribe a formatter's write mode,
+   `--fix`, dependency installation/update, database migration/seed/reset,
+   deployment, destructive command, provider CLI, credential-backed operation,
+   or network call as verification. If the target exposes only a mutating script
+   (for example `lint` expands to `eslint --fix`), identify it as an optional
+   modification action and prescribe an evidenced non-mutating alternative or
+   exact manual assertion for verification; do not relabel it as safe. Report
+   absent tooling as `N/A - not configured` and an unavailable required check as
+   `SKIPPED - <check>: <reason>; impact: <unverified behavior>` rather than
+   silently passing it.
 4. **Author `GOLDEN-PRINCIPLES.md`**: durable stack-specific non-negotiables, project-specific source authority, critical behavioral invariants, and secrets discipline.
 5. **Author `STABILIZATION.md`**: the error-to-rule loop the target uses to convert recurring mistakes into permanent rules.
 6. **Duplicate** `DOD.md`, `GOLDEN-PRINCIPLES.md`, `STABILIZATION.md` into every selected edition folder (byte-identical copies). Do NOT write into unselected editions.
-7. **Log** every written path and the profile line backing each command/rule.
+7. **Analyze commands before publication.** Run
+   `bootstrap-verifier/scripts/analyze_commands.py --target <real-target>` to
+   inventory target aliases without execution. Then analyze every command
+   prescribed by `AGENTS.md` or `DOD.md` separately with `--no-scripts
+   --verification --command '<command>'`. Resolve Composer/npm aliases all the
+   way to leaf commands. Any shell composition, unresolved/cyclic alias,
+   workspace mutation, destructive/database/deploy action, or
+   external/provider/network action is a blocking policy-generation error.
+8. **Log** every written path and the exact profile/evidence anchor backing each
+   command/rule, plus its command-analysis result.
 
 ## Output Template
 
@@ -79,6 +100,13 @@ skill-forge; hook-forge/memory-seed if not already run.
 - MUST keep the three companions byte-identical across editions in a single run.
 - MUST derive the generated roster/orchestration policy from the validated
   generation plan and MUST NOT mention pruned or unvalidated skills.
+- MUST prescribe only commands that the command analyzer classifies as
+  `non_mutating` and `verification_safe`; policy verification is never the
+  place for write, database, deployment, destructive, provider, or network
+  actions.
+- MUST cite each command and project-specific rule to an exact target-relative
+  line range or stable symbol/config-key anchor. A section number or bare path
+  alone is not an evidence anchor.
 
 ## Final Output
 

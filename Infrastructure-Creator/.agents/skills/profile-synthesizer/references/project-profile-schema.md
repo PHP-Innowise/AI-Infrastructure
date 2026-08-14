@@ -13,17 +13,23 @@ The JSON top level MUST contain exactly these required members (extensions requi
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "1.2",
   "catalog_version": "2.5.0",
   "target_root": "/absolute/path/to/target",
   "profile": "tasks/TASK-001/infra-scan-project-profile.md",
   "evidence": [],
   "skills": [],
-  "rejected_candidates": []
+  "rejected_candidates": [],
+  "critical_invariants": [],
+  "flow_contracts": {"roster": [], "flows": []}
 }
 ```
 
-Top-level membership is exact and `schema_version` is exactly `1.0`.
+Top-level membership is exact. New plans use `schema_version: "1.2"`.
+Schemas `1.0` and `1.1` remain readable for plan-only audit diagnostics and
+produce a nonblocking `PLAN_SCHEMA_MIGRATION` warning. They are publication
+ineligible: full or partial authored-skill validation emits blocking
+`LEGACY_PLAN_PUBLICATION_INELIGIBLE`. New synthesis runs MUST emit 1.2.
 `catalog_version` must equal
 `skill-forge/references/candidate-registry.json`. Every registry candidate must
 appear in exactly one disposition: a selected skill's `selection_gate` or
@@ -62,6 +68,10 @@ Each `skills[]` entry is one complete, independently actionable contract:
   "category": "universal",
   "kind": "project-adapted",
   "phase": "execution",
+  "capability": {
+    "mode": "workspace-write",
+    "summary": "May add or update tests within the declared write paths"
+  },
   "necessity_rationale": "The target has an evidenced test suite and project-specific test conventions that require operational guidance.",
   "selection_gate": {
     "catalog": "php-frameworks.md#testing",
@@ -85,19 +95,109 @@ Each `skills[]` entry is one complete, independently actionable contract:
   "source_paths": ["phpunit.xml", "tests/TestCase.php"],
   "owned_scope": ["Select and implement tests using the target's suite structure"],
   "excluded_scope": ["Root-cause investigation", "Release orchestration"],
+  "ownership": [
+    {
+      "id": "testing.test-suite",
+      "mode": "exclusive",
+      "description": "Test selection and implementation in the target suite",
+      "paths": ["tests/**"]
+    }
+  ],
   "required_procedure_roles": [
     {"role": "load-evidence", "requirements": ["Read the cited test configuration and changed behavior"]},
     {"role": "execute", "requirements": ["Choose test level and add target-specific cases"]},
     {"role": "verify", "requirements": ["Run the narrow suite, then required broader checks"]}
   ],
-  "decision_points": [
-    {"question": "Which test level protects this behavior?", "branches": ["unit", "integration", "feature/end-to-end"]}
+  "procedure_steps": [
+    {
+      "id": "inspect-test-topology",
+      "action": "Inspect the PHPUnit configuration and base test case before selecting a test level",
+      "evidence_ids": ["EV-0007", "EV-0008"],
+      "path_refs": ["phpunit.xml", "tests/TestCase.php"],
+      "decision_refs": ["choose-test-level"],
+      "expected_outcome": "The selected unit, integration, or feature boundary matches the target suite",
+      "failure_branch": "Stop and report unresolved test authority when no branch is evidenced"
+    }
   ],
-  "verification": ["Use the evidenced test command and report failures"],
+  "decision_points": [
+    {"id": "choose-test-level", "question": "Which test level protects this behavior?", "branches": ["unit", "integration", "feature/end-to-end"]}
+  ],
+  "verification": [
+    {
+      "id": "run-focused-tests",
+      "mode": "command",
+      "instruction": "Run the focused PHPUnit file that covers the changed behavior",
+      "command": "vendor/bin/phpunit tests/Feature/ExampleTest.php",
+      "prerequisites": ["Local dependencies are installed"],
+      "safe_scope": "Local test process with no provider or production access",
+      "mutation_class": "none",
+      "network_class": "none",
+      "expected_result": "The focused test exits zero and reports no failed assertions",
+      "failure_result": "Any nonzero exit or failed assertion blocks completion",
+      "skip_condition": "vendor/bin/phpunit is absent or the required local dependency is unavailable",
+      "skip_reporting": "Report SKIPPED with the missing dependency and the unverified assertion"
+    }
+  ],
   "output_contract": ["Changed tests or a test plan", "Commands and results"],
   "failure_handling": ["Stop when required tooling is unavailable and report N/A", "Do not weaken assertions to force a pass"],
+  "integration_safety": {
+    "network_policy": "forbidden",
+    "test_double_strategy": "Use local fixtures and framework fakes",
+    "environment": "local",
+    "authorization_required": false,
+    "rollback": "Revert only files changed by this skill when verification fails",
+    "sanitization": "Exclude credentials, customer payloads, and unsanitized provider errors"
+  },
+  "path_contracts": [
+    {
+      "path": "phpunit.xml",
+      "access": "read",
+      "classification": "required-existing",
+      "evidence_ids": ["EV-0007"]
+    },
+    {
+      "path": "tests/**",
+      "access": "write",
+      "classification": "creatable",
+      "evidence_ids": ["EV-0008"]
+    }
+  ],
+  "evidence_anchors": [
+    {
+      "evidence_id": "EV-0007",
+      "claim": "The target has a configured PHPUnit feature-test suite",
+      "anchor": "phpunit.xml:L8-L19",
+      "procedure_step_ids": ["inspect-test-topology"],
+      "verification_ids": ["run-focused-tests"]
+    }
+  ],
+  "routing_cases": [
+    {
+      "prompt": "Add a feature test for the changed HTTP behavior",
+      "expected_primary": "testing",
+      "permitted_secondary": [],
+      "forbidden_skills": ["systematic-debugger"],
+      "rationale": "The request changes tests in the owned target suite",
+      "evidence_ids": ["EV-0007", "EV-0008"]
+    },
+    {
+      "prompt": "Investigate an unexplained production failure before an expected assertion is known",
+      "expected_primary": "systematic-debugger",
+      "permitted_secondary": [],
+      "forbidden_skills": ["testing"],
+      "rationale": "Root-cause investigation precedes test implementation",
+      "evidence_ids": ["EV-0007"]
+    }
+  ],
   "related_skills": ["coding"],
-  "nearest_siblings": [{"name": "systematic-debugger", "boundary": "Finds root cause; testing protects expected behavior."}],
+  "nearest_siblings": [
+    {
+      "name": "systematic-debugger",
+      "role": "defer",
+      "ownership_ids": ["testing.test-suite"],
+      "boundary": "Defer root-cause investigation; testing protects expected behavior."
+    }
+  ],
   "writes": ["tests/**"],
   "fixed_blocks": [
     {"id": "safety.no-secrets", "version": "1.0", "content": "Exact approved text"}
@@ -105,7 +205,94 @@ Each `skills[]` entry is one complete, independently actionable contract:
 }
 ```
 
-All shown members except `fixed_blocks` are required, including non-empty positive and negative triggers, owned and excluded scope, required procedure roles, decision points, verification, output, failure handling, siblings, and writes (use an empty array only when the skill is intentionally read-only). `kind` distinguishes `runtime-fixed` from `project-adapted`, `integration`, `specialty`, and `domain-review`. `fixed_blocks`, when used, contains explicit `id`, `version`, and exact `content`; only that exact block is exempt from duplication checks, and it never exempts the skill-specific procedure.
+All shown members except `fixed_blocks` are required under schema 1.2, including non-empty
+positive and negative triggers, owned and excluded scope, structured ownership,
+required procedure roles and steps, decision points, structured verification,
+integration safety, path contracts, evidence anchors, routing cases, output,
+failure handling, siblings, and writes (use an empty array only when
+`capability.mode` is `read-only`). `kind` distinguishes `runtime-fixed` from
+`project-adapted`, `integration`, `specialty`, and `domain-review`.
+`fixed_blocks`, when used, contains explicit `id`, `version`, and exact
+`content`; only that exact block is exempt from duplication checks, and it never
+exempts the skill-specific procedure.
+
+`capability.mode` is exactly `read-only`, `workspace-write`, or
+`external-side-effect`. Read-only skills MUST have empty `writes` and use
+inspect/evaluate/report language; mutation verbs in procedure actions are
+blocking. Workspace-write skills MUST declare at least one write path.
+External-side-effect skills require an explicitly authorized
+`sandbox-with-approval` or `approved-live` integration policy; target writes,
+when any, remain bounded by `writes` and path contracts.
+
+Each schema 1.2 `decision_points[]` item has exactly `id`, `question`, and
+non-empty `branches`. Each `procedure_steps[]` item has exactly `id`, `action`,
+`evidence_ids`, `path_refs`, `decision_refs`, `expected_outcome`, and
+`failure_branch`. IDs are stable dotted/kebab lowercase, and every decision
+reference resolves within the skill.
+Every evidence reference is declared by the skill. Each `verification[]` item
+has exactly `id`, `mode`, `instruction`, `command`, `prerequisites`,
+`safe_scope`, `mutation_class`, `network_class`, `expected_result`,
+`failure_result`, `skip_condition`, and `skip_reporting`.
+`mode` is `command` or `manual`; command checks require a concrete command,
+while manual checks use JSON `null`. Generic references to an "evidenced",
+"configured", "appropriate", or "narrow" command are invalid. Verification
+commands MUST be non-mutating; for example, a lint script containing `--fix`
+cannot be used as a verification command.
+`mutation_class` is `none`, `workspace-write`, or `destructive`, and
+`network_class` is `none`, `local`, or `external-provider`. Publication
+verification requires mutation class `none`; external-provider checks also
+require external-side-effect capability and an approved integration policy.
+
+`integration_safety` is required for every skill so network behavior is
+explicit. `network_policy` is `forbidden`, `mock-only`,
+`sandbox-with-approval`, or `approved-live`. Integration skills default to
+static inspection, fakes, fixtures, local adapters, or sandboxes. Any policy
+that permits provider access requires explicit authorization; an
+`approved-live` policy still requires a safe test-double default. Rollback and
+sanitization are always substantive.
+`environment` is `none`, `local`, `sandbox`, or `approved-live` and must agree
+with the network policy.
+
+Each `path_contracts[]` item has exactly `path`, `access`, `classification`, and
+`evidence_ids`. Access is `read` or `write`; classification is
+`required-existing`, `generated-runtime`, or `creatable`. Every source and
+write path must have a contract.
+Existing paths/globs resolve in the target. Generated paths are reserved for
+`runtime-fixed` output. Creatable paths are write paths beneath an existing
+parent. All paths use the normalized target-relative rules below.
+
+Each `evidence_anchors[]` item has exactly `evidence_id`, `claim`, `anchor`,
+`procedure_step_ids`, and `verification_ids`. The claim exactly matches one of
+the evidence entry's `supported_claims`; the anchor begins with the canonical
+path followed by a bounded line or stable symbol reference. Every skill
+evidence ID has an anchor. The claim must be traceable through owned scope,
+the referenced procedure step and verification, and the output contract.
+
+Each `routing_cases[]` item has exactly `prompt`, `expected_primary`,
+`permitted_secondary`, `forbidden_skills`, `rationale`, and `evidence_ids`.
+Owner sets are disjoint, evidence resolves within the skill, and cases cover
+selection of the current skill plus deferral to every nearest sibling.
+
+Each `ownership[]` item has exactly `id`, `mode`, `description`, and `paths`.
+The ID is stable kebab/dotted lowercase syntax within the inventory and is used
+by sibling routing boundaries. `mode` is `exclusive`, `shared`, or `composed`.
+An `exclusive` ID has exactly one owner. A `shared` ID may have multiple owners
+but never authorizes intersecting writes. A `composed` ID may have multiple
+contributors, but every intersecting owned path has exactly one writer/composer
+as determined by `writes`. Reusing an ID with a different mode or substantive
+description is a semantic ownership-ID conflict. Paths and writes use normalized,
+target-relative `/`-separated globs: no absolute paths, `..`, backslashes,
+leading `./`, duplicate separators, or trailing `/`. Glob intersection, not
+literal string equality, determines write and ownership overlap.
+
+Under schemas 1.1 and 1.2 each `nearest_siblings[]` item has exactly `name`, `role`,
+`ownership_ids`, and `boundary`. `role` is `primary`, `defer`, or `fallback`.
+Every relation is reciprocal, names the same ownership IDs in both directions,
+and forms either `primary`/`defer` or `primary`/`fallback`. Missing reciprocals,
+unknown ownership IDs, mismatched ID sets, and bilateral `primary` (or any other
+role contradiction) are blocking. A valid reciprocal relation may resolve an
+intentional semantic-scope overlap; intersecting write globs always receive the
+separate blocking `WRITE_SURFACE_COLLISION` diagnostic.
 
 Every non-runtime `selection_gate.conditions[]` entry must be `satisfied`, cite
 evidence already listed by the skill, and explain a claim supported by that
@@ -113,7 +300,70 @@ evidence. `distinct_value_from` records adjacent candidates considered during
 pruning. Runtime-fixed memory skills may cite an empty evidence list only when
 the condition names the guaranteed generated runtime.
 
-`evidence_ids` MUST resolve to `evidence[]`. `source_paths` is the de-duplicated target-relative subset used by the skill. Every `related_skills` and `nearest_siblings[].name` MUST exist in the same plan. A skill contract cannot rely on another skill to supply its purpose, inputs, procedure, verification, output, or failure behavior.
+`evidence_ids` MUST resolve to `evidence[]`. `source_paths` is the de-duplicated
+target-relative subset used by the skill. Every `related_skills` and
+`nearest_siblings[].name` MUST exist in the same plan. A skill contract cannot
+rely on another skill to supply its purpose, inputs, procedure, verification,
+output, or failure behavior. Contract similarity and repeated-block warnings
+compare field values only; structural JSON keys, evidence IDs, paths, and exact
+versioned `fixed_blocks` are excluded.
+
+Schema 1.2 also carries plan-level critical invariants and executable flow
+shape:
+
+```json
+{
+  "critical_invariants": [
+    {
+      "id": "content-job.failure-terminal",
+      "statement": "An integration exception leaves the content job FAILED and never FINISHED",
+      "evidence_ids": ["EV-0042"],
+      "skill_names": ["contentjobs-lifecycle-review"],
+      "assertions": [
+        {
+          "skill_name": "contentjobs-lifecycle-review",
+          "verification_id": "assert-failed-never-finished"
+        }
+      ]
+    }
+  ],
+  "flow_contracts": {
+    "roster": [
+      {"skill": "coding", "agent": "coding-agent", "phase": "implementation", "writes": true},
+      {"skill": "code-review", "agent": "code-review-agent", "phase": "verification", "writes": false}
+    ],
+    "flows": [
+      {
+        "name": "flow-feature",
+        "required_code_review": "code-review-agent",
+        "stages": [
+          {"phase": "implementation", "agents": ["coding-agent"], "parallel": false, "checkpoint": true},
+          {"phase": "verification", "agents": ["code-review-agent"], "parallel": false, "checkpoint": true}
+        ]
+      },
+      {
+        "name": "flow-review",
+        "required_code_review": "code-review-agent",
+        "stages": [
+          {"phase": "verification", "agents": ["code-review-agent"], "parallel": false, "checkpoint": true}
+        ]
+      }
+    ]
+  }
+}
+```
+
+Every `critical_invariants[]` item has exactly `id`, `statement`,
+`evidence_ids`, `skill_names`, and non-empty `assertions`. Every assertion names
+a selected skill and one of its structured verification IDs. IDs are unique,
+evidence and skill
+references resolve, and each named skill carries the invariant into both a
+procedure step and a verification assertion. `flow_contracts` has exactly
+`roster` and `flows`. The roster is derived in plan order from every selected
+skill, agent name, phase, and write capability. Each flow has `name`,
+`required_code_review`, and ordered stages containing exactly `phase`, `agents`,
+`parallel`, and `checkpoint`. Both `flow-feature` and `flow-review` are required;
+when `code-review` is selected, its agent is a required review stage.
 
 Each rejected catalog candidate is recorded so inventory pruning is auditable:
 
@@ -315,7 +565,10 @@ One shared memory layer will be created at the target root, spanning two roots: 
 - Every line in sections 2-8 (including 3.1 and 3.2) MUST carry a confidence tag; every section 8 finding MUST also carry source type.
 - Section 8.5 MUST distinguish discovered statuses from evidenced transitions; section 8.6 MUST state permission-matrix completeness; section 8.8 MUST distinguish risk indicators from documented severity/approval.
 - Section 11.1 MUST equal JSON `skills[]` exactly. Every selected candidate satisfies its reference contract; every rejected candidate records the missing trigger/evidence. Only the memory quartet is unconditional.
-- JSON MUST satisfy the field, uniqueness, reference, canonical-path, and completeness rules above. Grouped summaries are invalid.
+- JSON MUST use schema 1.2 and satisfy the typed capability, procedure,
+  verification, provider-safety, path, invariant, evidence-anchor, routing-case,
+  flow, ownership, reciprocal-routing, uniqueness, reference, normalized-glob,
+  canonical-path, and completeness rules above. Grouped summaries are invalid.
 - Section 11.2's agent/command counts MUST be arithmetically consistent with `skills.length`, dynamic category counts, and section 1's selected editions.
 - Section 12 MUST list cohesive durable concepts composed only from `confirmed` facts across sections 2-8, MUST cite canonical sources, and MUST NOT include any `inferred`/`unknown` fact, raw incident data, customer data, or full copied source documents.
 - No secrets or credential values may appear anywhere in the profile.

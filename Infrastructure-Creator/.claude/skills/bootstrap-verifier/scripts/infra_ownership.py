@@ -21,6 +21,15 @@ from typing import Iterable
 MANIFEST_NAME = ".infra-manifest.json"
 VALID_MODES = ("full", "merge")
 VALID_DECISIONS = ("kept", "merged")
+VALID_DECISION_ORIGINS = ("generated", "preexisting-team", "shared")
+VALID_DECISION_STRATEGIES = ("keep", "append-requirements", "manual-merge")
+STRUCTURED_DECISION_FIELDS = {
+    "origin",
+    "strategy",
+    "proposal_sha256",
+    "resolved_sha256",
+    "requirements",
+}
 STATE_EXCLUDES = (
     "memory-bank/chunks/",
     "memory-bank/INDEX.md",
@@ -155,6 +164,92 @@ def hash_write_plan_sources(
     return dict(sorted(files.items()))
 
 
+def validate_decisions(decisions: dict, files: dict[str, str]) -> None:
+    """Validate legacy and additive structured decision entries.
+
+    Unknown fields are deliberately ignored so manifest v1 remains extensible.
+    The presence of any structured field opts an entry into the complete
+    structured contract; entries containing only the original three fields
+    retain their historical behavior.
+    """
+    if not isinstance(decisions, dict):
+        raise OwnershipError("decisions must be an object")
+    if not set(decisions).issubset(files):
+        raise OwnershipError("decisions contain paths outside manifest membership")
+    for rel, entry in decisions.items():
+        if not isinstance(entry, dict):
+            raise OwnershipError(f"decision entry must be an object: {rel}")
+        decision = entry.get("decision")
+        if decision not in VALID_DECISIONS:
+            raise OwnershipError(f"decision must be 'kept' or 'merged': {rel}")
+        if not re.fullmatch(r"TASK-\d+", str(entry.get("task", ""))):
+            raise OwnershipError(f"decision task must be TASK-<number>: {rel}")
+        rejected = str(entry.get("rejected_sha256", ""))
+        if not re.fullmatch(r"[0-9a-f]{64}", rejected):
+            raise OwnershipError(
+                f"decision rejected_sha256 must be a SHA-256 digest: {rel}"
+            )
+
+        if not (STRUCTURED_DECISION_FIELDS & set(entry)):
+            continue
+        missing = STRUCTURED_DECISION_FIELDS - set(entry)
+        if missing:
+            raise OwnershipError(
+                f"structured decision is missing {sorted(missing)}: {rel}"
+            )
+        origin = entry.get("origin")
+        strategy = entry.get("strategy")
+        proposal = str(entry.get("proposal_sha256", ""))
+        resolved = str(entry.get("resolved_sha256", ""))
+        requirements = entry.get("requirements")
+        if origin not in VALID_DECISION_ORIGINS:
+            raise OwnershipError(f"invalid decision origin for {rel}: {origin!r}")
+        if strategy not in VALID_DECISION_STRATEGIES:
+            raise OwnershipError(f"invalid decision strategy for {rel}: {strategy!r}")
+        if not re.fullmatch(r"[0-9a-f]{64}", proposal):
+            raise OwnershipError(f"decision proposal_sha256 must be a digest: {rel}")
+        if proposal != rejected:
+            raise OwnershipError(
+                f"proposal_sha256 must equal legacy rejected_sha256: {rel}"
+            )
+        if not re.fullmatch(r"[0-9a-f]{64}", resolved):
+            raise OwnershipError(f"decision resolved_sha256 must be a digest: {rel}")
+        if resolved != files[rel]:
+            raise OwnershipError(f"resolved_sha256 must equal files[{rel!r}]")
+        if (
+            not isinstance(requirements, list)
+            or any(not isinstance(item, str) or not item for item in requirements)
+            or requirements != sorted(set(requirements))
+        ):
+            raise OwnershipError(
+                f"decision requirements must be sorted unique strings: {rel}"
+            )
+        if strategy == "keep" and decision != "kept":
+            raise OwnershipError(f"keep strategy requires decision 'kept': {rel}")
+        if strategy != "keep" and decision != "merged":
+            raise OwnershipError(
+                f"{strategy} strategy requires decision 'merged': {rel}"
+            )
+        if strategy == "append-requirements":
+            if origin != "shared":
+                raise OwnershipError(
+                    f"append-requirements requires shared origin: {rel}"
+                )
+            if not requirements:
+                raise OwnershipError(
+                    f"append-requirements requires at least one requirement: {rel}"
+                )
+        elif origin == "shared":
+            if strategy != "keep" or not requirements:
+                raise OwnershipError(
+                    f"shared origin requires keep/append strategy and requirements: {rel}"
+                )
+        elif requirements:
+            raise OwnershipError(
+                f"requirements are only valid with shared origin: {rel}"
+            )
+
+
 def build_manifest(
     target: Path,
     write_plan: Iterable[str],
@@ -188,23 +283,7 @@ def build_manifest(
     else:
         files = hash_write_plan(target, normalized_plan)
     if decisions:
-        if not set(decisions).issubset(files):
-            raise OwnershipError("decisions contain paths outside manifest membership")
-        for rel, entry in decisions.items():
-            if not isinstance(entry, dict):
-                raise OwnershipError(f"decision entry must be an object: {rel}")
-            if entry.get("decision") not in {"kept", "merged"}:
-                raise OwnershipError(
-                    f"decision must be 'kept' or 'merged': {rel}"
-                )
-            if not re.fullmatch(r"TASK-\d+", str(entry.get("task", ""))):
-                raise OwnershipError(f"decision task must be TASK-<number>: {rel}")
-            if not re.fullmatch(
-                r"[0-9a-f]{64}", str(entry.get("rejected_sha256", ""))
-            ):
-                raise OwnershipError(
-                    f"decision rejected_sha256 must be a SHA-256 digest: {rel}"
-                )
+        validate_decisions(decisions, files)
     manifest = {
         "manifest_version": 1,
         "generator": generator,
@@ -294,10 +373,13 @@ def classify_update(target: Path, staging: Path, manifest: dict) -> list[dict]:
                 classification, reason = "requires-decision", "tracked-file-modified"
             elif decision is not None:
                 staged_sha = sha256_file(staged_path)
-                if staged_sha == decision.get("rejected_sha256"):
+                proposal_sha = decision.get(
+                    "proposal_sha256", decision.get("rejected_sha256")
+                )
+                if staged_sha == proposal_sha:
                     classification, reason = (
                         "standing-decision-honored",
-                        decision.get("decision", "kept"),
+                        decision.get("strategy", decision.get("decision", "kept")),
                     )
                 else:
                     classification, reason = (

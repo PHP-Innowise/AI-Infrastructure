@@ -37,14 +37,14 @@ Never write into the target.
 1. **Establish purpose and vocabulary.** Read the root README and relevant `docs/`, specs, ADRs, route names, module names, and central domain classes. Record only stable, repeated terminology and a short factual project purpose.
 2. **Identify project-specific sources of truth.** Detect explicit authority language such as "source of truth", "canonical", "generated from", "do not edit", schema ownership, OpenAPI ownership, workflow specifications, and links between documents. Record authority scope and conflicts; never infer an owner from Git history.
 3. **Map central modules and domain entities.** Use architecture findings as the structural baseline, then add each central module's evidenced responsibility and only the core entities, identifiers, relationships, ownership fields, lifecycle/status fields, and integrity constraints. Do not dump the whole schema.
-4. **Extract business invariants.** Read, in descending authority: explicit specs/ADRs; behavior-focused tests; database constraints; workflow/state-machine configuration; entities/value objects; application services/actions/use cases; policies/voters; validation rules; controllers as weaker corroboration. Record a rule only when the source actually expresses it.
+4. **Extract and identify business invariants.** Read, in descending authority: explicit specs/ADRs; behavior-focused tests; database constraints; workflow/state-machine configuration; entities/value objects; application services/actions/use cases; policies/voters; validation rules; controllers as weaker corroboration. Record a rule only when the source actually expresses it. Assign a stable kebab-case invariant ID, affected bounded context/path authority, consequence, priority (`high`, `normal`), and a bounded anchor (`line range`, `symbol`, or `JSON pointer`). High priority is reserved for evidenced data-loss, authorization, money, irreversible lifecycle, external-contract, or known-regression consequences.
 5. **Separate statuses from transitions.** An enum proves statuses exist, not which transitions are legal. Mark a transition `confirmed` only when a workflow config, guarded transition method, explicit spec, or behavioral test proves the edge and its guard. Record side effects only when evidenced.
 6. **Map roles and permissions.** Derive observed role -> action -> subject/resource rules from Policies/Gates/Voters, middleware/access-control config, ownership/tenant checks, and negative tests. Never claim the matrix is complete unless all relevant entry points are covered. Keep product roles distinct from authentication technology.
 7. **Detect audit obligations.** Look for explicit audit requirements, activity/event tables, audit packages, actor/timestamp/change-set fields, immutable logs, and tests. Record required events and fields only when evidenced; never copy log contents.
 8. **Identify high-risk and forbidden workflows.** Flag concrete behavior touching money, authorization, personal data, data integrity, irreversible transitions, or external contracts as a **risk indicator**, not an automatic severity or approval policy. Record severity/required approval only when a source states it.
-9. **Extract critical QA/regression scenarios.** Select a bounded set of behavior-focused tests/spec scenarios that protect important invariants, denied paths, transitions, retries/idempotency, or historical regressions. Prefer named scenarios over coverage metrics.
+9. **Extract critical QA/regression scenarios.** Select a bounded set of behavior-focused tests/spec scenarios that protect important invariants, denied paths, transitions, retries/idempotency, partial failure, or historical regressions. Prefer named scenarios over coverage metrics. Map each scenario to invariant IDs, its suite/root and focused repository command from stack findings, exact fixture/fake prerequisites, and expected pass/fail result. For a failure invariant, state both the required retained state and the forbidden later state.
 10. **Capture sanitized incident lessons and known risks.** Read tracked postmortems, known-issues docs, runbooks, and regression tests when present. Keep only the durable cause/prevention rule; never include raw logs, customer identifiers, payloads, or confidential incident detail.
-11. **Propose domain-skill candidates.** A candidate must represent one coherent bounded context with multiple durable rules and a distinct review purpose (for example, `billing-rules-review`). Never propose one skill per rule, role, entity, or status.
+11. **Propose domain-skill candidates and invariant coverage.** A candidate must represent one coherent bounded context with multiple durable rules and a distinct review purpose (for example, `billing-rules-review`). For each high-priority invariant, nominate at least one candidate procedure owner and concrete verification assertion owner, plus material adjacent owners for framework, security, testing, persistence, and provider mechanics. Never propose one skill per rule, role, entity, or status.
 12. **Bound the scan.** Prioritize central/high-risk modules and representative tests. Cite omitted low-value areas if the codebase is too large for exhaustive coverage.
 13. **Mark confidence and source type** on every factual entry. Leave unsupported items `unknown` or `none`; never turn implementation convention into intended business policy without qualification.
 
@@ -68,7 +68,7 @@ Never write into the target.
 - [entity] - identifiers/relationships/lifecycle fields: [...] (confidence; source type - path:L#)
 
 ## Business Invariants
-- [rule] - affected scope: [...] - consequence: [...] (confidence; source type - path:L#)
+- `[invariant-id]` [rule] - priority: [high|normal] - affected scope/path authority: [...] - consequence: [...] (confidence; source type - bounded path anchor)
 
 ## Lifecycles & Transitions
 - Statuses discovered: [entity -> statuses] (confidence; source type - path:L#)
@@ -85,13 +85,13 @@ Never write into the target.
 - [workflow/action] - risk indicator: [...] - documented approval/checks: [...] (confidence; source type - path:L#)
 
 ## Critical QA / Regression Scenarios
-- [scenario] - given/when/then: [...] - protected rule: [...] (confidence; source type - test/spec path:L#)
+- [scenario] - given/when/then: [...] - protected invariant IDs: [...] - suite/focused command: [...] - fixtures/fakes: [...] - expected/forbidden result: [...] (confidence; source type - bounded test/spec anchor)
 
 ## Known Risks & Incident Lessons
 - [sanitized lesson] - prevention rule: [...] (confidence; source type - path:L#)
 
 ## Domain Skill Candidates
-- `[skill-name]` - bounded context: [...] - rules covered: [...] - distinct review purpose: [...] (confidence; source paths)
+- `[skill-name]` - bounded context: [...] - invariant IDs covered: [...] - procedure/assertion ownership: [...] - material adjacencies: [...] - distinct review purpose: [...] (confidence; source paths)
 - none
 
 ## Gaps & Contradictions
@@ -111,6 +111,8 @@ Never write into the target.
 - MUST surface contradictions between tests, specs, constraints, and implementation instead of silently resolving them.
 - MUST keep output bounded: central entities, durable rules, and representative critical scenarios only.
 - MUST NOT propose a domain skill without multiple coherent rules and a distinct operational purpose.
+- MUST assign stable IDs and concrete regression mappings to every high-priority confirmed invariant; an unowned high-priority invariant is a blocking synthesis gap.
+- MUST NOT elevate an inferred convention, catalog concern, or external standard into a confirmed invariant.
 
 ## Final Output
 

@@ -63,11 +63,22 @@ def file_state(root: Path, rel: str) -> dict:
     }
 
 
-def build_snapshot(target: Path, paths: list[str]) -> dict:
+def build_snapshot(
+    target: Path, paths: list[str], baseline_only: list[str] | None = None
+) -> dict:
+    baseline_only = baseline_only or []
+    overlap = set(paths) & set(baseline_only)
+    if overlap:
+        raise PublicationError(
+            "publication/removal paths overlap baseline-only paths: "
+            + ", ".join(sorted(overlap))
+        )
+    all_paths = paths + baseline_only
     return {
         "schema_version": 1,
         "target": str(target),
-        "files": {rel: file_state(target, rel) for rel in sorted(set(paths))},
+        "files": {rel: file_state(target, rel) for rel in sorted(set(all_paths))},
+        "baseline_only": sorted(set(baseline_only)),
     }
 
 
@@ -81,13 +92,26 @@ def load_json(path: Path, label: str) -> dict:
     return value
 
 
-def verify_baseline(target: Path, paths: list[str], snapshot: dict) -> None:
+def verify_baseline(
+    target: Path,
+    paths: list[str],
+    snapshot: dict,
+    baseline_only: list[str] | None = None,
+) -> None:
+    baseline_only = baseline_only or []
     if snapshot.get("target") != str(target):
         raise PublicationError("baseline target does not match requested target")
     expected = snapshot.get("files")
-    if not isinstance(expected, dict) or set(expected) != set(paths):
+    recorded_baseline_only = snapshot.get("baseline_only", [])
+    if (
+        not isinstance(recorded_baseline_only, list)
+        or set(recorded_baseline_only) != set(baseline_only)
+    ):
+        raise PublicationError("baseline-only membership does not match watch plan")
+    all_paths = paths + baseline_only
+    if not isinstance(expected, dict) or set(expected) != set(all_paths):
         raise PublicationError("baseline membership does not match publication plan")
-    for rel in paths:
+    for rel in all_paths:
         if file_state(target, rel) != expected[rel]:
             raise PublicationError(f"target changed after collision review: {rel}")
 
@@ -107,7 +131,8 @@ def prepare_journal(
         raise PublicationError(f"rollback journal already exists: {journal}")
     backups = journal / "backups"
     backups.mkdir(parents=True)
-    for rel, state in snapshot["files"].items():
+    for rel in paths:
+        state = snapshot["files"][rel]
         if state["state"] != "file":
             continue
         source = confined_target_path(target, rel)
@@ -118,7 +143,7 @@ def prepare_journal(
         "schema_version": 1,
         "target": str(target),
         "paths": paths,
-        "baseline": snapshot["files"],
+        "baseline": {rel: snapshot["files"][rel] for rel in paths},
         "status": "prepared",
     }
     (journal / "journal.json").write_text(
@@ -179,15 +204,23 @@ def publish(
     snapshot: dict,
     journal: Path,
     removals: list[str] | None = None,
+    baseline_only: list[str] | None = None,
 ) -> None:
     removals = removals or []
+    baseline_only = baseline_only or []
     overlap = set(paths) & set(removals)
     if overlap:
         raise PublicationError(
             f"paths cannot be both published and removed: {', '.join(sorted(overlap))}"
         )
+    watched_overlap = set(baseline_only) & (set(paths) | set(removals))
+    if watched_overlap:
+        raise PublicationError(
+            "baseline-only paths cannot be published or removed: "
+            + ", ".join(sorted(watched_overlap))
+        )
     all_paths = paths + removals
-    verify_baseline(target, all_paths, snapshot)
+    verify_baseline(target, all_paths, snapshot, baseline_only)
     verify_staging(staging, paths)
     metadata = prepare_journal(target, all_paths, journal, snapshot)
     ordered = [rel for rel in paths if rel != MANIFEST_NAME] + [MANIFEST_NAME]
@@ -224,6 +257,10 @@ def main(argv: list[str] | None = None) -> int:
     snapshot_parser.add_argument("--target", required=True)
     snapshot_parser.add_argument("--publication-plan", required=True)
     snapshot_parser.add_argument("--removal-plan")
+    snapshot_parser.add_argument(
+        "--watch-plan",
+        help="paths checked for drift but never published, removed, or journaled",
+    )
     snapshot_parser.add_argument("--output", required=True)
 
     publish_parser = subparsers.add_parser("publish")
@@ -231,6 +268,10 @@ def main(argv: list[str] | None = None) -> int:
     publish_parser.add_argument("--staging", required=True)
     publish_parser.add_argument("--publication-plan", required=True)
     publish_parser.add_argument("--removal-plan")
+    publish_parser.add_argument(
+        "--watch-plan",
+        help="paths checked for drift but never published, removed, or journaled",
+    )
     publish_parser.add_argument("--baseline", required=True)
     publish_parser.add_argument("--journal", required=True)
 
@@ -255,16 +296,34 @@ def main(argv: list[str] | None = None) -> int:
             if getattr(args, "removal_plan", None)
             else None
         )
+        baseline_only = (
+            read_write_plan(resolve_target(args.watch_plan))
+            if getattr(args, "watch_plan", None)
+            else []
+        )
         if set(paths) & set(removals):
             raise PublicationError("publication and removal plans overlap")
+        watched_overlap = set(baseline_only) & (set(paths) | set(removals))
+        if watched_overlap:
+            raise PublicationError(
+                "watch plan overlaps publication or removal plan: "
+                + ", ".join(sorted(watched_overlap))
+            )
         if args.command == "snapshot":
             output = Path(args.output).expanduser().resolve()
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_text(
-                json.dumps(build_snapshot(target, paths + removals), indent=2) + "\n",
+                json.dumps(
+                    build_snapshot(target, paths + removals, baseline_only), indent=2
+                )
+                + "\n",
                 encoding="utf-8",
             )
-            print(f"snapshot recorded for {len(paths) + len(removals)} path(s)")
+            print(
+                "snapshot recorded for "
+                f"{len(paths) + len(removals)} publication/removal and "
+                f"{len(baseline_only)} baseline-only path(s)"
+            )
             return 0
 
         staging = resolve_target(args.staging)
@@ -278,6 +337,7 @@ def main(argv: list[str] | None = None) -> int:
             snapshot,
             resolve_target(args.journal),
             removals,
+            baseline_only,
         )
         print(
             f"published {len(paths)} and removed {len(removals)} path(s); "

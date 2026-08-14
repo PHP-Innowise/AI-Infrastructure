@@ -49,6 +49,13 @@ Integration categories, common PHP packages that signal them, and what a good ge
 
 The generated skill name identifies the concrete provider/mechanism. The contracts below are category shapes, not permission to generate a generic category skill. Required evidence always includes: runtime dependency, initialization/configuration path, at least one call site, exact-version official documentation URL, and a confirmed failure/runtime boundary. A package declaration alone fails the gate.
 
+Compilation rules:
+
+- A category “Skill covers” item is not confirmed target behavior. Require a bounded target anchor for each elevated claim; unsupported retry, timeout, deduplication, retention, model, webhook, audit, or degradation behavior remains a review question or external provider requirement.
+- Bind provider verification to the scanned provider test topology: existing fake/fixture/local adapter first, then an evidenced sandbox only with explicit authorization and environment classification. Network/credential-backed execution is default-deny.
+- Map each intersecting high-priority invariant ID to a procedure step and concrete safe assertion, including required and forbidden failure states.
+- Carry exact command definitions, path authority, rollback/sanitization boundaries, and every material adjacent owner. Routing cases must cover positive provider mechanics, negative local/domain work, ambiguity, and cross-domain/provider requests.
+
 ## Enforceable Integration Contracts
 
 ### Payment provider

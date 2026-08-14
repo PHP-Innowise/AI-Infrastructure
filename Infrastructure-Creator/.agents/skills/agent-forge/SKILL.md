@@ -21,9 +21,10 @@ skills distinguishable using the target's actual concerns.
 Only two editions carry an agent layer: **Claude** (`.claude/agents/`, full frontmatter) and **Cursor** (`.cursor/agents/`, reduced frontmatter). **Codex has no agent layer** and is always skipped. The agent body is identical across the two editions; only the frontmatter differs.
 
 Consumes: `tasks/TASK-{N}/skill-forge-log.md` (validated skill list),
-`tasks/TASK-{N}/skill-generation-plan.json` (routing and write contracts), and
-profile section **1** (selected editions). If the skill log does not record a
-passing semantic validation result, stop; wrappers must never legitimize an
+`tasks/TASK-{N}/skill-generation-plan.json` schema **1.2** (`routing_cases`,
+every `nearest_siblings[]` adjacency, `flow_contracts`, and write contracts),
+and profile section **1** (selected editions). If the skill log does not record
+a passing semantic validation result, stop; wrappers must never legitimize an
 unvalidated skill set.
 
 ## Generated File Naming Convention (MANDATORY)
@@ -41,12 +42,12 @@ each validated skill `<name>` and selected agent-carrying edition, write
 2. **Decide whether a wrapper adds routing value.** Create one agent per
    validated skill for the currently supported Claude/Cursor host model, but
    fail if its contract has no positive trigger, negative trigger, expected
-   output, or distinct boundary from its nearest sibling. Never invent a
+   output, or distinct boundary for every adjacent skill. Never invent a
    wrapper for a skill absent from the validated log.
 3. **Author the Claude agent** at `.claude/agents/<name>-agent.md` with frontmatter keys `name`, `description`, `model`, `invokes`, `phase`, and `writes` when write-capable:
    - `description` is a QUOTED selection sentence derived from the contract:
-     when to use this agent, its target-specific owned concern, and which
-     sibling owns the nearest excluded concern. Keep it under ~250 characters.
+     when to use this agent, its target-specific owned concern, and the
+     adjacent owners for excluded concerns. Keep it under ~250 characters.
      Circular descriptions such as "runs the X skill" or "use for work governed
      by X" are invalid.
    - Put at least one contract-derived positive example and one negative sibling
@@ -65,12 +66,17 @@ each validated skill `<name>` and selected agent-carrying edition, write
    (the contract's expected result plus Context Summary/Next Steps), and
    `## Constraints`. Keep the operational procedure in the skill; do not copy
    it into the wrapper.
-6. **Validate routing.** For each positive and negative example, name the one
-   primary agent or an explicit, justified ambiguity. Fail on two agents claiming
-   the same example without a primary/deferred relationship.
-7. **Log** every agent path, contract name, positive/negative routing examples,
-   nearest sibling, expected output, and write flag to `agent-forge-log.md`
-   (consumed by `command-forge` and `skill-flow-composer`).
+6. **Validate all adjacency and routing oracles.** Carry every
+   `nearest_siblings[]` entry into the wrapper's negative deferrals; never
+   collapse the list to one convenient sibling. Execute every schema 1.2
+   `routing_cases[]` oracle. Each case must preserve its prompt, one primary
+   owner, and the complete ordered deferred set. Fail on an omitted adjacency,
+   an undeclared owner, or two agents claiming the same example without an
+   explicit primary/deferred relationship.
+7. **Log** every agent path, contract name, positive/negative routing example,
+   complete adjacency list, routing-case result, expected output, and write
+   flag to `agent-forge-log.md` (consumed by `command-forge` and
+   `skill-flow-composer`).
 
 ## Output Template
 
@@ -99,8 +105,8 @@ command-forge (wrap these agents as commands); hook-forge/memory-seed if not alr
 - MUST make each agent invoke exactly one skill and STOP - no auto-chaining.
 - MUST keep the agent body identical across Claude and Cursor for the same skill.
 - MUST derive routing and `writes` from the validated per-skill contract; MUST
-  reject circular selection text, missing negative routing, and ambiguous
-  sibling ownership.
+  reject circular selection text, any omitted adjacent deferral, a routing-case
+  mismatch, and ambiguous sibling ownership.
 - MUST keep agents DRY: project-specific routing and expected output belong in
   the wrapper, while the complete procedure remains in the skill.
 

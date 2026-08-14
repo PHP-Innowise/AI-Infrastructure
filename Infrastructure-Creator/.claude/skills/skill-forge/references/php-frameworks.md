@@ -42,7 +42,9 @@ Detection signals and baseline skill scaffolding per PHP framework. Used by `ski
 
 ## Universal Skill Shape (all frameworks)
 
-Every generated universal skill must: name the target's REAL tools (test runner, static analyzer, formatter) from the profile; cite the config files that prove them; and avoid recommending a tool the target does not use.
+Every generated universal skill must: name the target's REAL tools (test runner, static analyzer, formatter) from the profile; cite bounded config/source anchors that prove them; consume the scanned suite topology and exact/resolved command definitions; and avoid recommending a tool the target does not use. A catalog capability or framework convention is not confirmed target behavior without target evidence. Unsupported items remain review questions or external-standard requirements.
+
+For every selected universal/design/frontend skill, map each intersecting high-priority invariant ID to an ordered procedure step and concrete verification assertion, carry `required-existing`/`generated-runtime`/`creatable` path authority, and enumerate all material adjacent owners with positive, negative, ambiguous, and cross-domain routing cases.
 
 ### `debugging`'s Scope (split from the process skill `systematic-debugger` - do not duplicate)
 

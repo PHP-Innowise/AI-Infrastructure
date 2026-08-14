@@ -68,6 +68,30 @@ jobs:
       - name: Verify tool mirrors against canon
         run: python3 scripts/build_mirrors.py --check
 
+  infrastructure-creator-reliability:
+    name: "Infrastructure-Creator reliability (Python ${{ matrix.python }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.x"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Run complete reliability suite
+        run: python3 -m unittest discover -s Infrastructure-Creator/tests -p "test_*.py"
+      - name: Validate canonical reference contracts
+        run: >-
+          python3
+          Infrastructure-Creator/.agents/skills/bootstrap-verifier/scripts/validate_reference_catalogs.py
+          --references-dir
+          Infrastructure-Creator/.agents/skills/skill-forge/references
+      - name: Verify Infrastructure-Creator mirrors
+        run: python3 scripts/build_mirrors.py --check --edition Infrastructure-Creator
+
   installation:
     name: installation
     runs-on: ubuntu-latest

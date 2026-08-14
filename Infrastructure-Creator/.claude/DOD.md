@@ -27,6 +27,17 @@ Pick the tier that matches the work performed. Higher tiers include all lower-ti
   repository evidence has current fingerprints, bounded ranges, and supported
   claims; every selected skill has satisfied claim-backed selection conditions;
   every rejected candidate records why and what evidence is missing.
+- [ ] The complete inventory passed plan-only ownership-ID, normalized
+  write-surface, reciprocal sibling-routing, and contract-duplication checks
+  before human approval. New profiles emit publication-eligible schema 1.2;
+  legacy 1.0/1.1 plans remain audit-readable but were re-synthesized before
+  generation.
+- [ ] Every selected skill has structured capability, evidence-anchored
+  procedure steps, concrete verification with pass/fail/skip behavior, path
+  authority, critical-invariant coverage, routing cases, and flow membership.
+- [ ] Every integration contract defaults to fake/fixture/local verification
+  and records network policy, environment, authorization, rollback, and
+  sanitization before any external-side-effect branch.
 - [ ] Section 12 previews one chunk per cohesive durable concept composed only from confirmed evidence, linked to canonical sources, with no inferred/unknown fact, copied canonical document, customer data, or raw incident detail.
 
 ## Tier 2 - Generate & Update (`infra-generate`, `infra-update`, and forges)
@@ -42,26 +53,47 @@ Pick the tier that matches the work performed. Higher tiers include all lower-ti
   implements its contract-specific procedure, decisions, failure handling,
   verification, output, and guardrails. It does not depend on the generator's
   `tasks/TASK-*` path at runtime.
+- [ ] Every local textual citation renders its bounded line range or approved
+  stable anchor; every owned-scope/output claim resolves to supporting evidence.
+- [ ] Verification command aliases were resolved without execution and are
+  non-mutating/non-networked unless an explicitly authorized capability branch
+  classifies the side effect. Read-only procedures contain no edit/apply/write
+  instruction.
 - [ ] Per-skill and inventory-wide semantic validation passed: no ownership
   collision, repeated substantive template, paraphrased boilerplate cluster, or
   unjustified shared project invariant.
+- [ ] Every bounded authoring batch passed `--allow-partial-skills`, and the
+  final invocation without partial mode passed before wrappers, flows, manifest,
+  or publication were constructed.
 - [ ] Every scope-split skill pair stays non-duplicative and cross-references its counterpart: `debugging` (tools/logs) vs. `systematic-debugger` (methodology); `database-designer` (schema design) vs. `orm-patterns` (ORM usage patterns, when generated); `performance` (hot-path measurement) vs. `caching-strategy` (cache correctness, when generated); `api-designer` (hand-rolled routes) vs. `api-platform-design` (declarative resources, when generated).
 - [ ] Every generated skill/agent/command carries valid frontmatter for its edition (see the forge skills' contracts).
 - [ ] Every `flow-next`, `flow-alternatives`, `related`, `invokes`, and `spawns` reference resolves to a skill/agent that was actually generated.
 - [ ] Agent descriptions and positive/negative examples route concrete target
   concerns to one primary owner (or explicit ambiguity); no circular "use X for
   X" wrapper exists. Flows include only scope-matching specialists.
+- [ ] Every material adjacent owner and routing case survived into wrappers.
+  `SKILL FLOW.md`, `flow-feature`, and `flow-review` match the canonical flow
+  contract exactly, including required code-review/checkpoint stages.
 - [ ] Every generated hook script passes `bash -n` and carries the executable bit; the per-edition hook set is complete (four enforcement + working-memory pair; Cursor deliberately lacks `working-memory-read.sh`), and every wiring file references only existing executable scripts.
 - [ ] The seeded `memory-bank/` passes its validator and matches section 12 (same count, concepts, and sources); the context-brain runtime (`context.py`, `brain_runtime.py`, `context_retrieval.py`, `validate.py`) and the `project-brain/` skeleton were copied verbatim with `runtime.json` substituted (`context.py status`/`validate` exit 0 in the target); the memory quartet skills were also generated and wrapped; any drift was reported.
-- [ ] No template placeholders (e.g. `{skill-name}`, `TODO`, `YYYY-MM-DD` left literal) remain in any manifest-owned text file; unmanifested team files were not opened by placeholder or structural validation.
+- [ ] `context.py status --json` reports task-identity and Git readiness
+  truthfully as active, retrieval-only, or degraded. Explicit task identity
+  outside Git is never reported as checkpoint-capable; all degraded hooks remain
+  non-blocking and provide bounded remediation.
+- [ ] No template placeholders (e.g. `{skill-name}`, `TODO`, `YYYY-MM-DD` left literal) remain in any manifest-owned text file. The only approved verbatim-asset declarations are the exact manifest-relative path-plus-regex pairs `memory-bank/templates/chunk.md` + `\bYYYY-MM-DD\b` and `memory-bank/scripts/validate.py` + `\bYYYY-MM-DD\b`; each exempts only matching occurrences, never the whole file. Every other placeholder in those files and the same token at every other path remains blocking. Unmanifested team files were not opened by placeholder or structural validation.
 - [ ] The complete bundle was built under task-scoped staging and passed
   evidence, semantic, routing, structural, runtime, and manifest checks before
   publication. The explicit publication plan and manifest write plan were used;
   no staging/target root walk inferred ownership.
 - [ ] `.infra-manifest.json` was written from the explicit generation/update write plan (version from the root `VERSION` file, profile/task reference, sha256 per planned file, no runtime state tracked). Manifest membership exclusively defines ownership in both modes; a manifest-owned `AGENTS.md` carries the matching stamp, while an untracked team `AGENTS.md` remains untouched.
+- [ ] Forges emitted task-scoped root-ignore requirements only. The centralized
+  helper deterministically composed `.gitignore`; missing requirements received
+  explicit append approval (or aborted), and structured shared decision fields
+  agree with legacy decision fields and the manifest hash.
 - [ ] Publication rechecked baseline hashes, kept a rollback journal, copied the
-  manifest last, and passed the full post-publication gate; any failure restored
-  the previous target state.
+  manifest last, and passed the full post-publication gate; watch-only target
+  members were rechecked without copying/journaling, and any failure restored
+  exact previous bytes and modes.
 - [ ] For `infra-update` runs additionally: the executable ownership helper aborted cleanly if no manifest existed (legacy target); no file whose hash differed from the manifest was overwritten without an explicit per-file decision; files absent from both the manifest and staged output were not read, reported, or touched; memory state (chunks, `INDEX.md`, counters, `project-brain` records/indexes) was not regenerated; the rewritten manifest reflects the explicit final write plan and validates all decision fields including `task`.
 - [ ] `bootstrap-verifier` was run and reported no unresolved failures.
 

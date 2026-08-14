@@ -30,8 +30,8 @@ Follow `references/project-profile-schema.md` exactly. The JSON is generator run
 
 1. **Load all inputs** from `tasks/TASK-{N}/`: the seven `*-findings.md` (including `domain-behavior-scanner-findings.md`), `stack-researcher-findings.md`, and `clarifying-interview-answers.md`. Fill section 0's "Generator version" from the `VERSION` file at this generator's root - it is the single source of the version (the same value `infra-generate` later stamps into the target's `AGENTS.md` and `.infra-manifest.json`); never hardcode it or recall it from the changelog.
 2. **Populate section 1 (AI Tool Selection)** strictly from the interview answer. If it is missing, STOP and re-run `clarifying-interview` - never assume an edition.
-3. **Merge sections 2-7** from the six technical scanners, preserving each fact's confidence tag and source path. When two technical scanners disagree, prefer the higher-confidence, more direct evidence and note the resolution. Sections 3.1 (Framework-Specialty Signals) and 3.2 (Frontend Presence) come from `architecture-scanner-findings.md`'s dedicated sections - carry every signal through even when its value is "none".
-4. **Build section 8 ("Domain & Behavioral Contract")** from `domain-behavior-scanner-findings.md`. Preserve both confidence and source type. Keep status discovery separate from confirmed transitions, authentication technology separate from product permissions, risk indicators separate from documented severity/approval, and contradictory sources visible. Carry only bounded central entities and representative critical scenarios.
+3. **Merge sections 2-7** from the six technical scanners, preserving each fact's confidence tag and source path. Compile the scanners' command definitions (including resolved Composer/npm aliases and mutation/network classification), test topology (suite/config/root, central-vs-domain placement, fixtures/fakes, and focused invocation), path-authority declarations, and material adjacency candidates without filling gaps from framework convention. When two technical scanners disagree, prefer the higher-confidence, more direct evidence and note the resolution. Sections 3.1 (Framework-Specialty Signals) and 3.2 (Frontend Presence) come from `architecture-scanner-findings.md`'s dedicated sections - carry every signal through even when its value is "none".
+4. **Build section 8 ("Domain & Behavioral Contract")** from `domain-behavior-scanner-findings.md`. Preserve both confidence and source type. Assign stable invariant IDs to every confirmed invariant, mark high-priority failure invariants explicitly, and retain their bounded evidence anchors and named regression scenarios. Keep status discovery separate from confirmed transitions, authentication technology separate from product permissions, risk indicators separate from documented severity/approval, and contradictory sources visible. Carry only bounded central entities and representative critical scenarios.
 5. **Fold in research notes (section 9)** from `stack-researcher`, keeping source URLs.
 6. **Resolve open items (section 10)** using interview answers; anything still unresolved stays `unknown`, explicitly listed. Preserve `interview answer` as its source type rather than making it indistinguishable from repository evidence.
 7. **Derive the evidence-gated skill inventory.** Load
@@ -40,16 +40,52 @@ Follow `references/project-profile-schema.md` exactly. The JSON is generator run
    disposition: selected (families may produce multiple concrete skills) or
    rejected with reason/missing evidence. There are no category quotas. Only
    the memory quartet is runtime-fixed.
-8. **Build `skill-generation-plan.json`.** Stamp schema `1.0` and the current
+8. **Build `skill-generation-plan.json`.** Stamp schema `1.2` and the current
    reference-corpus `catalog_version`. Normalize target evidence into
    `evidence[]` with supported claims and sha256 fingerprints for repository
-   files. Create exactly one complete contract per selected skill, including a
+   files. Local evidence needs a bounded anchor (`line_range`, `symbol`, or
+   `json_pointer`); a bare path is insufficient. Create exactly one complete
+   contract per selected skill, including a
    `selection_gate` whose satisfied conditions cite the skill's own evidence
-   and distinguish adjacent candidates. Never use a grouped summary. Every
-   source path is canonical and target-relative; URLs remain URLs.
+   and distinguish adjacent candidates, structured `ownership[]`, normalized
+   path contracts (`required-existing`, `generated-runtime`, or `creatable`),
+   command/test-topology references, and reciprocal routing entries for every
+   material adjacent owner. Add positive, negative, ambiguous, and cross-domain
+   routing cases with one primary owner or an explicitly approved ambiguity.
+   Never use a
+   grouped summary. Every source path is canonical and target-relative; URLs
+   remain URLs. Ownership IDs use stable lowercase kebab/dotted syntax and modes
+   `exclusive`, `shared`, or `composed`; enforce the single-owner,
+   non-overlapping-shared-writer, and exactly-one-composer invariants before the
+   checkpoint.
+   Every high-priority confirmed invariant ID must map to at least one selected
+   skill procedure step and one concrete verification assertion. If no
+   selected skill can own both, stop and correct the inventory. A catalog
+   capability (for example deduplication, retention, timeout handling, or WCAG
+   conformance) is not confirmed target behavior unless the cited target
+   evidence anchor proves it; otherwise encode it as a review question,
+   external-standard requirement, or excluded unsupported claim.
+   Load `memory-seed/assets/runtime-contract.json` for the runtime-fixed
+   quartet. Compile those four contracts from its exact paths, SQLite tables,
+   commands, ownership, required skeleton, and creatable artifacts; never
+   synthesize runtime paths from catalog prose.
 9. **Derive section 11.2 ("Agents & Commands Preview")** from `skills.length`, with a dynamic category breakdown. Multiply by selected editions carrying agent/command layers; Codex has neither. Do not embed baseline numbers in the arithmetic.
 10. **Derive section 12 ("Memory Bank Preview")** using the exact same selection rule `memory-seed` applies: one planned chunk per cohesive durable concept composed only from confirmed facts across sections 2-8. Group tightly related facts rather than producing tiny per-line chunks. Link canonical sources; do not copy full specs, schemas, permission matrices, test inventories, incident narratives, or sensitive data.
-11. **Self-validate both artifacts** against `references/project-profile-schema.md` and the plan-only semantic validator. Require exact top-level/schema membership, the sibling Profile path, catalog version, fingerprints and bounded ranges, supported claims, complete selection gates, auditable rejected candidates, unique/resolved references, complete skill contracts, dynamic count equality, canonical paths, no sensitive data, and runtime wiring for confirmed integrations.
+11. **Self-validate both artifacts** against
+    `references/project-profile-schema.md` and the plan-only semantic validator.
+    Require exact top-level/schema membership, the sibling Profile path, catalog
+    version, fingerprints and bounded ranges, supported claims, complete
+    selection gates, auditable rejected candidates, structured ownership,
+    reciprocal routing roles, normalized non-overlapping globs, unique/resolved
+    references, complete skill contracts, command definitions, test topology,
+    invariant procedure/assertion coverage, path authority/creatability,
+    material adjacency and routing cases, dynamic count equality, canonical
+    paths, no sensitive data, and runtime wiring for confirmed integrations.
+    Confirm the runtime-fixed contracts match
+    `memory-seed/assets/runtime-contract.json` exactly.
+    The human checkpoint requires zero blocking contract-inventory diagnostics;
+    report nonblocking contract-similarity warnings for review rather than
+    silently discarding them.
 12. **Write both files atomically for the run** and report both paths.
 
 ## Output Template
@@ -79,11 +115,15 @@ Read the profile and correct anything wrong, then run `infra-generate`.
 - MUST NOT propose any skill whose reference trigger and required evidence are unsatisfied. Familiarity, category symmetry, and a preferred baseline are not evidence.
 - MUST generate only the memory quartet unconditionally, because its runtime is always installed.
 - MUST provide a complete JSON contract for every selected skill; grouped or one-line descriptions are summaries only.
+- MUST emit schema 1.2 operational, ownership, invariant, path, and reciprocal routing contracts; schemas 1.0/1.1 are audit/migration input only and are not publishable.
 - MUST use target-relative canonical source paths in contracts and generated target skills; generator task paths are never target evidence.
 - MUST NOT include any secret or credential value.
 - MUST keep every fact's confidence tag and source; never launder an `inferred` fact into a `confirmed` one.
 - MUST NOT let section 12 include an `inferred`/`unknown` fact, raw incident detail, customer data, or copied canonical source content.
 - MUST preserve source type and contradictions for behavioral findings; confidence alone is not enough.
+- MUST NOT elevate a catalog concern, inferred convention, package feature, or external standard into confirmed target behavior without a bounded target evidence anchor.
+- MUST map every high-priority confirmed invariant to a selected skill procedure and concrete verification assertion.
+- MUST compile the memory quartet from `memory-seed/assets/runtime-contract.json`, including `memory-bank/local/context.db`, SQLite `working_tasks`/`turn_deltas`, `project-brain/dynamic/**`, `project-brain/control/**`, required skeleton paths, creatable paths, and exact CLI commands.
 
 ## Final Output
 

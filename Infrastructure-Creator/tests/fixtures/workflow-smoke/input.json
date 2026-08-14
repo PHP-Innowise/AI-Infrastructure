@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "editions": [
+    ["cursor"],
+    ["claude"],
+    ["codex"],
+    ["claude", "cursor", "codex"]
+  ],
+  "generated_file": "generated/policy.md",
+  "generated_content": "deterministic policy\n",
+  "team_file": "team-notes.md",
+  "team_content": "preserve team content\n"
+}

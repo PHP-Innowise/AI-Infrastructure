@@ -28,6 +28,10 @@ No new file naming of its own. It relies on `infra-scan` (which writes `tasks/TA
    - If the profile has unresolved `unknown` items that affect generation, the
      AI-tool selection is unset, or any evidence/skill contract is incomplete,
      STOP and hand both artifacts to the user for review.
+   - Require schema 1.2 and zero blocking diagnostics across the complete
+     operational-safety, ownership/write/routing/flow inventory. Legacy 1.0/1.1
+     plans may be audited but require re-synthesis before this build can
+     continue. Calibrated similarity warnings remain visible.
    - Otherwise, surface a one-line summary of the profile and proceed.
 4. **Run `infra-generate`** against the same target.
    - If the collision guard trips (target already has an accelerator), STOP and ask overwrite/merge/abort - never auto-decide.

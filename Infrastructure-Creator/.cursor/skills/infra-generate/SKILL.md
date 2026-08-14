@@ -28,53 +28,105 @@ target manifest member.
 ## Process
 
 1. **Locate the profile.** Require the target project path (must match a profile from `infra-scan`); if more than one `TASK-{N}/` exists for that target, use the most recent unless the user specifies one.
-2. **Validate evidence and the generation plan.** Require the matching
-   `skill-generation-plan.json`. Re-check every target-relative evidence path,
+2. **Validate evidence and the generation plan.** Require the matching schema
+   **1.2** `skill-generation-plan.json`, including top-level
+   `routing_cases[]` and canonical `flow_contracts`. Re-check every
+   target-relative evidence path,
    containment, fingerprint/range, authority, and supported claim against the
    current target. Require one complete contract per proposed skill and reject
    grouped substitutes, unjustified inventory entries, duplicate ownership,
-   missing negative routing, and stale evidence. If anything drifted, stop for
-   re-scan rather than accepting generic fallback content.
+   missing or singularly projected adjacency, incomplete routing oracles,
+   invalid flow rosters, and stale evidence. Every `nearest_siblings[]` entry
+   must be covered by `routing_cases[]`. If anything drifted, stop for re-scan
+   rather than accepting generic fallback content.
 3. **Read the selected editions** from the profile's section 1 (AI Tool Selection). Only these editions will be produced.
 4. **Collision guard and baseline.** If the target already has `AGENTS.md` or
    any selected edition folder, STOP and ask: overwrite, merge, or abort. Record
    the choice. Snapshot the existence and sha256 of every path the candidate
    may replace in `collision-baseline.json`; in merge mode also record the
-   full pre-existing surface and exclude it from both writes and ownership.
+   full pre-existing surface and exclude it from both writes and ownership,
+   except the separately approved shared root `.gitignore` contract below.
 5. **Create clean staging and explicit plans.** Refuse a non-empty staging root
    unless it belongs to this task and the user approved clearing it. Create
    `infra-generate-publication-plan.txt` for every staged file and
    `infra-generate-write-plan.txt` for the manifest-ownable subset. Every forge
    writes only beneath staging and appends each target-relative path exactly
    once to the publication plan; generator-owned non-runtime paths also enter
-   the write plan. Never infer either set by walking the target.
+   the write plan. When needed, create `infra-generate-watch-plan.txt` for target-sourced
+   manifest members that must be drift-checked without copying, plus
+   `gitignore-requirements/` for forge declarations. Never infer a plan by
+   walking the target.
 6. **Forge evidence-independent surfaces.** Policy, hooks, and initial memory
    surfaces may run in parallel, but all writes are redirected to staging.
 7. **Generate skills in evidence-scoped batches.** `skill-forge` authors one
    skill or a small sibling set from each validated contract. After every batch,
-   run the semantic validator; after all batches, run inventory-wide evidence,
+   run the semantic validator with `--allow-partial-skills`; after all batches,
+   run it again without partial mode for inventory-wide evidence,
    ownership, repeated-block, and similarity checks. Stop immediately on any
    failure. No agent, command, flow, manifest, or target skill may exist yet.
-8. **Wrap only validated skills.** Run `agent-forge`, then `command-forge`,
-   using the validated contracts and routing fixtures. Run `skill-flow-composer`
-   after wrappers exist. Validate adaptive specialist selection and write
-   serialization.
-9. **Stamp and stage the manifest.** Stamp only a staged `AGENTS.md` produced
+8. **Wrap and compile only validated skills.** Run `agent-forge`, then
+   `command-forge`, using every adjacency and schema 1.2 routing oracle. Run
+   `skill-flow-composer` after wrappers exist. Both forges MUST compile from the
+   same canonical `flow_contracts`; neither may infer its own stage graph.
+   Validate exact graph parity across `SKILL FLOW.md` and every executable flow:
+   order, phases, agents, checkpoints, required `code-review-agent`, roster,
+   and write serialization. A feature flow that skips code review or a
+   `parallel: true` stage with multiple write-capable roster agents fails.
+   For each selected command-carrying edition run:
+
+   ```bash
+   python3 .agents/skills/bootstrap-verifier/scripts/validate_flow_contracts.py \
+     --plan "tasks/TASK-003/skill-generation-plan.json" \
+     --skill-flow "tasks/TASK-003/infra-generate-staging/.cursor/skills/SKILL FLOW.md" \
+     --commands-dir "tasks/TASK-003/infra-generate-staging/.cursor/commands"
+   ```
+
+   Substitute the selected edition path. For Codex-only generation, validate
+   its compiled `SKILL FLOW.md` against the canonical graph and record that
+   executable command parity is N/A because Codex has no command layer.
+9. **Compose the shared root `.gitignore`.** Union and validate the exact
+   task-scoped requirements from `memory-seed` and `hook-forge`, then run the
+   bundled deterministic merge helper against the target file. If the existing
+   file already satisfies every requirement, `keep` is allowed and the path
+   enters the write and watch plans with a structured shared decision. If
+   requirements are missing, stop for an explicit `append-requirements` or
+   `abort` decision; `keep` is invalid. An approved append stages only the
+   deterministic merged bytes and enters the publication/write plans. No other
+   pre-existing merge-mode file receives this exception.
+   Record backward-compatible `decision: kept`/`merged`, the legacy
+   `rejected_sha256` and `task`, plus `origin: shared`, strategy
+   `keep`/`append-requirements`, proposal/resolved hashes, and the sorted exact
+   requirements. `resolved_sha256` must equal the manifest file hash.
+
+   ```bash
+   python3 .agents/skills/bootstrap-verifier/scripts/merge_gitignore.py \
+     --existing "<target>/.gitignore" \
+     --requirements "tasks/TASK-003/gitignore-requirements/memory-seed.json" \
+     --requirements "tasks/TASK-003/gitignore-requirements/hook-forge.json" \
+     --output "tasks/TASK-003/infra-generate-staging/.gitignore" \
+     --metadata "tasks/TASK-003/gitignore-proposal.json"
+   ```
+
+   Omit `--existing` when the target file is absent. Repeated requirement
+   documents are validated, unioned, sorted, and deduplicated by the helper.
+10. **Stamp and stage the manifest.** Stamp only a staged `AGENTS.md` produced
    by this run. Build `.infra-manifest.json` against staging from the explicit
-   write plan. Runtime state remains excluded from ownership.
-10. **Verify the complete staged bundle.** Run `bootstrap-verifier` against
+   write plan, final source map, and decisions. Runtime state remains excluded
+   from ownership.
+11. **Verify the complete staged bundle.** Run `bootstrap-verifier` against
     staging while validating skill evidence against the real target root.
-    Treat every semantic, routing, structural, hash, hook, runtime, or placeholder
-    failure as generation failure.
-11. **Recheck and publish transactionally.** Recompute the baseline immediately
+    Treat every semantic, adjacency, routing-oracle, flow-contract, structural,
+    hash, hook, runtime, or placeholder failure as generation failure.
+12. **Recheck and publish transactionally.** Recompute publication, removal,
+   and watch baselines immediately
     before publication. If any candidate destination changed, stop and rerun
     collision handling. Create a rollback journal, publish only explicit
     approved publication-plan paths, remove no team-owned path, and restore the
     previous state on any copy/rename failure. Copy the staged manifest last.
-12. **Verify the published target.** Run the complete bootstrap gate again
+13. **Verify the published target.** Run the complete bootstrap gate again
     against the real target. A failure triggers rollback and cannot be reported
     as success.
-13. **Report.** Record evidence/plan, per-category skill quality, routing,
+14. **Report.** Record evidence/plan, per-category skill quality, routing,
     staged bundle, publication, rollback, and post-publication results.
 
 ## Version Stamp & Generation Manifest (MANDATORY)
@@ -92,8 +144,8 @@ python3 .agents/skills/bootstrap-verifier/scripts/validate_skill_quality.py \
 ```
 
 After each skill batch, run the same script with `--skills-dir` pointing to
-each selected staged skills tree. A nonzero result blocks wrappers and
-publication.
+each selected staged skills tree plus `--allow-partial-skills`. After the last
+batch, rerun without that flag. A nonzero result blocks wrappers and publication.
 
 **Step A - stamp `AGENTS.md`.** Applies only to an `AGENTS.md` this run created: in merge mode a pre-existing `AGENTS.md` is never touched (it stays unstamped and untracked; `bootstrap-verifier` skips the stamp check for it). When this run did create it, make the FIRST line of the target's generated `AGENTS.md` this comment (real values, no placeholders), before hashing anything:
 
@@ -127,17 +179,20 @@ The helper hashes only explicit write-plan members and refuses missing files, ab
 ## Transactional Publication Recipe
 
 Use the bundled helper; do not implement ad-hoc recursive copies:
+Omit `--watch-plan` when there are no watch-only members.
 
 ```bash
 python3 .agents/skills/bootstrap-verifier/scripts/publish_staging.py snapshot \
   --target "<path-to-target>" \
   --publication-plan "tasks/TASK-003/infra-generate-publication-plan.txt" \
+  --watch-plan "tasks/TASK-003/infra-generate-watch-plan.txt" \
   --output "tasks/TASK-003/prepublication-baseline.json"
 
 python3 .agents/skills/bootstrap-verifier/scripts/publish_staging.py publish \
   --target "<path-to-target>" \
   --staging "tasks/TASK-003/infra-generate-staging" \
   --publication-plan "tasks/TASK-003/infra-generate-publication-plan.txt" \
+  --watch-plan "tasks/TASK-003/infra-generate-watch-plan.txt" \
   --baseline "tasks/TASK-003/prepublication-baseline.json" \
   --journal "tasks/TASK-003/publication-rollback"
 ```
@@ -182,7 +237,14 @@ The target now has its own working `AGENTS.md` + [selected edition folder(s)] + 
 - MUST NOT invent content beyond what the profile supports - a forge needing missing data is a signal to re-scan/re-interview, not to guess.
 - MUST stamp `AGENTS.md` only when this run wrote it, and write `.infra-manifest.json` from `infra-generate-write-plan.txt` before running `bootstrap-verifier`, taking the version only from this generator's root `VERSION` file.
 - MUST NOT list runtime state (memory chunks, indexes, counters, `local/` dirs, Project Brain records) in the manifest - `infra-update` treats everything the manifest lists as generator-owned.
-- MUST maintain an explicit generated write plan in both modes. In merge mode, snapshot `preexisting-files.txt` before any forge writes, record `"mode": "merge"`, and never write or track a pre-existing team file. In full mode, track only files actually written; never infer ownership with a target-root walk.
+- MUST maintain explicit write/publication/watch plans in both modes. In merge
+  mode, snapshot `preexisting-files.txt` before any forge writes, record
+  `"mode": "merge"`, and never write or track a pre-existing team file except
+  an explicitly approved, deterministically composed root `.gitignore`. In full
+  mode, track only files actually written or watched; never infer ownership with
+  a target-root walk.
+- MUST reject `keep` for a pre-existing `.gitignore` when any declared
+  requirement is missing; only approved append or abort is valid.
 - MUST maintain a separate explicit publication plan for initial team-owned
   runtime seeds that intentionally stay outside manifest ownership; publication
   still never walks staging or target roots.
@@ -191,6 +253,9 @@ The target now has its own working `AGENTS.md` + [selected edition folder(s)] + 
   fails; a partially published accelerator is never an acceptable result.
 - MUST NOT generate a skill absent from the validated plan or retain one whose
   evidence, operational ownership, procedure, or routing value is insufficient.
+- MUST require schema 1.2 routing/flow contracts before wrappers, and MUST
+  block publication when any adjacency is dropped or when `SKILL FLOW.md` and
+  executable flow commands do not compile to the same canonical graph.
 
 ## Final Output
 

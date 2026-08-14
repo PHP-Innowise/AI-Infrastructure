@@ -17,6 +17,15 @@ Stabilize whenever the generator:
   canonical target-relative source.
 - Routed unrelated specialists unconditionally or created two primary owners
   for the same request.
+- Detected inventory ownership/write/routing conflicts only after the human
+  approved the plan, or treated an incomplete authored batch as final.
+- Mutated a team's root `.gitignore` from parallel forges, lost exact bytes, or
+  published after an unchanged target-sourced member drifted.
+- Published a structurally valid skill with generic verification, a live
+  provider path, unsupported ownership, a missing critical invariant, or a
+  mutating check command.
+- Let declared and executable flow stages diverge, or reported automatic memory
+  active when task identity or Git metadata could not support checkpointing.
 - Let `stack-adapter` run without explicit confirmation, or produced a sibling generator that still mentioned PHP, Laravel, Symfony, PHP Core, or "Infrastructure-Creator" in its own content.
 
 ## The Loop
@@ -37,5 +46,14 @@ Stabilize whenever the generator:
   one generic process. *Rule:* compile one evidence-backed contract per skill,
   generate in small staged batches, and make the semantic validator reject
   repeated substantive procedures before wrappers or publication.
+- *Mistake:* two parallel forges appended competing entries to `.gitignore`.
+  *Rule:* forges emit exact requirement JSON; one deterministic composer and
+  one explicit human decision own the shared-file proposal and publication.
+- *Mistake:* every skill said “run the narrow command” without naming one.
+  *Rule:* schema 1.2 verification is structured, command risk is resolved
+  without execution, and pass/fail/skip criteria are publication gates.
+- *Mistake:* `SKILL FLOW.md` declared review while `flow-feature` omitted it.
+  *Rule:* both artifacts compile from one flow contract and byte-level stage
+  equivalence is regression-tested.
 
 Prefer enforcement over exhortation. A rule that a hook or validator enforces is worth ten paragraphs of guidance.

@@ -20,7 +20,7 @@ bundle passes.
 - **`memory-bank/`** - the durable, indexed shared-memory layer, plus the **context-brain runtime** under `memory-bank/scripts/`: `context.py` (the CLI facade), `brain_runtime.py` (governed Project Brain runtime), `context_retrieval.py` (local SQLite/BM25 retrieval), and `validate.py` (the bank validator). The runtime is dependency-free (standard library only) and stack-agnostic.
 - **`project-brain/`** - the governed control plane for active work: dynamic records (tasks, findings, bugs, incidents, decisions, events), handoffs, the append-only agent message channel that orchestrated flows write to, retrieval manifests, promotion proposals, schemas, and `PROTOCOL.md`. The runtime under `memory-bank/scripts/` operates it.
 
-`skill-forge` separately generates the operational skills that drive this layer in every selected edition (`memory-bank`, `project-brain`, `checkpoint`, `memory` - see `skill-forge/references/php-process-skills.md`), and `hook-forge` generates the working-memory hooks (`working-memory-read.sh` / `working-memory-write.sh`) that call `memory-bank/scripts/context.py refresh` / `turn` automatically. The paths this skill creates are the contract those hooks and skills depend on - never rename them.
+`skill-forge` separately generates the operational skills that drive this layer in every selected edition (`memory-bank`, `project-brain`, `checkpoint`, `memory` - see `skill-forge/references/php-process-skills.md`), and `hook-forge` generates the working-memory hooks (`working-memory-read.sh` / `working-memory-write.sh`) that call `memory-bank/scripts/context.py refresh` / `turn` automatically. `assets/runtime-contract.json` is the canonical machine-readable source for the quartet's paths, SQLite checkpoint/turn tables, creatable artifacts, command forms, and ownership split. The paths this skill creates are the contract those hooks and skills depend on - never rename them.
 
 The profile's section 12 ("Memory Bank Preview") already lists exactly what this skill is expected to seed. It plans one chunk per cohesive durable concept, composed only from confirmed evidence, rather than one tiny chunk per factual line. This skill's job is to **fulfill that preview**, not re-derive it: same count, same concepts, same sources. If the target changed, flag drift rather than silently seeding stale content.
 
@@ -32,6 +32,7 @@ Into the required generation root, create:
 
 **`memory-bank/` (durable memory + runtime):**
 - `memory-bank/README.md`, `memory-bank/INDEX.md`, `memory-bank/.memory-counter` (written fresh)
+- `memory-bank/runtime-contract.json` (copied verbatim from `assets/runtime-contract.json`)
 - `memory-bank/templates/chunk.md` (copied verbatim from `assets/templates/chunk.md`)
 - `memory-bank/scripts/context.py`, `memory-bank/scripts/brain_runtime.py`, `memory-bank/scripts/context_retrieval.py`, `memory-bank/scripts/validate.py` (copied verbatim from `assets/scripts/`)
 - `memory-bank/local/.gitkeep` (gitignored machine-local state: the disposable SQLite index `context.db`, turn buffers, ephemeral manifests)
@@ -44,7 +45,10 @@ Into the required generation root, create:
 - `indexes/active.json`, `indexes/archive.json` (both `[]`)
 - empty, `.gitkeep`-held directories: `archive/`, `local/`, `control/handoffs/`, `control/messages/`, `control/promotions/`, `control/retrieval-manifests/`, `dynamic/bugs/`, `dynamic/decisions/`, `dynamic/events/`, `dynamic/findings/`, `dynamic/incidents/`, `dynamic/tasks/`
 
-**Target `.gitignore`:** ensure it excludes `memory-bank/local/` and `__pycache__/` (append if missing; `project-brain/` ships its own `.gitignore` for `local/`).
+**Target `.gitignore` requirements:** do not read or modify the root file.
+Write `tasks/TASK-{N}/gitignore-requirements/memory-seed.json` containing the
+exact sorted requirements `["__pycache__/", "memory-bank/local/"]`.
+`infra-generate`/`infra-update` are the sole root-file composers.
 
 Append a log to `tasks/TASK-{N}/memory-seed-log.md`.
 
@@ -60,15 +64,18 @@ All other `runtime.json` values are shipped defaults (`mode: governed`, `automat
 ## Process
 
 1. **Read profile section 12 first** - it is the authoritative seed plan, already reviewed by the user. Cross-check it against confirmed facts in sections 2-8, including canonical source authority, durable invariants, lifecycles, permissions, audit obligations, integration contracts, and sanitized incident-prevention rules.
-2. **Bootstrap `memory-bank/`:** write `README.md` (fresh prose naming the target and its memory contract: authority hierarchy, layout, what belongs here, retrieval, creating/updating a chunk, lifecycle, security, and the runtime CLI - `python3 memory-bank/scripts/context.py --help`), copy `templates/chunk.md` and all four `assets/scripts/*.py` verbatim, create empty gitignored `local/`.
+2. **Bootstrap `memory-bank/`:** write `README.md` (fresh prose naming the target and its memory contract: authority hierarchy, layout, what belongs here, retrieval, creating/updating a chunk, lifecycle, security, and the runtime CLI - `python3 memory-bank/scripts/context.py --help`), copy `assets/runtime-contract.json` to `memory-bank/runtime-contract.json`, copy `templates/chunk.md` and all four `assets/scripts/*.py` verbatim, and create empty gitignored `local/`. Treat the contract's `required_skeleton` paths as required generation outputs and its `creatable` paths as runtime-created; do not require creatable files to pre-exist.
 3. **Bootstrap `project-brain/`:** copy the whole `assets/project-brain/` skeleton verbatim (including `.gitkeep` placeholders and both empty `[]` indexes), then materialize `config/runtime.json` from the template with the two substitutions above (framework slug + canonical edition).
 4. **Seed one chunk per row in section 12's preview table**, starting at `MEM-0001`, in the same order. Fill frontmatter exactly per `templates/chunk.md` (JSON frontmatter; `valid_from`/`valid_to` are optional temporal-validity keys - seed chunks normally set `valid_from` to the seed date and leave `valid_to` null). Each chunk represents one cohesive concept and links all canonical sources that prove it. It may group tightly related facts (for example, a lifecycle's statuses, confirmed transitions, guards, permission, and audit consequence) but MUST NOT copy full specs, schemas, permission matrices, test inventories, incident narratives, or logs. If revalidation surfaces a new confirmed concept or invalidates a previewed one, report drift rather than silently reconciling it.
 5. **Write `INDEX.md`** with the exact 8-column table: `ID | Title | Type | Scope | Tags | Status | Last Verified | File`.
 6. **Set `.memory-counter`** to one past the highest allocated ID.
-7. **Run the validators and smoke checks** from the staged generation root; fix any structural error before declaring success:
+7. **Declare root-ignore requirements** in the task-scoped JSON file above;
+   never append to `.gitignore` directly.
+8. **Run the validators and smoke checks** from the staged generation root; fix any structural error before declaring success:
    - `python3 memory-bank/scripts/validate.py` (bank structure)
    - `python3 memory-bank/scripts/context.py validate` (Project Brain records - passes on the empty skeleton)
    - `python3 memory-bank/scripts/context.py status` (runtime imports and index health; exit 0 proves the four scripts and the skeleton are wired correctly)
+   - compare `memory-bank/runtime-contract.json` byte-for-byte with the bundled asset and verify its required skeleton paths exist while its creatable paths are accepted as intentionally absent
 
 ## Output Template
 
@@ -91,7 +98,9 @@ skill-flow-composer, once all forges have finished.
 
 ## Guardrails
 
-- MUST copy every file under `assets/` byte-for-byte - runtime scripts, chunk template, and the `project-brain/` skeleton included; do not "improve", trim, or re-generate them. The only sanctioned edits are the `{{TARGET_FRAMEWORK}}` and `{{CANONICAL_EDITION}}` substitutions in `runtime.json.template` (which is copied under the name `config/runtime.json`).
+- MUST copy every file under `assets/` byte-for-byte - the runtime contract, runtime scripts, chunk template, and the `project-brain/` skeleton included; do not "improve", trim, or re-generate them. The only sanctioned edits are the `{{TARGET_FRAMEWORK}}` and `{{CANONICAL_EDITION}}` substitutions in `runtime.json.template` (which is copied under the name `config/runtime.json`).
+- MUST declare root `.gitignore` requirements through the task-scoped JSON
+  contract only; MUST NOT read, create, or append the target root file.
 - MUST leave no `{{TARGET_FRAMEWORK}}` or `{{CANONICAL_EDITION}}` placeholder in the written `project-brain/config/runtime.json`; MUST use `generic` rather than an unconfirmed framework slug; and MUST set `canonical_edition` to an edition root that is actually generated (`.agents` for Codex, else `.claude`, else `.cursor`) - a canonical edition absent from the tree makes `context.py parity` report false total drift.
 - MUST seed only cohesive concepts composed from `confirmed` facts, each with canonical source paths; never seed an `inferred`/`unknown` item as fact.
 - MUST seed the same set of chunks section 12 previewed - same count, same concepts, same sources - unless the target genuinely changed, in which case report drift explicitly.
@@ -100,6 +109,7 @@ skill-flow-composer, once all forges have finished.
 - MUST NOT include any secret or credential value in any chunk.
 - MUST run all three checks in step 7 and fix every reported error before reporting success.
 - MUST create ONE shared `memory-bank/` and ONE shared `project-brain/` at the target root, not per edition, and MUST NOT rename any runtime path (`hook-forge`'s working-memory hooks call `memory-bank/scripts/context.py` at exactly that path).
+- MUST make the runtime-fixed quartet compile from `assets/runtime-contract.json`; generic prose, guessed flags, and paths not listed as required or creatable cannot override it.
 
 ## Final Output
 

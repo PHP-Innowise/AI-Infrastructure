@@ -17,9 +17,12 @@ It shows primary ownership, evidence-gated specialist entry points, explicit
 sibling deferrals, and handoff artifacts; it never invents a universal chain
 or routes every request through every available skill.
 
-Consumes the validated **skill-forge log** and
-`tasks/TASK-{N}/skill-generation-plan.json` as its source of truth, plus
-profile section 1 for the selected editions.
+Consumes the validated **skill-forge log** and schema **1.2**
+`tasks/TASK-{N}/skill-generation-plan.json` as its source of truth, including
+all `routing_cases[]` and the canonical `flow_contracts`, plus profile section
+1 for the selected editions. The canonical graph is shared with
+`command-forge`; `SKILL FLOW.md` and executable flow commands are two compiled
+views of that one graph.
 
 ## Generated File Naming Convention (MANDATORY)
 
@@ -32,28 +35,47 @@ Keep the evidence target path separate from the generation root.
 
 1. **Require the target-project-path argument.** Resolve the selected editions from profile section 1 and their skills dirs.
 2. **Read the validated contracts** to obtain the exact generated set,
-   category, phase, positive/negative triggers, owned/excluded scope, nearest
-   siblings, outputs, and declared relationships.
-3. **Build the Main Flow** from primary core ownership only. Order applicable
-   skills by phase and wire only declared, resolved handoffs. Do not place
-   evidence-gated integration/domain specialists in a default path.
+   category, phase, positive/negative triggers, owned/excluded scope, every
+   adjacency, routing oracle, output, and declared relationship. Reject a
+   schema 1.0/1.1 plan; flow compilation requires schema 1.2.
+3. **Compile the Main Flow from `flow_contracts`.** Preserve canonical roster
+   order and each flow's ordered `{phase, agents, parallel, checkpoint}` stages
+   exactly. Render skill names for navigation, but never infer a second graph
+   from skill frontmatter or prose. Do not place evidence-gated
+   integration/domain specialists in a default path unless the canonical graph
+   does so.
 4. **Build Specialist Routing and Shortcuts.** For each optional specialist,
-   state the concrete project trigger, exclusion, nearest sibling, and expected
-   artifact. Every shortcut must have one primary owner or explicit ambiguity.
+   state the concrete project trigger, exclusions, every adjacent owner, and
+   expected artifact. Render every `routing_cases[]` oracle with its prompt,
+   one primary owner, and complete ordered deferred set. Every shortcut must
+   have one primary owner or explicit ambiguity.
 5. **Build the Phase Map table** mapping each phase to the generated skills that occupy it.
 6. **Write the Context Handoff section** from each contract's output and
    evidence requirements so a fresh context can resume without loading
    unrelated project material.
-7. **Validate cross-references:** every skill named anywhere in `SKILL FLOW.md` MUST exist in the generated set; fail fast on a dangling reference rather than emitting it.
-8. **Write** `SKILL FLOW.md` into each selected edition's skills dir and log the paths.
+7. **Embed the canonical graph.** Add exactly one `## Canonical Flow Graph`
+   section containing one fenced `json flow-contract` block whose JSON value is
+   exactly the plan's `flow_contracts` object. This is a deterministic compiled
+   record, not a second authoring surface.
+8. **Validate cross-references and flow semantics:** every skill/agent named
+   anywhere in `SKILL FLOW.md` MUST resolve through the canonical roster.
+   Require the same order, phases, agents, checkpoints, required
+   `code-review-agent`, roster, and writer serialization as executable flow
+   commands. Fail fast on a dangling reference or mismatch.
+9. **Write** `SKILL FLOW.md` into each selected edition's skills dir and log the paths.
 
 ## Output Template
 
-```markdown
+````markdown
 # Skill Flow: [target_name]
 
 ## Main Flow
 [dynamic diagram of generated skills, phase-ordered, edges only among generated skills]
+
+## Canonical Flow Graph
+```json flow-contract
+[exact schema 1.2 flow_contracts object]
+```
 
 ## Shortcuts
 - [entry point -> generated skill]
@@ -65,7 +87,7 @@ Keep the evidence target path separate from the generation root.
 
 ## Context Handoff
 - [skill] -> [next]: [artifact/log/memory handed off]
-```
+````
 
 ## Guardrails
 
@@ -76,8 +98,11 @@ Keep the evidence target path separate from the generation root.
 - MUST reflect each skill's real declared `phase`/`flow-next` when wiring edges.
 - MUST derive routing and handoffs from the validated generation plan and MUST
   NOT make every generated specialist part of the default flow.
-- MUST show positive and negative boundaries for adjacent skills; circular
-  "use X for X" shortcuts fail.
+- MUST preserve every adjacency and every schema 1.2 routing oracle; circular
+  "use X for X" shortcuts and singular-sibling projections fail.
+- MUST compile the human navigation and canonical JSON block from the same
+  `flow_contracts` consumed by `command-forge`; independent flow authoring is
+  forbidden.
 
 ## Final Output
 

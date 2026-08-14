@@ -44,11 +44,19 @@ These four operate one shared layer and must be authored as a coherent set, neve
 - **Safety, shared by all four:** never store raw prompts/responses/diffs/logs/secrets/customer data; never run destructive lifecycle commands (`complete`, `record`, `clear`) from a save/refresh skill; only ignored local state may be touched outside supported CLI mutations.
 - **Frontmatter linking:** the four reference each other in `related` (and `memory-bank`/`project-brain` also relate to `reflect` and `documentation-generator`); do not point them at skills the target does not receive.
 
-`memory-seed` installs the runtime these skills drive (`context.py`, `brain_runtime.py`, `context_retrieval.py`, `validate.py`, and the `project-brain/` skeleton with `PROTOCOL.md`). Author the quartet against those real shipped files - the CLI subcommands and paths are fixed contracts, so name them exactly and invent no flags.
+`memory-seed` installs the runtime these skills drive (`context.py`, `brain_runtime.py`, `context_retrieval.py`, `validate.py`, and the `project-brain/` skeleton with `PROTOCOL.md`). Author the quartet exclusively from `memory-seed/assets/runtime-contract.json`, which is copied to `memory-bank/runtime-contract.json`: it is the machine-readable authority for `memory-bank/local/context.db`, SQLite `working_tasks`/`turn_deltas`, `project-brain/dynamic/**`, `project-brain/control/**`, required skeleton paths, creatable artifacts, exact CLI forms, and skill ownership. Catalog prose may explain the contract but cannot add a path, table, file, flag, or command.
 
 ## Generation Rule
 
 Evaluate each contract independently. A generic desire for a mature workflow is not evidence. Include a candidate only when its trigger and required evidence are present in the plan, except the runtime-fixed memory quartet. Every selected candidate receives a complete JSON contract and its own authored procedure.
+
+## Operational Evidence Rules
+
+- Catalog capabilities are candidate concerns, not confirmed target facts. Elevate a claim only when a bounded target evidence anchor proves it; otherwise encode it as a review question, an external-standard requirement, or an excluded unsupported claim.
+- Every selected skill consumes the applicable repository command definitions and test topology. Verification names the focused command/manual assertion, prerequisites, safe scope, expected result, and skip/failure reporting.
+- Every high-priority confirmed invariant ID intersecting a skill maps to at least one ordered procedure step and one concrete verification assertion. Missing ownership blocks selection/compilation.
+- Routing lists every material adjacent owner and includes positive, negative, ambiguous, and cross-domain cases; one convenient nearest sibling is not sufficient.
+- Owned/write paths carry authority as `required-existing`, `generated-runtime`, or `creatable`. A path not supported by scan evidence or the runtime contract is not writable.
 
 ## Enforceable Per-Skill Contracts
 

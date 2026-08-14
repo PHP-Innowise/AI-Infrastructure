@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -78,6 +79,25 @@ class StagedPublicationTest(unittest.TestCase):
         self.assertFalse((self.target / "runtime/seed.md").exists())
         self.assertFalse((self.target / ".infra-manifest.json").exists())
 
+    def test_changed_file_rollback_restores_exact_bytes_and_mode(self) -> None:
+        changed = self.target / "config/policy.md"
+        original = b"\xffteam\r\nwithout-final-newline"
+        changed.write_bytes(original)
+        os.chmod(changed, 0o640)
+        staged = self.staging / "config/policy.md"
+        os.chmod(staged, 0o755)
+        paths = planned_paths(self.plan)
+        snapshot = build_snapshot(self.target, paths)
+        journal = (Path(self.temp.name) / "mode-journal").resolve()
+
+        publish(self.target, self.staging, paths, snapshot, journal)
+        self.assertNotEqual(changed.read_bytes(), original)
+        self.assertEqual(changed.stat().st_mode & 0o777, 0o755)
+
+        restore(self.target, journal)
+        self.assertEqual(changed.read_bytes(), original)
+        self.assertEqual(changed.stat().st_mode & 0o777, 0o640)
+
     def test_target_drift_refuses_publication(self) -> None:
         paths = planned_paths(self.plan)
         snapshot = build_snapshot(self.target, paths)
@@ -100,6 +120,63 @@ class StagedPublicationTest(unittest.TestCase):
         publish(self.target, self.staging, paths, snapshot, journal)
 
         self.assertEqual(team_file.read_text(encoding="utf-8"), "team\n")
+
+    def test_baseline_only_path_is_checked_but_never_published_or_journaled(self) -> None:
+        watched = self.target / ".gitignore"
+        watched.write_bytes(b"team\r\n")
+        os.chmod(watched, 0o640)
+        staged_watch = self.staging / ".gitignore"
+        staged_watch.write_text("must not publish\n", encoding="utf-8")
+        paths = planned_paths(self.plan)
+        snapshot = build_snapshot(self.target, paths, [".gitignore"])
+        journal = (Path(self.temp.name) / "watch-journal").resolve()
+
+        publish(
+            self.target,
+            self.staging,
+            paths,
+            snapshot,
+            journal,
+            baseline_only=[".gitignore"],
+        )
+
+        self.assertEqual(watched.read_bytes(), b"team\r\n")
+        self.assertEqual(watched.stat().st_mode & 0o777, 0o640)
+        metadata = json.loads(
+            (journal / "journal.json").read_text(encoding="utf-8")
+        )
+        self.assertNotIn(".gitignore", metadata["paths"])
+        self.assertNotIn(".gitignore", metadata["baseline"])
+        self.assertFalse((journal / "backups/.gitignore").exists())
+
+    def test_watched_drift_aborts_before_manifest_publication(self) -> None:
+        watched = self.target / ".gitignore"
+        watched.write_text("baseline\n", encoding="utf-8")
+        paths = planned_paths(self.plan)
+        snapshot = build_snapshot(self.target, paths, [".gitignore"])
+        watched.write_text("team drift\n", encoding="utf-8")
+        journal = (Path(self.temp.name) / "drift-journal").resolve()
+
+        with self.assertRaisesRegex(PublicationError, "target changed"):
+            publish(
+                self.target,
+                self.staging,
+                paths,
+                snapshot,
+                journal,
+                baseline_only=[".gitignore"],
+            )
+
+        self.assertFalse((self.target / ".infra-manifest.json").exists())
+        self.assertFalse(journal.exists())
+        self.assertEqual(
+            (self.target / "config/policy.md").read_text(encoding="utf-8"), "old\n"
+        )
+
+    def test_baseline_only_overlap_is_rejected(self) -> None:
+        paths = planned_paths(self.plan)
+        with self.assertRaisesRegex(PublicationError, "overlap baseline-only"):
+            build_snapshot(self.target, paths, ["config/policy.md"])
 
     def test_copy_failure_rolls_back_partial_publication(self) -> None:
         paths = planned_paths(self.plan)

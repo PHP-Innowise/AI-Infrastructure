@@ -20,6 +20,8 @@ Phase 1 produces a human Project Profile plus a machine-readable evidence ledger
 and one generation contract per proposed skill. Phase 2 consumes only validated
 contracts and their cited evidence. If a forge needs something absent from them,
 it re-scans or re-interviews instead of inventing or falling back to boilerplate.
+Approval validates the complete structured ownership, write, and reciprocal
+routing inventory—not merely the prose profile.
 
 ## 5. Generate Only What Was Chosen
 
@@ -57,6 +59,22 @@ overlapping proposals are pruned or merged.
 
 ## 12. Validate Before Publishing
 
-Candidate output remains in task staging until per-skill semantics, global
-distinctness, routing, structure, runtime, and ownership all pass. Publication
-uses an explicit path plan and rollback journal. Partial publication is failure.
+Candidate output remains in task staging until per-batch partial checks and the
+mandatory final complete semantic, distinctness, routing, structure, runtime,
+and ownership gates pass. Publication uses explicit changed/watch plans and a
+rollback journal. Shared-file composition is centralized and approval-bound.
+Partial publication is failure.
+
+## 13. Operational Proof Over Plausible Prose
+
+A skill is not ready because its sections exist or its wording resembles the
+evidence. It must name evidence-anchored actions, safe concrete verification,
+expected pass/fail/skip outcomes, capability and provider boundaries, path
+authority, and every critical invariant it protects. Legacy plans missing these
+facts are re-synthesized, never filled with generic defaults.
+
+## 14. One Graph, One Routing Truth
+
+Skill adjacency, wrapper routing, `SKILL FLOW.md`, and executable flow commands
+compile from one reviewed graph. Independent flow prose creates silent omissions
+and is invalid even when every referenced file exists.

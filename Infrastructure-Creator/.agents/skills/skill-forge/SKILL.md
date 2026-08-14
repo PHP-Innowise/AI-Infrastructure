@@ -37,19 +37,71 @@ orchestration step. The log maps every staged skill to exactly one plan entry.
 1. **Validate inputs.** Run the plan-only gate. Require exact schema/catalog
    versions, Profile sibling identity, current fingerprints/ranges, supported
    claims, a satisfied evidence-backed `selection_gate` for every selected
-   skill, auditable rejected candidates, resolved references, canonical paths,
-   and plan/profile inventory equality.
+   skill, auditable rejected candidates, structured ownership, reciprocal
+   routing, resolved references, normalized write globs, canonical paths, and
+   plan/profile inventory equality. Stop before authoring when any blocking
+   contract-inventory diagnostic exists; surface nonblocking contract
+   similarity/repeated-block warnings for review.
 2. **Choose one authoring unit.** Default to one skill. A group may contain only a small set of nearest siblings whose contracts explicitly define their ownership boundary (for example `debugging`/`systematic-debugger`). Never batch a whole category.
 3. **Load the minimum slice.** Provide the authoring pass only the selected contract(s), referenced `evidence[]`, cited target files/excerpts, and applicable reference contract. Do not feed unrelated profile prose or prior generated skill bodies.
-4. **Author into staging.** Implement every contract field as operational content: bounded purpose and positive/negative triggers; canonical inputs; owned/excluded scope; ordered procedure with real decision branches; target commands, paths, types, packages, and invariants where evidenced; verification; explicit outputs; and failure handling. Procedure text must materially reflect the evidence, not merely mention it in a generic preface.
+4. **Author into staging.** Implement every contract field as operational
+   content: bounded purpose and positive/negative triggers; canonical inputs;
+   owned/excluded scope; an evidence-specific procedure; safe verification;
+   explicit outputs; and failure handling. Render each evidence item with its
+   exact evidence ID, target-relative path, bounded line range (or an exact
+   stable symbol/config-key anchor when a line range is unavailable), source
+   type, confidence, and only the supported claim. A path without an anchor or
+   a decorative evidence list is not sufficient.
+   - Structure every procedure step as **Anchor**, **Inspect/Change**,
+     **Decision**, and **Expected result**. Name the real target method,
+     invariant, field, configuration key, fixture, suite, or package supported
+     by that anchor. Include both the evidenced success branch and consequential
+     failure branch; do not emit a generic open/trace/apply/exercise loop.
+   - For a read-only contract, use only inspect/evaluate/compare/report wording,
+     prescribe no edit or write, and state that implementation requires routing
+     to a generated write-capable owner. For a write-capable contract, identify
+     the exact owned write scope before any change instruction.
+   - Structure each verification as **Check**, **Applies when**, **Command or
+     manual assertion**, **Safety**, **Expected result**, **Pass**, **Fail**, and
+     **Unavailable/skip report**. Commands must be copied from target evidence,
+     resolved through target script aliases, and non-mutating. Manual assertions
+     must identify exact observable behavior and evidence anchors.
+   - If a dependency, fixture, binary, or local service is unavailable, do not
+     silently pass or install/start it. Report `SKIPPED - <check>: <unavailable
+     dependency>; impact: <unverified behavior>; evidence: <anchor>` and keep a
+     required check blocking when its contract cannot otherwise be proved.
+   Procedure text must materially reflect the evidence, not merely mention it
+   in a generic preface.
 5. **Preserve boundaries.** If a nearest sibling is planned, state what routes to each and cross-reference it without copying its procedure. If it is not planned, do not create a dangling reference or silently absorb unsupported scope.
 6. **Write valid frontmatter:** `name`, one-line trigger-aware `description`, `phase`, `flow-next`, `flow-alternatives`, and `related`. Every reference resolves within the plan.
 7. **Review substance, not length.** Reject a skill that could serve an unrelated PHP repository after renaming nouns; reject generic five-step loops, unsupported commands, decorative evidence lists, grouped procedures, and line padding. There is no minimum line count.
    Shared safety/authority text is allowed only through a plan
    `fixed_blocks` entry with an explicit ID, version, and exact content; keep it
    confined to guardrails/failure handling.
-8. **Verify the unit.** Check frontmatter, contract-field coverage, evidence/source resolution, sibling boundaries, write scope, commands against real config, and absence of secrets/placeholders/task paths. Record pass/fail before selecting the next unit.
-9. **Log exactly one mapping per skill.** Record plan name/category, evidence IDs, staged path, verification result, and publication eligibility. Compute category and total counts from successful log entries.
+8. **Analyze every proposed command without executing it.** Use
+   `bootstrap-verifier/scripts/analyze_commands.py` against the real target.
+   First inventory aliases without enforcement, then pass each command proposed
+   for a generated verification separately with `--no-scripts --verification
+   --command '<command>'`. The analyzer reads `composer.json` and `package.json`,
+   resolves aliases transitively, and blocks shell composition, unknown aliases,
+   cycles, workspace-writing format/fix modes, database/deploy/destructive
+   operations, and external/provider/network actions. A mutating formatter may
+   be documented only as an explicitly selected change step, never as
+   verification. Replace unsafe verification with a real check/dry-run script
+   evidenced in the target or an exact manual assertion; never weaken the
+   classification.
+9. **Verify the unit.** Run authored validation with
+   `--allow-partial-skills` while batches remain. This still validates the
+   complete plan inventory and every staged skill that exists; it suppresses
+   only missing planned `SKILL.md` diagnostics. Check frontmatter,
+   contract-field coverage, evidence/source resolution, sibling boundaries,
+   write scope, commands against real config, and absence of
+   secrets/placeholders/task paths. Record pass/fail before selecting the next
+   unit.
+10. **Log exactly one mapping per skill.** Record plan name/category, evidence IDs, staged path, verification result, and publication eligibility. Compute category and total counts from successful log entries.
+11. **Run the complete final gate.** After all batches are authored, run normal
+    full validation without `--allow-partial-skills`. Missing planned files and
+    every other authored or contract diagnostic remain publication blockers.
 
 ## Output Template
 
@@ -77,10 +129,23 @@ agent-forge (wrap these skills), then command-forge; policy-forge/hook-forge/mem
 - MUST reflect the target's real framework/version and real tooling, not assumed defaults.
 - MUST write only the selected edition(s).
 - MUST ensure every cross-reference resolves to a skill generated in this run.
+- MUST NOT use partial mode as the publication gate; the final complete inventory gate is mandatory.
 - MUST NOT generate deep skills for non-PHP neighbors - those are integration contracts only.
 - MUST NOT let a scope-split pair duplicate content: `debugging`/`systematic-debugger`, `database-designer`/`orm-patterns`, `performance`/`caching-strategy`, and `api-designer`/`api-platform-design` each have one explicit owner per concern and MUST cross-reference, not restate, their counterpart's half.
 - MUST enrich existing skills from confirmed section 8 behavior before creating a domain skill; MUST NOT generate a domain skill without multiple coherent confirmed rules and a distinct operational purpose.
 - MUST preserve source type, unknowns, and contradictions; MUST NOT turn statuses into transitions, observed enforcement into a complete permission matrix, or risk indicators into invented severity/approval.
+- MUST default provider and integration procedures to static inspection,
+  existing unit/contract tests, dependency-injected fakes, local fixtures, or
+  local adapters. Network and credential-backed execution is denied by default,
+  including provider sandboxes. A live action may be described only as a
+  separately authorized operational branch that records the authorizer,
+  classifies the non-production environment, bounds data and rollback, and
+  sanitizes output; it MUST NOT be a generated verification check.
+- MUST reject generated verification that writes the workspace, changes a
+  database/deployment, invokes an external/provider/network boundary, contains
+  shell composition, or relies on an unresolved/cyclic script alias.
+- MUST include exact evidence anchors, explicit pass/fail outcomes, and
+  unavailable-dependency/skip impact reporting in every generated skill.
 
 ## Final Output
 

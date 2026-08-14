@@ -24,10 +24,12 @@ Not everything needs to be rewritten - some of Infrastructure-Creator's own bund
 - **Copy verbatim (already stack-agnostic):** memory runtime validation
   assets, `bootstrap-verifier/scripts/validate_generated.py`,
   `validate_skill_quality.py`, `validate_reference_catalogs.py`,
-  `publish_staging.py`, ownership helpers, the generation-plan schema
+  command-risk and flow-contract validators, `publish_staging.py`, ownership
+  helpers, the generation-plan schema
   mechanism, and their negative/positive/rollback regression fixtures. These
-  enforce evidence, contract, semantic, routing, transactional, and structural
-  quality without encoding a source stack.
+  enforce evidence, typed operational contracts, provider/capability safety,
+  path/invariant/anchor coverage, routing/flow equivalence, transactional, and
+  structural quality without encoding a source stack.
 - **Replicate structurally, then adapt wording only:** the directory layout, `SKILL.md`/agent/command frontmatter contracts, hook *mechanics* (event wiring per edition schema), the three-edition layout, the Orchestration Exception model, and the general shape of `AGENTS.md`/`DOD.md`/`GOLDEN-PRINCIPLES.md`/`STABILIZATION.md`. Only the prose describing the target domain changes (e.g. "PHP project" -> "[Stack] project"); the policy structure itself does not.
 - **Re-author entirely, grounded in fresh research:** all seven scanners' detection signals (including domain behavior), `stack-researcher`, `clarifying-interview`, `profile-synthesizer`, every forge's stack-specific guidance, all `skill-forge/references/*.md` equivalents, and the Project Profile schema.
 - **Re-author with identity swapped, not copied verbatim:** `stack-adapter` itself. Its own copy in the new generator must keep the same mechanism (research -> replicate -> re-author -> mirror -> self-verify -> report) but with every self-reference updated: "PHP" -> the new generator's own domain, "Infrastructure-Creator" -> the new generator's own name, and its own independence guardrail restated in terms of *that* generator's identity (e.g. a Flutter generator's `stack-adapter` copy must forbid mentions of Flutter/Dart or "Infrastructure-Creator-Flutter" in whatever it spawns next, not PHP).
@@ -64,6 +66,8 @@ Not everything needs to be rewritten - some of Infrastructure-Creator's own bund
    entry resolves to a real catalog anchor, plus the Project Profile schema.
    Every mapped skill kind
    defines evidence requirements, owned/excluded scope, procedure roles,
+   typed verification, provider safety where applicable, path authority,
+   capability, invariant mapping, evidence anchors, routing cases,
    decision points, verification, outputs, failure handling, sibling
    boundaries, and positive/negative examples. A heading-only catalog, package
    list, or three-line summary is a failed adaptation.
@@ -73,9 +77,11 @@ Not everything needs to be rewritten - some of Infrastructure-Creator's own bund
    reduced-frontmatter agents/commands from Claude's canonical wrapper layer;
    skip agents/commands for Codex.
 9. **Prove the sibling carries the quality architecture.** Verify its profile
-   synthesizer emits a complete evidence ledger and one contract per planned
+   synthesizer emits a complete schema 1.2 evidence ledger and one operational
+   contract per planned
    skill; its forge generates into staging in small evidence-scoped batches;
-   wrappers derive routing from contracts; and generation/update refuse
+   wrappers and every flow artifact derive routing from one contract graph; and
+   generation/update refuse
    publication before semantic PASS. Confirm every generic quality script and
    regression fixture was copied byte-for-byte.
 10. **Run semantic self-verification.** In addition to structural/hook checks,
