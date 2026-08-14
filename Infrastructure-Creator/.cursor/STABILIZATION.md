@@ -11,6 +11,12 @@ Stabilize whenever the generator:
 - Wrote (or nearly wrote) into a target without an explicit collision decision.
 - Emitted an edition that was not selected, or skipped one that was.
 - Carried a placeholder, a secret, or a stale cross-reference into output.
+- Published a structurally valid but generic, duplicated, unsupported, or
+  operationally empty skill/agent set.
+- Cited a generator-only task artifact where the generated target needed a
+  canonical target-relative source.
+- Routed unrelated specialists unconditionally or created two primary owners
+  for the same request.
 - Let `stack-adapter` run without explicit confirmation, or produced a sibling generator that still mentioned PHP, Laravel, Symfony, PHP Core, or "Infrastructure-Creator" in its own content.
 
 ## The Loop
@@ -27,5 +33,9 @@ Stabilize whenever the generator:
 - *Mistake:* generation created a `.codex/` folder when the target profile selected Cursor and did not select Codex. *Rule:* `hook-forge`/`agent-forge`/`command-forge` must read the profile's AI Tool Selection field and hard-skip unselected editions; `bootstrap-verifier` must assert no unselected edition folder exists.
 - *Mistake:* a generated skill's `related:` pointed at a skill that was never generated. *Rule:* `skill-flow-composer` must build cross-references only from the actually-generated skill set, and `bootstrap-verifier` must fail on any dangling reference.
 - *Mistake:* `stack-adapter` re-authored a scanner for a new stack by lightly editing PHP wording instead of researching the stack fresh, leaving a stray PHP-era assumption in the detection logic. *Rule:* `stack-adapter` must treat every `.claude/skills/*/SKILL.md` in this folder as a structural exemplar only (frontmatter shape, section headings) and must ground every stack-specific claim in its own research step, never in the PHP skill's content.
+- *Mistake:* dozens of skills changed only their title and purpose while sharing
+  one generic process. *Rule:* compile one evidence-backed contract per skill,
+  generate in small staged batches, and make the semantic validator reject
+  repeated substantive procedures before wrappers or publication.
 
 Prefer enforcement over exhortation. A rule that a hook or validator enforces is worth ten paragraphs of guidance.

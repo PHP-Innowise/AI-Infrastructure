@@ -1,6 +1,6 @@
 ---
 name: bootstrap-verifier
-description: Run the final QA gate for a freshly generated accelerator before infra-generate is allowed to report success - validates frontmatter and cross-references across every generated skill/agent/command, every generated hook's syntax/executable bit and wiring, the seeded memory-bank validator, the context-brain runtime, the .infra-manifest.json upgrade contract, and leftover template placeholders. Takes a required target-project-path argument. Use as the last step of infra-generate or infra-update. Triggers on "verify the generated accelerator", "bootstrap-verifier", "run the QA gate", "check what infra-generate produced".
+description: Run the blocking staged/published QA gate for evidence and per-skill contract conformance, semantic distinctness, routing, structure, hooks, memory runtime, manifest ownership, and placeholders.
 phase: verification
 flow-next: null
 flow-alternatives: []
@@ -11,7 +11,10 @@ related: [infra-generate, infra-update, skill-forge, agent-forge, command-forge,
 
 ## Overview
 
-`bootstrap-verifier` is the last step of `infra-generate` and of `infra-update`. It mechanically checks that the generated accelerator is internally consistent and immediately usable, for the selected edition(s) only. A failed run means generation is not done - it must be fixed and re-run before success is reported.
+`bootstrap-verifier` is the blocking gate for both the complete staged bundle
+and the published target. It validates generated skills against the approved
+evidence/contract plan before running structural, routing, hook, runtime,
+ownership, and placeholder checks.
 
 It uses the bundled `scripts/validate_generated.py` (dependency-free) plus targeted manual checks.
 
@@ -22,7 +25,22 @@ Writes a report to `tasks/TASK-{N}/bootstrap-verifier-report.md`. Does not write
 ## Process
 
 1. **Determine the selected editions** from the profile (section 1) and the generate report.
-2. **Run the validator:** `python3 scripts/validate_generated.py --target <target> --editions <selected>`. It checks:
+2. **Run the validator:** distinguish the generation root (staging or published
+   target) from the real evidence target:
+
+   `python3 scripts/validate_generated.py --target <generation-root> --editions <selected> --skill-plan <task/skill-generation-plan.json> --evidence-target <real-target> --candidate-registry <generator>/skill-forge/references/candidate-registry.json`
+
+   It checks:
+   - The plan's required evidence metadata, containment, optional fingerprints
+     and ranges, one complete contract per skill, and no generator task path as
+     generated runtime evidence.
+   - Every planned skill exists and no unplanned skill exists; required
+     operational sections, procedure roles, decisions, outputs, failure
+     handling, owned/excluded scope, sibling boundaries, and routing triggers
+     are traceable to substantive skill content.
+   - Inventory-wide ownership/write collisions, ambiguous positive routing,
+     repeated substantive blocks, and line/token similarity after removing only
+     exact approved fixed safety blocks.
    - Every selected edition root exists and every unselected edition root is absent (`.claude`; `.cursor`; `.agents` + `.codex` for Codex).
    - Frontmatter validity across every generated `SKILL.md`, agent, and command.
    - Every `flow-next`/`flow-alternatives`/`related`/`invokes`/`spawns` reference resolves to a skill/agent that exists in that edition.
@@ -77,6 +95,9 @@ A non-empty `STILL MISSING` list means a tracked file vanished - that is an esca
 **Result:** [PASS / FAIL]
 
 ## Checks
+- Evidence/plan completeness and fingerprints: [pass/fail]
+- Per-skill contract conformance: [pass/fail]
+- Inventory ownership/distinctness/routing: [pass/fail]
 - Frontmatter: [pass/fail]
 - Cross-references: [pass/fail]
 - Hooks (bash -n + exec bit + per-edition set): [pass/fail]
@@ -100,6 +121,9 @@ A non-empty `STILL MISSING` list means a tracked file vanished - that is an esca
 
 - MUST treat any unresolved failure as "generation not done"; MUST NOT let `infra-generate` report success on failure.
 - MUST NOT auto-fix anything ambiguous (e.g. rewrite a skill to satisfy a reference) - escalate instead.
+- MUST require `--skill-plan` and `--evidence-target` for every generation or
+  update gate; structural-only invocation is for validator maintenance tests,
+  not release approval.
 - MUST confirm no unselected edition was generated.
 - MUST run the seeded memory bank's own validator, not a substitute.
 - MUST refresh the manifest hashes (recipe above) after any auto-fix that changed file content, and re-run the validator - a manifest describing pre-fix content is a broken upgrade contract.

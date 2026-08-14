@@ -11,6 +11,9 @@ Upgrade a previously generated accelerator to this generator's current version w
 
 Usage: `/infra-update <path-to-target-php-project>`
 
-The target path is passed as `$ARGUMENTS` and is required. This spawns the `infra-update-agent`, which reads the target's `.infra-manifest.json`, re-validates the profile, regenerates into staging, replaces only files untouched since generation (sha256 match against the manifest), honors standing keep/merge decisions recorded in the manifest's `decisions` map (a file you chose to keep is never silently replaced on a later run), routes every user-modified file to you for an explicit decision, rewrites the manifest, and re-runs `bootstrap-verifier`.
+The agent reads `.infra-manifest.json`, re-validates the Profile and generation
+plan, runs the current semantic/routing gates in staging, honors manifest
+ownership and standing decisions, applies approved changes with rollback, and
+verifies the published target.
 
 Targets generated before manifests existed (generator v1.3.x or earlier) have no `.infra-manifest.json`; the run aborts with recovery options instead of guessing which files are yours.

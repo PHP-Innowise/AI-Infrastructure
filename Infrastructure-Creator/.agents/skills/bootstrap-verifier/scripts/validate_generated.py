@@ -66,6 +66,12 @@ from infra_ownership import (  # noqa: E402
     resolve_target,
     sha256_file,
 )
+from validate_skill_quality import (  # noqa: E402
+    DEFAULT_REGISTRY,
+    validate as validate_skill_semantics,
+    validate_agent_routing,
+    validate_flow_routing,
+)
 
 PLACEHOLDER_PATTERNS = [
     re.compile(r"\{skill-name\}"),
@@ -764,6 +770,19 @@ def main() -> int:
         default="claude,cursor,codex",
         help="comma-separated editions that should exist",
     )
+    parser.add_argument(
+        "--skill-plan",
+        help="path to the validated skill-generation-plan.json",
+    )
+    parser.add_argument(
+        "--evidence-target",
+        help="real target root used to resolve plan evidence (required with --skill-plan)",
+    )
+    parser.add_argument(
+        "--candidate-registry",
+        default=str(DEFAULT_REGISTRY),
+        help="machine-readable catalog candidate registry",
+    )
     args = parser.parse_args()
 
     target = resolve_target(args.target)
@@ -775,6 +794,12 @@ def main() -> int:
         if e not in EDITION_LAYOUT:
             print(f"unknown edition: {e}", file=sys.stderr)
             return 2
+    if bool(args.skill_plan) != bool(args.evidence_target):
+        print(
+            "--skill-plan and --evidence-target must be supplied together",
+            file=sys.stderr,
+        )
+        return 2
 
     errors: list = []
     manifest = validate_manifest(target, errors)
@@ -799,6 +824,63 @@ def main() -> int:
     validate_memory_bank(target, files, errors)
     validate_memory_runtime(target, files, errors)
     validate_owned_placeholders(target, files, errors)
+    if args.skill_plan:
+        evidence_target = resolve_target(args.evidence_target)
+        if not evidence_target.is_dir():
+            errors.append(f"evidence target not found: {evidence_target}")
+        else:
+            skills_roots = {
+                "claude": target / ".claude/skills",
+                "cursor": target / ".cursor/skills",
+                "codex": target / ".agents/skills",
+            }
+            agent_roots = {
+                "claude": target / ".claude/agents",
+                "cursor": target / ".cursor/agents",
+            }
+            command_roots = {
+                "claude": target / ".claude/commands",
+                "cursor": target / ".cursor/commands",
+            }
+            for edition in editions:
+                diagnostics = validate_skill_semantics(
+                    skills_roots[edition],
+                    Path(args.skill_plan),
+                    evidence_target,
+                    Path(args.candidate_registry),
+                )
+                for diagnostic in diagnostics:
+                    if diagnostic.severity == "error":
+                        errors.append(
+                            f"semantic[{edition}] {diagnostic.code}: "
+                            f"{diagnostic.message}"
+                        )
+                if edition in agent_roots:
+                    routing_diagnostics = validate_agent_routing(
+                        agent_roots[edition],
+                        Path(args.skill_plan),
+                        evidence_target,
+                        require_invokes=edition == "claude",
+                        registry_path=Path(args.candidate_registry),
+                    )
+                    for diagnostic in routing_diagnostics:
+                        if diagnostic.severity == "error":
+                            errors.append(
+                                f"routing[{edition}] {diagnostic.code}: "
+                                f"{diagnostic.message}"
+                            )
+                    flow_diagnostics = validate_flow_routing(
+                        command_roots[edition],
+                        Path(args.skill_plan),
+                        evidence_target,
+                        Path(args.candidate_registry),
+                    )
+                    for diagnostic in flow_diagnostics:
+                        if diagnostic.severity == "error":
+                            errors.append(
+                                f"flow-routing[{edition}] {diagnostic.code}: "
+                                f"{diagnostic.message}"
+                            )
 
     if errors:
         for e in errors:

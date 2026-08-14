@@ -11,22 +11,39 @@ related: [infra-generate, policy-forge, skill-forge, agent-forge, command-forge,
 
 ## Overview
 
-`skill-flow-composer` writes the target project's navigational map - `SKILL FLOW.md` - describing how the generated skills chain together for that specific project. It is assembled dynamically from the skills `skill-forge` actually produced (read from the skill-forge log) - whatever mix of architecture, design & interaction, frontend, process & workflow, universal PHP, framework-specialty, and integration skills that run generated - never a fixed template. Every arrow, shortcut, and table row references only a skill that exists in the generated set. The composed `SKILL FLOW.md` is written into each selected edition's skills directory so each edition is independently navigable.
+`skill-flow-composer` writes the target project's navigational map -
+`SKILL FLOW.md` - from the validated skill inventory and routing contracts.
+It shows primary ownership, evidence-gated specialist entry points, explicit
+sibling deferrals, and handoff artifacts; it never invents a universal chain
+or routes every request through every available skill.
 
-Consumes the **skill-forge log** (`tasks/TASK-{N}/skill-forge-log.md`) as its source of truth, plus profile section 1 for the selected editions.
+Consumes the validated **skill-forge log** and
+`tasks/TASK-{N}/skill-generation-plan.json` as its source of truth, plus
+profile section 1 for the selected editions.
 
 ## Generated File Naming Convention (MANDATORY)
 
-For each selected edition, write `<edition-skills-dir>/SKILL FLOW.md` (literal filename with a space), where the edition skills dir is `.claude/skills`, `.cursor/skills`, and/or `.agents/skills` (Codex). Requires a target-project-path argument to resolve those dirs. Append a log to `tasks/TASK-{N}/skill-flow-composer-log.md`.
+For each selected edition, write `<edition-skills-dir>/SKILL FLOW.md` under the
+required generation root (task staging during orchestration), where the edition
+skills dir is `.claude/skills`, `.cursor/skills`, and/or `.agents/skills`.
+Keep the evidence target path separate from the generation root.
 
 ## Process
 
 1. **Require the target-project-path argument.** Resolve the selected editions from profile section 1 and their skills dirs.
-2. **Read the skill-forge log** to obtain the EXACT generated skill set, grouped by category (architecture / design & interaction / frontend / process & workflow / universal / specialty / integrations / domain), and each skill's declared `phase`/`flow-next`.
-3. **Build the Main Flow** as a diagram that orders the generated skills by phase, wiring each skill to the successor it actually declares - only among generated skills. Drop any edge whose target was not generated.
-4. **Build Shortcuts** - the common jump-in entry points (e.g. straight to the coding or review skill) using only generated skill names.
+2. **Read the validated contracts** to obtain the exact generated set,
+   category, phase, positive/negative triggers, owned/excluded scope, nearest
+   siblings, outputs, and declared relationships.
+3. **Build the Main Flow** from primary core ownership only. Order applicable
+   skills by phase and wire only declared, resolved handoffs. Do not place
+   evidence-gated integration/domain specialists in a default path.
+4. **Build Specialist Routing and Shortcuts.** For each optional specialist,
+   state the concrete project trigger, exclusion, nearest sibling, and expected
+   artifact. Every shortcut must have one primary owner or explicit ambiguity.
 5. **Build the Phase Map table** mapping each phase to the generated skills that occupy it.
-6. **Write the Context Handoff section** describing what each step hands the next (artifacts, logs, memory-bank chunks) so a fresh context can resume mid-flow.
+6. **Write the Context Handoff section** from each contract's output and
+   evidence requirements so a fresh context can resume without loading
+   unrelated project material.
 7. **Validate cross-references:** every skill named anywhere in `SKILL FLOW.md` MUST exist in the generated set; fail fast on a dangling reference rather than emitting it.
 8. **Write** `SKILL FLOW.md` into each selected edition's skills dir and log the paths.
 
@@ -57,6 +74,10 @@ For each selected edition, write `<edition-skills-dir>/SKILL FLOW.md` (literal f
 - MUST require and use the target-project-path argument to locate edition skills dirs.
 - MUST write `SKILL FLOW.md` into EACH selected edition's skills dir, and only selected ones.
 - MUST reflect each skill's real declared `phase`/`flow-next` when wiring edges.
+- MUST derive routing and handoffs from the validated generation plan and MUST
+  NOT make every generated specialist part of the default flow.
+- MUST show positive and negative boundaries for adjacent skills; circular
+  "use X for X" shortcuts fail.
 
 ## Final Output
 

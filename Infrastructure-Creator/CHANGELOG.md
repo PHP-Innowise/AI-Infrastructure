@@ -4,7 +4,49 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+## [3.0.0] - 2026-08-14
+
+### Added
+
+- Machine-readable `skill-generation-plan.json` with a validated evidence
+  ledger and one complete necessity, scope, procedure, verification, output,
+  failure, write, and routing contract per proposed skill.
+- Dependency-free semantic gates for plan/evidence integrity, fingerprints,
+  contract-to-skill traceability, target-relative citations, ownership
+  collisions, routing ambiguity, substantive duplication, approved versioned
+  fixed blocks, agent routing, and conditional specialist flows.
+- Transactional staged publication with explicit publication/removal plans,
+  target-drift detection, manifest-last writes, team-file preservation, and
+  rollback for generation and updates.
+- Reference-catalog validation and regression fixtures for generic/duplicated
+  skills, paraphrased filler, invalid or irrelevant evidence, stale
+  fingerprints, scope/routing collisions, reference stubs, merge preservation,
+  and failed-publication rollback.
+
 ### Changed
+
+- Skill inventory selection is evidence-gated instead of quota-driven. Only the
+  memory quartet remains unconditional because its runtime is always installed.
+- `skill-forge` authors one skill or a small bounded sibling group at a time
+  from the minimum evidence slice; line padding and grouped category generation
+  are invalid.
+- Agents derive positive/negative selection, sibling deferrals, expected
+  results, and write capability from validated contracts. `flow-feature` and
+  `flow-review` route specialists conditionally rather than selecting every
+  available reviewer.
+- `infra-generate` and `infra-update` verify the complete staged bundle before
+  publication and run the full gate again on the published target.
+- `stack-adapter` must carry the complete contract compiler, semantic/reference
+  validators, staging/rollback helper, fixtures, and synthetic rehearsal into
+  every future sibling generator.
+
+### Breaking
+
+- Profiles created before 3.0.0 do not contain per-skill generation contracts.
+  Re-run `infra-scan` before generation/update instead of reconstructing
+  authority from previously generated prose.
+
+### Orchestration and context changes
 
 - **Generated accelerators reach orchestration parity with the hand-built
   editions.** The seeded context-brain runtime was a stale fork — no agent
@@ -46,7 +88,7 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
   versions; the new write-serialization logic is dormant here until an
   agent declares `writes: true`.
 
-### Added
+### Additional additions included in this release
 
 - Agent `<example>` blocks moved out of `description:` frontmatter into a
   `## Selection examples` body section, and `agent-forge` now requires the

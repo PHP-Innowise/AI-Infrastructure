@@ -1,8 +1,137 @@
 # Project Profile Schema
 
-The Project Profile is the single hand-off artifact between Phase 1 (scan) and Phase 2 (generate). `profile-synthesizer` writes it; every forge reads it (re-validated against current files). It MUST follow this schema exactly so forges can parse it reliably. File name: `tasks/TASK-{N}/infra-scan-project-profile.md`.
+The profile and its machine-readable skill plan are the hand-off artifacts between Phase 1 (scan) and Phase 2 (generate). `profile-synthesizer` writes both; every forge reads them after re-validating evidence against current target files.
+
+- Human review: `tasks/TASK-{N}/infra-scan-project-profile.md`
+- Machine contract: `tasks/TASK-{N}/skill-generation-plan.json`
 
 Every factual line MUST carry a confidence tag - `(confirmed - path:L#)`, `(inferred - reason)`, or `(unknown)` - so generated artifacts remain auditable back to evidence. Behavioral findings in section 8 MUST additionally name the source type (`spec/ADR`, `test`, `database constraint`, `workflow configuration`, `authorization rule`, `domain code`, `application code`, `configuration`, or `interview answer`) because confirmed implementation and confirmed policy are not equal authorities.
+
+## Machine-Readable Skill Plan
+
+The JSON top level MUST contain exactly these required members (extensions require a schema-version change):
+
+```json
+{
+  "schema_version": "1.0",
+  "catalog_version": "3.0.0",
+  "target_root": "/absolute/path/to/target",
+  "profile": "tasks/TASK-001/infra-scan-project-profile.md",
+  "evidence": [],
+  "skills": [],
+  "rejected_candidates": []
+}
+```
+
+Top-level membership is exact and `schema_version` is exactly `1.0`.
+`catalog_version` must equal
+`skill-forge/references/candidate-registry.json`. Every registry candidate must
+appear in exactly one disposition: a selected skill's `selection_gate` or
+`rejected_candidates` (family candidates may select multiple concrete skills).
+`profile` must identify the sibling Profile in the same
+`tasks/TASK-{N}/`. By contrast, evidence paths and generated-skill source
+citations MUST be canonical paths relative to `target_root`; they MUST NOT be
+absolute, contain `..`, or point into `tasks/TASK-{N}/`.
+
+Each `evidence[]` entry is:
+
+```json
+{
+  "id": "EV-0001",
+  "path": "composer.json",
+  "source_type": "configuration",
+  "authority": "Declares runtime dependencies and PHP constraints",
+  "confidence": "confirmed",
+  "line_range": {"start": 8, "end": 19},
+  "fingerprint": "sha256:<digest>",
+  "supported_claims": ["Laravel is a runtime dependency"]
+}
+```
+
+Exactly one of `path` or `url` is required. `id`, `source_type`, `authority`,
+`confidence`, and non-empty `supported_claims` are required. Repository-path
+evidence also requires the current `sha256:<digest>` fingerprint; `line_range`
+is optional but may not exceed the source. URLs rely on their recorded
+authority/version and do not require a local fingerprint.
+
+Each `skills[]` entry is one complete, independently actionable contract:
+
+```json
+{
+  "name": "testing",
+  "category": "universal",
+  "kind": "project-adapted",
+  "phase": "execution",
+  "necessity_rationale": "The target has an evidenced test suite and project-specific test conventions that require operational guidance.",
+  "selection_gate": {
+    "catalog": "php-frameworks.md#testing",
+    "candidate_id": "testing",
+    "candidate": "testing",
+    "conditions": [
+      {
+        "requirement": "A configured target test suite and conventions exist",
+        "evidence_ids": ["EV-0007", "EV-0008"],
+        "status": "satisfied",
+        "explanation": "The cited PHPUnit config and base test case prove distinct operational guidance."
+      }
+    ],
+    "distinct_value_from": ["coding", "systematic-debugger"]
+  },
+  "triggers": {
+    "positive": ["A change requires tests under tests/Feature"],
+    "negative": ["The request is only to investigate a production symptom"]
+  },
+  "evidence_ids": ["EV-0007", "EV-0008"],
+  "source_paths": ["phpunit.xml", "tests/TestCase.php"],
+  "owned_scope": ["Select and implement tests using the target's suite structure"],
+  "excluded_scope": ["Root-cause investigation", "Release orchestration"],
+  "required_procedure_roles": [
+    {"role": "load-evidence", "requirements": ["Read the cited test configuration and changed behavior"]},
+    {"role": "execute", "requirements": ["Choose test level and add target-specific cases"]},
+    {"role": "verify", "requirements": ["Run the narrow suite, then required broader checks"]}
+  ],
+  "decision_points": [
+    {"question": "Which test level protects this behavior?", "branches": ["unit", "integration", "feature/end-to-end"]}
+  ],
+  "verification": ["Use the evidenced test command and report failures"],
+  "output_contract": ["Changed tests or a test plan", "Commands and results"],
+  "failure_handling": ["Stop when required tooling is unavailable and report N/A", "Do not weaken assertions to force a pass"],
+  "related_skills": ["coding"],
+  "nearest_siblings": [{"name": "systematic-debugger", "boundary": "Finds root cause; testing protects expected behavior."}],
+  "writes": ["tests/**"],
+  "fixed_blocks": [
+    {"id": "safety.no-secrets", "version": "1.0", "content": "Exact approved text"}
+  ]
+}
+```
+
+All shown members except `fixed_blocks` are required, including non-empty positive and negative triggers, owned and excluded scope, required procedure roles, decision points, verification, output, failure handling, siblings, and writes (use an empty array only when the skill is intentionally read-only). `kind` distinguishes `runtime-fixed` from `project-adapted`, `integration`, `specialty`, and `domain-review`. `fixed_blocks`, when used, contains explicit `id`, `version`, and exact `content`; only that exact block is exempt from duplication checks, and it never exempts the skill-specific procedure.
+
+Every non-runtime `selection_gate.conditions[]` entry must be `satisfied`, cite
+evidence already listed by the skill, and explain a claim supported by that
+evidence. `distinct_value_from` records adjacent candidates considered during
+pruning. Runtime-fixed memory skills may cite an empty evidence list only when
+the condition names the guaranteed generated runtime.
+
+`evidence_ids` MUST resolve to `evidence[]`. `source_paths` is the de-duplicated target-relative subset used by the skill. Every `related_skills` and `nearest_siblings[].name` MUST exist in the same plan. A skill contract cannot rely on another skill to supply its purpose, inputs, procedure, verification, output, or failure behavior.
+
+Each rejected catalog candidate is recorded so inventory pruning is auditable:
+
+```json
+{
+  "candidate_id": "caching-strategy",
+  "name": "caching-strategy",
+  "category": "specialty",
+  "reason": "No confirmed cache usage or invalidation ownership",
+  "missing_evidence": ["runtime cache calls", "write-path invalidation"]
+}
+```
+
+`candidate_id` and `catalog` must resolve exactly to the registry entry and its
+real Markdown anchor. This prevents a plan from inventing a catalog reference
+or silently omitting candidates from the selected/rejected inventory.
+
+The runtime-fixed memory quartet may have empty `evidence_ids`/`source_paths` during synthesis because its necessity comes from runtime files that `memory-seed` is contractually guaranteed to create in the same generation run. Its `necessity_rationale` and `writes` must name that dependency. The authored skills must refer to those future files by target-relative paths such as `memory-bank/scripts/context.py`, never by generator task/staging paths.
 
 ## Required Structure
 
@@ -139,19 +268,17 @@ Each line is a scannable, generalized signal (never named after a specific frame
 ## 11. Generation Notes
 - Pre-existing accelerator in target: [yes/no + which folders]
 
-### 11.1 Skills To Generate (with what each will do)
-One line per skill, every description target-specific (never generic boilerplate), citing the same evidence as the section it is drawn from. Organized into eight groups - see `skill-forge/references/` for the full authoring rules behind each group:
-- **Architecture** (1, from section 3): `[skill-name]` - [1 sentence: the detected pattern + what this skill will actually guide for this target, e.g. its real module/service boundaries].
-- **Design & Interaction** (3, always generated, from sections 2-3): `architecture-implementer`, `api-designer`, `database-designer` - [1 sentence each naming the target's real scaffolding tool/API shape/persistence approach].
-- **Frontend** (0 or 5, conditional on section 3.2's verdict): if applicable, `frontend-design`, `coder-frontend`, `wcag-accessibility`, `web-design-guidelines`, `browser-verify` - [1 sentence naming the target's real templating/asset stack]; if not applicable, state "No UI surface detected - frontend skill group skipped" explicitly.
-- **Process & Workflow** (18, always generated, framework-agnostic - per `skill-forge/references/php-process-skills.md`): `requirements-analyst`, `researcher`, `brainstorming`, `council`, `writing-plans`, `using-git-worktrees`, `systematic-debugger`, `refactorer`, `dependency-manager`, `review-pr`, `finishing-branch`, `documentation-generator`, `skill-creator`, `reflect`, `memory-bank`, `project-brain`, `checkpoint`, `memory` - list by name; a single shared sentence describing this fixed group is sufficient. The last four are the memory quartet: `memory-bank` is the operational retrieve/capture/audit/supersede skill for the shared bank that `memory-seed` creates, `project-brain` operates the governed control plane, and `checkpoint`/`memory` are the manual companions to the automatic working-memory hooks.
-- **Universal PHP** (7, from section 2): `coding`, `testing`, `code-review`, `security-review`, `performance`, `release`, `debugging`: [1 sentence each, naming the REAL tools/config this target uses, e.g. "testing will reference Pest 2.x and tests/Pest.php"].
-- **Framework-Specialty** (one per `confirmed`/`inferred` signal in section 3.1 - per `skill-forge/references/php-specialty-skills.md`): `[skill-name]` - [1 sentence naming the real signal and pattern it guides]; state "none" if section 3.1 has no confirmed/inferred signals.
-- **Integrations** (one per `confirmed` integration in section 4): `[skill-name]` - [1 sentence naming the real package/service and how it's wired].
-- **Domain** (0 or more, evidence-gated from section 8.11): generate one bounded-context review skill only when multiple coherent confirmed rules create a distinct review purpose; `[skill-name]` - [1 sentence naming the bounded context, invariants/transitions/permissions it protects, and source paths]. Never generate one skill per rule/entity/status/role. State "none - no cohesive domain skill candidate" when section 8.11 has none.
+### 11.1 Skills To Generate
+Inventory is evidence-gated across all categories. There are no fixed category counts. The memory quartet is the sole exception because the generated runtime always exists.
+
+- Plan file: `tasks/TASK-{N}/skill-generation-plan.json`
+- Selected: one line per skill: `[name]` (`[category]`) - `[necessity rationale]` - evidence: `[EV ids and target-relative paths]`.
+- Rejected candidates: one line per considered catalog candidate: `[name]` - skipped because `[selection trigger or required evidence not satisfied]`.
+- Runtime-fixed: `memory-bank`, `project-brain`, `checkpoint`, `memory` - justified by the always-installed memory runtime; each still has its own complete contract.
+- Inventory check: `[skills.length]` selected entries = `[skills.length]` complete JSON contracts.
 
 ### 11.2 Agents & Commands Preview
-- Skill count breakdown: state each group's count explicitly, e.g. "1 architecture + 3 design + [0 or 5] frontend + 18 process + 7 universal + [N] specialty + [M] integrations + [D] domain = [total] skills".
+- Skill count breakdown: derive all category counts from the JSON inventory and sum them to `skills.length`; categories with zero entries remain zero. Do not use baseline constants.
 - Agents: one per skill listed in 11.1, generated only for selected editions with an agent layer (Claude: full frontmatter; Cursor: reduced frontmatter; Codex: none) -> state the arithmetic explicitly, e.g. "[total] skills x [E] agent-carrying selected editions = [total*E] agents".
 - Commands: one per agent, generated only for selected editions with a command layer (Claude, Cursor; Codex invokes skills directly by name, no command layer) -> state the resulting count explicitly.
 - If Codex is among the selected editions, say so plainly: "Codex: skills only, no agents or commands."
@@ -177,7 +304,7 @@ One shared memory layer will be created at the target root, spanning two roots: 
 ## Consumption Contract (what each forge reads)
 
 - `policy-forge`: sections 1, 2, 3, 6, 7, and confirmed high-value rules from section 8 -> the target's `AGENTS.md`/`DOD.md`/`GOLDEN-PRINCIPLES.md`/`STABILIZATION.md`.
-- `skill-forge`: sections 2, 3, 3.1, 3.2, 4, 8, and 11.1's draft descriptions as a starting point -> architecture + design/interaction + (conditional) frontend + process/workflow (including memory-bank) + universal PHP + framework-specialty + integration + evidence-gated domain skills.
+- `skill-forge`: `skill-generation-plan.json` plus the exact profile/evidence slices referenced by each contract; it authors one skill or a small sibling group at a time.
 - `agent-forge`/`command-forge`: the final skill list from `skill-forge` + section 1 (which editions); section 11.2's counts are what the user was shown to expect.
 - `hook-forge`: sections 2, 4, 5, 6 + section 1 -> the four enforcement hooks tuned to real tooling/risks plus the two working-memory hooks calling `memory-bank/scripts/context.py`, for the selected editions only.
 - `memory-seed`: section 12 -> the authoritative, pre-reviewed list of cohesive concepts to seed, each already cited to canonical source files; plus section 2's confirmed framework -> the framework slug written into `project-brain/config/runtime.json` (`generic` when none is confirmed).
@@ -187,8 +314,9 @@ One shared memory layer will be created at the target root, spanning two roots: 
 - Section 1 MUST list at least one edition and MUST cite the interview as its source (never assumed).
 - Every line in sections 2-8 (including 3.1 and 3.2) MUST carry a confidence tag; every section 8 finding MUST also carry source type.
 - Section 8.5 MUST distinguish discovered statuses from evidenced transitions; section 8.6 MUST state permission-matrix completeness; section 8.8 MUST distinguish risk indicators from documented severity/approval.
-- Section 11.1's skill list MUST be derivable from sections 2-4 and 8 (no framework-specialty skill for a signal not `confirmed`/`inferred` present in 3.1, no frontend group unless 3.2's verdict says it applies, no integration skill for an integration not in section 4, no domain skill without a cohesive section 8.11 candidate). Every entry MUST carry a one-line, target-specific description - never generic boilerplate reused across projects (the 18 process/workflow skills may share one group sentence since their mechanic is fixed, but MUST still be listed by name).
-- Section 11.2's agent/command counts MUST be arithmetically consistent with the 11.1 skill count (including the group breakdown) and section 1's selected editions.
+- Section 11.1 MUST equal JSON `skills[]` exactly. Every selected candidate satisfies its reference contract; every rejected candidate records the missing trigger/evidence. Only the memory quartet is unconditional.
+- JSON MUST satisfy the field, uniqueness, reference, canonical-path, and completeness rules above. Grouped summaries are invalid.
+- Section 11.2's agent/command counts MUST be arithmetically consistent with `skills.length`, dynamic category counts, and section 1's selected editions.
 - Section 12 MUST list cohesive durable concepts composed only from `confirmed` facts across sections 2-8, MUST cite canonical sources, and MUST NOT include any `inferred`/`unknown` fact, raw incident data, customer data, or full copied source documents.
 - No secrets or credential values may appear anywhere in the profile.
 - A `confirmed` integration MUST cite runtime wiring, not merely a `composer.json` entry.

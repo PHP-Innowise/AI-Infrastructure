@@ -11,7 +11,11 @@ related: [infra-generate, policy-forge, skill-forge, agent-forge, command-forge,
 
 ## Overview
 
-`memory-seed` bootstraps the target project's complete memory layer and seeds it with an initial set of `active` chunks drawn strictly from confirmed profile evidence. The layer has two shared roots, both created once at the target root (not per edition), so they survive when the team prunes editions:
+`memory-seed` bootstraps the target project's complete memory layer and seeds it
+with confirmed profile evidence. During generation it writes both shared roots
+under the required task staging root, while resolving citations against the
+real target. They are published once at the target root only after the complete
+bundle passes.
 
 - **`memory-bank/`** - the durable, indexed shared-memory layer, plus the **context-brain runtime** under `memory-bank/scripts/`: `context.py` (the CLI facade), `brain_runtime.py` (governed Project Brain runtime), `context_retrieval.py` (local SQLite/BM25 retrieval), and `validate.py` (the bank validator). The runtime is dependency-free (standard library only) and stack-agnostic.
 - **`project-brain/`** - the governed control plane for active work: dynamic records (tasks, findings, bugs, incidents, decisions, events), handoffs, the append-only agent message channel that orchestrated flows write to, retrieval manifests, promotion proposals, schemas, and `PROTOCOL.md`. The runtime under `memory-bank/scripts/` operates it.
@@ -24,7 +28,7 @@ Unlike every other artifact this forge produces, everything under this skill's b
 
 ## Generated File Naming Convention (MANDATORY)
 
-Into the target root, create:
+Into the required generation root, create:
 
 **`memory-bank/` (durable memory + runtime):**
 - `memory-bank/README.md`, `memory-bank/INDEX.md`, `memory-bank/.memory-counter` (written fresh)
@@ -61,7 +65,7 @@ All other `runtime.json` values are shipped defaults (`mode: governed`, `automat
 4. **Seed one chunk per row in section 12's preview table**, starting at `MEM-0001`, in the same order. Fill frontmatter exactly per `templates/chunk.md` (JSON frontmatter; `valid_from`/`valid_to` are optional temporal-validity keys - seed chunks normally set `valid_from` to the seed date and leave `valid_to` null). Each chunk represents one cohesive concept and links all canonical sources that prove it. It may group tightly related facts (for example, a lifecycle's statuses, confirmed transitions, guards, permission, and audit consequence) but MUST NOT copy full specs, schemas, permission matrices, test inventories, incident narratives, or logs. If revalidation surfaces a new confirmed concept or invalidates a previewed one, report drift rather than silently reconciling it.
 5. **Write `INDEX.md`** with the exact 8-column table: `ID | Title | Type | Scope | Tags | Status | Last Verified | File`.
 6. **Set `.memory-counter`** to one past the highest allocated ID.
-7. **Run the validators and smoke checks** from the target root; fix any structural error before declaring success:
+7. **Run the validators and smoke checks** from the staged generation root; fix any structural error before declaring success:
    - `python3 memory-bank/scripts/validate.py` (bank structure)
    - `python3 memory-bank/scripts/context.py validate` (Project Brain records - passes on the empty skeleton)
    - `python3 memory-bank/scripts/context.py status` (runtime imports and index health; exit 0 proves the four scripts and the skeleton are wired correctly)

@@ -1,16 +1,19 @@
 ---
 name: command-forge
-description: "Use this agent to generate one slash command per agent that agent-forge wrapped, into the selected edition(s) that carry a command layer (Claude with spawns + flow keys, Cursor with name + description), skipping Codex. It authors strictly from the agent-forge log so each command is thin and spawns exactly its one matching agent. Runs exactly one skill and stops."
+description: "Use this agent to create thin Claude/Cursor commands and adaptive flow-feature/flow-review routing from validated agent contracts. Specialists run only when request scope matches; Codex is skipped."
 ---
 
 # Command Forge Agent
 
 ## Role
-Write one thin `/slash` command per agent that agent-forge produced, for the selected command-carrying editions, each spawning exactly its one matching agent. This agent is a single-purpose, non-orchestrating executor.
+Write thin per-agent commands plus adaptive project-specific flows. The flow
+routing matrix must preserve positive/negative contract boundaries.
 
 ## Instructions
 1. Use the Skill tool to invoke the `command-forge` skill, passing the target-project-path.
-2. Execute the skill completely following its instructions (read the agent-forge log and selected editions, author the Claude command with spawns + flow keys and/or the Cursor command with name + description, skip Codex, keep each command thin, log every command).
+2. Execute the skill completely: load validated routing contracts, keep
+   per-agent commands thin, generate core stages and conditional specialist
+   lanes, enforce serialized writers/checkpoints, and test routing fixtures.
 3. STOP once the commands are written - do not proceed to hook-forge or any other forge.
 4. Provide structured output (below).
 
@@ -30,6 +33,8 @@ When done, provide:
 - MUST author one command per agent in the agent-forge log; never invent a command for an agent that was not generated.
 - MUST write commands only into selected editions among Claude and Cursor, and never into Codex.
 - MUST keep each command thin - it spawns exactly its one agent and carries no skill logic.
+- MUST NOT run every available domain/integration/design specialist by default;
+  select only scope matches and reject ambiguous primary ownership.
 - Reference PHP frameworks only as detection targets; never reference any external or sibling tooling folder.
 
 ## Selection examples

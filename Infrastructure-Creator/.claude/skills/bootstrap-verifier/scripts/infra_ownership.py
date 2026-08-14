@@ -125,6 +125,36 @@ def hash_write_plan(target: Path, write_plan: Iterable[str]) -> dict[str, str]:
     return dict(sorted(files.items()))
 
 
+def hash_write_plan_sources(
+    staging: Path,
+    write_plan: Iterable[str],
+    source_target: Path,
+    source_map: dict[str, str],
+) -> dict[str, str]:
+    """Hash each explicit member from its declared final-content source."""
+    plan = [normalize_relative_path(value) for value in write_plan]
+    unknown = set(source_map) - set(plan)
+    if unknown:
+        raise OwnershipError(
+            f"source map contains paths outside write plan: {sorted(unknown)}"
+        )
+    files: dict[str, str] = {}
+    for rel in plan:
+        if not may_be_manifest_owned(rel):
+            raise OwnershipError(f"write plan contains non-ownable runtime state: {rel}")
+        source = source_map.get(rel, "staging")
+        if source not in {"staging", "target"}:
+            raise OwnershipError(f"invalid final source for {rel}: {source!r}")
+        root = source_target if source == "target" else staging
+        path = confined_target_path(root, rel)
+        if not path.is_file() or path.is_symlink():
+            raise OwnershipError(
+                f"{source} final-content source missing or not regular: {rel}"
+            )
+        files[rel] = sha256_file(path)
+    return dict(sorted(files.items()))
+
+
 def build_manifest(
     target: Path,
     write_plan: Iterable[str],
@@ -136,6 +166,7 @@ def build_manifest(
     editions: Iterable[str],
     mode: str,
     decisions: dict | None = None,
+    file_hashes: dict[str, str] | None = None,
     generated_at: str | None = None,
 ) -> dict:
     """Build a manifest whose membership is exactly the explicit write plan."""
@@ -145,7 +176,35 @@ def build_manifest(
         raise OwnershipError("generator_version must be semver")
     if not re.fullmatch(r"TASK-\d+", task):
         raise OwnershipError("task must be a TASK-<number> id")
-    files = hash_write_plan(target, write_plan)
+    normalized_plan = [normalize_relative_path(value) for value in write_plan]
+    if file_hashes is not None:
+        if set(file_hashes) != set(normalized_plan) or any(
+            not isinstance(value, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", value)
+            for value in file_hashes.values()
+        ):
+            raise OwnershipError("file_hashes must exactly match the write plan")
+        files = dict(sorted(file_hashes.items()))
+    else:
+        files = hash_write_plan(target, normalized_plan)
+    if decisions:
+        if not set(decisions).issubset(files):
+            raise OwnershipError("decisions contain paths outside manifest membership")
+        for rel, entry in decisions.items():
+            if not isinstance(entry, dict):
+                raise OwnershipError(f"decision entry must be an object: {rel}")
+            if entry.get("decision") not in {"kept", "merged"}:
+                raise OwnershipError(
+                    f"decision must be 'kept' or 'merged': {rel}"
+                )
+            if not re.fullmatch(r"TASK-\d+", str(entry.get("task", ""))):
+                raise OwnershipError(f"decision task must be TASK-<number>: {rel}")
+            if not re.fullmatch(
+                r"[0-9a-f]{64}", str(entry.get("rejected_sha256", ""))
+            ):
+                raise OwnershipError(
+                    f"decision rejected_sha256 must be a SHA-256 digest: {rel}"
+                )
     manifest = {
         "manifest_version": 1,
         "generator": generator,
@@ -161,6 +220,16 @@ def build_manifest(
     if decisions:
         manifest["decisions"] = decisions
     return manifest
+
+
+def load_json_object(path: Path, label: str) -> dict:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise OwnershipError(f"{label} unreadable or invalid: {error}") from error
+    if not isinstance(value, dict):
+        raise OwnershipError(f"{label} must contain a JSON object")
+    return value
 
 
 def write_manifest(target: Path, manifest: dict) -> Path:
@@ -265,6 +334,18 @@ def main(argv: list[str] | None = None) -> int:
     manifest_parser.add_argument("--profile", required=True)
     manifest_parser.add_argument("--editions", required=True)
     manifest_parser.add_argument("--mode", choices=VALID_MODES, required=True)
+    manifest_parser.add_argument(
+        "--decisions",
+        help="JSON object of final keep/merge decision entries",
+    )
+    manifest_parser.add_argument(
+        "--source-target",
+        help="target root supplying explicitly retained final file content",
+    )
+    manifest_parser.add_argument(
+        "--source-map",
+        help='JSON map of write-plan path to "staging" or "target"',
+    )
 
     classify_parser = subparsers.add_parser("classify")
     classify_parser.add_argument("--target", required=True)
@@ -277,15 +358,61 @@ def main(argv: list[str] | None = None) -> int:
             raise OwnershipError(f"target not found: {target}")
         if args.command == "manifest":
             write_plan_path = resolve_target(args.write_plan)
+            write_plan = read_write_plan(write_plan_path)
+            decisions = (
+                load_json_object(resolve_target(args.decisions), "decisions")
+                if args.decisions
+                else None
+            )
+            if bool(args.source_target) != bool(args.source_map):
+                raise OwnershipError(
+                    "--source-target and --source-map must be supplied together"
+                )
+            file_hashes = None
+            if args.source_map:
+                source_target = resolve_target(args.source_target)
+                if not source_target.is_dir():
+                    raise OwnershipError(f"source target not found: {source_target}")
+                source_map = load_json_object(
+                    resolve_target(args.source_map), "source map"
+                )
+                for rel, source in source_map.items():
+                    decision = (decisions or {}).get(rel)
+                    if source == "target" and (
+                        not isinstance(decision, dict)
+                        or decision.get("decision") != "kept"
+                    ):
+                        raise OwnershipError(
+                            f"target final-content source requires a kept decision: {rel}"
+                        )
+                for rel, decision in (decisions or {}).items():
+                    if decision.get("decision") == "kept" and source_map.get(rel) != "target":
+                        raise OwnershipError(
+                            f"kept decision must hash the final target bytes: {rel}"
+                        )
+                    if decision.get("decision") == "merged" and source_map.get(
+                        rel, "staging"
+                    ) != "staging":
+                        raise OwnershipError(
+                            f"merged decision must hash staged merged bytes: {rel}"
+                        )
+                file_hashes = hash_write_plan_sources(
+                    target,
+                    write_plan,
+                    source_target,
+                    source_map,
+                )
             manifest = build_manifest(
                 target,
-                read_write_plan(write_plan_path),
+                write_plan,
                 generator=args.generator,
                 generator_version=args.version,
                 task=args.task,
                 profile=args.profile,
                 editions=(item.strip() for item in args.editions.split(",") if item.strip()),
                 mode=args.mode,
+                decisions=decisions,
+                file_hashes=file_hashes,
             )
             path = write_manifest(target, manifest)
             print(f"wrote {path} ({len(manifest['files'])} files)")

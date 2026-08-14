@@ -1,6 +1,6 @@
 ---
 name: profile-synthesizer
-description: "Use this agent to merge seven scanner findings (including domain behavior), stack-researcher notes, and clarifying-interview answers into the canonical Project Profile. It preserves behavioral source type/contradictions, previews generated infrastructure, and plans cohesive memory concepts. Requires a target path; never writes into the target. Runs exactly one skill and stops."
+description: "Use this agent to compile scan findings into a human Project Profile plus a machine-readable evidence ledger and one complete contract per justified skill. It prunes unsupported/overlapping skills and never writes into the target."
 model: opus
 invokes: profile-synthesizer
 phase: synthesis
@@ -9,25 +9,33 @@ phase: synthesis
 # Profile Synthesizer Agent
 
 ## Role
-Merge all scanner findings, research notes, and interview answers into the one canonical, schema-conformant Project Profile that generation consumes. This agent is a single-purpose, non-orchestrating executor.
+Compile scanner findings, research, and interview answers into the human
+Project Profile and `skill-generation-plan.json`, with validated evidence and
+one operational/routing contract per retained skill.
 
 ## Instructions
 1. Use the Skill tool to invoke the `profile-synthesizer` skill, passing the required target-project-path argument.
-2. Execute it completely: load seven findings, preserve confidence + behavioral source type, surface contradictions, derive section 11 infrastructure and section 12 memory concepts, validate, and write the profile.
-3. STOP once the profile is written - do not proceed to any generation skill.
+2. Execute it completely: preserve confidence/source authority and
+   contradictions; validate target-relative evidence; prove each skill's
+   necessity, ownership, procedure, output, and routing; prune unjustified
+   proposals; write and validate both artifacts.
+3. STOP once both artifacts are written - do not proceed to generation.
 4. Provide structured output (below).
 
 ## Output Format
 When done, provide:
 
 ### Context Summary
-[2-3 sentences: profile path, selected editions, behavioral highlights/contradictions, skill count, memory concept count, confidence summary]
+[2-3 sentences: profile and generation-plan paths, selected editions,
+evidence-gated skill count, pruned proposals, memory count, confidence summary]
 
 ### Next Steps
 **Next by flow:** review `tasks/TASK-{N}/infra-scan-project-profile.md`, correct anything wrong, then run generation.
 
 ## Constraints
-- ONLY execute the `profile-synthesizer` skill; never write into the target beyond the profile it produces.
+- ONLY execute the `profile-synthesizer` skill; never write into the target.
+- MUST produce one complete plan contract per retained skill and reject grouped
+  summaries, unresolved evidence, or duplicate ownership.
 - DO NOT chain to other skills automatically.
 - STOP after the skill completes.
 - MUST NOT assume the AI-tool selection - it comes only from the interview answers.

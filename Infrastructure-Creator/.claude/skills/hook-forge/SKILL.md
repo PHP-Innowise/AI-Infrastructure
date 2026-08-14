@@ -17,7 +17,10 @@ related: [infra-generate, policy-forge, skill-forge, agent-forge, command-forge,
 - **Working memory (2):** `working-memory-read.sh` (prompt-time: refresh every memory layer and emit a bounded task capsule) and `working-memory-write.sh` (turn-end: buffer the turn's change set and flush it to the authoritative task on a boundary). These are stack-agnostic thin callers of the runtime `memory-seed` installs at `memory-bank/scripts/context.py` - that path is a fixed contract between the two forges.
 - **Subagent orchestration (2):** `subagent-gate.sh` restricts subagent spawning to the target's own generated roster; the host tool's built-in agents (Claude Code's Explore/Plan/general-purpose, Cursor's explore/bash/browser, Codex's spawn_agent roles) are denied, and agents whose frontmatter carries `writes: true` are serialized one at a time. `subagent-dispatch.sh` observes the other end: when a subagent finishes it appends a `completion` entry to the task's agent channel and releases that write lock. Unlike the six shared scripts, the gate is TOOL-OWNED: each edition gets a variant matching its host's contract - Claude reads `tool_input.subagent_type` and blocks with exit 2, Cursor answers `subagentStart` with `{"permission": "allow"|"deny"}` JSON, Codex denies the `spawn_agent` tool family outright (its edition delegates through skills and has no agent roster). The dispatch observer is one script in all three editions.
 
-Hooks are generated ONLY for the selected editions, and each edition wires the identical scripts through its own configuration mechanism.
+Hooks are generated ONLY for the selected editions under the required
+generation root (task staging during orchestration), and each edition wires the
+scripts through its own configuration mechanism. Stack/risk evidence is always
+read from the real target; generated paths are resolved from staging.
 
 Consumes profile sections **1** (which editions), **2** (stack/tooling for context + naming rules), **4** (integrations that widen the risk surface), **5** (infra/ops - the only source that authorizes infra danger rules), and **6** (security - secrets/destructive-op posture).
 

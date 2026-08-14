@@ -1,6 +1,6 @@
 ---
 name: infra-scan
-description: Run the full Phase 1 discovery pipeline against a target PHP project - seven parallel scanners (including domain behavior), dependency/integration research, a minimal clarifying interview, and synthesis into one reviewable Project Profile. Use when the user wants to start generating a bespoke accelerator for a specific PHP project or points Infrastructure-Creator at a target path. Triggers on "infra-scan", "scan this project", "scan my project", "analyze this codebase for infrastructure generation", "analyze my PHP project for the accelerator generator", "start the infrastructure creator".
+description: Run Phase 1 discovery against a target PHP project and compile a human Project Profile plus a machine-readable evidence ledger with one complete generation contract per justified skill. Use when starting bespoke infrastructure generation from a target path.
 phase: orchestration
 flow-next: infra-generate
 flow-alternatives: [infra-build, stack-adapter]
@@ -11,7 +11,11 @@ related: [stack-scanner, architecture-scanner, integration-scanner, infra-ops-sc
 
 ## Overview
 
-`infra-scan` is one of the four orchestrator skills permitted to fan out other skills automatically (see `AGENTS.md`'s "Orchestration Exception"). Its purpose is to turn a target PHP project's path into one reviewable, evidence-backed Project Profile: it fans out the seven Phase 1 scanners, runs bounded web research on the real dependencies, asks the user only what evidence could not settle (including which AI tool the target team uses), and synthesizes everything into a single file. The seventh scanner, `domain-behavior-scanner`, adds the behavioral contract that the technical scanners cannot provide: source-backed invariants, transitions, permissions, audit obligations, high-risk workflows, and critical regression scenarios. This skill never writes into the target project - only into this folder's own `tasks/TASK-{N}/`.
+`infra-scan` turns a target PHP project into two reviewable handoff artifacts:
+a human Project Profile and a machine-readable evidence/skill generation plan.
+The plan gives every justified skill its own evidence, ownership, procedure,
+verification, output, failure, and routing contract. This skill never writes
+into the target project - only into this folder's own `tasks/TASK-{N}/`.
 
 This skill does not generate anything for a PHP target. It stops at the profile. `infra-generate` is a separate, later step the user runs only after reviewing the profile.
 
@@ -25,6 +29,7 @@ All output from this run lives under `tasks/TASK-{N}/` in Infrastructure-Creator
 - `stack-researcher-findings.md`
 - `clarifying-interview-questions.md`, `clarifying-interview-answers.md`
 - `infra-scan-project-profile.md` (the deliverable)
+- `skill-generation-plan.json` (validated evidence ledger and per-skill contracts)
 
 ## Process
 
@@ -41,7 +46,9 @@ All output from this run lives under `tasks/TASK-{N}/` in Infrastructure-Creator
    - **If your AI tool is single-threaded:** invoke each scanner's logic sequentially in the same session. Output is identical; only mechanics differ. Say so in the Context Summary.
 6. **Run `stack-researcher`** once the scanners have written findings - it needs `integration-scanner-findings.md` (what to research) and `stack-scanner-findings.md` (the PHP framework/version to ground research in).
 7. **Run `clarifying-interview`** once research is done - it turns remaining `inferred`/`unknown` items into a short question set and always asks the mandatory AI-tool-selection question.
-8. **Run `profile-synthesizer`** last - it consumes all of the above and produces `infra-scan-project-profile.md`, validating against `profile-synthesizer/references/project-profile-schema.md` before this skill reports done.
+8. **Run `profile-synthesizer`** last - it produces both handoff artifacts,
+   validates evidence paths and fingerprints, prunes unjustified/overlapping
+   skill proposals, and requires one complete contract per retained skill.
 9. **Stop.** Do not proceed to generation automatically - the profile is a human checkpoint by design.
 
 ## Output Template
@@ -59,7 +66,9 @@ All output from this run lives under `tasks/TASK-{N}/` in Infrastructure-Creator
 [2-4 sentences: PHP framework, architecture pattern, key integrations, and the most important confirmed domain invariants/risks]
 
 ## What Will Be Generated (see profile sections 11-12 for full detail)
-- **Skills:** [total count] across architecture (1) / design & interaction (3) / frontend (0 or 5) / process & workflow (18, including the memory quartet: memory-bank, project-brain, checkpoint, memory) / universal PHP (7) / framework-specialty ([N], evidence-driven) / integrations ([M], one per confirmed integration) / domain ([D], evidence-gated bounded-context skills) - each with a target-specific description in section 11.1 (not just a bare name)
+- **Skills:** [dynamic evidence-gated count] - each has a distinct
+  necessity/scope/procedure/output/routing contract; the memory quartet remains
+  because its runtime is always installed
 - **Agents & commands:** [counts from section 11.2, for the selected edition(s)]
 - **Memory bank:** [count] cohesive confirmed concepts planned in section 12, each linked to canonical sources
 
@@ -67,7 +76,9 @@ All output from this run lives under `tasks/TASK-{N}/` in Infrastructure-Creator
 [Anything still `unknown` after the interview, or flagged for the user to double check]
 
 ## Review This Before Generating
-Read `tasks/TASK-{N}/infra-scan-project-profile.md` in full - not just the confidence summary. Section 8 shows the behavioral contract; section 11 tells you exactly what each generated skill/agent/command will be; section 12 previews every memory-bank concept. Correct anything wrong, then run `infra-generate` against `[target path]`.
+Read the Project Profile and review the proposed inventory. Inspect
+`skill-generation-plan.json` when checking evidence, ownership boundaries, or
+routing. Correct anything wrong, then run `infra-generate`.
 ```
 
 ## Guardrails

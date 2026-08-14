@@ -62,16 +62,19 @@ infra-scan <path-to-php-project>          (read-only; never writes into the targ
    -> stack-researcher (web research grounded in the real composer dependencies)
    -> clarifying-interview (asks only what evidence could not settle,
       including which AI tool(s) the target team uses)
-   -> profile-synthesizer -> tasks/TASK-{N}/infra-scan-project-profile.md
-      (incl. behavioral contract, per-skill descriptions, counts, memory preview)
+   -> profile-synthesizer -> human Project Profile
+      + machine-readable skill-generation-plan.json
+      (one evidence/ownership/procedure/routing contract per proposed skill)
 
    <-- REVIEW THE PROFILE (what you read here is what infra-generate will build) -->
 
-infra-generate <path-to-php-project>       (the only step that writes into the target)
-   -> re-validates the profile against the target's current files
-   -> forges (parallel): policy-forge, skill-forge, hook-forge, memory-seed
-   -> agent-forge + command-forge (need the final skill list)
-   -> skill-flow-composer, then version stamp + .infra-manifest.json, then bootstrap-verifier
+infra-generate <path-to-php-project>
+   -> validates evidence, contracts, and skill necessity
+   -> builds policy/hooks/memory and evidence-scoped skill batches in staging
+   -> semantic gate: project evidence, procedures, outputs, scope, distinctness
+   -> only then generates agents, commands, and adaptive flows
+   -> verifies the complete staged bundle
+   -> publishes explicit paths with rollback, manifest last, and verifies again
    -> Target now has its own working AGENTS.md + selected edition(s) + memory-bank/
       + .infra-manifest.json (so a later `infra-update <path>` can upgrade it safely)
 ```
@@ -80,7 +83,7 @@ infra-generate <path-to-php-project>       (the only step that writes into the t
 
 Infrastructure-Creator only generates PHP accelerators directly - but it does not silently fail on a non-PHP target either. When `infra-scan` finds no PHP evidence, it checks for a *recognizable* non-PHP stack (Flutter/Dart, Node.js, Python, Go, Ruby, Java/Kotlin, .NET, Rust, Swift, or similar, detected from real manifest files like `pubspec.yaml`, `package.json`, `go.mod`, etc.):
 
-- **Recognized:** it offers to build `stack-adapter` - a brand-new, fully independent sibling generator, `Infrastructure-Creator-[Stack]/`, next to this folder. That architecture contains 23 skills, including domain-behavior discovery, across all three editions.
+- **Recognized:** it offers to build `stack-adapter` - a brand-new, fully independent sibling generator, `Infrastructure-Creator-[Stack]/`, next to this folder. The sibling carries the same evidence contracts, semantic gates, staged publication, and regression fixtures across all three editions.
 - **Not recognized at all:** it reports the target out of scope, same as before.
 
 ### Quick Guide: Building A Sibling Generator
@@ -91,7 +94,7 @@ Your project isn't PHP (Flutter, Node.js, Python, Go, or similar) but you still 
 2. **Let it detect the stack.** No `composer.json`/`*.php` found, so it checks for a recognizable manifest (`pubspec.yaml`, `package.json`, `go.mod`, etc.) instead of just giving up.
 3. **Confirm the offer.** It asks once: *"This uses Flutter/Dart, not PHP - want me to build `Infrastructure-Creator-Flutter`, an independent sibling generator for it?"* Say yes.
    - Already certain you need this and don't want to go through `infra-scan` first? Ask the assistant to `Run infra-adapt against "/absolute/path/to/my-flutter-app".`
-4. **Wait for it to build.** `stack-adapter` re-authors all 23 skills, including the new stack's own domain-behavior scanner, then mirrors and verifies the sibling.
+4. **Wait for it to build.** `stack-adapter` re-authors the generator and all six ecosystem contract catalogs, copies the stack-agnostic quality gates, then rejects stub references, mechanical substitutions, and failed semantic fixtures before reporting success.
 5. **Check the report.** It tells you the new generator's path (e.g. `../Infrastructure-Creator-Flutter/`) and whether self-verification passed. If it flags a problem, don't proceed until that's resolved.
 6. **Switch workspaces.** Open `Infrastructure-Creator-Flutter/` (the new folder) as its own workspace - separate from both this generator and your target project.
 7. **Use it exactly like this one.** Ask the assistant to run `infra-scan` against the absolute target path, review the profile, then ask it to run `infra-generate` (or `infra-build` for the one-shot) against the same path. From this point on, everything works the same as the PHP flow above - just for Flutter.
@@ -104,23 +107,25 @@ The generator always creates the shared, tool-neutral infrastructure and adds
 only the native integration directories selected during `clarifying-interview`:
 
 - `AGENTS.md`, `DOD.md`, `GOLDEN-PRINCIPLES.md`, `STABILIZATION.md` - policy tailored to what was found.
-- A full, custom PHP skill set in eight groups - not just a handful of generic skills:
-  - **Architecture** (1) - grounded in the detected pattern (monolith/modular-monolith/microservices/event-driven).
-  - **Design & interaction** (3, always) - `architecture-implementer`, `api-designer`, `database-designer`, shaped to the target's real scaffolding tooling, API shape, and persistence layer.
-  - **Frontend** (0 or 5, only if a rendering/asset layer exists) - `frontend-design`, `coder-frontend`, `wcag-accessibility`, `web-design-guidelines`, `browser-verify`.
-  - **Process & workflow** (18, always, framework-agnostic) - fourteen workflow mechanics plus the memory quartet (`memory-bank`, `project-brain`, `checkpoint`, `memory`) that operates the seeded memory layer.
-  - **Universal PHP** (7) - `coding`, `testing`, `code-review`, `security-review`, `performance`, `release`, `debugging`, adapted to the target's actual PHP framework/version/tooling.
+- An evidence-gated custom PHP skill set: catalog names are candidates, not quotas. A skill is generated only when it has distinct project-backed selection, scope, procedure, output, and routing value.
+  - **Architecture, design, and frontend** skills exist only where the detected structure and UI surface justify a separate operational workflow.
+  - **Process and universal PHP** skills are selected and adapted to the target's actual conventions/tooling instead of being emitted as a fixed list. The memory quartet (`memory-bank`, `project-brain`, `checkpoint`, `memory`) remains because the generator always installs that runtime.
   - **Framework-specialty** (evidence-gated, one per confirmed pattern) - e.g. ORM patterns, migration safety, async/queue jobs, event-boundary review, caching strategy, file storage, auth scaffolding, form/validator design, admin panel, console commands, test-data factories - generated only where the scan found real evidence, never speculatively.
   - **Integrations** (one per detected package/service) - e.g. a payment-integration skill if a Stripe SDK was found, a queue skill if a Redis/SQS worker was found.
   - **Domain** (0 or more, evidence-gated) - one bounded-context review skill only when multiple confirmed rules create a coherent purpose, e.g. `billing-rules-review`; never one skill per rule/entity/status.
-- Matching agents and thin per-agent commands (commands only for selected Claude/Cursor editions; Codex invokes skills directly).
-- Two project-specific orchestrator commands for Claude/Cursor: `flow-feature` composes the generated delivery agents into a checkpointed feature workflow, and `flow-review` runs the generated read-only reviewers in parallel and synthesizes one report. Both are built only from agents that were actually generated; Codex follows the same skills sequentially without a command layer.
+- Matching agents with project-specific positive/negative routing and sibling deferrals, plus thin commands (Claude/Cursor only; Codex invokes skills directly).
+- Two adaptive orchestrator commands for Claude/Cursor: `flow-feature` and `flow-review` select specialists only when the current request/change intersects their validated contract. Available domain or integration reviewers are not run unconditionally.
 - Eight hook roles in three groups: four evidence-tuned enforcement hooks (`local-context.sh`, `bash-validator.sh`, `file-naming-validator.sh`, `loop-detection.sh`), two automatic-memory hooks (`working-memory-read.sh`, `working-memory-write.sh`), and two orchestration hooks (`subagent-gate.sh`, `subagent-dispatch.sh`) for roster enforcement, write serialization, and completion recording. Cursor omits `working-memory-read.sh` and renders the previous turn's capsule into an ignored `alwaysApply` rule; Codex ships the dispatch hook unregistered because multi-agent execution is disabled.
 - A seeded `memory-bank/` whose chunks represent cohesive durable confirmed concepts, link canonical sources, and are operated through the generated `memory-bank` skill - plus the dependency-free context-brain runtime under `memory-bank/scripts/` (`context.py`, `brain_runtime.py`, `context_retrieval.py`, `validate.py`) and the governed `project-brain/` control-plane skeleton it drives.
 - A `SKILL FLOW.md` built from the skills that were actually generated, not a template.
 - The upgrade contract: a version-stamp comment on a generated `AGENTS.md` and a `.infra-manifest.json` at the target root (generator version, source profile, and sha256 of every path in the explicit generation write plan) - this is what makes `infra-update` possible later. Manifest membership, not location under a managed root, exclusively defines generator ownership. Commit it with the rest of the accelerator.
 
-None of this is a surprise at generation time: the profile you review after `infra-scan` (step 4 of the Quick Start above) already spells out a one-line description of every skill about to be written, the exact agent/command counts for your selected edition(s), and a full preview table of every memory-bank chunk `infra-generate` will seed.
+None of this is a surprise at generation time: the profile gives the human
+preview, while `skill-generation-plan.json` records the complete per-skill
+evidence, ownership, procedure, verification, output, and routing contract.
+Each selected skill carries satisfied claim-backed selection conditions;
+rejected catalog candidates record their reason and missing evidence.
+Unsupported or overlapping candidates are pruned before generation.
 
 ## Upgrading A Generated Accelerator
 
@@ -132,7 +137,7 @@ infra-update ../my-php-app
 
 How it stays safe:
 
-1. Every `infra-generate` run ends by writing `.infra-manifest.json` into the target - the generator version (from Infrastructure-Creator's `VERSION` file, the single version source), the profile it consumed, and the sha256 of every file in that run's explicit write plan - and stamping `AGENTS.md` only when that file was generated (`<!-- Generated by Infrastructure-Creator vX.Y.Z | TASK-N | YYYY-MM-DD -->`, with real values substituted).
+1. Every `infra-generate` run builds and validates the complete accelerator in task staging, rechecks target baseline hashes, then publishes an explicit path plan with rollback. `.infra-manifest.json` is copied last and `AGENTS.md` is stamped only when generated.
 2. `infra-update` re-validates the profile, regenerates everything into a staging area (never into your project), then compares each file three ways: manifest hash vs. what's in your project vs. what would be generated now.
    - Hash unchanged since generation -> your team never touched it -> safely replaced with the new version.
    - Hash differs (or the file was deleted) -> it's yours now -> it goes into a "requires decision" report showing all three sides; nothing is overwritten without your explicit per-file answer.
@@ -148,9 +153,9 @@ Infrastructure-Creator/
 ├── AGENTS.md                 # Shared generator policy
 ├── VERSION                   # Single source of the generator's version
 ├── README.md  CHANGELOG.md   # This file + change history
-├── .claude/                  # Claude Code edition of the generator (source of truth)
+├── .claude/                  # Claude Code agents/commands and mirrored skills
 ├── .cursor/                  # Cursor edition
-├── .codex/  .agents/         # Codex config/hooks/docs + Codex skills tree
+├── .codex/  .agents/         # Codex config/hooks/docs + canonical skills tree
 ├── specs/                    # This tool's own living specs
 ├── tasks/                    # One TASK-{N}/ per scan+generate run against a target
 └── examples/                 # Illustrative sample outputs

@@ -219,24 +219,26 @@ class ManifestOwnershipTest(OwnershipFixture):
         )
         for entry in invalid_entries:
             with self.subTest(entry=entry):
-                self.manifest(["AGENTS.md"], decisions={"AGENTS.md": entry})
-                self.assertNotEqual(self.manifest_errors(), [])
+                with self.assertRaises(ownership.OwnershipError):
+                    self.manifest(
+                        ["AGENTS.md"], decisions={"AGENTS.md": entry}
+                    )
 
     def test_decision_for_untracked_file_fails(self) -> None:
         self.write("AGENTS.md", STAMP + "generated\n")
-        self.manifest(
-            ["AGENTS.md"],
-            decisions={
-                "team.md": {
-                    "decision": "kept",
-                    "rejected_sha256": "a" * 64,
-                    "task": "TASK-002",
-                }
-            },
-        )
-        self.assertTrue(
-            any("decisions entry for untracked file" in error for error in self.manifest_errors())
-        )
+        with self.assertRaisesRegex(
+            ownership.OwnershipError, "outside manifest membership"
+        ):
+            self.manifest(
+                ["AGENTS.md"],
+                decisions={
+                    "team.md": {
+                        "decision": "kept",
+                        "rejected_sha256": "a" * 64,
+                        "task": "TASK-002",
+                    }
+                },
+            )
 
 
 class UpdateClassificationTest(OwnershipFixture):

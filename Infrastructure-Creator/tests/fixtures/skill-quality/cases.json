@@ -1,0 +1,58 @@
+{
+  "duplicate-shared-template": {
+    "expected": "SKILL_SIMILARITY",
+    "description": "Unrelated skills reuse the same generic five-step procedure."
+  },
+  "paraphrased-empty": {
+    "expected": "SKILL_CONTENT_EMPTY",
+    "description": "Headings are present but the operational contract is filler."
+  },
+  "lexically-unique-empty": {
+    "expected": "SKILL_PROCEDURE_TRACE",
+    "description": "Long varied prose has no traceable project procedure or contract decisions."
+  },
+  "invalid-evidence": {
+    "expected": "EVIDENCE_PATH_INVALID",
+    "description": "Evidence attempts target traversal or names a missing file."
+  },
+  "irrelevant-evidence-reuse": {
+    "expected": "SKILL_EVIDENCE_IRRELEVANT",
+    "description": "An integration reuses valid evidence that does not identify it."
+  },
+  "missing-evidence": {
+    "expected": "SKILL_EVIDENCE_UNKNOWN",
+    "description": "A skill references an evidence ID absent from the plan."
+  },
+  "unsupported-evidence-claim": {
+    "expected": "EVIDENCE_CLAIM_UNSUPPORTED",
+    "description": "A selection condition repeats a claim that the cited source/range does not support."
+  },
+  "scope-collision": {
+    "expected": "SCOPE_COLLISION",
+    "description": "Sibling skills claim the same owned scope."
+  },
+  "ambiguous-routing": {
+    "expected": "ROUTING_AMBIGUITY",
+    "description": "Two skills claim the same positive request without explicit primary ownership."
+  },
+  "unjustified-inventory-growth": {
+    "expected": "SKILL_SELECTION_CONDITION",
+    "description": "A catalog candidate is added without a satisfied evidence-backed selection condition."
+  },
+  "registry-coverage-bypass": {
+    "expected": "INVENTORY_CANDIDATE_UNACCOUNTED",
+    "description": "A canonical candidate is neither selected nor rejected, or its catalog anchor is invalid."
+  },
+  "nonconforming-agent-file": {
+    "expected": "AGENT_ROUTING_NONCONFORMING_FILE",
+    "description": "An extra Markdown wrapper outside the planned <skill>-agent naming contract is rejected."
+  },
+  "good-distinct-shared-safety": {
+    "expected": null,
+    "description": "Distinct procedures share one exact approved safety block."
+  },
+  "deterministic-output": {
+    "expected": "SKILL_SIMILARITY",
+    "description": "Repeated runs emit byte-identical sorted JSON diagnostics."
+  }
+}

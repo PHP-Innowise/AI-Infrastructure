@@ -1,6 +1,6 @@
 ---
 name: profile-synthesizer
-description: Merge all seven scanner findings (including domain behavior), stack-researcher's results, and clarifying-interview's answers into the single canonical, schema-conformant Project Profile that is the sole contract between Phase 1 (scanning) and Phase 2 (generation). Takes a required target-project-path argument. Use as the last step of infra-scan, after clarifying-interview. Triggers on "synthesize the profile", "build the project profile", "profile-synthesizer", "merge the findings".
+description: Compile all discovery findings into a human Project Profile plus a machine-readable evidence ledger and one complete generation contract per justified skill. Use as the final read-only infra-scan step.
 phase: synthesis
 flow-next: infra-generate
 flow-alternatives: []
@@ -11,15 +11,20 @@ related: [infra-scan, stack-scanner, architecture-scanner, integration-scanner, 
 
 ## Overview
 
-`profile-synthesizer` produces the one artifact Phase 2 consumes: `infra-scan-project-profile.md`. It merges the seven scanners' findings, `stack-researcher`'s sourced notes, and `clarifying-interview`'s answers into a single, schema-conformant document. Technical conflicts prefer higher-confidence direct evidence; behavioral conflicts preserve both source type and confidence and are surfaced rather than silently collapsed, because a test, ADR, database constraint, code path, and interview answer are not equal authorities.
+`profile-synthesizer` produces the two artifacts Phase 2 consumes: the human-reviewable `infra-scan-project-profile.md` and the machine-readable `skill-generation-plan.json`. It merges the seven scanners' findings, `stack-researcher`'s sourced notes, and `clarifying-interview`'s answers into a schema-conformant profile and one complete generation contract per proposed skill. Technical conflicts prefer higher-confidence direct evidence; behavioral conflicts preserve both source type and confidence and are surfaced rather than silently collapsed, because a test, ADR, database constraint, code path, and interview answer are not equal authorities.
 
-Crucially, the profile is not just a dry evidence dump - it is the user's one chance to review *what will actually be generated* before committing to `infra-generate`. Section 8 shows the discovered behavioral contract; section 11 gives a target-specific, one-line description of every skill about to be written (including any evidence-gated domain skills), an explicit agent/command count for the selected edition(s); and section 12 previews the exact memory-bank concepts that will be seeded.
+Crucially, the profile is not just a dry evidence dump - it is the user's one chance to review *what will actually be generated* before committing to `infra-generate`. Section 8 shows the discovered behavioral contract; section 11 summarizes the evidence-gated inventory and points to the complete JSON contracts; section 12 previews the exact memory-bank concepts that will be seeded.
 
 The target project path is a **required** argument. This skill reads only the current run's `tasks/TASK-{N}/` findings files (plus, if needed, the target's files to break a tie); it never writes into the target.
 
 ## Generated File Naming Convention (MANDATORY)
 
-Write exactly one file: `tasks/TASK-{N}/infra-scan-project-profile.md`, following `references/project-profile-schema.md` exactly.
+Write exactly two sibling files:
+
+- `tasks/TASK-{N}/infra-scan-project-profile.md`
+- `tasks/TASK-{N}/skill-generation-plan.json`
+
+Follow `references/project-profile-schema.md` exactly. The JSON is generator runtime input, not a target artifact, and MUST NOT be copied into a generated skill tree or cited as a generated target skill's source.
 
 ## Process
 
@@ -29,20 +34,23 @@ Write exactly one file: `tasks/TASK-{N}/infra-scan-project-profile.md`, followin
 4. **Build section 8 ("Domain & Behavioral Contract")** from `domain-behavior-scanner-findings.md`. Preserve both confidence and source type. Keep status discovery separate from confirmed transitions, authentication technology separate from product permissions, risk indicators separate from documented severity/approval, and contradictory sources visible. Carry only bounded central entities and representative critical scenarios.
 5. **Fold in research notes (section 9)** from `stack-researcher`, keeping source URLs.
 6. **Resolve open items (section 10)** using interview answers; anything still unresolved stays `unknown`, explicitly listed. Preserve `interview answer` as its source type rather than making it indistinguishable from repository evidence.
-7. **Derive section 11.1 ("Skills To Generate")** in eight groups, cross-referencing `skill-forge/references/` for what each group actually contains:
-   - **Architecture** (1): from section 3, as before.
-   - **Design & Interaction** (3, always): `architecture-implementer`, `api-designer`, `database-designer` - each grounded in sections 2-3's real framework/persistence evidence (see `skill-forge/references/php-frameworks.md`'s "Design & Interaction Skills").
-   - **Frontend** (0 or 5): only if section 3.2's verdict is "applies" - `frontend-design`, `coder-frontend`, `wcag-accessibility`, `web-design-guidelines`, `browser-verify`; otherwise write "No UI surface detected - frontend skill group skipped" and generate none.
-   - **Process & Workflow** (18, always, fixed list): the skills named in `skill-forge/references/php-process-skills.md`, including the memory quartet (`memory-bank`, `project-brain`, `checkpoint`, `memory`) that operates the shared memory layer - list all 18 by name; one shared sentence suffices since this group's mechanic never varies by target.
-   - **Universal PHP** (7): `coding`, `testing`, `code-review`, `security-review`, `performance`, `release`, `debugging`, as before.
-   - **Framework-Specialty** (one per `confirmed`/`inferred` line in section 3.1, per `skill-forge/references/php-specialty-skills.md`'s mapping table): skip every `none`/`unknown` signal - never generate one speculatively.
-   - **Integrations** (one per `confirmed` integration in section 4), as before.
-   - **Domain** (0 or more): one skill per cohesive candidate in section 8.11 only when multiple confirmed rules form a bounded context and the skill has a distinct review purpose. Never generate one skill per rule, status, entity, role, risk, or test.
-   For EVERY non-fixed entry, write a one-line description specific to this target - name the real detected pattern/tool/package/domain rules, never generic boilerplate. Record non-PHP neighbors in 11.3 as integration contracts only.
-8. **Derive section 11.2 ("Agents & Commands Preview")** by first stating the group-by-group skill count breakdown (architecture + design + frontend + 18 process + 7 universal + specialty + integrations + domain = total), then the skill total from 11.1, times the number of selected editions (section 1) that carry an agent layer (Claude, Cursor), for the agent total; the same count again for commands (Claude and Cursor carry command layers; Codex has no command layer). State Codex's direct-skill invocation model explicitly if it was selected.
-9. **Derive section 12 ("Memory Bank Preview")** using the exact same selection rule `memory-seed` applies: one planned chunk per cohesive durable concept composed only from confirmed facts across sections 2-8. Group tightly related facts (such as one lifecycle's statuses, transitions, guards, permissions, and audit consequence) rather than producing tiny per-line chunks. Link canonical sources; do not copy full specs, schemas, permission matrices, test inventories, incident narratives, or sensitive data. This becomes the authoritative seed plan.
-10. **Self-validate** against `references/project-profile-schema.md`: every line in sections 2-8 has confidence; every section 8 finding also has source type; statuses are not presented as transitions without evidence; permission completeness is stated; risk indicators do not invent severity/approval; section 1 lists >=1 edition sourced from the interview; no skill is proposed for absent evidence; every non-fixed 11.1 entry has a target-specific description; 11.2 counts are arithmetically consistent; section 12 contains only confirmed, source-linked cohesive concepts; no secrets/customer data anywhere; a `confirmed` integration cites runtime wiring.
-11. **Write the profile** and report.
+7. **Derive the evidence-gated skill inventory.** Load
+   `skill-forge/references/candidate-registry.json` and evaluate every candidate
+   against its real catalog anchor. Every registry ID must receive exactly one
+   disposition: selected (families may produce multiple concrete skills) or
+   rejected with reason/missing evidence. There are no category quotas. Only
+   the memory quartet is runtime-fixed.
+8. **Build `skill-generation-plan.json`.** Stamp schema `1.0` and the current
+   reference-corpus `catalog_version`. Normalize target evidence into
+   `evidence[]` with supported claims and sha256 fingerprints for repository
+   files. Create exactly one complete contract per selected skill, including a
+   `selection_gate` whose satisfied conditions cite the skill's own evidence
+   and distinguish adjacent candidates. Never use a grouped summary. Every
+   source path is canonical and target-relative; URLs remain URLs.
+9. **Derive section 11.2 ("Agents & Commands Preview")** from `skills.length`, with a dynamic category breakdown. Multiply by selected editions carrying agent/command layers; Codex has neither. Do not embed baseline numbers in the arithmetic.
+10. **Derive section 12 ("Memory Bank Preview")** using the exact same selection rule `memory-seed` applies: one planned chunk per cohesive durable concept composed only from confirmed facts across sections 2-8. Group tightly related facts rather than producing tiny per-line chunks. Link canonical sources; do not copy full specs, schemas, permission matrices, test inventories, incident narratives, or sensitive data.
+11. **Self-validate both artifacts** against `references/project-profile-schema.md` and the plan-only semantic validator. Require exact top-level/schema membership, the sibling Profile path, catalog version, fingerprints and bounded ranges, supported claims, complete selection gates, auditable rejected candidates, unique/resolved references, complete skill contracts, dynamic count equality, canonical paths, no sensitive data, and runtime wiring for confirmed integrations.
+12. **Write both files atomically for the run** and report both paths.
 
 ## Output Template
 
@@ -50,6 +58,7 @@ Write exactly one file: `tasks/TASK-{N}/infra-scan-project-profile.md`, followin
 # Profile Synthesized: [target_name]
 
 **File:** tasks/TASK-{N}/infra-scan-project-profile.md
+**Generation plan:** tasks/TASK-{N}/skill-generation-plan.json
 **Editions:** [selected]
 **Skills to generate:** [count] ([list]) - see section 11.1 for what each one will actually do
 **Agents/commands preview:** [counts from section 11.2]
@@ -67,8 +76,10 @@ Read the profile and correct anything wrong, then run `infra-generate`.
 
 - MUST conform to `references/project-profile-schema.md` exactly.
 - MUST NOT assume the AI-tool selection - it comes only from the interview.
-- MUST NOT propose a skill for an integration with no evidence, a framework-specialty skill for a `none`/`unknown` section 3.1 signal, the frontend group when section 3.2's verdict says it doesn't apply, or a domain skill without a cohesive section 8.11 candidate.
-- MUST NOT write a generic, boilerplate description for any 11.1 skill entry - each one must name what was actually found in this target.
+- MUST NOT propose any skill whose reference trigger and required evidence are unsatisfied. Familiarity, category symmetry, and a preferred baseline are not evidence.
+- MUST generate only the memory quartet unconditionally, because its runtime is always installed.
+- MUST provide a complete JSON contract for every selected skill; grouped or one-line descriptions are summaries only.
+- MUST use target-relative canonical source paths in contracts and generated target skills; generator task paths are never target evidence.
 - MUST NOT include any secret or credential value.
 - MUST keep every fact's confidence tag and source; never launder an `inferred` fact into a `confirmed` one.
 - MUST NOT let section 12 include an `inferred`/`unknown` fact, raw incident detail, customer data, or copied canonical source content.
@@ -76,4 +87,4 @@ Read the profile and correct anything wrong, then run `infra-generate`.
 
 ## Final Output
 
-Return the profile path, the selected editions, the behavioral-contract summary (including contradictions), the derived skill list with a one-line summary of each (from 11.1), the agents/commands preview counts (from 11.2), the memory-bank concept preview count (from 12), the confidence summary, and the next step (user reviews, then runs `infra-generate`).
+Return both artifact paths, the selected editions, the behavioral-contract summary (including contradictions), the selected and rejected skill inventory with reasons, the dynamic agents/commands preview counts, the memory-bank concept preview count, the confidence summary, and the next step (user reviews both artifacts, then runs `infra-generate`).
