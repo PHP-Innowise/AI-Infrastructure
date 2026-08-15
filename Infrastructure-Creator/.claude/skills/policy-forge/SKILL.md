@@ -60,8 +60,10 @@ Append a generation log to `tasks/TASK-{N}/policy-forge-log.md` listing every fi
    prescribed by `AGENTS.md` or `DOD.md` separately with `--no-scripts
    --verification --command '<command>'`. Resolve Composer/npm aliases all the
    way to leaf commands. Any shell composition, unresolved/cyclic alias,
-   workspace mutation, destructive/database/deploy action, or
-   external/provider/network action is a blocking policy-generation error.
+   shell/sudo/xargs/variable indirection, executable outside the analyzer's
+   read-only allow-list, workspace mutation, destructive/database/deploy
+   action, or external/provider/network action is a blocking
+   policy-generation error.
 8. **Log** every written path and the exact profile/evidence anchor backing each
    command/rule, plus its command-analysis result.
 

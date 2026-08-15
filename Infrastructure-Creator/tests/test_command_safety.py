@@ -8,6 +8,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -347,6 +348,193 @@ class CommandSafetyTest(unittest.TestCase):
             json.loads(explicit.stdout)["commands"][0]["categories"],
             ["non_mutating"],
         )
+
+    def test_wrapper_commands_unwrap_and_classify_wrapped_command(self) -> None:
+        command_analyzer = self.analyzer()
+        for command in (
+            "timeout 30 rm -rf build",
+            "/usr/bin/env rm -rf build",
+            "nice -n 10 rm -rf build",
+            "nohup rm -rf build",
+            "stdbuf -oL rm -rf build",
+        ):
+            with self.subTest(command=command):
+                analysis = command_analyzer.analyze(command, verification=True)
+                self.assert_code(analysis, "DESTRUCTIVE_FILESYSTEM")
+                self.assert_category(analysis, "destructive_database_deploy")
+                self.assertFalse(analysis.verification_safe)
+        wrapped_safe = command_analyzer.analyze(
+            "timeout 30 vendor/bin/phpunit", verification=True
+        )
+        self.assertTrue(wrapped_safe.verification_safe)
+
+    def test_sudo_xargs_and_variable_indirection_fail_closed(self) -> None:
+        command_analyzer = self.analyzer()
+        sudo = command_analyzer.analyze(
+            "sudo rm -rf /tmp/x", verification=True
+        )
+        self.assert_code(sudo, "SUDO_EXECUTION")
+        self.assert_code(sudo, "DESTRUCTIVE_FILESYSTEM")
+        self.assertFalse(sudo.verification_safe)
+        for command in ("xargs rm -rf", "$CMD --all"):
+            with self.subTest(command=command):
+                analysis = command_analyzer.analyze(command, verification=True)
+                self.assert_code(analysis, "COMMAND_INDIRECTION")
+                self.assertFalse(analysis.verification_safe)
+
+    def test_unknown_executables_fail_closed_for_verification(self) -> None:
+        command_analyzer = self.analyzer()
+        for command in (
+            "sed -i s/a/b/ file",
+            "awk '{print}' file",
+            "./scripts/custom-tool --check",
+        ):
+            with self.subTest(command=command):
+                analysis = command_analyzer.analyze(command, verification=True)
+                self.assert_code(analysis, "UNKNOWN_EXECUTABLE")
+                self.assertIn("verification_blocker", analysis.categories)
+                self.assertFalse(analysis.verification_safe)
+
+    def test_shell_clustered_flags_and_script_files_fail_closed(self) -> None:
+        command_analyzer = self.analyzer()
+        for command in (
+            "bash -lc 'rm -rf /tmp/x'",
+            "sh deploy.sh",
+            "bash scripts/anything.sh",
+        ):
+            with self.subTest(command=command):
+                analysis = command_analyzer.analyze(command, verification=True)
+                self.assert_code(analysis, "SHELL_INTERPRETER")
+                self.assertFalse(analysis.verification_safe)
+
+    def test_git_global_options_do_not_bypass_classification(self) -> None:
+        command_analyzer = self.analyzer()
+        for command, code in (
+            ("git -C /repo push origin main", "GIT_NETWORK"),
+            ("git -c user.name=x reset --hard HEAD~5", "DESTRUCTIVE_GIT"),
+            ("git --git-dir=/x/.git clean -fdx", "DESTRUCTIVE_GIT"),
+        ):
+            with self.subTest(command=command):
+                analysis = command_analyzer.analyze(command, verification=True)
+                self.assert_code(analysis, code)
+                self.assertFalse(analysis.verification_safe)
+
+    def test_symfony_console_database_commands_are_destructive(self) -> None:
+        command_analyzer = self.analyzer()
+        for command in (
+            "php bin/console doctrine:migrations:migrate --no-interaction",
+            "php bin/console doctrine:database:drop --force",
+            "symfony console doctrine:migrations:migrate",
+            "bin/console doctrine:schema:drop --force",
+        ):
+            with self.subTest(command=command):
+                analysis = command_analyzer.analyze(command, verification=True)
+                self.assert_category(analysis, "destructive_database_deploy")
+                self.assertFalse(analysis.verification_safe)
+        status = command_analyzer.analyze(
+            "php bin/console doctrine:migrations:status", verification=True
+        )
+        self.assertTrue(status.verification_safe)
+
+    def test_package_manager_shorthands_and_runners_are_classified(self) -> None:
+        command_analyzer = self.analyzer()
+        for command in ("npm i", "npm ci", "pnpm up", "yarn upgrade"):
+            with self.subTest(command=command):
+                analysis = command_analyzer.analyze(command, verification=True)
+                self.assert_code(analysis, "DEPENDENCY_WRITE")
+                self.assert_code(analysis, "DEPENDENCY_NETWORK")
+                self.assertFalse(analysis.verification_safe)
+        for command in (
+            "npx some-package",
+            "pnpm dlx create-thing",
+            "yarn dlx create-thing",
+            "bunx cowsay",
+        ):
+            with self.subTest(command=command):
+                analysis = command_analyzer.analyze(command, verification=True)
+                self.assert_code(analysis, "DEPENDENCY_EXECUTE")
+                self.assert_code(analysis, "DEPENDENCY_NETWORK")
+                self.assertFalse(analysis.verification_safe)
+
+    def test_unknown_bare_package_scripts_fail_closed(self) -> None:
+        command_analyzer = self.analyzer(
+            package_scripts={"lint": "eslint src"}
+        )
+        for command in ("yarn deploy", "pnpm build", "bun release"):
+            with self.subTest(command=command):
+                analysis = command_analyzer.analyze(command, verification=True)
+                self.assert_code(analysis, "UNKNOWN_ALIAS")
+                self.assertFalse(analysis.verification_safe)
+        known = command_analyzer.analyze("pnpm lint", verification=True)
+        self.assertTrue(known.verification_safe)
+
+    def test_alias_expansion_is_bounded_and_fails_closed(self) -> None:
+        scripts = {"s0": "vendor/bin/phpunit"}
+        for index in range(1, 25):
+            scripts[f"s{index}"] = [f"@s{index - 1}", f"@s{index - 1}"]
+        command_analyzer = self.analyzer(composer_scripts=scripts)
+        started = time.monotonic()
+        analysis = command_analyzer.analyze(
+            "composer run-script s24", verification=True
+        )
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 5.0)
+        self.assert_code(analysis, "EXPANSION_LIMIT")
+        self.assertFalse(analysis.verification_safe)
+
+    def test_composer_scripts_shadowing_builtins_classify_the_builtin(
+        self,
+    ) -> None:
+        command_analyzer = self.analyzer(
+            composer_scripts={"update": "echo noop"}
+        )
+        builtin = command_analyzer.analyze(
+            "composer update", verification=True
+        )
+        self.assert_code(builtin, "DEPENDENCY_WRITE")
+        self.assert_code(builtin, "DEPENDENCY_NETWORK")
+        self.assertEqual(builtin.aliases, ())
+        self.assertFalse(builtin.verification_safe)
+        script = command_analyzer.analyze(
+            "composer run-script update", verification=True
+        )
+        self.assertTrue(script.verification_safe)
+        self.assertEqual(script.expanded_commands, ("echo noop",))
+
+    def test_blocked_commands_report_blocker_category(self) -> None:
+        command_analyzer = self.analyzer()
+        for command in (
+            "rm -rf build && echo done",
+            "bash -c 'vendor/bin/phpunit'",
+            "phpunit 'unterminated",
+        ):
+            with self.subTest(command=command):
+                analysis = command_analyzer.analyze(command)
+                self.assertEqual(
+                    analysis.categories, ("verification_blocker",)
+                )
+                self.assertFalse(analysis.verification_safe)
+        mixed = command_analyzer.analyze("sudo rm -rf /tmp/x")
+        self.assertEqual(
+            mixed.categories,
+            ("destructive_database_deploy", "verification_blocker"),
+        )
+
+    def test_read_only_flag_lookalikes_are_not_mutating(self) -> None:
+        command_analyzer = self.analyzer()
+        for command in ("ruff check .", "gofmt -l .", "pytest -W error"):
+            with self.subTest(command=command):
+                analysis = command_analyzer.analyze(command, verification=True)
+                self.assertEqual(analysis.categories, ("non_mutating",))
+                self.assertTrue(analysis.verification_safe)
+        for command, code in (
+            ("gofmt -w .", "WORKSPACE_WRITE_FLAG"),
+            ("ruff format .", "FORMAT_WRITES"),
+        ):
+            with self.subTest(command=command):
+                analysis = command_analyzer.analyze(command, verification=True)
+                self.assert_code(analysis, code)
+                self.assertFalse(analysis.verification_safe)
 
 
 if __name__ == "__main__":

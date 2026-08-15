@@ -2047,35 +2047,40 @@ def automatic_memory_readiness(repository: Path) -> dict[str, object]:
     )
     branch: Optional[str] = None
     git_state = git_error or "worktree"
+    probe_failures = ("git-unavailable", "git-probe-failed")
+    failed_probe: Optional[str] = None
     if git_error is None:
         branch, branch_error = _readiness_git_probe(
             repository, ["symbolic-ref", "--quiet", "--short", "HEAD"]
         )
-        if branch_error is not None:
+        if branch_error in probe_failures:
+            # A transient probe failure says nothing about HEAD, so report the
+            # failed probe itself instead of guessing detached or unborn.
+            branch = None
+            git_state = branch_error
+            failed_probe = "branch"
+        else:
             head, head_error = _readiness_git_probe(
                 repository, ["rev-parse", "--verify", "HEAD"]
             )
-            git_state = "detached-head" if head_error is None and head else "unborn-head"
+            if head_error in probe_failures:
+                if branch_error is None:
+                    # The branch probe already supplied a usable identity; a
+                    # transient HEAD-classification failure must not discard
+                    # it, so keep the pre-classification worktree report.
+                    git_state = "worktree"
+                else:
+                    branch = None
+                    git_state = head_error
+                    failed_probe = "HEAD-classification"
+            elif head_error is None and head:
+                git_state = "worktree" if branch_error is None else "detached-head"
+            else:
+                # HEAD does not resolve to a commit: the branch is unborn
+                # (fresh init, zero commits) or HEAD itself is broken.
+                git_state = "unborn-head"
 
-    if git_error is None:
-        git_metadata = {
-            "status": "active",
-            "state": git_state,
-            "worktree": worktree,
-            "branch": branch,
-            "reason": (
-                "Git changed-path metadata is available."
-                if git_state == "worktree"
-                else "Git changed-path metadata is available, but HEAD is detached "
-                "and cannot supply task identity."
-            ),
-            "remediation": (
-                None
-                if git_state == "worktree"
-                else "Set CONTEXT_TASK_ID for task-aware automation while HEAD is detached."
-            ),
-        }
-    else:
+    if git_error is not None:
         git_metadata = {
             "status": "degraded",
             "state": git_state,
@@ -2083,6 +2088,51 @@ def automatic_memory_readiness(repository: Path) -> dict[str, object]:
             "branch": None,
             "reason": "Git changed-path metadata is unavailable; turn checkpointing cannot run.",
             "remediation": "Run the accelerator inside its Git worktree.",
+        }
+    elif git_state in probe_failures:
+        git_metadata = {
+            "status": "degraded",
+            "state": git_state,
+            "worktree": worktree,
+            "branch": None,
+            "reason": {
+                "branch": (
+                    "The Git branch probe failed before HEAD could be "
+                    "classified, so branch state is unknown for this report."
+                ),
+                "HEAD-classification": (
+                    "The Git HEAD-classification probe failed after no "
+                    "branch was found, so HEAD state is unknown for this "
+                    "report."
+                ),
+            }[failed_probe],
+            "remediation": (
+                "Retry when Git responds within the probe timeout, or set "
+                "CONTEXT_TASK_ID for task-aware automation."
+            ),
+        }
+    else:
+        git_metadata = {
+            "status": "active",
+            "state": git_state,
+            "worktree": worktree,
+            "branch": branch,
+            "reason": {
+                "worktree": "Git changed-path metadata is available.",
+                "detached-head": (
+                    "Git changed-path metadata is available, but HEAD is "
+                    "detached and cannot supply task identity."
+                ),
+                "unborn-head": (
+                    "Git changed-path metadata is available, but HEAD does "
+                    "not resolve to a commit yet (unborn branch)."
+                ),
+            }[git_state],
+            "remediation": (
+                "Set CONTEXT_TASK_ID for task-aware automation while HEAD is detached."
+                if git_state == "detached-head"
+                else None
+            ),
         }
 
     explicit_identity = os.environ.get("CONTEXT_TASK_ID", "").strip()

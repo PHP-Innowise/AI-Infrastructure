@@ -4,6 +4,103 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Fixed
+
+- Six contradictions between the canonical LLM-prompt documents and the
+  shipped validators, each capable of steering an obedient agent into a
+  blocking gate or leaking non-neutral fixture data:
+  - `infra-generate` step 2 demanded a top-level `routing_cases[]` in
+    `skill-generation-plan.json`, but the schema's top-level membership is
+    exact and `validate_skill_quality.py` blocks any extra field with
+    `PLAN_FIELD_UNKNOWN`; the step now requires the per-skill
+    `routing_cases[]` (`skills[].routing_cases`) the validator actually
+    checks.
+  - `command-forge` step 8 read as an in-skill instruction to run
+    `validate_flow_contracts.py`, yet `skill-flow-composer` runs after
+    command-forge, so `SKILL FLOW.md` cannot exist and the validator exits 1
+    on the missing artifact; the step now states compiled-graph validation
+    is orchestrator-owned (`infra-generate` step 8 after the composer), must
+    not run inside command-forge, and is recorded as pending that gate.
+  - The `command-forge` frontmatter guardrail ("Cursor command only `name`,
+    `description`") carried no flow-command exception while step 7 and the
+    flow guardrail require `flow` + ordered `stages` frontmatter and one
+    fenced `json flow-contract` block in every selected command-carrying
+    edition; the guardrail now names flow commands as the sole exception, so
+    a literal reading no longer guarantees failing
+    `validate_flow_contracts.py`.
+  - The `project-profile-schema.md` exemplar skill stamped
+    `"phase": "execution"`, outside the fixed vocabulary (`understanding`,
+    `planning`, `implementation`, `verification`, `finalization`) that flow
+    stages and the composer's Phase Map accept; the example now uses
+    `implementation`.
+  - Adjacent `AGENTS.md` bullets contradicted each other on schema 1.1
+    approvability; both now state the policy DOD.md, the schema doc, and
+    `LEGACY_PLAN_PUBLICATION_INELIGIBLE` enforce: only a schema 1.2 plan is
+    approvable (1.2 carries the ownership/routing structures introduced in
+    1.1), and legacy 1.0/1.1 plans stay audit-readable but must be
+    re-synthesized.
+  - The `critical_invariants` example in `project-profile-schema.md` leaked
+    a real project's domain (`content-job.failure-terminal` /
+    `contentjobs-lifecycle-review`); it now uses the neutral acme-billing
+    fixture family (`invoice.paid-immutable`, `billing-rules-review`) like
+    every other example, preserving the example's structure.
+
+  Pinned by the new `tests/test_doc_contracts.py`, which parses the
+  documents and cross-checks them against the validators' actual field
+  sets, phase vocabulary, and diagnostics instead of trusting prose.
+
+- `analyze_commands.py` no longer fails open: unknown executables, `sudo`/
+  `env`/`timeout`/`nice`/`nohup`/`stdbuf` wrappers (unwrapped by basename),
+  `xargs` and `$VAR` indirection, clustered `-lc` interpreter flags, shell
+  invocations of script files, git global options before the subcommand,
+  `php bin/console` / `symfony console` database commands, and
+  `npm i`/`ci`/`npx`/`dlx`-family runners all classify or block instead of
+  reporting `verification_safe=true`. Blocked commands now carry an explicit
+  `verification_blocker` category instead of `non_mutating`. False positives
+  fixed (`ruff check .`, `gofmt -l .`, `pytest -W error`); alias expansion
+  is bounded (512 walks, fail-closed `EXPANSION_LIMIT`); unknown bare
+  `yarn`/`pnpm`/`bun` scripts fail closed as `UNKNOWN_ALIAS`; direct
+  `composer <builtin>` classifies the builtin, not a shadowing script.
+- `publish_staging.py` refuses to write outside its contract: publication
+  plans must be members of the staged manifest, removal plans members of
+  the target manifest, and non-ownable runtime state (memory-bank/
+  project-brain) is rejected before any mutation. Rollback now removes
+  directory chains publication created and, using post-publish content
+  hashes recorded in the journal, skips (and reports) files edited by third
+  parties instead of silently clobbering them. `classify_update` no longer
+  reports the staged `.infra-manifest.json` as a `new-file-collision`, and
+  malformed manifest/decision entries raise clean `OwnershipError`s.
+- `merge_gitignore.py` emits positive patterns before `!` negations so
+  re-includes survive git's last-match-wins, and a requirement that would
+  silently override a team `!entry` (or vice versa) is now a reported
+  conflict requiring an explicit decision.
+- `validate_skill_quality.py` diagnoses wrong-typed plan fields instead of
+  crashing (five reproduced crash sites; `--json` always emits its
+  payload), accepts the shipped five-key `candidate-registry.json`
+  (previously every default-registry `--skill-plan` run failed
+  `REGISTRY_INVALID`), no longer corrupts similarity metrics via the
+  `profile` normalization regex, and flags per-trigger routing collisions
+  that whole-set Jaccard diluted below threshold. Also fixed: unescaped
+  skill names in regexes, `_globs_intersect` false positives on disjoint
+  patterns, glob matches escaping the target through symlinks, the dead
+  pre-`resolve()` symlink guard, trailing sentence punctuation in
+  traceability tokens, and YAML folded/literal description parsing.
+- `validate_flow_contracts.py` reports structured errors instead of
+  raising on malformed routing fields and null stage `agents`, and command
+  file-set discovery follows declared flow names instead of a hardcoded
+  `flow-*.md` glob. `validate_generated.py` reports one placeholder error
+  per file/pattern. `validate_reference_catalogs.py` rejects empty
+  candidate registries and reports unreadable catalogs per file instead of
+  crashing.
+- Memory readiness in the seeded `context.py` distinguishes transient git
+  probe failures (`git-probe-failed`) from detached HEAD and makes
+  `unborn-head` genuinely detectable; the workflow-smoke repeatability hash
+  now covers recomputed outputs instead of constants.
+- CI: the reliability job is pinned to Python 3.9 (its 3.x leg duplicated
+  the tests-matrix and mirrors jobs), and `build_mirrors.py --check` now
+  detects stale mirrors of deleted canonical `only`-class files (pinned by
+  the new root `tests/test_build_mirrors.py`).
+
 ## [2.5.0] - 2026-08-14
 
 ### Added

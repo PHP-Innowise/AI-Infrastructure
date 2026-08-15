@@ -87,21 +87,16 @@ each validated wrapped agent and selected command-carrying edition, write
      `writes: true`; preserve graph order; stop at every checkpoint for explicit
      user approval (a multi-stage flow MUST declare at least one); stop and
      report a failed stage rather than retrying silently.
-8. **Validate the compiled graph.** After `skill-flow-composer` writes its
-   artifact, run the stdlib validator against each selected edition:
-
-   ```bash
-   python3 .agents/skills/bootstrap-verifier/scripts/validate_flow_contracts.py \
-     --plan "tasks/TASK-003/skill-generation-plan.json" \
-     --skill-flow "tasks/TASK-003/infra-generate-staging/.cursor/skills/SKILL FLOW.md" \
-     --commands-dir "tasks/TASK-003/infra-generate-staging/.cursor/commands"
-   ```
-
-   Repeat with selected Claude paths. Codex has no executable command layer;
-   its `SKILL FLOW.md` is compared through a command-carrying selected edition,
-   or by the orchestrator's canonical graph check when Codex is selected alone.
-   Any graph, order, phase, agent, checkpoint, required-review, roster, writer
+8. **Compiled-graph validation is orchestrator-owned - do NOT run it here.**
+   `skill-flow-composer` runs after command-forge, so `SKILL FLOW.md` does not
+   exist yet when this skill finishes; invoking `validate_flow_contracts.py`
+   now would fail on the missing artifact instead of validating anything.
+   After `skill-flow-composer` writes its artifact, `infra-generate` step 8
+   runs that validator against each selected command-carrying edition, and any
+   graph, order, phase, agent, checkpoint, required-review, roster, writer
    serialization, adjacency, or routing-oracle mismatch blocks publication.
+   In this skill's report, record compiled-graph validation as pending that
+   orchestrator gate.
 9. **Log** every command path and agent plus each flow's core stages,
    conditional specialist lanes, skipped agents with reasons, and routing test
    results to `command-forge-log.md`.
@@ -120,14 +115,16 @@ each validated wrapped agent and selected command-carrying edition, write
 tasks/TASK-{N}/command-forge-log.md
 
 ## Next
-hook-forge; memory-seed/skill-flow-composer if not already run.
+hook-forge; memory-seed/skill-flow-composer if not already run. Compiled-graph
+validation stays pending until the orchestrator runs
+`validate_flow_contracts.py` after `skill-flow-composer`.
 ```
 
 ## Guardrails
 
 - MUST author one command per agent in the agent-forge log; MUST NOT invent a command for an agent that was not generated.
 - MUST write commands ONLY into selected editions among {Claude, Cursor}; MUST NEVER write a command into Codex.
-- MUST give the Claude command only `spawns`, `phase`, `flow-next`, `flow-alternatives` (no `name`/`description`), and the Cursor command only `name`, `description`.
+- MUST give the per-agent Claude command only `spawns`, `phase`, `flow-next`, `flow-alternatives` (no `name`/`description`), and the per-agent Cursor command only `name`, `description`. Flow commands are the sole exception: in every selected command-carrying edition they carry `flow` + ordered `stages` frontmatter and one fenced `json flow-contract` block, per step 7 and the flow guardrail below.
 - MUST make each per-agent command spawn exactly its one `<name>-agent` and carry no skill logic.
 - MUST generate exactly the canonical `flow_contracts.flows[]` for every
   selected command-carrying edition, composed ONLY of canonical roster agents,

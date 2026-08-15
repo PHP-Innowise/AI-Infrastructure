@@ -7,6 +7,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -1332,6 +1333,321 @@ Be careful.
         codes = self.codes()
         self.assertIn("SKILL_PLAN_INCOMPLETE", codes)
         self.assertIn("EVIDENCE_ID_DUPLICATE", codes)
+
+    def test_triggers_as_list_is_diagnosed_not_crashed(self) -> None:
+        self.plan["skills"][0]["triggers"] = ["change Firebase messaging"]
+        self.rewrite()
+        self.assertIn(
+            "SKILL_TRIGGERS_INVALID",
+            [item.code for item in self.plan_diagnostics()],
+        )
+        self.assertIn("SKILL_TRIGGERS_INVALID", self.codes())
+
+    def test_triggers_null_positive_is_diagnosed_not_crashed(self) -> None:
+        self.plan["skills"][0]["triggers"]["positive"] = None
+        self.rewrite()
+        self.assertIn(
+            "SKILL_TRIGGERS_INVALID",
+            [item.code for item in self.plan_diagnostics()],
+        )
+        self.assertIn("SKILL_TRIGGERS_INVALID", self.codes())
+
+    def test_string_line_range_is_diagnosed_not_crashed(self) -> None:
+        self.plan["evidence"][0]["line_range"] = {"start": "1", "end": "5"}
+        self.rewrite()
+        self.assertIn(
+            "EVIDENCE_LINE_RANGE",
+            [item.code for item in self.plan_diagnostics()],
+        )
+        self.assertIn("EVIDENCE_LINE_RANGE", self.codes())
+
+    def test_schema_1_2_string_source_paths_is_diagnosed_not_crashed(self) -> None:
+        self.use_schema_1_2()
+        self.plan["skills"][0]["source_paths"] = "config/firebase.php"
+        self.rewrite()
+        self.assertIn(
+            "SKILL_PLAN_VALUE",
+            [item.code for item in self.plan_diagnostics()],
+        )
+
+    def test_non_list_nearest_siblings_is_diagnosed_not_crashed(self) -> None:
+        self.plan["skills"][0]["nearest_siblings"] = None
+        self.rewrite()
+        self.assertIn(
+            "SKILL_PLAN_VALUE",
+            [item.code for item in self.plan_diagnostics()],
+        )
+        self.plan = self.base_plan()
+        self.use_schema_1_1()
+        self.plan["skills"][0]["nearest_siblings"] = None
+        self.rewrite()
+        self.assertIn(
+            "SKILL_PLAN_VALUE",
+            [item.code for item in self.plan_diagnostics()],
+        )
+
+    def test_agents_dir_json_cli_reports_non_dict_skill_entry(self) -> None:
+        agents = self.write_agent_wrappers()
+        self.plan["skills"].append("rogue-entry")
+        self.rewrite()
+        command = [
+            sys.executable,
+            str(VALIDATOR_PATH),
+            "--skills-dir",
+            str(self.skills),
+            "--plan",
+            str(self.plan_path),
+            "--target",
+            str(self.target),
+            "--registry",
+            str(self.registry_path),
+            "--agents-dir",
+            str(agents),
+            "--json",
+        ]
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 1, result.stderr or result.stdout)
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["valid"])
+        self.assertIn(
+            "SKILL_PLAN_INVALID",
+            [item["code"] for item in payload["diagnostics"]],
+        )
+
+    def test_profile_normalization_only_rewrites_profile_identifiers(self) -> None:
+        normalize = validator._normalize_line
+        self.assertEqual(
+            normalize("review the profile before deploying"),
+            "review the profile before deploying",
+        )
+        summary = normalize(
+            "compare the code against the approved project profile summary"
+        )
+        budget = normalize(
+            "compare the code against the approved project profile budget"
+        )
+        self.assertNotEqual(summary, budget)
+        self.assertEqual(
+            summary,
+            "compare the code against the approved project profile summary",
+        )
+        self.assertEqual(
+            normalize("check the profiler output"), "check the profiler output"
+        )
+        self.assertEqual(
+            normalize("read profile-2024-alpha now"), "read profile-id now"
+        )
+        self.assertEqual(
+            normalize("apply PROFILE_A settings"), "apply profile-id settings"
+        )
+
+    def test_shared_positive_trigger_is_ambiguous_despite_low_set_overlap(self) -> None:
+        first, second = self.plan["skills"]
+        first["triggers"]["positive"] = [
+            "review Doctrine migrations",
+            "check database schema changes",
+        ]
+        second["triggers"]["positive"] = [
+            "review Doctrine migrations",
+            "design entity relationships",
+            "plan messenger transport indexes",
+        ]
+        first["nearest_siblings"][0]["boundary"] = "Adjacent scope differs."
+        second["nearest_siblings"][0]["boundary"] = "Adjacent scope differs."
+        self.rewrite()
+        left_tokens = validator._meaningful_tokens(
+            " ".join(first["triggers"]["positive"])
+        )
+        right_tokens = validator._meaningful_tokens(
+            " ".join(second["triggers"]["positive"])
+        )
+        whole_set_score = len(left_tokens & right_tokens) / len(
+            left_tokens | right_tokens
+        )
+        self.assertLess(whole_set_score, 0.75)
+        self.assertIn(
+            "ROUTING_AMBIGUITY",
+            [item.code for item in self.plan_diagnostics()],
+        )
+
+    def test_distinct_triggers_without_precedence_are_not_ambiguous(self) -> None:
+        first, second = self.plan["skills"]
+        first["nearest_siblings"][0]["boundary"] = "Adjacent scope differs."
+        second["nearest_siblings"][0]["boundary"] = "Adjacent scope differs."
+        self.rewrite()
+        self.assertNotIn(
+            "ROUTING_AMBIGUITY",
+            [item.code for item in self.plan_diagnostics()],
+        )
+
+    def test_shipped_candidate_registry_is_accepted_by_the_gate(self) -> None:
+        registry_payload = json.loads(
+            validator.DEFAULT_REGISTRY.read_text(encoding="utf-8")
+        )
+        diagnostics: list = []
+        candidates = validator._load_registry(
+            validator.DEFAULT_REGISTRY,
+            registry_payload["catalog_version"],
+            diagnostics,
+        )
+        self.assertEqual([item.code for item in diagnostics], [])
+        self.assertEqual(
+            set(candidates),
+            {item["id"] for item in registry_payload["candidates"]},
+        )
+
+    def test_registry_with_unknown_top_level_key_is_rejected(self) -> None:
+        registry = json.loads(self.registry_path.read_text(encoding="utf-8"))
+        registry["unexpected"] = True
+        self.registry_path.write_text(
+            json.dumps(registry, indent=2) + "\n", encoding="utf-8"
+        )
+        self.assertIn(
+            "REGISTRY_INVALID",
+            [item.code for item in self.plan_diagnostics()],
+        )
+
+    def test_regex_metacharacter_skill_name_does_not_crash(self) -> None:
+        old, new = "firebase-services", "firebase-(services"
+        self.plan["skills"][0]["name"] = new
+        self.skill_texts[new] = self.skill_texts.pop(old).replace(old, new)
+        self.rewrite()
+        codes = self.codes()
+        self.assertIn("SKILL_SIBLING_UNKNOWN", codes)
+        agents = self.write_agent_wrappers()
+        diagnostics = validator.validate_agent_routing(
+            agents,
+            self.plan_path,
+            self.target,
+            registry_path=self.registry_path,
+            validate_plan_first=False,
+        )
+        self.assertIsInstance(diagnostics, list)
+
+    def test_disjoint_extension_globs_do_not_collide(self) -> None:
+        self.assertFalse(validator._globs_intersect("docs/*.md", "docs/*.json"))
+        self.assertFalse(
+            validator._globs_intersect("docs/*.md", "docs/CHANGELOG.json")
+        )
+        self.assertFalse(validator._globs_intersect("docs/*.md", "src/*.md"))
+        self.assertTrue(validator._globs_intersect("docs/*.md", "docs/**"))
+        self.assertTrue(validator._globs_intersect("docs/*.md", "docs/README.md"))
+        self.assertTrue(validator._globs_intersect("docs", "docs/*.md"))
+        self.assertTrue(validator._globs_intersect("docs/*", "docs/*.md"))
+        # A bare wildcard-free subdirectory may denote a whole tree
+        # (docs/sub/notes.md is matched by fnmatch's slash-crossing "*"),
+        # so it stays a conservative collision with an ancestor-level glob.
+        self.assertTrue(validator._globs_intersect("docs/*.md", "docs/sub"))
+        self.assertTrue(validator._globs_intersect("docs/sub", "docs/*.md"))
+        self.assertTrue(validator._globs_intersect("docs/sub/", "docs/*.md"))
+        # Disjoint sibling directories still do not collide.
+        self.assertFalse(validator._globs_intersect("docs/sub", "docs/other"))
+        # A wildcard-free name WITH an extension stays a single file, so the
+        # suffix disjointness proof still applies to it.
+        self.assertFalse(
+            validator._globs_intersect("docs/*.md", "docs/sub.json")
+        )
+        self.plan["skills"][0]["writes"] = ["reports/*.md"]
+        self.plan["skills"][1]["writes"] = ["reports/*.json"]
+        self.rewrite()
+        self.assertNotIn(
+            "WRITE_SURFACE_COLLISION",
+            [item.code for item in self.plan_diagnostics()],
+        )
+
+    def test_character_class_globs_stay_conservative(self) -> None:
+        # fnmatch proves "docs/b.txt" matches both patterns, so the suffix
+        # disjointness proof must not fire when a [...] class is in the tail.
+        self.assertTrue(
+            validator._globs_intersect("docs/[ab].txt", "docs/[bc].txt")
+        )
+        self.assertTrue(
+            validator._globs_intersect("docs/[ab].txt", "docs/*.txt")
+        )
+        # A class-bearing tail is suffix-unknown; a class before the last
+        # wildcard still yields a provable literal tail.
+        self.assertIsNone(validator._glob_suffix("docs/[ab].txt"))
+        self.assertIsNone(validator._glob_suffix("docs/*.t[xy]t"))
+        self.assertEqual(validator._glob_suffix("docs/[ab]*.md"), ".md")
+        # Directory-disjoint class patterns still do not collide.
+        self.assertFalse(
+            validator._globs_intersect("src/[ab].txt", "docs/[ab].txt")
+        )
+
+    def test_glob_path_matches_do_not_follow_symlinks_out_of_target(self) -> None:
+        outside = self.base / "outside"
+        outside.mkdir()
+        (outside / "secret.txt").write_text("secret", encoding="utf-8")
+        (self.target / "link").symlink_to(outside)
+        self.assertEqual(validator._path_matches(self.target, "link/*.txt"), [])
+        (self.target / "docs").mkdir()
+        (self.target / "docs" / "a.txt").write_text("a", encoding="utf-8")
+        self.assertEqual(
+            validator._path_matches(self.target, "docs/*.txt"),
+            [self.target / "docs" / "a.txt"],
+        )
+
+    def test_symlinked_skills_dir_is_rejected(self) -> None:
+        link = self.base / "skills-link"
+        link.symlink_to(self.skills)
+        diagnostics = validator.validate(
+            link, self.plan_path, self.target, self.registry_path
+        )
+        self.assertIn(
+            "SKILLS_DIR_UNSAFE", [item.code for item in diagnostics]
+        )
+
+    def test_tokenizer_strips_sentence_punctuation(self) -> None:
+        self.assertEqual(
+            validator._tokens("The project uses config/services.yaml."),
+            ["project", "uses", "config/services.yaml"],
+        )
+        self.assertIn("doctrine", validator._meaningful_tokens("uses Doctrine."))
+        self.assertTrue(
+            validator._contract_matches(
+                ["config/services.yaml"],
+                "The project uses config/services.yaml.",
+            )
+        )
+
+    def test_frontmatter_supports_folded_and_literal_descriptions(self) -> None:
+        fields, body = validator._parse_frontmatter(
+            "---\nname: sample\ndescription: >\n  Use when reviewing\n"
+            "  folded descriptions.\n---\nBody\n"
+        )
+        self.assertEqual(fields["name"], "sample")
+        self.assertEqual(
+            fields["description"], "Use when reviewing folded descriptions."
+        )
+        self.assertEqual(body, "Body")
+        fields, _ = validator._parse_frontmatter(
+            "---\ndescription: |\n  Use when needed.\n  Second line.\n---\n"
+        )
+        self.assertEqual(fields["description"], "Use when needed. Second line.")
+        self.skill_texts["firebase-services"] = self.skill_texts[
+            "firebase-services"
+        ].replace(
+            "description: Use when changing Firebase initialization, messaging,"
+            " or provider failure handling.",
+            "description: >\n  Use when changing Firebase initialization,\n"
+            "  messaging, or provider failure handling.",
+        )
+        self.rewrite()
+        codes = self.codes()
+        self.assertNotIn("SKILL_DESCRIPTION", codes)
+        self.assertNotIn("SKILL_FRONTMATTER_NAME", codes)
+
+    def test_fixture_catalog_expected_codes_are_emitted_by_validator(self) -> None:
+        source = VALIDATOR_PATH.read_text(encoding="utf-8")
+        emitted = set(re.findall(r'"([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)"', source))
+        cases = json.loads(CASES_PATH.read_text(encoding="utf-8"))
+        for name, case in sorted(cases.items()):
+            if case["expected"] is not None:
+                self.assertIn(
+                    case["expected"],
+                    emitted,
+                    f"{name} expects a code the validator never emits",
+                )
 
 
 if __name__ == "__main__":

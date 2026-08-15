@@ -29,8 +29,9 @@ target manifest member.
 
 1. **Locate the profile.** Require the target project path (must match a profile from `infra-scan`); if more than one `TASK-{N}/` exists for that target, use the most recent unless the user specifies one.
 2. **Validate evidence and the generation plan.** Require the matching schema
-   **1.2** `skill-generation-plan.json`, including top-level
-   `routing_cases[]` and canonical `flow_contracts`. Re-check every
+   **1.2** `skill-generation-plan.json`, including per-skill
+   `routing_cases[]` (`skills[].routing_cases`) and canonical top-level
+   `flow_contracts`. Re-check every
    target-relative evidence path,
    containment, fingerprint/range, authority, and supported claim against the
    current target. Require one complete contract per proposed skill and reject
@@ -109,6 +110,11 @@ target manifest member.
 
    Omit `--existing` when the target file is absent. Repeated requirement
    documents are validated, unioned, sorted, and deduplicated by the helper.
+   The managed block emits positive patterns before `!` negations so
+   re-includes win under git's last-match rule (metadata `requirements` stay
+   plain-sorted), and a requirement that exactly contradicts a team entry
+   (`x` vs `!x`) fails the merge for an explicit human decision instead of
+   being appended silently.
 10. **Stamp and stage the manifest.** Stamp only a staged `AGENTS.md` produced
    by this run. Build `.infra-manifest.json` against staging from the explicit
    write plan, final source map, and decisions. Runtime state remains excluded
@@ -196,6 +202,16 @@ python3 .agents/skills/bootstrap-verifier/scripts/publish_staging.py publish \
   --baseline "tasks/TASK-003/prepublication-baseline.json" \
   --journal "tasks/TASK-003/publication-rollback"
 ```
+
+`publish` proves the plans safe before writing anything: every
+manifest-ownable publication path must be a member of the staged manifest's
+files map, non-ownable runtime state (live memory-bank/project-brain data) may
+only be seeded into a path that does not yet exist in the target and is never
+overwritten, cache artifacts are refused, and every removal-plan path must be
+a member of the target's current manifest. `rollback` restores exact baseline
+bytes and modes, removes directory chains the publication created, and never
+clobbers a file that changed after publication: a third-party edit is
+preserved and reported as a conflict to resolve manually.
 
 Keep the journal until post-publication `bootstrap-verifier` succeeds. On any
 failure:

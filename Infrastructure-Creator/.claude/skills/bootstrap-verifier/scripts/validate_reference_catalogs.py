@@ -37,7 +37,11 @@ def validate(directory: Path, forbidden: list[str] | None = None) -> list[str]:
         errors.append(f"expected at least six reference catalogs, found {len(files)}")
     headings: dict[str, set[str]] = {}
     for path in files:
-        text = path.read_text(encoding="utf-8")
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as error:
+            errors.append(f"{path.name}: cannot read catalog: {error}")
+            continue
         headings[path.name] = {
             heading_slug(match.group(1))
             for match in re.finditer(r"^#{1,6}\s+(.+?)\s*$", text, re.M)
@@ -66,6 +70,10 @@ def validate(directory: Path, forbidden: list[str] | None = None) -> list[str]:
     ):
         errors.append("candidate-registry.json: invalid schema")
     else:
+        if not candidates:
+            errors.append(
+                "candidate-registry.json: candidates must list at least one entry"
+            )
         seen: set[str] = set()
         for index, candidate in enumerate(candidates):
             if (

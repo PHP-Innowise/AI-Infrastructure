@@ -43,14 +43,36 @@ class StagedPublicationTest(unittest.TestCase):
         for rel, content in (
             ("config/policy.md", "new\n"),
             ("runtime/seed.md", "seed\n"),
-            (".infra-manifest.json", '{"manifest_version": 1}\n'),
         ):
             path = self.staging / rel
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
+        self.refresh_staged_manifest()
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def refresh_staged_manifest(self) -> None:
+        """Write a staged manifest owning every manifest-ownable staged file."""
+        files = {
+            path.relative_to(self.staging).as_posix(): ownership.sha256_file(path)
+            for path in sorted(self.staging.rglob("*"))
+            if path.is_file()
+            and path.name != ownership.MANIFEST_NAME
+            and ownership.may_be_manifest_owned(
+                path.relative_to(self.staging).as_posix()
+            )
+        }
+        (self.staging / ownership.MANIFEST_NAME).write_text(
+            json.dumps({"manifest_version": 1, "files": files}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    def write_target_manifest(self, files: dict) -> None:
+        (self.target / ownership.MANIFEST_NAME).write_text(
+            json.dumps({"manifest_version": 1, "files": files}, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
     def test_publish_then_rollback_restores_exact_baseline(self) -> None:
         paths = planned_paths(self.plan)
@@ -77,6 +99,8 @@ class StagedPublicationTest(unittest.TestCase):
             (self.target / "config/policy.md").read_text(encoding="utf-8"), "old\n"
         )
         self.assertFalse((self.target / "runtime/seed.md").exists())
+        self.assertFalse((self.target / "runtime").exists())
+        self.assertTrue((self.target / "config").is_dir())
         self.assertFalse((self.target / ".infra-manifest.json").exists())
 
     def test_changed_file_rollback_restores_exact_bytes_and_mode(self) -> None:
@@ -202,6 +226,9 @@ class StagedPublicationTest(unittest.TestCase):
     def test_approved_removal_is_rollback_capable(self) -> None:
         obsolete = self.target / "config/obsolete.md"
         obsolete.write_text("restore me\n", encoding="utf-8")
+        self.write_target_manifest(
+            {"config/obsolete.md": ownership.sha256_file(obsolete)}
+        )
         paths = planned_paths(self.plan)
         removals = ["config/obsolete.md"]
         snapshot = build_snapshot(self.target, paths + removals)
@@ -219,6 +246,172 @@ class StagedPublicationTest(unittest.TestCase):
 
         restore(self.target, journal)
         self.assertEqual(obsolete.read_text(encoding="utf-8"), "restore me\n")
+
+    def test_publish_refuses_to_overwrite_runtime_state(self) -> None:
+        memory = self.target / "memory-bank/local/notes.md"
+        memory.parent.mkdir(parents=True)
+        memory.write_text("your live memory\n", encoding="utf-8")
+        staged = self.staging / "memory-bank/local/notes.md"
+        staged.parent.mkdir(parents=True)
+        staged.write_text("generator overwrote your memory\n", encoding="utf-8")
+        self.refresh_staged_manifest()
+        self.plan.write_text(
+            "config/policy.md\nruntime/seed.md\nmemory-bank/local/notes.md\n",
+            encoding="utf-8",
+        )
+        paths = planned_paths(self.plan)
+        snapshot = build_snapshot(self.target, paths)
+        journal = (Path(self.temp.name) / "runtime-journal").resolve()
+
+        with self.assertRaisesRegex(
+            PublicationError, "non-ownable runtime state"
+        ):
+            publish(self.target, self.staging, paths, snapshot, journal)
+
+        self.assertEqual(
+            memory.read_text(encoding="utf-8"), "your live memory\n"
+        )
+        self.assertEqual(
+            (self.target / "config/policy.md").read_text(encoding="utf-8"), "old\n"
+        )
+        self.assertFalse(journal.exists())
+        self.assertFalse((self.target / ".infra-manifest.json").exists())
+
+    def test_publish_seeds_runtime_state_only_into_absent_paths(self) -> None:
+        staged = self.staging / "memory-bank/local/notes.md"
+        staged.parent.mkdir(parents=True)
+        staged.write_text("initial seed\n", encoding="utf-8")
+        self.refresh_staged_manifest()
+        self.plan.write_text(
+            "config/policy.md\nruntime/seed.md\nmemory-bank/local/notes.md\n",
+            encoding="utf-8",
+        )
+        paths = planned_paths(self.plan)
+        snapshot = build_snapshot(self.target, paths)
+        journal = (Path(self.temp.name) / "seed-journal").resolve()
+
+        publish(self.target, self.staging, paths, snapshot, journal)
+
+        self.assertEqual(
+            (self.target / "memory-bank/local/notes.md").read_text(
+                encoding="utf-8"
+            ),
+            "initial seed\n",
+        )
+
+    def test_publish_refuses_paths_absent_from_staged_manifest(self) -> None:
+        extra = self.staging / "unowned-extra.md"
+        extra.write_text("orphan\n", encoding="utf-8")
+        self.plan.write_text(
+            "config/policy.md\nruntime/seed.md\nunowned-extra.md\n",
+            encoding="utf-8",
+        )
+        paths = planned_paths(self.plan)
+        snapshot = build_snapshot(self.target, paths)
+        journal = (Path(self.temp.name) / "unowned-journal").resolve()
+
+        with self.assertRaisesRegex(
+            PublicationError, "missing from the staged manifest: unowned-extra.md"
+        ):
+            publish(self.target, self.staging, paths, snapshot, journal)
+
+        self.assertFalse((self.target / "unowned-extra.md").exists())
+        self.assertEqual(
+            (self.target / "config/policy.md").read_text(encoding="utf-8"), "old\n"
+        )
+        self.assertFalse(journal.exists())
+
+    def test_publish_refuses_removal_of_unmanifested_team_file(self) -> None:
+        team_file = self.target / "config/team-owned.md"
+        team_file.write_text("team\n", encoding="utf-8")
+        self.write_target_manifest({})
+        paths = planned_paths(self.plan)
+        removals = ["config/team-owned.md"]
+        snapshot = build_snapshot(self.target, paths + removals)
+        journal = (Path(self.temp.name) / "team-removal-journal").resolve()
+
+        with self.assertRaisesRegex(
+            PublicationError,
+            "not owned by the target manifest: config/team-owned.md",
+        ):
+            publish(self.target, self.staging, paths, snapshot, journal, removals)
+
+        self.assertEqual(team_file.read_text(encoding="utf-8"), "team\n")
+        self.assertFalse(journal.exists())
+
+    def test_publish_refuses_removals_when_target_has_no_manifest(self) -> None:
+        team_file = self.target / "config/team-owned.md"
+        team_file.write_text("team\n", encoding="utf-8")
+        paths = planned_paths(self.plan)
+        removals = ["config/team-owned.md"]
+        snapshot = build_snapshot(self.target, paths + removals)
+        journal = (Path(self.temp.name) / "legacy-removal-journal").resolve()
+
+        with self.assertRaisesRegex(PublicationError, "target manifest missing"):
+            publish(self.target, self.staging, paths, snapshot, journal, removals)
+
+        self.assertEqual(team_file.read_text(encoding="utf-8"), "team\n")
+        self.assertFalse(journal.exists())
+
+    def test_rollback_removes_directory_chains_publish_created(self) -> None:
+        staged = self.staging / "deep/nested/dir/file.md"
+        staged.parent.mkdir(parents=True)
+        staged.write_text("generated\n", encoding="utf-8")
+        self.refresh_staged_manifest()
+        self.plan.write_text(
+            "config/policy.md\nruntime/seed.md\ndeep/nested/dir/file.md\n",
+            encoding="utf-8",
+        )
+        paths = planned_paths(self.plan)
+        snapshot = build_snapshot(self.target, paths)
+        journal = (Path(self.temp.name) / "dirs-journal").resolve()
+
+        publish(self.target, self.staging, paths, snapshot, journal)
+        self.assertTrue((self.target / "deep/nested/dir/file.md").is_file())
+
+        restore(self.target, journal)
+        self.assertFalse((self.target / "deep").exists())
+        self.assertFalse((self.target / "runtime").exists())
+        self.assertTrue((self.target / "config").is_dir())
+
+    def test_rollback_keeps_created_directory_holding_team_content(self) -> None:
+        paths = planned_paths(self.plan)
+        snapshot = build_snapshot(self.target, paths)
+        journal = (Path(self.temp.name) / "kept-dir-journal").resolve()
+
+        publish(self.target, self.staging, paths, snapshot, journal)
+        team_file = self.target / "runtime/team-added.md"
+        team_file.write_text("team\n", encoding="utf-8")
+
+        restore(self.target, journal)
+        self.assertFalse((self.target / "runtime/seed.md").exists())
+        self.assertEqual(team_file.read_text(encoding="utf-8"), "team\n")
+        self.assertTrue((self.target / "runtime").is_dir())
+
+    def test_rollback_preserves_third_party_edits_and_reports_conflict(self) -> None:
+        paths = planned_paths(self.plan)
+        snapshot = build_snapshot(self.target, paths)
+        journal = (Path(self.temp.name) / "conflict-journal").resolve()
+
+        publish(self.target, self.staging, paths, snapshot, journal)
+        edited = self.target / "config/policy.md"
+        edited.write_text("post-publish team edit\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            PublicationError, "third-party edits.*config/policy.md"
+        ):
+            restore(self.target, journal)
+
+        self.assertEqual(
+            edited.read_text(encoding="utf-8"), "post-publish team edit\n"
+        )
+        self.assertFalse((self.target / "runtime/seed.md").exists())
+        self.assertFalse((self.target / ".infra-manifest.json").exists())
+        metadata = json.loads(
+            (journal / "journal.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(metadata["status"], "rolled-back-with-conflicts")
+        self.assertEqual(metadata["conflicts"], ["config/policy.md"])
 
     def test_update_cli_persists_keep_and_merge_final_hashes(self) -> None:
         kept_rel = ".claude/hooks/local-context.sh"
@@ -322,6 +515,19 @@ class StagedPublicationTest(unittest.TestCase):
             refreshed["decisions"][merged_rel]["decision"], "merged"
         )
         rows = ownership.classify_update(self.target, self.staging, refreshed)
+        self.assertEqual(
+            [item["path"] for item in rows],
+            sorted(
+                [
+                    agents_rel,
+                    kept_rel,
+                    merged_rel,
+                    "config/policy.md",
+                    "runtime/seed.md",
+                ]
+            ),
+            "the staged manifest itself must never surface as a classify row",
+        )
         row = next(item for item in rows if item["path"] == kept_rel)
         self.assertEqual(row["classification"], "standing-decision-honored")
 

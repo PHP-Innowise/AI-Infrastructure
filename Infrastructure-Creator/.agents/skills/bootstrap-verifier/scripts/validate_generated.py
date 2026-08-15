@@ -273,11 +273,12 @@ def check_placeholders(
     except (OSError, UnicodeDecodeError):
         return
     for pat in PLACEHOLDER_PATTERNS:
-        for _match in pat.finditer(text):
-            declaration = (manifest_relative_path, pat.pattern)
-            if declaration in APPROVED_VERBATIM_PLACEHOLDERS:
-                continue
-            errors.append(f"{path}: leftover placeholder matching /{pat.pattern}/")
+        if not pat.search(text):
+            continue
+        declaration = (manifest_relative_path, pat.pattern)
+        if declaration in APPROVED_VERBATIM_PLACEHOLDERS:
+            continue
+        errors.append(f"{path}: leftover placeholder matching /{pat.pattern}/")
 
 
 def validate_owned_placeholders(target: Path, files: dict, errors: list) -> None:

@@ -33,6 +33,38 @@ class ReferenceContractTest(unittest.TestCase):
         self.assertTrue(any("procedure" in error for error in errors))
         self.assertTrue(any("candidate-registry" in error for error in errors))
 
+    def test_empty_candidate_registry_is_rejected(self) -> None:
+        source = ROOT / ".agents/skills/skill-forge/references"
+        with tempfile.TemporaryDirectory(prefix="reference-empty-") as temporary:
+            references = Path(temporary)
+            for path in source.glob("*"):
+                if path.is_file():
+                    shutil.copy2(path, references / path.name)
+            (references / "candidate-registry.json").write_text(
+                '{"schema_version": "1.0", "candidates": []}\n', encoding="utf-8"
+            )
+            errors = validate(references)
+        self.assertTrue(
+            any("candidates must list at least one entry" in error for error in errors)
+        )
+
+    def test_unreadable_catalog_is_a_validation_error_not_a_crash(self) -> None:
+        source = ROOT / ".agents/skills/skill-forge/references"
+        with tempfile.TemporaryDirectory(prefix="reference-decode-") as temporary:
+            references = Path(temporary)
+            for path in source.glob("*"):
+                if path.is_file():
+                    shutil.copy2(path, references / path.name)
+            corrupted = sorted(references.glob("*.md"))[0]
+            corrupted.write_bytes(b"\xff\xfe invalid utf-8 catalog\n")
+            errors = validate(references)
+        self.assertTrue(
+            any(
+                error.startswith(f"{corrupted.name}: cannot read catalog")
+                for error in errors
+            )
+        )
+
     def test_registry_catalog_anchor_must_resolve(self) -> None:
         source = ROOT / ".agents/skills/skill-forge/references"
         with tempfile.TemporaryDirectory(prefix="reference-registry-") as temporary:

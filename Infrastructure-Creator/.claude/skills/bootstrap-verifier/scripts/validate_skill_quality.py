@@ -205,6 +205,11 @@ def _flatten_strings(value: Any) -> list[str]:
     return []
 
 
+def _as_list(value: Any) -> list[Any]:
+    """Project a possibly wrong-typed plan field to a safe iterable."""
+    return value if isinstance(value, list) else []
+
+
 def _is_substantive_contract(value: Any, *, allow_empty: bool = False) -> bool:
     if isinstance(value, str):
         return bool(value.strip())
@@ -311,11 +316,13 @@ def _load_registry(
             f"candidate registry unreadable or invalid: {error}",
         )
         return {}
-    if not isinstance(registry, dict) or set(registry) != {
-        "schema_version",
-        "catalog_version",
-        "candidates",
-    }:
+    required_registry_fields = {"schema_version", "catalog_version", "candidates"}
+    optional_registry_fields = {"runtime_contract", "compilation_requirements"}
+    if (
+        not isinstance(registry, dict)
+        or not required_registry_fields <= set(registry)
+        or not set(registry) <= required_registry_fields | optional_registry_fields
+    ):
         _diag(diagnostics, "REGISTRY_INVALID", "candidate registry fields are invalid")
         return {}
     if (
@@ -391,10 +398,22 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
     except StopIteration:
         return {}, text
     fields: dict[str, str] = {}
-    for line in lines[1:end]:
-        match = re.match(r"^([A-Za-z][A-Za-z0-9_-]*):\s*(.*?)\s*$", line)
-        if match:
-            fields[match.group(1)] = match.group(2).strip().strip("\"'")
+    index = 1
+    while index < end:
+        match = re.match(r"^([A-Za-z][A-Za-z0-9_-]*):\s*(.*?)\s*$", lines[index])
+        index += 1
+        if not match:
+            continue
+        value = match.group(2).strip().strip("\"'")
+        if re.fullmatch(r"[>|][+-]?", value):
+            continuation: list[str] = []
+            while index < end and (
+                not lines[index].strip() or lines[index][:1].isspace()
+            ):
+                continuation.append(lines[index].strip())
+                index += 1
+            value = " ".join(part for part in continuation if part)
+        fields[match.group(1)] = value
     return fields, "\n".join(lines[end + 1 :])
 
 
@@ -419,15 +438,21 @@ def _section(sections: dict[str, str], aliases: Iterable[str]) -> str:
 
 
 def _tokens(value: str) -> list[str]:
-    return [
-        token
-        for token in re.findall(r"[a-z0-9][a-z0-9_.:/-]*", value.lower())
-        if token not in STOPWORDS and len(token) > 1
-    ]
+    tokens: list[str] = []
+    for raw in re.findall(r"[a-z0-9][a-z0-9_.:/-]*", value.lower()):
+        token = raw.rstrip(".:/")
+        if token and token not in STOPWORDS and len(token) > 1:
+            tokens.append(token)
+    return tokens
 
 
 def _meaningful_tokens(value: str) -> set[str]:
     return {token for token in _tokens(value) if len(token) >= 3 or any(char.isdigit() for char in token)}
+
+
+def _name_pattern(name: str) -> str:
+    """Regex-safe pattern matching a skill name with '-' or ' ' separators."""
+    return r"[- ]".join(re.escape(part) for part in name.split("-"))
 
 
 def _contract_matches(contract: Any, text: str) -> bool:
@@ -442,7 +467,7 @@ def _contract_matches(contract: Any, text: str) -> bool:
 
 def _normalize_line(line: str) -> str:
     line = re.sub(r"TASK-\d+", "task-id", line, flags=re.IGNORECASE)
-    line = re.sub(r"\bprofile[-_ ]?[a-z0-9_-]*\b", "profile-id", line, flags=re.IGNORECASE)
+    line = re.sub(r"\bprofile[-_][a-z0-9_-]+\b", "profile-id", line, flags=re.IGNORECASE)
     line = re.sub(r"\s+", " ", line.strip().lower())
     return line
 
@@ -481,7 +506,10 @@ def _token_similarity(left: list[str], right: list[str]) -> float:
 
 
 def _scope_parts(values: list[str]) -> set[str]:
-    return {re.sub(r"/+$", "", value.strip().lower()) for value in values}
+    return {
+        re.sub(r"/+$", "", value.strip().lower())
+        for value in _flatten_strings(values)
+    }
 
 
 def _scopes_collide(left: set[str], right: set[str]) -> set[str]:
@@ -509,6 +537,34 @@ def _glob_prefix(value: str) -> str:
     return value[:wildcard].rstrip("/")
 
 
+def _glob_suffix(value: str) -> str | None:
+    """Literal tail after the last ``*``/``?`` wildcard (whole value if none).
+
+    Returns ``None`` when the tail contains a ``[`` character class: the text a
+    class matches is not part of the literal suffix, so the tail cannot be
+    proven literal and callers must treat the suffix as unknown.
+    """
+    index = max(value.rfind("*"), value.rfind("?"))
+    suffix = value if index < 0 else value[index + 1 :]
+    return None if "[" in suffix else suffix
+
+
+def _bare_directory_pattern(value: str) -> bool:
+    """True for a wildcard-free pattern whose final segment has no extension.
+
+    ``_normalize_glob`` accepts bare directory writes (``docs/sub/`` becomes
+    ``docs/sub``), so such a pattern may denote a whole directory tree rather
+    than a single file.  Its effective literal suffix is therefore unknown and
+    must not participate in the suffix disjointness proof: ``docs/sub`` can
+    contain ``docs/sub/notes.md``, which fnmatch's slash-crossing ``*`` lets
+    ``docs/*.md`` match.  Wildcard-free names WITH an extension (e.g.
+    ``docs/CHANGELOG.json``) are deliberately treated as single files.
+    """
+    if any(token in value for token in "*?["):
+        return False
+    return "." not in value.rsplit("/", 1)[-1]
+
+
 def _globs_intersect(left: str, right: str) -> bool:
     """Conservatively determine whether two normalized target globs intersect."""
     left = _normalize_glob(left).lower()
@@ -517,6 +573,27 @@ def _globs_intersect(left: str, right: str) -> bool:
         return False
     if fnmatch.fnmatchcase(left, right) or fnmatch.fnmatchcase(right, left):
         return True
+    left_wild = any(token in left for token in "*?[")
+    right_wild = any(token in right for token in "*?[")
+    bare_containment = (
+        (not left_wild and right.startswith(left + "/"))
+        or (not right_wild and left.startswith(right + "/"))
+    )
+    left_suffix = None if _bare_directory_pattern(left) else _glob_suffix(left)
+    right_suffix = None if _bare_directory_pattern(right) else _glob_suffix(right)
+    if (
+        not bare_containment
+        and left_suffix is not None
+        and right_suffix is not None
+        and not left_suffix.endswith(right_suffix)
+        and not right_suffix.endswith(left_suffix)
+    ):
+        # Every path matched by a glob ends with its literal suffix, so
+        # incompatible suffixes (e.g. *.md vs *.json) are provably disjoint.
+        # Suffixes containing a character class are unknown (None), as are
+        # bare directory patterns (which may denote whole trees); both fall
+        # through to the conservative prefix heuristic below.
+        return False
     left_prefix, right_prefix = _glob_prefix(left), _glob_prefix(right)
     if not left_prefix or not right_prefix:
         return True
@@ -579,7 +656,7 @@ def _contract_projection(skill: dict[str, Any]) -> dict[str, tuple[list[str], li
     for field in CONTRACT_PROJECTION_FIELDS:
         value = skill.get(field)
         if field == "triggers" and isinstance(value, dict):
-            value = list(value.get("positive", [])) + list(value.get("negative", []))
+            value = _as_list(value.get("positive")) + _as_list(value.get("negative"))
         lines = [
             normalized
             for raw in _flatten_strings(value)
@@ -611,9 +688,17 @@ def _contract_projection(skill: dict[str, Any]) -> dict[str, tuple[list[str], li
     return projection
 
 
+def _positive_triggers(skill: dict[str, Any]) -> list[str]:
+    triggers = skill.get("triggers")
+    if not isinstance(triggers, dict):
+        return []
+    return [
+        item for item in _as_list(triggers.get("positive")) if isinstance(item, str)
+    ]
+
+
 def _routing_tokens(skill: dict[str, Any]) -> set[str]:
-    triggers = skill.get("triggers", {})
-    return _meaningful_tokens(" ".join(triggers.get("positive", [])))
+    return _meaningful_tokens(" ".join(_positive_triggers(skill)))
 
 
 def _has_explicit_routing_precedence(
@@ -662,9 +747,19 @@ def _contract_ids(items: Any) -> set[str]:
 def _path_matches(target: Path, value: str) -> list[Path]:
     if any(token in value for token in "*?["):
         try:
-            return sorted(target.glob(value))
+            matches = sorted(target.glob(value))
         except (OSError, ValueError):
             return []
+        confined: list[Path] = []
+        for match in matches:
+            try:
+                relative = match.relative_to(target)
+            except ValueError:
+                continue
+            candidate = _confined(target, str(relative))
+            if candidate is not None and candidate.exists():
+                confined.append(candidate)
+        return confined
     candidate = _confined(target, value)
     return [candidate] if candidate is not None and candidate.exists() else []
 
@@ -717,7 +812,7 @@ def _validate_schema_1_2_skill(
             )
         procedure_language = " ".join(
             str(item.get("action", ""))
-            for item in skill.get("procedure_steps", [])
+            for item in _as_list(skill.get("procedure_steps"))
             if isinstance(item, dict)
         )
         if READ_ONLY_MUTATION_PATTERN.search(procedure_language):
@@ -811,7 +906,7 @@ def _validate_schema_1_2_skill(
         for path_ref in step["path_refs"]:
             if path_ref not in {
                 item.get("path")
-                for item in skill.get("path_contracts", [])
+                for item in _as_list(skill.get("path_contracts"))
                 if isinstance(item, dict)
             }:
                 _diag(
@@ -1269,10 +1364,10 @@ def _validate_schema_1_2_skill(
         if not all(
             _contract_matches(claim, text)
             for text in (
-                " ".join(skill.get("owned_scope", [])),
+                " ".join(_flatten_strings(skill.get("owned_scope"))),
                 step_text,
                 verification_text,
-                " ".join(skill.get("output_contract", [])),
+                " ".join(_flatten_strings(skill.get("output_contract"))),
             )
         ):
             _diag(
@@ -1446,7 +1541,7 @@ def _validate_schema_1_2_plan_contracts(
         evidence_claim_text = " ".join(
             claim
             for skill in plan_skills.values()
-            for anchor in skill.get("evidence_anchors", [])
+            for anchor in _as_list(skill.get("evidence_anchors"))
             if isinstance(anchor, dict)
             and anchor.get("evidence_id") in invariant["evidence_ids"]
             for claim in [str(anchor.get("claim", ""))]
@@ -1494,12 +1589,12 @@ def _validate_schema_1_2_plan_contracts(
                 )
             procedure_text = " ".join(
                 value
-                for item in skill.get("procedure_steps", [])
+                for item in _as_list(skill.get("procedure_steps"))
                 for value in _flatten_strings(item)
             )
             verification_text = " ".join(
                 value
-                for item in skill.get("verification", [])
+                for item in _as_list(skill.get("verification"))
                 for value in _flatten_strings(item)
             )
             if not _contract_matches(invariant["statement"], procedure_text) or not _contract_matches(
@@ -1767,16 +1862,37 @@ def _validate_contract_inventory(
                 if routing_union
                 else 0.0
             )
-            if routing_score >= 0.75 and not (
-                _has_explicit_routing_precedence(left, right_name)
-                or _has_explicit_routing_precedence(right, left_name)
-            ):
+            explicit_precedence = _has_explicit_routing_precedence(
+                left, right_name
+            ) or _has_explicit_routing_precedence(right, left_name)
+            if routing_score >= 0.75 and not explicit_precedence:
                 _diag(
                     diagnostics,
                     "ROUTING_AMBIGUITY",
                     f"{left_name} and {right_name} have overlapping positive "
                     f"routing ({routing_score:.3f}) without explicit precedence",
                 )
+            if not explicit_precedence:
+                for left_trigger in _positive_triggers(left):
+                    left_trigger_tokens = _meaningful_tokens(left_trigger)
+                    if not left_trigger_tokens:
+                        continue
+                    for right_trigger in _positive_triggers(right):
+                        right_trigger_tokens = _meaningful_tokens(right_trigger)
+                        trigger_union = left_trigger_tokens | right_trigger_tokens
+                        trigger_score = (
+                            len(left_trigger_tokens & right_trigger_tokens)
+                            / len(trigger_union)
+                        )
+                        if trigger_score >= 0.75:
+                            _diag(
+                                diagnostics,
+                                "ROUTING_AMBIGUITY",
+                                f"{left_name} and {right_name} share an "
+                                f"ambiguous positive trigger "
+                                f"({trigger_score:.3f}): {left_trigger!r} vs "
+                                f"{right_trigger!r}",
+                            )
 
             for field in CONTRACT_PROJECTION_FIELDS + (
                 "ownership",
@@ -1985,6 +2101,7 @@ def _validate_plan(
                         "EVIDENCE_LINE_RANGE",
                         f"evidence {evidence_id} has an invalid line_range",
                     )
+                    line_range = None
                 elif line_range is not None:
                     line_count = len(
                         resolved.read_text(
@@ -2010,9 +2127,9 @@ def _validate_plan(
                         encoding="utf-8", errors="replace"
                     ).splitlines()
                     cited_text = "\n".join(lines)
-                    if isinstance(entry.get("line_range"), dict):
-                        start = max(0, entry["line_range"].get("start", 1) - 1)
-                        end = min(len(lines), entry["line_range"].get("end", 0))
+                    if isinstance(line_range, dict):
+                        start = max(0, line_range.get("start", 1) - 1)
+                        end = min(len(lines), line_range.get("end", 0))
                         cited_text = "\n".join(lines[start:end])
                     cited_tokens = _meaningful_tokens(cited_text)
                     for claim in entry["supported_claims"]:
@@ -2119,6 +2236,7 @@ def _validate_plan(
         if name in plan_skills:
             _diag(diagnostics, "SKILL_NAME_DUPLICATE", f"duplicate skill name: {name}")
             continue
+        structural = True
         scalar_fields = ("category", "kind", "phase", "necessity_rationale")
         for field in scalar_fields:
             if not _is_nonempty_string(skill[field]):
@@ -2130,7 +2248,36 @@ def _validate_plan(
             or not _is_string_list(triggers.get("negative"))
         ):
             _diag(diagnostics, "SKILL_TRIGGERS_INVALID", f"{name}.triggers requires positive and negative string arrays")
+            if not isinstance(triggers, dict) or not all(
+                isinstance(triggers.get(key), list)
+                for key in ("positive", "negative")
+            ):
+                structural = False
         runtime_fixed = str(skill.get("kind", "")).lower() == "runtime-fixed"
+        for field in ("evidence_ids", "source_paths", "writes", "related_skills"):
+            allow_empty = field == "writes" or (runtime_fixed and field in {"evidence_ids", "source_paths"})
+            if not _is_string_list(skill[field], allow_empty=allow_empty):
+                _diag(diagnostics, "SKILL_PLAN_VALUE", f"{name}.{field} must be a string array")
+                if not _is_string_list(skill[field], allow_empty=True):
+                    structural = False
+        for field in (
+            "owned_scope", "excluded_scope", "required_procedure_roles",
+            "decision_points", "verification", "output_contract",
+            "failure_handling", "nearest_siblings",
+        ):
+            if not _is_substantive_contract(skill[field]):
+                _diag(diagnostics, "SKILL_PLAN_VALUE", f"{name}.{field} must be a substantive array")
+                if not isinstance(skill[field], (str, list)):
+                    structural = False
+        fixed_blocks = skill.get("fixed_blocks", [])
+        if not isinstance(fixed_blocks, list) or len(
+            _fixed_block_contents(fixed_blocks)
+        ) != len(fixed_blocks):
+            _diag(
+                diagnostics,
+                "SKILL_FIXED_BLOCKS_INVALID",
+                f"{name}.fixed_blocks must contain versioned id/version/content objects",
+            )
         selection_gate = skill.get("selection_gate")
         if not isinstance(selection_gate, dict) or set(selection_gate) != {
             "catalog",
@@ -2144,8 +2291,15 @@ def _validate_plan(
                 "SKILL_SELECTION_GATE",
                 f"{name}.selection_gate has invalid fields",
             )
-        else:
-            registry_candidate = registry.get(selection_gate.get("candidate_id"))
+            if not isinstance(selection_gate, dict):
+                structural = False
+        elif structural:
+            candidate_id = selection_gate.get("candidate_id")
+            registry_candidate = (
+                registry.get(candidate_id)
+                if _is_nonempty_string(candidate_id)
+                else None
+            )
             if registry_candidate is None:
                 _diag(
                     diagnostics,
@@ -2231,26 +2385,8 @@ def _validate_plan(
                             "SKILL_SELECTION_CLAIM_TRACE",
                             f"{name} selection condition is not supported by cited claims",
                         )
-        for field in ("evidence_ids", "source_paths", "writes", "related_skills"):
-            allow_empty = field == "writes" or (runtime_fixed and field in {"evidence_ids", "source_paths"})
-            if not _is_string_list(skill[field], allow_empty=allow_empty):
-                _diag(diagnostics, "SKILL_PLAN_VALUE", f"{name}.{field} must be a string array")
-        for field in (
-            "owned_scope", "excluded_scope", "required_procedure_roles",
-            "decision_points", "verification", "output_contract",
-            "failure_handling", "nearest_siblings",
-        ):
-            if not _is_substantive_contract(skill[field]):
-                _diag(diagnostics, "SKILL_PLAN_VALUE", f"{name}.{field} must be a substantive array")
-        fixed_blocks = skill.get("fixed_blocks", [])
-        if not isinstance(fixed_blocks, list) or len(
-            _fixed_block_contents(fixed_blocks)
-        ) != len(fixed_blocks):
-            _diag(
-                diagnostics,
-                "SKILL_FIXED_BLOCKS_INVALID",
-                f"{name}.fixed_blocks must contain versioned id/version/content objects",
-            )
+        if not structural:
+            continue
         for evidence_id in skill.get("evidence_ids", []):
             if evidence_id not in evidence_map:
                 _diag(diagnostics, "SKILL_EVIDENCE_UNKNOWN", f"{name} references unknown evidence: {evidence_id}")
@@ -2282,6 +2418,16 @@ def _validate_plan(
                 target,
                 diagnostics,
             )
+            if not all(
+                isinstance(skill.get(field), list)
+                for field in (
+                    "procedure_steps",
+                    "path_contracts",
+                    "evidence_anchors",
+                    "routing_cases",
+                )
+            ):
+                continue
         plan_skills[name] = skill
 
     names = set(plan_skills)
@@ -2337,8 +2483,8 @@ def _validate_plan(
         for sibling in siblings:
             if sibling == name or sibling not in names:
                 _diag(diagnostics, "SKILL_SIBLING_UNKNOWN", f"{name} has unresolved sibling reference: {sibling}")
-        for candidate in skill.get("selection_gate", {}).get(
-            "distinct_value_from", []
+        for candidate in _as_list(
+            skill.get("selection_gate", {}).get("distinct_value_from")
         ):
             if candidate not in names | rejected_names:
                 _diag(
@@ -2409,7 +2555,7 @@ def _validate_skill_file(
     for phrase in GENERIC_PHRASES:
         if phrase in lower:
             _diag(diagnostics, "SKILL_GENERIC_PHRASE", f"{name}: generic phrase is not operational: {phrase!r}")
-    if re.search(rf"\b{name.replace('-', r'[- ]')}\b.*\b{name.replace('-', r'[- ]')}\b", resolved["purpose"], re.I):
+    if re.search(rf"\b{_name_pattern(name)}\b.*\b{_name_pattern(name)}\b", resolved["purpose"], re.I):
         _diag(diagnostics, "SKILL_CIRCULAR_PURPOSE", f"{name}: purpose is circular")
 
     checks = (
@@ -2590,7 +2736,7 @@ def validate(
 ) -> list[Diagnostic]:
     diagnostics: list[Diagnostic] = []
     target = target.expanduser().resolve()
-    skills_dir = skills_dir.expanduser().resolve()
+    skills_dir = skills_dir.expanduser()
     plan_path = plan_path.expanduser().resolve()
     if not target.is_dir():
         _diag(diagnostics, "TARGET_INVALID", f"target is not a directory: {target}")
@@ -2601,6 +2747,7 @@ def validate(
     if skills_dir.is_symlink():
         _diag(diagnostics, "SKILLS_DIR_UNSAFE", f"skills directory must not be a symlink: {skills_dir}")
         return sorted(set(diagnostics))
+    skills_dir = skills_dir.resolve()
 
     plan = _load_plan(plan_path, diagnostics)
     plan_skills, evidence_map = (
@@ -2662,7 +2809,11 @@ def validate_agent_routing(
     if any(item.severity == "error" for item in diagnostics):
         return diagnostics
     plan = _load_plan(plan_path.expanduser().resolve(), diagnostics)
-    contracts = {item["name"]: item for item in plan.get("skills", [])}
+    contracts = {
+        item["name"]: item
+        for item in _as_list(plan.get("skills"))
+        if isinstance(item, dict) and _is_nonempty_string(item.get("name"))
+    }
     agents_dir = agents_dir.expanduser().resolve()
     if not agents_dir.is_dir():
         _diag(
@@ -2718,8 +2869,11 @@ def validate_agent_routing(
                 f"{name}: wrapper must invoke exactly {name}",
             )
         description = frontmatter.get("description", "")
+        triggers = contract.get("triggers")
+        if not isinstance(triggers, dict):
+            triggers = {}
         if not _contract_matches(
-            contract.get("triggers", {}).get("positive"),
+            triggers.get("positive"),
             description + "\n" + body,
         ):
             _diag(
@@ -2727,9 +2881,7 @@ def validate_agent_routing(
                 "AGENT_POSITIVE_ROUTING",
                 f"{name}: positive trigger is not traceable to wrapper",
             )
-        if not _contract_matches(
-            contract.get("triggers", {}).get("negative"), body
-        ):
+        if not _contract_matches(triggers.get("negative"), body):
             _diag(
                 diagnostics,
                 "AGENT_NEGATIVE_ROUTING",
@@ -2741,7 +2893,7 @@ def validate_agent_routing(
                 "AGENT_OUTPUT_ROUTING",
                 f"{name}: expected result is not traceable to wrapper",
             )
-        for sibling in contract.get("nearest_siblings", []):
+        for sibling in _as_list(contract.get("nearest_siblings")):
             if isinstance(sibling, dict) and (
                 str(sibling.get("name", "")).lower() not in body.lower()
                 or not _contract_matches(sibling.get("boundary"), body)
@@ -2760,7 +2912,7 @@ def validate_agent_routing(
                 f"{name}: wrapper writes flag does not match contract",
             )
         if re.search(
-            rf"\b(use|select)\b.*\b{name.replace('-', r'[- ]')}\b.*"
+            rf"\b(use|select)\b.*\b{_name_pattern(name)}\b.*"
             rf"\b(governed|handled|skill)\b",
             description,
             re.I,

@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""Doc-to-validator coherence tests for canonical LLM-prompt documents.
+
+These pin the executable instructions in the canonical docs against the
+actual validation gates so a doc edit cannot quietly contradict a validator:
+
+- infra-generate step 2 must demand per-skill `routing_cases[]`
+  (`skills[].routing_cases`), never a top-level member that
+  `validate_skill_quality.py` blocks with PLAN_FIELD_UNKNOWN.
+- The project-profile-schema exemplars must satisfy the exact plan/skill
+  membership and the fixed flow-phase vocabulary the validators enforce.
+- The schema doc must use only the neutral acme-billing fixture family,
+  never a leaked real-project domain.
+- command-forge must not instruct running `validate_flow_contracts.py`
+  before `skill-flow-composer` exists; that gate is orchestrator-owned and
+  documented (with the runnable recipe) in infra-generate.
+- The command-forge frontmatter guardrail must carry the flow-command
+  exception that the flow-contract validator mechanically enforces.
+- AGENTS.md must state one consistent schema policy: only 1.2 is
+  approvable; 1.0/1.1 are audit-readable and must be re-synthesized.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sys
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS = ROOT / ".agents/skills/bootstrap-verifier/scripts"
+sys.path.insert(0, str(SCRIPTS))
+
+from validate_flow_contracts import PHASES  # noqa: E402
+from validate_skill_quality import (  # noqa: E402
+    OWNERSHIP_ID_PATTERN,
+    SCHEMA_1_2_PLAN_FIELDS,
+    SCHEMA_1_2_SKILL_FIELDS,
+)
+
+SCHEMA_DOC = (
+    ROOT
+    / ".agents/skills/profile-synthesizer/references/project-profile-schema.md"
+)
+INFRA_GENERATE_DOC = ROOT / ".agents/skills/infra-generate/SKILL.md"
+COMMAND_FORGE_DOC = ROOT / ".agents/skills/command-forge/SKILL.md"
+AGENTS_DOC = ROOT / "AGENTS.md"
+
+JSON_BLOCK = re.compile(r"```json\n(.*?)\n```", re.DOTALL)
+BASH_BLOCK = re.compile(r"```bash\n(.*?)\n```", re.DOTALL)
+
+
+def normalized(path: Path) -> str:
+    """Collapse whitespace so assertions survive line re-wrapping."""
+    return re.sub(r"\s+", " ", path.read_text(encoding="utf-8"))
+
+
+def json_examples(path: Path) -> list:
+    """Every ```json exemplar in the doc must parse as standalone JSON."""
+    return [
+        json.loads(payload)
+        for payload in JSON_BLOCK.findall(path.read_text(encoding="utf-8"))
+    ]
+
+
+class SchemaDocExemplarTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.blocks = json_examples(SCHEMA_DOC)
+        self.text = SCHEMA_DOC.read_text(encoding="utf-8")
+
+    def _only(self, predicate) -> dict:
+        matches = [
+            block
+            for block in self.blocks
+            if isinstance(block, dict) and predicate(block)
+        ]
+        self.assertEqual(len(matches), 1)
+        return matches[0]
+
+    def test_plan_top_level_example_matches_validator_membership(self) -> None:
+        plan = self._only(lambda block: "schema_version" in block)
+        self.assertEqual(set(plan), set(SCHEMA_1_2_PLAN_FIELDS))
+
+    def test_skill_exemplar_carries_schema_1_2_fields(self) -> None:
+        skill = self._only(lambda block: block.get("name") == "testing")
+        self.assertLessEqual(set(SCHEMA_1_2_SKILL_FIELDS), set(skill))
+
+    def test_skill_exemplar_phase_is_in_fixed_vocabulary(self) -> None:
+        skill = self._only(lambda block: block.get("name") == "testing")
+        self.assertIn(skill["phase"], PHASES)
+
+    def test_doc_lists_exactly_the_validator_phase_vocabulary(self) -> None:
+        for phase in PHASES:
+            self.assertIn(f"`{phase}`", self.text)
+        self.assertNotIn("`execution`", self.text)
+
+    def test_invariant_example_shape_matches_validator(self) -> None:
+        block = self._only(lambda item: item.get("critical_invariants"))
+        for invariant in block["critical_invariants"]:
+            self.assertEqual(
+                set(invariant),
+                {"id", "statement", "evidence_ids", "skill_names", "assertions"},
+            )
+            self.assertRegex(invariant["id"], OWNERSHIP_ID_PATTERN)
+            for assertion in invariant["assertions"]:
+                self.assertEqual(set(assertion), {"skill_name", "verification_id"})
+                self.assertIn(assertion["skill_name"], invariant["skill_names"])
+
+    def test_flow_contract_example_uses_legal_phases(self) -> None:
+        block = self._only(
+            lambda item: item.get("flow_contracts", {}).get("flows")
+        )
+        graph = block["flow_contracts"]
+        for entry in graph["roster"]:
+            self.assertIn(entry["phase"], PHASES)
+        for flow in graph["flows"]:
+            for stage in flow["stages"]:
+                self.assertIn(stage["phase"], PHASES)
+
+    def test_examples_use_only_the_neutral_fixture_family(self) -> None:
+        lowered = self.text.lower()
+        self.assertNotIn("contentjob", lowered)
+        self.assertNotIn("content-job", lowered)
+        self.assertIn("billing-rules-review", self.text)
+
+
+class InfraGenerateDocTest(unittest.TestCase):
+    def test_step_2_demands_per_skill_routing_cases(self) -> None:
+        text = normalized(INFRA_GENERATE_DOC)
+        self.assertNotIn("top-level `routing_cases[]`", text)
+        self.assertIn("`routing_cases[]` (`skills[].routing_cases`)", text)
+        self.assertIn("canonical top-level `flow_contracts`", text)
+
+    def test_orchestrator_keeps_the_runnable_flow_validator_recipe(self) -> None:
+        bash_blocks = BASH_BLOCK.findall(
+            INFRA_GENERATE_DOC.read_text(encoding="utf-8")
+        )
+        self.assertTrue(
+            any("validate_flow_contracts.py" in block for block in bash_blocks)
+        )
+
+
+class CommandForgeDocTest(unittest.TestCase):
+    def test_flow_validation_is_deferred_to_the_orchestrator(self) -> None:
+        text = COMMAND_FORGE_DOC.read_text(encoding="utf-8")
+        bash_blocks = BASH_BLOCK.findall(text)
+        self.assertFalse(
+            any("validate_flow_contracts.py" in block for block in bash_blocks)
+        )
+        flat = normalized(COMMAND_FORGE_DOC)
+        self.assertIn("do NOT run it here", flat)
+        self.assertIn("`infra-generate` step 8", flat)
+
+    def test_frontmatter_guardrail_carries_the_flow_command_exception(
+        self,
+    ) -> None:
+        flat = normalized(COMMAND_FORGE_DOC)
+        self.assertIn("Flow commands are the sole exception", flat)
+        self.assertIn(
+            "`flow` + ordered `stages` frontmatter and one fenced "
+            "`json flow-contract` block",
+            flat,
+        )
+
+
+class AgentsPolicyDocTest(unittest.TestCase):
+    def test_schema_policy_bullets_are_consistent(self) -> None:
+        flat = normalized(AGENTS_DOC)
+        self.assertIn("only a schema 1.2 plan is approvable", flat)
+        self.assertIn(
+            "Legacy 1.0/1.1 plans remain readable for audit but MUST be "
+            "re-synthesized",
+            flat,
+        )
+        self.assertNotIn("schema 1.0 is migration-only", flat)
+        self.assertNotIn("Schema 1.1 uses", flat)
+
+
+if __name__ == "__main__":
+    unittest.main()

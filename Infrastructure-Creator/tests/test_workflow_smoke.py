@@ -86,6 +86,7 @@ class WorkflowSmokeTests(unittest.TestCase):
             return {
                 "approval": [item.as_dict() for item in approval],
                 "partial": [item.as_dict() for item in partial],
+                "final_incomplete": [item.as_dict() for item in final_incomplete],
                 "final": [item.as_dict() for item in final],
             }
         finally:
@@ -173,7 +174,20 @@ class WorkflowSmokeTests(unittest.TestCase):
         target_generated.chmod(0o640)
         target_team.write_text(fixture["team_content"], encoding="utf-8")
         staged_generated.write_text(fixture["generated_content"], encoding="utf-8")
-        staged_manifest.write_text("{}\n", encoding="utf-8")
+        staged_manifest.write_text(
+            json.dumps(
+                {
+                    "manifest_version": 1,
+                    "files": {
+                        generated.as_posix(): hashlib.sha256(
+                            fixture["generated_content"].encode("utf-8")
+                        ).hexdigest()
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
         paths = [generated.as_posix(), ".infra-manifest.json"]
         watched = [team.as_posix()]
@@ -183,12 +197,16 @@ class WorkflowSmokeTests(unittest.TestCase):
             publication.publish(
                 target, staging, paths, snapshot, journal, baseline_only=watched
             )
-        self.assertFalse(journal.exists())
+        journal_after_drift = journal.exists()
+        self.assertFalse(journal_after_drift)
         target_team.write_text(fixture["team_content"], encoding="utf-8")
         snapshot = publication.build_snapshot(target, paths, watched)
         publication.publish(
             target, staging, paths, snapshot, journal, baseline_only=watched
         )
+        published_digest = hashlib.sha256(target_generated.read_bytes()).hexdigest()
+        watched_digest = hashlib.sha256(target_team.read_bytes()).hexdigest()
+        watched_backup_exists = (journal / "backups" / team).exists()
         self.assertEqual(
             target_generated.read_text(encoding="utf-8"),
             fixture["generated_content"],
@@ -196,19 +214,25 @@ class WorkflowSmokeTests(unittest.TestCase):
         self.assertEqual(
             target_team.read_text(encoding="utf-8"), fixture["team_content"]
         )
-        self.assertFalse((journal / "backups" / team).exists())
+        self.assertFalse(watched_backup_exists)
 
         publication.restore(target, journal)
-        self.assertEqual(
-            target_generated.read_text(encoding="utf-8"), "previous policy\n"
-        )
-        self.assertEqual(target_generated.stat().st_mode & 0o777, 0o640)
-        self.assertFalse((target / ".infra-manifest.json").exists())
+        restored_bytes = target_generated.read_bytes()
+        restored_mode = oct(target_generated.stat().st_mode & 0o777)
+        manifest_after_restore = (target / ".infra-manifest.json").exists()
+        self.assertEqual(restored_bytes.decode("utf-8"), "previous policy\n")
+        self.assertEqual(restored_mode, "0o640")
+        self.assertFalse(manifest_after_restore)
+        # Every value below is observed from the rehearsal filesystem so the
+        # repeated-run hash compares recomputed outcomes, not constants.
         return {
-            "drift_rejected": True,
-            "published": True,
-            "rolled_back": True,
-            "watch_unchanged": True,
+            "drift_journal_exists": journal_after_drift,
+            "published_digest": published_digest,
+            "watched_digest": watched_digest,
+            "watched_backup_exists": watched_backup_exists,
+            "restored_digest": hashlib.sha256(restored_bytes).hexdigest(),
+            "restored_mode": restored_mode,
+            "manifest_exists_after_restore": manifest_after_restore,
         }
 
     def run_scenario(self) -> dict:

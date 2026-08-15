@@ -84,8 +84,10 @@ orchestration step. The log maps every staged skill to exactly one plan entry.
    for a generated verification separately with `--no-scripts --verification
    --command '<command>'`. The analyzer reads `composer.json` and `package.json`,
    resolves aliases transitively, and blocks shell composition, unknown aliases,
-   cycles, workspace-writing format/fix modes, database/deploy/destructive
-   operations, and external/provider/network actions. A mutating formatter may
+   cycles, shell/sudo/xargs/variable indirection, executables outside its
+   curated read-only allow-list, workspace-writing format/fix modes,
+   database/deploy/destructive operations, and external/provider/network
+   actions. A mutating formatter may
    be documented only as an explicitly selected change step, never as
    verification. Replace unsafe verification with a real check/dry-run script
    evidenced in the target or an exact manual assertion; never weaken the

@@ -108,7 +108,7 @@ def _validate_routing(plan: dict[str, Any], errors: list[str]) -> None:
     }
     expected: dict[str, set[str]] = {}
     for skill in skills:
-        if not isinstance(skill, dict) or skill.get("name") not in names:
+        if not isinstance(skill, dict) or not isinstance(skill.get("name"), str):
             continue
         source = skill["name"]
         adjacent: set[str] = set()
@@ -118,7 +118,7 @@ def _validate_routing(plan: dict[str, Any], errors: list[str]) -> None:
             continue
         for sibling in siblings:
             name = sibling.get("name") if isinstance(sibling, dict) else None
-            if name not in names or name == source:
+            if not isinstance(name, str) or name not in names or name == source:
                 errors.append(f"routing: {source} has invalid adjacent skill {name!r}")
             else:
                 adjacent.add(name)
@@ -134,9 +134,12 @@ def _validate_routing(plan: dict[str, Any], errors: list[str]) -> None:
         "evidence_ids",
     }
     for skill in skills:
-        if not isinstance(skill, dict) or skill.get("name") not in names:
+        if not isinstance(skill, dict) or not isinstance(skill.get("name"), str):
             continue
         source = skill["name"]
+        if source not in expected:
+            # nearest_siblings was invalid; already reported above.
+            continue
         cases = skill.get("routing_cases")
         if not isinstance(cases, list) or not cases:
             errors.append(f"routing: {source}.routing_cases must be non-empty")
@@ -152,12 +155,21 @@ def _validate_routing(plan: dict[str, Any], errors: list[str]) -> None:
             secondary = case["permitted_secondary"]
             forbidden = case["forbidden_skills"]
             if (
+                not isinstance(primary, str)
+                or not isinstance(secondary, list)
+                or not all(isinstance(item, str) for item in secondary)
+                or not isinstance(forbidden, list)
+                or not all(isinstance(item, str) for item in forbidden)
+            ):
+                errors.append(
+                    f"routing: {label} routing fields must use string skill names"
+                )
+                continue
+            if (
                 primary not in ({source} | expected[source])
                 or not isinstance(case["prompt"], str)
                 or not case["prompt"].strip()
-                or not isinstance(secondary, list)
                 or any(item not in expected[source] for item in secondary)
-                or not isinstance(forbidden, list)
                 or any(item not in names for item in forbidden)
                 or primary in secondary
                 or primary in forbidden
@@ -259,7 +271,8 @@ def _validate_graph(
             phase = stage["phase"]
             agents = stage["agents"]
             if (
-                phase not in PHASES
+                not isinstance(phase, str)
+                or phase not in PHASES
                 or not isinstance(agents, list)
                 or not agents
                 or any(
@@ -302,7 +315,8 @@ def _validate_graph(
                 stage_index
                 for stage_index, stage in enumerate(stages)
                 if isinstance(stage, dict)
-                and required_review in stage.get("agents", [])
+                and isinstance(stage.get("agents"), list)
+                and required_review in stage["agents"]
             ]
             implementation_stages = [
                 stage_index
@@ -374,8 +388,15 @@ def validate(plan_path: Path, skill_flow: Path, commands_dir: Path) -> list[str]
         for flow in flows
         if isinstance(flow, dict) and isinstance(flow.get("name"), str)
     }
+    # A flow candidate is any file matching a declared flow name (flows are
+    # not required to carry a flow- prefix) plus any stray flow-*.md that no
+    # declared flow claims.
     actual_files = (
-        {path.name for path in commands_dir.glob("flow-*.md")}
+        {
+            path.name
+            for path in commands_dir.glob("*.md")
+            if path.name in expected_files or path.name.startswith("flow-")
+        }
         if commands_dir.is_dir()
         else set()
     )

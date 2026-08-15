@@ -61,6 +61,14 @@ class PlaceholderContractTest(unittest.TestCase):
         self.assertTrue(any(r"/\bFIXME\b/" in error for error in errors))
         self.assertFalse(any(r"/\bYYYY-MM-DD\b/" in error for error in errors))
 
+    def test_repeated_placeholder_reports_one_error_per_file_and_pattern(self) -> None:
+        errors = self.validate(
+            {"memory-bank/templates/notes.md": "TODO\nTODO\nTODO\n"}
+        )
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn(r"/\bTODO\b/", errors[0])
+
     def test_same_iso_date_token_fails_at_every_other_path(self) -> None:
         errors = self.validate(
             {

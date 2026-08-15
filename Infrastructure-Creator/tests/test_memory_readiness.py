@@ -12,6 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Optional
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +24,12 @@ VALIDATOR_SPEC = importlib.util.spec_from_file_location(
 )
 validator = importlib.util.module_from_spec(VALIDATOR_SPEC)
 VALIDATOR_SPEC.loader.exec_module(validator)
+sys.path.insert(0, str(CONTEXT.parent))
+CONTEXT_SPEC = importlib.util.spec_from_file_location(
+    "readiness_context_runtime", CONTEXT
+)
+context_runtime = importlib.util.module_from_spec(CONTEXT_SPEC)
+CONTEXT_SPEC.loader.exec_module(context_runtime)
 TIMEOUT = 30
 
 
@@ -135,6 +142,7 @@ class MemoryReadinessTest(unittest.TestCase):
 
     def test_healthy_branch_is_active(self) -> None:
         repository = self.initialized_repository()
+        self.commit(repository)
 
         readiness = self.status(repository)
 
@@ -143,6 +151,84 @@ class MemoryReadinessTest(unittest.TestCase):
         self.assertEqual(readiness["task_identity"]["task_id"], "feature/readiness")
         self.assertEqual(readiness["git_metadata"]["state"], "worktree")
         self.assertIsNone(readiness["remediation"])
+
+    def test_unborn_branch_reports_unborn_head_with_branch_identity(self) -> None:
+        repository = self.initialized_repository()
+
+        readiness = self.status(repository)
+
+        self.assertEqual(readiness["git_metadata"]["state"], "unborn-head")
+        self.assertEqual(readiness["git_metadata"]["status"], "active")
+        self.assertIn("unborn", readiness["git_metadata"]["reason"])
+        self.assertNotIn("detached", readiness["git_metadata"]["reason"])
+        self.assertEqual(readiness["task_identity"]["source"], "git-branch")
+        self.assertEqual(readiness["task_identity"]["task_id"], "feature/readiness")
+        self.assertEqual(readiness["status"], "active")
+
+    def readiness_with_probe_failure(self, repository, marker: str) -> dict:
+        real_run = subprocess.run
+
+        def flaky_run(command, *arguments, **keywords):
+            if marker in command:
+                raise subprocess.TimeoutExpired(cmd=command, timeout=2)
+            return real_run(command, *arguments, **keywords)
+
+        environment = dict(os.environ)
+        environment.pop("CONTEXT_TASK_ID", None)
+        with mock.patch.dict(os.environ, environment, clear=True):
+            with mock.patch.object(
+                context_runtime.subprocess, "run", side_effect=flaky_run
+            ):
+                return context_runtime.automatic_memory_readiness(repository)
+
+    def test_branch_probe_timeout_is_probe_failure_not_detached(self) -> None:
+        repository = self.initialized_repository()
+        self.commit(repository)
+
+        readiness = self.readiness_with_probe_failure(repository, "symbolic-ref")
+
+        self.assertEqual(readiness["git_metadata"]["state"], "git-probe-failed")
+        self.assertEqual(readiness["git_metadata"]["status"], "degraded")
+        self.assertIn("branch probe", readiness["git_metadata"]["reason"])
+        self.assertNotIn("detached", readiness["git_metadata"]["reason"])
+        self.assertIsNone(readiness["git_metadata"]["branch"])
+        self.assertEqual(readiness["status"], "degraded")
+        errors: list[str] = []
+        validator.validate_memory_readiness({"automatic_memory": readiness}, errors)
+        self.assertEqual(errors, [])
+
+    def test_head_probe_timeout_on_branch_keeps_branch_identity(self) -> None:
+        repository = self.initialized_repository()
+        self.commit(repository)
+
+        readiness = self.readiness_with_probe_failure(repository, "--verify")
+
+        self.assertEqual(readiness["git_metadata"]["state"], "worktree")
+        self.assertEqual(readiness["git_metadata"]["status"], "active")
+        self.assertEqual(readiness["git_metadata"]["branch"], "feature/readiness")
+        self.assertEqual(readiness["task_identity"]["source"], "git-branch")
+        self.assertEqual(readiness["task_identity"]["task_id"], "feature/readiness")
+        self.assertEqual(readiness["status"], "active")
+
+    def test_head_probe_timeout_when_detached_is_probe_failure_not_unborn(
+        self,
+    ) -> None:
+        repository = self.initialized_repository()
+        self.commit(repository)
+        self.git(repository, "checkout", "--detach", "-q", "HEAD")
+
+        readiness = self.readiness_with_probe_failure(repository, "--verify")
+
+        self.assertEqual(readiness["git_metadata"]["state"], "git-probe-failed")
+        self.assertEqual(readiness["git_metadata"]["status"], "degraded")
+        self.assertIsNone(readiness["git_metadata"]["branch"])
+        self.assertIn("HEAD-classification", readiness["git_metadata"]["reason"])
+        self.assertNotIn("branch probe", readiness["git_metadata"]["reason"])
+        self.assertNotIn("unborn", readiness["git_metadata"]["reason"])
+        self.assertEqual(readiness["status"], "degraded")
+        errors: list[str] = []
+        validator.validate_memory_readiness({"automatic_memory": readiness}, errors)
+        self.assertEqual(errors, [])
 
     def test_bootstrap_readiness_contract_accepts_runtime_report(self) -> None:
         repository = self.base / "plain"

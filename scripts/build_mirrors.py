@@ -14,8 +14,9 @@ Usage:
     python3 scripts/build_mirrors.py --write [--edition NAME]
 
 --check lists every file whose mirror does not match what the rules derive
-from the canonical copy (or is a stray file the rules do not account for)
-and exits non-zero; it never writes. --write regenerates the mirrors from
+from the canonical copy (or is a stray file the rules do not account for,
+or an "only" entry listed in the rules whose canonical file is gone) and
+exits non-zero; it never writes. --write regenerates the mirrors from
 the canonical copies and prints every file it changed.
 
 Both modes also maintain `<edition>/.gitattributes`, which marks exactly the
@@ -269,6 +270,18 @@ def process_edition(
         if not canonical.is_dir():
             problems.append(f"{label}: canonical directory missing: {cls['canonical']}")
             continue
+        if cls.get("only") is not None:
+            # A listed "only" entry must exist in canon. iter_canonical
+            # silently skips a listed path with no file behind it, so
+            # without this report a typo in the list (or a canonical file
+            # deleted or renamed after mirrors were generated) would mirror
+            # nothing while --check stayed green.
+            for rel in cls["only"]:
+                if not (canonical / rel).is_file():
+                    problems.append(
+                        f"{label}: [{cls['name']}] {cls['canonical']}/{rel} "
+                        f"is listed in 'only' but missing from canon"
+                    )
         for mirror_rel, mirror_spec in cls["mirrors"].items():
             mirror = edition_dir / mirror_rel
             skips = class_skips(cls, mirror_spec, framework)
@@ -303,6 +316,21 @@ def process_edition(
                         f"{label}: [{cls['name']}] {mirror_rel}/{rel} "
                         f"has no source in {cls['canonical']}"
                     )
+            elif cls.get("only") is not None:
+                # Reverse pass for "only"-classes. The mirror directory also
+                # holds files other classes own, so only the listed names are
+                # examined: a listed mirror file whose canonical copy is gone
+                # is drift, not a skip — otherwise deleting e.g. .claude/DOD.md
+                # would leave .cursor/DOD.md and .codex/DOD.md orphaned with
+                # no rule accounting for them.
+                for rel in cls["only"]:
+                    if rel in expected or is_skipped(rel, skips):
+                        continue
+                    if (mirror / rel).is_file():
+                        problems.append(
+                            f"{label}: [{cls['name']}] {mirror_rel}/{rel} "
+                            f"has no source in {cls['canonical']}"
+                        )
 
     # The generated-file manifest is derived from the same rules, so it stays
     # correct as skills come and go without anyone maintaining a glob.

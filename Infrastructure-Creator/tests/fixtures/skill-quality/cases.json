@@ -96,7 +96,7 @@
     "description": "Routing fixtures cover self-selection and every adjacent owner."
   },
   "flow-contract-shape": {
-    "expected": "FLOW_STAGE_INVALID",
+    "expected": "FLOW_CONTRACT_INVALID",
     "description": "Declared flows use typed stages and resolve every selected skill."
   }
 }

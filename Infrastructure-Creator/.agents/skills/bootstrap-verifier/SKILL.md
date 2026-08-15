@@ -41,9 +41,17 @@ Writes a report to `tasks/TASK-{N}/bootstrap-verifier-report.md`. Does not write
    `python3 scripts/analyze_commands.py --target <real-target> --no-scripts --verification --command '<exact-command>'`
 
    Exit 1 is blocking. Shell composition, malformed tokenization, unknown or
-   cyclic aliases, any workspace-writing fix/format mode, destructive/database/
-   deploy behavior, and provider/network behavior fail closed when used as
-   verification. Do not execute a command to discover whether it is safe.
+   cyclic aliases, shell interpreters running `-c` strings (including
+   clustered forms such as `-lc`) or script files, sudo, xargs/variable
+   indirection, executables outside the curated read-only allow-list
+   (`UNKNOWN_EXECUTABLE`), alias expansion beyond the safety cap, any
+   workspace-writing fix/format mode, destructive/database/deploy behavior,
+   and provider/network behavior fail closed when used as verification.
+   Wrapper commands (`env`, `nice`, `nohup`, `stdbuf`, `sudo`, `timeout`) are
+   unwrapped by basename and the wrapped command is classified. Blocked or
+   unresolvable commands additionally report the `verification_blocker`
+   category in JSON output instead of defaulting to `non_mutating`. Do not
+   execute a command to discover whether it is safe.
 3. **Run the validator:** distinguish the generation root (staging or published
    target) from the real evidence target:
 
@@ -103,10 +111,11 @@ Writes a report to `tasks/TASK-{N}/bootstrap-verifier-report.md`. Does not write
   single-command convenience API.
 - `analyze_target(target, commands=(), verification=False)` returns
   `TargetAnalysis`.
-- `CommandAnalysis` exposes `categories`, structured `findings`,
-  `expanded_commands`, traversed `aliases`, `verification_safe`, and
-  `to_dict()`. The analyzer is standard-library-only and never starts a process
-  other than its own CLI.
+- `CommandAnalysis` exposes `categories` (the four risk categories, plus
+  `verification_blocker` when the command is blocked or unresolvable),
+  structured `findings`, `expanded_commands`, traversed `aliases`,
+  `verification_safe`, and `to_dict()`. The analyzer is standard-library-only
+  and never starts a process other than its own CLI.
 
 ## Manifest Refresh Recipe (after content auto-fixes)
 

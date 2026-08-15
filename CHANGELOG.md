@@ -347,6 +347,26 @@ edition's own files remain in that edition's changelog.
   main-session turns, and compact deliberately near ~400k of context. Both
   thresholds are derived from local transcripts and are marked as such.
 
+### Fixed
+
+- `scripts/build_mirrors.py` now runs its reverse stray pass over
+  `only`-classes too (the governance documents: `DOD.md`,
+  `GOLDEN-PRINCIPLES.md`, `STABILIZATION.md`). Previously a deleted
+  canonical governance file with surviving mirrors was silently skipped:
+  deleting `.claude/DOD.md` left `--check` flagging only the stale
+  `.gitattributes`, and once `--write` refreshed that manifest the orphaned
+  `.cursor/DOD.md` and `.codex/DOD.md` would have persisted indefinitely as
+  canonical-looking files no rule accounts for. The pass examines only the
+  listed names, so canonical files other classes own inside the same mirror
+  directory are untouched; behavior for every other class is unchanged.
+  A listed `only` entry whose canonical file does not exist is now itself a
+  reported problem: previously `iter_canonical` skipped it silently, so a
+  typo in the list (or a canonical file renamed after mirrors were
+  generated) mirrored nothing while `--check` stayed green and the
+  orphaned mirrors persisted. Pinned by the new
+  `tests/test_build_mirrors.py`, which the `mirrors` CI job now runs
+  alongside `--check`.
+
 ## 2.0.0 - 2026-08-07
 
 ### 2026-08-06 hook and installation hardening
