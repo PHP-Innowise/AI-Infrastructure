@@ -88,6 +88,12 @@ Use only commands/components installed by the consuming project. Xdebug/Blackfir
    - What called this with bad value?
    - Keep tracing up until you find the source
 
+5. **Localize Before Fixing**
+   - Label the earliest failure after which execution never recovered, not the last error printed. Later errors are consequences of it.
+   - Write the localization as `COMPONENT - COMPONENT | blame: SIDE`; the component list and attribution rules are in the active edition's `STABILIZATION.md`.
+   - Separate a broken condition from a weak reaction to it. A transient error, a missing file, or an ambiguous state that the run could have retried, diagnosed, worked around, or asked about is our defect. A condition that was genuinely unrecoverable is the other system's defect, and our only remaining fix is honest reporting.
+   - The blamed side decides where the fix lands: application code and tests, a hook or `context.py`, an incident record plus an explicit retry/fallback, or `DOD.md` and the request itself.
+
 ### Phase 2: Pattern Analysis
 
 1. **Find Working Examples**
@@ -137,6 +143,7 @@ Use only commands/components installed by the consuming project. Xdebug/Blackfir
 4. **If 3+ Fixes Failed**
    - STOP and question the architecture
    - 3+ failures = architectural problem
+   - Re-run the Phase 1 localization first: repeated failed fixes usually mean the blame sits on the wrong side, and every fix has been aimed at a consequence
    - Discuss with human partner before continuing
 
 ## Red Flags - STOP

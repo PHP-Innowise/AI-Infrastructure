@@ -53,6 +53,6 @@ Include:
 
 - Tier used.
 - Commands run and status.
-- N/A tooling.
+- N/A tooling, each with the probe command and output that establish the absence. An `N/A` asserted without a probe closes a check without running it.
 - Failures and next fix command.
 - Final verdict.

@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import sqlite3
 import subprocess
@@ -1447,6 +1449,8 @@ class ContextEngineTest(unittest.TestCase):
                 "working_sources": 2,
                 "working_progress_characters": 0,
                 "last_turn_characters": 0,
+                "semantic": 0,
+                "episodic": 0,
             },
             payload["omitted"],
         )
@@ -1649,14 +1653,18 @@ class ContextEngineTest(unittest.TestCase):
         self.assertEqual("AGENTS.md", compacted["procedural"][0]["path"])
         self.assertLessEqual(CONTEXT.capsule_character_count(compacted), 1250)
 
-    def test_capsule_budget_preserves_latest_progress_suffix(self) -> None:
+    def test_capsule_budget_preserves_both_ends_of_progress(self) -> None:
         capsule = {
             "query": "capsule",
             "task_id": "CAPSULE-LATEST",
             "working": {
                 "task_id": "CAPSULE-LATEST",
                 "goal": "Preserve the latest outcome.",
-                "progress": ("old progress " * 200) + "LATEST_OUTCOME",
+                "progress": (
+                    "CONSTRAINT: the idempotency key stays. "
+                    + ("old progress " * 200)
+                    + "LATEST_OUTCOME"
+                ),
                 "next_steps": ["Run verification."],
                 "files": ["src/Required.php"],
                 "sources": ["specs/required.md"],
@@ -1676,10 +1684,122 @@ class ContextEngineTest(unittest.TestCase):
         with mock.patch.object(CONTEXT, "CAPSULE_CHARACTER_LIMIT", 500):
             compacted = CONTEXT.enforce_capsule_budget(capsule)
 
-        self.assertTrue(compacted["working"]["progress"].startswith("…"))
-        self.assertTrue(compacted["working"]["progress"].endswith("LATEST_OUTCOME"))
+        progress = compacted["working"]["progress"]
+        # Both ends survive: the head carries the constraint the work is bound
+        # by, the tail carries where it now stands. A tail-only cut keeps the
+        # action and drops the reason a later turn would need to keep it.
+        self.assertTrue(progress.startswith("CONSTRAINT"))
+        self.assertTrue(progress.endswith("LATEST_OUTCOME"))
+        self.assertIn("…", progress)
         self.assertGreater(compacted["omitted"]["working_progress_characters"], 0)
         self.assertLessEqual(CONTEXT.capsule_character_count(compacted), 500)
+
+    def test_capsule_budget_counts_dropped_retrieval_layers(self) -> None:
+        capsule = {
+            "query": "capsule",
+            "task_id": None,
+            "working": None,
+            "procedural": [],
+            "semantic": [{
+                "path": f"specs/{index}.md", "layer": "semantic", "kind": "spec",
+                "title": str(index), "snippet": "s" * 250,
+            } for index in range(3)],
+            "episodic": [{
+                "id": 1, "layer": "episodic", "summary": "Prior work",
+                "outcome": "e" * 300, "files": [], "verification": ["Verified"],
+                "sources": [], "created_at": "2026-07-29T00:00:00+00:00",
+            }],
+            "warnings": [],
+            "omitted": {},
+        }
+
+        with mock.patch.object(CONTEXT, "CAPSULE_CHARACTER_LIMIT", 600):
+            compacted = CONTEXT.enforce_capsule_budget(capsule)
+
+        self.assertEqual([], compacted["episodic"])
+        self.assertEqual(1, compacted["omitted"]["episodic"])
+        self.assertGreater(compacted["omitted"]["semantic"], 0)
+        self.assertIn("semantic result(s)", CONTEXT.compaction_summary(compacted))
+
+    def test_print_capsule_reports_what_compaction_removed(self) -> None:
+        capsule = {
+            "query": "capsule",
+            "task_id": "CAPSULE-REPORT",
+            "working": {
+                "task_id": "CAPSULE-REPORT",
+                "goal": "Report the lossy view.",
+                "progress": "…truncated",
+                "next_steps": ["Verify."],
+                "files": ["src/Kept.php"],
+                "sources": [],
+            },
+            "procedural": [],
+            "semantic": [],
+            "episodic": [],
+            "warnings": [],
+            "omitted": {
+                "semantic": 2,
+                "working_files": 3,
+                "working_progress_characters": 118,
+            },
+        }
+
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            CONTEXT.print_capsule(capsule)
+        rendered = stream.getvalue()
+
+        self.assertIn("compaction: omitted", rendered)
+        self.assertIn("2 semantic result(s)", rendered)
+        self.assertIn("3 working file(s)", rendered)
+        self.assertIn("118 characters of progress", rendered)
+        self.assertIn("re-read the cited source", rendered)
+
+    def test_print_capsule_stays_silent_when_nothing_was_omitted(self) -> None:
+        capsule = {
+            "query": "capsule",
+            "task_id": "CAPSULE-COMPLETE",
+            "working": None,
+            "procedural": [],
+            "semantic": [],
+            "episodic": [],
+            "warnings": [],
+            "omitted": {"semantic": 0, "working_files": 0},
+        }
+
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            CONTEXT.print_capsule(capsule)
+
+        self.assertNotIn("compaction:", stream.getvalue())
+        self.assertIsNone(CONTEXT.compaction_summary(capsule))
+
+    def test_governed_contract_counts_hidden_working_state(self) -> None:
+        capsule = {
+            "query": "capsule",
+            "task_id": "GOVERNED-OMIT",
+            "working": {
+                "task_id": "GOVERNED-OMIT",
+                "goal": "Count what the projection hides.",
+                "progress": "Latest outcome.",
+                "next_steps": [f"Step {index}." for index in range(4)],
+                "files": [f"src/File{index}.php" for index in range(12)],
+                "sources": [f"specs/spec{index}.md" for index in range(6)],
+            },
+            "procedural": [],
+            "semantic": [],
+            "episodic": [],
+            "warnings": [],
+        }
+
+        compacted = CONTEXT.enforce_governed_capsule_contract(capsule)
+
+        self.assertEqual(3, compacted["omitted"]["working_next_steps"])
+        self.assertEqual(4, compacted["omitted"]["working_files"])
+        self.assertEqual(2, compacted["omitted"]["working_sources"])
+        self.assertIn(
+            "4 working file(s)", CONTEXT.compaction_summary(compacted)
+        )
 
     def test_capsule_budget_drops_nonpriority_working_sources(self) -> None:
         capsule = {

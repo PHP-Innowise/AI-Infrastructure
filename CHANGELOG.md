@@ -172,6 +172,50 @@ edition's own files remain in that edition's changelog.
 
 ### Changed
 
+- **Capsule compaction now reports itself, and keeps both ends of a progress
+  narrative.** `enforce_capsule_budget` and the governed contract counted some
+  of what they removed and nothing rendered the counters, so a capsule that
+  had lost a constraint reached the prompt looking complete — the failure the
+  interaction taxonomy calls context rationale erosion, blamed on the harness
+  rather than on the model that later "optimized" the decision away. Three
+  changes: `print_capsule` renders a `compaction:` line naming every omitted
+  section and instructing a re-read of the cited source; budget-driven drops
+  of semantic and episodic results, of governed working files, sources and
+  next steps, and of the governed last-turn report are now counted instead of
+  vanishing; and progress truncation keeps a head and a tail
+  (`truncate_progress`) rather than the tail alone, because the opening of a
+  narrative carries the constraint and the end carries only the current state.
+  `Capsule unavailable` warnings now state the consequence — no task context
+  was assembled — instead of only the cause. Covered by four new tests in
+  `memory-bank/tests/test_context.py`; one existing test that pinned the
+  tail-only cut was updated to the new contract.
+
+- **Hooks no longer swallow their own failures.** `working-memory-read.sh`
+  discarded stderr and exited silently when the refresh produced no report, so
+  a crashed memory refresh and a quiet one were indistinguishable from inside
+  the turn; it now prints the exit status, a bounded error detail, and the line
+  `Working memory was NOT consulted this turn`. `subagent-dispatch.sh` wrote
+  the completion journal to `/dev/null` while the flow commands told the
+  orchestrator that completions are recorded automatically; a failed write is
+  now reported, and the flow commands instruct the orchestrator to record the
+  completion itself rather than read the gap as an unfinished agent. A missing
+  governed task stays silent: with no channel, nothing was lost.
+
+- **`bash-validator.sh` gained a repetition guard and an outward-action
+  warning.** The file-edit loop detector cannot see a command loop, because
+  rerunning one failing command touches no file: identical invocations are now
+  counted per exact command string in the session-scoped counter directory,
+  warning at six and blocking at twelve with a pointer to `/debugger`. Actions
+  that publish outside the checkout — `gh pr create|merge|comment|review`,
+  `gh issue`, `gh release`, `gh api -X POST|PUT|PATCH`, `gh workflow run`,
+  `git push` — now warn that they need the user's explicit approval; they are
+  not blocked, because the user is often the one asking for exactly that.
+
+- **Project Brain bug, finding and incident templates carry a `Localization`
+  section** naming the interaction edge and the blamed side of the earliest
+  unrecovered failure, so the repair is routed by attribution rather than by
+  symptom.
+
 - **The ready-made accelerator installer can now adopt standard existing
   project root files without destructive overwrites.** The new
   `--merge-existing` mode preserves project `.gitignore`, `.gitattributes`, and

@@ -10,7 +10,10 @@
 # runs on Stop; see working-memory-write.sh.
 #
 # The layer report is printed even when it fails. A request that silently reads
-# a stale index is worse than one told which layer went stale.
+# a stale index is worse than one told which layer went stale. The same applies
+# one level up: a refresh that never ran must say so. An empty hook and a
+# crashed one look identical from inside the turn, and the difference decides
+# whether working memory may be treated as consulted at all.
 
 set -u
 
@@ -57,11 +60,29 @@ if [ -n "$QUERY" ] && [ -n "$TASK_ID" ]; then
   ARGUMENTS+=(--query "$QUERY" --task-id "$TASK_ID" --ephemeral)
 fi
 
-REPORT=$(run python3 "$CONTEXT_CLI" "${ARGUMENTS[@]}" 2>/dev/null)
-[ -n "$REPORT" ] || exit 0
+ERROR_FILE="${TMPDIR:-/tmp}/working-memory-read-$$.err"
+REPORT=$(run python3 "$CONTEXT_CLI" "${ARGUMENTS[@]}" 2>"$ERROR_FILE")
+STATUS=$?
+# One bounded line: enough to name the failure, never enough to paste a trace
+# or anything the CLI refused to accept into the prompt.
+DETAIL=$(tr '\n\t' '  ' < "$ERROR_FILE" 2>/dev/null | cut -c1-160)
+rm -f "$ERROR_FILE" 2>/dev/null
 
 echo "Memory refresh (retrieved context is not authoritative — verify the source)"
 echo "=========================================================================="
-echo "$REPORT"
+
+if [ -n "$REPORT" ]; then
+  echo "$REPORT"
+  exit 0
+fi
+
+# Nothing to report means the refresh did not complete. Say which, and say
+# what follows from it, instead of leaving the turn to assume memory was read.
+if [ "$STATUS" -eq 124 ]; then
+  echo "unavailable: refresh exceeded its ${BUDGET_SECONDS}s budget"
+else
+  echo "unavailable: refresh exited $STATUS${DETAIL:+ — $DETAIL}"
+fi
+echo "Working memory was NOT consulted this turn. Read the canonical sources directly."
 
 exit 0

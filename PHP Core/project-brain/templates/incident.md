@@ -8,4 +8,8 @@
 
 ## Timeline
 
+## Localization
+
+`COMPONENT - COMPONENT | blame: SIDE` for the earliest failure after which the run never recovered. Components and attribution rules: the active edition's `STABILIZATION.md`. The blamed side, not the symptom, decides where the repair belongs.
+
 ## Recovery

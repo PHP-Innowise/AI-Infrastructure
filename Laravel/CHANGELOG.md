@@ -55,6 +55,22 @@ it at the top of every session.
   flows. Cursor mirrors are generated; Codex keeps its sequential skill
   flow by design.
 
+### Changed
+
+- **Stabilization now localizes a failure before naming its root cause.**
+  `STABILIZATION.md` gains a `Localization` section - the components an agent
+  interacts with, the rule to label the earliest failure after which the run
+  never recovered, and blame that follows behavior rather than opportunity -
+  plus a `Routing` table mapping the blamed side to the only repair that can
+  work: rule text for the model, a hook or `context.py` change for the
+  harness, an incident record for the environment, `DOD.md` or the request
+  itself for a grader/owner conflict. The rule template carries `Edge:` and
+  `Blame:` fields that must agree with its `Enforcement:`, and two worked
+  examples show a harness-side rule and a case that yields no rule at all.
+  Without localization every incident routes to the same repair - one more
+  sentence of policy - including the ones no policy sentence can fix. The
+  vocabulary is shared with the Project Brain record templates; this
+  edition's `reflect` and `systematic-debugger` skills are unchanged.
 
 ## 2.0.0 - 2026-08-07
 

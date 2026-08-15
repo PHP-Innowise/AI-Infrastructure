@@ -128,8 +128,12 @@ class FakeRepoMixin:
         self._tmp.cleanup()
 
 
-class BashValidatorTest(unittest.TestCase):
+class BashValidatorTest(FakeRepoMixin, unittest.TestCase):
     HOOK = "bash-validator.sh"
+
+    # Commands that reach the repetition guard run against a throwaway repo:
+    # its counters are keyed by repo root and removed on cleanup, so one suite
+    # run cannot inherit the previous run's counts and start warning.
 
     @staticmethod
     def payload(command: str) -> dict:
@@ -138,7 +142,9 @@ class BashValidatorTest(unittest.TestCase):
     def test_safe_command_passes(self) -> None:
         for tool in MIRRORS:
             with self.subTest(tool=tool):
-                result = run_hook(tool, self.HOOK, self.payload("ls -la src/"))
+                result = run_hook(
+                    tool, self.HOOK, self.payload("ls -la src/"), cwd=self.repo_a
+                )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stderr, "")
 
@@ -167,9 +173,53 @@ class BashValidatorTest(unittest.TestCase):
         )
         for tool in MIRRORS:
             with self.subTest(tool=tool):
-                result = run_hook(tool, self.HOOK, self.payload(command))
+                result = run_hook(
+                    tool, self.HOOK, self.payload(command), cwd=self.repo_a
+                )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stderr, "")
+
+    def test_outward_action_warns_without_blocking(self) -> None:
+        # Publishing outside the checkout is the user's call, not the agent's:
+        # the hook must surface it and still let an approved run through.
+        commands = (
+            "gh pr create --title Fix --body x",
+            "gh release create v1.2.3",
+            "git push origin feature/x",
+        )
+        for tool in MIRRORS:
+            for command in commands:
+                with self.subTest(tool=tool, command=command):
+                    result = run_hook(
+                        tool, self.HOOK, self.payload(command), cwd=self.repo_b
+                    )
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn("CONFIRM", result.stderr)
+                    self.assertIn("explicit approval", result.stderr)
+
+    def test_repeated_identical_command_warns_then_blocks(self) -> None:
+        # A command loop touches no file, so loop-detection.sh cannot see it.
+        # Counting is per exact command string: a changed command starts over.
+        command = self.payload("vendor/bin/phpunit --filter Broken")
+        for tool in MIRRORS:
+            with self.subTest(tool=tool):
+                codes = [
+                    run_hook(tool, self.HOOK, command, cwd=self.repo_a).returncode
+                    for _ in range(12)
+                ]
+                self.assertEqual([0] * 5, codes[:5])
+                self.assertEqual([1] * 6, codes[5:11])
+                blocked = run_hook(tool, self.HOOK, command, cwd=self.repo_a)
+                self.assertEqual(2, blocked.returncode)
+                self.assertIn("BLOCKED", blocked.stderr)
+                self.assertIn("/debugger", blocked.stderr)
+                fresh = run_hook(
+                    tool,
+                    self.HOOK,
+                    self.payload("vendor/bin/phpunit --filter Other"),
+                    cwd=self.repo_a,
+                )
+                self.assertEqual(0, fresh.returncode, fresh.stderr)
 
     def test_nested_destructive_command_still_blocked(self) -> None:
         # The full nested command must survive extraction so the pattern
@@ -1142,14 +1192,27 @@ class SubagentDispatchTest(WriteLockMixin, unittest.TestCase):
 
 
 class MirrorConsistencyTest(unittest.TestCase):
-    def test_bash_validator_mirrors_are_byte_identical(self) -> None:
-        # Documented invariant: bash-validator has zero per-mirror
-        # adaptations inside an edition.
+    def test_bash_validator_mirrors_differ_only_by_counter_namespace(self) -> None:
+        # Documented invariant: bash-validator's only per-mirror adaptation is
+        # the counter directory its repetition guard shares with
+        # loop-detection.sh, which is namespaced per tool so two hosts driving
+        # one checkout cannot inflate each other's counts. Everything else -
+        # every pattern, threshold and message - is identical, so a rule added
+        # to one host reaches all three.
         contents = {
-            tool: hook_path(tool, "bash-validator.sh").read_bytes() for tool in MIRRORS
+            tool: hook_path(tool, "bash-validator.sh").read_text(encoding="utf-8")
+            for tool in MIRRORS
         }
-        self.assertEqual(contents["claude"], contents["cursor"])
-        self.assertEqual(contents["claude"], contents["codex"])
+        for tool, text in contents.items():
+            self.assertIn(f"/tmp/{MIRRORS[tool][2]}-loop-detection-", text)
+        normalized = {
+            tool: text.replace(
+                f"/tmp/{MIRRORS[tool][2]}-loop-detection-", "/tmp/TOOL-loop-detection-"
+            )
+            for tool, text in contents.items()
+        }
+        self.assertEqual(normalized["claude"], normalized["cursor"])
+        self.assertEqual(normalized["claude"], normalized["codex"])
 
 
 if __name__ == "__main__":

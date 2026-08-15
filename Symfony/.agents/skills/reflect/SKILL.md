@@ -29,9 +29,22 @@ Extract:
 
 If unclear, ask the user — max 2 questions.
 
-### Step 2: Root Cause Analysis
+### Step 2: Localize, Then Name the Root Cause
 
-Classify into one of these causes:
+**2a. Localize.** Name the interaction edge and the responsible side first: `COMPONENT - COMPONENT | blame: SIDE`. The component list and the two attribution rules — label the earliest failure after which the run never recovered, and blame follows behavior rather than opportunity — are defined in the active edition's `STABILIZATION.md`.
+
+The blamed side decides which repair is legitimate at all:
+
+| Blame | Repair |
+|-------|--------|
+| Model | rule text: skill instruction, `AGENTS.md`, review checklist |
+| Context, Memory, or Tool | harness change: hook, `context.py`, capsule or record template. A rule alone cannot fix what the model cannot observe |
+| Local or external environment | `project-brain/` incident; a rule only when the condition was recoverable and the run failed to recover |
+| Owner or Grader | `DOD.md`, `AGENTS.md`, or the request itself; report the contradiction to the user instead of resolving it silently |
+
+Stop here when the environment is to blame and the condition was unrecoverable: there is nothing to stabilize. Say so, and record the incident instead of drafting a rule.
+
+**2b. Root cause.** Classify into one of these causes:
 
 | Root Cause | Description | Example |
 |-----------|-------------|---------|
@@ -50,7 +63,9 @@ Write a rule following this template:
 ### Rule: {Short Name}
 
 **Trigger:** {What error was observed}
-**Root cause:** {Why it happened — from Step 2}
+**Edge:** {COMPONENT - COMPONENT — from Step 2a}
+**Blame:** {Responsible component — from Step 2a}
+**Root cause:** {Why it happened — from Step 2b}
 **Rule:** MUST/MUST NOT {enforceable statement}
 **Example:**
 - Incorrect: {concrete bad example}
@@ -69,6 +84,8 @@ Choose where the rule belongs:
 | Code style | the active edition's `GOLDEN-PRINCIPLES.md` | Naming, Symfony/PSR conventions, error handling, tests |
 | Specific skill | the active edition's `skills/{name}/SKILL.md` | Only relevant to one skill's workflow |
 | Process | the active edition's `STABILIZATION.md` | Add as example cycle for future reference |
+
+Placement must agree with the blame from Step 2a. A Context, Memory, or Tool failure filed as one more policy sentence is a mislocalization, not a rule: name the harness change instead.
 
 If enforcement is automatable, also identify which hook to create/update.
 

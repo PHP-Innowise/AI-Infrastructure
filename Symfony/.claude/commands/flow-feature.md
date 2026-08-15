@@ -43,7 +43,10 @@ if it does not (an existing task is never overwritten).
      read, and the task ID for `context.py retrieve`.
    - **Task boundaries** - what the agent must NOT do in this stage.
    - **Decisions and assumptions so far** - carried forward from previous
-     stages' Context Summaries; never leave this empty after stage one.
+     stages' Context Summaries; never leave this empty after stage one. Carry
+     each decision together with the constraint or rationale behind it: a
+     decision whose reason was dropped on the way is the one a later stage
+     "optimizes" away.
 
    Keep the serialized capsule within the 8,000-character Task Capsule
    bound. Pass file paths, never file contents, raw diffs, or transcripts.
@@ -55,11 +58,15 @@ if it does not (an existing task is never overwritten).
    has `parallel: true` (read-only agents only), spawn all of its agents in
    one message; otherwise spawn strictly one agent at a time and wait for it.
 3. When an agent returns, read its Context Summary, then record progress:
-   `python3 memory-bank/scripts/context.py update --task-id <ID> --actor <name> --progress "<stage>: <sanitized one-line result>"`
-   (the SubagentStop hook records the completion in the channel
-   automatically). Check the channel for agent messages addressed to you:
+   `python3 memory-bank/scripts/context.py update --task-id <ID> --actor <name> --progress "<stage>: <sanitized one-line result>"`.
+   Check the channel for agent messages addressed to you:
    `python3 memory-bank/scripts/context.py msg-read --task-id <ID> --for main --since <last seen seq>`.
-   Carry its decisions into the next capsule.
+   The SubagentStop hook normally records the completion there; when it
+   reports that the write failed, or the channel shows no completion for an
+   agent that returned, record it yourself with
+   `msg-dispatch --event complete` rather than reading the gap as "nothing
+   happened". Carry the agent's decisions, and the reasons behind them, into
+   the next capsule.
 4. At a `checkpoint:` stage, STOP after the spawned agent returns: present
    the accumulated result (the plan, the diff summary) and wait for explicit
    user approval. The user may amend the plan, skip a stage, or abort the
