@@ -97,4 +97,70 @@ if printf '%s\n' "$COMMAND" | grep -Eqi -- "$BLOCKED_REGEX"; then
   exit 2
 fi
 
+# OUTWARD patterns - not destructive, but they publish outside this checkout:
+# a pull request, a comment, a release, a push. They are reversible only in the
+# sense that a retraction is itself public, so they need the user's word first.
+# Warn rather than block: the user is often the one asking for exactly this,
+# and a hook cannot ask. The corresponding rule for the agent is in AGENTS.md.
+OUTWARD_PATTERNS=(
+  "gh[[:space:]]+pr[[:space:]]+(create|merge|comment|review|close|reopen|ready)"
+  "gh[[:space:]]+issue[[:space:]]+(create|comment|close|reopen)"
+  "gh[[:space:]]+release[[:space:]]+(create|edit|upload)"
+  "gh[[:space:]]+api[^;&|]*(-X|--method)[[:space:]]+(POST|PUT|PATCH)"
+  "gh[[:space:]]+workflow[[:space:]]+run"
+  "git[[:space:]]+push"
+)
+
+OUTWARD_REGEX=""
+for PATTERN in "${OUTWARD_PATTERNS[@]}"; do
+  OUTWARD_REGEX="${OUTWARD_REGEX:+$OUTWARD_REGEX|}($PATTERN)"
+done
+
+if printf '%s\n' "$COMMAND" | grep -Eqi -- "$OUTWARD_REGEX"; then
+  echo "CONFIRM: outward-facing action detected (publishes outside this repository)." >&2
+  echo "   Run it only with the user's explicit approval for this specific action." >&2
+  exit 1
+fi
+
+# Repetition guard. The file-edit counterpart lives in loop-detection.sh; a
+# command loop is invisible to it, because rerunning one failing command
+# forever touches no file. This hook sees the call before it runs and cannot
+# see its result, so identical invocations are the only signal available -
+# and they are counted per exact command string, so any real change of
+# approach starts its own count. The counter directory is the one the session
+# start hook clears, which makes the window a session.
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+REPO_KEY=$(printf '%s' "$REPO_ROOT" | cksum | cut -d' ' -f1)
+TRACK_DIR="/tmp/cursor-loop-detection-$REPO_KEY"
+
+if mkdir -p "$TRACK_DIR" 2>/dev/null; then
+  if command -v md5sum > /dev/null 2>&1; then
+    COMMAND_KEY=$(printf '%s' "$COMMAND" | md5sum | cut -d' ' -f1)
+  elif command -v md5 > /dev/null 2>&1; then
+    COMMAND_KEY=$(printf '%s' "$COMMAND" | md5 -q)
+  else
+    COMMAND_KEY=$(printf '%s' "$COMMAND" | cksum | tr -d ' ')
+  fi
+  TRACK_FILE="$TRACK_DIR/cmd-$COMMAND_KEY"
+
+  COUNT=0
+  [ -f "$TRACK_FILE" ] && COUNT=$(cat "$TRACK_FILE" 2>/dev/null)
+  case "$COUNT" in *[!0-9]*|'') COUNT=0 ;; esac
+  COUNT=$((COUNT + 1))
+  echo "$COUNT" > "$TRACK_FILE" 2>/dev/null
+
+  if [ "$COUNT" -ge 12 ]; then
+    {
+      printf 'BLOCKED: this exact command has run %s times this session.\n' "$COUNT"
+      printf '   Repeating it again is not a new attempt. Either change the\n'
+      printf '   command (narrow it, add the failing case, read the output\n'
+      printf '   differently) or escalate to /debugger for a root cause.\n'
+    } >&2
+    exit 2
+  elif [ "$COUNT" -ge 6 ]; then
+    printf 'WARNING: this exact command has run %s times this session. If it keeps failing, /debugger instead of another rerun.\n' "$COUNT" >&2
+    exit 1
+  fi
+fi
+
 exit 0

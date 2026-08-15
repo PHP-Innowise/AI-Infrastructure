@@ -1,6 +1,6 @@
 # Definition of Done - Symfony Layered Architecture
 
-Tiered checklist for Symfony work. Every item should be verified by command when tooling exists. If tooling is missing, report `N/A - tooling not configured` and do not install it without user approval.
+Tiered checklist for Symfony work. Every item should be verified by command when tooling exists. If tooling is missing, report `N/A - tooling not configured` together with the probe command and its output that establish the absence (`ls vendor/bin/phpunit`, `composer run-script --list`, `test -f phpstan.neon`), and do not install it without user approval. An unprobed `N/A` is a claim, not a result: it is the cheapest way to close a check without doing it, and it must be as falsifiable as a passing command.
 
 Prefer project Composer scripts (`composer test`, `composer analyse`, `composer lint`) so local and CI use the same entry points.
 
@@ -92,16 +92,25 @@ Report each unavailable command as `N/A - tooling not configured`.
 ## Failure Handling
 
 1. Read the full failure output.
-2. Fix the root cause, not just the symptom.
-3. Re-run the failing command.
-4. Stop after three unsuccessful fix attempts and escalate to `/debugger` with the exact command and failure summary.
+2. Localize before fixing: name the interaction edge and the responsible side, as defined in the active edition's `STABILIZATION.md`. A failure produced by the environment, by the harness, or by a check that contradicts the request is not repaired by editing application code.
+3. Fix the root cause, not just the symptom.
+4. Re-run the failing command.
+5. Stop after three unsuccessful fix attempts and escalate to `/debugger` with the exact command and failure summary.
+
+## When A Check And The Instruction Disagree
+
+A checklist item can contradict what the user explicitly asked for. The checklist is a grader, and a grader can be wrong, stale, or aimed at a different project shape.
+
+- MUST stop and report the mismatch: name the item, name the instruction, and state what each would produce.
+- MUST NOT silently satisfy one side and drop the other, and MUST NOT report the conflict as a passed check.
+- Only the user retires a check or amends the request. Resolving it inside the run hides an owner-side decision as an implementation detail.
 
 ## Reporting
 
 Final Context Summary must include:
 
 - Commands run.
-- Pass/fail/N/A status.
+- Pass/fail/N/A status, with the probe command behind every `N/A`.
 - Layering decisions.
 - Any unresolved risks.
 - Recommended next command in the workflow.
