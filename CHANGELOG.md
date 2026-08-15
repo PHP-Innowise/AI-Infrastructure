@@ -347,6 +347,23 @@ edition's own files remain in that edition's changelog.
   main-session turns, and compact deliberately near ~400k of context. Both
   thresholds are derived from local transcripts and are marked as such.
 
+### Fixed
+
+- `scripts/token_budget.json` re-baselines the Infrastructure-Creator
+  ceilings, which the 2.5.0 evidence-contract work outgrew without moving
+  them - the `lint` job had been red on every commit since. Per the file's
+  own policy (ceiling = observed + ~5%, raised only with the change that
+  justifies the growth), all six byte ceilings are re-derived from the
+  current tree: `body_bytes` 176549 -> 220441 and `agents_md_bytes` 12720 ->
+  15673 admit the new evidence, contract and semantic-gate procedures, while
+  `descriptor_bytes` 12478 -> 10811, `agent_bytes` 10342 -> 8134 and
+  `frontmatter_bytes` 18078 -> 16499 are *tightened* onto the slimming 2.5.0
+  performed, so the gate keeps its grip instead of inheriting dead slack.
+  Net effect on the surface that matters most: the startup total - paid on
+  every session whether or not anything is invoked - is 823 B *smaller* than
+  before 2.5.0 (34648 B -> 33825 B); the growth is confined to skill bodies,
+  which are paid only on invocation. `skills` stays at 25.
+
 ## 2.0.0 - 2026-08-07
 
 ### 2026-08-06 hook and installation hardening
