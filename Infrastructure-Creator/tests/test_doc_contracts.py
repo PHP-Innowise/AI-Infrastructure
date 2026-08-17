@@ -33,6 +33,7 @@ SCRIPTS = ROOT / ".agents/skills/bootstrap-verifier/scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from validate_flow_contracts import PHASES  # noqa: E402
+import validate_skill_quality  # noqa: E402
 from validate_skill_quality import (  # noqa: E402
     OWNERSHIP_ID_PATTERN,
     SCHEMA_1_2_PLAN_FIELDS,
@@ -46,6 +47,7 @@ SCHEMA_DOC = (
 INFRA_GENERATE_DOC = ROOT / ".agents/skills/infra-generate/SKILL.md"
 COMMAND_FORGE_DOC = ROOT / ".agents/skills/command-forge/SKILL.md"
 AGENTS_DOC = ROOT / "AGENTS.md"
+BOOTSTRAP_VERIFIER_DOC = ROOT / ".agents/skills/bootstrap-verifier/SKILL.md"
 
 JSON_BLOCK = re.compile(r"```json\n(.*?)\n```", re.DOTALL)
 BASH_BLOCK = re.compile(r"```bash\n(.*?)\n```", re.DOTALL)
@@ -161,6 +163,63 @@ class CommandForgeDocTest(unittest.TestCase):
             "`flow` + ordered `stages` frontmatter and one fenced "
             "`json flow-contract` block",
             flat,
+        )
+
+
+class BootstrapVerifierDedupDocTest(unittest.TestCase):
+    """The documented dedup thresholds must be the ones the gate applies.
+
+    `bootstrap-verifier/SKILL.md` publishes the skeleton pass's calibration as
+    concrete numbers so a reader can judge the false-positive margin. Numbers
+    in prose drift silently, so they are pinned to the constants here.
+    """
+
+    def setUp(self) -> None:
+        self.flat = normalized(BOOTSTRAP_VERIFIER_DOC)
+
+    def test_documented_thresholds_match_the_validator(self) -> None:
+        for constant, rendered in (
+            (validate_skill_quality.SKELETON_LINE_FAIL, "0.38"),
+            (validate_skill_quality.SKELETON_TOKEN_FAIL, "0.26"),
+            (validate_skill_quality.SKELETON_LINE_WARN, "0.28"),
+            (validate_skill_quality.SKELETON_TOKEN_WARN, "0.20"),
+        ):
+            self.assertEqual(f"{constant:.2f}", rendered)
+            self.assertIn(rendered, self.flat)
+        self.assertIn("blocks at 0.38 / 0.26", self.flat)
+        self.assertIn("a warning sits at 0.28 / 0.20", self.flat)
+
+    def test_documented_codes_and_severities_match_the_validator(self) -> None:
+        for code in (
+            "SKILL_TEMPLATE_REUSE",
+            "SKILL_TEMPLATE_BLOCK",
+            "SKILL_SIMILARITY",
+            "REPEATED_BLOCK",
+        ):
+            self.assertIn(f"`{code}`", self.flat)
+        # The doc claims the block pass is a warning; the validator must agree.
+        diagnostics: list = []
+        repeated = [
+            "trace the xid payload through the transport and record every "
+            "redelivery the handler accepts",
+            "reject the xid allocation once the invoice reaches its terminal "
+            "state and report the refusal",
+        ]
+        validate_skill_quality._report_skeleton_blocks(
+            {"left": repeated, "right": repeated}, diagnostics
+        )
+        self.assertEqual(
+            [(item.code, item.severity) for item in diagnostics],
+            [("SKILL_TEMPLATE_BLOCK", "warning")],
+        )
+        self.assertIn("deliberately a *warning*", self.flat.lower())
+
+    def test_documented_block_size_matches_the_validator(self) -> None:
+        self.assertEqual(validate_skill_quality.SKELETON_BLOCK_SIZE, 2)
+        self.assertIn(
+            "two adjacent shared skeleton lines, down from three "
+            "byte-identical ones",
+            self.flat,
         )
 
 

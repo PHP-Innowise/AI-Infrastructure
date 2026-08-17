@@ -369,6 +369,15 @@ _KNOWN_EXECUTABLES = frozenset(
         "symfony",
     }
 )
+# Public projection of every executable name this module recognises, including
+# the wrapper executables that are unwrapped before classification. Callers
+# that must decide whether a token found in prose is plausibly a command at
+# all (rather than a class name, a path, or a constant) gate on this set.
+RUNNER_EXECUTABLES = frozenset(_KNOWN_EXECUTABLES | set(_WRAPPER_VALUE_FLAGS))
+# Public: executables that run code handed to them as an argument. A caller
+# scanning prose re-reads their arguments as a nested command so a payload
+# quoted behind `bash -c` or `php -r` is classified rather than hidden.
+CODE_HOST_EXECUTABLES = frozenset(_SHELL_INTERPRETERS | _GENERAL_INTERPRETERS)
 
 
 def _load_json(path: Path) -> dict:

@@ -6,6 +6,123 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Fixed
 
+- The skill-quality gate held the *shape* of a generated skill - contract
+  completeness, candidate registry, sha256 fingerprints, path existence - and
+  lexical duplication, but not its *meaning*. Six reproduced ways to pass it
+  with an unusable or unsafe skill are now closed; the entries below describe
+  each one. Throughout, calibration was measured against honest corpora rather
+  than guessed, because a gate that fails a good-faith generation breaks the
+  generator outright, which is worse than the miss it closes.
+- Command safety stopped at the plan's `verification[].command`, so a
+  generated `SKILL.md` could hand the agent `rm -rf var/cache/dev` or
+  `curl -X POST https://billing.internal/api/invoices/void` in its prose and
+  still pass. Skill bodies are now analyzed too: fenced `bash`/`sh`/`shell`/
+  `console` blocks strictly (transcript prompts stripped, continuations
+  joined, comments dropped) and inline backtick spans permissively (a segment
+  counts only when it names a known executable *and* carries an argument, and
+  a bare English-word executable only when path-qualified). Chains are split
+  at quote-aware separators and classified leaf by leaf, homoglyph spaces are
+  folded first, and the argument of a code host (`bash -c`, `php -r`) is
+  re-read as a nested command. Destructive, workspace-mutating,
+  provider/network, or `sudo` behavior blocks (`SKILL_BODY_COMMAND_RISK`);
+  attestability-only findings (unknown executable, unresolved alias,
+  tokenization) do not, because prose legitimately carries placeholders and
+  sample output. That split is the measured one: on 93 hand-written
+  accelerator skills the naive "anything not provably safe" policy fired ~100
+  times on the 48 Symfony skills alone and was almost entirely noise
+  (`<number>` placeholders, heredoc fragments, JSON payload strings, `EOF`),
+  while the shipped policy fires 64 times and every hit is a real mutating or
+  networked command.
+  Two defects in that first cut were found by review and closed before it
+  shipped. Prose polarity is now read: a guardrail names the command it
+  forbids, so `Never run \`rm -rf var/\`` - the safest sentence a skill can
+  carry - was the one sentence that failed the gate. A backtick span whose
+  own clause carries a prohibition (`never`, `do not`, `must not`, `avoid`,
+  `instead of`, `tempted to`, ...) is read as a mention, not a prescription;
+  the window stops at the previous clause boundary so one prohibition cannot
+  silence a section, a lone hyphen is deliberately not a boundary (it would
+  truncate the window at "read-only" and hand the false positive back), and a
+  fenced shell block stays an instruction whatever the surrounding prose
+  claims. Second, the segment walk was LIFO against a 256-segment cap, so a
+  chain longer than the cap dropped its *head* - exactly where padding hides
+  a dangerous command; `rm -rf var/important && <300 harmless echoes>`
+  validated clean. The walk is now breadth-first over the written order, and
+  reaching the cap is itself reported (`SKILL_BODY_COMMAND_UNSCANNED`)
+  instead of silently truncating: an unscanned tail is an unproven command,
+  and unproven fails closed.
+- `evidence_anchors[].anchor` was validated for shape only, so an anchor could
+  cite line 7400 of a 60-line file or a symbol that does not exist in the
+  class it names. Anchors now resolve against the cited file - `L` ranges must
+  run forwards and lie inside its real bounds (`EVIDENCE_ANCHOR_RANGE`), and a
+  `symbol:` anchor's last segment must occur in it
+  (`EVIDENCE_ANCHOR_SYMBOL_ABSENT`, case-insensitive whole-identifier match so
+  `Ns\Class::member` resolves through `member`) - the same bound
+  `evidence[].line_range` already carried. An unreadable source is reported
+  (`EVIDENCE_ANCHOR_UNRESOLVABLE`), never raised.
+- Ownership was only ever compared writes-against-writes, so a skill could
+  write into a zone another skill holds under `mode: exclusive` whenever that
+  owner was read-only - which, by contract, every reviewer is
+  (`OWNERSHIP_EXCLUSIVE_WRITE_CONFLICT`). `shared`/`composed` zones keep their
+  own rules. Separately, a declared primary/defer precedence silenced overlap
+  unconditionally, so two skills could claim the same `owned_scope` entry,
+  `ownership[].description`, or positive trigger *word for word* and still
+  pass. Verbatim repetition is now `BOUNDARY_NOT_SEPARATING` regardless of
+  precedence - a boundary that repeats itself divides nothing - while nested
+  or otherwise partial overlap under an explicit precedence stays legitimate.
+- A skill could carry the project's real paths, classes and constants in every
+  sentence and still instruct nothing, passing every lexical traceability
+  check. Procedure steps are now read structurally: a step must command an
+  action (`SKILL_STEP_NOT_OPERATIONAL`) and must not open by deferring to
+  reflection - "consider", "bear in mind", "form an opinion"
+  (`SKILL_STEP_HEDGED`); the procedure as a whole must name a concrete anchor
+  (`SKILL_PROCEDURE_UNANCHORED`); and verification must state a check rather
+  than an impression (`SKILL_VERIFICATION_NOT_FALSIFIABLE`,
+  `SKILL_VERIFICATION_NOT_OPERATIONAL`). The plan is read the same way
+  (`PROCEDURE_STEP_NOT_OPERATIONAL`, `PROCEDURE_STEP_UNANCHORED`,
+  `VERIFICATION_NOT_FALSIFIABLE`). The `GENERIC_PHRASES` blacklist is demoted
+  to a secondary net, since one paraphrase defeats it. Calibration is
+  deliberately loose where it can only cost honest skills: the verb set is
+  open and matched anywhere in the step, mid-sentence hedging next to a real
+  action stays legitimate, and the anchor is required per procedure and never
+  per step, so honest branch and delegation steps survive.
+- The action-verb set that gate reads against was too narrow on arrival and
+  rejected honest instruction: 5 of the 37 procedure steps in the adversarial
+  harness's *honest* five-skill baseline were failed as commanding no action
+  ("Bound delivery at three attempts.", "Downgrade only on a permanent
+  delivery boundary error.", "Not this skill: recompute the anniversary
+  anchor of a subscription cycle."), and a step reading "Accept transitions
+  that revive a cancelled slot" was reported as inert rather than as wrong.
+  The set is widened by two stated rules - a verb enters when a measured
+  honest step used it, and a verb whose counterpart is already listed
+  ("upgrade"/"downgrade", "compute"/"recompute", "reject"/"accept",
+  "stop"/"start", "bind"/"bound", "modify"/"change") enters with it - stopping
+  at words that ordinarily read as adjective or noun, so "close" stays out and
+  "the closed invoice" keeps reading as a bare noun list. The honest baseline
+  is clean again at 0 findings over 271 distinct steps of every corpus
+  available.
+- Skill deduplication in `validate_skill_quality.py` was advertised as
+  semantic but compared normalized lines for *equality*, so it only ever saw
+  byte-identical prose - and since a plan-conforming `SKILL.md` must carry its
+  own claim, paths and neighbours' names, those mandated differences diluted
+  the score below the fail lines even for a byte clone of the procedure
+  (measured on the fixture: clone line 0.500 / token 0.680 against thresholds
+  0.70 / 0.80; one template with the project's nouns substituted 0.100 /
+  0.351; the same template differing only in `,`->`;` and `and`->`plus`
+  0.000 / 0.324 - indistinguishable from two honestly different skills).
+  A second pass now compares a *skeleton*: backticked spans, paths, CamelCase
+  and `UPPER_SNAKE` identifiers, dotted ids, PHP variables and calls, numbers
+  and the inventory's other skill names collapse to one placeholder, fenced
+  code and approved fixed blocks are dropped, punctuation and interchangeable
+  connectives are folded, and lines that are almost entirely project identity
+  are ignored; what remains is scored by one-to-one line matching plus token
+  trigrams (`SKILL_TEMPLATE_REUSE`, error at 0.38 / 0.26, warning at
+  0.28 / 0.20). Thresholds are measured, not guessed: across 2371 pairs of
+  honest hand-written skills the worst pair scores 0.350 / 0.154 and is a
+  deliberately parallel scanner family, while the three duplicates above
+  score 0.400 / 0.329, 0.400 / 0.311 and 0.500 / 0.471. `REPEATED_BLOCK`'s
+  three-consecutive-identical-lines rule drops to two adjacent skeleton lines
+  as `SKILL_TEMPLATE_BLOCK`, kept a *warning* because on the same honest
+  corpus it fires five times on legitimately shared policy sentences.
 - Six contradictions between the canonical LLM-prompt documents and the
   shipped validators, each capable of steering an obedient agent into a
   blocking gate or leaking non-neutral fixture data:

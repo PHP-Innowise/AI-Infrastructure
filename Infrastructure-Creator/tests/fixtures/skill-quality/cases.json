@@ -3,6 +3,18 @@
     "expected": "SKILL_SIMILARITY",
     "description": "Unrelated skills reuse the same generic five-step procedure."
   },
+  "noun-substituted-template": {
+    "expected": "SKILL_TEMPLATE_REUSE",
+    "description": "One prose template serves two skills, differing only in the project nouns each plan contract forces it to carry; every line is lexically distinct."
+  },
+  "repunctuated-template": {
+    "expected": "SKILL_TEMPLATE_REUSE",
+    "description": "The same template again, the second skill differing from the first only in punctuation and interchangeable connectives."
+  },
+  "template-reuse-calibration": {
+    "expected": null,
+    "description": "Honest inventories stay clean: two genuinely different skills, an approved versioned fixed block repeated word for word, and the same framework idiom shown in a fenced code block."
+  },
   "paraphrased-empty": {
     "expected": "SKILL_CONTENT_EMPTY",
     "description": "Headings are present but the operational contract is filler."
@@ -91,6 +103,18 @@
     "expected": "EVIDENCE_ANCHOR_LOCATION",
     "description": "Skill evidence carries a bounded canonical source anchor."
   },
+  "evidence-anchor-resolution": {
+    "expected": "EVIDENCE_ANCHOR_RANGE",
+    "description": "A well-formed anchor must resolve inside the file it cites: a line range past EOF, an inverted range, or an absent symbol cites nothing."
+  },
+  "exclusive-ownership-write": {
+    "expected": "OWNERSHIP_EXCLUSIVE_WRITE_CONFLICT",
+    "description": "A skill writes a path another skill owns exclusively, including a read-only owner whose own writes are empty."
+  },
+  "verbatim-boundary": {
+    "expected": "BOUNDARY_NOT_SEPARATING",
+    "description": "A declared primary/defer precedence cannot resolve an owned scope, ownership description, or positive trigger that both skills claim word for word."
+  },
   "routing-case-coverage": {
     "expected": "ROUTING_CASE_COVERAGE",
     "description": "Routing fixtures cover self-selection and every adjacent owner."
@@ -98,5 +122,21 @@
   "flow-contract-shape": {
     "expected": "FLOW_CONTRACT_INVALID",
     "description": "Declared flows use typed stages and resolve every selected skill."
+  },
+  "skill-body-command-risk": {
+    "expected": "SKILL_BODY_COMMAND_RISK",
+    "description": "Skill prose hands the agent a destructive, mutating, or provider-calling command."
+  },
+  "skill-body-command-calibration": {
+    "expected": null,
+    "description": "Class names, config paths, constants, and read-only tooling in backticks are not commands."
+  },
+  "vacuous-operational-content": {
+    "expected": "SKILL_STEP_HEDGED",
+    "description": "A skill names real project files, classes, and constants in every section, traces to every plan contract, and still commands nothing: procedure steps hedge instead of acting and verification accepts an impression."
+  },
+  "operational-content-calibration": {
+    "expected": null,
+    "description": "Honest instruction stays clean: project-specific verbs outside the whitelist, delegation and decision steps, and steps carrying no anchor of their own."
   }
 }
