@@ -436,6 +436,12 @@ python3 -m unittest tests.test_installation
 
 Review generated inventory changes before committing them.
 
+Inventories are generated from `git ls-files --cached`, so stage new
+distribution files before regenerating: an unstaged file is not part of the
+payload. The same rule keeps untracked working-tree content - a client
+application under `Task/`, caches, `.env` files - out of the shipped
+inventories and out of verification.
+
 ## Further Documentation
 
 - [Full safe-adoption procedure](../docs/ADOPTION.md)

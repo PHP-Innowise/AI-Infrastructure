@@ -194,32 +194,51 @@ def merge_agents_file(existing: str, source: str) -> str:
 
 
 def discover_distribution_files(root: Path, edition: str) -> list[str]:
-    """Return tracked plus non-ignored pending distribution files.
+    """Return the Git-tracked distribution files of one edition.
 
-    Including non-ignored pending files makes local verification useful before
-    the user stages a change. In CI, the same command resolves to tracked files.
+    The inventory is a closed contract over what the repository tracks, so the
+    file set comes from the index rather than from a working-tree scan. An
+    untracked working tree may hold a client application, build caches, local
+    databases or secrets; scanning the disk would publish that material into
+    the inventories, which are shipped. Staging (`git add`) is enough to make a
+    new distribution file visible here - a commit is not required - and both
+    `--write-inventories` and `--verify-inventories` read the same index, so a
+    working tree that is dirty with untracked files can neither change an
+    inventory nor fail its verification.
+
+    Without a Git checkout there is no way to tell distribution files from
+    client data, so this raises instead of guessing from the filesystem.
     """
-    result = subprocess.run(
-        [
-            "git",
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "--",
-            edition,
-        ],
-        cwd=root,
-        capture_output=True,
-        check=True,
-    )
+    command = ["git", "ls-files", "-z", "--cached", "--", edition]
+    try:
+        result = subprocess.run(command, cwd=str(root), capture_output=True)
+    except OSError as error:
+        raise InventoryError(
+            f"{edition}: cannot run git ({error}); inventories require a Git checkout"
+        ) from error
+    if result.returncode != 0:
+        reason = result.stderr.decode("utf-8", "replace").strip().splitlines()
+        raise InventoryError(
+            f"{edition}: cannot list tracked files under {root}"
+            + (f": {reason[-1]}" if reason else "")
+            + "; inventories are generated from a Git checkout only"
+        )
     prefix = edition + "/"
-    return sorted(
-        raw.decode("utf-8")[len(prefix) :]
-        for raw in result.stdout.split(b"\0")
-        if raw and raw.decode("utf-8").startswith(prefix)
-    )
+    # Unmerged index entries repeat a path once per stage; distinct paths are
+    # what the inventory records.
+    paths = set()
+    for raw in result.stdout.split(b"\0"):
+        if not raw:
+            continue
+        value = raw.decode("utf-8")
+        if value.startswith(prefix):
+            paths.add(value[len(prefix) :])
+    if not paths:
+        raise InventoryError(
+            f"{edition}: no tracked files under {root / edition}; "
+            "--source-root must point at the Git checkout holding the editions"
+        )
+    return sorted(paths)
 
 
 def component_for(path: str) -> str:
@@ -270,16 +289,30 @@ def build_inventory(root: Path, edition: str) -> dict:
     }
 
 
-def write_inventories(root: Path) -> None:
-    destination = root / "install" / "inventories"
+def write_inventories(root: Path, destination: Path | None = None) -> None:
+    """Generate every edition inventory into ``destination``.
+
+    ``destination`` defaults to the checkout's own ``install/inventories``.
+    Pointing it elsewhere lets a caller regenerate and compare without writing
+    into the repository under test.
+    """
+    if destination is None:
+        destination = root / "install" / "inventories"
+    generated = {
+        edition: build_inventory(root, edition) for edition in EDITIONS
+    }
     destination.mkdir(parents=True, exist_ok=True)
     for edition in EDITIONS:
         path = destination / inventory_path(edition).name
         path.write_text(
-            json.dumps(build_inventory(root, edition), indent=2, ensure_ascii=False) + "\n",
+            json.dumps(generated[edition], indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
-        print(f"WROTE\t{path.relative_to(root).as_posix()}")
+        try:
+            label = path.relative_to(root).as_posix()
+        except ValueError:
+            label = path.as_posix()
+        print(f"WROTE\t{label}")
 
 
 def verify_inventory(root: Path, edition: str) -> None:
@@ -449,6 +482,12 @@ def parse_args() -> argparse.Namespace:
     mode.add_argument("--write-inventories", action="store_true")
     mode.add_argument("--verify-inventories", action="store_true")
     mode.add_argument("--edition", choices=EDITIONS)
+    parser.add_argument(
+        "--inventory-out",
+        type=Path,
+        help="with --write-inventories, write the generated inventories to this "
+        "directory instead of the checkout's install/inventories",
+    )
     parser.add_argument("--target", type=Path)
     parser.add_argument("--tool", action="append", choices=TOOLS)
     parser.add_argument("--dry-run", action="store_true")
@@ -462,6 +501,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.edition and args.target is None:
         parser.error("--target is required with --edition")
+    if args.inventory_out is not None and not args.write_inventories:
+        parser.error("--inventory-out requires --write-inventories")
     return args
 
 
@@ -470,7 +511,12 @@ def main() -> int:
     root = args.source_root.resolve()
     try:
         if args.write_inventories:
-            write_inventories(root)
+            destination = (
+                args.inventory_out.expanduser().resolve()
+                if args.inventory_out is not None
+                else None
+            )
+            write_inventories(root, destination)
             return 0
         if args.verify_inventories:
             for edition in EDITIONS:

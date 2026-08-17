@@ -101,10 +101,20 @@ python3 scripts/install_accelerator.py \
   `MERGE`, `COPY_AS`, `UNCHANGED`, and `COMPLETE` records; meaningful nonzero
   exit status on inventory errors or refused collisions.
 - **Dependencies:** Python 3 standard library and Git. Inventory discovery for
-  verification/writing uses `git ls-files`.
+  verification/writing is `git ls-files --cached`, so the payload is exactly
+  what the index holds. Untracked working-tree content - a client application
+  under `Task/`, build caches, local databases, `.env` files - is invisible to
+  both modes: it cannot be written into an inventory and cannot fail
+  verification on a dirty tree. A new distribution file therefore has to be
+  staged (`git add`; no commit needed) before regeneration records it. Without
+  a Git checkout both modes fail with an explicit error rather than falling
+  back to a filesystem scan, because outside the index there is no way to tell
+  distribution files from client data.
 - **Writes:** verification and dry-run do not write. Installation creates
   selected files in the target. `--write-inventories` regenerates repository
-  inventory JSON. The target path rejects symlink components.
+  inventory JSON, or writes it to `--inventory-out DIR` instead, which lets a
+  caller regenerate and compare without touching the checkout under test. The
+  target path rejects symlink components.
 - **CI relationship:** the `installation` job verifies inventories and runs
   installation and framework-semantics tests.
 

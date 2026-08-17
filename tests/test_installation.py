@@ -113,8 +113,25 @@ class InventoryTest(unittest.TestCase):
             for edition in EDITIONS
         )
         before = {path: path.read_bytes() for path in inventory_paths}
-        generated = run(sys.executable, str(INSTALLER), "--write-inventories")
-        self.assertEqual(0, generated.returncode, generated.stderr)
+        with tempfile.TemporaryDirectory(prefix="regenerated inventories ") as raw:
+            regenerated = Path(raw).resolve() / "inventories"
+            generated = run(
+                sys.executable,
+                str(INSTALLER),
+                "--write-inventories",
+                "--inventory-out",
+                str(regenerated),
+            )
+            self.assertEqual(0, generated.returncode, generated.stderr)
+            self.assertEqual(
+                before,
+                {
+                    path: (regenerated / path.name).read_bytes()
+                    for path in inventory_paths
+                },
+            )
+        # Regeneration reads the index, so an untracked working tree can neither
+        # change the committed inventories nor be written into them.
         self.assertEqual(before, {path: path.read_bytes() for path in inventory_paths})
 
         for edition in EDITIONS:
@@ -452,6 +469,116 @@ class InventoryTest(unittest.TestCase):
                 lines[-1],
             )
             self.assertFalse(any(target.iterdir()))
+
+
+class UntrackedSourceTest(unittest.TestCase):
+    """Untracked working-tree content must never reach a shipped inventory."""
+
+    LEAKS = (
+        ".env",
+        "client-notes.txt",
+        "Task/app/.env",
+        "Task/app/var/cache/dev/ContainerSynthetic.php",
+    )
+    MARKER = "CLIENT_SECRET=must-not-ship"
+
+    def _write_editions(self, base: Path) -> None:
+        for edition in EDITIONS:
+            edition_root = base / edition
+            (edition_root / "memory-bank" / ".install").mkdir(parents=True)
+            (edition_root / ".claude").mkdir(parents=True)
+            (edition_root / "VERSION").write_text("0.0.0\n", encoding="utf-8")
+            (edition_root / "AGENTS.md").write_text("# policy\n", encoding="utf-8")
+            (edition_root / "CHANGELOG.md").write_text("# history\n", encoding="utf-8")
+            (edition_root / "memory-bank" / "INDEX.md").write_text(
+                "# source index\n", encoding="utf-8"
+            )
+            (edition_root / "memory-bank" / ".install" / "INDEX.md").write_text(
+                "# production index\n", encoding="utf-8"
+            )
+            (edition_root / ".claude" / "settings.json").write_text(
+                "{}\n", encoding="utf-8"
+            )
+
+    def _plant_untracked_files(self, base: Path) -> None:
+        for relative in self.LEAKS:
+            leak = base / "Symfony" / relative
+            leak.parent.mkdir(parents=True, exist_ok=True)
+            leak.write_text(self.MARKER + "\n", encoding="utf-8")
+
+    def test_untracked_files_are_absent_from_generated_inventories(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="untracked source ") as raw:
+            base = Path(raw).resolve()
+            self._write_editions(base)
+            initialized = run(
+                "git", "-c", "init.defaultBranch=main", "init", "-q", str(base)
+            )
+            self.assertEqual(0, initialized.returncode, initialized.stderr)
+            # Staged and never committed: the index alone defines the payload.
+            staged = run("git", "add", "--", *EDITIONS, cwd=base)
+            self.assertEqual(0, staged.returncode, staged.stderr)
+            self._plant_untracked_files(base)
+
+            generated = run(
+                sys.executable,
+                str(INSTALLER),
+                "--source-root",
+                str(base),
+                "--write-inventories",
+                cwd=base,
+            )
+            self.assertEqual(0, generated.returncode, generated.stderr)
+
+            written = base / "install" / "inventories" / "symfony.json"
+            raw_text = written.read_text(encoding="utf-8")
+            self.assertNotIn(self.MARKER, raw_text)
+            data = json.loads(raw_text)
+            installed = [
+                path for paths in data["installed"].values() for path in paths
+            ]
+            recorded = set(installed) | set(data["excluded_tracked_paths"])
+            for relative in self.LEAKS:
+                with self.subTest(path=relative):
+                    self.assertNotIn(relative, recorded)
+            self.assertEqual(
+                ["AGENTS.md", "VERSION", "memory-bank/INDEX.md"],
+                data["installed"]["shared"],
+            )
+            self.assertEqual([".claude/settings.json"], data["installed"]["claude"])
+            self.assertEqual(
+                ["CHANGELOG.md", "memory-bank/.install/INDEX.md"],
+                data["excluded_tracked_paths"],
+            )
+
+            # Verification reads the same index, so the dirty working tree keeps
+            # the installation gate green instead of failing on client files.
+            verified = run(
+                sys.executable,
+                str(INSTALLER),
+                "--source-root",
+                str(base),
+                "--verify-inventories",
+                cwd=base,
+            )
+            self.assertEqual(0, verified.returncode, verified.stderr)
+            self.assertIn("VERIFIED\tSymfony", verified.stdout)
+
+    def test_generation_without_a_git_checkout_fails_instead_of_scanning(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ungit source ") as raw:
+            base = Path(raw).resolve()
+            self._write_editions(base)
+            self._plant_untracked_files(base)
+            result = run(
+                sys.executable,
+                str(INSTALLER),
+                "--source-root",
+                str(base),
+                "--write-inventories",
+                cwd=base,
+            )
+            self.assertEqual(1, result.returncode, result.stdout)
+            self.assertIn("install-accelerator:", result.stderr)
+            self.assertFalse((base / "install").exists())
 
 
 class CleanInstallTest(unittest.TestCase):
