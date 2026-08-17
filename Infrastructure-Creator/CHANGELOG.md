@@ -6,6 +6,20 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Fixed
 
+- `CommandAnalyzer` raised on the stock Symfony skeleton, so the quality gate
+  could not run at all on a normal Symfony target. Flex writes `auto-scripts`
+  as an object keyed by command (`{"cache:clear": "symfony-cmd"}`), and
+  `_normalise_script_commands` accepted only a string or a string list - it
+  raised, `validate_skill_quality.py` turned that into
+  `COMMAND_ANALYZER_UNAVAILABLE`, and every skill in the inventory failed.
+  All seven real Symfony projects available for measurement carry the object
+  form, so this was not an edge case: it made generation impossible on the
+  generator's own primary target ecosystem. The object form is now read, with
+  the command reconstructed from the key according to its handler
+  (`symfony-cmd` -> `bin/console <key>`, `php-script` -> `php <key>`), and a
+  script object with non-string values is still rejected. Found by running
+  the pipeline end to end against a real project rather than a fixture.
+
 - The skill-quality gate held the *shape* of a generated skill - contract
   completeness, candidate registry, sha256 fingerprints, path existence - and
   lexical duplication, but not its *meaning*. Seven reproduced ways to pass it

@@ -482,6 +482,38 @@ class CommandSafetyTest(unittest.TestCase):
         self.assert_code(analysis, "EXPANSION_LIMIT")
         self.assertFalse(analysis.verification_safe)
 
+    def test_flex_auto_scripts_object_is_read_not_rejected(self) -> None:
+        """The stock Symfony skeleton must not break the analyzer.
+
+        Symfony Flex writes `auto-scripts` as an object keyed by command.
+        Rejecting that shape made CommandAnalyzer raise on construction, so
+        every skill on a stock Symfony target failed the quality gate with
+        COMMAND_ANALYZER_UNAVAILABLE - the gate could not run at all. Found
+        by generating against a real Symfony project.
+        """
+        analyzer = self.analyzer(
+            composer_scripts={
+                "auto-scripts": {
+                    "cache:clear": "symfony-cmd",
+                    "assets:install %PUBLIC_DIR%": "symfony-cmd",
+                    "some-file.php": "php-script",
+                },
+                "post-install-cmd": ["@auto-scripts"],
+            }
+        )
+        self.assertEqual(
+            analyzer.scripts["composer:auto-scripts"],
+            (
+                "bin/console cache:clear",
+                "bin/console assets:install %PUBLIC_DIR%",
+                "php some-file.php",
+            ),
+        )
+
+    def test_a_script_object_with_non_string_values_is_still_rejected(self) -> None:
+        with self.assertRaises(analyzer_module.CommandAnalysisError):
+            self.analyzer(composer_scripts={"auto-scripts": {"cache:clear": ["x"]}})
+
     def test_composer_scripts_shadowing_builtins_classify_the_builtin(
         self,
     ) -> None:

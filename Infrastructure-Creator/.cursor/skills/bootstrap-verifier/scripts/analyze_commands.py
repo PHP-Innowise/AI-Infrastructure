@@ -400,7 +400,33 @@ def _normalise_script_commands(
     if ecosystem == "composer" and isinstance(value, list):
         if all(isinstance(item, str) for item in value):
             return tuple(value)
-    expected = "a string or string list" if ecosystem == "composer" else "a string"
+    if ecosystem == "composer" and isinstance(value, dict):
+        # Symfony Flex writes `auto-scripts` as an object whose KEYS are the
+        # commands and whose values name the handler ("symfony-cmd",
+        # "php-script", "script"). This is the stock shape of a Symfony
+        # skeleton, so rejecting it made the analyzer - and therefore the
+        # whole quality gate - unusable on essentially every Symfony target.
+        # The handler decides how the key is executed, so reconstruct the
+        # command from the key and let the normal classification run.
+        if all(
+            isinstance(key, str) and isinstance(item, str)
+            for key, item in value.items()
+        ):
+            commands = []
+            for key, handler in value.items():
+                if handler == "symfony-cmd":
+                    # Flex routes these through the Symfony binary/console.
+                    commands.append(f"bin/console {key}")
+                elif handler == "php-script":
+                    commands.append(f"php {key}")
+                else:
+                    commands.append(key)
+            return tuple(commands)
+    expected = (
+        "a string, string list or Flex auto-scripts object"
+        if ecosystem == "composer"
+        else "a string"
+    )
     raise CommandAnalysisError(
         f"{source}: script {name!r} must be {expected}, got "
         f"{type(value).__name__}"
