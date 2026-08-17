@@ -74,6 +74,12 @@ Writes a report to `tasks/TASK-{N}/bootstrap-verifier-report.md`. Does not write
      match, so a qualified `Ns\Class::member` resolves through `member`). This
      is the same bound `evidence[].line_range` already carries. An unreadable
      source is reported (`EVIDENCE_ANCHOR_UNRESOLVABLE`), never raised.
+   - Each `evidence[].supported_claims` entry must share with its cited range
+     wording that no other PHP file would: sharing only PHP keywords is
+     `EVIDENCE_CLAIM_UNSUPPORTED`, sharing only software-English boilerplate
+     is `EVIDENCE_CLAIM_GENERIC_SUPPORT` (warning). Cited identifiers split
+     (`publishReminder` grounds "reminder"). Polarity is beyond any such rule
+     - `docs/ADR-001-claim-adjudication.md`.
    - Every planned skill exists and no unplanned skill exists; required
      operational sections, procedure roles, decisions, outputs, failure
      handling, owned/excluded scope, sibling boundaries, and routing triggers

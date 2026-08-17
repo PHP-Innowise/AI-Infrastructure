@@ -725,6 +725,9 @@ class SkillQualityTest(SkillQualityFixture):
                 "irrelevant-evidence-reuse",
                 "missing-evidence",
                 "unsupported-evidence-claim",
+                "claim-language-lexicon-only",
+                "claim-common-lexicon-only",
+                "claim-compound-identifier-calibration",
                 "scope-collision",
                 "ambiguous-routing",
                 "unjustified-inventory-growth",
@@ -1092,6 +1095,84 @@ Be careful.
         ] = "Interplanetary teleportation quantum gateway is configured"
         self.rewrite()
         self.assertIn("EVIDENCE_CLAIM_UNSUPPORTED", self.codes())
+
+    def claim_case(self, claim: str) -> list:
+        """Attach ``claim`` to the first evidence entry over a real PHP file.
+
+        The claim is substituted everywhere the selection gate echoes it, so
+        the plan stays internally consistent - the only lie left is the
+        relationship between the claim and the code it cites, which is exactly
+        what a fabricating agent produces.
+        """
+        self.write_target("config/firebase.php", FIREBASE_SOURCE)
+        self.refingerprint("firebase-runtime")
+        self.plan["evidence"][0]["supported_claims"] = [claim]
+        condition = self.plan["skills"][0]["selection_gate"]["conditions"][0]
+        condition["requirement"] = claim
+        condition["explanation"] = f"config/firebase.php confirms: {claim}"
+        self.rewrite()
+        return [
+            item
+            for item in validator.validate(
+                self.skills, self.plan_path, self.target, self.registry_path
+            )
+            if item.code.startswith("EVIDENCE_CLAIM")
+        ]
+
+    def test_claim_made_only_of_php_language_vocabulary_is_not_grounded(self) -> None:
+        """Bag-of-words overlap is trivial to satisfy with PHP keywords.
+
+        'class' and 'function' occur in roughly three quarters of all PHP
+        files, so two of them were enough to ground an invented claim against
+        any cited source.  This claim has four such overlaps and still says
+        nothing about the file it cites, so the distinctive-vocabulary tier
+        rejects it.
+        """
+        claim = (
+            "The public class exposes a private function that returns a string "
+            "value from the configuration array"
+        )
+        diagnostics = self.claim_case(claim)
+        self.assertEqual(
+            [("error", "EVIDENCE_CLAIM_UNSUPPORTED")],
+            [(item.severity, item.code) for item in diagnostics],
+        )
+        # The old bag-of-words test was satisfied - that was the whole miss.
+        claim_tokens = validator._meaningful_tokens(claim)
+        cited_tokens = validator._meaningful_tokens(FIREBASE_SOURCE)
+        self.assertGreaterEqual(len(claim_tokens & cited_tokens), 2)
+
+    def test_claim_supported_only_by_common_lexicon_is_warned_about(self) -> None:
+        """One tier down: the claim does share a word, but only a boilerplate one.
+
+        'final' is not a PHP keyword the language tier knows, so this claim
+        clears the error tier; nothing project-specific in it ('whose', 'each',
+        'payload') appears in the cited range.  Measured on real docblock/code
+        pairs this tier costs 2.3-3.6% false positives, which is why it warns
+        instead of failing the run.
+        """
+        diagnostics = self.claim_case(
+            "The final class is a service handler whose method returns the "
+            "result value for each request option payload"
+        )
+        self.assertEqual(
+            [("warning", "EVIDENCE_CLAIM_GENERIC_SUPPORT")],
+            [(item.severity, item.code) for item in diagnostics],
+        )
+
+    def test_claim_grounded_through_a_compound_identifier_is_accepted(self) -> None:
+        """Honest prose names what the code spells as one identifier.
+
+        The cited file never writes 'reminder' on its own - only
+        ``publishReminder``.  Without splitting compound identifiers this
+        honest claim would score zero distinctive overlap and be rejected, and
+        a false rejection here blocks a correct plan.
+        """
+        self.assertNotIn("reminder", validator._meaningful_tokens(FIREBASE_SOURCE))
+        self.assertIn("reminder", validator._cited_vocabulary(FIREBASE_SOURCE))
+        self.assertEqual(
+            [], self.claim_case("The class publishes each reminder string it receives")
+        )
 
     def test_exact_schema_profile_and_evidence_bounds_are_enforced(self) -> None:
         self.plan["schema_version"] = 1

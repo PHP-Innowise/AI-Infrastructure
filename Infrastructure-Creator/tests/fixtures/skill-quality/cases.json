@@ -39,6 +39,18 @@
     "expected": "EVIDENCE_CLAIM_UNSUPPORTED",
     "description": "A selection condition repeats a claim that the cited source/range does not support."
   },
+  "claim-language-lexicon-only": {
+    "expected": "EVIDENCE_CLAIM_UNSUPPORTED",
+    "description": "An invented claim overlaps the cited source only through PHP keywords ('class', 'function', 'public', 'string'), which occur in most PHP files and therefore ground nothing."
+  },
+  "claim-common-lexicon-only": {
+    "expected": "EVIDENCE_CLAIM_GENERIC_SUPPORT",
+    "description": "A claim clears the language tier but nothing project-specific in it appears in the cited range; support rests entirely on software-English boilerplate ('service', 'method', 'result', 'value')."
+  },
+  "claim-compound-identifier-calibration": {
+    "expected": null,
+    "description": "Honest prose stays clean when the code spells its subject as one identifier: a claim about the 'reminder' the file only ever writes as publishReminder is accepted."
+  },
   "scope-collision": {
     "expected": "SCOPE_COLLISION",
     "description": "Sibling skills claim the same owned scope."

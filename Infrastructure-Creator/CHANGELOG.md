@@ -8,7 +8,7 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 - The skill-quality gate held the *shape* of a generated skill - contract
   completeness, candidate registry, sha256 fingerprints, path existence - and
-  lexical duplication, but not its *meaning*. Six reproduced ways to pass it
+  lexical duplication, but not its *meaning*. Seven reproduced ways to pass it
   with an unusable or unsafe skill are now closed; the entries below describe
   each one. Throughout, calibration was measured against honest corpora rather
   than guessed, because a gate that fails a good-faith generation breaks the
@@ -123,6 +123,35 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
   three-consecutive-identical-lines rule drops to two adjacent skeleton lines
   as `SKILL_TEMPLATE_BLOCK`, kept a *warning* because on the same honest
   corpus it fires five times on legitimately shared policy sentences.
+- An `evidence[].supported_claims` entry was "grounded" by a bag-of-words
+  overlap with the cited range: two shared tokens (one for a claim of three
+  tokens or fewer) after subtracting five service words. `class` occurs in
+  75% of real PHP files, `function` in 77%, `public` in 74%, `string` in 56%,
+  so an invented claim - "the public class exposes a private function that
+  returns a string value from the configuration array" - was grounded by any
+  PHP file it pointed at. Support now has to come from vocabulary that
+  distinguishes *that* range: a claim sharing nothing outside PHP-keyword and
+  licence-header lexicon is `EVIDENCE_CLAIM_UNSUPPORTED` (error), and one
+  sharing nothing outside software-English boilerplate (`service`, `method`,
+  `value`, `result`, `config`) while at least 65% of its own vocabulary is
+  such boilerplate is `EVIDENCE_CLAIM_GENERIC_SUPPORT` (warning). The cited
+  side is matched with compound identifiers split into their parts, so
+  `publishReminder` grounds an honest claim about the "reminder" the file
+  never writes on its own. Both lexicons are unedited document-frequency cuts
+  (share >= 0.40 and >= 0.04) over 3997 real PHP files from the Symfony and
+  Laravel vendor trees, measured in that same identifier-split token space.
+  Calibration on 1485-2190 honest docblock/code pairs from those trees: the
+  error tier costs 0.18-0.27% false positives and catches 20-45% of
+  generic-lexicon fabrications, the warning tier costs 2.3-3.6% and takes the
+  pair to 87-99%; on the harness's honest control claims the margin is 3-10
+  project-specific tokens matched against a threshold of one. The second tier
+  warns rather than blocking because at that false-positive rate a failed
+  generation would cost more than the miss.
+  What no lexical rule can reach is *polarity*: a claim asserting the opposite
+  of the code it cites shares all the same vocabulary. That gap, the options
+  weighed for it (an LLM judge inside the gate, doing nothing, this
+  deterministic narrowing plus adjudication in the repo-root `harness/`), and
+  the decision are recorded in `docs/ADR-001-claim-adjudication.md`.
 - Six contradictions between the canonical LLM-prompt documents and the
   shipped validators, each capable of steering an obedient agent into a
   blocking gate or leaking non-neutral fixture data:

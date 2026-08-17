@@ -141,6 +141,88 @@ IDENTITY_STOPWORDS = {
     "adapter", "contract", "domain", "integration", "review", "service", "services",
     "skill", "workflow",
 }
+CLAIM_SERVICE_WORDS = {"project", "confirmed", "supports", "uses", "runtime"}
+# Claim-grounding lexicons (`EVIDENCE_CLAIM_UNSUPPORTED` /
+# `EVIDENCE_CLAIM_GENERIC_SUPPORT`).  A claim is "supported" only if it shares
+# vocabulary with the cited range that actually says something about *this*
+# project, so the words that say nothing have to be known.  Both sets are raw
+# document-frequency cuts - no hand curation - measured over 3997 real PHP
+# files sampled from the Symfony 7 and Laravel vendor trees, in the same
+# identifier-expanded token space `_cited_vocabulary` matches in.
+#
+# CLAIM_LANGUAGE_LEXICON: share >= 0.40.  PHP syntax and licence-header
+# boilerplate; a claim built only from these says nothing at all, so missing
+# overlap here is an error.  Measured on 1485-2190 honest docblock/code pairs
+# it costs 0.18-0.27% false errors and catches 20-45% of generic-lexicon
+# fabrications outright.
+#
+# CLAIM_COMMON_LEXICON: share >= 0.04.  Adds the software-English band -
+# 'service', 'method', 'value', 'result', 'config', 'handler', 'message' - the
+# words that let a fabricated claim look grounded against any PHP file.
+# Missing overlap here is a warning, not an error: measured cost is 2.28-3.64%
+# false warnings, and with the error tier it catches 87-99% of fabrications.
+# The cut is the unedited measurement, author names and hostnames included:
+# licence headers make 'fabien' exactly as uninformative as 'class'.
+CLAIM_LANGUAGE_LEXICON = frozenset({
+    "array", "class", "code", "com", "copyright", "distributed", "extends",
+    "file", "full", "function", "get", "information", "license", "namespace",
+    "new", "part", "php", "please", "public", "return", "source", "string",
+    "this-", "use", "view", "was",
+})
+
+# The band between the two cuts; CLAIM_COMMON_LEXICON is the union below.
+_CLAIM_COMMON_BAND = frozenset({
+    "abstract", "add", "after", "all", "any", "args", "argument", "arguments",
+    "array_merge", "assert", "attribute", "attributes", "author", "backward",
+    "base", "before", "bergmann", "bool", "break", "brian", "builder", "but",
+    "cache", "call", "callable", "callback", "can", "cannot", "carbon", "case",
+    "catch", "check", "class-string", "class_exists", "closure", "collection",
+    "command", "compatibility", "component", "config", "configuration",
+    "connection", "console", "const", "construct", "container", "contains",
+    "content", "context", "continue", "contracts", "count", "covered",
+    "create", "current", "data", "database", "date", "debug", "declare",
+    "default", "definition", "dependency", "deprecated", "deprecation",
+    "description", "dir__", "doc", "doctrine", "does", "element", "else",
+    "elseif", "empty", "end", "error", "event", "exception", "exists",
+    "expression", "extension", "fabien", "factory", "failed", "faker", "false",
+    "filter", "final", "first", "for", "foreach", "format", "formats", "found",
+    "foundation", "framework", "from", "generator", "getname", "gettype",
+    "given", "gmail", "gmail.com", "handle", "handler", "has", "have", "html",
+    "http", "httpfoundation", "ignore", "illuminate", "immutable",
+    "implements", "implode", "in_array", "index", "info", "input", "instance",
+    "instanceof", "instead", "int", "interface", "internal", "invalid",
+    "invalidargumentexception", "is_array", "is_string", "isset", "its",
+    "kernel", "key", "keys", "last", "length", "line", "link", "list", "logic",
+    "logicexception", "make", "map", "match", "matches", "max", "merge",
+    "message", "metadata", "method", "min", "mixed", "name", "named", "names",
+    "nesbitt", "nesbot", "nesbot.com", "next", "no-named-arguments", "node",
+    "non", "not", "null", "number", "object", "one", "only", "option",
+    "options", "org", "other", "output", "package", "param", "parameter",
+    "parameters", "parent::__construct", "parse", "parser", "path",
+    "phpparser", "phpstan", "phpunit", "phpunit.de", "potencier", "prefix",
+    "preg", "preg_match", "previous", "private", "process", "promise",
+    "property", "protected", "provider", "query", "readonly", "reference",
+    "reflection", "remove", "replace", "request", "require", "response",
+    "result", "returns", "runtime", "runtimeexception", "sebastian", "see",
+    "self", "service", "set", "sprintf", "start", "state", "static", "str",
+    "str_replace", "strict", "strict_types", "strlen", "subscriber", "substr",
+    "support", "symfony", "symfony.com", "tag", "template", "test", "text",
+    "throw", "throwable", "throws", "time", "tostring", "trait", "true", "try",
+    "type", "types", "unset", "used", "user", "using", "valid", "validator",
+    "value", "values", "var", "version", "void", "whether", "which", "while",
+    "with", "you",
+})
+CLAIM_COMMON_LEXICON = CLAIM_LANGUAGE_LEXICON | _CLAIM_COMMON_BAND
+# A claim is only *called* generic when this share or less of its own
+# vocabulary survives CLAIM_COMMON_LEXICON.  Honest claims that trip the
+# warning are abstract but still project-specific; a fabrication is common
+# lexicon by construction.  The guard cuts false warnings from 7.24% to 3.50%
+# with no loss on the fabricated side.
+CLAIM_GENERIC_SHARE_PERCENT = 35
+_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_CAMEL_RE = re.compile(r"[a-z0-9]+|[A-Z][a-z0-9]*")
+_DOTTED_RE = re.compile(r"[a-z0-9]+(?:[-/.][a-z0-9]+)+")
+_DOTTED_SPLIT_RE = re.compile(r"[-/.]")
 LINE_FAIL_THRESHOLD = 0.70
 TOKEN_FAIL_THRESHOLD = 0.80
 TOKEN_WARN_THRESHOLD = 0.65
@@ -745,6 +827,30 @@ def _tokens(value: str) -> list[str]:
 
 def _meaningful_tokens(value: str) -> set[str]:
     return {token for token in _tokens(value) if len(token) >= 3 or any(char.isdigit() for char in token)}
+
+
+def _cited_vocabulary(value: str) -> set[str]:
+    """Cited tokens plus the parts of every compound identifier.
+
+    Prose says "failure description", the code says ``failureDescription``, and
+    ``_tokens`` keeps identifiers whole.  Without this split an honest claim
+    scores zero project-specific overlap against the very range it describes,
+    and a false ``EVIDENCE_CLAIM_UNSUPPORTED`` is the expensive failure here:
+    it blocks a correct plan.  Measured on 2500 real docblock/code pairs from
+    the Symfony and Laravel vendor trees, splitting identifiers cuts the false
+    error rate from 0.55-0.88% to 0.18-0.27% and costs 0.10-0.34 points of
+    fabrication detection (99.15 -> 99.05, 98.53 -> 98.45, 88.34 -> 88.00):
+    the parts an identifier contributes ('value', 'name', 'type') are
+    themselves common lexicon, so a fabricator gains almost nothing from them.
+    """
+    tokens = _meaningful_tokens(value)
+    for raw in _IDENTIFIER_RE.findall(value):
+        parts = [part.lower() for part in _CAMEL_RE.findall(raw) if len(part) >= 3]
+        if len(parts) > 1:
+            tokens.update(parts)
+    for raw in _DOTTED_RE.findall(value.lower()):
+        tokens.update(part for part in _DOTTED_SPLIT_RE.split(raw) if len(part) >= 3)
+    return tokens
 
 
 def _name_pattern(name: str) -> str:
@@ -3193,17 +3299,45 @@ def _validate_plan(
                         end = min(len(lines), line_range.get("end", 0))
                         cited_text = "\n".join(lines[start:end])
                     cited_tokens = _meaningful_tokens(cited_text)
+                    cited_words = _cited_vocabulary(cited_text)
                     for claim in entry["supported_claims"]:
-                        claim_tokens = _meaningful_tokens(claim) - {
-                            "project", "confirmed", "supports", "uses", "runtime"
-                        }
+                        claim_tokens = _meaningful_tokens(claim) - CLAIM_SERVICE_WORDS
                         required = 1 if len(claim_tokens) <= 3 else 2
+                        # Bag-of-words overlap alone is trivial to satisfy:
+                        # 'class' and 'function' appear in three quarters of
+                        # all PHP files, so two of them are enough to "ground"
+                        # an invented claim.  Support therefore has to come
+                        # from vocabulary that distinguishes this range from
+                        # any other PHP file, in two measured tiers.
+                        distinctive = claim_tokens - CLAIM_LANGUAGE_LEXICON
+                        specific = claim_tokens - CLAIM_COMMON_LEXICON
                         if len(claim_tokens & cited_tokens) < required:
                             _diag(
                                 diagnostics,
                                 "EVIDENCE_CLAIM_UNSUPPORTED",
                                 f"evidence {evidence_id} claim is not grounded "
                                 f"in the cited source/range: {claim}",
+                            )
+                        elif not distinctive & cited_words:
+                            _diag(
+                                diagnostics,
+                                "EVIDENCE_CLAIM_UNSUPPORTED",
+                                f"evidence {evidence_id} claim shares only PHP "
+                                f"language vocabulary with the cited "
+                                f"source/range: {claim}",
+                            )
+                        elif not specific & cited_words and (
+                            len(specific) * 100
+                            <= CLAIM_GENERIC_SHARE_PERCENT * len(claim_tokens)
+                        ):
+                            _diag(
+                                diagnostics,
+                                "EVIDENCE_CLAIM_GENERIC_SUPPORT",
+                                f"evidence {evidence_id} claim is supported "
+                                f"only by lexicon common to any PHP file; "
+                                f"nothing project-specific in it appears in "
+                                f"the cited source/range: {claim}",
+                                severity="warning",
                             )
             evidence_map[evidence_id] = location
 
