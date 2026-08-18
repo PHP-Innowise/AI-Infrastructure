@@ -5636,6 +5636,36 @@ def _validate_skill_file(
     for field, haystack, code in checks:
         if not _contract_matches(plan[field], haystack):
             _diag(diagnostics, code, f"{name}: {field} is not traceable to skill content")
+    # The field-level checks above grade a whole contract member as one bag of
+    # words, so a body could satisfy `required_procedure_roles` by echoing two
+    # words from any one role. Rendering is per member: an approved step or
+    # obligation that never reaches the page was dropped, whatever else got
+    # written. Measured on 45 real authored skills before release - 0 of 191
+    # planned steps and 0 of 135 obligations untraceable - so the bar costs
+    # honest work nothing.
+    for step in _as_list(plan.get("procedure_steps")):
+        if not isinstance(step, dict) or not _is_nonempty_string(step.get("action")):
+            continue
+        if not _contract_matches(step["action"], resolved["procedure"]):
+            _diag(
+                diagnostics,
+                "SKILL_STEP_NOT_RENDERED",
+                f"{name}: approved step {step.get('id', '?')} never reaches the "
+                f"procedure: {_excerpt(str(step['action']))}",
+            )
+    for role in _as_list(plan.get("required_procedure_roles")):
+        if not isinstance(role, dict) or not _is_nonempty_string(role.get("role")):
+            continue
+        stated = " ".join(
+            [str(role["role"])] + [str(item) for item in _as_list(role.get("requirements"))]
+        )
+        if not _contract_matches(stated, resolved["procedure"]):
+            _diag(
+                diagnostics,
+                "SKILL_ROLE_NOT_RENDERED",
+                f"{name}: catalog obligation {role['role']} never reaches the "
+                "procedure",
+            )
 
     expected_refs: list[str] = list(plan.get("source_paths", []))
     for evidence_id in plan.get("evidence_ids", []):

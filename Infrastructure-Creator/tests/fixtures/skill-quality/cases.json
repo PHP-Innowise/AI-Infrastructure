@@ -55,6 +55,14 @@
     "description": "Evidence claims trace through scope, procedure, verification, and output.",
     "expected": "CLAIM_TRACEABILITY_MISSING"
   },
+  "contract-rendering": {
+    "description": "An approved procedure step is planned but never reaches the authored skill.",
+    "expected": "SKILL_STEP_NOT_RENDERED"
+  },
+  "contract-rendering-obligation": {
+    "description": "A catalog obligation is planned but never reaches the authored procedure.",
+    "expected": "SKILL_ROLE_NOT_RENDERED"
+  },
   "critical-invariant-coverage": {
     "description": "Every critical invariant reaches a selected skill procedure and verification assertion.",
     "expected": "CRITICAL_INVARIANT_COVERAGE"

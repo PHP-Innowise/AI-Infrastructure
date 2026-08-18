@@ -865,6 +865,8 @@ class SkillQualityTest(SkillQualityFixture):
                 "absence-evidence-calibration",
                 "absence-evidence-contradicted",
                 "catalog-role-coverage",
+                "contract-rendering",
+                "contract-rendering-obligation",
                 "claim-invariant-lost",
                 "evidence-undisposed",
                 "large-plan-calibration",
@@ -4999,6 +5001,57 @@ class EvidenceDispositionTest(SkillQualityFixture):
             "LEGACY_PLAN_PUBLICATION_INELIGIBLE",
             [item.code for item in authored],
         )
+
+
+class ContractRenderingTest(SkillQualityFixture):
+    """Section 7: the forge renders the approved contract, not a summary of it.
+
+    The field-level trace checks grade a whole contract member as one bag of
+    words, so a body could satisfy `required_procedure_roles` by echoing two
+    words from any one role. An approved step that never reaches the page was
+    dropped, whatever else got written.
+    """
+
+    def test_an_approved_step_that_never_reaches_the_page_is_reported(self) -> None:
+        self.use_schema_1_4()
+        skill = self.plan["skills"][0]
+        skill["procedure_steps"].append(
+            {
+                "id": "sanitize-provider-payload",
+                "action": (
+                    "Redact the customer telephone identifiers before writing "
+                    "the boundary report"
+                ),
+                "evidence_ids": [skill["evidence_ids"][0]],
+                "path_refs": [skill["source_paths"][0]],
+                "decision_refs": [skill["decision_points"][0]["id"]],
+                "expected_outcome": "No telephone identifier reaches the report",
+                "failure_branch": "Stop and report the unredacted identifier",
+            }
+        )
+        self.rewrite()
+        self.assertIn("SKILL_STEP_NOT_RENDERED", self.codes())
+
+    def test_a_step_the_body_carries_is_accepted(self) -> None:
+        self.use_schema_1_4()
+        self.assertNotIn("SKILL_STEP_NOT_RENDERED", self.codes())
+        self.assertNotIn("SKILL_ROLE_NOT_RENDERED", self.codes())
+
+    def test_an_obligation_that_never_reaches_the_page_is_reported(self) -> None:
+        self.use_schema_1_4()
+        skill = self.plan["skills"][0]
+        skill["required_procedure_roles"].append(
+            {
+                "role": "redact-customer-telephone-identifiers",
+                "requirements": [
+                    "Remove every subscriber telephone identifier before writing"
+                ],
+                "evidence_ids": [skill["evidence_ids"][0]],
+                "procedure_step_ids": [skill["procedure_steps"][0]["id"]],
+            }
+        )
+        self.rewrite()
+        self.assertIn("SKILL_ROLE_NOT_RENDERED", self.codes())
 
 
 if __name__ == "__main__":

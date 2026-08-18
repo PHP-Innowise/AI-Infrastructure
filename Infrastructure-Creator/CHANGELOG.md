@@ -174,6 +174,16 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Verified
 
+- **The forge must render the approved contract, not a summary of it.** The
+  trace checks graded a whole contract member as one bag of words, so an
+  authored skill could satisfy `required_procedure_roles` by echoing two words
+  from any one role while dropping the other five. Rendering is now checked per
+  member: an approved procedure step or catalog obligation that never reaches
+  the page is `SKILL_STEP_NOT_RENDERED` / `SKILL_ROLE_NOT_RENDERED`.
+  Measured on 45 real authored skills before release - 0 of 191 planned steps
+  and 0 of 135 obligations untraceable - so the bar costs honest work nothing
+  and only catches what was dropped between approval and authoring.
+
 - **The regression catalog is now an index of coverage that exists.** Every rule
   shipped this cycle has a named case in
   `tests/fixtures/skill-quality/cases.json`, and a new test fails if any
