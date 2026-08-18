@@ -221,8 +221,20 @@ CLAIM_COMMON_LEXICON = CLAIM_LANGUAGE_LEXICON | _CLAIM_COMMON_BAND
 CLAIM_GENERIC_SHARE_PERCENT = 35
 _IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _CAMEL_RE = re.compile(r"[a-z0-9]+|[A-Z][a-z0-9]*")
-_DOTTED_RE = re.compile(r"[a-z0-9]+(?:[-/.][a-z0-9]+)+")
-_DOTTED_SPLIT_RE = re.compile(r"[-/.]")
+# '::' and '->' are the two PHP member separators and are as much a compound
+# joint as '.' or '/': `_tokens` keeps `FrameworkBundle::class` whole, so prose
+# naming FrameworkBundle scored zero overlap against the very line that
+# registers it.  They are listed before the single-character class so the
+# alternation consumes both characters rather than matching '-' alone.
+_DOTTED_RE = re.compile(r"[a-z0-9]+(?:(?:::|->|[-/.])[a-z0-9]+)+")
+_DOTTED_SPLIT_RE = re.compile(r"::|->|[-/.]")
+# Two overlapping words is a fair bar only for a range with vocabulary to
+# spare.  A claim is one sentence, and a sentence carries on the order of
+# CLAIM_SENTENCE_TOKENS significant words, so the bar is one reused word per
+# sentence-worth of vocabulary the cited range can actually offer: `.php-version`
+# is the single word "8.2", one bundle registration line offers five, and no
+# honest claim can reuse two words a range does not have.
+CLAIM_SENTENCE_TOKENS = 8
 LINE_FAIL_THRESHOLD = 0.70
 TOKEN_FAIL_THRESHOLD = 0.80
 TOKEN_WARN_THRESHOLD = 0.65
@@ -270,6 +282,36 @@ _CAMEL_CASE_PATTERN = re.compile(r"\b[A-Za-z]+[a-z0-9]*(?:[A-Z][a-z0-9]*)+\b")
 _DOTTED_ID_PATTERN = re.compile(r"\b[A-Za-z0-9]+(?:[_.:][A-Za-z0-9]+)+\b")
 _NUMBER_PATTERN = re.compile(r"\b\d[\d,.]*\b")
 _NON_WORD_PATTERN = re.compile(r"[^a-z0-9]+")
+# Markdown table scaffolding, matched on `_normalize_line` output (folded case
+# and whitespace). The header rule and an evidence citation row are mandated
+# form, not reusable substance - see `_repeatable_segments`.
+_TABLE_RULE_CELL = re.compile(r":?-{2,}:?")
+_EVIDENCE_ID_CELL = re.compile(r"(?:ev|evidence)[-_]?\d{1,6}", re.I)
+RUNTIME_FIXED_KIND = "runtime-fixed"
+RUNTIME_ROOTS = ("memory-bank", "project-brain")
+_RUNTIME_BODY_PATH = re.compile(
+    r"\b(?:memory-bank|project-brain)/[A-Za-z0-9_*{},./-]*"
+)
+_RUNTIME_BODY_COMMAND = re.compile(
+    r"python3[ \t]+(memory-bank/scripts/[A-Za-z0-9_.-]+\.py)"
+    r"((?:[ \t]+[^\s`|;&<>()]+)*)"
+)
+_CODE_SPAN_CONTENT = re.compile(r"`([^`\n]+)`")
+_LINE_ANCHOR_SUFFIX = re.compile(r":L\d+(?:\s*-\s*L?\d+)?$")
+_PATH_SPAN_PATTERN = re.compile(r"[A-Za-z0-9_@*][A-Za-z0-9_.@*{},/-]*")
+_PATH_EXTENSION_PATTERN = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,7}$")
+_SYMBOL_ANCHOR_SUFFIX = ":symbol:"
+# Trees that are installed or generated rather than committed, so their
+# absence from a checkout proves nothing about the skill that names them.
+BODY_PATH_UNTRACKED_ROOTS = frozenset({"node_modules", "var", "vendor"})
+# A path on a line that commands its creation is a path that does not exist
+# yet by design. Inflections are enumerated so `additional`, `placeholder`,
+# and `authorization` never read as creation.
+BODY_PATH_CREATION_PATTERN = re.compile(
+    r"\b(?:add|append|create|emit|generate|introduce|produce|register|save"
+    r"|scaffold|write)(?:s|d|es|ed|ing)?\b|\b(?:new|wrote)\b",
+    re.I,
+)
 SUPPORTED_PLAN_SCHEMAS = {"1.0", "1.1", "1.2"}
 ROUTING_ROLES = {"primary", "defer", "fallback"}
 OWNERSHIP_MODES = {"exclusive", "shared", "composed"}
@@ -842,6 +884,8 @@ def _cited_vocabulary(value: str) -> set[str]:
     fabrication detection (99.15 -> 99.05, 98.53 -> 98.45, 88.34 -> 88.00):
     the parts an identifier contributes ('value', 'name', 'type') are
     themselves common lexicon, so a fabricator gains almost nothing from them.
+    Compounds joined by '.', '/', '::' or '->' split the same way, so a PHP
+    member reference contributes its parts and not one glued token.
     """
     tokens = _meaningful_tokens(value)
     for raw in _IDENTIFIER_RE.findall(value):
@@ -856,6 +900,38 @@ def _cited_vocabulary(value: str) -> set[str]:
 def _name_pattern(name: str) -> str:
     """Regex-safe pattern matching a skill name with '-' or ' ' separators."""
     return r"[- ]".join(re.escape(part) for part in name.split("-"))
+
+
+def _self_reference_spans(name: str, line: str) -> list[int]:
+    """Return the offsets at which ``line`` names the skill as itself.
+
+    A skill whose directory shares its name has to spell that directory out to
+    be operational: ``memory-bank`` cannot describe its purpose without
+    naming ``memory-bank/chunks/`` and ``memory-bank/scripts/context.py``. A
+    name that is part of a path, or that sits inside a code span, is naming a
+    file rather than restating the skill, so it is not a self-reference.
+    """
+    prose = _blank_inline_code(line)
+    spans: list[int] = []
+    for match in re.finditer(rf"\b{_name_pattern(name)}\b", prose, re.I):
+        after = prose[match.end() : match.end() + 1]
+        before = prose[match.start() - 1 : match.start()] if match.start() else ""
+        if after == "/" or before == "/":
+            continue
+        spans.append(match.start())
+    return spans
+
+
+def _purpose_is_circular(name: str, purpose: str) -> bool:
+    """Report whether a purpose defines the skill by restating its own name.
+
+    Circularity is a sentence that says nothing beyond the name ("use
+    ``memory-bank`` when you need ``memory-bank``"), so it is measured per
+    line and only over mentions that are prose rather than paths.
+    """
+    return any(
+        len(_self_reference_spans(name, line)) > 1 for line in purpose.splitlines()
+    )
 
 
 def _contract_matches(contract: Any, text: str) -> bool:
@@ -1135,15 +1211,31 @@ def _verification_attested(command: str, analysis) -> bool:
     return _normalize_command_text(command).strip() in _attested_read_only_commands()
 
 
+def _blank_inline_code(text: str) -> str:
+    """Blank the inside of inline code spans, preserving every offset.
+
+    Clause boundaries and prohibition markers are properties of prose. A CLI
+    flag inside a span is neither: with span contents left in the window, the
+    ``--`` of ``--force`` closed the clause, so the second command of
+    "Never run `a --force` or `b`" was read as prescribed - the guardrail
+    silently blocked the very command it forbids. Offsets are preserved so a
+    caller may slice the blanked text with indices taken from the original.
+    """
+    return INLINE_CODE_PATTERN.sub(
+        lambda match: "`" + " " * len(match.group(1)) + "`", text
+    )
+
+
 def _forbids_span(body: str, start: int) -> bool:
     """Report whether the clause carrying ``start`` forbids its command.
 
     The window is the text between the last clause boundary before the span
     and the span itself, so a prohibition governs only its own clause: in
     ``Do not run `a` - run `b` instead`` the first span is a mention and the
-    second stays a prescription.
+    second stays a prescription. Boundaries are read from prose only, never
+    from the contents of an earlier code span.
     """
-    window = body[:start]
+    window = _blank_inline_code(body[:start])
     boundaries = list(CLAUSE_BOUNDARY_PATTERN.finditer(window))
     if boundaries:
         window = window[boundaries[-1].end():]
@@ -1341,6 +1433,69 @@ def _normalized_body(body: str, fixed_blocks: list[str]) -> tuple[list[str], lis
         if normalized:
             lines.append(normalized)
     return lines, _tokens("\n".join(lines))
+
+
+def _table_cells(line: str) -> list[str]:
+    """Split a markdown table row into its cells, or return [] for prose."""
+    stripped = line.strip()
+    if not stripped.startswith("|") or stripped.count("|") < 2:
+        return []
+    return [cell.strip() for cell in stripped.strip("|").split("|")]
+
+
+def _is_table_rule(line: str) -> bool:
+    """Report whether the line is a markdown header rule (``| --- | --- |``)."""
+    cells = _table_cells(line)
+    return bool(cells) and all(_TABLE_RULE_CELL.fullmatch(cell) for cell in cells)
+
+
+def _is_evidence_row(line: str) -> bool:
+    """Report whether the line is one row of an evidence table.
+
+    Identified structurally: a table row carrying a cell that is nothing but
+    an evidence identifier, next to a cell that carries a source path. Two
+    skills citing one piece of evidence must render that row identically -
+    the citation is the point - so the repetition is mandated, not reuse.
+    """
+    cells = _table_cells(line)
+    if len(cells) < 2:
+        return False
+    has_id = any(
+        _EVIDENCE_ID_CELL.fullmatch(cell.strip("`*_ ")) for cell in cells
+    )
+    return has_id and any(_PATH_PATTERN.search(cell) for cell in cells)
+
+
+def _repeatable_segments(lines: list[str]) -> list[list[str]]:
+    """Split normalized lines into runs eligible for repeated-block reporting.
+
+    A markdown table header (with its rule) and an evidence-table row are
+    excluded: both are prescribed scaffolding around a citation, so an
+    identical run of them across two skills is mandated duplication rather
+    than a reused procedure. Excluded lines break the run instead of being
+    deleted from it, so prose on either side of a table never fuses into a
+    block that was never adjacent in the file.
+    """
+    exempt = [False] * len(lines)
+    for index, line in enumerate(lines):
+        if _is_table_rule(line):
+            exempt[index] = True
+            if index and _table_cells(lines[index - 1]):
+                exempt[index - 1] = True
+        elif _is_evidence_row(line):
+            exempt[index] = True
+    segments: list[list[str]] = []
+    current: list[str] = []
+    for index, line in enumerate(lines):
+        if exempt[index]:
+            if current:
+                segments.append(current)
+                current = []
+            continue
+        current.append(line)
+    if current:
+        segments.append(current)
+    return segments
 
 
 def _line_similarity(left: list[str], right: list[str]) -> float:
@@ -1820,6 +1975,445 @@ def _creatable_parent_exists(target: Path, value: str) -> bool:
     return parent.is_dir()
 
 
+# --- runtime-fixed accountability -------------------------------------------
+#
+# The `runtime-fixed` quartet (`memory-bank`, `project-brain`, `checkpoint`,
+# `memory`) is generated unconditionally because `memory-seed` installs the
+# runtime it drives in the same run. It therefore cannot be measured by
+# project specificity - it describes the generator's own runtime, not the
+# target's code - so the gate stops demanding target evidence from it and
+# demands a bar it CAN meet instead: every runtime path and every runtime
+# command it names must exist verbatim in the canonical
+# `memory-seed/assets/runtime-contract.json`, and it may not claim target
+# knowledge it declared no evidence for.
+
+
+def _expand_braces(value: str) -> list[str]:
+    """Expand one `{a,b}` alternation group at a time, left to right."""
+    match = re.search(r"\{([^{}]*)\}", value)
+    if match is None:
+        return [value]
+    expanded: list[str] = []
+    for option in match.group(1).split(","):
+        expanded.extend(
+            _expand_braces(
+                value[: match.start()] + option.strip() + value[match.end() :]
+            )
+        )
+    return expanded
+
+
+def _path_segments(value: str) -> list[str]:
+    return [segment for segment in value.split("/") if segment not in ("", ".")]
+
+
+def _segments_match(left: str, right: str) -> bool:
+    return fnmatch.fnmatchcase(left, right) or fnmatch.fnmatchcase(right, left)
+
+
+def _segment_run_matches(fragment: list[str], contract: list[str]) -> bool:
+    """True when `fragment` is a contiguous run of `contract`'s segments.
+
+    A skill legitimately names both the whole runtime path
+    (`memory-bank/scripts/validate.py`) and a bare tail or interior fragment
+    of it (`scripts/validate.py`, `chunks/`, `control/`), so membership is
+    decided on segment runs rather than on string prefixes.
+    """
+    if not fragment or len(fragment) > len(contract):
+        return False
+    return any(
+        all(
+            _segments_match(fragment[offset], contract[start + offset])
+            for offset in range(len(fragment))
+        )
+        for start in range(len(contract) - len(fragment) + 1)
+    )
+
+
+def _segment_prefix_matches(fragment: list[str], forbidden: list[str]) -> bool:
+    """True when `fragment` is the forbidden path itself or lives beneath it."""
+    bounded = [segment for segment in forbidden if segment != "**"]
+    if not bounded or len(fragment) < len(bounded):
+        return False
+    return all(
+        _segments_match(fragment[index], bounded[index])
+        for index in range(len(bounded))
+    )
+
+
+def _runtime_command_forms(value: Any) -> list[str]:
+    """Every runtime CLI form the contract spells out, at any nesting depth."""
+    if isinstance(value, str):
+        return [value] if "memory-bank/scripts/" in value else []
+    if isinstance(value, dict):
+        return [
+            form for item in value.values() for form in _runtime_command_forms(item)
+        ]
+    if isinstance(value, list):
+        return [form for item in value for form in _runtime_command_forms(item)]
+    return []
+
+
+def _runtime_command_signature(command: str) -> tuple[str, str, set[str]] | None:
+    """`python3 <script> <subcommand> --flags` reduced to its callable shape."""
+    tokens = [token.strip(".,;:") for token in command.split()]
+    tokens = [token for token in tokens if token]
+    if len(tokens) < 2 or tokens[0] != "python3":
+        return None
+    subcommand = ""
+    flags: set[str] = set()
+    for token in tokens[2:]:
+        if token.startswith("-"):
+            flags.add(token.split("=", 1)[0])
+        elif not subcommand and not flags:
+            subcommand = token
+    return tokens[1], subcommand, flags
+
+
+def _runtime_body_contract(
+    diagnostics: list[Diagnostic],
+) -> dict[str, Any] | None:
+    """Load the canonical runtime contract as body-checkable path/command sets."""
+    try:
+        document = json.loads(RUNTIME_CONTRACT.read_text(encoding="utf-8"))
+        contracts = document["path_contracts"]
+        declared: list[list[str]] = []
+        for item in contracts["required_skeleton"]:
+            for expanded in _expand_braces(str(item)):
+                declared.append(_path_segments(expanded))
+        for item in contracts["creatable"]:
+            for expanded in _expand_braces(str(item["path"])):
+                declared.append(_path_segments(expanded))
+        forbidden = [
+            _path_segments(expanded)
+            for item in contracts["forbidden_invented_paths"]
+            for expanded in _expand_braces(str(item))
+        ]
+        commands: dict[tuple[str, str], set[str]] = {}
+        for form in _runtime_command_forms(document["commands"]):
+            signature = _runtime_command_signature(form)
+            if signature is None:
+                continue
+            script, subcommand, flags = signature
+            commands.setdefault((script, subcommand), set()).update(flags)
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as error:
+        _diag(
+            diagnostics,
+            "RUNTIME_CONTRACT_UNREADABLE",
+            f"canonical runtime contract is invalid: {error}",
+        )
+        return None
+    return {"paths": declared, "forbidden": forbidden, "commands": commands}
+
+
+def _named_runtime_path(value: str) -> str:
+    """Trim sentence punctuation from a runtime path named in prose."""
+    return value.strip().rstrip(".,;:)]").rstrip("/")
+
+
+def _named_path_candidate(span: str) -> str | None:
+    """A code span that is itself a path, or `None` when it is prose."""
+    value = _LINE_ANCHOR_SUFFIX.sub("", span.strip()).strip().rstrip(".,;:")
+    if not value or not _PATH_SPAN_PATTERN.fullmatch(value):
+        return None
+    if "/" not in value and not _PATH_EXTENSION_PATTERN.search(value):
+        return None
+    return value.rstrip("/") or None
+
+
+def _claims_declared_path(candidate: str, declared: Iterable[str]) -> bool:
+    for item in declared:
+        normalized = str(item).rstrip("/")
+        if not normalized:
+            continue
+        if _globs_intersect(candidate, normalized):
+            return True
+        if normalized.startswith(candidate + "/"):
+            return True
+    return False
+
+
+# --- body path accountability -----------------------------------------------
+#
+# A skill body is an instruction sheet: "open `src/Security/Foo.php`" sends the
+# agent to a file. The plan's `path_contracts` are resolved against the target,
+# but the rendered prose was not, so an invented path shipped clean. Prose is
+# full of strings that only look like target paths, so the reading is
+# deliberately narrow: a diagnostic is raised only for a bare path code span
+# that is rooted in the target's own tree and is not accounted for by anything
+# else. Every ambiguous class is skipped rather than guessed - the classes left
+# uncovered are listed in `bootstrap-verifier/SKILL.md`.
+
+
+def _anchor_path(span: str) -> str | None:
+    """The path part of a code span, with any `:L…`/`:symbol:…` anchor cut."""
+    return _named_path_candidate(span.split(_SYMBOL_ANCHOR_SUFFIX, 1)[0])
+
+
+def _body_path_spans(body: str) -> list[tuple[str, str]]:
+    """Each bare-path code span in the body, paired with its own paragraph.
+
+    The context is the paragraph, not the physical line, because generated
+    bodies are hard-wrapped at about eighty columns: in "a reviewer would
+    add at `tests/Booking/HoldExpiryTest.php`" the verb that marks the path
+    as one to be CREATED lands on the previous line as often as not. Reading
+    one line made the verdict depend on where the text happened to wrap -
+    the same sentence passed unwrapped and failed wrapped. A paragraph is
+    bounded by blank lines, so intent still cannot leak in from a
+    neighbouring instruction.
+    """
+    found: list[tuple[str, str]] = []
+    for block in body.split("\n\n"):
+        paragraph = " ".join(block.split())
+        if not paragraph:
+            continue
+        for match in _CODE_SPAN_CONTENT.finditer(paragraph):
+            candidate = _anchor_path(match.group(1))
+            if candidate is not None:
+                found.append((candidate, paragraph))
+    return found
+
+
+def _cited_target_text(
+    plan: dict[str, Any],
+    evidence_map: dict[str, tuple[str, str]],
+    target: Path,
+) -> str:
+    """Text of the target files this skill declares it reads.
+
+    A path can be absent from disk and still be an honest quotation: a config
+    key (`schema_type_dirs: src/Model`), a Twig logical template name, a glob
+    root. If the target's own cited source spells the string out, the skill is
+    reporting the project rather than inventing a file.
+    """
+    paths = [
+        item for item in _as_list(plan.get("source_paths")) if isinstance(item, str)
+    ]
+    for evidence_id in _as_list(plan.get("evidence_ids")):
+        location = (
+            evidence_map.get(evidence_id) if isinstance(evidence_id, str) else None
+        )
+        if location and location[0] == "path":
+            paths.append(location[1])
+    chunks: list[str] = []
+    for value in sorted(set(paths)):
+        resolved = _confined(target, value)
+        if resolved is None or not resolved.is_file():
+            continue
+        try:
+            chunks.append(
+                resolved.read_text(encoding="utf-8", errors="replace")[:200_000]
+            )
+        except OSError:
+            continue
+    return "\n".join(chunks)
+
+
+def _validate_body_paths(
+    name: str,
+    plan: dict[str, Any],
+    body: str,
+    evidence_map: dict[str, tuple[str, str]],
+    target: Path,
+    diagnostics: list[Diagnostic],
+) -> None:
+    """Every target file a skill body sends the agent to must exist."""
+    creatable = {
+        str(item["path"])
+        for item in _as_list(plan.get("path_contracts"))
+        if isinstance(item, dict)
+        and isinstance(item.get("path"), str)
+        and item.get("classification") != "required-existing"
+    }
+    creatable.update(
+        item for item in _as_list(plan.get("writes")) if isinstance(item, str)
+    )
+    suspects: list[str] = []
+    for candidate, line in _body_path_spans(body):
+        segments = _path_segments(candidate)
+        if (
+            # A bare file name (`security.yaml`) is shorthand, not a location;
+            # a dotted config key or property reference never gets this far.
+            len(segments) < 2
+            # A glob or a `{a,b}`/placeholder group names a set, not a file.
+            or any(token in candidate for token in "*?[]{}")
+            or segments[0] in BODY_PATH_UNTRACKED_ROOTS
+            or segments[0] in RUNTIME_ROOTS
+            or candidate in creatable
+            or BODY_PATH_CREATION_PATTERN.search(line)
+        ):
+            continue
+        if _path_matches(target, candidate):
+            continue
+        parent = _confined(target, "/".join(segments[:-1]))
+        root = _confined(target, segments[0])
+        # Rooted in the target's own tree: its first segment is a real
+        # top-level entry AND its parent directory exists. A foreign project's
+        # path, a vendor path, and a Twig logical name all fail this and are
+        # left alone - the alternative is calling every unfamiliar string a lie.
+        if (
+            parent is None
+            or not parent.is_dir()
+            or root is None
+            or not root.is_dir()
+        ):
+            continue
+        suspects.append(candidate)
+    if not suspects:
+        return
+    quoted = _cited_target_text(plan, evidence_map, target)
+    for candidate in suspects:
+        if candidate in quoted:
+            continue
+        _diag(
+            diagnostics,
+            "SKILL_BODY_PATH_MISSING",
+            f"{name}: body sends the agent to a target path that does not "
+            f"exist: {candidate}",
+        )
+
+
+def _evidence_table_rows(
+    body: str, known_ids: set[str]
+) -> list[tuple[str, list[str]]]:
+    """Rendered evidence rows as `(evidence id, path candidates)` pairs."""
+    rows: list[tuple[str, list[str]]] = []
+    for line in body.splitlines():
+        cells = _table_cells(line)
+        if len(cells) < 2:
+            continue
+        identifier = ""
+        paths: list[str] = []
+        for cell in cells:
+            bare = cell.strip("`*_ ")
+            if not identifier and (
+                _EVIDENCE_ID_CELL.fullmatch(bare) or bare in known_ids
+            ):
+                identifier = bare
+                continue
+            for match in _CODE_SPAN_CONTENT.finditer(cell):
+                candidate = _anchor_path(match.group(1))
+                if candidate is not None:
+                    paths.append(candidate)
+        if identifier and paths:
+            rows.append((identifier, paths))
+    return rows
+
+
+def _validate_evidence_rows(
+    name: str,
+    plan: dict[str, Any],
+    body: str,
+    evidence_map: dict[str, tuple[str, str]],
+    diagnostics: list[Diagnostic],
+) -> None:
+    """A rendered evidence row must say what the plan says.
+
+    The table is the skill's citation of record. Its identifier and its path
+    are checked against the plan, so a row cannot re-point a real evidence id
+    at a file the plan never declared, nor cite an id this skill was not given.
+    """
+    declared = [
+        item for item in _as_list(plan.get("evidence_ids")) if isinstance(item, str)
+    ]
+    for identifier, paths in _evidence_table_rows(body, set(evidence_map)):
+        if identifier not in declared:
+            _diag(
+                diagnostics,
+                "SKILL_EVIDENCE_ROW_UNDECLARED",
+                f"{name}: evidence table cites evidence the plan does not give "
+                f"this skill: {identifier}",
+            )
+            continue
+        location = evidence_map.get(identifier)
+        if not location or location[0] != "path" or location[1] in paths:
+            continue
+        _diag(
+            diagnostics,
+            "SKILL_EVIDENCE_ROW_ANCHOR",
+            f"{name}: evidence table anchors {identifier} to a path the plan "
+            f"does not declare: {', '.join(sorted(set(paths)))}",
+        )
+
+
+def _validate_runtime_fixed_body(
+    name: str,
+    plan: dict[str, Any],
+    body: str,
+    evidence_map: dict[str, tuple[str, str]],
+    diagnostics: list[Diagnostic],
+) -> None:
+    """Hold a runtime-fixed skill to the runtime it claims to operate."""
+    contract = _runtime_body_contract(diagnostics)
+    if contract is None:
+        return
+    for raw in sorted({match.group(0) for match in _RUNTIME_BODY_PATH.finditer(body)}):
+        path = _named_runtime_path(raw)
+        if not path:
+            continue
+        if any(
+            _segment_prefix_matches(_path_segments(path), item)
+            for item in contract["forbidden"]
+        ):
+            _diag(
+                diagnostics,
+                "RUNTIME_PATH_FORBIDDEN",
+                f"{name}: body names an invented runtime path: {path}",
+            )
+            continue
+        if not any(
+            _segment_run_matches(_path_segments(path), item)
+            for item in contract["paths"]
+        ):
+            _diag(
+                diagnostics,
+                "RUNTIME_PATH_UNSUPPORTED",
+                f"{name}: runtime path is absent from the canonical runtime "
+                f"contract: {path}",
+            )
+    for raw in sorted(
+        {
+            ("python3 " + match.group(1) + match.group(2)).strip()
+            for match in _RUNTIME_BODY_COMMAND.finditer(body)
+        }
+    ):
+        signature = _runtime_command_signature(raw)
+        if signature is None:
+            continue
+        script, subcommand, flags = signature
+        allowed = contract["commands"].get((script, subcommand))
+        if allowed is None or not flags <= allowed:
+            _diag(
+                diagnostics,
+                "RUNTIME_COMMAND_UNSUPPORTED",
+                f"{name}: runtime command is absent from the canonical runtime "
+                f"contract: {_excerpt(raw)}",
+            )
+    declared_target = [
+        item for item in _as_list(plan.get("source_paths")) if isinstance(item, str)
+    ]
+    for evidence_id in _as_list(plan.get("evidence_ids")):
+        location = evidence_map.get(evidence_id) if isinstance(evidence_id, str) else None
+        if location and location[0] == "path":
+            declared_target.append(location[1])
+    for span in sorted({match.group(1) for match in _CODE_SPAN_CONTENT.finditer(body)}):
+        candidate = _named_path_candidate(span)
+        if candidate is None:
+            continue
+        segments = _path_segments(candidate)
+        if any(_segment_run_matches(segments, item) for item in contract["paths"]):
+            continue
+        if segments and segments[0] in RUNTIME_ROOTS:
+            continue  # already reported against the runtime contract above
+        if not _claims_declared_path(candidate, declared_target):
+            _diag(
+                diagnostics,
+                "RUNTIME_PROJECT_CLAIM_UNSUPPORTED",
+                f"{name}: runtime-fixed skill claims target knowledge it declares "
+                f"no evidence for: {candidate}",
+            )
+
+
 def _symbol_identifier(symbol: str) -> str:
     """Last namespace/member segment of a qualified anchor symbol.
 
@@ -1906,6 +2500,10 @@ def _validate_schema_1_2_skill(
     target: Path,
     diagnostics: list[Diagnostic],
 ) -> None:
+    # A runtime-fixed skill is allowed to declare no project evidence at all;
+    # every contract member that cites evidence has to accept that emptiness,
+    # or the quartet could satisfy no consistent set of rules.
+    runtime_fixed = str(skill.get("kind", "")).lower() == RUNTIME_FIXED_KIND
     try:
         command_analyzer: CommandAnalyzer | None = CommandAnalyzer(target)
     except CommandAnalysisError as error:
@@ -2579,7 +3177,9 @@ def _validate_schema_1_2_skill(
             )
             or not _is_string_list(case.get("forbidden_skills"), allow_empty=True)
             or not _is_nonempty_string(case.get("rationale"))
-            or not _is_string_list(case.get("evidence_ids"))
+            or not _is_string_list(
+                case.get("evidence_ids"), allow_empty=runtime_fixed
+            )
         ):
             _diag(
                 diagnostics,
@@ -3352,20 +3952,41 @@ def _validate_plan(
                         start = max(0, line_range.get("start", 1) - 1)
                         end = min(len(lines), line_range.get("end", 0))
                         cited_text = "\n".join(lines[start:end])
-                    cited_tokens = _meaningful_tokens(cited_text)
                     cited_words = _cited_vocabulary(cited_text)
+                    # Invariant: the bar is never higher than the source can
+                    # answer.  A range can only be asked for as many reused
+                    # words as it has sentence-worths of vocabulary to give,
+                    # and never fewer than one - so `.php-version`, whose whole
+                    # content is "8.2", is gradeable instead of impossible,
+                    # while every ordinary file (hundreds of distinct tokens)
+                    # keeps the full bar.  Relaxing the count does not open the
+                    # door to invented claims: the path must resolve and the
+                    # fingerprint must match the bytes on disk, the floor of one
+                    # still forces the claim to name something the range
+                    # actually contains, and the two distinctive-vocabulary
+                    # tiers below reject a claim whose only shared words are
+                    # PHP or software-English boilerplate.
+                    affordable = max(1, len(cited_words) // CLAIM_SENTENCE_TOKENS)
                     for claim in entry["supported_claims"]:
                         claim_tokens = _meaningful_tokens(claim) - CLAIM_SERVICE_WORDS
-                        required = 1 if len(claim_tokens) <= 3 else 2
+                        required = min(
+                            1 if len(claim_tokens) <= 3 else 2, affordable
+                        )
                         # Bag-of-words overlap alone is trivial to satisfy:
                         # 'class' and 'function' appear in three quarters of
                         # all PHP files, so two of them are enough to "ground"
                         # an invented claim.  Support therefore has to come
                         # from vocabulary that distinguishes this range from
                         # any other PHP file, in two measured tiers.
+                        # All three tiers grade in one token space: the range's
+                        # identifier-expanded vocabulary.  Grading the first
+                        # tier on unexpanded tokens made it stricter than the
+                        # tiers meant to be strict - a claim naming
+                        # FrameworkBundle failed here on the line that
+                        # registers `FrameworkBundle::class`.
                         distinctive = claim_tokens - CLAIM_LANGUAGE_LEXICON
                         specific = claim_tokens - CLAIM_COMMON_LEXICON
-                        if len(claim_tokens & cited_tokens) < required:
+                        if len(claim_tokens & cited_words) < required:
                             _diag(
                                 diagnostics,
                                 "EVIDENCE_CLAIM_UNSUPPORTED",
@@ -3848,7 +4469,7 @@ def _validate_skill_file(
             f"{name}: verification names no check to run: "
             f"{_excerpt(resolved['verification'])}",
         )
-    if re.search(rf"\b{_name_pattern(name)}\b.*\b{_name_pattern(name)}\b", resolved["purpose"], re.I):
+    if _purpose_is_circular(name, resolved["purpose"]):
         _diag(diagnostics, "SKILL_CIRCULAR_PURPOSE", f"{name}: purpose is circular")
 
     checks = (
@@ -3871,17 +4492,26 @@ def _validate_skill_file(
         if location and location[0] == "path":
             expected_refs.append(location[1])
     kind = str(plan.get("kind", "")).lower()
-    if kind in TARGET_DERIVED_KINDS or expected_refs:
+    # A runtime-fixed skill documents the runtime `memory-seed` installs, not
+    # the target's code, so project specificity is not a bar it can meet; it
+    # is held to the runtime contract instead (see `_validate_runtime_fixed_body`).
+    if kind != RUNTIME_FIXED_KIND and (kind in TARGET_DERIVED_KINDS or expected_refs):
         if not any(reference.lower() in lower for reference in expected_refs):
             _diag(diagnostics, "SKILL_TARGET_REFERENCE", f"{name}: no concrete target evidence path appears in the skill")
-    if kind == "runtime-fixed" and not re.search(
-        r"\b(memory-bank|project-brain)/", body
-    ):
-        _diag(
-            diagnostics,
-            "SKILL_RUNTIME_REFERENCE",
-            f"{name}: runtime-fixed skill must cite its generated target-relative runtime",
-        )
+    if kind == RUNTIME_FIXED_KIND:
+        if not re.search(r"\b(memory-bank|project-brain)/", body):
+            _diag(
+                diagnostics,
+                "SKILL_RUNTIME_REFERENCE",
+                f"{name}: runtime-fixed skill must cite its generated target-relative runtime",
+            )
+        _validate_runtime_fixed_body(name, plan, body, evidence_map, diagnostics)
+    else:
+        # A runtime-fixed body names the runtime `memory-seed` installs after
+        # this gate runs, so nothing it cites is on disk yet; it answers to the
+        # canonical runtime contract above instead.
+        _validate_body_paths(name, plan, body, evidence_map, target, diagnostics)
+    _validate_evidence_rows(name, plan, body, evidence_map, diagnostics)
 
     category = str(plan.get("category", "")).lower()
     if category in INTEGRATION_CATEGORIES or category in DOMAIN_CATEGORIES:
@@ -4015,11 +4645,12 @@ def _validate_authored_inventory(
 
     block_owners: defaultdict[tuple[str, ...], set[str]] = defaultdict(set)
     for name, (lines, _) in normalized.items():
-        for size in range(3, min(7, len(lines) + 1)):
-            for index in range(len(lines) - size + 1):
-                block = tuple(lines[index : index + size])
-                if sum(len(_tokens(line)) for line in block) >= 20:
-                    block_owners[block].add(name)
+        for segment in _repeatable_segments(lines):
+            for size in range(3, min(7, len(segment) + 1)):
+                for index in range(len(segment) - size + 1):
+                    block = tuple(segment[index : index + size])
+                    if sum(len(_tokens(line)) for line in block) >= 20:
+                        block_owners[block].add(name)
     for block, owners in sorted(block_owners.items()):
         if len(owners) > 1 and len(block) == max(
             len(candidate)
@@ -4359,6 +4990,32 @@ def validate_flow_routing(
     return sorted(set(diagnostics))
 
 
+def skill_class_split(plan_path: Path) -> dict[str, list[str]]:
+    """Split the planned inventory into the two classes a reader must not confuse.
+
+    `project` skills are derived from this target's evidence; `runtime_fixed`
+    skills are the unconditional guides to the memory runtime `memory-seed`
+    installs. Reporting one total ("9 skills for your project") overstates how
+    much of the accelerator was actually derived from the target, so every
+    summary names both counts.
+    """
+    try:
+        plan = json.loads(Path(plan_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"project": [], "runtime_fixed": []}
+    project: list[str] = []
+    runtime_fixed: list[str] = []
+    for skill in plan.get("skills", []) if isinstance(plan, dict) else []:
+        if not isinstance(skill, dict) or not _is_nonempty_string(skill.get("name")):
+            continue
+        name = skill["name"].strip()
+        if str(skill.get("kind", "")).lower() == RUNTIME_FIXED_KIND:
+            runtime_fixed.append(name)
+        else:
+            project.append(name)
+    return {"project": sorted(project), "runtime_fixed": sorted(runtime_fixed)}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--skills-dir")
@@ -4411,6 +5068,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
     errors = [item for item in diagnostics if item.severity == "error"]
+    classes = skill_class_split(Path(args.plan))
     if args.as_json:
         print(
             json.dumps(
@@ -4419,6 +5077,7 @@ def main(argv: list[str] | None = None) -> int:
                     "error_count": len(errors),
                     "warning_count": len(diagnostics) - len(errors),
                     "diagnostics": [item.as_dict() for item in diagnostics],
+                    "skill_classes": classes,
                 },
                 indent=2,
                 sort_keys=True,
@@ -4431,6 +5090,12 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"skill quality: {'PASS' if not errors else 'FAIL'} "
             f"({len(errors)} errors, {len(diagnostics) - len(errors)} warnings)"
+        )
+        print(
+            f"skill inventory: {len(classes['project'])} project skills, "
+            f"{len(classes['runtime_fixed'])} runtime guides "
+            f"(project: {', '.join(classes['project']) or 'none'}; "
+            f"runtime: {', '.join(classes['runtime_fixed']) or 'none'})"
         )
     return 1 if errors else 0
 

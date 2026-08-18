@@ -94,6 +94,7 @@
 .claude/skills/stack-adapter/SKILL.md -diff linguist-generated=true
 .claude/skills/stack-researcher/SKILL.md -diff linguist-generated=true
 .claude/skills/stack-scanner/SKILL.md -diff linguist-generated=true
+.claude/skills/stack-scanner/references/scan-evidence-contract.md -diff linguist-generated=true
 .codex/DOD.md -diff linguist-generated=true
 .codex/GOLDEN-PRINCIPLES.md -diff linguist-generated=true
 .codex/STABILIZATION.md -diff linguist-generated=true
@@ -220,3 +221,4 @@
 .cursor/skills/stack-adapter/SKILL.md -diff linguist-generated=true
 .cursor/skills/stack-researcher/SKILL.md -diff linguist-generated=true
 .cursor/skills/stack-scanner/SKILL.md -diff linguist-generated=true
+.cursor/skills/stack-scanner/references/scan-evidence-contract.md -diff linguist-generated=true

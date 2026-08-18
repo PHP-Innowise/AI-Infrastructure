@@ -276,6 +276,13 @@ Each `routing_cases[]` item has exactly `prompt`, `expected_primary`,
 `permitted_secondary`, `forbidden_skills`, `rationale`, and `evidence_ids`.
 Owner sets are disjoint, evidence resolves within the skill, and cases cover
 selection of the current skill plus deferral to every nearest sibling.
+`evidence_ids` must be non-empty and a subset of the skill's own
+`evidence_ids` - with one exception that keeps the two rules consistent: a
+`runtime-fixed` skill may declare no evidence at all, so its routing cases may
+carry an empty `evidence_ids`. Any other skill, and any runtime-fixed skill
+that does declare evidence, must cite at least one declared ID per case. A
+non-empty list that is not a subset of the skill's declared evidence is
+blocking for every kind.
 
 Each `ownership[]` item has exactly `id`, `mode`, `description`, and `paths`.
 The ID is stable kebab/dotted lowercase syntax within the inventory and is used
@@ -385,7 +392,48 @@ Each rejected catalog candidate is recorded so inventory pruning is auditable:
 real Markdown anchor. This prevents a plan from inventing a catalog reference
 or silently omitting candidates from the selected/rejected inventory.
 
-The runtime-fixed memory quartet may have empty `evidence_ids`/`source_paths` during synthesis because its necessity comes from runtime files that `memory-seed` is contractually guaranteed to create in the same generation run. Its `necessity_rationale` and `writes` must name that dependency. The authored skills must refer to those future files by target-relative paths such as `memory-bank/scripts/context.py`, never by generator task/staging paths.
+### The runtime-fixed quartet: what it is measured by
+
+`memory-bank`, `project-brain`, `checkpoint`, and `memory` carry
+`kind: "runtime-fixed"` and are the only candidates the registry marks
+`"mode": "runtime-fixed"`. They are generated unconditionally because
+`memory-seed` installs the runtime they operate in the same generation run.
+
+They may have empty `evidence_ids`/`source_paths` during synthesis because
+their necessity comes from those runtime files rather than from target
+evidence. Their `necessity_rationale` and `writes` must name that dependency.
+The authored skills must refer to those future files by target-relative paths
+such as `memory-bank/scripts/context.py`, never by generator task/staging
+paths.
+
+Emptiness propagates consistently: every member that cites evidence -
+`selection_gate.conditions[].evidence_ids`, `path_contracts[].evidence_ids`,
+`procedure_steps[].evidence_ids`, `routing_cases[].evidence_ids` - accepts an
+empty list for a runtime-fixed skill, and `evidence_anchors` is required only
+when evidence is actually declared. The gate likewise does not require a
+runtime-fixed skill's body to quote a target evidence path.
+
+**This is a decision, not a gap in selection.** A runtime-fixed skill
+documents the generator's memory runtime, not the target's code, so project
+specificity is a bar it cannot meet by construction. It is held to two
+verifiable bars instead:
+
+- **Runtime accuracy.** Every path it names under `memory-bank/` or
+  `project-brain/`, and every `python3 memory-bank/scripts/*.py` command form
+  it names, must exist in `memory-seed/assets/runtime-contract.json`
+  (`path_contracts.required_skeleton`, `path_contracts.creatable`,
+  `commands`). Forbidden invented paths, unlisted paths, unlisted
+  subcommands, and unlisted flags are blocking
+  (`RUNTIME_PATH_FORBIDDEN`, `RUNTIME_PATH_UNSUPPORTED`,
+  `RUNTIME_COMMAND_UNSUPPORTED`).
+- **No borrowed project knowledge.** A target path named in a runtime-fixed
+  body is valid only when the skill declares it, through `source_paths` or a
+  declared evidence anchor; anything else is blocking
+  (`RUNTIME_PROJECT_CLAIM_UNSUPPORTED`).
+
+Because the two classes are earned differently, they are reported
+differently: a generated inventory is summarized as *N project skills* plus
+*M runtime guides*, never as one combined count of skills "for your project".
 
 ## Required Structure
 

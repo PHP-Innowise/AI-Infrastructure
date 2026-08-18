@@ -229,7 +229,8 @@ python3 .agents/skills/bootstrap-verifier/scripts/publish_staging.py rollback \
 
 **Target:** [target path]
 **Edition(s) generated:** [only the selected ones]
-**Skills generated:** [count] ([list, including operational memory-bank and any domain skills])
+**Project skills generated:** [count] ([list of evidence-derived skills, including any domain skills])
+**Runtime guides generated:** [count] ([list of `runtime-fixed` skills]) - guides to the `memory-bank/`/`project-brain/` runtime this run installed; unconditional and not derived from your project
 
 ## Verification
 [bootstrap-verifier pass/fail summary]
@@ -264,6 +265,7 @@ The target now has its own working `AGENTS.md` + [selected edition folder(s)] + 
 - MUST maintain a separate explicit publication plan for initial team-owned
   runtime seeds that intentionally stay outside manifest ownership; publication
   still never walks staging or target roots.
+- MUST report the generated inventory as two counts - evidence-derived project skills and `runtime-fixed` runtime guides - and MUST NOT present their sum as skills derived from the target. `validate_skill_quality.py` prints the same split on its `skill inventory:` line and in the `skill_classes` member of its `--json` result.
 - MUST NOT report success while `bootstrap-verifier` has unresolved failures.
 - MUST roll back publication when any write or post-publication verification
   fails; a partially published accelerator is never an acceptable result.

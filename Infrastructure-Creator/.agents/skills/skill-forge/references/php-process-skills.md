@@ -2,9 +2,11 @@
 
 These are framework-agnostic process/workflow **candidates**. They are generated only when their contract's selection trigger is supported by evidence. The memory quartet is the sole exception because `memory-seed` always installs the runtime it operates.
 
-Most are stable framework-independent workflow candidates. The only fixed inventory is the four-skill set `memory-bank`, `project-brain`, `checkpoint`, and `memory`, which operates the shared memory layer that `memory-seed` creates (the durable bank, the governed Project Brain control plane, and the context-brain runtime at `memory-bank/scripts/context.py`).
+Most are stable framework-independent workflow candidates. The only fixed inventory is the four-skill set `memory-bank`, `project-brain`, `checkpoint`, and `memory`, which operates the shared memory layer that `memory-seed` creates (the durable bank, the governed Project Brain control plane, and the context-brain runtime at `memory-bank/scripts/context.py`). The registry marks exactly these four `"mode": "runtime-fixed"`; every other candidate is `static` or `family`.
 
 ## Process & Workflow Candidate Catalog
+
+The Phase column uses the fixed flow vocabulary - `understanding`, `planning`, `implementation`, `verification`, `finalization` - because the canonical flow roster copies a skill's phase verbatim and `validate_flow_contracts.py` accepts no other value. A catalog phase outside that vocabulary (`execution`, `utility`, and the like) cannot be compiled into a plan.
 
 | Skill | What it does | Phase |
 | --- | --- | --- |
@@ -14,18 +16,18 @@ Most are stable framework-independent workflow candidates. The only fixed invent
 | `council` | Convenes a simulated multi-persona expert panel (architecture, security, performance, testing, ops) to debate a high-stakes or ambiguous decision before committing to it. | planning |
 | `writing-plans` | Converts an approved design/decision into a step-by-step, dependency-ordered implementation plan that another engineer (or agent) could execute without re-deriving the architecture. | planning |
 | `using-git-worktrees` | Sets up an isolated git worktree (own checkout, own `.env`/DB where relevant) so experimental or parallel implementation work never collides with the main working copy. | planning |
-| `systematic-debugger` | The debugging **methodology**, tool-agnostic: reproduce, isolate, and confirm the actual root cause before applying a fix - forbids guessing or symptom-only patches. Deliberately contains no target-specific tool names; it stays valid whether the target is instrumented with Sentry, plain error logs, or nothing at all. Complements, and is cross-referenced by, the universal `debugging` skill (see the note below and `references/php-frameworks.md`), which supplies the *"where to look"* half. | execution |
-| `refactorer` | Behavior-preserving structural cleanup performed under a test safety net: extract methods/services, remove duplication, and (only where evidence supports it) apply automated refactoring tooling. | execution |
-| `dependency-manager` | Composer dependency hygiene: vulnerability audits (`composer audit`), outdated-package review, tightening version constraints, and vetting new packages before they're added. | execution |
-| `review-pr` | Reviews a **remote** pull request via the `gh` CLI (not a local diff) and either fixes flagged issues locally or posts review comments back to the PR. | execution |
-| `finishing-branch` | The end-of-implementation decision point: once tests/DoD pass, presents structured options (open a PR, merge, clean up the worktree) rather than silently picking one. | execution |
+| `systematic-debugger` | The debugging **methodology**, tool-agnostic: reproduce, isolate, and confirm the actual root cause before applying a fix - forbids guessing or symptom-only patches. Deliberately contains no target-specific tool names; it stays valid whether the target is instrumented with Sentry, plain error logs, or nothing at all. Complements, and is cross-referenced by, the universal `debugging` skill (see the note below and `references/php-frameworks.md`), which supplies the *"where to look"* half. | implementation |
+| `refactorer` | Behavior-preserving structural cleanup performed under a test safety net: extract methods/services, remove duplication, and (only where evidence supports it) apply automated refactoring tooling. | implementation |
+| `dependency-manager` | Composer dependency hygiene: vulnerability audits (`composer audit`), outdated-package review, tightening version constraints, and vetting new packages before they're added. | implementation |
+| `review-pr` | Reviews a **remote** pull request via the `gh` CLI (not a local diff) and either fixes flagged issues locally or posts review comments back to the PR. | verification |
+| `finishing-branch` | The end-of-implementation decision point: once tests/DoD pass, presents structured options (open a PR, merge, clean up the worktree) rather than silently picking one. | finalization |
 | `documentation-generator` | Generates and maintains README sections, ADRs, API docs, and changelog entries so documentation tracks the code instead of drifting from it. | finalization |
-| `skill-creator` | Meta-skill for creating, editing, and evaluating the target's OWN skills after generation - lets the project's team extend its generated accelerator safely once Infrastructure-Creator has handed it off. | utility |
-| `reflect` | Converts an agent mistake or a user correction into a permanent rule via an Error -> Root Cause -> Rule -> Example -> Enforce cycle, so the same mistake isn't repeated in a later session. | utility |
-| `memory-bank` | Operates the shared `memory-bank/` after `memory-seed` creates it: retrieve and revalidate active context, capture cohesive confirmed concepts, supersede stale memory without erasing history, and audit structure/source freshness. Its full contract is in `references/php-domain-behavior.md`. | utility |
-| `project-brain` | Operates the governed `project-brain/` control plane through the runtime facade `memory-bank/scripts/context.py`: shared task lifecycle and handoffs, governed retrieval (`retrieve QUERY --task-id ID`), findings/bugs/incidents/decisions/events records, compaction, and promotion proposals. One operation per invocation; canonical sources always outrank retrieved context. | utility |
-| `checkpoint` | Manually saves current working state without completing anything. Governed-aware: when `project-brain/config/runtime.json` says `governed`, it reports `working: skipped` and defers to `project-brain` (one task authority, never two); only in explicit lightweight mode does it checkpoint the branch task via `context.py --mode lightweight` with a sanitized summary - never raw diffs, file bodies, or secrets. | utility |
-| `memory` | Manually refreshes repository-local context and reports layer health: runs `context.py refresh` (procedural/semantic/episodic - the same command the read hook runs, so skill and hook cannot drift apart) and `context.py status`, honors the governed/lightweight authority gate, and never completes/promotes/invents task state. | utility |
+| `skill-creator` | Meta-skill for creating, editing, and evaluating the target's OWN skills after generation - lets the project's team extend its generated accelerator safely once Infrastructure-Creator has handed it off. | implementation |
+| `reflect` | Converts an agent mistake or a user correction into a permanent rule via an Error -> Root Cause -> Rule -> Example -> Enforce cycle, so the same mistake isn't repeated in a later session. | finalization |
+| `memory-bank` | Operates the shared `memory-bank/` after `memory-seed` creates it: retrieve and revalidate active context, capture cohesive confirmed concepts, supersede stale memory without erasing history, and audit structure/source freshness. Its full contract is in `references/php-domain-behavior.md`. | understanding |
+| `project-brain` | Operates the governed `project-brain/` control plane through the runtime facade `memory-bank/scripts/context.py`: shared task lifecycle and handoffs, governed retrieval (`retrieve QUERY --task-id ID`), findings/bugs/incidents/decisions/events records, compaction, and promotion proposals. One operation per invocation; canonical sources always outrank retrieved context. | understanding |
+| `checkpoint` | Manually saves current working state without completing anything. Governed-aware: when `project-brain/config/runtime.json` says `governed`, it reports `working: skipped` and defers to `project-brain` (one task authority, never two); only in explicit lightweight mode does it checkpoint the branch task via the contract's turn form (`context.py turn --task-id ID --flush`) with a sanitized summary - never raw diffs, file bodies, or secrets. | finalization |
+| `memory` | Manually refreshes repository-local context and reports layer health: runs `context.py refresh` (procedural/semantic/episodic - the same command the read hook runs, so skill and hook cannot drift apart) and `context.py status`, honors the governed/lightweight authority gate, and never completes/promotes/invents task state. | understanding |
 
 Note: `release` is generated as part of the universal PHP set (`references/php-frameworks.md`) since its content already names the target's real CI/CD pipeline; it is not duplicated here.
 
@@ -35,6 +37,23 @@ Note: `release` is generated as part of the universal PHP set (`references/php-f
 `skill-forge` MUST NOT let either skill re-explain the other's half - `debugging` assumes the reader already knows the root-cause discipline and links to `systematic-debugger` for it; `systematic-debugger` names zero target-specific tools and links to `debugging` for where to apply that discipline in this target.
 
 ## The Memory Quartet (`memory-bank`, `project-brain`, `checkpoint`, `memory`)
+
+### Status: runtime-fixed by decision, not a selection failure
+
+Read this before judging the quartet against the rest of the inventory.
+
+Measured on a real end-to-end run against a Symfony/UniteCMS target, the four skills contained zero identifiers of that target, 77-85% of their lines carried no project token at all, and all four cited a single shared evidence entry. **That is the intended shape, not a defect of the selection stage.** These four do not describe the target's code; they describe the memory runtime that `memory-seed` installs into every target in the same generation run. A `memory` skill that named the target's entities would be describing something it does not operate.
+
+So the quartet is deliberately exempted from the one bar it cannot meet, and held to a different one it can:
+
+1. **Not measured by project specificity.** The gate does not require a runtime-fixed skill to declare project evidence, to declare source paths, or to quote a target evidence path in its body. `evidence_ids`, `source_paths`, and `routing_cases[].evidence_ids` may all be empty; when evidence *is* declared it must still resolve and anchor like any other skill's.
+2. **Measured by runtime accuracy instead.** Every path a runtime-fixed skill names under `memory-bank/` or `project-brain/`, and every `python3 memory-bank/scripts/*.py` command form it names, must exist in `memory-seed/assets/runtime-contract.json` (`path_contracts.required_skeleton`, `path_contracts.creatable`, and `commands`). A path listed in `path_contracts.forbidden_invented_paths`, an unlisted path, an unlisted subcommand, or an unlisted flag is blocking. The quartet's job is to describe the runtime exactly; that is checkable, and it is checked.
+3. **Forbidden to claim project knowledge it does not have.** A target path named in a runtime-fixed skill body is valid only when the skill declares it - as a `source_paths` entry or through a declared evidence anchor. Naming a target file the skill has no evidence for is blocking, the same way an invented runtime path is.
+4. **Reported as its own class.** Generated inventories are never summarized as one number. A run that produced five evidence-derived skills plus the quartet reports "5 project skills, 4 runtime guides", never "9 skills for your project" - the quartet is real and useful, but it was not derived from the target and must not be counted as if it were.
+
+The corresponding gate codes are `RUNTIME_PATH_UNSUPPORTED`, `RUNTIME_PATH_FORBIDDEN`, `RUNTIME_COMMAND_UNSUPPORTED`, and `RUNTIME_PROJECT_CLAIM_UNSUPPORTED` in `bootstrap-verifier/scripts/validate_skill_quality.py`.
+
+### Authoring contract
 
 These four operate one shared layer and must be authored as a coherent set, never in isolation:
 
@@ -50,9 +69,12 @@ These four operate one shared layer and must be authored as a coherent set, neve
 
 Evaluate each contract independently. A generic desire for a mature workflow is not evidence. Include a candidate only when its trigger and required evidence are present in the plan, except the runtime-fixed memory quartet. Every selected candidate receives a complete JSON contract and its own authored procedure.
 
+The registry's `mode` field, not a hand-maintained name list, decides which rules apply: `mode: "runtime-fixed"` selects the runtime-accuracy bar described above; `static` and `family` candidates stay evidence-gated. Report the two classes separately - evidence-derived project skills and runtime-fixed runtime guides - wherever a generated inventory is summarized.
+
 ## Operational Evidence Rules
 
 - Catalog capabilities are candidate concerns, not confirmed target facts. Elevate a claim only when a bounded target evidence anchor proves it; otherwise encode it as a review question, an external-standard requirement, or an excluded unsupported claim.
+- Runtime-fixed candidates read their facts from `memory-seed/assets/runtime-contract.json` instead of from target evidence. For them, the runtime contract is the evidence anchor: an unlisted path, subcommand, or flag is the same class of failure as an unsupported target claim, and a target path they cannot back with a declared anchor is forbidden outright.
 - Every selected skill consumes the applicable repository command definitions and test topology. Verification names the focused command/manual assertion, prerequisites, safe scope, expected result, and skip/failure reporting.
 - Every high-priority confirmed invariant ID intersecting a skill maps to at least one ordered procedure step and one concrete verification assertion. Missing ownership blocks selection/compilation.
 - Routing lists every material adjacent owner and includes positive, negative, ambiguous, and cross-domain cases; one convenient nearest sibling is not sufficient.
@@ -175,7 +197,7 @@ Each contract defines selection, evidence, procedure, verification, output, sibl
 - **Positive:** prohibit a proven unsafe command pattern in the relevant rule. **Negative:** “Be more careful next time.”
 
 ### `memory-bank`
-- **Select when / evidence:** always; required evidence is the installed `memory-bank/` runtime and section 12 seed contract.
+- **Select when / evidence:** always (runtime-fixed); the required evidence is the runtime contract's `memory-bank/` skeleton and section 12 seed contract, not target evidence. Declaring no `evidence_ids`/`source_paths` is legal here and only here.
 - **Own / exclude:** owns durable reusable confirmed concepts, retrieval, audit, and supersession; excludes active task state and self-approval of promotions.
 - **Procedure:** choose retrieve/capture/update/audit; revalidate canonical sources; use the shipped validator/runtime; keep one cohesive concept; preserve history and contradictions; sanitize all content.
 - **Verify / output:** `memory-bank/scripts/validate.py` passes and cited sources exist; output retrieved context or changed chunk/index plus validation result.
@@ -183,7 +205,7 @@ Each contract defines selection, evidence, procedure, verification, output, sibl
 - **Positive:** supersede stale architecture memory with linked evidence. **Negative:** store raw prompts, diffs, logs, or secrets.
 
 ### `project-brain`
-- **Select when / evidence:** always; required evidence is `project-brain/PROTOCOL.md`, runtime config, schemas/templates, and `context.py`.
+- **Select when / evidence:** always (runtime-fixed); the required evidence is `project-brain/PROTOCOL.md`, runtime config, schemas/templates, and `context.py` as the runtime contract lists them, not target evidence.
 - **Own / exclude:** owns one governed task operation per invocation; excludes durable-memory application and bypassing revision/promotion controls.
 - **Procedure:** read runtime mode/protocol; select exactly one supported operation; use the exact facade; enforce task ID/revision/templates; append transitions; propose but never self-approve promotion.
 - **Verify / output:** runtime status and schema validation succeed; output operation, task/revision, records affected, and next legal operation.
@@ -191,7 +213,7 @@ Each contract defines selection, evidence, procedure, verification, output, sibl
 - **Positive:** retrieve with `--task-id` then hand off through a template. **Negative:** directly edit governed indexes.
 
 ### `checkpoint`
-- **Select when / evidence:** always; required evidence is runtime mode and the shipped lightweight checkpoint command.
+- **Select when / evidence:** always (runtime-fixed); the required evidence is runtime mode and the contract's turn form `python3 memory-bank/scripts/context.py turn --task-id ID --flush`, not target evidence.
 - **Own / exclude:** owns a manual sanitized save in lightweight mode; excludes completion, records, promotion, clear, and governed task writes.
 - **Procedure:** inspect runtime mode; if governed report `working: skipped`; if lightweight, summarize branch task without raw content and invoke only the supported checkpoint command; report result.
 - **Verify / output:** status confirms expected mode/state; output saved/skipped status and reason.
@@ -199,7 +221,7 @@ Each contract defines selection, evidence, procedure, verification, output, sibl
 - **Positive:** skip cleanly in governed mode. **Negative:** call destructive lifecycle commands from a save operation.
 
 ### `memory`
-- **Select when / evidence:** always; required evidence is `context.py refresh`, `context.py status`, and runtime mode.
+- **Select when / evidence:** always (runtime-fixed); the required evidence is the contract's `context.py refresh` and `context.py status` forms and the runtime mode, not target evidence.
 - **Own / exclude:** owns manual context refresh and health reporting; excludes task mutation, completion, promotion, or invented state.
 - **Procedure:** run the shipped refresh command; run status; interpret procedural/semantic/episodic health under the authority gate; report stale/unavailable layers without repairing unsupported state.
 - **Verify / output:** commands complete and health is reported; output refresh result, mode, layer health, and remediation needed.

@@ -11,7 +11,7 @@ related: [infra-generate, policy-forge, agent-forge, command-forge, hook-forge, 
 
 ## Overview
 
-`skill-forge` authors the evidence-gated inventory in `skill-generation-plan.json`. It works on one skill, or one small sibling group with an explicit shared boundary, at a time. Each pass receives only that contract and its referenced evidence slice, writes to task-scoped staging, and produces a substantive project-specific procedure rather than a renamed template. There are no fixed category counts and no minimum-line padding. Only the memory quartet is unconditional because `memory-seed` always installs its runtime.
+`skill-forge` authors the evidence-gated inventory in `skill-generation-plan.json`. It works on one skill, or one small sibling group with an explicit shared boundary, at a time. Each pass receives only that contract and its referenced evidence slice, writes to task-scoped staging, and produces a substantive project-specific procedure rather than a renamed template. There are no fixed category counts and no minimum-line padding. Only the memory quartet is unconditional because `memory-seed` always installs its runtime; those four are `runtime-fixed` and are judged by runtime accuracy rather than project specificity (see `references/php-process-skills.md`).
 
 Completeness means every justified contract is implemented, not that every catalog slot is filled.
 
@@ -19,7 +19,7 @@ Consult the bundled references for PHP-specific grounding:
 - `references/php-frameworks.md` - detection signals and evidence-gated contracts for Design & Interaction, Universal PHP, and Frontend candidates.
 - `references/php-architecture-patterns.md` - architecture detection and its generated-skill implications.
 - `references/php-integration-catalog.md` - integration categories and what good coverage looks like per category.
-- `references/php-process-skills.md` - evidence gates and distinct contracts for process/workflow candidates; only the memory quartet (`memory-bank`, `project-brain`, `checkpoint`, `memory`) is unconditional.
+- `references/php-process-skills.md` - evidence gates and distinct contracts for process/workflow candidates; only the memory quartet (`memory-bank`, `project-brain`, `checkpoint`, `memory`) is unconditional, and its "Status: runtime-fixed by decision" section defines the bar those four are held to instead.
 - `references/php-specialty-skills.md` - the evidence-gated framework-specialty catalog, keyed to profile section 3.1's signals.
 - `references/php-domain-behavior.md` - how section 8 enriches existing skills, when a domain skill is justified, and the always-generated operational `memory-bank` skill contract.
 
@@ -100,7 +100,7 @@ orchestration step. The log maps every staged skill to exactly one plan entry.
    write scope, commands against real config, and absence of
    secrets/placeholders/task paths. Record pass/fail before selecting the next
    unit.
-10. **Log exactly one mapping per skill.** Record plan name/category, evidence IDs, staged path, verification result, and publication eligibility. Compute category and total counts from successful log entries.
+10. **Log exactly one mapping per skill.** Record plan name/category, `kind`, evidence IDs, staged path, verification result, and publication eligibility. Compute category and total counts from successful log entries, and keep the two classes separate: evidence-derived project skills and `runtime-fixed` runtime guides are counted and reported apart, never merged into one "skills for your project" number.
 11. **Run the complete final gate.** After all batches are authored, run normal
     full validation without `--allow-partial-skills`. Missing planned files and
     every other authored or contract diagnostic remain publication blockers.
@@ -111,7 +111,8 @@ orchestration step. The log maps every staged skill to exactly one plan entry.
 # Skill Forge Complete: [target_name]
 
 **Editions:** [selected]
-**Skills staged:** [total from successful log entries]
+**Project skills staged:** [count of non-runtime-fixed entries] ([names])
+**Runtime guides staged:** [count of runtime-fixed entries] ([names]) - guides to the memory runtime `memory-seed` installs, not derived from this target
 **Dynamic breakdown:** [category=count, including zero-count categories]
 - [category]: [names, or none]
 
@@ -125,6 +126,8 @@ agent-forge (wrap these skills), then command-forge; policy-forge/hook-forge/mem
 ## Guardrails
 
 - MUST author only plan entries whose evidence gates passed; the memory quartet is the only unconditional set.
+- MUST author every `runtime-fixed` skill exclusively from `memory-seed/assets/runtime-contract.json`: each `memory-bank/`/`project-brain/` path and each `python3 memory-bank/scripts/*.py` form it names must appear there, and it MUST NOT name a target path it declares no evidence for. Project specificity is not required of these four and MUST NOT be faked by borrowing an unrelated target file as evidence.
+- MUST report project skills and runtime guides as two counts, never as one combined total.
 - MUST process one skill or a small explicit sibling group at a time from a minimal contract/evidence slice.
 - MUST stage before publication and MUST NOT cite generator task/staging paths in generated target skills.
 - MUST produce substantive project-specific procedures; evidence-name substitution and minimum-line padding are invalid.

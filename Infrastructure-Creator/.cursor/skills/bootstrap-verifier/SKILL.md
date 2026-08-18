@@ -130,6 +130,17 @@ Writes a report to `tasks/TASK-{N}/bootstrap-verifier-report.md`. Does not write
      `sudo` behavior is blocking (`SKILL_BODY_COMMAND_RISK`); attestability-only
      findings (unknown executable, unresolved alias, tokenization) are not,
      because prose legitimately carries placeholders and sample output.
+   - Every target path the *rendered body* cites, not only the plan's. A bare
+     path code span rooted in the target tree - first segment and parent
+     directory both present - that resolves to nothing is
+     `SKILL_BODY_PATH_MISSING`; an evidence row must keep the identifier and
+     path the plan declares (`SKILL_EVIDENCE_ROW_UNDECLARED`,
+     `SKILL_EVIDENCE_ROW_ANCHOR`). Skipped, being indistinguishable from an
+     honest citation: backslashed class names, dotted keys, bare file names,
+     globs/placeholders, `vendor`/`node_modules`/`var`, foreign layouts and
+     Twig logical names, declared `writes`, a line commanding creation, and
+     any string the skill's own cited source spells out. So an invented path
+     under a directory the target lacks is missed - deliberately.
    - Inventory-wide ownership/write collisions, ambiguous positive routing,
      repeated substantive blocks, and line/token similarity after removing only
      exact approved fixed safety blocks. Ownership is checked against writes,
