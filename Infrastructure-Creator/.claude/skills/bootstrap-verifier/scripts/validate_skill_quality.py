@@ -4149,12 +4149,63 @@ def _validate_schema_1_2_skill(
         )
 
 
+def _validate_routing_tautology(
+    plan_skills: dict, diagnostics: list
+) -> None:
+    """Report a routing fixture that names the skill it expects to win.
+
+    "Route architecture-implementer work to architecture-implementer" tests
+    string matching, not routing: no arrangement of skills could get it wrong,
+    so it proves nothing about whether the boundaries hold. A fixture earns its
+    place by describing the request in the words a person would use.
+
+    Runtime-fixed skills are exempt because their names are ordinary words for
+    what they do - a prompt about reloading memory cannot avoid saying "memory"
+    without becoming artificial.
+
+    Calibrated on both corpora: 0 of 102 fixtures across four real runs, and 183
+    of 183 in an externally authored plan, 40 of them verbatim. The rule
+    separates the two rather than taxing either.
+    """
+    kinds = {
+        name: str(skill.get("kind", "")).lower()
+        for name, skill in plan_skills.items()
+    }
+    for name, skill in sorted(plan_skills.items()):
+        for case in _as_list(skill.get("routing_cases")):
+            if not isinstance(case, dict):
+                continue
+            prompt = str(case.get("prompt") or "")
+            expected = str(case.get("expected_primary") or "").strip()
+            if not prompt or not expected:
+                continue
+            if kinds.get(expected) == RUNTIME_FIXED_KIND:
+                continue
+            # `_tokens` keeps compound identifiers whole, so both sides are
+            # spoken aloud first: `coder-frontend` and "coder frontend" are the
+            # same name, and a fixture does not escape by writing the hyphen.
+            spoken = expected.replace("-", " ").replace("_", " ").lower()
+            said = prompt.replace("-", " ").replace("_", " ").lower()
+            expected_tokens = _meaningful_tokens(spoken)
+            if spoken in said or (
+                expected_tokens and expected_tokens <= _meaningful_tokens(said)
+            ):
+                _diag(
+                    diagnostics,
+                    "ROUTING_CASE_TAUTOLOGICAL",
+                    f"{name} routing fixture names the skill it expects to "
+                    f"win ({expected}), so no routing decision is being "
+                    f"tested: {_excerpt(prompt)}",
+                )
+
+
 def _validate_schema_1_2_plan_contracts(
     plan: dict[str, Any],
     plan_skills: dict[str, dict[str, Any]],
     evidence_map: dict[str, tuple[str, str]],
     diagnostics: list[Diagnostic],
 ) -> None:
+    _validate_routing_tautology(plan_skills, diagnostics)
     invariants = plan.get("critical_invariants")
     invariant_ids: set[str] = set()
     if not isinstance(invariants, list):

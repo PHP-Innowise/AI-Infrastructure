@@ -362,6 +362,15 @@ cannot be used as a verification command.
 verification requires mutation class `none`; external-provider checks also
 require external-side-effect capability and an approved integration policy.
 
+A routing fixture may not name the skill it expects to win.
+"Route architecture-implementer work to architecture-implementer" tests string
+matching, not routing: no arrangement of skills could get it wrong, so it proves
+nothing about whether the boundaries hold. Write the request in the words a
+person would use; `ROUTING_CASE_TAUTOLOGICAL` blocks the rest. Runtime-fixed
+skills are exempt, because their names are ordinary words for what they do.
+Measured before release: 0 of 148 fixtures across four real runs, and 183 of 183
+non-runtime fixtures in an externally authored plan, 40 of them verbatim.
+
 `integration_safety` is required for every skill so network behavior is
 explicit. `network_policy` is `forbidden`, `mock-only`,
 `sandbox-with-approval`, or `approved-live`. Integration skills default to

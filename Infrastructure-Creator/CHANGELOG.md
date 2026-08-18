@@ -79,6 +79,20 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
   reconciliation time the parallel siblings have landed, so a claim made against
   a missing neighbour is confirmed or withdrawn rather than left standing.
 
+- **A routing fixture may no longer name the skill it expects to win.**
+  "Route architecture-implementer work to architecture-implementer" tests string
+  matching, not routing: no arrangement of skills could get it wrong, so it
+  proves nothing about whether the boundaries hold, while looking like a routing
+  test in every count and report. `ROUTING_CASE_TAUTOLOGICAL` blocks it.
+  Calibrated on both corpora: 0 of 148 fixtures across four real runs, and 183 of
+  183 non-runtime fixtures in an externally authored plan - 40 of those verbatim.
+  Runtime-fixed skills are exempt: a prompt about reloading memory cannot avoid
+  saying "memory" without becoming artificial.
+  The first implementation was wrong in the safe direction and the tests caught
+  it: the tokenizer keeps compound identifiers whole, so `firebase-services` in a
+  prompt did not match the skill named `firebase-services`. Both sides are now
+  spoken aloud before comparison.
+
 - **Seven parallel scanners now produce one reconciled claim set.** Each stated
   its findings in prose inside its own ledger; nothing merged them, so nothing
   noticed when two contradicted each other, and nothing noticed when an

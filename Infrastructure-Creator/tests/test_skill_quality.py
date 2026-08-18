@@ -4778,5 +4778,44 @@ class AbsenceEvidenceTest(SkillQualityFixture):
         )
 
 
+class RoutingTautologyTest(SkillQualityFixture):
+    """A fixture that names its own answer tests nothing about routing."""
+
+    def test_a_prompt_naming_the_expected_skill_is_rejected(self) -> None:
+        self.use_schema_1_3()
+        skill = self.plan["skills"][0]
+        skill["routing_cases"][0]["prompt"] = (
+            f"Route {skill['name']} work to {skill['name']}"
+        )
+        self.rewrite()
+        self.assertIn(
+            "ROUTING_CASE_TAUTOLOGICAL",
+            [item.code for item in self.plan_diagnostics()],
+        )
+
+    def test_a_prompt_describing_the_request_is_accepted(self) -> None:
+        self.use_schema_1_3()
+        self.assertNotIn(
+            "ROUTING_CASE_TAUTOLOGICAL",
+            [item.code for item in self.plan_diagnostics()],
+        )
+
+    def test_a_runtime_fixed_skill_may_be_named_by_its_own_subject(self) -> None:
+        """`memory` cannot describe a memory request without saying memory."""
+        self.use_schema_1_3()
+        skill = self.plan["skills"][0]
+        skill["kind"] = "runtime-fixed"
+        skill["evidence_ids"] = []
+        skill["source_paths"] = []
+        skill["routing_cases"][0]["prompt"] = (
+            f"Reload the {skill['name']} layers and report their health"
+        )
+        self.rewrite()
+        self.assertNotIn(
+            "ROUTING_CASE_TAUTOLOGICAL",
+            [item.code for item in self.plan_diagnostics()],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
