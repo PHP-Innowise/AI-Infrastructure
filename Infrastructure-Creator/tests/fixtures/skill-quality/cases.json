@@ -51,6 +51,18 @@
     "expected": null,
     "description": "Honest prose stays clean when the code spells its subject as one identifier: a claim about the 'reminder' the file only ever writes as publishReminder is accepted."
   },
+  "claim-php-separator-calibration": {
+    "expected": null,
+    "description": "PHP member separators join compounds like '.' and '/': a true claim naming FrameworkBundle is accepted against the line registering FrameworkBundle::class."
+  },
+  "claim-single-word-source-calibration": {
+    "expected": null,
+    "description": "A cited file whose whole content is '8.2' can offer one word, so the overlap bar cannot demand two; .php-version stays gradeable and a claim reusing nothing it says is still rejected."
+  },
+  "claim-short-config-calibration": {
+    "expected": null,
+    "description": "An eight-line config holds a single sentence of vocabulary, so an honest claim that reuses one of its words and paraphrases the rest is accepted."
+  },
   "scope-collision": {
     "expected": "SCOPE_COLLISION",
     "description": "Sibling skills claim the same owned scope."
@@ -150,5 +162,17 @@
   "operational-content-calibration": {
     "expected": null,
     "description": "Honest instruction stays clean: project-specific verbs outside the whitelist, delegation and decision steps, and steps carrying no anchor of their own."
+  },
+  "body-path-existence": {
+    "expected": "SKILL_BODY_PATH_MISSING",
+    "description": "A skill body sends the agent to a target file that does not exist."
+  },
+  "body-path-calibration": {
+    "expected": null,
+    "description": "Strings shaped like paths are not paths: backslashed class names, dotted config keys, constants, placeholders and globs, foreign-layout and installed-tree paths, Twig logical names, files the body commands into existence, and directories the cited configuration itself declares."
+  },
+  "evidence-row-agreement": {
+    "expected": "SKILL_EVIDENCE_ROW_ANCHOR",
+    "description": "A rendered evidence row keeps a real identifier but re-points it at a path the plan never declared."
   }
 }

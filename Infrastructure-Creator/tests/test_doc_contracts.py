@@ -45,6 +45,14 @@ SCHEMA_DOC = (
     / ".agents/skills/profile-synthesizer/references/project-profile-schema.md"
 )
 INFRA_GENERATE_DOC = ROOT / ".agents/skills/infra-generate/SKILL.md"
+PROCESS_CATALOG_DOC = (
+    ROOT / ".agents/skills/skill-forge/references/php-process-skills.md"
+)
+SKILL_FORGE_DOC = ROOT / ".agents/skills/skill-forge/SKILL.md"
+RUNTIME_CONTRACT_ASSET = (
+    ROOT / ".agents/skills/memory-seed/assets/runtime-contract.json"
+)
+CATALOG_ROW = re.compile(r"^\| `[^`]+` \|.*\| ([a-z-]+) \|$", re.M)
 COMMAND_FORGE_DOC = ROOT / ".agents/skills/command-forge/SKILL.md"
 AGENTS_DOC = ROOT / "AGENTS.md"
 BOOTSTRAP_VERIFIER_DOC = ROOT / ".agents/skills/bootstrap-verifier/SKILL.md"
@@ -234,6 +242,104 @@ class AgentsPolicyDocTest(unittest.TestCase):
         )
         self.assertNotIn("schema 1.0 is migration-only", flat)
         self.assertNotIn("Schema 1.1 uses", flat)
+
+
+class ProcessCatalogPhaseVocabularyTest(unittest.TestCase):
+    """C2: the catalog's Phase column feeds `phase` verbatim, so it may only
+    use the vocabulary `validate_flow_contracts.py` accepts."""
+
+    def setUp(self) -> None:
+        self.text = PROCESS_CATALOG_DOC.read_text(encoding="utf-8")
+        self.phases = CATALOG_ROW.findall(self.text)
+
+    def test_catalog_lists_every_candidate_with_a_phase(self) -> None:
+        self.assertGreaterEqual(len(self.phases), 18)
+
+    def test_every_catalog_phase_is_in_the_validator_vocabulary(self) -> None:
+        for phase in self.phases:
+            self.assertIn(phase, PHASES)
+
+    def test_the_retired_off_vocabulary_phases_are_gone(self) -> None:
+        for retired in ("| utility |", "| execution |"):
+            self.assertNotIn(retired, self.text)
+
+
+class RuntimeFixedDecisionDocTest(unittest.TestCase):
+    """C3: the quartet's status must be documented where a reader would
+    otherwise mistake it for a selection failure, and must name the gate codes
+    that actually enforce the substituted bar."""
+
+    CODES = (
+        "RUNTIME_PATH_UNSUPPORTED",
+        "RUNTIME_PATH_FORBIDDEN",
+        "RUNTIME_COMMAND_UNSUPPORTED",
+        "RUNTIME_PROJECT_CLAIM_UNSUPPORTED",
+    )
+
+    def test_catalog_states_the_status_and_the_substituted_bar(self) -> None:
+        text = PROCESS_CATALOG_DOC.read_text(encoding="utf-8")
+        self.assertIn("not a selection failure", text)
+        for code in self.CODES:
+            self.assertIn(code, text)
+
+    def test_schema_states_the_same_decision(self) -> None:
+        text = SCHEMA_DOC.read_text(encoding="utf-8")
+        self.assertIn("This is a decision, not a gap in selection.", text)
+        for code in self.CODES:
+            self.assertIn(code, text)
+
+    def test_documented_gate_codes_exist_in_the_validator(self) -> None:
+        source = (
+            ROOT
+            / ".agents/skills/bootstrap-verifier/scripts/validate_skill_quality.py"
+        ).read_text(encoding="utf-8")
+        for code in self.CODES:
+            self.assertIn(f'"{code}"', source)
+
+    def test_catalog_quotes_only_runtime_contract_command_forms(self) -> None:
+        """Catalog prose may explain the contract but never add a CLI form."""
+        contract = json.loads(RUNTIME_CONTRACT_ASSET.read_text(encoding="utf-8"))
+        signatures = [
+            validate_skill_quality._runtime_command_signature(form)
+            for form in validate_skill_quality._runtime_command_forms(
+                contract["commands"]
+            )
+        ]
+        allowed = {
+            (item[0], item[1]) for item in signatures if item is not None
+        }
+        text = PROCESS_CATALOG_DOC.read_text(encoding="utf-8")
+        for match in re.finditer(r"context\.py ([a-z-]+)", text):
+            self.assertIn(
+                ("memory-bank/scripts/context.py", match.group(1)), allowed
+            )
+
+
+class InventoryReportingSplitDocTest(unittest.TestCase):
+    """C3(d): a run that produced five derived skills plus the quartet must
+    never be summarized as nine skills 'for your project'."""
+
+    def test_infra_generate_output_template_splits_the_two_classes(self) -> None:
+        flat = normalized(INFRA_GENERATE_DOC)
+        self.assertIn("**Project skills generated:**", flat)
+        self.assertIn("**Runtime guides generated:**", flat)
+        self.assertNotIn("**Skills generated:**", flat)
+
+    def test_skill_forge_output_template_splits_the_two_classes(self) -> None:
+        flat = normalized(SKILL_FORGE_DOC)
+        self.assertIn("**Project skills staged:**", flat)
+        self.assertIn("**Runtime guides staged:**", flat)
+        self.assertNotIn("**Skills staged:**", flat)
+
+    def test_validator_exposes_the_split_the_docs_promise(self) -> None:
+        self.assertTrue(hasattr(validate_skill_quality, "skill_class_split"))
+        self.assertIn(
+            "skill_classes",
+            (
+                ROOT
+                / ".agents/skills/bootstrap-verifier/scripts/validate_skill_quality.py"
+            ).read_text(encoding="utf-8"),
+        )
 
 
 if __name__ == "__main__":

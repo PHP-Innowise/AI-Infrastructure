@@ -15,7 +15,7 @@ related: [stack-scanner, architecture-scanner, integration-scanner, infra-ops-sc
 a human Project Profile and a machine-readable evidence/skill generation plan.
 The plan gives every justified skill its own evidence, ownership, procedure,
 verification, output, failure, and routing contract. This skill never writes
-into the target project - only into this folder's own `tasks/TASK-{N}/`.
+into the target project - only into this folder's own `tasks/TASK-{NNN}/`.
 
 This skill does not generate anything for a PHP target. It stops at the profile. `infra-generate` is a separate, later step the user runs only after reviewing the profile.
 
@@ -23,9 +23,9 @@ If the target turns out not to be PHP at all, this skill does not silently fail 
 
 ## Generated File Naming Convention (MANDATORY)
 
-All output from this run lives under `tasks/TASK-{N}/` in Infrastructure-Creator's own folder (not the target project), where `{N}` is the next value from `tasks/.task-counter`:
+All output from this run lives under `tasks/TASK-{NNN}/` in Infrastructure-Creator's own folder (not the target project), where `{NNN}` is the next value from `tasks/.task-counter` zero-padded to three digits (`TASK-001`); see `stack-scanner/references/scan-evidence-contract.md`:
 
-- `stack-scanner-findings.md`, `architecture-scanner-findings.md`, `integration-scanner-findings.md`, `infra-ops-scanner-findings.md`, `security-compliance-scanner-findings.md`, `conventions-scanner-findings.md`, `domain-behavior-scanner-findings.md`
+- per scanner, a report and an evidence ledger: `stack-scanner-findings.md` + `stack-scanner-evidence.json`, and the same pair for `architecture-scanner`, `integration-scanner`, `infra-ops-scanner`, `security-compliance-scanner`, `conventions-scanner`, `domain-behavior-scanner`
 - `stack-researcher-findings.md`
 - `clarifying-interview-questions.md`, `clarifying-interview-answers.md`
 - `infra-scan-project-profile.md` (the deliverable)
@@ -40,7 +40,7 @@ All output from this run lives under `tasks/TASK-{N}/` in Infrastructure-Creator
    - **If nothing recognizable is found at all:** STOP and report the target is out of scope (this tool only generates PHP accelerators, and no other stack could even be identified) rather than scanning further.
    - Otherwise (PHP evidence found): continue to step 3.
 3. **Collision note.** Check whether the target already has `AGENTS.md` or any AI-tool edition folder (`.claude/`, `.cursor/`, `.codex/`, `.agents/`). If so, note it in the profile's "Generation Notes" so `infra-generate` asks about overwrite/merge/abort before writing. (This read-only phase does not need to ask yet.)
-4. **Allocate the task directory.** Read `tasks/.task-counter`, create `tasks/TASK-{N}/`, and increment the counter.
+4. **Allocate the task directory.** Read `tasks/.task-counter`, create the zero-padded `tasks/TASK-{NNN}/`, and increment the counter.
 5. **Fan out the seven scanners.**
    - **If your AI tool supports parallel subagents/tool calls:** spawn all seven in one batch so they run concurrently: `stack-scanner`, `architecture-scanner`, `integration-scanner`, `infra-ops-scanner`, `security-compliance-scanner`, `conventions-scanner`, `domain-behavior-scanner`, each given the target path and the task directory. Wait for all seven before continuing.
    - **If your AI tool is single-threaded:** invoke each scanner's logic sequentially in the same session. Output is identical; only mechanics differ. Say so in the Context Summary.
@@ -63,7 +63,7 @@ All output from this run lives under `tasks/TASK-{N}/` in Infrastructure-Creator
 ```markdown
 # Infra Scan Complete: [target_name]
 
-**Task:** tasks/TASK-{N}/
+**Task:** tasks/TASK-{NNN}/
 **Target:** [target path]
 **PHP:** [detected PHP version + framework]
 **Confidence summary:** [X confirmed, Y inferred, Z unknown]

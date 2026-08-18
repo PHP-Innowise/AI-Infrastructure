@@ -43,6 +43,27 @@ final class FirebaseMessagingClient
     }
 }
 """
+# Three real shapes of cited source that a claim has to be gradeable against:
+# a whole file that is one word, a single registration line whose subject is
+# glued to a PHP member separator, and a config too short to spare a second
+# reusable word.  All three are copied from a Symfony target.
+PHP_VERSION_SOURCE = "8.2\n"
+BUNDLES_SOURCE = """<?php
+
+return [
+    FrameworkBundle::class => ['all' => true],
+    DoctrineBundle::class => ['all' => true],
+];
+"""
+FLYSYSTEM_SOURCE = """flysystem:
+  storages:
+    default:
+      adapter: 'aws'
+      options:
+        client: 'exoscale.client'
+        bucket: '%env(S3_CLIENT_BUCKET)%'
+        prefix: 'website'
+"""
 
 
 def skill_markdown(
@@ -728,6 +749,9 @@ class SkillQualityTest(SkillQualityFixture):
                 "claim-language-lexicon-only",
                 "claim-common-lexicon-only",
                 "claim-compound-identifier-calibration",
+                "claim-php-separator-calibration",
+                "claim-single-word-source-calibration",
+                "claim-short-config-calibration",
                 "scope-collision",
                 "ambiguous-routing",
                 "unjustified-inventory-growth",
@@ -756,6 +780,9 @@ class SkillQualityTest(SkillQualityFixture):
                 "noun-substituted-template",
                 "repunctuated-template",
                 "template-reuse-calibration",
+                "body-path-existence",
+                "body-path-calibration",
+                "evidence-row-agreement",
             },
         )
 
@@ -991,6 +1018,108 @@ class SkillQualityTest(SkillQualityFixture):
         self.assertIn("SKILL_SIMILARITY", codes)
         self.assertIn("REPEATED_BLOCK", codes)
 
+    def set_purpose(self, name: str, purpose: str) -> None:
+        original = {
+            "firebase-services": "Protect the Firebase messaging runtime "
+            "boundary established in config/firebase.php.",
+            "availability-contract-review": "Protect availability sampled-date "
+            "and cancellation invariants encoded in domain/availability.php.",
+        }[name]
+        self.assertIn(original, self.skill_texts[name])
+        self.skill_texts[name] = self.skill_texts[name].replace(original, purpose)
+        self.rewrite()
+
+    def test_a_name_used_as_a_path_is_not_a_circular_purpose(self) -> None:
+        """A skill that owns a directory of its own name must be able to say so.
+
+        `memory-bank` cannot describe its purpose without naming
+        `memory-bank/chunks/` and `memory-bank/scripts/context.py`, and a
+        word-boundary match inside those paths called the honest purpose
+        circular.
+        """
+        self.use_schema_1_2()
+        self.set_purpose(
+            "firebase-services",
+            "Keep the Firebase transport contract in firebase-services/state/ "
+            "current by running `firebase-services/scripts/probe.py` against "
+            "config/firebase.php.",
+        )
+        self.assertNotIn("SKILL_CIRCULAR_PURPOSE", self.codes())
+
+    def test_a_purpose_that_restates_its_own_name_is_still_circular(self) -> None:
+        self.use_schema_1_2()
+        self.set_purpose(
+            "firebase-services",
+            "Use firebase-services whenever firebase-services work is requested.",
+        )
+        self.assertIn("SKILL_CIRCULAR_PURPOSE", self.codes())
+
+    def install_evidence_table(self, note: str) -> None:
+        """Give both skills the same cited evidence row, verbatim."""
+        table = (
+            "| ID | Source | Type | Confidence | Note |\n"
+            "| --- | --- | --- | --- | --- |\n"
+            f"| EV-0007 | `domain/availability.php` | domain code | confirmed "
+            f"| {note} |\n"
+        )
+        for name, text in list(self.skill_texts.items()):
+            self.skill_texts[name] = text.replace(
+                "\n## Procedure / Process\n", f"\n{table}\n## Procedure / Process\n"
+            )
+        self.rewrite()
+
+    def test_a_shared_evidence_row_is_a_citation_not_a_repeated_block(self) -> None:
+        """Two skills citing one fact must render that row identically.
+
+        The header, its rule, and the row are a byte-identical three-line run,
+        which is exactly the shape `REPEATED_BLOCK` reports - but the sameness
+        is mandated by the citation, not a reused procedure.
+        """
+        self.use_schema_1_2()
+        self.install_evidence_table(
+            "Availability keeps its sampled-date invariant and its cancellation "
+            "transition in one guarded block that every citing skill repeats."
+        )
+        self.assertNotIn("REPEATED_BLOCK", self.codes())
+
+    def test_repeated_prose_around_a_shared_table_is_still_reported(self) -> None:
+        """The exemption covers the table, never the prose beside it."""
+        self.use_schema_1_2()
+        shared = (
+            "Hold the written boundary next to the incoming request and mark "
+            "each gap you find.\n"
+            "Roll the change out in small increments and re-read the touched "
+            "file afterwards.\n"
+            "Record every deviation from the stated rule that you decide to "
+            "accept for now.\n"
+        )
+        for name, text in list(self.skill_texts.items()):
+            self.skill_texts[name] = text.replace(
+                "\n## Procedure / Process\n", f"\n{shared}\n## Procedure / Process\n"
+            )
+        self.install_evidence_table("Availability guards its cancellation transition.")
+        self.assertIn("REPEATED_BLOCK", self.codes())
+
+    def test_repeated_plain_table_rows_are_still_reported(self) -> None:
+        """A table without evidence citations is ordinary duplicated content."""
+        self.use_schema_1_2()
+        rows = (
+            "| Case | Expected |\n"
+            "| --- | --- |\n"
+            "| Sampled date repeated inside one request | reject the duplicate "
+            "identifier and report the offending index |\n"
+            "| Cancellation of an already terminal record | refuse the "
+            "transition and keep the recorded terminal state |\n"
+            "| Partial provider failure during a batch | keep the succeeded "
+            "entries and report only the failed ones |\n"
+        )
+        for name, text in list(self.skill_texts.items()):
+            self.skill_texts[name] = text.replace(
+                "\n## Procedure / Process\n", f"\n{rows}\n## Procedure / Process\n"
+            )
+        self.rewrite()
+        self.assertIn("REPEATED_BLOCK", self.codes())
+
     def test_paraphrased_empty_skill_fails_without_word_count_dependency(self) -> None:
         self.skill_texts["firebase-services"] = """---
 name: firebase-services
@@ -1172,6 +1301,128 @@ Be careful.
         self.assertIn("reminder", validator._cited_vocabulary(FIREBASE_SOURCE))
         self.assertEqual(
             [], self.claim_case("The class publishes each reminder string it receives")
+        )
+
+    def claim_case_over(
+        self,
+        relative: str,
+        content: str,
+        claim: str,
+        line_range: dict | None = None,
+    ) -> list:
+        """``claim_case`` against an arbitrary cited file and range.
+
+        The three grounding regressions below are about the *source* rather
+        than the claim - a one-word file, a PHP member separator, a config too
+        short to spare a second word - so the cited path has to move.
+        """
+        self.write_target(relative, content)
+        entry = self.plan["evidence"][0]
+        entry["path"] = relative
+        if line_range is None:
+            entry.pop("line_range", None)
+        else:
+            entry["line_range"] = line_range
+        entry["supported_claims"] = [claim]
+        self.refingerprint("firebase-runtime")
+        condition = self.plan["skills"][0]["selection_gate"]["conditions"][0]
+        condition["requirement"] = claim
+        condition["explanation"] = f"{relative} confirms: {claim}"
+        self.rewrite()
+        return [
+            (item.severity, item.code)
+            for item in validator.validate(
+                self.skills, self.plan_path, self.target, self.registry_path
+            )
+            if item.code.startswith("EVIDENCE_CLAIM")
+        ]
+
+    def test_php_member_separators_split_like_any_other_compound(self) -> None:
+        """'::' and '->' join compounds exactly as '.' and '/' do.
+
+        ``_tokens`` keeps ``FrameworkBundle::class`` whole, so a true claim
+        naming FrameworkBundle scored zero overlap against the one line that
+        registers it - the most common separator in the language reading as
+        a fabrication signal.
+        """
+        vocabulary = validator._cited_vocabulary("FrameworkBundle::class")
+        self.assertIn("frameworkbundle", vocabulary)
+        self.assertIn("transport", validator._cited_vocabulary("$this->transport"))
+        self.assertEqual(
+            [],
+            self.claim_case_over(
+                "config/bundles.php",
+                BUNDLES_SOURCE,
+                "Project registers FrameworkBundle in every environment",
+                {"start": 4, "end": 4},
+            ),
+        )
+
+    def test_single_word_source_can_still_ground_a_longer_claim(self) -> None:
+        """A file whose whole content is "8.2" can offer exactly one word.
+
+        Two overlaps were required of any claim longer than three tokens, so
+        `.php-version` - which the stack scanner is contractually told to cite
+        as the runtime pin - made every honest claim about it impossible to
+        state.  The bar now cannot exceed what the source has to give.
+        """
+        self.assertEqual({"8.2"}, validator._cited_vocabulary(PHP_VERSION_SOURCE))
+        self.assertEqual(
+            [],
+            self.claim_case_over(
+                ".php-version",
+                PHP_VERSION_SOURCE,
+                "Project PHP runtime version is pinned to 8.2 by .php-version",
+            ),
+        )
+        # The floor is one overlap, never zero: a claim that reuses nothing
+        # the one-word file says is still rejected.
+        self.assertEqual(
+            [("error", "EVIDENCE_CLAIM_UNSUPPORTED")],
+            self.claim_case_over(
+                ".php-version",
+                PHP_VERSION_SOURCE,
+                "Project runs on the Node 20 runtime with a Yarn workspace",
+            ),
+        )
+
+    def test_short_config_grounds_a_claim_on_the_word_it_shares(self) -> None:
+        """An eight-line config has one sentence of vocabulary, not two.
+
+        Prose about the storage adapter reuses 'adapter' and paraphrases the
+        rest ('storages' -> 'storage'), which is what an honest summary of a
+        short file looks like.
+        """
+        self.assertLess(
+            len(validator._cited_vocabulary(FLYSYSTEM_SOURCE)),
+            2 * validator.CLAIM_SENTENCE_TOKENS,
+        )
+        self.assertEqual(
+            [],
+            self.claim_case_over(
+                "config/packages/flysystem.yaml",
+                FLYSYSTEM_SOURCE,
+                "Media uploads go through a remote storage adapter",
+            ),
+        )
+
+    def test_relaxed_bar_still_needs_distinctive_overlap(self) -> None:
+        """The relaxation is a reachability fix, not a lexicon amnesty.
+
+        A short config offers a low bar, so the two distinctive-vocabulary
+        tiers are what keeps a fabricated claim out: this one clears the
+        one-word bar three times over, and every word it clears it with
+        ('default', 'options', 'prefix') is common lexicon that grounds
+        nothing.
+        """
+        self.assertEqual(
+            [("warning", "EVIDENCE_CLAIM_GENERIC_SUPPORT")],
+            self.claim_case_over(
+                "config/packages/flysystem.yaml",
+                FLYSYSTEM_SOURCE,
+                "The default options value returns a result for each "
+                "configured prefix option",
+            ),
         )
 
     def test_exact_schema_profile_and_evidence_bounds_are_enforced(self) -> None:
@@ -2318,6 +2569,33 @@ class BodyCommandExtractionTest(unittest.TestCase):
         body = f"Do not use the read-only shortcut `{destructive} var/` here."
         self.assertEqual(self.commands(body), [])
 
+    def test_a_flag_inside_a_span_does_not_end_the_prohibition(self) -> None:
+        """A CLI flag is not punctuation, so it cannot close a clause.
+
+        With span contents left in the polarity window, the ``--`` of a flag
+        in the first span opened a fresh clause, and the second command of a
+        two-command prohibition was read as prescribed - the guardrail
+        blocked the very command it forbids.
+        """
+        for body in (
+            "Never run `bin/console doctrine:schema:update --force` or "
+            "`composer install` here.",
+            "Do not run `composer install --no-dev` or `php artisan migrate`.",
+        ):
+            with self.subTest(body=body):
+                self.assertEqual(self.commands(body), [])
+
+    def test_a_dash_after_a_flagged_span_still_ends_the_prohibition(self) -> None:
+        """Blanking span contents must not blind the boundary scan to prose."""
+        destructive = "rm " + "-rf"
+        body = (
+            f"Do not run `{destructive} var/cache --no-ansi` — clear it with "
+            "`bin/console cache:clear` instead."
+        )
+        self.assertEqual(
+            self.commands(body), [("bin/console cache:clear", False)]
+        )
+
     def test_a_shell_fence_stays_an_instruction_despite_prose_polarity(
         self,
     ) -> None:
@@ -3150,6 +3428,508 @@ class SkillTemplateReuseTest(SkillQualityFixture):
             [(item.code, item.message, item.severity) for item in diagnostics],
             [(item.code, item.message, item.severity) for item in again],
         )
+
+
+class RuntimeFixedAccountabilityTest(unittest.TestCase):
+    """The runtime-fixed quartet is measured by runtime accuracy, not by
+    project specificity it cannot have.
+
+    `memory-bank`, `project-brain`, `checkpoint`, and `memory` describe the
+    memory runtime `memory-seed` installs, so no target evidence is demanded
+    of them. In exchange every path and command they name has to exist in
+    `memory-seed/assets/runtime-contract.json`, and they may not name a target
+    file they declare no evidence for.
+    """
+
+    PLAN = {
+        "kind": "runtime-fixed",
+        "source_paths": ["CLAUDE.md"],
+        "evidence_ids": ["EV-0029"],
+    }
+    EVIDENCE = {"EV-0029": ("path", "CLAUDE.md")}
+
+    def diagnose(self, body: str, plan: dict | None = None) -> list[str]:
+        diagnostics: list = []
+        validator._validate_runtime_fixed_body(
+            "memory", plan if plan is not None else self.PLAN,
+            body, self.EVIDENCE, diagnostics,
+        )
+        return sorted(item.code for item in diagnostics)
+
+    def test_contract_paths_and_commands_are_accepted(self) -> None:
+        body = (
+            "Run `python3 memory-bank/scripts/context.py refresh`, then "
+            "`python3 memory-bank/scripts/context.py status --json` and "
+            "`python3 memory-bank/scripts/validate.py --summary`. Records live "
+            "under `project-brain/dynamic/` and `project-brain/control/`; the "
+            "index is `memory-bank/local/context.db`; the mode is read from "
+            "`project-brain/config/runtime.json`."
+        )
+        self.assertEqual(self.diagnose(body), [])
+
+    def test_tail_and_interior_path_fragments_are_accepted(self) -> None:
+        """A skill may name `scripts/validate.py` or `control/` for short."""
+        body = (
+            "The durable validator is `scripts/validate.py`, chunks live in "
+            "`chunks/`, the template is `templates/chunk.md`, and handoffs "
+            "live under `control/`. See `memory-bank/scripts/validate.py`."
+        )
+        self.assertEqual(self.diagnose(body), [])
+
+    def test_creatable_brace_group_is_expanded(self) -> None:
+        body = "Task records are written to `project-brain/dynamic/tasks/`."
+        self.assertEqual(self.diagnose(body), [])
+
+    def test_forbidden_invented_runtime_path_blocks(self) -> None:
+        body = "Checkpoints append to `memory-bank/local/checkpoints.jsonl`."
+        self.assertEqual(self.diagnose(body), ["RUNTIME_PATH_FORBIDDEN"])
+
+    def test_runtime_path_absent_from_the_contract_blocks(self) -> None:
+        body = "The mode is read from `project-brain/state/mode.json`."
+        self.assertEqual(self.diagnose(body), ["RUNTIME_PATH_UNSUPPORTED"])
+
+    def test_unlisted_subcommand_blocks(self) -> None:
+        body = "Run `python3 memory-bank/scripts/context.py reindex`."
+        codes = self.diagnose(body)
+        self.assertIn("RUNTIME_COMMAND_UNSUPPORTED", codes)
+
+    def test_unlisted_flag_blocks(self) -> None:
+        body = "Run `python3 memory-bank/scripts/context.py validate --deep`."
+        self.assertEqual(self.diagnose(body), ["RUNTIME_COMMAND_UNSUPPORTED"])
+
+    def test_declared_target_path_is_allowed(self) -> None:
+        body = (
+            "An empty result is explained by `CLAUDE.md`, not by a stale "
+            "`memory-bank/local/context.db`."
+        )
+        self.assertEqual(self.diagnose(body), [])
+
+    def test_undeclared_target_path_is_a_borrowed_project_claim(self) -> None:
+        body = (
+            "Capture the publication rule from `src/Entity/Article.php` into "
+            "`memory-bank/chunks/MEM-001.md`."
+        )
+        self.assertEqual(
+            self.diagnose(body), ["RUNTIME_PROJECT_CLAIM_UNSUPPORTED"]
+        )
+
+    def test_target_claim_needs_the_skill_own_evidence(self) -> None:
+        """The same body passes once the skill actually declares the file."""
+        body = "Capture the rule stated in `src/Entity/Article.php`."
+        self.assertEqual(
+            self.diagnose(body), ["RUNTIME_PROJECT_CLAIM_UNSUPPORTED"]
+        )
+        declared = dict(self.PLAN, source_paths=["src/Entity/Article.php"])
+        self.assertEqual(self.diagnose(body, declared), [])
+
+    def test_prose_code_spans_are_not_mistaken_for_paths(self) -> None:
+        body = (
+            "Report `working: skipped`, inspect `working_tasks` and "
+            "`turn_deltas`, and honour schema `1.2` under "
+            "`memory-bank/scripts/context.py`."
+        )
+        self.assertEqual(self.diagnose(body), [])
+
+    def test_segment_runs_and_brace_expansion_are_exact(self) -> None:
+        self.assertEqual(
+            validator._expand_braces("a/{x,y}/b"), ["a/x/b", "a/y/b"]
+        )
+        self.assertTrue(
+            validator._segment_run_matches(
+                ["scripts", "validate.py"],
+                ["memory-bank", "scripts", "validate.py"],
+            )
+        )
+        self.assertFalse(
+            validator._segment_run_matches(
+                ["scripts", "chunk.md"],
+                ["memory-bank", "scripts", "validate.py"],
+            )
+        )
+        self.assertTrue(
+            validator._segment_prefix_matches(
+                ["project-brain", "records", "x.md"],
+                ["project-brain", "records", "**"],
+            )
+        )
+        self.assertFalse(
+            validator._segment_prefix_matches(
+                ["memory-bank"], ["memory-bank", "local", "checkpoints.jsonl"]
+            )
+        )
+
+    def test_runtime_body_diagnostics_are_deterministic(self) -> None:
+        body = (
+            "Use `project-brain/state/mode.json` and "
+            "`python3 memory-bank/scripts/context.py validate --deep`."
+        )
+        self.assertEqual(self.diagnose(body), self.diagnose(body))
+
+
+class RuntimeFixedRoutingEvidenceTest(SkillQualityFixture):
+    """C1: `routing_cases[].evidence_ids` cannot be required non-empty AND a
+    subset of an empty declaration at the same time."""
+
+    def blank_first_routing_evidence(self) -> list[str]:
+        self.plan["skills"][0]["routing_cases"][0]["evidence_ids"] = []
+        self.rewrite()
+        return [item.code for item in self.plan_diagnostics()]
+
+    def test_empty_routing_evidence_blocks_an_evidence_derived_skill(self) -> None:
+        self.use_schema_1_2()
+        self.assertIn("ROUTING_CASE_INVALID", self.blank_first_routing_evidence())
+
+    def test_empty_routing_evidence_is_legal_for_a_runtime_fixed_skill(self) -> None:
+        self.use_schema_1_2()
+        self.plan["skills"][0]["kind"] = "runtime-fixed"
+        self.assertNotIn(
+            "ROUTING_CASE_INVALID", self.blank_first_routing_evidence()
+        )
+
+
+class SkillClassSplitTest(SkillQualityFixture):
+    """The report must not merge derived skills with unconditional runtime
+    guides into one 'skills for your project' number."""
+
+    def test_split_names_both_classes(self) -> None:
+        self.use_schema_1_2()
+        self.plan["skills"][1]["kind"] = "runtime-fixed"
+        self.rewrite()
+        self.assertEqual(
+            validator.skill_class_split(self.plan_path),
+            {
+                "project": [self.plan["skills"][0]["name"]],
+                "runtime_fixed": [self.plan["skills"][1]["name"]],
+            },
+        )
+
+    def test_unreadable_plan_reports_no_inventory(self) -> None:
+        self.assertEqual(
+            validator.skill_class_split(self.base / "absent.json"),
+            {"project": [], "runtime_fixed": []},
+        )
+
+
+class SkillBodyPathTest(SkillQualityFixture):
+    """A skill body may not send the agent to a file the target does not have.
+
+    Plan `path_contracts` were resolved against the target, but the rendered
+    prose was not, so a body could say "open `src/Security/Foo.php`" about a
+    file that never existed and still pass. Prose is full of strings shaped
+    like paths that are not target paths, so the reading is narrow on purpose:
+    everything that cannot be told apart from an honest citation is skipped.
+    """
+
+    PLAN = {
+        "kind": "project-derived",
+        "source_paths": ["config/firebase.php"],
+        "evidence_ids": ["firebase-runtime"],
+        "path_contracts": [
+            {
+                "path": "config/firebase.php",
+                "access": "read",
+                "classification": "required-existing",
+                "evidence_ids": ["firebase-runtime"],
+            },
+            {
+                "path": "reports/firebase-boundary.md",
+                "access": "write",
+                "classification": "creatable",
+                "evidence_ids": ["firebase-runtime"],
+            },
+        ],
+        "writes": ["reports/firebase-boundary.md"],
+    }
+    EVIDENCE = {"firebase-runtime": ("path", "config/firebase.php")}
+
+    def setUp(self) -> None:
+        super().setUp()
+        # A tree deep enough to separate "rooted in this project" from
+        # "borrowed from somewhere else", plus the two installed trees whose
+        # absence from a checkout proves nothing.
+        self.write_target("src/Kernel.php", "<?php // kernel\n")
+        self.write_target("src/Security/ContentVoter.php", "<?php // voter\n")
+        self.write_target("tests/ExistingTest.php", "<?php // existing case\n")
+        self.write_target("templates/page/show.html.twig", "<div></div>\n")
+        self.write_target("vendor/autoload.php", "<?php // installed\n")
+        self.write_target("var/cache/.gitkeep", "\n")
+
+    def diagnose(self, body: str, plan: dict | None = None) -> list[str]:
+        diagnostics: list = []
+        validator._validate_body_paths(
+            "firebase-services",
+            self.PLAN if plan is None else plan,
+            body,
+            self.EVIDENCE,
+            self.target.resolve(),
+            diagnostics,
+        )
+        return sorted(item.code for item in diagnostics)
+
+    def test_a_body_path_absent_from_the_target_is_reported(self) -> None:
+        body = (
+            "Open `src/Security/ImaginaryFirewallResolver.php` and confirm "
+            "the resolver rejects the anonymous branch."
+        )
+        self.assertEqual(self.diagnose(body), ["SKILL_BODY_PATH_MISSING"])
+
+    def test_creation_intent_survives_a_hard_wrap(self) -> None:
+        """The verdict must not depend on where the text happened to wrap.
+
+        Generated bodies are hard-wrapped near eighty columns, so the verb
+        marking a path as one to be CREATED lands on the previous line as
+        often as not. Reading only the physical line rejected an honest
+        instruction whose sentence was identical but wrapped.
+        """
+        sentence = (
+            "The suite has no expiry case; a reviewer would add at "
+            "`tests/Booking/HoldExpiryTest.php` so the owner picks it up."
+        )
+        wrapped = sentence.replace("add at ", "add at\n", 1)
+        self.assertEqual(self.diagnose(sentence), [])
+        self.assertEqual(self.diagnose(wrapped), [])
+
+    def test_creation_intent_does_not_leak_across_a_paragraph(self) -> None:
+        """A blank line still bounds the intent.
+
+        Widening the window to the paragraph must not let a create verb in
+        one instruction excuse an invented path in the next.
+        """
+        body = (
+            "A reviewer would add a regression case for the hold expiry.\n\n"
+            "Open `src/Security/ImaginaryFirewallResolver.php` and confirm "
+            "the resolver rejects the anonymous branch."
+        )
+        self.assertEqual(self.diagnose(body), ["SKILL_BODY_PATH_MISSING"])
+
+    def test_real_target_paths_stay_clean(self) -> None:
+        body = (
+            "Read `config/firebase.php`, then `src/Kernel.php` and "
+            "`src/Security/ContentVoter.php`; the rendered template is "
+            "`templates/page/show.html.twig`."
+        )
+        self.assertEqual(self.diagnose(body), [])
+
+    def test_class_names_keys_and_constants_are_not_paths(self) -> None:
+        """Backslashed symbols, dotted keys, members, and bare file names."""
+        body = (
+            "The subject is `App\\Entity\\Page`, delivered through "
+            "`Symfony\\Component\\Messenger\\Envelope`. The retry key is "
+            "`retry_strategy.max_retries`, the attribute is `ROLE_ADMIN`, the "
+            "constant is `CRUDEntityResolver::READ_PERMISSION`, the field is "
+            "`article.content`, and the file is `security.yaml`."
+        )
+        self.assertEqual(self.diagnose(body), [])
+
+    def test_placeholders_and_globs_name_a_set_not_a_file(self) -> None:
+        body = (
+            "Templates live at `templates/{type}/show.html.twig`, sources "
+            "match `src/**/*.php`, environment overrides sit in "
+            "`config/packages/{dev,prod}/doctrine.yaml`, and the entity is "
+            "`src/Entity/<Name>.php` for `{id}`."
+        )
+        self.assertEqual(self.diagnose(body), [])
+
+    def test_foreign_and_installed_trees_are_left_alone(self) -> None:
+        """A path is judged only when it is rooted in this target's own tree.
+
+        `app/` belongs to another framework's layout, `page/show.html.twig` is
+        a Twig logical name resolved under `templates/`, and `vendor/`,
+        `node_modules/`, `var/` are installed or generated rather than
+        committed - none of them is evidence of an invented file.
+        """
+        body = (
+            "Other projects put it in `app/Http/Controllers/PageController.php`. "
+            "The controller renders `page/show.html.twig`. Run "
+            "`vendor/bin/phpunit`, lint with `node_modules/.bin/eslint`, and "
+            "inspect `var/cache/dev/AppKernelDevDebugContainer.php`."
+        )
+        self.assertEqual(self.diagnose(body), [])
+
+    def test_a_path_the_skill_declares_it_writes_is_not_missing(self) -> None:
+        body = "The bounded artifact of this review is `reports/firebase-boundary.md`."
+        self.assertEqual(self.diagnose(body), [])
+
+    def test_a_path_the_body_commands_into_existence_is_not_missing(self) -> None:
+        """A file the skill tells the agent to create does not exist yet."""
+        for line in (
+            "Create `tests/AnonymousApiTest.php` beside the existing suite.",
+            "Add `tests/Security/DeniedPathTest.php` to the suite.",
+            "Generate `src/Security/AnonymousGuard.php` from the template.",
+            "Write `src/Security/TokenAuthenticator.php` for the api firewall.",
+        ):
+            self.assertEqual(self.diagnose(line), [], line)
+
+    def test_creation_verbs_do_not_swallow_their_look_alikes(self) -> None:
+        """`authorization`, `additional`, `placeholder` are not creation."""
+        for line in (
+            "The authorization branch lives in "
+            "`src/Security/ImaginaryFirewallResolver.php`.",
+            "One additional check sits in `src/Security/ImaginaryAudit.php`.",
+            "The placeholder is `src/Security/ImaginaryPlaceholder.php`.",
+        ):
+            self.assertEqual(self.diagnose(line), ["SKILL_BODY_PATH_MISSING"], line)
+
+    def test_a_path_quoted_from_the_cited_source_is_a_report(self) -> None:
+        """Configuration may declare a directory that was never created.
+
+        `unite.yaml` in the Symfony run lists `src/Model` as a schema type
+        dir although the directory does not exist. Reporting what the cited
+        file says is the skill doing its job, so a string the target itself
+        spells out is never called an invention.
+        """
+        self.write_target(
+            "config/firebase.php",
+            "<?php // Firebase initialization, messaging client, and runtime "
+            "boundary.\n// type_dirs: src/Entity, src/Model, src/Union\n",
+        )
+        body = "Types are collected from `src/Entity`, `src/Model` and `src/Union`."
+        self.assertEqual(self.diagnose(body), [])
+        # The same three strings, from a skill that cites nothing, stay invented.
+        self.assertEqual(
+            self.diagnose(body, {"kind": "project-derived"}),
+            ["SKILL_BODY_PATH_MISSING"] * 3,
+        )
+
+    def test_a_path_below_an_absent_directory_is_left_uncovered(self) -> None:
+        """A documented miss, kept deliberately.
+
+        `src/Security/Firewall/Resolver/` does not exist, so the fabricated
+        file under it is indistinguishable from a path belonging to a layout
+        this target simply does not use. Skipping is honester than guessing.
+        """
+        body = "Open `src/Security/Firewall/Resolver/ImaginaryResolver.php`."
+        self.assertEqual(self.diagnose(body), [])
+
+    def test_body_path_diagnostics_are_deterministic(self) -> None:
+        body = (
+            "Read `src/Security/ImaginaryTwo.php`, then "
+            "`src/Security/ImaginaryOne.php`, then `src/Security/ImaginaryTwo.php`."
+        )
+        diagnostics: list = []
+        validator._validate_body_paths(
+            "firebase-services", self.PLAN, body, self.EVIDENCE,
+            self.target.resolve(), diagnostics,
+        )
+        self.assertEqual(
+            [item.message for item in sorted(set(diagnostics))],
+            [
+                "firebase-services: body sends the agent to a target path that "
+                "does not exist: src/Security/ImaginaryOne.php",
+                "firebase-services: body sends the agent to a target path that "
+                "does not exist: src/Security/ImaginaryTwo.php",
+            ],
+        )
+
+    def test_the_gate_reports_an_invented_body_path_end_to_end(self) -> None:
+        self.use_schema_1_2()
+        self.write_target("src/Kernel.php", "<?php // kernel\n")
+        name = "firebase-services"
+        self.skill_texts[name] = self.skill_texts[name].replace(
+            "\n## Verification\n",
+            "\nOpen `src/ImaginaryFirebaseBridge.php` and confirm the "
+            "transport is bound.\n\n## Verification\n",
+        )
+        self.rewrite()
+        self.assertIn("SKILL_BODY_PATH_MISSING", self.codes())
+
+
+class SkillEvidenceRowTest(SkillQualityFixture):
+    """The rendered evidence table is the skill's citation of record.
+
+    Nothing compared it with the plan, so a row could keep a real evidence
+    identifier and re-point it at a file the plan never declared. Identifier
+    and path are now both held to what the plan says.
+    """
+
+    PLAN = {"evidence_ids": ["firebase-runtime"]}
+    EVIDENCE = {
+        "firebase-runtime": ("path", "config/firebase.php"),
+        "availability-rules": ("path", "domain/availability.php"),
+    }
+
+    def diagnose(self, body: str) -> list[str]:
+        diagnostics: list = []
+        validator._validate_evidence_rows(
+            "firebase-services", self.PLAN, body, self.EVIDENCE, diagnostics
+        )
+        return sorted(item.code for item in diagnostics)
+
+    def row(self, identifier: str, anchor: str) -> str:
+        return (
+            "| Evidence | Anchor | Source type | Confidence | Claim |\n"
+            "| --- | --- | --- | --- | --- |\n"
+            f"| {identifier} | `{anchor}` | configuration | confirmed | "
+            "The messaging transport is declared here. |\n"
+        )
+
+    def test_an_honest_row_is_clean(self) -> None:
+        self.assertEqual(
+            self.diagnose(self.row("firebase-runtime", "config/firebase.php:L1-L4")),
+            [],
+        )
+
+    def test_a_symbol_anchor_resolves_to_its_path(self) -> None:
+        self.assertEqual(
+            self.diagnose(
+                self.row(
+                    "firebase-runtime",
+                    "config/firebase.php:symbol:FirebaseMessagingClient",
+                )
+            ),
+            [],
+        )
+
+    def test_a_re_pointed_anchor_is_reported(self) -> None:
+        self.assertEqual(
+            self.diagnose(
+                self.row(
+                    "firebase-runtime",
+                    "config/packages/totally-made-up-firebase.yaml:L1-L5",
+                )
+            ),
+            ["SKILL_EVIDENCE_ROW_ANCHOR"],
+        )
+
+    def test_a_row_citing_evidence_this_skill_was_not_given_is_reported(self) -> None:
+        self.assertEqual(
+            self.diagnose(self.row("availability-rules", "domain/availability.php:L1")),
+            ["SKILL_EVIDENCE_ROW_UNDECLARED"],
+        )
+
+    def test_a_row_citing_evidence_the_plan_never_declared_is_reported(self) -> None:
+        self.assertEqual(
+            self.diagnose(self.row("EV-9999", "config/firebase.php:L1")),
+            ["SKILL_EVIDENCE_ROW_UNDECLARED"],
+        )
+
+    def test_an_ordinary_table_is_not_an_evidence_table(self) -> None:
+        body = (
+            "| Case | Expected |\n"
+            "| --- | --- |\n"
+            "| Transient provider failure | retry once, then report |\n"
+        )
+        self.assertEqual(self.diagnose(body), [])
+
+    def test_a_row_without_a_path_claims_no_location(self) -> None:
+        body = (
+            "| Evidence | Claim |\n"
+            "| --- | --- |\n"
+            "| firebase-runtime | The transport is declared. |\n"
+        )
+        self.assertEqual(self.diagnose(body), [])
+
+    def test_the_gate_reports_a_re_pointed_row_end_to_end(self) -> None:
+        self.use_schema_1_2()
+        name = "firebase-services"
+        self.skill_texts[name] = self.skill_texts[name].replace(
+            "\n## Procedure / Process\n",
+            "\n"
+            + self.row("firebase-runtime", "config/invented-firebase.yaml:L1-L5")
+            + "\n## Procedure / Process\n",
+        )
+        self.rewrite()
+        self.assertIn("SKILL_EVIDENCE_ROW_ANCHOR", self.codes())
 
 
 if __name__ == "__main__":

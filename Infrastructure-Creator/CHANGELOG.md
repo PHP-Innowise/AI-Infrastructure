@@ -6,6 +6,168 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Fixed
 
+- The body-path check made its verdict depend on where the text happened to
+  wrap. Creation intent was read from the physical line carrying the code
+  span, but generated bodies are hard-wrapped near eighty columns, so in "a
+  reviewer would add at `tests/Booking/HoldExpiryTest.php`" the verb that
+  marks the path as one to be created lands on the previous line as often as
+  not. Measured A/B on identical prose: unwrapped passed, wrapped failed with
+  `SKILL_BODY_PATH_MISSING` - a correct instruction rejected for its line
+  breaks. The context is now the paragraph. A blank line still bounds it, so
+  a create verb in one instruction cannot excuse an invented path in the
+  next, and that direction is pinned by its own test.
+
+- The seven discovery scanners told their agents to produce something the
+  evidence gate cannot accept, and four of them answered wrong on a real
+  target. Found by running the pipeline end to end against a Symfony/UniteCMS
+  project; none of it was visible to the tests or the fixtures, because every
+  fixture already carried hand-built evidence.
+  - **No scanner knew what evidence is.** The profile schema requires each
+    `evidence[]` entry to carry an id, a target-relative path, a current
+    `sha256:` fingerprint and non-empty supported claims, but the word
+    `sha256` appeared in no scanner; `stack-scanner` never mentioned
+    fingerprints or evidence ids at all. Executed literally, a scanner
+    produced zero gate-eligible evidence and every agent in the run had to
+    invent fingerprinting for itself. The record shape, the id namespace, the
+    whole-file digest recipe, the anchor grammar and the bounded-range rule
+    now live once in
+    `stack-scanner/references/scan-evidence-contract.md`, which all seven
+    scanners point at; the contract's member list is pinned by test to the
+    validator's own allow-list and to the schema's source-type vocabulary.
+  - **Report and ledger were conflated.** Each scanner mandated "exactly one
+    findings file" in Markdown and specified no machine-readable form, while
+    the rest of the pipeline needs structure. The two are now separate
+    artifacts, both mandatory, and "exactly one" attaches to each kind:
+    `<scanner>-findings.md` for the human reviewer and
+    `<scanner>-evidence.json` for `profile-synthesizer` and the validators.
+    The seven report templates moved into the contract's appendix A, which
+    kept the change inside the context budget.
+  - **The task directory was unspecified.** `TASK-{N}` let parallel scanners
+    in one run create both `tasks/TASK-1/` and `tasks/TASK-001/`. The canon is
+    now three-digit zero padding (as in the schema's own examples), stated in
+    the contract, in all seven scanners, and in `infra-scan`, which allocates
+    the directory.
+  - **Cross-scanner inputs had no address.** `conventions-scanner` steps 2/8
+    and `domain-behavior-scanner` steps 3/9 said "take it from stack-scanner
+    findings" without saying where, so the step was unexecutable in a
+    standalone run. Siblings are now addressed as
+    `tasks/TASK-{NNN}/<sibling>-findings.md` / `-evidence.json`, and a missing
+    sibling degrades explicitly: derive only the minimum first-hand, mark it
+    `inferred`, record a `Missing sibling input:` gap line - never invent the
+    sibling's verdict, never block on it.
+  - **Two scanners contradicted each other about `.env`.** `integration-scanner`
+    forbade reading it; `security-compliance-scanner` step 2 required listing
+    its keys. Resolved once, in identical wording in both: key *names* may be
+    cited from non-secret committed sources (`config/**`, container/CI config,
+    deploy scripts, committed `.env.example`/templates, `env()`/`getenv()`/
+    `$_ENV` call sites); values and the `.env` file itself are never read,
+    recorded or fingerprinted, and a key knowable only from a real `.env`
+    stays `unknown`.
+  - **Four hardcoded assumptions answered wrong on the target.**
+    `infra-ops-scanner` recognized containerization only by
+    `Dockerfile`/`docker-compose`, so a DDEV project reported "no containers";
+    `stack-scanner` read the PHP version from `composer.lock` `platform`,
+    which holds the *constraint* `>=8.2.0`, while the pin lived in
+    `platform-overrides`; `stack-scanner` searched for commands only in
+    Composer/package-manager scripts, while `deploy.sh`
+    (`git reset --hard`, `doctrine:schema:update --force` in production),
+    `.ddev` hooks and three `#[AsCommand]` console commands sat outside them,
+    yielding "no risky commands" from the scan the command gate exists for;
+    and `integration-scanner` enumerated integrations from `composer.json`
+    `require` alone, returning zero on a project whose providers arrive
+    through a CMS meta-package and `config/packages/**`. Each detection step
+    is now a signal *class* with a breadth checklist in the contract, and an
+    absence verdict is reportable only after the whole class was searched and
+    named.
+
+- The runtime-fixed memory quartet could satisfy no consistent set of rules,
+  and when it did pass it was reported as if it had been derived from the
+  target. Both were found by running the pipeline end to end against a real
+  Symfony/UniteCMS project.
+  - **Contract contradiction.** The schema promised that `memory-bank`,
+    `project-brain`, `checkpoint` and `memory` "may have empty
+    `evidence_ids`/`source_paths` during synthesis", while
+    `routing_cases[].evidence_ids` was validated non-empty *and* required to
+    be a subset of the skill's own evidence. With no declared evidence the
+    quartet could satisfy neither branch: any value failed the subset check
+    and no value failed the non-empty check. Emptiness now propagates
+    consistently - a `runtime-fixed` skill's routing cases may carry an empty
+    `evidence_ids`, exactly like its selection conditions and path contracts
+    already could. A non-empty list that is not a subset is still blocking for
+    every kind.
+  - **Vocabulary contradiction.** `php-process-skills.md` assigned the quartet
+    (and `skill-creator`/`reflect`) the phase `utility` and five other
+    candidates `execution`, neither of which exists in the flow vocabulary the
+    schema and `validate_flow_contracts.py` accept
+    (`understanding`/`planning`/`implementation`/`verification`/
+    `finalization`). The catalog phase is copied verbatim into `phase`, so a
+    plan built from those rows was unbuildable. Every row now uses the real
+    vocabulary, the column documents why it is closed, and a test pins each
+    catalog phase to the validator's set. The catalog also quoted a
+    `context.py --mode lightweight` form that the runtime contract does not
+    define; it now quotes the contract's `turn --task-id ID --flush`, and a
+    test asserts every `context.py` subcommand named in catalog prose exists
+    in the contract.
+  - **Status of the quartet.** Measured on the real run, the four skills
+    contained zero identifiers of the target, 77-85% of their lines carried no
+    project token, and all four cited one shared evidence entry. That is the
+    nature of the set, not a selection failure: the registry already marks
+    exactly these four `"mode": "runtime-fixed"` (4 of 52), and they document
+    the memory runtime `memory-seed` installs into every target rather than
+    the target's code. They stay unconditional, stop being measured by a
+    project specificity they cannot have, and are held to a bar they can meet.
+    The gate no longer demands target evidence, source paths, or a quoted
+    target path from a runtime-fixed body; instead every path it names under
+    `memory-bank/`/`project-brain/` and every
+    `python3 memory-bank/scripts/*.py` form it names must exist in
+    `memory-seed/assets/runtime-contract.json`
+    (`RUNTIME_PATH_UNSUPPORTED`, `RUNTIME_PATH_FORBIDDEN`,
+    `RUNTIME_COMMAND_UNSUPPORTED`), and a target path it declares no evidence
+    for is blocking (`RUNTIME_PROJECT_CLAIM_UNSUPPORTED`). Membership is
+    decided on segment runs, so a skill may name `memory-bank/scripts/
+    validate.py` or just `scripts/validate.py` and `control/`, but not
+    `project-brain/state/mode.json`. The `mode` field already in the registry
+    is the trigger; no new field was invented.
+  - **Reporting.** "9 skills for your project" overstated what was derived
+    from the target. `validate_skill_quality.py` now prints a `skill
+    inventory:` line and emits a `skill_classes` member in `--json`, and the
+    `infra-generate`/`skill-forge` output templates report two counts:
+    5 project skills and 4 runtime guides, never their sum. The decision and
+    its rationale are documented in `php-process-skills.md` and in the profile
+    schema so the next reader does not mistake the quartet for a failure of
+    selection.
+
+- Three ways the skill-quality gate rejected honest generated content, all
+  three found by running the pipeline end to end against a real Symfony
+  project (UniteCMS) rather than against a fixture, and none of them visible
+  to the 324 tests or the 38 fixtures.
+  - The polarity window read clause boundaries out of code spans, so `--` in
+    a CLI flag closed the clause. A prohibition naming two commands lost its
+    force for the second: ``Never run `bin/console doctrine:schema:update
+    --force` or `composer install` here.`` reported `composer install` as
+    *prescribed* and failed the body as `DEPENDENCY_WRITE` - the guardrail
+    blocked the very command it forbids. Span contents are now blanked (with
+    offsets preserved) before the boundary and marker scan, because a
+    boundary is a property of prose, not of code. Prose punctuation still
+    ends a clause, a lone hyphen still does not, and a fenced shell block is
+    still an instruction whatever the surrounding prose claims.
+  - `SKILL_CIRCULAR_PURPOSE` fired on any skill whose name matches its own
+    directory. `memory-bank`, honestly naming `memory-bank/chunks/` and
+    `` `memory-bank/scripts/validate.py` `` in its Purpose, was called
+    circular by a word-boundary match inside a path. A mention that is part
+    of a path, or that sits inside a code span, is naming a file rather than
+    restating the skill, and no longer counts; a purpose that restates its
+    own name in prose is still circular.
+  - `REPEATED_BLOCK` fired on the evidence table. Two skills citing one piece
+    of evidence must render that row identically - the citation is the point -
+    and header, rule and row form exactly the three-line identical run the
+    check reports. A markdown header with its rule, and an evidence row
+    (a cell that is only an evidence id, next to a cell carrying a source
+    path), now break the run instead of forming a block. Nothing else was
+    relaxed: duplicated prose beside a shared table, duplicated ordinary
+    table rows, and the byte-identical, noun-substituted and repunctuated
+    template corpora are all still reported.
+
 - The generator could not pass its own quality gate on any target. The memory
   quartet is unconditional, its skills verify themselves with the seeded
   runtime, and every one of those commands is an interpreter invocation -
@@ -284,6 +446,98 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
   the tests-matrix and mirrors jobs), and `build_mirrors.py --check` now
   detects stale mirrors of deleted canonical `only`-class files (pinned by
   the new root `tests/test_build_mirrors.py`).
+- Claim grounding (`EVIDENCE_CLAIM_UNSUPPORTED`) blocked three *true* claims
+  on the Symfony/UniteCMS run, each on the very citation the scanner contracts
+  prescribe, and the rule was documented nowhere.
+  - **PHP member separators were not compound joints.** `_tokens` keeps
+    `FrameworkBundle::class` whole, so the cited vocabulary offered
+    `framework` and `bundle` but never `frameworkbundle`, and prose naming
+    the bundle scored zero overlap against the one line that registers it.
+    `::` and `->` now split like `.` and `/`, and all three grading tiers
+    read the same identifier-expanded vocabulary - the first tier had been
+    graded on unexpanded tokens, making it stricter than the tiers meant to
+    be strict.
+  - **The bar could exceed what the source has to give.** Two overlapping
+    words were demanded of any claim longer than three tokens, so
+    `.php-version` - whose entire content is `8.2`, and which the stack
+    scanner is contractually told to cite as the runtime pin - admitted no
+    statable claim at all, and an eight-line `flysystem.yaml` could not
+    afford a second reusable word. The requirement is now one reused word per
+    sentence-worth of vocabulary the cited range actually offers, floored at
+    one and never zero. Fabrication defence is unchanged: the path must
+    resolve and the fingerprint must match the bytes on disk, the floor still
+    forces the claim to name something the range contains, and the two
+    distinctive-lexicon tiers still reject a claim grounded only in PHP or
+    software-English boilerplate.
+  - **The rule was untaught.** `scan-evidence-contract.md` now states it in
+    the `supported_claims` bullet, with one good and one bad claim over the
+    same cited file.
+
+- **A generated skill could send the agent to a file that does not exist.**
+  Found on the same Symfony/UniteCMS run: a body line reading "Open
+  `src/Security/ImaginaryFirewallResolver.php` and confirm the resolver
+  rejects the anonymous branch" passed with 0 errors, and so did an evidence
+  row whose anchor was re-pointed from `config/packages/security.yaml` to
+  `config/packages/totally-made-up-security.yaml`. The plan's
+  `path_contracts` were resolved against the target all along; the *rendered
+  prose* never was, and the table nobody compared with the plan is the
+  skill's citation of record. Two readings were added. A bare path code span
+  is now resolved against the target when it is rooted in the target's own
+  tree - its first segment and its parent directory both exist - and an
+  unresolvable one is `SKILL_BODY_PATH_MISSING`. A rendered evidence row must
+  agree with the plan on both identifier and path
+  (`SKILL_EVIDENCE_ROW_UNDECLARED`, `SKILL_EVIDENCE_ROW_ANCHOR`); `:L…` and
+  `:symbol:…` anchors are reduced to their path first.
+  - **Calibration is the whole difficulty, so every ambiguous class is
+    skipped rather than guessed:** backslashed class names and namespaces
+    (`App\Entity\Page`), dotted config keys and member references
+    (`retry_strategy.max_retries`, `article.content`), constants, bare file
+    names used as shorthand (`security.yaml`), globs and placeholder groups
+    (`src/**/*.php`, `config/packages/{dev,prod}/doctrine.yaml`,
+    `src/Entity/<Name>.php`), installed or generated trees (`vendor`,
+    `node_modules`, `var`), the generated runtime roots, foreign-framework
+    layouts and Twig logical names (`page/show.html.twig`) - both rejected by
+    the rooted-in-the-target test - paths the skill declares in `writes` or
+    classifies as creatable, a path on a line that commands its creation
+    (inflections enumerated, so `authorization`, `additional` and
+    `placeholder` are not creation), and any string the skill's own cited
+    source spells out, which is how a real `unite.yaml` may declare
+    `src/Model` for a directory that was never created.
+  - **The deliberate miss:** an invented path below a directory the target
+    does not have (`src/Security/Firewall/Resolver/Imaginary.php`) is
+    indistinguishable from a layout this project simply does not use, so it
+    is not reported. A gate that fails honest instruction is worse than the
+    miss it closes.
+  - Measured on the real run: 98 path spans across nine generated skills, 0
+    false positives, both injected defects reported, control gate still PASS.
+
+### Verified
+
+- The tightened skill-quality gate was re-measured on a domain it has never
+  seen (warehouse logistics: carrier label transport and wave cutoff review),
+  authored independently of the shipped fixtures. An honest two-skill
+  accelerator whose guardrails *enumerate* ten forbidden commands - two in a
+  single sentence, four carrying `--force`, seven of which the gate's own
+  analyzer classifies as destructive or mutating - passes `--plan-only`,
+  `--allow-partial-skills` and the full gate with 0 errors and 0 warnings.
+  Removing only the prohibition word from those same sentences makes the gate
+  report them (`SKILL_BODY_COMMAND_RISK`), so the pass is a polarity reading,
+  not a skipped scan. Grip was re-confirmed for a prescribed destructive
+  command (`SKILL_BODY_COMMAND_RISK`), a noun-substituted and a
+  punctuation-only duplicated template (`SKILL_TEMPLATE_REUSE`,
+  `REPEATED_BLOCK`), a circular purpose (`SKILL_CIRCULAR_PURPOSE`) and a
+  vacuous procedure written in project vocabulary
+  (`SKILL_STEP_NOT_OPERATIONAL`); and for the runtime-fixed quartet, which
+  passes with no project evidence at all but is blocked when it names a
+  runtime path or command absent from `runtime-contract.json`
+  (`RUNTIME_PATH_UNSUPPORTED`, `RUNTIME_COMMAND_UNSUPPORTED`) or a target file
+  it declares no evidence for (`RUNTIME_PROJECT_CLAIM_UNSUPPORTED`). No code
+  changed; two coverage limits were recorded rather than closed:
+  `docker compose down -v` and a project-specific `bin/console` command with
+  `--force` are not classified as destructive by `analyze_commands.py`, and a
+  bare noun-list procedure step can still read as operational when a path
+  segment or a noun coincides with a listed action verb ("dispatch", "states",
+  "pick", "forward").
 
 ## [2.5.0] - 2026-08-14
 
