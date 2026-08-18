@@ -2325,7 +2325,13 @@ Be careful.
         self.assertNotIn("SKILL_FRONTMATTER_NAME", codes)
 
     def test_fixture_catalog_expected_codes_are_emitted_by_validator(self) -> None:
-        source = VALIDATOR_PATH.read_text(encoding="utf-8")
+        # The catalog spans every gate in this directory, not only the plan
+        # quality one: discovery coverage, claim reconciliation, and the
+        # adversarial review each emit codes it now names.
+        source = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted(VALIDATOR_PATH.parent.glob("validate_*.py"))
+        )
         emitted = set(re.findall(r'"([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)"', source))
         cases = json.loads(CASES_PATH.read_text(encoding="utf-8"))
         for name, case in sorted(cases.items()):
