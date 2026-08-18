@@ -660,6 +660,68 @@ class LargePlanCalibrationTest(unittest.TestCase):
             self.assertEqual(len(modules), 2, item.message)
             self.assertEqual(modules[0], modules[1], item.message)
 
+    def mutate(self, mutation) -> list:
+        """Apply one deliberate loss to the honest plan and re-validate.
+
+        A gate is only worth its false-rejection cost if the corresponding
+        omission is actually caught. These mutations are the losses the merged
+        plan names: a dropped claim, a dropped obligation, evidence passed over
+        in silence.
+        """
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        corpus = build_corpus(Path(temporary.name))
+        plan = corpus["plan"]
+        mutation(plan)
+        corpus["plan_path"].write_text(
+            json.dumps(plan, indent=2) + "\n", encoding="utf-8"
+        )
+        return [
+            item.code
+            for item in validator.validate_plan(
+                corpus["plan_path"], corpus["target"], corpus["registry_path"]
+            )
+            if item.severity == "error"
+        ]
+
+    def test_dropping_a_skills_claim_reference_is_caught(self) -> None:
+        codes = self.mutate(lambda plan: plan["skills"][3].update(claim_ids=[]))
+        self.assertIn("SKILL_CLAIM_IDS_INVALID", codes)
+
+    def test_dropping_a_catalog_obligation_is_caught(self) -> None:
+        def drop(plan):
+            plan["skills"][5]["required_procedure_roles"] = plan["skills"][5][
+                "required_procedure_roles"
+            ][:1]
+
+        self.assertIn("CATALOG_ROLE_UNCOVERED", self.mutate(drop))
+
+    def test_unwiring_an_obligation_from_its_step_is_caught(self) -> None:
+        def unwire(plan):
+            plan["skills"][7]["required_procedure_roles"][0]["procedure_step_ids"] = []
+
+        self.assertIn("PROCEDURE_ROLE_CONTRACT_INVALID", self.mutate(unwire))
+
+    def test_dropping_a_recorded_baseline_is_caught(self) -> None:
+        def drop(plan):
+            for skill in plan["skills"]:
+                for check in skill["verification"]:
+                    if check["mode"] == "command" and check["baseline"]:
+                        check["baseline"] = None
+                        return
+
+        self.assertIn("VERIFICATION_BASELINE_MISSING", self.mutate(drop))
+
+    def test_dropping_an_invariants_only_assertion_is_caught(self) -> None:
+        def drop(plan):
+            plan["critical_invariants"][2]["assertions"] = []
+
+        codes = self.mutate(drop)
+        self.assertTrue(
+            [code for code in codes if code.startswith("CRITICAL_INVARIANT")],
+            codes,
+        )
+
     def test_the_same_plan_collapsed_onto_one_step_is_rejected(self) -> None:
         diagnostics, _ = self.build(collapsed=True)
         codes = [item.code for item in diagnostics if item.severity == "error"]

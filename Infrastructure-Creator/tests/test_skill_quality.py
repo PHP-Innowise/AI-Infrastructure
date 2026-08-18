@@ -838,7 +838,7 @@ class SkillQualityTest(SkillQualityFixture):
                 "nonconforming-agent-file",
                 "good-distinct-shared-safety",
                 "deterministic-output",
-                "schema-1.2-valid",
+                "schema-1.4-valid",
                 "legacy-publication-ineligible",
                 "generic-verification",
                 "provider-safety",
@@ -862,8 +862,46 @@ class SkillQualityTest(SkillQualityFixture):
                 "body-path-existence",
                 "body-path-calibration",
                 "evidence-row-agreement",
+                "absence-evidence-calibration",
+                "absence-evidence-contradicted",
+                "catalog-role-coverage",
+                "claim-invariant-lost",
+                "evidence-undisposed",
+                "large-plan-calibration",
+                "procedure-role-collapse-calibration",
+                "procedure-role-collapsed",
+                "procedure-role-wiring",
+                "review-verification-not-executed",
+                "routing-tautology",
+                "routing-tautology-calibration",
+                "scan-secret-covered",
+                "scan-surface-unaccounted",
+                "verification-baseline-calibration",
+                "verification-baseline-contradicted",
+                "verification-baseline-missing",
             },
         )
+
+    def test_every_catalogued_code_is_actually_asserted_somewhere(self) -> None:
+        """The catalog is an index of covered regressions, not a wish list.
+
+        A named case whose code no test asserts would make the catalog read as
+        coverage that does not exist - the same failure mode as a scan that
+        records what it found and not what it missed.
+        """
+        cases = json.loads(CASES_PATH.read_text(encoding="utf-8"))
+        suite = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted((ROOT / "tests").glob("test_*.py"))
+        )
+        missing = sorted(
+            {
+                case["expected"]
+                for case in cases.values()
+                if case.get("expected") and f'"{case["expected"]}"' not in suite
+            }
+        )
+        self.assertEqual(missing, [])
 
     def test_good_distinct_skills_with_shared_approved_safety_pass(self) -> None:
         self.assertEqual(

@@ -174,6 +174,17 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Verified
 
+- **The regression catalog is now an index of coverage that exists.** Every rule
+  shipped this cycle has a named case in
+  `tests/fixtures/skill-quality/cases.json`, and a new test fails if any
+  catalogued code is not actually asserted by some test - a catalog that lists
+  coverage it does not have is the same failure as a scan that records what it
+  found and not what it missed. Seventeen cases added, including the four
+  calibration entries that pin what must stay clean.
+  The large corpus also carries mutation tests now: dropping a claim reference,
+  a catalog obligation, an obligation's wiring, a recorded baseline, or an
+  invariant's only assertion is each caught by name.
+
 - **An honest thirty-six skill plan validates with zero blocking diagnostics.**
   Every threshold in this gate was calibrated on plans of nine to thirteen
   skills, because that is what our runs produce; the failure that costs most is
