@@ -52,6 +52,28 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Fixed
 
+- A selected candidate could ignore every obligation its catalog places on it.
+  `required_procedure_roles` existed in schema 1.2, but nothing said what
+  belonged there, so both measured plans filled it with one universal trio -
+  `load-evidence`, `execute`, `verify` - for every skill: 9 of 9 in our fourth
+  run and 35 of 35 in an external 39-skill plan. A database designer, a WCAG
+  reviewer and a Marketo integration all declared the same three roles, while
+  the catalog's real obligations (derive constraints from invariants, design
+  indexes from evidenced access paths, cover denied paths) appeared nowhere.
+  A trio that describes every skill ever written describes none of them.
+  `candidate-registry.json` gains an optional `roles` array carrying the
+  catalog's obligations in machine-readable form, extracted from the catalog
+  prose rather than invented, and a selected candidate that fails to cover them
+  is `CATALOG_ROLE_UNCOVERED`. The field is optional on purpose: obligations are
+  filled in tranches, and a candidate nobody has described yet stays unchecked
+  instead of blocking generation. Thirteen candidates are described in this
+  first tranche, chosen to cover both measured corpora.
+  The schema exemplar taught the defect and is rewritten: it now shows the six
+  real obligations of `testing` instead of the trio. This is the third defect
+  this cycle traced to an example in the documentation rather than to the code.
+  Calibrated on both corpora: the rule fires on every skill whose candidate
+  declares roles - 4 of 4 in our plan, 12 of 12 in the external one - which is
+  the universal defect, not a false positive.
 - A skill that writes could prove itself by grepping for the text it had just
   written. Three runs against a real project shipped exactly that: `testing`
   declared `tests/**`, promised a suite invocation and verified itself with

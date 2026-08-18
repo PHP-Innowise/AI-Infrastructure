@@ -104,9 +104,12 @@ Each `skills[]` entry is one complete, independently actionable contract:
     }
   ],
   "required_procedure_roles": [
-    {"role": "load-evidence", "requirements": ["Read the cited test configuration and changed behavior"]},
-    {"role": "execute", "requirements": ["Choose test level and add target-specific cases"]},
-    {"role": "verify", "requirements": ["Run the narrow suite, then required broader checks"]}
+    {"role": "select-suite-and-focused-scope", "requirements": ["Read the cited PHPUnit configuration and pick the suite the change belongs to"]},
+    {"role": "derive-critical-scenarios-from-invariants", "requirements": ["Turn each intersecting high-priority invariant into a named case"]},
+    {"role": "cover-denied-and-forbidden-paths", "requirements": ["Assert the transitions and permissions the target refuses"]},
+    {"role": "arrange-fixtures-and-test-doubles", "requirements": ["Build rows through the target's own factories and fakes"]},
+    {"role": "execute-the-evidenced-focused-command", "requirements": ["Run the command the scan proved, not a composed one"]},
+    {"role": "assert-expected-and-forbidden-outcomes", "requirements": ["State what must hold and what must never appear"]}
   ],
   "procedure_steps": [
     {
@@ -235,6 +238,15 @@ non-empty `branches`. Each `procedure_steps[]` item has exactly `id`, `action`,
 reference resolves within the skill.
 Every evidence reference is declared by the skill. Each `verification[]` item
 has exactly `id`, `mode`, `instruction`, `command`, `prerequisites`,
+`required_procedure_roles` carries the candidate's own obligations from
+`candidate-registry.json`, not a universal trio. A candidate whose registry entry
+declares `roles` must cover every one of them, or the plan fails with
+`CATALOG_ROLE_UNCOVERED`: a database designer derives constraints from invariants
+and indexes from evidenced access paths; a testing skill selects a suite and
+covers denied paths. `load-evidence`/`execute`/`verify` describes every skill ever
+written and therefore describes none - two measured plans filled this field with
+exactly that trio for 9 of 9 and 35 of 35 skills.
+
 `safe_scope`, `mutation_class`, `network_class`, `expected_result`,
 `failure_result`, `skip_condition`, and `skip_reporting`.
 `mode` is `command` or `manual`; command checks require a concrete command,

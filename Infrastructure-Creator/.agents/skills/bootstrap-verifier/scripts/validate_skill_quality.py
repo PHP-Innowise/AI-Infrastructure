@@ -761,9 +761,15 @@ def _load_registry(
     for index, item in enumerate(registry["candidates"]):
         if (
             not isinstance(item, dict)
-            or set(item) != {"id", "catalog", "category", "mode"}
-            or not all(_is_nonempty_string(item.get(key)) for key in item)
+            or not {"id", "catalog", "category", "mode"} <= set(item)
+            or set(item) - {"id", "catalog", "category", "mode", "roles"}
+            or not all(
+                _is_nonempty_string(item.get(key))
+                for key in item
+                if key != "roles"
+            )
             or item.get("mode") not in {"static", "runtime-fixed", "family"}
+            or not _is_optional_role_list(item.get("roles"))
         ):
             _diag(
                 diagnostics,
@@ -779,6 +785,7 @@ def _load_registry(
                 f"duplicate candidate registry id: {candidate_id}",
             )
             continue
+        roles = item.get("roles")
         catalog_parts = item["catalog"].split("#", 1)
         catalog_file = path.parent / catalog_parts[0]
         if (
@@ -1229,6 +1236,52 @@ def _subcommand_tokens(command: str) -> set:
         if token and token not in {"python", "python3", "json", "context"}:
             tokens.add(token)
     return tokens
+
+
+def _is_optional_role_list(value) -> bool:
+    """A candidate may declare its mandatory reasoning roles, or declare none."""
+    if value is None:
+        return True
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(_is_nonempty_string(item) for item in value)
+    )
+
+
+def _validate_catalog_role_coverage(
+    name: str,
+    skill: dict,
+    mandatory: list,
+    diagnostics: list,
+) -> None:
+    """Report a selected candidate that does not carry its catalog obligations.
+
+    The catalog states what a candidate must reason about - a database designer
+    derives constraints from invariants and indexes from access paths; a testing
+    skill selects a suite and covers denied paths. Those obligations were prose,
+    so nothing could check them, and every skill in both measured corpora
+    declared the same three universal roles instead: load-evidence, execute,
+    verify - 9 of 9 in one plan and 35 of 35 in the other. A skill that declares
+    a placeholder where its obligations belong is a template, whatever else it
+    gets right.
+
+    Only candidates whose registry entry declares roles are checked, so the
+    obligation set can be filled in tranches without blocking generation for
+    candidates nobody has described yet.
+    """
+    declared = set()
+    for entry in _as_list(skill.get("required_procedure_roles")):
+        if isinstance(entry, dict) and _is_nonempty_string(entry.get("role")):
+            declared.add(entry["role"].strip().lower())
+    uncovered = [role for role in mandatory if role.strip().lower() not in declared]
+    if uncovered:
+        _diag(
+            diagnostics,
+            "CATALOG_ROLE_UNCOVERED",
+            f"{name} does not carry the catalog obligations of its candidate: "
+            f"{', '.join(uncovered)}",
+        )
 
 
 def _runtime_command_purposes() -> dict:
@@ -4735,6 +4788,10 @@ def _validate_plan(
                     diagnostics,
                     "SKILL_SELECTION_REGISTRY_MISMATCH",
                     f"{name} selection gate does not match candidate registry",
+                )
+            if registry_candidate is not None and registry_candidate.get("roles"):
+                _validate_catalog_role_coverage(
+                    name, skill, registry_candidate["roles"], diagnostics
                 )
             if (
                 not _is_nonempty_string(selection_gate.get("catalog"))

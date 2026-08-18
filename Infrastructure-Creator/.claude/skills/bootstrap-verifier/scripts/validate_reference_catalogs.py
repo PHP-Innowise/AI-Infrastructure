@@ -29,6 +29,17 @@ def heading_slug(value: str) -> str:
     return re.sub(r"-+", "-", re.sub(r"\s+", "-", value)).strip("-")
 
 
+def _valid_roles(value) -> bool:
+    """A candidate declares its mandatory reasoning roles, or declares none."""
+    if value is None:
+        return True
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(isinstance(item, str) and item.strip() for item in value)
+    )
+
+
 def validate(directory: Path, forbidden: list[str] | None = None) -> list[str]:
     errors: list[str] = []
     directory = directory.expanduser().resolve()
@@ -78,7 +89,12 @@ def validate(directory: Path, forbidden: list[str] | None = None) -> list[str]:
         for index, candidate in enumerate(candidates):
             if (
                 not isinstance(candidate, dict)
-                or set(candidate) != {"id", "catalog", "category", "mode"}
+                # `roles` is the optional machine-readable form of the
+                # catalog's obligations for this candidate; it is filled in
+                # tranches, so an entry without it stays valid.
+                or not {"id", "catalog", "category", "mode"} <= set(candidate)
+                or set(candidate) - {"id", "catalog", "category", "mode", "roles"}
+                or not _valid_roles(candidate.get("roles"))
                 or candidate.get("mode") not in {"static", "family", "runtime-fixed"}
                 or not all(
                     isinstance(candidate.get(field), str)

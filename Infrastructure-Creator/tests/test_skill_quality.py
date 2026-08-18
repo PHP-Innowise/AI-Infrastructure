@@ -3430,6 +3430,99 @@ class SkillTemplateReuseTest(SkillQualityFixture):
         )
 
 
+class CatalogRoleCoverageTest(unittest.TestCase):
+    """A selected candidate must carry its catalog obligations.
+
+    Both measured plans filled `required_procedure_roles` with the same
+    universal trio - load-evidence, execute, verify - for every skill: 9 of 9
+    in one and 35 of 35 in the other. A trio that describes every skill ever
+    written describes none of them, and the catalog's real obligations (derive
+    constraints from invariants, cover denied paths) appeared nowhere.
+    """
+
+    MANDATORY = ["derive-constraints-from-invariants", "specify-migrations"]
+
+    def diagnose(self, roles: list) -> list:
+        diagnostics: list = []
+        validator._validate_catalog_role_coverage(
+            "database-designer",
+            {"required_procedure_roles": roles},
+            self.MANDATORY,
+            diagnostics,
+        )
+        return sorted(item.code for item in diagnostics)
+
+    def test_the_universal_trio_does_not_cover_a_candidates_obligations(self) -> None:
+        self.assertEqual(
+            self.diagnose([
+                {"role": "load-evidence", "requirements": ["read"]},
+                {"role": "execute", "requirements": ["do"]},
+                {"role": "verify", "requirements": ["check"]},
+            ]),
+            ["CATALOG_ROLE_UNCOVERED"],
+        )
+
+    def test_declaring_every_mandatory_role_passes(self) -> None:
+        self.assertEqual(
+            self.diagnose([
+                {"role": "derive-constraints-from-invariants", "requirements": ["x"]},
+                {"role": "specify-migrations", "requirements": ["y"]},
+                {"role": "load-evidence", "requirements": ["extra roles are fine"]},
+            ]),
+            [],
+        )
+
+    def test_a_partially_covered_candidate_is_still_reported(self) -> None:
+        codes = self.diagnose(
+            [{"role": "specify-migrations", "requirements": ["y"]}]
+        )
+        self.assertEqual(codes, ["CATALOG_ROLE_UNCOVERED"])
+
+    def test_role_matching_ignores_case_and_padding(self) -> None:
+        self.assertEqual(
+            self.diagnose([
+                {"role": "  Derive-Constraints-From-Invariants ", "requirements": ["x"]},
+                {"role": "SPECIFY-MIGRATIONS", "requirements": ["y"]},
+            ]),
+            [],
+        )
+
+
+class RegistryRolesTest(unittest.TestCase):
+    """The shipped registry must keep its declared obligations loadable."""
+
+    def test_declared_roles_load_and_are_candidate_specific(self) -> None:
+        registry = json.loads(
+            (ROOT / ".agents/skills/skill-forge/references/candidate-registry.json")
+            .read_text(encoding="utf-8")
+        )
+        with_roles = {
+            item["id"]: item["roles"]
+            for item in registry["candidates"]
+            if item.get("roles")
+        }
+        self.assertTrue(with_roles, "no candidate declares catalog roles")
+        universal = {"load-evidence", "execute", "verify"}
+        for candidate, roles in with_roles.items():
+            with self.subTest(candidate=candidate):
+                self.assertTrue(all(isinstance(r, str) and r for r in roles))
+                self.assertFalse(
+                    universal & set(roles),
+                    "the universal trio is a placeholder, not an obligation",
+                )
+                self.assertEqual(len(roles), len(set(roles)))
+
+    def test_a_registry_with_declared_roles_still_loads(self) -> None:
+        path = ROOT / ".agents/skills/skill-forge/references/candidate-registry.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        diagnostics: list = []
+        loaded = validator._load_registry(
+            path, data.get("catalog_version"), diagnostics
+        )
+        self.assertEqual([], [item.code for item in diagnostics])
+        self.assertTrue(loaded)
+
+
 class WriteVerificationTest(unittest.TestCase):
     """A skill that produces artifacts must exercise them, not grep for them.
 
