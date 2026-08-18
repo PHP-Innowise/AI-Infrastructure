@@ -64,8 +64,9 @@ Infrastructure-Creator intentionally has no `memory-bank/` of its own: its job i
   output, evidence, and routing value. Catalog membership alone is not a reason
   to generate it; unsupported or overlapping skills are pruned or merged.
 - Plan approval MUST validate the complete selected inventory before any skill
-  is authored. Schema 1.1 uses stable ownership IDs/modes, normalized write
-  surfaces, and reciprocal sibling routing; schema 1.0 is migration-only.
+  is authored, and only a schema 1.2 plan is approvable. Schema 1.2 carries
+  the stable ownership IDs/modes, normalized write surfaces, and reciprocal
+  sibling routing introduced in 1.1, plus the operational contracts.
 - New generation and publication require schema 1.2 operational contracts.
   Legacy 1.0/1.1 plans remain readable for audit but MUST be re-synthesized;
   missing verification, provider-safety, invariant, path, or routing facts are

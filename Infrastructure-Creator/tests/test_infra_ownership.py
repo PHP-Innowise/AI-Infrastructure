@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
+import json
 import sys
 import tempfile
 import unittest
@@ -394,6 +397,96 @@ class UpdateClassificationTest(OwnershipFixture):
         row = ownership.classify_update(self.target, self.staging, manifest)[0]
         self.assertEqual(row["classification"], "standing-decision-honored")
         self.assertEqual(row["reason"], "append-requirements")
+
+    def test_staged_manifest_is_never_a_classify_row(self) -> None:
+        self.write("AGENTS.md", STAMP + "generated\n")
+        manifest = self.manifest(["AGENTS.md"])
+        self.write("AGENTS.md", STAMP + "generated\n", staging=True)
+        staged_manifest = ownership.build_manifest(
+            self.staging,
+            ["AGENTS.md"],
+            generator="Infrastructure-Creator",
+            generator_version=VERSION,
+            task="TASK-002",
+            profile="tasks/TASK-002/infra-scan-project-profile.md",
+            editions=["claude"],
+            mode="full",
+            generated_at="2026-08-06T08:00:00Z",
+        )
+        ownership.write_manifest(self.staging, staged_manifest)
+
+        rows = ownership.classify_update(self.target, self.staging, manifest)
+
+        self.assertEqual([row["path"] for row in rows], ["AGENTS.md"])
+        self.assertEqual(rows[0]["classification"], "safe-update")
+
+    def test_malformed_decision_entry_raises_ownership_error(self) -> None:
+        self.write("AGENTS.md", STAMP + "generated\n")
+        manifest = self.manifest(["AGENTS.md"])
+        manifest["decisions"] = {"AGENTS.md": "kept"}
+        ownership.write_manifest(self.target, manifest)
+        self.write("AGENTS.md", STAMP + "generated\n", staging=True)
+
+        with self.assertRaisesRegex(
+            ownership.OwnershipError, "decision entry must be an object"
+        ):
+            ownership.classify_update(
+                self.target, self.staging, ownership.load_manifest(self.target)
+            )
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            code = ownership.main(
+                [
+                    "classify",
+                    "--target",
+                    str(self.target),
+                    "--staging",
+                    str(self.staging),
+                ]
+            )
+        self.assertEqual(code, 2)
+        self.assertIn("ERROR: ", stderr.getvalue())
+        self.assertIn("decision entry must be an object", stderr.getvalue())
+
+    def test_malformed_external_decisions_json_fails_cleanly(self) -> None:
+        self.write("AGENTS.md", "generated\n", staging=True)
+        write_plan = self.base / "write-plan.txt"
+        write_plan.write_text("AGENTS.md\n", encoding="utf-8")
+        decisions = self.base / "decisions.json"
+        decisions.write_text(json.dumps({"AGENTS.md": "kept"}), encoding="utf-8")
+        source_map = self.base / "sources.json"
+        source_map.write_text(json.dumps({}), encoding="utf-8")
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            code = ownership.main(
+                [
+                    "manifest",
+                    "--target",
+                    str(self.staging),
+                    "--write-plan",
+                    str(write_plan),
+                    "--version",
+                    VERSION,
+                    "--task",
+                    "TASK-002",
+                    "--profile",
+                    "tasks/TASK-002/infra-scan-project-profile.md",
+                    "--editions",
+                    "claude",
+                    "--mode",
+                    "full",
+                    "--source-target",
+                    str(self.target),
+                    "--source-map",
+                    str(source_map),
+                    "--decisions",
+                    str(decisions),
+                ]
+            )
+        self.assertEqual(code, 2)
+        self.assertIn("ERROR: ", stderr.getvalue())
+        self.assertIn("decision entry must be an object", stderr.getvalue())
 
     def test_legacy_target_refuses_without_writes(self) -> None:
         marker = self.write(".claude/team.md", "unchanged\n")

@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
+import io
 import json
 import sys
 import tempfile
@@ -14,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / ".agents/skills/bootstrap-verifier/scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from validate_flow_contracts import validate  # noqa: E402
+from validate_flow_contracts import main, validate  # noqa: E402
 
 
 def contract_block(payload: dict) -> str:
@@ -258,6 +260,234 @@ class FlowContractTests(FlowContractFixture):
         errors = self.errors()
         self.assertTrue(any("requires a checkpoint" in error for error in errors))
         self.assertTrue(any("phase order moves backwards" in error for error in errors))
+
+
+class RoutingContractRobustnessTests(FlowContractFixture):
+    """Malformed-but-plausible plan JSON must report errors, never raise."""
+
+    def test_nearest_siblings_none_reports_contract_error(self) -> None:
+        self.plan["skills"][0]["nearest_siblings"] = None
+        self.write_artifacts()
+        self.assertTrue(
+            any(
+                "alpha.nearest_siblings must be a list" in error
+                for error in self.errors()
+            )
+        )
+
+    def test_nearest_siblings_string_reports_contract_error(self) -> None:
+        self.plan["skills"][0]["nearest_siblings"] = "oops"
+        self.write_artifacts()
+        self.assertTrue(
+            any(
+                "alpha.nearest_siblings must be a list" in error
+                for error in self.errors()
+            )
+        )
+
+    def test_expected_primary_list_reports_contract_error(self) -> None:
+        self.plan["skills"][0]["routing_cases"][0]["expected_primary"] = ["alpha"]
+        self.write_artifacts()
+        self.assertTrue(
+            any(
+                "alpha.routing_cases[0] routing fields must use string skill names"
+                in error
+                for error in self.errors()
+            )
+        )
+
+    def test_permitted_secondary_dict_entries_report_contract_error(self) -> None:
+        self.plan["skills"][0]["routing_cases"][1]["permitted_secondary"] = [
+            {"name": "beta"}
+        ]
+        self.write_artifacts()
+        self.assertTrue(
+            any(
+                "alpha.routing_cases[1] routing fields must use string skill names"
+                in error
+                for error in self.errors()
+            )
+        )
+
+    def test_forbidden_skills_nested_list_reports_contract_error(self) -> None:
+        self.plan["skills"][0]["routing_cases"][0]["forbidden_skills"] = [["beta"]]
+        self.write_artifacts()
+        self.assertTrue(
+            any(
+                "alpha.routing_cases[0] routing fields must use string skill names"
+                in error
+                for error in self.errors()
+            )
+        )
+
+    def test_stage_agents_null_reports_error_without_crash(self) -> None:
+        self.plan["flow_contracts"]["flows"][0]["stages"][2]["agents"] = None
+        self.plan_path.write_text(
+            json.dumps(self.plan, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        self.assertTrue(
+            any(
+                "invalid phase, agents, or flags" in error
+                for error in self.errors()
+            )
+        )
+
+    def test_sibling_unhashable_name_reports_contract_error(self) -> None:
+        self.plan["skills"][0]["nearest_siblings"] = [{"name": ["beta"]}]
+        self.write_artifacts()
+        self.assertTrue(
+            any(
+                "alpha has invalid adjacent skill ['beta']" in error
+                for error in self.errors()
+            )
+        )
+
+    def test_skill_unhashable_name_reports_contract_error(self) -> None:
+        self.plan["skills"][0]["name"] = ["alpha"]
+        self.write_artifacts()
+        errors = self.errors()
+        self.assertTrue(
+            any("has invalid adjacent skill 'alpha'" in error for error in errors)
+        )
+        self.assertTrue(
+            any("roster must match plan skill order" in error for error in errors)
+        )
+
+    def test_stage_phase_list_reports_contract_error(self) -> None:
+        feature = self.plan["flow_contracts"]["flows"][0]
+        feature["stages"][0]["phase"] = ["understanding"]
+        self.write_artifacts()
+        self.assertTrue(
+            any(
+                "flows[0].stages[0]: invalid phase, agents, or flags" in error
+                for error in self.errors()
+            )
+        )
+
+    def test_all_crash_shapes_exit_nonzero_with_structured_errors(self) -> None:
+        skills = self.plan["skills"]
+        skills[0]["nearest_siblings"] = None
+        skills[1]["routing_cases"][0]["expected_primary"] = ["beta"]
+        skills[2]["routing_cases"][0]["permitted_secondary"] = [{"name": "alpha"}]
+        skills[3]["routing_cases"][0]["forbidden_skills"] = [["alpha"]]
+        self.write_artifacts()
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = main(
+                [
+                    "--plan",
+                    str(self.plan_path),
+                    "--skill-flow",
+                    str(self.skill_flow),
+                    "--commands-dir",
+                    str(self.commands),
+                    "--json",
+                ]
+            )
+        self.assertEqual(exit_code, 1)
+        payload = json.loads(stdout.getvalue())
+        self.assertFalse(payload["valid"])
+        self.assertTrue(
+            any(
+                "alpha.nearest_siblings must be a list" in error
+                for error in payload["errors"]
+            )
+        )
+        self.assertTrue(
+            any(
+                "routing fields must use string skill names" in error
+                for error in payload["errors"]
+            )
+        )
+
+    def test_unhashable_shapes_exit_nonzero_with_structured_errors(self) -> None:
+        self.plan["skills"][0]["nearest_siblings"] = [{"name": ["beta"]}]
+        self.plan["skills"][1]["name"] = {"nested": "beta"}
+        self.plan["flow_contracts"]["flows"][0]["stages"][0]["phase"] = [
+            "understanding"
+        ]
+        self.write_artifacts()
+        argv = [
+            "--plan",
+            str(self.plan_path),
+            "--skill-flow",
+            str(self.skill_flow),
+            "--commands-dir",
+            str(self.commands),
+            "--json",
+        ]
+        outputs = []
+        for _run in range(2):
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(argv)
+            self.assertEqual(exit_code, 1)
+            outputs.append(stdout.getvalue())
+        self.assertEqual(outputs[0], outputs[1])
+        payload = json.loads(outputs[0])
+        self.assertFalse(payload["valid"])
+        self.assertTrue(
+            any(
+                "alpha has invalid adjacent skill ['beta']" in error
+                for error in payload["errors"]
+            )
+        )
+        self.assertTrue(
+            any(
+                "invalid phase, agents, or flags" in error
+                for error in payload["errors"]
+            )
+        )
+
+
+class CommandFileSetTests(FlowContractFixture):
+    """Expected/actual command files derive from the declared flow names."""
+
+    def hotfix_flow(self) -> dict:
+        return {
+            "name": "hotfix",
+            "required_code_review": None,
+            "stages": [
+                {
+                    "phase": "understanding",
+                    "agents": ["alpha-agent"],
+                    "parallel": False,
+                    "checkpoint": True,
+                },
+                {
+                    "phase": "implementation",
+                    "agents": ["beta-agent"],
+                    "parallel": False,
+                    "checkpoint": False,
+                },
+            ],
+        }
+
+    def test_declared_flow_without_prefix_validates(self) -> None:
+        self.plan["flow_contracts"]["flows"].append(self.hotfix_flow())
+        self.write_artifacts()
+        self.assertEqual(self.errors(), [])
+
+    def test_missing_declared_unprefixed_flow_file_is_flagged(self) -> None:
+        self.plan["flow_contracts"]["flows"].append(self.hotfix_flow())
+        self.write_artifacts()
+        (self.commands / "hotfix.md").unlink()
+        self.assertTrue(
+            any(
+                "commands: expected" in error and "hotfix.md" in error
+                for error in self.errors()
+            )
+        )
+
+    def test_undeclared_flow_prefixed_stray_is_still_flagged(self) -> None:
+        (self.commands / "flow-extra.md").write_text("# stray\n", encoding="utf-8")
+        self.assertTrue(
+            any(
+                "commands: expected" in error and "flow-extra.md" in error
+                for error in self.errors()
+            )
+        )
 
 
 if __name__ == "__main__":

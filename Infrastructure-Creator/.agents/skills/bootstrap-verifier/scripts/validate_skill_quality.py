@@ -9,8 +9,9 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import sys
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -20,7 +21,12 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from analyze_commands import CommandAnalysisError, CommandAnalyzer
+from analyze_commands import (
+    CODE_HOST_EXECUTABLES,
+    CommandAnalysisError,
+    CommandAnalyzer,
+    RUNNER_EXECUTABLES,
+)
 from validate_flow_contracts import validate_plan_graph
 
 DEFAULT_REGISTRY = (
@@ -96,6 +102,24 @@ GENERIC_PHRASES = (
     "use this skill to use this skill",
     "this skill handles this skill",
     "as needed",
+    # Paraphrases of the same emptiness. The blacklist is only the secondary
+    # net: operational content is enforced structurally per procedure step
+    # (action verb + concrete anchor) so a fresh paraphrase does not slip past.
+    "adhere to best practices",
+    "adhere to industry best practice",
+    "apply best practices",
+    "apply industry best practice",
+    "as you see fit",
+    "at your discretion",
+    "follow industry best practice",
+    "form a considered view",
+    "form an opinion",
+    "take a considered view",
+    "use best practices",
+    "use your best judgement",
+    "use your best judgment",
+    "use your own judgement",
+    "use your own judgment",
 )
 STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in",
@@ -117,9 +141,135 @@ IDENTITY_STOPWORDS = {
     "adapter", "contract", "domain", "integration", "review", "service", "services",
     "skill", "workflow",
 }
+CLAIM_SERVICE_WORDS = {"project", "confirmed", "supports", "uses", "runtime"}
+# Claim-grounding lexicons (`EVIDENCE_CLAIM_UNSUPPORTED` /
+# `EVIDENCE_CLAIM_GENERIC_SUPPORT`).  A claim is "supported" only if it shares
+# vocabulary with the cited range that actually says something about *this*
+# project, so the words that say nothing have to be known.  Both sets are raw
+# document-frequency cuts - no hand curation - measured over 3997 real PHP
+# files sampled from the Symfony 7 and Laravel vendor trees, in the same
+# identifier-expanded token space `_cited_vocabulary` matches in.
+#
+# CLAIM_LANGUAGE_LEXICON: share >= 0.40.  PHP syntax and licence-header
+# boilerplate; a claim built only from these says nothing at all, so missing
+# overlap here is an error.  Measured on 1485-2190 honest docblock/code pairs
+# it costs 0.18-0.27% false errors and catches 20-45% of generic-lexicon
+# fabrications outright.
+#
+# CLAIM_COMMON_LEXICON: share >= 0.04.  Adds the software-English band -
+# 'service', 'method', 'value', 'result', 'config', 'handler', 'message' - the
+# words that let a fabricated claim look grounded against any PHP file.
+# Missing overlap here is a warning, not an error: measured cost is 2.28-3.64%
+# false warnings, and with the error tier it catches 87-99% of fabrications.
+# The cut is the unedited measurement, author names and hostnames included:
+# licence headers make 'fabien' exactly as uninformative as 'class'.
+CLAIM_LANGUAGE_LEXICON = frozenset({
+    "array", "class", "code", "com", "copyright", "distributed", "extends",
+    "file", "full", "function", "get", "information", "license", "namespace",
+    "new", "part", "php", "please", "public", "return", "source", "string",
+    "this-", "use", "view", "was",
+})
+
+# The band between the two cuts; CLAIM_COMMON_LEXICON is the union below.
+_CLAIM_COMMON_BAND = frozenset({
+    "abstract", "add", "after", "all", "any", "args", "argument", "arguments",
+    "array_merge", "assert", "attribute", "attributes", "author", "backward",
+    "base", "before", "bergmann", "bool", "break", "brian", "builder", "but",
+    "cache", "call", "callable", "callback", "can", "cannot", "carbon", "case",
+    "catch", "check", "class-string", "class_exists", "closure", "collection",
+    "command", "compatibility", "component", "config", "configuration",
+    "connection", "console", "const", "construct", "container", "contains",
+    "content", "context", "continue", "contracts", "count", "covered",
+    "create", "current", "data", "database", "date", "debug", "declare",
+    "default", "definition", "dependency", "deprecated", "deprecation",
+    "description", "dir__", "doc", "doctrine", "does", "element", "else",
+    "elseif", "empty", "end", "error", "event", "exception", "exists",
+    "expression", "extension", "fabien", "factory", "failed", "faker", "false",
+    "filter", "final", "first", "for", "foreach", "format", "formats", "found",
+    "foundation", "framework", "from", "generator", "getname", "gettype",
+    "given", "gmail", "gmail.com", "handle", "handler", "has", "have", "html",
+    "http", "httpfoundation", "ignore", "illuminate", "immutable",
+    "implements", "implode", "in_array", "index", "info", "input", "instance",
+    "instanceof", "instead", "int", "interface", "internal", "invalid",
+    "invalidargumentexception", "is_array", "is_string", "isset", "its",
+    "kernel", "key", "keys", "last", "length", "line", "link", "list", "logic",
+    "logicexception", "make", "map", "match", "matches", "max", "merge",
+    "message", "metadata", "method", "min", "mixed", "name", "named", "names",
+    "nesbitt", "nesbot", "nesbot.com", "next", "no-named-arguments", "node",
+    "non", "not", "null", "number", "object", "one", "only", "option",
+    "options", "org", "other", "output", "package", "param", "parameter",
+    "parameters", "parent::__construct", "parse", "parser", "path",
+    "phpparser", "phpstan", "phpunit", "phpunit.de", "potencier", "prefix",
+    "preg", "preg_match", "previous", "private", "process", "promise",
+    "property", "protected", "provider", "query", "readonly", "reference",
+    "reflection", "remove", "replace", "request", "require", "response",
+    "result", "returns", "runtime", "runtimeexception", "sebastian", "see",
+    "self", "service", "set", "sprintf", "start", "state", "static", "str",
+    "str_replace", "strict", "strict_types", "strlen", "subscriber", "substr",
+    "support", "symfony", "symfony.com", "tag", "template", "test", "text",
+    "throw", "throwable", "throws", "time", "tostring", "trait", "true", "try",
+    "type", "types", "unset", "used", "user", "using", "valid", "validator",
+    "value", "values", "var", "version", "void", "whether", "which", "while",
+    "with", "you",
+})
+CLAIM_COMMON_LEXICON = CLAIM_LANGUAGE_LEXICON | _CLAIM_COMMON_BAND
+# A claim is only *called* generic when this share or less of its own
+# vocabulary survives CLAIM_COMMON_LEXICON.  Honest claims that trip the
+# warning are abstract but still project-specific; a fabrication is common
+# lexicon by construction.  The guard cuts false warnings from 7.24% to 3.50%
+# with no loss on the fabricated side.
+CLAIM_GENERIC_SHARE_PERCENT = 35
+_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_CAMEL_RE = re.compile(r"[a-z0-9]+|[A-Z][a-z0-9]*")
+_DOTTED_RE = re.compile(r"[a-z0-9]+(?:[-/.][a-z0-9]+)+")
+_DOTTED_SPLIT_RE = re.compile(r"[-/.]")
 LINE_FAIL_THRESHOLD = 0.70
 TOKEN_FAIL_THRESHOLD = 0.80
 TOKEN_WARN_THRESHOLD = 0.65
+# Skeleton comparison (`_skeleton_line`/`SKILL_TEMPLATE_REUSE`). The raw
+# thresholds above are calibrated on unmasked prose and mean something else
+# once project identity is erased, so the skeleton pass carries its own
+# numbers, measured rather than guessed. Honest corpus: 2371 pairs of
+# hand-written accelerator skills (Symfony 1128, Laravel 990, this repo's own
+# 253) plus the fixture's distinct pair - worst pair line=0.350 token=0.154,
+# and that worst pair is a deliberately parallel scanner family; genuinely
+# unrelated skills top out at line=0.231 token=0.107. Duplicate corpus: one
+# template with the project's own nouns substituted line=0.400 token=0.329,
+# the same template differing only in punctuation and connectives line=0.400
+# token=0.311, a byte-identical clone line=0.500 token=0.471, the fixture's
+# shared-template case line=1.000 token=1.000. The error line sits inside that
+# gap on both axes, so a duplicate has to clear two independent metrics'
+# margins to slip through, and the warning line sits above honest noise.
+SKELETON_PLACEHOLDER = "xid"
+_SKELETON_SUB = " " + SKELETON_PLACEHOLDER + " "
+SKELETON_CONNECTIVES = {
+    "additionally": "and",
+    "afterwards": "then",
+    "also": "and",
+    "moreover": "and",
+    "plus": "and",
+    "subsequently": "then",
+    "whilst": "while",
+}
+SKELETON_MIN_RESIDUAL = 3
+SKELETON_MIN_LINES = 5
+SKELETON_LINE_MATCH = 0.80
+SKELETON_LINE_FAIL = 0.38
+SKELETON_LINE_WARN = 0.28
+SKELETON_TOKEN_FAIL = 0.26
+SKELETON_TOKEN_WARN = 0.20
+SKELETON_BLOCK_SIZE = 2
+_CODE_SPAN_PATTERN = re.compile(r"`[^`]*`")
+_PHP_VARIABLE_PATTERN = re.compile(
+    r"\$[A-Za-z_][A-Za-z0-9_]*(?:\s*->\s*[A-Za-z0-9_]+)*"
+)
+_CALL_PATTERN = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\(\s*\)")
+_PATH_PATTERN = re.compile(r"[A-Za-z0-9_.@-]*[\\/][A-Za-z0-9_.@\\/-]+")
+_UPPER_SNAKE_PATTERN = re.compile(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b")
+_CAMEL_CASE_PATTERN = re.compile(r"\b[A-Za-z]+[a-z0-9]*(?:[A-Z][a-z0-9]*)+\b")
+_DOTTED_ID_PATTERN = re.compile(r"\b[A-Za-z0-9]+(?:[_.:][A-Za-z0-9]+)+\b")
+_NUMBER_PATTERN = re.compile(r"\b\d[\d,.]*\b")
+_NON_WORD_PATTERN = re.compile(r"[^a-z0-9]+")
 SUPPORTED_PLAN_SCHEMAS = {"1.0", "1.1", "1.2"}
 ROUTING_ROLES = {"primary", "defer", "fallback"}
 OWNERSHIP_MODES = {"exclusive", "shared", "composed"}
@@ -161,6 +311,235 @@ CONTRACT_PROJECTION_FIELDS = (
     "output_contract",
     "failure_handling",
 )
+# Skill prose is executed by the agent, so it is scanned for commands with the
+# same analyzer the plan's verification commands use. Fenced shell blocks are
+# unambiguous instructions and are read strictly; inline single-backtick spans
+# also carry class names, config paths, constants, and code fragments, so they
+# are gated to segments that actually look like an invocation.
+SHELL_FENCE_LANGUAGES = frozenset({"bash", "console", "sh", "shell"})
+# Executables whose bare form is also an ordinary English word or a PHP
+# function name. A bare occurrence inside an inline span is prose; a
+# path-qualified form (`bin/console`, `vendor/bin/...`) or a fenced shell
+# block is not exempt.
+AMBIGUOUS_BARE_EXECUTABLES = frozenset(
+    {"artisan", "cap", "console", "deploy", "install", "test"}
+)
+COMMAND_RISK_CATEGORIES = frozenset(
+    {
+        "destructive_database_deploy",
+        "external_provider_network",
+        "workspace_mutation",
+    }
+)
+# Verification blockers are about attestability, not danger, so prose is not
+# failed for an unresolvable alias or an unknown executable. Privilege
+# escalation is danger regardless of attestability.
+COMMAND_BLOCKING_FINDINGS = frozenset({"SUDO_EXECUTION"})
+FENCE_LINE_PATTERN = re.compile(r"^(?P<marker>`{3,}|~{3,})[ \t]*(?P<info>[^\s`]*)")
+SHELL_PROMPT_PATTERN = re.compile(r"^[$>][ \t]+")
+INLINE_CODE_PATTERN = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
+ENV_ASSIGNMENT_TOKEN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+UNICODE_SPACE_PATTERN = re.compile(
+    "[\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]"
+)
+ZERO_WIDTH_PATTERN = re.compile("[\u200b-\u200d\u2060\ufeff]")
+COMMAND_SEGMENT_SEPARATORS = frozenset(";|&<>()`\n\r")
+# Safety cap on nested interpreter payloads analyzed per prose command.
+MAX_BODY_COMMAND_SEGMENTS = 256
+# A guardrail names the command it forbids, so prose polarity decides whether a
+# backticked span is a USE (the skill tells the agent to run it) or a MENTION
+# (the skill tells the agent never to). Without this, the safest possible
+# guardrail - "Never run `rm -rf var/`" - is the one sentence that fails the
+# gate. The markers are matched only inside the clause that carries the span,
+# never across a whole section, so one prohibition cannot silence the scan.
+# Fenced shell blocks are exempt from this relaxation by design: a ```bash
+# block is an instruction to run, whatever the surrounding prose claims.
+PROHIBITION_MARKERS = (
+    "never",
+    "do not",
+    "don't",
+    "does not",
+    "must not",
+    "cannot",
+    "can't",
+    "avoid",
+    "refuse",
+    "refrain",
+    "forbidden",
+    "prohibited",
+    "not allowed",
+    "no need to",
+    "instead of",
+    "rather than",
+    "tempted to",
+    "without running",
+)
+# Clause boundaries for the polarity window. Commas are deliberately absent:
+# "Never run `x`, then `y`" must keep both spans inside the prohibition.
+CLAUSE_BOUNDARY_PATTERN = re.compile(r"[.!?;\n\r]|—|--")
+
+# Operational-content gate. A skill can carry real project nouns in every
+# sentence and still tell the agent to do nothing, which passes every lexical
+# and traceability check. Procedure steps are therefore read structurally: a
+# step must command an action (a verb from the open technical set below, or a
+# prescribed tool invocation) and the procedure must name something concrete.
+# The blacklists are secondary; the verb/anchor structure is the mechanism.
+#
+# The set is open by design and is widened whenever honest instruction is
+# measured to trip it, never narrowed to catch a specific miss: a gate that
+# fails an honest generation is worse than the miss it closes. Two rules keep
+# the widening principled instead of ad hoc - a verb enters when a measured
+# honest step used it, and a verb whose counterpart is already listed
+# ("upgrade"/"downgrade", "compute"/"recompute", "subscribe"/"unsubscribe",
+# "serialize"/"deserialize", "modify"/"change", "bind"/"bound",
+# "reject"/"accept", "stop"/"start") enters with it, because the omission was
+# an oversight rather than a judgement. The counterpart rule stops at a word
+# that is ordinarily an adjective or a noun: "close" stays out because
+# "the closed invoice" must keep reading as a bare noun list.
+ACTION_VERBS = frozenset(
+    {
+        "abort", "accept", "acknowledge", "add", "allow", "analyse", "analyze",
+        "answer", "append",
+        "apply", "approve", "ask", "assert", "assign", "attach", "audit",
+        "author", "await", "benchmark",
+        "bind", "block", "bound", "build", "cache", "calculate", "call",
+        "cancel", "cap",
+        "capture", "catalog", "catalogue", "categorise", "categorize", "catch",
+        "change", "check", "choose", "cite", "clamp", "classify", "clone",
+        "collect", "compare", "compile", "compute", "confirm", "constrain",
+        "consume", "convert", "copy", "count", "cover", "create", "decide",
+        "declare", "decode", "defer", "define", "delegate", "delete",
+        "demand", "deny", "dequeue", "deploy", "derive", "describe",
+        "deserialise", "deserialize", "detach",
+        "detect", "diff", "disable",
+        "disallow", "dispatch", "document", "downgrade", "draft", "draw",
+        "drop", "dump",
+        "edit", "elicit", "emit", "enable", "encode", "enforce", "enqueue",
+        "ensure", "enumerate", "escalate", "estimate", "examine", "exclude",
+        "execute", "exercise",
+        "expand", "explain", "export", "extract", "fake", "fetch", "filter",
+        "find", "fix", "flag", "flush", "follow", "forbid", "format",
+        "forward", "frame", "gather", "generate", "give", "grep", "group",
+        "guard", "halt", "hand", "handle", "highlight", "hold", "hydrate",
+        "identify", "ignore",
+        "implement", "import", "include", "index", "initialise", "initialize",
+        "inject", "insert", "inspect", "install", "instantiate", "instrument",
+        "invoke", "isolate", "iterate", "keep", "launch", "leave", "limit",
+        "lint", "list", "load", "locate", "lock", "log", "maintain", "make",
+        "map", "mark", "mask", "match", "measure", "merge", "migrate", "mock",
+        "modify", "monitor", "move", "name", "normalise", "normalize", "note",
+        "notify", "observe", "open", "outline", "paginate", "parse",
+        "partition", "pass",
+        "patch", "permit", "persist", "pick", "pin", "poll", "prefer",
+        "prepend", "present", "preserve", "prevent", "print", "prioritise",
+        "prioritize", "produce", "profile", "prohibit", "propose", "protect",
+        "prove", "provide", "publish",
+        "purge", "push", "query", "queue", "quote", "raise", "rank", "read",
+        "rebuild", "recommend", "recompute", "record", "redact", "redeliver",
+        "refactor",
+        "refresh", "register", "reindex", "reject", "release", "reload",
+        "remove",
+        "rename", "render", "repair", "repeat", "replace", "replay", "report",
+        "requeue", "require", "resend", "reset", "resolve", "restore",
+        "restrict", "retry", "return", "reuse", "revert", "review", "rewrite",
+        "rollback", "route", "run", "sanitise", "sanitize", "scan", "schedule",
+        "search", "seed", "select", "send", "separate", "serialise",
+        "serialize", "set", "show", "simulate", "skip", "sort", "specify",
+        "split", "start", "state",
+        "stop", "store", "stub", "subscribe", "suggest", "summarise",
+        "summarize",
+        "surface", "sync", "tag", "test", "throttle", "throw", "trace",
+        "track", "transform", "translate", "traverse", "trigger", "truncate",
+        "unlock", "unregister", "unset", "unsubscribe", "update", "upgrade",
+        "upsert", "use",
+        "validate", "verify", "wait", "walk", "warn", "watch", "wire", "wrap",
+        "write",
+    }
+)
+# A verification section exists to state a check, so it is read against the
+# narrower set of verbs that describe running, observing, or asserting an
+# outcome. A section naming only subject nouns ("Tenant scoping before offset
+# and limit: fine.") states nothing an agent can execute or falsify.
+VERIFICATION_ACTION_VERBS = frozenset(
+    {
+        "assert", "benchmark", "block", "catch", "check", "compare", "confirm",
+        "contain", "count", "cover", "demonstrate", "detect", "diff", "emit",
+        "ensure", "evaluate", "examine", "execute", "exercise", "exit",
+        "expect", "fail", "grep", "hold", "inspect", "lint", "list", "match",
+        "measure", "observe", "output", "pass", "print", "produce", "prove",
+        "raise", "reject", "replay", "report", "reproduce", "resolve",
+        "return", "review", "run", "scan", "show", "surface", "test", "throw",
+        "trace", "validate", "verify", "watch", "yield",
+    }
+)
+# A hedge is blocked where it governs the step: at the start of the step or of
+# a sentence inside it. Mid-sentence hedging next to a real action verb stays
+# legitimate, so an honest "Reject the allocation, keeping in mind ..." is not
+# failed.
+HEDGE_OPENERS = (
+    "be aware", "be conscious", "be mindful", "bear in mind", "bearing in mind",
+    "consider", "contemplate", "form a considered view", "form a view",
+    "form an opinion", "have a look", "keep in mind", "keeping in mind",
+    "mull over", "ponder", "reflect on", "reflect upon",
+    "take a considered view", "take a holistic view", "take account of",
+    "take into account", "taking into account", "think about", "think over",
+    "think through",
+)
+# Hedges that are vacuous wherever they appear.
+HEDGE_PHRASES = (
+    "as you see fit", "at your discretion", "ensure everything",
+    "ensure that everything", "form a considered view", "form an opinion",
+    "make sure everything", "take a considered view",
+    "use your best judgement", "use your best judgment",
+)
+HEDGE_OPENER_PATTERN = re.compile(
+    r"^(?:"
+    + "|".join(
+        re.escape(phrase)
+        for phrase in sorted(HEDGE_OPENERS, key=len, reverse=True)
+    )
+    + r")\b"
+)
+STEP_MARKER_PATTERN = re.compile(r"^(?:\d{1,3}[.)]|[-*+•]|[a-z][.)])\s+")
+SENTENCE_SPLIT_PATTERN = re.compile(r"(?<=[.!?;:])\s+")
+LEADING_CONNECTIVE_PATTERN = re.compile(
+    r"^(?:additionally|afterwards|also|and|but|finally|first|firstly|"
+    r"furthermore|instead|moreover|next|now|please|second|secondly|so|then|"
+    r"therefore|third|thirdly)\b[\s,]*"
+)
+SUBORDINATE_CLAUSE_PATTERN = re.compile(
+    r"^(?:after|before|if|once|unless|until|when|whenever|where|while)\b"
+    r"[^,]{0,160},\s*"
+)
+WORD_PATTERN = re.compile(r"[a-z]+")
+# A concrete anchor: something a reader can open, run, or grep for.
+ANCHOR_PATTERNS = (
+    re.compile(r"`[^`\n]+`"),
+    re.compile(r"'[^'\n]{2,}'|\"[^\"\n]{2,}\""),
+    re.compile(r"[\w.-]+/[\w.*/-]+"),
+    re.compile(
+        r"\w+\.(?:php|json|ya?ml|xml|md|twig|env|lock|ini|sql|neon|dist|toml|"
+        r"js|ts|sh|py|txt|csv)\b",
+        re.I,
+    ),
+    re.compile(r"::|->|\$\w+|\w+\(\)"),
+    re.compile(r"\b[A-Za-z][a-z0-9]+[A-Z]\w*"),
+    re.compile(r"\b[A-Z][A-Z0-9]{3,}\b|\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b"),
+    re.compile(r"\b[a-z0-9]+_[a-z0-9_]+\b"),
+    re.compile(r"\b[a-z0-9]+(?:-[a-z0-9]+)+\b"),
+    re.compile(r"\b\d+\b"),
+)
+NON_FALSIFIABLE_VERIFICATION_PATTERN = re.compile(
+    r"\b(?:look|looks|looked|looking|seem|seems|seemed|appear|appears|"
+    r"appeared|feel|feels)\s+(?:to\s+be\s+)?(?:acceptable|correct|fine|good|"
+    r"healthy|ok|okay|plausible|reasonable|right|sane|sensible|sound)\b"
+    r"|\bnothing\s+(?:appears|is|looks|seems)\s+(?:amiss|broken|off|"
+    r"suspicious|unusual|wrong)\b"
+    r"|\beverything\s+(?:appears|is|looks|seems)\s+(?:correct|fine|good|"
+    r"in order|ok|okay|right|as expected)\b",
+    re.I,
+)
+MAX_DIAGNOSTIC_EXCERPT = 72
 
 
 @dataclass(frozen=True, order=True)
@@ -203,6 +582,11 @@ def _flatten_strings(value: Any) -> list[str]:
             flattened.extend(_flatten_strings(value[key]))
         return flattened
     return []
+
+
+def _as_list(value: Any) -> list[Any]:
+    """Project a possibly wrong-typed plan field to a safe iterable."""
+    return value if isinstance(value, list) else []
 
 
 def _is_substantive_contract(value: Any, *, allow_empty: bool = False) -> bool:
@@ -311,11 +695,13 @@ def _load_registry(
             f"candidate registry unreadable or invalid: {error}",
         )
         return {}
-    if not isinstance(registry, dict) or set(registry) != {
-        "schema_version",
-        "catalog_version",
-        "candidates",
-    }:
+    required_registry_fields = {"schema_version", "catalog_version", "candidates"}
+    optional_registry_fields = {"runtime_contract", "compilation_requirements"}
+    if (
+        not isinstance(registry, dict)
+        or not required_registry_fields <= set(registry)
+        or not set(registry) <= required_registry_fields | optional_registry_fields
+    ):
         _diag(diagnostics, "REGISTRY_INVALID", "candidate registry fields are invalid")
         return {}
     if (
@@ -391,10 +777,22 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
     except StopIteration:
         return {}, text
     fields: dict[str, str] = {}
-    for line in lines[1:end]:
-        match = re.match(r"^([A-Za-z][A-Za-z0-9_-]*):\s*(.*?)\s*$", line)
-        if match:
-            fields[match.group(1)] = match.group(2).strip().strip("\"'")
+    index = 1
+    while index < end:
+        match = re.match(r"^([A-Za-z][A-Za-z0-9_-]*):\s*(.*?)\s*$", lines[index])
+        index += 1
+        if not match:
+            continue
+        value = match.group(2).strip().strip("\"'")
+        if re.fullmatch(r"[>|][+-]?", value):
+            continuation: list[str] = []
+            while index < end and (
+                not lines[index].strip() or lines[index][:1].isspace()
+            ):
+                continuation.append(lines[index].strip())
+                index += 1
+            value = " ".join(part for part in continuation if part)
+        fields[match.group(1)] = value
     return fields, "\n".join(lines[end + 1 :])
 
 
@@ -419,15 +817,45 @@ def _section(sections: dict[str, str], aliases: Iterable[str]) -> str:
 
 
 def _tokens(value: str) -> list[str]:
-    return [
-        token
-        for token in re.findall(r"[a-z0-9][a-z0-9_.:/-]*", value.lower())
-        if token not in STOPWORDS and len(token) > 1
-    ]
+    tokens: list[str] = []
+    for raw in re.findall(r"[a-z0-9][a-z0-9_.:/-]*", value.lower()):
+        token = raw.rstrip(".:/")
+        if token and token not in STOPWORDS and len(token) > 1:
+            tokens.append(token)
+    return tokens
 
 
 def _meaningful_tokens(value: str) -> set[str]:
     return {token for token in _tokens(value) if len(token) >= 3 or any(char.isdigit() for char in token)}
+
+
+def _cited_vocabulary(value: str) -> set[str]:
+    """Cited tokens plus the parts of every compound identifier.
+
+    Prose says "failure description", the code says ``failureDescription``, and
+    ``_tokens`` keeps identifiers whole.  Without this split an honest claim
+    scores zero project-specific overlap against the very range it describes,
+    and a false ``EVIDENCE_CLAIM_UNSUPPORTED`` is the expensive failure here:
+    it blocks a correct plan.  Measured on 2500 real docblock/code pairs from
+    the Symfony and Laravel vendor trees, splitting identifiers cuts the false
+    error rate from 0.55-0.88% to 0.18-0.27% and costs 0.10-0.34 points of
+    fabrication detection (99.15 -> 99.05, 98.53 -> 98.45, 88.34 -> 88.00):
+    the parts an identifier contributes ('value', 'name', 'type') are
+    themselves common lexicon, so a fabricator gains almost nothing from them.
+    """
+    tokens = _meaningful_tokens(value)
+    for raw in _IDENTIFIER_RE.findall(value):
+        parts = [part.lower() for part in _CAMEL_RE.findall(raw) if len(part) >= 3]
+        if len(parts) > 1:
+            tokens.update(parts)
+    for raw in _DOTTED_RE.findall(value.lower()):
+        tokens.update(part for part in _DOTTED_SPLIT_RE.split(raw) if len(part) >= 3)
+    return tokens
+
+
+def _name_pattern(name: str) -> str:
+    """Regex-safe pattern matching a skill name with '-' or ' ' separators."""
+    return r"[- ]".join(re.escape(part) for part in name.split("-"))
 
 
 def _contract_matches(contract: Any, text: str) -> bool:
@@ -440,9 +868,463 @@ def _contract_matches(contract: Any, text: str) -> bool:
     return len(expected & actual) >= required
 
 
+def _verb_forms(verb: str) -> set[str]:
+    """Expand one base verb to the surface forms procedure prose uses."""
+    forms = {verb, verb + "s", verb + "ing", verb + "ed"}
+    if verb.endswith("e"):
+        forms.add(verb[:-1] + "ing")
+        forms.add(verb + "d")
+    if verb.endswith(("s", "x", "z", "ch", "sh")):
+        forms.add(verb + "es")
+    if verb.endswith("y") and len(verb) > 2 and verb[-2] not in "aeiou":
+        forms.add(verb[:-1] + "ies")
+        forms.add(verb[:-1] + "ied")
+    return forms
+
+
+ACTION_VERB_FORMS = frozenset(
+    form for verb in ACTION_VERBS for form in _verb_forms(verb)
+)
+VERIFICATION_VERB_FORMS = frozenset(
+    form for verb in VERIFICATION_ACTION_VERBS for form in _verb_forms(verb)
+)
+
+
+def _excerpt(value: str) -> str:
+    """Quote a bounded, whitespace-collapsed excerpt for a diagnostic."""
+    collapsed = " ".join(value.split())
+    if len(collapsed) > MAX_DIAGNOSTIC_EXCERPT:
+        collapsed = collapsed[: MAX_DIAGNOSTIC_EXCERPT - 3] + "..."
+    return repr(collapsed)
+
+
+def _procedure_steps(section: str) -> list[str]:
+    """Split a procedure section into the steps an agent would follow.
+
+    Flush-left ordered or bulleted markers delimit steps; wrapped lines,
+    indented sub-bullets, and fenced blocks continue the step they belong to,
+    and any lead-in before the first marker is not a step. A section written
+    as prose falls back to blank-line paragraphs, so an unlisted procedure is
+    read as one instruction rather than as many fragments.
+    """
+    listed: list[list[str]] = []
+    paragraphs: list[list[str]] = []
+    current: list[str] | None = None
+    fence = ""
+    for raw in section.splitlines():
+        stripped = raw.strip()
+        if fence:
+            if (
+                stripped
+                and len(stripped) >= len(fence)
+                and set(stripped) == {fence[0]}
+            ):
+                fence = ""
+            elif current is not None:
+                current.append(stripped)
+            continue
+        opening = FENCE_LINE_PATTERN.match(stripped)
+        if opening:
+            fence = opening.group("marker")
+            continue
+        if STEP_MARKER_PATTERN.match(raw):
+            current = [STEP_MARKER_PATTERN.sub("", raw, count=1).strip()]
+            listed.append(current)
+            continue
+        if not stripped:
+            if not listed:
+                current = None
+            continue
+        if current is None:
+            current = []
+            paragraphs.append(current)
+        current.append(stripped)
+    buckets = listed or paragraphs
+    return [
+        text for text in (" ".join(bucket).strip() for bucket in buckets) if text
+    ]
+
+
+def _has_action_verb(text: str, vocabulary: frozenset = ACTION_VERB_FORMS) -> bool:
+    """True when the text names an action from the given verb vocabulary."""
+    return any(
+        word in vocabulary
+        for word in WORD_PATTERN.findall(_normalize_command_text(text).lower())
+    )
+
+
+def _prescribes_tooling(text: str) -> bool:
+    """True when the text hands the agent an invocation instead of a phrase.
+
+    A bare command is written lowercase, so a sentence that merely opens with
+    a capitalized word which happens to name a CLI ("Firebase initialization
+    and the messaging boundary: fine.") is prose, not an invocation.
+    """
+    for segment in _command_segments(_normalize_command_text(text)):
+        head = segment.split()[0] if segment.split() else ""
+        if head[:1].isupper():
+            continue
+        if _prescribes_command(segment, strict=False):
+            return True
+    return False
+
+
+def _commands_action(text: str) -> bool:
+    return _has_action_verb(text) or _prescribes_tooling(text)
+
+
+def _clause_openings(sentence: str) -> list[str]:
+    """Return the governing openings of a sentence.
+
+    A leading connective ("Then, ...") and one leading subordinate clause
+    ("When the guard trips, ...") do not carry the instruction, so the text
+    behind them is tested as an opening too.
+    """
+    opening = LEADING_CONNECTIVE_PATTERN.sub("", sentence.strip(" \t\"'`*_-([")).strip()
+    openings = [opening]
+    remainder = SUBORDINATE_CLAUSE_PATTERN.sub("", opening).strip()
+    if remainder and remainder != opening:
+        openings.append(LEADING_CONNECTIVE_PATTERN.sub("", remainder).strip())
+    return openings
+
+
+def _hedge_phrase(text: str) -> str | None:
+    """Return the hedge that governs the text, or None.
+
+    Deterministic: the anywhere-blacklist is scanned in its declared order,
+    then sentence openings left to right, longest hedge first.
+    """
+    lowered = _normalize_command_text(text).lower()
+    for phrase in HEDGE_PHRASES:
+        if phrase in lowered:
+            return phrase
+    for sentence in SENTENCE_SPLIT_PATTERN.split(lowered):
+        for opening in _clause_openings(sentence):
+            match = HEDGE_OPENER_PATTERN.match(opening)
+            if match:
+                return match.group(0)
+    return None
+
+
+def _has_concrete_anchor(text: str) -> bool:
+    """True when the text names a path, symbol, constant, command, or number."""
+    return any(pattern.search(text) for pattern in ANCHOR_PATTERNS)
+
+
+def _normalize_command_text(value: str) -> str:
+    """Fold invisible separators so a homoglyph cannot hide an executable.
+
+    ``rm -rf`` tokenizes as one unknown word; normalizing the non-breaking
+    space (and dropping zero-width joiners) makes it the ``rm`` it will be when
+    an agent retypes the line into a shell.
+    """
+    value = ZERO_WIDTH_PATTERN.sub("", value)
+    return UNICODE_SPACE_PATTERN.sub(" ", value)
+
+
+def _shell_code_blocks(body: str) -> list[list[str]]:
+    """Return the raw lines of every fenced bash/sh/shell/console block."""
+    blocks: list[list[str]] = []
+    marker = ""
+    language = ""
+    collected: list[str] = []
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not marker:
+            opening = FENCE_LINE_PATTERN.match(stripped)
+            if opening:
+                marker = opening.group("marker")
+                language = opening.group("info").strip().lower()
+                collected = []
+            continue
+        if (
+            stripped
+            and len(stripped) >= len(marker)
+            and set(stripped) == {marker[0]}
+        ):
+            if language in SHELL_FENCE_LANGUAGES:
+                blocks.append(collected)
+            marker = ""
+            language = ""
+            collected = []
+            continue
+        collected.append(line)
+    if marker and language in SHELL_FENCE_LANGUAGES:
+        blocks.append(collected)
+    return blocks
+
+
+def _shell_block_commands(lines: list[str]) -> list[str]:
+    """Project fenced-block lines to command lines.
+
+    Backslash continuations are joined, shell comments are dropped, and a
+    leading ``$``/``>`` transcript prompt is removed so a pasted session still
+    exposes its commands.
+    """
+    joined: list[str] = []
+    pending = ""
+    for raw in lines:
+        line = _normalize_command_text(raw).strip()
+        if pending:
+            line = f"{pending} {line}".strip()
+            pending = ""
+        if line.endswith("\\"):
+            pending = line[:-1].strip()
+            continue
+        joined.append(line)
+    if pending:
+        joined.append(pending)
+    commands: list[str] = []
+    for line in joined:
+        line = SHELL_PROMPT_PATTERN.sub("", line).strip()
+        if not line or line.startswith("#"):
+            continue
+        commands.append(line)
+    return commands
+
+
+def _attested_read_only_commands() -> frozenset:
+    """Return the runtime contract's declared read-only command surface.
+
+    The seeded memory runtime is executed through an interpreter, which static
+    analysis can never prove non-mutating: `python3 <script> status` is opaque
+    by construction. The generator nevertheless MUST emit the memory quartet on
+    every target, and those skills verify themselves with exactly those
+    commands - so without an attestation route the gate rejects the one
+    inventory the generator is required to produce.
+
+    The attestation is deliberately narrow. It is read from the generator's OWN
+    shipped asset, never from the target, so a scanned project cannot declare
+    its own commands safe; it is an exact-match list, not a pattern; and it
+    covers only `commands.read_health`, the group the contract itself separates
+    from `refresh_retrieve`, `checkpoint`, `governed_task` and
+    `dynamic_records`, all of which mutate. It waives attestability alone -
+    never a risk category (see _verification_attested).
+    """
+    try:
+        contract = json.loads(RUNTIME_CONTRACT.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return frozenset()
+    commands = contract.get("commands")
+    if not isinstance(commands, dict):
+        return frozenset()
+    read_health = commands.get("read_health")
+    if not isinstance(read_health, list):
+        return frozenset()
+    return frozenset(
+        _normalize_command_text(item).strip()
+        for item in read_health
+        if isinstance(item, str) and item.strip()
+    )
+
+
+def _verification_attested(command: str, analysis) -> bool:
+    """Report whether the runtime contract vouches for an unprovable command.
+
+    True only when the command is verbatim in the contract's read-only surface
+    AND the analysis found no risk category at all. A destructive or networked
+    command stays blocked however it is declared: the contract can attest what
+    the analyzer cannot prove, it cannot overrule what the analyzer proved.
+    """
+    # Any category other than these two is a proven risk the contract may not
+    # overrule: 'non_mutating' is the benign default and 'verification_blocker'
+    # is the attestability marker this function exists to answer.
+    non_risk = {"non_mutating", "verification_blocker"}
+    if set(analysis.categories) - non_risk:
+        return False
+    return _normalize_command_text(command).strip() in _attested_read_only_commands()
+
+
+def _forbids_span(body: str, start: int) -> bool:
+    """Report whether the clause carrying ``start`` forbids its command.
+
+    The window is the text between the last clause boundary before the span
+    and the span itself, so a prohibition governs only its own clause: in
+    ``Do not run `a` - run `b` instead`` the first span is a mention and the
+    second stays a prescription.
+    """
+    window = body[:start]
+    boundaries = list(CLAUSE_BOUNDARY_PATTERN.finditer(window))
+    if boundaries:
+        window = window[boundaries[-1].end():]
+    lowered = window.lower()
+    return any(marker in lowered for marker in PROHIBITION_MARKERS)
+
+
+def _body_commands(body: str) -> list[tuple[str, bool]]:
+    """Return ``(command, strict)`` pairs an agent would execute from prose."""
+    found: list[tuple[str, bool]] = []
+    for block in _shell_code_blocks(body):
+        for command in _shell_block_commands(block):
+            found.append((command, True))
+    for match in INLINE_CODE_PATTERN.finditer(body):
+        span = _normalize_command_text(match.group(1)).strip()
+        # A span the prose forbids is quoted, not prescribed: skipping it keeps
+        # the safest guardrail a skill can carry from failing the gate.
+        if span and not _forbids_span(body, match.start()):
+            found.append((span, False))
+    return found
+
+
+def _command_segments(command: str) -> list[str]:
+    """Split a command at quote-aware shell separators.
+
+    The analyzer refuses to classify a composed command, so ``rm -rf x && curl
+    -X POST url`` would otherwise report only that it is composed. Splitting
+    first means every leaf is classified on its own.
+    """
+    segments: list[str] = []
+    current: list[str] = []
+    quote = ""
+    for char in command:
+        if quote:
+            current.append(char)
+            if char == quote:
+                quote = ""
+            continue
+        if char in "'\"":
+            quote = char
+            current.append(char)
+            continue
+        if char in COMMAND_SEGMENT_SEPARATORS:
+            segments.append("".join(current).strip())
+            current = []
+            continue
+        current.append(char)
+    segments.append("".join(current).strip())
+    return [segment for segment in segments if segment]
+
+
+def _prescribes_command(segment: str, *, strict: bool) -> bool:
+    """Decide whether a prose segment is an invocation rather than a phrase.
+
+    A fenced shell block is strict: any segment naming a known executable is a
+    command. An inline span must additionally carry an argument, and a bare
+    English-word executable (``test``, ``install``) only counts when it is
+    path-qualified, so class names, config paths, constants, YAML keys, and PHP
+    fragments in backticks are never mistaken for commands.
+    """
+    tokens = segment.split()
+    index = 0
+    while index < len(tokens) and ENV_ASSIGNMENT_TOKEN.match(tokens[index]):
+        index += 1
+    if index >= len(tokens):
+        return False
+    head = tokens[index]
+    executable = Path(head).name.lower()
+    if executable not in RUNNER_EXECUTABLES:
+        return False
+    if strict:
+        return True
+    if len(tokens) - index < 2:
+        return False
+    return not (executable in AMBIGUOUS_BARE_EXECUTABLES and "/" not in head)
+
+
+def _hosted_code_arguments(segment: str) -> list[str]:
+    """Return the arguments an interpreter would execute as code.
+
+    ``bash -c "curl -X POST https://host/x"`` keeps its payload inside one
+    quoted token, so segment splitting alone would only see the shell. The
+    payload of a code-hosting executable is re-read as a nested command; any
+    other executable's arguments are left alone, so ``grep -rn "rm -rf" src/``
+    stays a grep.
+    """
+    tokens = segment.split()
+    if not tokens or Path(tokens[0]).name.lower() not in CODE_HOST_EXECUTABLES:
+        return []
+    try:
+        parsed = shlex.split(segment, posix=True)
+    except ValueError:
+        return []
+    return [
+        token
+        for token in parsed[1:]
+        if token.strip() and not token.startswith("-")
+    ]
+
+
+def _command_risk_codes(analysis: Any) -> list[str]:
+    """Return the danger findings of an analysis, ignoring attestability."""
+    return sorted(
+        {
+            finding.code
+            for finding in analysis.findings
+            if finding.category in COMMAND_RISK_CATEGORIES
+            or finding.code in COMMAND_BLOCKING_FINDINGS
+        }
+    )
+
+
+def _validate_body_commands(
+    name: str,
+    body: str,
+    target: Path,
+    diagnostics: list[Diagnostic],
+) -> None:
+    """Analyze the commands a skill body hands to the agent."""
+    commands = _body_commands(body)
+    if not commands:
+        return
+    try:
+        analyzer = CommandAnalyzer(target)
+    except CommandAnalysisError as error:
+        _diag(
+            diagnostics,
+            "COMMAND_ANALYZER_UNAVAILABLE",
+            f"{name} target commands cannot be analyzed safely: {error}",
+        )
+        return
+    for command, strict in commands:
+        # Breadth-first over the written order. A LIFO walk pops the tail
+        # first, so a chain longer than the cap would drop its head - exactly
+        # where a dangerous command hides behind harmless padding.
+        pending = deque(
+            (segment, strict) for segment in _command_segments(command)
+        )
+        seen: set[tuple[str, bool]] = set()
+        while pending:
+            if len(seen) >= MAX_BODY_COMMAND_SEGMENTS:
+                # Never drop the remainder silently: an unscanned tail is an
+                # unproven command, and unproven fails closed.
+                _diag(
+                    diagnostics,
+                    "SKILL_BODY_COMMAND_UNSCANNED",
+                    f"{name} prose command exceeds the "
+                    f"{MAX_BODY_COMMAND_SEGMENTS}-segment analysis cap and "
+                    f"cannot be proven safe: {command}",
+                )
+                break
+            entry = pending.popleft()
+            if entry in seen:
+                continue
+            seen.add(entry)
+            segment, segment_strict = entry
+            if not _prescribes_command(segment, strict=segment_strict):
+                continue
+            for hosted in _hosted_code_arguments(segment):
+                # Hosted code is unambiguously an instruction, never prose,
+                # so the nested pass is always strict.
+                pending.extend(
+                    (nested, True) for nested in _command_segments(hosted)
+                )
+            try:
+                analysis = analyzer.analyze(segment)
+            except CommandAnalysisError:
+                continue
+            codes = _command_risk_codes(analysis)
+            if codes:
+                _diag(
+                    diagnostics,
+                    "SKILL_BODY_COMMAND_RISK",
+                    f"{name}: skill body prescribes an unsafe command "
+                    f"({', '.join(codes)}): {segment}",
+                )
+
+
 def _normalize_line(line: str) -> str:
     line = re.sub(r"TASK-\d+", "task-id", line, flags=re.IGNORECASE)
-    line = re.sub(r"\bprofile[-_ ]?[a-z0-9_-]*\b", "profile-id", line, flags=re.IGNORECASE)
+    line = re.sub(r"\bprofile[-_][a-z0-9_-]+\b", "profile-id", line, flags=re.IGNORECASE)
     line = re.sub(r"\s+", " ", line.strip().lower())
     return line
 
@@ -480,8 +1362,170 @@ def _token_similarity(left: list[str], right: list[str]) -> float:
     return len(left_set & right_set) / len(union) if union else 0.0
 
 
+def _skeleton_line(raw: str, entities: Iterable[str] = ()) -> str:
+    """Erase project identity from a line, keeping only its prose skeleton.
+
+    `_normalize_line` folds case and whitespace and nothing else, so two
+    sentences produced from one template score as unrelated as soon as the
+    generator substitutes the project's own nouns: a plan-conforming SKILL.md
+    is *required* to carry its claim, its paths and its neighbours' names, and
+    those mandatory differences dilute raw similarity below any usable
+    threshold. Removing exactly that mandated vocabulary leaves the reusable
+    scaffolding, which is what a duplicate actually is.
+
+    Erased: backticked spans, paths, PHP variables/calls, CamelCase and
+    UPPER_SNAKE identifiers, dotted/underscored ids, numbers, and the caller's
+    entity names (the inventory's other skill names). Punctuation is dropped
+    and a small set of interchangeable connectives is folded, so swapping
+    `,` for `;` or `and` for `plus` no longer produces a different line.
+    """
+    text = _CODE_SPAN_PATTERN.sub(_SKELETON_SUB, raw)
+    text = _PHP_VARIABLE_PATTERN.sub(_SKELETON_SUB, text)
+    text = _CALL_PATTERN.sub(_SKELETON_SUB, text)
+    text = _PATH_PATTERN.sub(_SKELETON_SUB, text)
+    text = _UPPER_SNAKE_PATTERN.sub(_SKELETON_SUB, text)
+    text = _CAMEL_CASE_PATTERN.sub(_SKELETON_SUB, text)
+    text = _DOTTED_ID_PATTERN.sub(_SKELETON_SUB, text)
+    text = _NUMBER_PATTERN.sub(_SKELETON_SUB, text)
+    for entity in sorted(entities, key=lambda item: (-len(item), item)):
+        if len(entity) >= 3:
+            text = re.sub(
+                r"\b" + re.escape(entity) + r"\b", _SKELETON_SUB, text, flags=re.I
+            )
+    text = _NON_WORD_PATTERN.sub(" ", text.lower())
+    return " ".join(
+        SKELETON_CONNECTIVES.get(word, word) for word in text.split()
+    ).strip()
+
+
+def _skeleton_body(
+    body: str, fixed_blocks: list[str], entities: Iterable[str] = ()
+) -> list[str]:
+    """Skeleton lines that still carry enough prose of their own to compare.
+
+    A line that is almost entirely project identity ("Read <path>.") collapses
+    to placeholders; counting it would make every honest inventory look like a
+    template, so only lines with at least `SKELETON_MIN_RESIDUAL` remaining
+    content words take part in the comparison.
+
+    Fenced blocks are dropped as well: a shared code idiom or an identical
+    snippet of framework boilerplate is legitimate reuse, and on the skeleton
+    two such fences collapse onto each other whatever the surrounding prose
+    says. The check is about duplicated *instructions*, not duplicated code.
+    """
+    cleaned = body
+    for block in sorted(fixed_blocks, key=lambda item: (-len(item), item)):
+        cleaned = cleaned.replace(block, "")
+    entities = tuple(entities)
+    lines: list[str] = []
+    fenced = False
+    for raw in cleaned.splitlines():
+        if re.match(r"^\s*(```|~~~)", raw):
+            fenced = not fenced
+            continue
+        if fenced or re.match(r"^#{1,6}\s+", raw) or not raw.strip():
+            continue
+        line = _skeleton_line(raw, entities)
+        residual = [
+            word
+            for word in line.split()
+            if word != SKELETON_PLACEHOLDER
+            and word not in STOPWORDS
+            and len(word) > 1
+        ]
+        if len(residual) >= SKELETON_MIN_RESIDUAL:
+            lines.append(line)
+    return lines
+
+
+def _bag_similarity(left: Counter, right: Counter) -> float:
+    """Dice coefficient over word bags: `difflib.quick_ratio` without difflib."""
+    total = sum(left.values()) + sum(right.values())
+    if not total:
+        return 0.0
+    return 2 * sum((left & right).values()) / total
+
+
+def _skeleton_line_similarity(left: list[str], right: list[str]) -> float:
+    """Fraction of the shorter body whose lines have a twin in the other body.
+
+    Two skeleton lines are twins when their word bags reach
+    `SKELETON_LINE_MATCH`; that tolerance is what survives one substituted
+    noun in an otherwise identical sentence, which exact comparison cannot.
+    Matching is greedy over a deterministic order and one-to-one, so a single
+    boilerplate line cannot claim several partners.
+    """
+    if not left or not right:
+        return 0.0
+    left_bags = [Counter(line.split()) for line in left]
+    right_bags = [Counter(line.split()) for line in right]
+    index: defaultdict[str, set[int]] = defaultdict(set)
+    for position, bag in enumerate(right_bags):
+        for word in bag:
+            if word != SKELETON_PLACEHOLDER and word not in STOPWORDS and len(word) > 1:
+                index[word].add(position)
+    taken: set[int] = set()
+    matched = 0
+    for bag in left_bags:
+        candidates: set[int] = set()
+        for word in bag:
+            candidates |= index.get(word, set())
+        best_score, best_position = 0.0, None
+        for position in sorted(candidates - taken):
+            score = _bag_similarity(bag, right_bags[position])
+            if score > best_score:
+                best_score, best_position = score, position
+        if best_position is not None and best_score >= SKELETON_LINE_MATCH:
+            taken.add(best_position)
+            matched += 1
+    return matched / min(len(left), len(right))
+
+
+def _compare_skeletons(
+    left_name: str,
+    left: list[str],
+    right_name: str,
+    right: list[str],
+    diagnostics: list[Diagnostic],
+) -> None:
+    """Report two skills written from one template once identity is erased.
+
+    Short bodies are skipped: below `SKELETON_MIN_LINES` comparable lines a
+    single shared sentence already moves the ratio far enough to accuse an
+    honest skill, and the raw `SKILL_SIMILARITY` pass still covers those.
+    """
+    if len(left) < SKELETON_MIN_LINES or len(right) < SKELETON_MIN_LINES:
+        return
+    line_score = _skeleton_line_similarity(left, right)
+    token_score = _token_similarity(
+        _tokens("\n".join(left)), _tokens("\n".join(right))
+    )
+    if line_score >= SKELETON_LINE_FAIL or token_score >= SKELETON_TOKEN_FAIL:
+        shared = sorted(set(left) & set(right))[:2]
+        detail = "; shared skeleton: " + " | ".join(shared) if shared else ""
+        _diag(
+            diagnostics,
+            "SKILL_TEMPLATE_REUSE",
+            f"{left_name} and {right_name} are the same prose template once "
+            f"paths, identifiers, constants, numbers and neighbour names are "
+            f"removed (line={line_score:.3f}, token={token_score:.3f})"
+            f"{detail}",
+        )
+    elif line_score >= SKELETON_LINE_WARN or token_score >= SKELETON_TOKEN_WARN:
+        _diag(
+            diagnostics,
+            "SKILL_TEMPLATE_REUSE_WARN",
+            f"{left_name} and {right_name} share prose scaffolding once project "
+            f"identity is removed (line={line_score:.3f}, token={token_score:.3f})",
+            "warning",
+        )
+
+
 def _scope_parts(values: list[str]) -> set[str]:
-    return {re.sub(r"/+$", "", value.strip().lower()) for value in values}
+    return {
+        re.sub(r"/+$", "", value.strip().lower())
+        for value in _flatten_strings(values)
+    }
 
 
 def _scopes_collide(left: set[str], right: set[str]) -> set[str]:
@@ -509,6 +1553,34 @@ def _glob_prefix(value: str) -> str:
     return value[:wildcard].rstrip("/")
 
 
+def _glob_suffix(value: str) -> str | None:
+    """Literal tail after the last ``*``/``?`` wildcard (whole value if none).
+
+    Returns ``None`` when the tail contains a ``[`` character class: the text a
+    class matches is not part of the literal suffix, so the tail cannot be
+    proven literal and callers must treat the suffix as unknown.
+    """
+    index = max(value.rfind("*"), value.rfind("?"))
+    suffix = value if index < 0 else value[index + 1 :]
+    return None if "[" in suffix else suffix
+
+
+def _bare_directory_pattern(value: str) -> bool:
+    """True for a wildcard-free pattern whose final segment has no extension.
+
+    ``_normalize_glob`` accepts bare directory writes (``docs/sub/`` becomes
+    ``docs/sub``), so such a pattern may denote a whole directory tree rather
+    than a single file.  Its effective literal suffix is therefore unknown and
+    must not participate in the suffix disjointness proof: ``docs/sub`` can
+    contain ``docs/sub/notes.md``, which fnmatch's slash-crossing ``*`` lets
+    ``docs/*.md`` match.  Wildcard-free names WITH an extension (e.g.
+    ``docs/CHANGELOG.json``) are deliberately treated as single files.
+    """
+    if any(token in value for token in "*?["):
+        return False
+    return "." not in value.rsplit("/", 1)[-1]
+
+
 def _globs_intersect(left: str, right: str) -> bool:
     """Conservatively determine whether two normalized target globs intersect."""
     left = _normalize_glob(left).lower()
@@ -517,6 +1589,27 @@ def _globs_intersect(left: str, right: str) -> bool:
         return False
     if fnmatch.fnmatchcase(left, right) or fnmatch.fnmatchcase(right, left):
         return True
+    left_wild = any(token in left for token in "*?[")
+    right_wild = any(token in right for token in "*?[")
+    bare_containment = (
+        (not left_wild and right.startswith(left + "/"))
+        or (not right_wild and left.startswith(right + "/"))
+    )
+    left_suffix = None if _bare_directory_pattern(left) else _glob_suffix(left)
+    right_suffix = None if _bare_directory_pattern(right) else _glob_suffix(right)
+    if (
+        not bare_containment
+        and left_suffix is not None
+        and right_suffix is not None
+        and not left_suffix.endswith(right_suffix)
+        and not right_suffix.endswith(left_suffix)
+    ):
+        # Every path matched by a glob ends with its literal suffix, so
+        # incompatible suffixes (e.g. *.md vs *.json) are provably disjoint.
+        # Suffixes containing a character class are unknown (None), as are
+        # bare directory patterns (which may denote whole trees); both fall
+        # through to the conservative prefix heuristic below.
+        return False
     left_prefix, right_prefix = _glob_prefix(left), _glob_prefix(right)
     if not left_prefix or not right_prefix:
         return True
@@ -533,6 +1626,37 @@ def _write_collisions(left: list[str], right: list[str]) -> set[str]:
         for one in left
         for two in right
         if _globs_intersect(one, two)
+    }
+
+
+def _writes_of(skill: dict[str, Any]) -> list[str]:
+    """Declared write globs of a skill, tolerant of a wrong-typed field."""
+    return [item for item in _as_list(skill.get("writes")) if isinstance(item, str)]
+
+
+def _verbatim_boundary_fields(skill: dict[str, Any]) -> dict[str, set[str]]:
+    """The boundary text a skill claims, normalized for comparison only.
+
+    Case and whitespace are folded so a reflowed contract still counts as the
+    same sentence; nothing else is relaxed, because the point of the check is
+    literal identity.
+    """
+    descriptions = [
+        item.get("description")
+        for item in _as_list(skill.get("ownership"))
+        if isinstance(item, dict)
+    ]
+    return {
+        field: {
+            normalized
+            for raw in _flatten_strings(value)
+            if (normalized := _normalize_line(raw))
+        }
+        for field, value in (
+            ("owned_scope", skill.get("owned_scope")),
+            ("ownership.description", descriptions),
+            ("triggers.positive", _positive_triggers(skill)),
+        )
     }
 
 
@@ -579,7 +1703,7 @@ def _contract_projection(skill: dict[str, Any]) -> dict[str, tuple[list[str], li
     for field in CONTRACT_PROJECTION_FIELDS:
         value = skill.get(field)
         if field == "triggers" and isinstance(value, dict):
-            value = list(value.get("positive", [])) + list(value.get("negative", []))
+            value = _as_list(value.get("positive")) + _as_list(value.get("negative"))
         lines = [
             normalized
             for raw in _flatten_strings(value)
@@ -611,9 +1735,17 @@ def _contract_projection(skill: dict[str, Any]) -> dict[str, tuple[list[str], li
     return projection
 
 
+def _positive_triggers(skill: dict[str, Any]) -> list[str]:
+    triggers = skill.get("triggers")
+    if not isinstance(triggers, dict):
+        return []
+    return [
+        item for item in _as_list(triggers.get("positive")) if isinstance(item, str)
+    ]
+
+
 def _routing_tokens(skill: dict[str, Any]) -> set[str]:
-    triggers = skill.get("triggers", {})
-    return _meaningful_tokens(" ".join(triggers.get("positive", [])))
+    return _meaningful_tokens(" ".join(_positive_triggers(skill)))
 
 
 def _has_explicit_routing_precedence(
@@ -662,9 +1794,19 @@ def _contract_ids(items: Any) -> set[str]:
 def _path_matches(target: Path, value: str) -> list[Path]:
     if any(token in value for token in "*?["):
         try:
-            return sorted(target.glob(value))
+            matches = sorted(target.glob(value))
         except (OSError, ValueError):
             return []
+        confined: list[Path] = []
+        for match in matches:
+            try:
+                relative = match.relative_to(target)
+            except ValueError:
+                continue
+            candidate = _confined(target, str(relative))
+            if candidate is not None and candidate.exists():
+                confined.append(candidate)
+        return confined
     candidate = _confined(target, value)
     return [candidate] if candidate is not None and candidate.exists() else []
 
@@ -676,6 +1818,84 @@ def _creatable_parent_exists(target: Path, value: str) -> bool:
         return False
     parent = candidate if value.endswith("/**") else candidate.parent
     return parent.is_dir()
+
+
+def _symbol_identifier(symbol: str) -> str:
+    """Last namespace/member segment of a qualified anchor symbol.
+
+    ``EVIDENCE_ANCHOR_FORMAT`` admits qualified symbols (``Foo\\Bar::baz``,
+    ``framework.messenger.transports``), so the resolvable unit is the final
+    segment; the qualifiers name packages or config parents that need not
+    occur verbatim in the cited file.
+    """
+    segments = [item for item in re.split(r"[.:\\-]", symbol) if item]
+    return segments[-1] if segments else symbol
+
+
+def _resolve_evidence_anchor(
+    name: str,
+    anchor: str,
+    path_value: str,
+    target: Path,
+    diagnostics: list[Diagnostic],
+) -> None:
+    """Resolve a well-formed anchor against the file it cites.
+
+    ``evidence[].line_range`` is bound to the real length of the cited file, and
+    an anchor is the same kind of claim at skill granularity, so it is held to
+    the same standard: a line range past EOF and a symbol that never occurs in
+    the source both cite nothing. The source is read defensively - an
+    unreadable file yields a diagnostic, never a traceback.
+    """
+    resolved = _confined(target, path_value)
+    if resolved is None or not resolved.is_file():
+        _diag(
+            diagnostics,
+            "EVIDENCE_ANCHOR_UNRESOLVABLE",
+            f"{name} anchor cites a missing or unsafe source: {anchor}",
+        )
+        return
+    try:
+        text = resolved.read_text(encoding="utf-8", errors="replace")
+    except OSError as error:
+        _diag(
+            diagnostics,
+            "EVIDENCE_ANCHOR_UNRESOLVABLE",
+            f"{name} anchor source cannot be read: {anchor} ({error})",
+        )
+        return
+    body = anchor[len(path_value) + 1 :]
+    if body.startswith("symbol:"):
+        # Case-insensitive on purpose: PHP class/function names are
+        # case-insensitive and config keys are re-cased freely, so only a
+        # symbol that is absent under ANY casing is treated as unresolvable.
+        identifier = _symbol_identifier(body[len("symbol:") :])
+        if not re.search(
+            rf"(?<![A-Za-z0-9_]){re.escape(identifier)}(?![A-Za-z0-9_])",
+            text,
+            re.I,
+        ):
+            _diag(
+                diagnostics,
+                "EVIDENCE_ANCHOR_SYMBOL_ABSENT",
+                f"{name} anchor symbol does not occur in the cited source: {anchor}",
+            )
+        return
+    try:
+        bounds = [int(item.lstrip("L")) for item in body.split("-")]
+    except ValueError:
+        # Shape belongs to EVIDENCE_ANCHOR_FORMAT, which gates this call; a
+        # malformed body reaching here is not re-reported and never raises.
+        return
+    start, end = bounds[0], bounds[-1]
+    line_count = len(text.splitlines())
+    if end < start or start > line_count or end > line_count:
+        _diag(
+            diagnostics,
+            "EVIDENCE_ANCHOR_RANGE",
+            f"{name} anchor line range falls outside the cited source "
+            f"({line_count} lines): {anchor}",
+        )
 
 
 def _validate_schema_1_2_skill(
@@ -717,7 +1937,7 @@ def _validate_schema_1_2_skill(
             )
         procedure_language = " ".join(
             str(item.get("action", ""))
-            for item in skill.get("procedure_steps", [])
+            for item in _as_list(skill.get("procedure_steps"))
             if isinstance(item, dict)
         )
         if READ_ONLY_MUTATION_PATTERN.search(procedure_language):
@@ -801,6 +2021,31 @@ def _validate_schema_1_2_skill(
                 f"{name} repeats procedure step id: {step['id']}",
             )
         procedure_ids.add(step["id"])
+        action = str(step["action"])
+        action_hedge = _hedge_phrase(action)
+        if action_hedge is not None:
+            _diag(
+                diagnostics,
+                "PROCEDURE_STEP_NOT_OPERATIONAL",
+                f"{name}.{step['id']} defers to reflection instead of an action "
+                f"({action_hedge!r}): {_excerpt(action)}",
+            )
+        elif not _commands_action(action):
+            _diag(
+                diagnostics,
+                "PROCEDURE_STEP_NOT_OPERATIONAL",
+                f"{name}.{step['id']} commands no action: {_excerpt(action)}",
+            )
+        if (
+            not step["path_refs"]
+            and not step["evidence_ids"]
+            and not _has_concrete_anchor(action)
+        ):
+            _diag(
+                diagnostics,
+                "PROCEDURE_STEP_UNANCHORED",
+                f"{name}.{step['id']} names no path, evidence, or concrete anchor",
+            )
         for evidence_id in step["evidence_ids"]:
             if evidence_id not in skill.get("evidence_ids", []):
                 _diag(
@@ -811,7 +2056,7 @@ def _validate_schema_1_2_skill(
         for path_ref in step["path_refs"]:
             if path_ref not in {
                 item.get("path")
-                for item in skill.get("path_contracts", [])
+                for item in _as_list(skill.get("path_contracts"))
                 if isinstance(item, dict)
             }:
                 _diag(
@@ -907,6 +2152,13 @@ def _validate_schema_1_2_skill(
                 "GENERIC_VERIFICATION",
                 f"{name}.{check['id']} verification is generic rather than executable",
             )
+        if NON_FALSIFIABLE_VERIFICATION_PATTERN.search(verification_text):
+            _diag(
+                diagnostics,
+                "VERIFICATION_NOT_FALSIFIABLE",
+                f"{name}.{check['id']} verification accepts an impression "
+                "instead of a check",
+            )
         command = str(check.get("command") or "")
         if (
             check.get("mutation_class") != "none"
@@ -929,7 +2181,9 @@ def _validate_schema_1_2_skill(
                     f"{name}.{check['id']} command cannot be resolved: {error}",
                 )
             else:
-                if not command_analysis.verification_safe:
+                if not command_analysis.verification_safe and not (
+                    _verification_attested(command, command_analysis)
+                ):
                     findings = ", ".join(
                         sorted({item.code for item in command_analysis.findings})
                     )
@@ -1253,6 +2507,10 @@ def _validate_schema_1_2_skill(
                 "EVIDENCE_ANCHOR_FORMAT",
                 f"{name} anchor must use a bounded line range or stable symbol",
             )
+        elif expected_prefix:
+            _resolve_evidence_anchor(
+                name, anchor["anchor"], expected_prefix, target, diagnostics
+            )
         claim = anchor["claim"]
         step_text = " ".join(
             value
@@ -1269,10 +2527,10 @@ def _validate_schema_1_2_skill(
         if not all(
             _contract_matches(claim, text)
             for text in (
-                " ".join(skill.get("owned_scope", [])),
+                " ".join(_flatten_strings(skill.get("owned_scope"))),
                 step_text,
                 verification_text,
-                " ".join(skill.get("output_contract", [])),
+                " ".join(_flatten_strings(skill.get("output_contract"))),
             )
         ):
             _diag(
@@ -1446,7 +2704,7 @@ def _validate_schema_1_2_plan_contracts(
         evidence_claim_text = " ".join(
             claim
             for skill in plan_skills.values()
-            for anchor in skill.get("evidence_anchors", [])
+            for anchor in _as_list(skill.get("evidence_anchors"))
             if isinstance(anchor, dict)
             and anchor.get("evidence_id") in invariant["evidence_ids"]
             for claim in [str(anchor.get("claim", ""))]
@@ -1494,12 +2752,12 @@ def _validate_schema_1_2_plan_contracts(
                 )
             procedure_text = " ".join(
                 value
-                for item in skill.get("procedure_steps", [])
+                for item in _as_list(skill.get("procedure_steps"))
                 for value in _flatten_strings(item)
             )
             verification_text = " ".join(
                 value
-                for item in skill.get("verification", [])
+                for item in _as_list(skill.get("verification"))
                 for value in _flatten_strings(item)
             )
             if not _contract_matches(invariant["statement"], procedure_text) or not _contract_matches(
@@ -1613,12 +2871,46 @@ def _validate_contract_inventory(
                 continue
             mode = next(iter(modes))
             owners = sorted({name for name, _ in entries})
-            if mode == "exclusive" and len(owners) != 1:
-                _diag(
-                    diagnostics,
-                    "OWNERSHIP_ID_CONFLICT",
-                    f"exclusive ownership {ownership_id} has multiple owners: {owners}",
+            if mode == "exclusive":
+                if len(owners) != 1:
+                    _diag(
+                        diagnostics,
+                        "OWNERSHIP_ID_CONFLICT",
+                        f"exclusive ownership {ownership_id} has multiple "
+                        f"owners: {owners}",
+                    )
+                # WRITE_SURFACE_COLLISION compares writes with writes, so a
+                # read-only owner - whose writes are empty by contract - could
+                # be written through by any neighbour. Exclusive means
+                # exclusive: no non-owner may write the owned surface.
+                owner_set = set(owners)
+                owned_paths = sorted(
+                    {
+                        path
+                        for _, item in entries
+                        for path in item.get("paths", [])
+                        if isinstance(path, str)
+                    }
                 )
+                for writer_name in names:
+                    if writer_name in owner_set:
+                        continue
+                    intrusions = sorted(
+                        {
+                            _normalize_glob(path)
+                            for path in owned_paths
+                            for write in _writes_of(plan_skills[writer_name])
+                            if _globs_intersect(path, write)
+                        }
+                    )
+                    if intrusions:
+                        _diag(
+                            diagnostics,
+                            "OWNERSHIP_EXCLUSIVE_WRITE_CONFLICT",
+                            f"{writer_name} writes into exclusive ownership "
+                            f"{ownership_id} held by {', '.join(owners)}: "
+                            f"{', '.join(intrusions)}",
+                        )
             if mode == "shared":
                 for index, left_name in enumerate(owners):
                     for right_name in owners[index + 1 :]:
@@ -1720,12 +3012,36 @@ def _validate_contract_inventory(
         name: _contract_projection(skill)
         for name, skill in sorted(plan_skills.items())
     }
+    verbatim_fields = {
+        name: _verbatim_boundary_fields(skill)
+        for name, skill in sorted(plan_skills.items())
+    }
     repeated_owners: defaultdict[tuple[str, str], set[str]] = defaultdict(set)
     for index, left_name in enumerate(names):
         left = plan_skills[left_name]
         left_scope = _scope_parts(left.get("owned_scope", []))
         for right_name in names[index + 1 :]:
             right = plan_skills[right_name]
+            # A declared precedence resolves a PARTIAL overlap: the pair still
+            # states which side owns what. It can never resolve text both
+            # skills claim word for word - such a boundary divides nothing -
+            # so this runs before and independently of the suppressors below.
+            for field in (
+                "owned_scope",
+                "ownership.description",
+                "triggers.positive",
+            ):
+                for line in sorted(
+                    verbatim_fields[left_name][field]
+                    & verbatim_fields[right_name][field]
+                ):
+                    _diag(
+                        diagnostics,
+                        "BOUNDARY_NOT_SEPARATING",
+                        f"{left_name} and {right_name} declare the same "
+                        f"{field} verbatim, so no declared precedence can "
+                        f"separate them: {line}",
+                    )
             collisions = _scopes_collide(
                 left_scope, _scope_parts(right.get("owned_scope", []))
             )
@@ -1767,16 +3083,37 @@ def _validate_contract_inventory(
                 if routing_union
                 else 0.0
             )
-            if routing_score >= 0.75 and not (
-                _has_explicit_routing_precedence(left, right_name)
-                or _has_explicit_routing_precedence(right, left_name)
-            ):
+            explicit_precedence = _has_explicit_routing_precedence(
+                left, right_name
+            ) or _has_explicit_routing_precedence(right, left_name)
+            if routing_score >= 0.75 and not explicit_precedence:
                 _diag(
                     diagnostics,
                     "ROUTING_AMBIGUITY",
                     f"{left_name} and {right_name} have overlapping positive "
                     f"routing ({routing_score:.3f}) without explicit precedence",
                 )
+            if not explicit_precedence:
+                for left_trigger in _positive_triggers(left):
+                    left_trigger_tokens = _meaningful_tokens(left_trigger)
+                    if not left_trigger_tokens:
+                        continue
+                    for right_trigger in _positive_triggers(right):
+                        right_trigger_tokens = _meaningful_tokens(right_trigger)
+                        trigger_union = left_trigger_tokens | right_trigger_tokens
+                        trigger_score = (
+                            len(left_trigger_tokens & right_trigger_tokens)
+                            / len(trigger_union)
+                        )
+                        if trigger_score >= 0.75:
+                            _diag(
+                                diagnostics,
+                                "ROUTING_AMBIGUITY",
+                                f"{left_name} and {right_name} share an "
+                                f"ambiguous positive trigger "
+                                f"({trigger_score:.3f}): {left_trigger!r} vs "
+                                f"{right_trigger!r}",
+                            )
 
             for field in CONTRACT_PROJECTION_FIELDS + (
                 "ownership",
@@ -1985,6 +3322,7 @@ def _validate_plan(
                         "EVIDENCE_LINE_RANGE",
                         f"evidence {evidence_id} has an invalid line_range",
                     )
+                    line_range = None
                 elif line_range is not None:
                     line_count = len(
                         resolved.read_text(
@@ -2010,22 +3348,50 @@ def _validate_plan(
                         encoding="utf-8", errors="replace"
                     ).splitlines()
                     cited_text = "\n".join(lines)
-                    if isinstance(entry.get("line_range"), dict):
-                        start = max(0, entry["line_range"].get("start", 1) - 1)
-                        end = min(len(lines), entry["line_range"].get("end", 0))
+                    if isinstance(line_range, dict):
+                        start = max(0, line_range.get("start", 1) - 1)
+                        end = min(len(lines), line_range.get("end", 0))
                         cited_text = "\n".join(lines[start:end])
                     cited_tokens = _meaningful_tokens(cited_text)
+                    cited_words = _cited_vocabulary(cited_text)
                     for claim in entry["supported_claims"]:
-                        claim_tokens = _meaningful_tokens(claim) - {
-                            "project", "confirmed", "supports", "uses", "runtime"
-                        }
+                        claim_tokens = _meaningful_tokens(claim) - CLAIM_SERVICE_WORDS
                         required = 1 if len(claim_tokens) <= 3 else 2
+                        # Bag-of-words overlap alone is trivial to satisfy:
+                        # 'class' and 'function' appear in three quarters of
+                        # all PHP files, so two of them are enough to "ground"
+                        # an invented claim.  Support therefore has to come
+                        # from vocabulary that distinguishes this range from
+                        # any other PHP file, in two measured tiers.
+                        distinctive = claim_tokens - CLAIM_LANGUAGE_LEXICON
+                        specific = claim_tokens - CLAIM_COMMON_LEXICON
                         if len(claim_tokens & cited_tokens) < required:
                             _diag(
                                 diagnostics,
                                 "EVIDENCE_CLAIM_UNSUPPORTED",
                                 f"evidence {evidence_id} claim is not grounded "
                                 f"in the cited source/range: {claim}",
+                            )
+                        elif not distinctive & cited_words:
+                            _diag(
+                                diagnostics,
+                                "EVIDENCE_CLAIM_UNSUPPORTED",
+                                f"evidence {evidence_id} claim shares only PHP "
+                                f"language vocabulary with the cited "
+                                f"source/range: {claim}",
+                            )
+                        elif not specific & cited_words and (
+                            len(specific) * 100
+                            <= CLAIM_GENERIC_SHARE_PERCENT * len(claim_tokens)
+                        ):
+                            _diag(
+                                diagnostics,
+                                "EVIDENCE_CLAIM_GENERIC_SUPPORT",
+                                f"evidence {evidence_id} claim is supported "
+                                f"only by lexicon common to any PHP file; "
+                                f"nothing project-specific in it appears in "
+                                f"the cited source/range: {claim}",
+                                severity="warning",
                             )
             evidence_map[evidence_id] = location
 
@@ -2119,6 +3485,7 @@ def _validate_plan(
         if name in plan_skills:
             _diag(diagnostics, "SKILL_NAME_DUPLICATE", f"duplicate skill name: {name}")
             continue
+        structural = True
         scalar_fields = ("category", "kind", "phase", "necessity_rationale")
         for field in scalar_fields:
             if not _is_nonempty_string(skill[field]):
@@ -2130,7 +3497,36 @@ def _validate_plan(
             or not _is_string_list(triggers.get("negative"))
         ):
             _diag(diagnostics, "SKILL_TRIGGERS_INVALID", f"{name}.triggers requires positive and negative string arrays")
+            if not isinstance(triggers, dict) or not all(
+                isinstance(triggers.get(key), list)
+                for key in ("positive", "negative")
+            ):
+                structural = False
         runtime_fixed = str(skill.get("kind", "")).lower() == "runtime-fixed"
+        for field in ("evidence_ids", "source_paths", "writes", "related_skills"):
+            allow_empty = field == "writes" or (runtime_fixed and field in {"evidence_ids", "source_paths"})
+            if not _is_string_list(skill[field], allow_empty=allow_empty):
+                _diag(diagnostics, "SKILL_PLAN_VALUE", f"{name}.{field} must be a string array")
+                if not _is_string_list(skill[field], allow_empty=True):
+                    structural = False
+        for field in (
+            "owned_scope", "excluded_scope", "required_procedure_roles",
+            "decision_points", "verification", "output_contract",
+            "failure_handling", "nearest_siblings",
+        ):
+            if not _is_substantive_contract(skill[field]):
+                _diag(diagnostics, "SKILL_PLAN_VALUE", f"{name}.{field} must be a substantive array")
+                if not isinstance(skill[field], (str, list)):
+                    structural = False
+        fixed_blocks = skill.get("fixed_blocks", [])
+        if not isinstance(fixed_blocks, list) or len(
+            _fixed_block_contents(fixed_blocks)
+        ) != len(fixed_blocks):
+            _diag(
+                diagnostics,
+                "SKILL_FIXED_BLOCKS_INVALID",
+                f"{name}.fixed_blocks must contain versioned id/version/content objects",
+            )
         selection_gate = skill.get("selection_gate")
         if not isinstance(selection_gate, dict) or set(selection_gate) != {
             "catalog",
@@ -2144,8 +3540,15 @@ def _validate_plan(
                 "SKILL_SELECTION_GATE",
                 f"{name}.selection_gate has invalid fields",
             )
-        else:
-            registry_candidate = registry.get(selection_gate.get("candidate_id"))
+            if not isinstance(selection_gate, dict):
+                structural = False
+        elif structural:
+            candidate_id = selection_gate.get("candidate_id")
+            registry_candidate = (
+                registry.get(candidate_id)
+                if _is_nonempty_string(candidate_id)
+                else None
+            )
             if registry_candidate is None:
                 _diag(
                     diagnostics,
@@ -2231,26 +3634,8 @@ def _validate_plan(
                             "SKILL_SELECTION_CLAIM_TRACE",
                             f"{name} selection condition is not supported by cited claims",
                         )
-        for field in ("evidence_ids", "source_paths", "writes", "related_skills"):
-            allow_empty = field == "writes" or (runtime_fixed and field in {"evidence_ids", "source_paths"})
-            if not _is_string_list(skill[field], allow_empty=allow_empty):
-                _diag(diagnostics, "SKILL_PLAN_VALUE", f"{name}.{field} must be a string array")
-        for field in (
-            "owned_scope", "excluded_scope", "required_procedure_roles",
-            "decision_points", "verification", "output_contract",
-            "failure_handling", "nearest_siblings",
-        ):
-            if not _is_substantive_contract(skill[field]):
-                _diag(diagnostics, "SKILL_PLAN_VALUE", f"{name}.{field} must be a substantive array")
-        fixed_blocks = skill.get("fixed_blocks", [])
-        if not isinstance(fixed_blocks, list) or len(
-            _fixed_block_contents(fixed_blocks)
-        ) != len(fixed_blocks):
-            _diag(
-                diagnostics,
-                "SKILL_FIXED_BLOCKS_INVALID",
-                f"{name}.fixed_blocks must contain versioned id/version/content objects",
-            )
+        if not structural:
+            continue
         for evidence_id in skill.get("evidence_ids", []):
             if evidence_id not in evidence_map:
                 _diag(diagnostics, "SKILL_EVIDENCE_UNKNOWN", f"{name} references unknown evidence: {evidence_id}")
@@ -2282,6 +3667,16 @@ def _validate_plan(
                 target,
                 diagnostics,
             )
+            if not all(
+                isinstance(skill.get(field), list)
+                for field in (
+                    "procedure_steps",
+                    "path_contracts",
+                    "evidence_anchors",
+                    "routing_cases",
+                )
+            ):
+                continue
         plan_skills[name] = skill
 
     names = set(plan_skills)
@@ -2337,8 +3732,8 @@ def _validate_plan(
         for sibling in siblings:
             if sibling == name or sibling not in names:
                 _diag(diagnostics, "SKILL_SIBLING_UNKNOWN", f"{name} has unresolved sibling reference: {sibling}")
-        for candidate in skill.get("selection_gate", {}).get(
-            "distinct_value_from", []
+        for candidate in _as_list(
+            skill.get("selection_gate", {}).get("distinct_value_from")
         ):
             if candidate not in names | rejected_names:
                 _diag(
@@ -2376,6 +3771,7 @@ def _validate_skill_file(
         _diag(diagnostics, "SKILL_UNREADABLE", f"{name}: cannot read SKILL.md: {error}")
         return "", [], []
     frontmatter, body = _parse_frontmatter(text)
+    _validate_body_commands(name, body, target, diagnostics)
     if frontmatter.get("name") != name:
         _diag(diagnostics, "SKILL_FRONTMATTER_NAME", f"{name}: directory and frontmatter name differ")
     description = frontmatter.get("description", "")
@@ -2409,7 +3805,50 @@ def _validate_skill_file(
     for phrase in GENERIC_PHRASES:
         if phrase in lower:
             _diag(diagnostics, "SKILL_GENERIC_PHRASE", f"{name}: generic phrase is not operational: {phrase!r}")
-    if re.search(rf"\b{name.replace('-', r'[- ]')}\b.*\b{name.replace('-', r'[- ]')}\b", resolved["purpose"], re.I):
+    # Naming the project is not instructing the agent: every step must command
+    # an action, and the procedure as a whole must name something concrete.
+    procedure_steps = _procedure_steps(resolved["procedure"])
+    for index, step in enumerate(procedure_steps, 1):
+        hedge = _hedge_phrase(step)
+        if hedge is not None:
+            _diag(
+                diagnostics,
+                "SKILL_STEP_HEDGED",
+                f"{name}: procedure step {index} defers to reflection instead of "
+                f"an action ({hedge!r}): {_excerpt(step)}",
+            )
+        elif not _commands_action(step):
+            _diag(
+                diagnostics,
+                "SKILL_STEP_NOT_OPERATIONAL",
+                f"{name}: procedure step {index} commands no action: {_excerpt(step)}",
+            )
+    # Anchors are counted over the step text only: the "1." list markers are
+    # not evidence that the procedure names anything.
+    if procedure_steps and not _has_concrete_anchor(" ".join(procedure_steps)):
+        _diag(
+            diagnostics,
+            "SKILL_PROCEDURE_UNANCHORED",
+            f"{name}: procedure names no concrete anchor (path, symbol, command, "
+            "constant, or number)",
+        )
+    if NON_FALSIFIABLE_VERIFICATION_PATTERN.search(resolved["verification"]):
+        _diag(
+            diagnostics,
+            "SKILL_VERIFICATION_NOT_FALSIFIABLE",
+            f"{name}: verification accepts an impression instead of a check",
+        )
+    elif resolved["verification"] and not (
+        _has_action_verb(resolved["verification"], VERIFICATION_VERB_FORMS)
+        or _prescribes_tooling(resolved["verification"])
+    ):
+        _diag(
+            diagnostics,
+            "SKILL_VERIFICATION_NOT_OPERATIONAL",
+            f"{name}: verification names no check to run: "
+            f"{_excerpt(resolved['verification'])}",
+        )
+    if re.search(rf"\b{_name_pattern(name)}\b.*\b{_name_pattern(name)}\b", resolved["purpose"], re.I):
         _diag(diagnostics, "SKILL_CIRCULAR_PURPOSE", f"{name}: purpose is circular")
 
     checks = (
@@ -2531,11 +3970,18 @@ def _validate_authored_inventory(
         _diag(diagnostics, "SKILL_UNPLANNED", f"skill has no plan entry: {name}")
 
     normalized: dict[str, tuple[list[str], list[str]]] = {}
+    skeletons: dict[str, list[str]] = {}
+    entities = frozenset(set(plan_skills) | set(actual))
     for name in sorted(set(plan_skills) & set(actual)):
-        _, lines, tokens = _validate_skill_file(
+        body, lines, tokens = _validate_skill_file(
             name, plan_skills[name], actual[name], evidence_map, target, diagnostics
         )
         normalized[name] = (lines, tokens)
+        skeletons[name] = _skeleton_body(
+            body,
+            _fixed_block_contents(plan_skills[name].get("fixed_blocks", [])),
+            entities,
+        )
 
     names = sorted(normalized)
     for index, left_name in enumerate(names):
@@ -2559,6 +4005,13 @@ def _validate_authored_inventory(
                     f"(line={line_score:.3f}, token={token_score:.3f})",
                     "warning",
                 )
+            _compare_skeletons(
+                left_name,
+                skeletons[left_name],
+                right_name,
+                skeletons[right_name],
+                diagnostics,
+            )
 
     block_owners: defaultdict[tuple[str, ...], set[str]] = defaultdict(set)
     for name, (lines, _) in normalized.items():
@@ -2579,6 +4032,50 @@ def _validate_authored_inventory(
                 f"repeated substantive block across {', '.join(sorted(owners))}: {' | '.join(block[:2])}",
             )
 
+    _report_skeleton_blocks(skeletons, diagnostics)
+
+
+def _report_skeleton_blocks(
+    skeletons: dict[str, list[str]], diagnostics: list[Diagnostic]
+) -> None:
+    """Adjacent skeleton lines shared by two skills are a copied passage.
+
+    `REPEATED_BLOCK` needs three consecutive byte-identical lines, which one
+    substituted noun anywhere in the run defeats. On the skeleton the run
+    survives substitution, so the block shrinks to `SKELETON_BLOCK_SIZE`
+    lines; the token floor is kept so two short scaffolding sentences are not
+    enough on their own. Only the longest block per owner set is reported, so
+    a copied passage produces one diagnostic instead of one per sub-window.
+
+    Deliberately a warning, unlike `REPEATED_BLOCK`. Measured on 2371 pairs of
+    honest hand-written skills this fires five times - on a shared task-counter
+    instruction and on the shared confidence rubric of a parallel scanner
+    family - all of them legitimate reuse of one policy sentence rather than a
+    duplicated skill. Blocking on that would fail honest generations, so the
+    error verdict stays with the two calibrated similarity metrics and this
+    pass only names the passage that is worth a human look.
+    """
+    block_owners: defaultdict[tuple[str, ...], set[str]] = defaultdict(set)
+    for name, lines in skeletons.items():
+        for size in range(SKELETON_BLOCK_SIZE, min(7, len(lines) + 1)):
+            for index in range(len(lines) - size + 1):
+                block = tuple(lines[index : index + size])
+                if sum(len(_tokens(line)) for line in block) >= 20:
+                    block_owners[block].add(name)
+    for block, owners in sorted(block_owners.items()):
+        if len(owners) > 1 and len(block) == max(
+            len(candidate)
+            for candidate, candidate_owners in block_owners.items()
+            if candidate_owners == owners
+        ):
+            _diag(
+                diagnostics,
+                "SKILL_TEMPLATE_BLOCK",
+                f"repeated prose skeleton across {', '.join(sorted(owners))}: "
+                f"{' | '.join(block[:2])}",
+                "warning",
+            )
+
 
 def validate(
     skills_dir: Path,
@@ -2590,7 +4087,7 @@ def validate(
 ) -> list[Diagnostic]:
     diagnostics: list[Diagnostic] = []
     target = target.expanduser().resolve()
-    skills_dir = skills_dir.expanduser().resolve()
+    skills_dir = skills_dir.expanduser()
     plan_path = plan_path.expanduser().resolve()
     if not target.is_dir():
         _diag(diagnostics, "TARGET_INVALID", f"target is not a directory: {target}")
@@ -2601,6 +4098,7 @@ def validate(
     if skills_dir.is_symlink():
         _diag(diagnostics, "SKILLS_DIR_UNSAFE", f"skills directory must not be a symlink: {skills_dir}")
         return sorted(set(diagnostics))
+    skills_dir = skills_dir.resolve()
 
     plan = _load_plan(plan_path, diagnostics)
     plan_skills, evidence_map = (
@@ -2662,7 +4160,11 @@ def validate_agent_routing(
     if any(item.severity == "error" for item in diagnostics):
         return diagnostics
     plan = _load_plan(plan_path.expanduser().resolve(), diagnostics)
-    contracts = {item["name"]: item for item in plan.get("skills", [])}
+    contracts = {
+        item["name"]: item
+        for item in _as_list(plan.get("skills"))
+        if isinstance(item, dict) and _is_nonempty_string(item.get("name"))
+    }
     agents_dir = agents_dir.expanduser().resolve()
     if not agents_dir.is_dir():
         _diag(
@@ -2718,8 +4220,11 @@ def validate_agent_routing(
                 f"{name}: wrapper must invoke exactly {name}",
             )
         description = frontmatter.get("description", "")
+        triggers = contract.get("triggers")
+        if not isinstance(triggers, dict):
+            triggers = {}
         if not _contract_matches(
-            contract.get("triggers", {}).get("positive"),
+            triggers.get("positive"),
             description + "\n" + body,
         ):
             _diag(
@@ -2727,9 +4232,7 @@ def validate_agent_routing(
                 "AGENT_POSITIVE_ROUTING",
                 f"{name}: positive trigger is not traceable to wrapper",
             )
-        if not _contract_matches(
-            contract.get("triggers", {}).get("negative"), body
-        ):
+        if not _contract_matches(triggers.get("negative"), body):
             _diag(
                 diagnostics,
                 "AGENT_NEGATIVE_ROUTING",
@@ -2741,7 +4244,7 @@ def validate_agent_routing(
                 "AGENT_OUTPUT_ROUTING",
                 f"{name}: expected result is not traceable to wrapper",
             )
-        for sibling in contract.get("nearest_siblings", []):
+        for sibling in _as_list(contract.get("nearest_siblings")):
             if isinstance(sibling, dict) and (
                 str(sibling.get("name", "")).lower() not in body.lower()
                 or not _contract_matches(sibling.get("boundary"), body)
@@ -2760,7 +4263,7 @@ def validate_agent_routing(
                 f"{name}: wrapper writes flag does not match contract",
             )
         if re.search(
-            rf"\b(use|select)\b.*\b{name.replace('-', r'[- ]')}\b.*"
+            rf"\b(use|select)\b.*\b{_name_pattern(name)}\b.*"
             rf"\b(governed|handled|skill)\b",
             description,
             re.I,

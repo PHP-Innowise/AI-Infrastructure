@@ -75,10 +75,12 @@ class _Accumulator:
     findings: list[Finding]
     expanded: list[str]
     aliases: list[str]
+    walk_count: int = 0
 
 
 _SHELL_COMPOSITION = re.compile(r"(?:&&|\|\||[;&|<>`]|\$\(|[\r\n])")
 _ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
+_SHORT_OPTION_CLUSTER = re.compile(r"-[A-Za-z]+")
 _MUTATING_FLAGS = {
     "--fix",
     "--fix-dry-run=false",
@@ -89,6 +91,195 @@ _MUTATING_FLAGS = {
 }
 _SAFE_FORMAT_FLAGS = {"--check", "--dry-run", "--test", "--diff"}
 _PACKAGE_MANAGERS = {"npm", "pnpm", "yarn", "bun", "composer"}
+_PACKAGE_RUNNERS = {"bunx", "npx"}
+_SHELL_INTERPRETERS = {"bash", "dash", "fish", "sh", "zsh"}
+# Flags that make a shell print a report and exit instead of starting an
+# interactive session reading commands from stdin.
+_SHELL_REPORT_FLAGS = frozenset({"--help", "--version"})
+# General-purpose interpreters execute arbitrary code. Report/lint modes
+# (php -v, php -l), python -m with a re-classified module, and script
+# arguments whose basename is itself a known executable (php artisan,
+# php vendor/bin/phpunit) stay classified; inline code flags, unknown
+# script files, and stdin/REPL sessions are verification blockers.
+_GENERAL_INTERPRETERS = {"node", "php", "python", "python3"}
+_INTERPRETER_INLINE_FLAGS = {
+    "node": frozenset(
+        {
+            "--eval",
+            "--interactive",
+            "--print",
+            "--require",
+            "-e",
+            "-i",
+            "-p",
+            "-r",
+        }
+    ),
+    "php": frozenset({"-F", "-R", "-a", "-f", "-r"}),
+    "python": frozenset({"-c", "-i"}),
+    "python3": frozenset({"-c", "-i"}),
+}
+_INTERPRETER_INLINE_LETTERS = {
+    "node": frozenset("eipr"),
+    "php": frozenset("FRafr"),
+    "python": frozenset("ci"),
+    "python3": frozenset("ci"),
+}
+# Interpreter options that consume the following token as a value without
+# executing code, so the value is never mistaken for a script argument.
+_INTERPRETER_VALUE_FLAGS = {
+    "node": frozenset({"--conditions"}),
+    "php": frozenset({"-c", "-d"}),
+    "python": frozenset({"-W", "-X"}),
+    "python3": frozenset({"-W", "-X"}),
+}
+# Flags that make an interpreter print a report (or run its built-in test
+# runner) and exit instead of reading code from stdin.
+_INTERPRETER_REPORT_FLAGS = {
+    "node": frozenset({"--help", "--test", "--version", "-h", "-v"}),
+    "php": frozenset(
+        {"--help", "--ini", "--modules", "--version", "-h", "-i", "-m", "-v"}
+    ),
+    "python": frozenset({"--help", "--version", "-V", "-h"}),
+    "python3": frozenset({"--help", "--version", "-V", "-h"}),
+}
+_PHP_LINT_FLAGS = frozenset({"--syntax-check", "-l"})
+_FORMATTER_EXECUTABLES = {"black", "php-cs-fixer", "pint", "prettier", "ruff"}
+_DESTRUCTIVE_FILESYSTEM_COMMANDS = {"rm", "rmdir", "shred", "unlink"}
+_FILESYSTEM_MUTATION_COMMANDS = {"cp", "install", "ln", "mkdir", "mv", "touch"}
+_MAX_ALIAS_EXPANSIONS = 512
+# Wrapper executables that run another command; each maps to the set of its
+# options that consume a following value token. Wrappers are unwrapped by
+# basename so absolute forms such as /usr/bin/env are treated identically.
+_WRAPPER_VALUE_FLAGS = {
+    "env": frozenset({"-C", "-S", "-u", "--chdir", "--split-string", "--unset"}),
+    "nice": frozenset({"-n", "--adjustment"}),
+    "nohup": frozenset(),
+    "stdbuf": frozenset({"-e", "-i", "-o", "--error", "--input", "--output"}),
+    "sudo": frozenset({"-g", "--group", "-p", "--prompt", "-u", "--user"}),
+    "timeout": frozenset({"-k", "--kill-after", "-s", "--signal"}),
+}
+_GIT_VALUE_OPTIONS = {"-C", "-c", "--git-dir", "--work-tree"}
+_DEPENDENCY_ACTIONS = {
+    "add",
+    "create",
+    "create-project",
+    "install",
+    "publish",
+    "remove",
+    "require",
+    "self-update",
+    "update",
+}
+_NODE_DEPENDENCY_SHORTHANDS = {"ci", "i", "up", "upgrade"}
+_NODE_EXECUTE_ACTIONS = {"dlx", "exec", "x"}
+# Builtin subcommands of pnpm/yarn/bun that never resolve to a package.json
+# script when invoked bare; anything else bare is treated as a script alias
+# and fails closed when unknown.
+_NODE_PACKAGE_BUILTINS = {
+    "add",
+    "audit",
+    "bin",
+    "cache",
+    "ci",
+    "config",
+    "create",
+    "dedupe",
+    "dlx",
+    "doctor",
+    "exec",
+    "fetch",
+    "global",
+    "help",
+    "i",
+    "import",
+    "info",
+    "init",
+    "install",
+    "licenses",
+    "link",
+    "list",
+    "ls",
+    "node",
+    "outdated",
+    "pack",
+    "patch",
+    "patch-commit",
+    "prune",
+    "publish",
+    "rebuild",
+    "remove",
+    "rm",
+    "run",
+    "run-script",
+    "setup",
+    "store",
+    "un",
+    "uninstall",
+    "unlink",
+    "up",
+    "update",
+    "upgrade",
+    "version",
+    "versions",
+    "why",
+    "workspace",
+    "workspaces",
+    "x",
+}
+# Curated allow-list of executables known to be read-only (or read-only unless
+# an explicitly classified flag/action is present). Anything not derivable
+# from a classification set below fails closed as UNKNOWN_EXECUTABLE.
+_KNOWN_READONLY_EXECUTABLES = {
+    "@putenv",
+    "ava",
+    "behat",
+    "cat",
+    "date",
+    "deptrac",
+    "diff",
+    "echo",
+    "eslint",
+    "false",
+    "find",
+    "flake8",
+    "gofmt",
+    "grep",
+    "head",
+    "jest",
+    "ls",
+    "mocha",
+    "mypy",
+    "node",
+    "parallel-lint",
+    "paratest",
+    "pest",
+    "php",
+    "phpcs",
+    "phploc",
+    "phpmd",
+    "phpspec",
+    "phpstan",
+    "phpunit",
+    "printf",
+    "psalm",
+    "pwd",
+    "pylint",
+    "pytest",
+    "python",
+    "python3",
+    "sort",
+    "stylelint",
+    "tail",
+    "test",
+    "true",
+    "tsc",
+    "uniq",
+    "unittest",
+    "vitest",
+    "wc",
+    "which",
+}
 _PROVIDER_COMMANDS = {
     "aws",
     "az",
@@ -153,6 +344,40 @@ _COMPOSER_BUILTINS = {
     "update",
     "validate",
 }
+# Every executable the classifier understands. Executables outside this union
+# are verification blockers (UNKNOWN_EXECUTABLE) because their effects cannot
+# be attested statically.
+_KNOWN_EXECUTABLES = frozenset(
+    _KNOWN_READONLY_EXECUTABLES
+    | _FORMATTER_EXECUTABLES
+    | _SHELL_INTERPRETERS
+    | _PACKAGE_MANAGERS
+    | _PACKAGE_RUNNERS
+    | _NETWORK_COMMANDS
+    | _PROVIDER_COMMANDS
+    | _DESTRUCTIVE_FILESYSTEM_COMMANDS
+    | _FILESYSTEM_MUTATION_COMMANDS
+    | {
+        "artisan",
+        "cap",
+        "console",
+        "deploy",
+        "deployer",
+        "git",
+        "mysql",
+        "psql",
+        "symfony",
+    }
+)
+# Public projection of every executable name this module recognises, including
+# the wrapper executables that are unwrapped before classification. Callers
+# that must decide whether a token found in prose is plausibly a command at
+# all (rather than a class name, a path, or a constant) gate on this set.
+RUNNER_EXECUTABLES = frozenset(_KNOWN_EXECUTABLES | set(_WRAPPER_VALUE_FLAGS))
+# Public: executables that run code handed to them as an argument. A caller
+# scanning prose re-reads their arguments as a nested command so a payload
+# quoted behind `bash -c` or `php -r` is classified rather than hidden.
+CODE_HOST_EXECUTABLES = frozenset(_SHELL_INTERPRETERS | _GENERAL_INTERPRETERS)
 
 
 def _load_json(path: Path) -> dict:
@@ -175,7 +400,33 @@ def _normalise_script_commands(
     if ecosystem == "composer" and isinstance(value, list):
         if all(isinstance(item, str) for item in value):
             return tuple(value)
-    expected = "a string or string list" if ecosystem == "composer" else "a string"
+    if ecosystem == "composer" and isinstance(value, dict):
+        # Symfony Flex writes `auto-scripts` as an object whose KEYS are the
+        # commands and whose values name the handler ("symfony-cmd",
+        # "php-script", "script"). This is the stock shape of a Symfony
+        # skeleton, so rejecting it made the analyzer - and therefore the
+        # whole quality gate - unusable on essentially every Symfony target.
+        # The handler decides how the key is executed, so reconstruct the
+        # command from the key and let the normal classification run.
+        if all(
+            isinstance(key, str) and isinstance(item, str)
+            for key, item in value.items()
+        ):
+            commands = []
+            for key, handler in value.items():
+                if handler == "symfony-cmd":
+                    # Flex routes these through the Symfony binary/console.
+                    commands.append(f"bin/console {key}")
+                elif handler == "php-script":
+                    commands.append(f"php {key}")
+                else:
+                    commands.append(key)
+            return tuple(commands)
+    expected = (
+        "a string, string list or Flex auto-scripts object"
+        if ecosystem == "composer"
+        else "a string"
+    )
     raise CommandAnalysisError(
         f"{source}: script {name!r} must be {expected}, got "
         f"{type(value).__name__}"
@@ -239,27 +490,23 @@ class CommandAnalyzer:
             raise CommandAnalysisError(f"unknown ecosystem: {ecosystem}")
         accumulator = _Accumulator([], [], [])
         self._walk(command, ecosystem, (), accumulator)
+        risk_values = {risk.value for risk in Risk}
         categories = {
             finding.category
             for finding in accumulator.findings
-            if finding.category in {risk.value for risk in Risk}
+            if finding.category in risk_values
         }
-        if not categories:
+        blocked = any(
+            finding.category == "verification_blocker"
+            for finding in accumulator.findings
+        )
+        if not categories and not blocked:
             categories.add(Risk.NON_MUTATING.value)
         ordered = tuple(risk.value for risk in Risk if risk.value in categories)
-        unsafe_codes = {
-            "SHELL_COMPOSITION",
-            "TOKENIZE_ERROR",
-            "UNKNOWN_ALIAS",
-            "ALIAS_CYCLE",
-            "SHELL_INTERPRETER",
-        }
+        if blocked:
+            ordered = (*ordered, "verification_blocker")
         verification_safe = (
-            categories == {Risk.NON_MUTATING.value}
-            and not any(
-                finding.code in unsafe_codes
-                for finding in accumulator.findings
-            )
+            not blocked and categories == {Risk.NON_MUTATING.value}
         )
         if verification and not verification_safe:
             accumulator.findings.append(
@@ -302,6 +549,15 @@ class CommandAnalyzer:
         stack: tuple[tuple[str, str], ...],
         accumulator: _Accumulator,
     ) -> None:
+        if accumulator.walk_count >= _MAX_ALIAS_EXPANSIONS:
+            self._add_blocker(
+                accumulator,
+                "EXPANSION_LIMIT",
+                f"alias expansion exceeded {_MAX_ALIAS_EXPANSIONS} commands; "
+                "refusing to analyze further",
+            )
+            return
+        accumulator.walk_count += 1
         composition = _SHELL_COMPOSITION.search(command)
         if composition:
             accumulator.findings.append(
@@ -418,10 +674,11 @@ class CommandAnalyzer:
                     tokens[alias_index + 1 :],
                     True,
                 )
-            key = ("composer", subcommand)
-            return key, tokens[index + 1 :], (
-                key in self._scripts or subcommand not in _COMPOSER_BUILTINS
-            )
+            if subcommand in _COMPOSER_BUILTINS:
+                # Composer always runs the builtin for a direct invocation;
+                # name-colliding scripts are reachable only via run-script.
+                return None
+            return ("composer", subcommand), tokens[index + 1 :], True
 
         if first in {"npm", "pnpm", "yarn", "bun"} and len(tokens) >= 2:
             index = 1
@@ -447,22 +704,37 @@ class CommandAnalyzer:
             if subcommand in {"test", "start", "stop", "restart"}:
                 return ("package", subcommand), tokens[index + 1 :], True
             if first in {"pnpm", "yarn", "bun"}:
-                key = ("package", subcommand)
-                if key in self._scripts:
-                    return key, tokens[index + 1 :], True
+                if subcommand in _NODE_PACKAGE_BUILTINS:
+                    return None
+                # Bare invocations resolve package.json scripts; unknown
+                # scripts fail closed as UNKNOWN_ALIAS like `npm run`.
+                return ("package", subcommand), tokens[index + 1 :], True
         return None
 
     def _classify_leaf(
         self, tokens: list[str], command: str, accumulator: _Accumulator
     ) -> None:
         working = list(tokens)
-        while working and _ENV_ASSIGNMENT.match(working[0]):
+        while working:
+            if _ENV_ASSIGNMENT.match(working[0]):
+                working.pop(0)
+                continue
+            wrapper = Path(working[0]).name.lower()
+            if wrapper not in _WRAPPER_VALUE_FLAGS:
+                break
+            if wrapper == "sudo":
+                self._add_blocker(
+                    accumulator,
+                    "SUDO_EXECUTION",
+                    f"{command!r} escalates privileges with sudo",
+                )
+            value_flags = _WRAPPER_VALUE_FLAGS[wrapper]
             working.pop(0)
-        if working and working[0] == "env":
-            working.pop(0)
-            while working and (
-                working[0].startswith("-") or _ENV_ASSIGNMENT.match(working[0])
-            ):
+            while working and working[0].startswith("-"):
+                flag = working.pop(0)
+                if flag in value_flags and working:
+                    working.pop(0)
+            if wrapper == "timeout" and working:
                 working.pop(0)
         if working and working[0] == "@php":
             working[0] = "php"
@@ -477,21 +749,73 @@ class CommandAnalyzer:
                 )
             )
             return
+        if working[0].startswith("$"):
+            self._add_blocker(
+                accumulator,
+                "COMMAND_INDIRECTION",
+                f"{command!r} resolves its executable from a shell variable",
+            )
+            return
 
         executable = Path(working[0]).name.lower()
-        lowered = [token.lower() for token in working[1:]]
-        token_set = set(lowered)
-
-        if executable in {"bash", "dash", "fish", "sh", "zsh"} and (
-            "-c" in token_set or "--command" in token_set
-        ):
-            accumulator.findings.append(
-                Finding(
-                    "SHELL_INTERPRETER",
-                    "verification_blocker",
-                    f"{command!r} delegates interpretation to a shell",
-                )
+        if executable == "xargs":
+            self._add_blocker(
+                accumulator,
+                "COMMAND_INDIRECTION",
+                f"{command!r} builds its final command through xargs",
             )
+            return
+        arguments = working[1:]
+        lowered = [token.lower() for token in arguments]
+        token_set = set(arguments)
+
+        if executable not in _KNOWN_EXECUTABLES:
+            self._add_blocker(
+                accumulator,
+                "UNKNOWN_EXECUTABLE",
+                f"executable {executable!r} is not a known read-only tool",
+            )
+
+        if executable in _GENERAL_INTERPRETERS and self._classify_interpreter(
+            executable, arguments, command, accumulator
+        ):
+            return
+
+        if executable in _SHELL_INTERPRETERS:
+            delegates = "--command" in token_set or any(
+                "c" in flag
+                for flag in arguments
+                if _SHORT_OPTION_CLUSTER.fullmatch(flag)
+            )
+            script_argument = next(
+                (token for token in arguments if not token.startswith("-")), ""
+            )
+            if delegates:
+                accumulator.findings.append(
+                    Finding(
+                        "SHELL_INTERPRETER",
+                        "verification_blocker",
+                        f"{command!r} delegates interpretation to a shell",
+                    )
+                )
+            elif script_argument:
+                accumulator.findings.append(
+                    Finding(
+                        "SHELL_INTERPRETER",
+                        "verification_blocker",
+                        f"{command!r} runs unanalyzed shell script "
+                        f"{script_argument!r}",
+                    )
+                )
+            elif not token_set & _SHELL_REPORT_FLAGS:
+                accumulator.findings.append(
+                    Finding(
+                        "SHELL_INTERPRETER",
+                        "verification_blocker",
+                        f"{command!r} starts an interactive shell reading "
+                        "commands from stdin",
+                    )
+                )
 
         if token_set & _MUTATING_FLAGS:
             self._add(
@@ -501,15 +825,15 @@ class CommandAnalyzer:
                 f"{command!r} uses a write/fix flag",
             )
 
-        formatter = executable in {
-            "pint",
-            "php-cs-fixer",
-            "prettier",
-            "black",
-            "ruff",
-            "gofmt",
-        }
-        if formatter and not token_set.intersection(_SAFE_FORMAT_FLAGS):
+        first_action = next(
+            (token for token in lowered if not token.startswith("-")), ""
+        )
+        formatter = executable in _FORMATTER_EXECUTABLES
+        if (
+            formatter
+            and first_action != "check"
+            and not token_set.intersection(_SAFE_FORMAT_FLAGS)
+        ):
             if executable != "prettier" or "--write" in token_set:
                 self._add(
                     accumulator,
@@ -520,7 +844,15 @@ class CommandAnalyzer:
                 )
 
         if executable == "git" and lowered:
-            action = lowered[0]
+            index = 0
+            while index < len(arguments) and arguments[index].startswith("-"):
+                if arguments[index] in _GIT_VALUE_OPTIONS:
+                    index += 2
+                else:
+                    index += 1
+            action = (
+                arguments[index].lower() if index < len(arguments) else ""
+            )
             if action in {"reset", "clean"}:
                 self._add(
                     accumulator,
@@ -554,13 +886,21 @@ class CommandAnalyzer:
                 )
 
         action = lowered[0] if lowered else ""
-        artisan_action = (
-            lowered[1]
-            if executable == "php"
+        console_action = ""
+        if (
+            executable == "php"
             and len(lowered) >= 2
-            and Path(lowered[0]).name == "artisan"
-            else ""
-        )
+            and Path(lowered[0]).name in {"artisan", "console"}
+        ):
+            console_action = lowered[1]
+        elif executable in {"artisan", "console"} and lowered:
+            console_action = lowered[0]
+        elif (
+            executable == "symfony"
+            and len(lowered) >= 2
+            and lowered[0] == "console"
+        ):
+            console_action = lowered[1]
         database_actions = {
             "db:wipe",
             "db:seed",
@@ -585,18 +925,18 @@ class CommandAnalyzer:
                 and action != "migrations:status"
             )
         )
-        artisan_database_action = (
-            artisan_action in database_actions
+        console_database_action = (
+            any(term in console_action for term in database_actions)
             or (
-                "migrat" in artisan_action
-                and not artisan_action.endswith(":status")
+                "migrat" in console_action
+                and not console_action.endswith(":status")
             )
         )
         database_or_deploy = (
             executable in {"deploy", "cap", "deployer"}
             or database_action
-            or artisan_database_action
-            or artisan_action in {"deploy", "release", "rollback"}
+            or console_database_action
+            or console_action in {"deploy", "release", "rollback"}
             or action in provider_mutations.get(executable, set())
             or (executable in {"mysql", "psql"} and bool(lowered))
         )
@@ -627,50 +967,79 @@ class CommandAnalyzer:
             "akeneo",
         )
         provider_actions = ("sync", "send", "publish", "upload", "download")
-        if artisan_action and any(
-            term in artisan_action for term in provider_terms
-        ) and any(action in artisan_action for action in provider_actions):
+        if console_action and any(
+            term in console_action for term in provider_terms
+        ) and any(action in console_action for action in provider_actions):
             self._add(
                 accumulator,
                 "PROVIDER_OPERATION",
                 Risk.EXTERNAL_PROVIDER_NETWORK,
-                f"artisan action {artisan_action!r} can invoke a provider",
+                f"console action {console_action!r} can invoke a provider",
             )
 
-        if executable in _PACKAGE_MANAGERS and lowered:
-            action = lowered[0]
-            if action in {
-                "install",
-                "update",
-                "require",
-                "remove",
-                "add",
-                "publish",
-                "create",
-                "create-project",
-                "self-update",
-            }:
+        if executable in _PACKAGE_MANAGERS:
+            positional = [
+                token for token in lowered if not token.startswith("-")
+            ]
+            pm_action = positional[0] if positional else ""
+            if pm_action == "global" and len(positional) >= 2:
+                pm_action = positional[1]
+            dependency_actions = set(_DEPENDENCY_ACTIONS)
+            execute_actions = set()
+            if executable != "composer":
+                dependency_actions |= _NODE_DEPENDENCY_SHORTHANDS
+                execute_actions = _NODE_EXECUTE_ACTIONS
+            if pm_action in dependency_actions:
                 self._add(
                     accumulator,
                     "DEPENDENCY_WRITE",
                     Risk.WORKSPACE_MUTATION,
-                    f"{executable} {action} can change dependencies or generated files",
+                    f"{executable} {pm_action} can change dependencies "
+                    "or generated files",
                 )
                 self._add(
                     accumulator,
                     "DEPENDENCY_NETWORK",
                     Risk.EXTERNAL_PROVIDER_NETWORK,
-                    f"{executable} {action} can access a package registry",
+                    f"{executable} {pm_action} can access a package registry",
+                )
+            if pm_action in execute_actions:
+                self._add(
+                    accumulator,
+                    "DEPENDENCY_EXECUTE",
+                    Risk.WORKSPACE_MUTATION,
+                    f"{executable} {pm_action} can download and execute "
+                    "package code",
+                )
+                self._add(
+                    accumulator,
+                    "DEPENDENCY_NETWORK",
+                    Risk.EXTERNAL_PROVIDER_NETWORK,
+                    f"{executable} {pm_action} can access a package registry",
                 )
 
-        if executable in {"rm", "rmdir", "shred", "unlink"}:
+        if executable in _PACKAGE_RUNNERS:
+            self._add(
+                accumulator,
+                "DEPENDENCY_EXECUTE",
+                Risk.WORKSPACE_MUTATION,
+                f"{executable} can download and execute package code",
+            )
+            self._add(
+                accumulator,
+                "DEPENDENCY_NETWORK",
+                Risk.EXTERNAL_PROVIDER_NETWORK,
+                f"{executable} can access a package registry",
+            )
+
+        if executable in _DESTRUCTIVE_FILESYSTEM_COMMANDS:
             self._add(
                 accumulator,
                 "DESTRUCTIVE_FILESYSTEM",
                 Risk.DESTRUCTIVE_DATABASE_DEPLOY,
                 f"{executable} removes workspace data",
             )
-        elif executable in {"cp", "install", "ln", "mkdir", "mv", "touch"}:
+        elif executable in _FILESYSTEM_MUTATION_COMMANDS:
             self._add(
                 accumulator,
                 "FILESYSTEM_MUTATION",
@@ -678,11 +1047,92 @@ class CommandAnalyzer:
                 f"{executable} can write workspace data",
             )
 
+    def _classify_interpreter(
+        self,
+        executable: str,
+        arguments: list[str],
+        command: str,
+        accumulator: _Accumulator,
+    ) -> bool:
+        """Classify a general-purpose interpreter invocation.
+
+        Returns True when the invocation was fully handled here (blocked,
+        or re-dispatched to classify the known tool it runs); False when
+        the caller should continue classifying the interpreter itself
+        (report and lint modes such as ``php -v`` or ``php -l``).
+        """
+        if executable == "php" and _PHP_LINT_FLAGS.intersection(arguments):
+            return False
+        inline_flags = _INTERPRETER_INLINE_FLAGS[executable]
+        inline_letters = _INTERPRETER_INLINE_LETTERS[executable]
+        value_flags = _INTERPRETER_VALUE_FLAGS[executable]
+        index = 0
+        while index < len(arguments):
+            token = arguments[index]
+            if not token.startswith("-"):
+                if Path(token).name.lower() in _KNOWN_EXECUTABLES:
+                    self._classify_leaf(
+                        arguments[index:], command, accumulator
+                    )
+                else:
+                    self._add_blocker(
+                        accumulator,
+                        "INTERPRETER_EXECUTION",
+                        f"{command!r} runs unanalyzed {executable} "
+                        f"script {token!r}",
+                    )
+                return True
+            base = token.split("=", 1)[0]
+            if base in inline_flags or (
+                _SHORT_OPTION_CLUSTER.fullmatch(token)
+                and inline_letters.intersection(token[1:])
+            ):
+                self._add_blocker(
+                    accumulator,
+                    "INTERPRETER_EXECUTION",
+                    f"{command!r} passes code to {executable} "
+                    f"via {token!r}",
+                )
+                return True
+            if executable in {"python", "python3"} and base == "-m":
+                if index + 1 < len(arguments):
+                    self._classify_leaf(
+                        arguments[index + 1 :], command, accumulator
+                    )
+                else:
+                    self._add_blocker(
+                        accumulator,
+                        "INTERPRETER_EXECUTION",
+                        f"{command!r} names no module to run",
+                    )
+                return True
+            if base in value_flags and "=" not in token:
+                index += 2
+                continue
+            index += 1
+        if not set(arguments) & _INTERPRETER_REPORT_FLAGS[executable]:
+            self._add_blocker(
+                accumulator,
+                "INTERPRETER_EXECUTION",
+                f"{command!r} starts an interactive {executable} session "
+                "reading code from stdin",
+            )
+            return True
+        return False
+
     @staticmethod
     def _add(
         accumulator: _Accumulator, code: str, risk: Risk, message: str
     ) -> None:
         finding = Finding(code, risk.value, message)
+        if finding not in accumulator.findings:
+            accumulator.findings.append(finding)
+
+    @staticmethod
+    def _add_blocker(
+        accumulator: _Accumulator, code: str, message: str
+    ) -> None:
+        finding = Finding(code, "verification_blocker", message)
         if finding not in accumulator.findings:
             accumulator.findings.append(finding)
 

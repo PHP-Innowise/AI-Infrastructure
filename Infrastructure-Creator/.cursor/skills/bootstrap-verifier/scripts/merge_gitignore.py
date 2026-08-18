@@ -157,6 +157,23 @@ def _outside_entries(lines: Sequence[str], span: tuple[int, int] | None) -> set[
     return entries
 
 
+def _block_order(requirements: Sequence[str]) -> list[str]:
+    """Emit positive patterns before '!' negations so re-includes win.
+
+    Git evaluates .gitignore with last-match-wins semantics: a negation is
+    inert unless it appears after the positive pattern it re-includes.
+    """
+    positives = sorted(
+        entry for entry in requirements if not entry.startswith("!")
+    )
+    negations = sorted(entry for entry in requirements if entry.startswith("!"))
+    return positives + negations
+
+
+def _opposite(entry: str) -> str:
+    return entry[1:] if entry.startswith("!") else "!" + entry
+
+
 def _block(requirements: Sequence[str], newline: str) -> str:
     values = [BEGIN_MARKER, *requirements, END_MARKER]
     return newline.join(values) + newline
@@ -191,7 +208,17 @@ def merge_gitignore(
     lines = text.splitlines(keepends=True)
     span = _managed_span(lines)
     outside = _outside_entries(lines, span)
-    managed_requirements = [entry for entry in normalized if entry not in outside]
+    managed_requirements = _block_order(
+        [entry for entry in normalized if entry not in outside]
+    )
+    conflicts = sorted(
+        entry for entry in managed_requirements if _opposite(entry) in outside
+    )
+    if conflicts:
+        raise GitignoreMergeError(
+            "requirements contradict team-owned entries; an explicit decision "
+            "is required: " + ", ".join(conflicts)
+        )
 
     if span is None and not managed_requirements:
         proposal_text = text

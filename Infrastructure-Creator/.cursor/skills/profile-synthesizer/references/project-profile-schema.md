@@ -67,7 +67,7 @@ Each `skills[]` entry is one complete, independently actionable contract:
   "name": "testing",
   "category": "universal",
   "kind": "project-adapted",
-  "phase": "execution",
+  "phase": "implementation",
   "capability": {
     "mode": "workspace-write",
     "summary": "May add or update tests within the declared write paths"
@@ -212,6 +212,10 @@ integration safety, path contracts, evidence anchors, routing cases, output,
 failure handling, siblings, and writes (use an empty array only when
 `capability.mode` is `read-only`). `kind` distinguishes `runtime-fixed` from
 `project-adapted`, `integration`, `specialty`, and `domain-review`.
+`phase` uses the fixed flow vocabulary - `understanding`, `planning`,
+`implementation`, `verification`, or `finalization` - because the canonical
+flow roster copies each skill's phase verbatim and flow stages accept only
+that vocabulary.
 `fixed_blocks`, when used, contains explicit `id`, `version`, and exact
 `content`; only that exact block is exempt from duplication checks, and it never
 exempts the skill-specific procedure.
@@ -315,14 +319,14 @@ shape:
 {
   "critical_invariants": [
     {
-      "id": "content-job.failure-terminal",
-      "statement": "An integration exception leaves the content job FAILED and never FINISHED",
+      "id": "invoice.paid-immutable",
+      "statement": "A paid invoice is immutable except through the refund workflow",
       "evidence_ids": ["EV-0042"],
-      "skill_names": ["contentjobs-lifecycle-review"],
+      "skill_names": ["billing-rules-review"],
       "assertions": [
         {
-          "skill_name": "contentjobs-lifecycle-review",
-          "verification_id": "assert-failed-never-finished"
+          "skill_name": "billing-rules-review",
+          "verification_id": "assert-paid-invoice-immutable"
         }
       ]
     }

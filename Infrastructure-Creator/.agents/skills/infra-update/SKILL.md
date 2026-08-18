@@ -93,7 +93,10 @@ Allocate a new `tasks/TASK-{N}/` for the update run. Staging output goes to `tas
    invalid. An unchanged satisfied file becomes a watch-only target source; an
    append requires explicit approval and staged merged bytes. Never offer
    `keep` while a requirement is missing, and never scan unrelated team
-   comments as generated placeholders.
+   comments as generated placeholders. The helper emits positive patterns
+   before `!` negations and fails a requirement that exactly contradicts a
+   team entry (`x` vs `!x`); such a conflict requires an explicit human
+   decision, never a silent append.
    Persist `decision: kept`/`merged` with the legacy hash/task fields and
    structured `origin: shared`, strategy, proposal/resolved hashes, and sorted
    exact requirements. Unknown additive metadata is preserved; contradictory
@@ -117,12 +120,17 @@ Allocate a new `tasks/TASK-{N}/` for the update run. Staging output goes to `tas
    publication, optional removal, and optional watch plans, immediately recheck the baseline,
    then use `publish_staging.py publish`. It copies the refreshed manifest last,
    removes only approved paths, preserves every unplanned team file, and keeps
-   a rollback journal. Re-stamp `AGENTS.md` only when manifest-owned or
+   a rollback journal. Before writing anything it refuses publication paths
+   the staged manifest does not list, any overwrite of live runtime state
+   (non-ownable paths may only seed absences), and removals the target
+   manifest does not own. Re-stamp `AGENTS.md` only when manifest-owned or
    explicitly accepted as new.
 10. **Verify.** Run the complete bootstrap gate, including semantic skill and
    routing validation against the refreshed plan, on the updated target. A
    failure MUST invoke `publish_staging.py rollback`; keep the journal until
-   PASS.
+   PASS. Rollback removes directory chains the publication created and never
+   clobbers a file a team member edited after publication - such a file is
+   kept as-is and reported as a conflict to resolve manually.
 11. **Report.** Write `tasks/TASK-{N}/infra-update-report.md`: version
     transition, classifications/decisions, publication/removal plan counts,
     rollback status, and verification result.

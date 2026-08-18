@@ -7,6 +7,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -29,6 +30,19 @@ SHARED_SAFETY = (
     "Never expose credentials or customer payloads. Stop and report sanitized "
     "context when required evidence contains secrets."
 )
+# A multi-line evidence source, so an anchor can be pointed inside and outside
+# the real bounds of the file it cites.
+FIREBASE_SOURCE = """<?php
+// Firebase initialization, messaging client, and runtime boundary.
+
+final class FirebaseMessagingClient
+{
+    public function publishReminder(string $token): void
+    {
+        $this->transport->send($token);
+    }
+}
+"""
 
 
 def skill_markdown(
@@ -157,6 +171,15 @@ class SkillQualityFixture(unittest.TestCase):
         path = self.target / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
+
+    def refingerprint(self, evidence_id: str) -> None:
+        """Re-pin an evidence fingerprint after its source file was rewritten."""
+        entry = next(
+            item for item in self.plan["evidence"] if item["id"] == evidence_id
+        )
+        entry["fingerprint"] = "sha256:" + hashlib.sha256(
+            (self.target / entry["path"]).read_bytes()
+        ).hexdigest()
 
     def base_plan(self) -> dict:
         return {
@@ -702,6 +725,9 @@ class SkillQualityTest(SkillQualityFixture):
                 "irrelevant-evidence-reuse",
                 "missing-evidence",
                 "unsupported-evidence-claim",
+                "claim-language-lexicon-only",
+                "claim-common-lexicon-only",
+                "claim-compound-identifier-calibration",
                 "scope-collision",
                 "ambiguous-routing",
                 "unjustified-inventory-growth",
@@ -718,8 +744,18 @@ class SkillQualityTest(SkillQualityFixture):
                 "critical-invariant-coverage",
                 "claim-traceability",
                 "evidence-anchor",
+                "evidence-anchor-resolution",
+                "exclusive-ownership-write",
+                "verbatim-boundary",
                 "routing-case-coverage",
                 "flow-contract-shape",
+                "skill-body-command-risk",
+                "skill-body-command-calibration",
+                "vacuous-operational-content",
+                "operational-content-calibration",
+                "noun-substituted-template",
+                "repunctuated-template",
+                "template-reuse-calibration",
             },
         )
 
@@ -835,6 +871,90 @@ class SkillQualityTest(SkillQualityFixture):
         codes = [item.code for item in self.plan_diagnostics()]
         self.assertIn("EVIDENCE_ANCHOR_LOCATION", codes)
         self.assertIn("ROUTING_CASE_COVERAGE", codes)
+
+    def anchor_case(self, anchor: str) -> list[str]:
+        """Point the first skill's only anchor at ``anchor`` and re-validate."""
+        self.plan["skills"][0]["evidence_anchors"][0]["anchor"] = anchor
+        self.rewrite()
+        return [item.code for item in self.plan_diagnostics()]
+
+    def test_evidence_anchor_line_range_must_resolve_inside_the_cited_file(self) -> None:
+        """An anchor is bound to the file it cites, exactly like line_range.
+
+        Before this gate existed the anchor was checked for shape only, so
+        ``config/firebase.php:L7400-L7480`` over a nine-line file passed with a
+        perfectly valid prefix and a perfectly valid format.
+        """
+        self.use_schema_1_2()
+        self.write_target("config/firebase.php", FIREBASE_SOURCE)
+        self.refingerprint("firebase-runtime")
+        codes = self.anchor_case("config/firebase.php:L7400-L7480")
+        self.assertIn("EVIDENCE_ANCHOR_RANGE", codes)
+        # The old shape checks were already satisfied; that was the whole miss.
+        self.assertNotIn("EVIDENCE_ANCHOR_FORMAT", codes)
+        self.assertNotIn("EVIDENCE_ANCHOR_LOCATION", codes)
+        # A single line one past the end is caught for the same reason.
+        self.assertIn(
+            "EVIDENCE_ANCHOR_RANGE", self.anchor_case("config/firebase.php:L11")
+        )
+        # An inverted range bounds nothing either.
+        self.assertIn(
+            "EVIDENCE_ANCHOR_RANGE", self.anchor_case("config/firebase.php:L8-L3")
+        )
+        # Negative control: ranges that really are inside the file resolve.
+        for good in (
+            "config/firebase.php:L1",
+            "config/firebase.php:L2-L10",
+            "config/firebase.php:L4-6",
+        ):
+            self.assertNotIn("EVIDENCE_ANCHOR_RANGE", self.anchor_case(good), good)
+
+    def test_evidence_anchor_symbol_must_occur_in_the_cited_source(self) -> None:
+        """``symbol:`` anchors are resolved by text search, not trusted."""
+        self.use_schema_1_2()
+        self.write_target("config/firebase.php", FIREBASE_SOURCE)
+        self.refingerprint("firebase-runtime")
+        codes = self.anchor_case(
+            "config/firebase.php:symbol:refundOrphanedSettlement"
+        )
+        self.assertIn("EVIDENCE_ANCHOR_SYMBOL_ABSENT", codes)
+        self.assertNotIn("EVIDENCE_ANCHOR_FORMAT", codes)
+        # A symbol that only occurs as a fragment of a longer identifier is
+        # still absent: `publish` is not `publishReminder`.
+        self.assertIn(
+            "EVIDENCE_ANCHOR_SYMBOL_ABSENT",
+            self.anchor_case("config/firebase.php:symbol:publish"),
+        )
+        # Negative control: present symbols resolve, including qualified forms
+        # whose last segment is what actually lives in the file, and casing
+        # that differs from the source.
+        for good in (
+            "config/firebase.php:symbol:publishReminder",
+            "config/firebase.php:symbol:FirebaseMessagingClient",
+            "config/firebase.php:symbol:App.Firebase.publishReminder",
+            "config/firebase.php:symbol:FirebaseMessagingClient::publishReminder",
+            "config/firebase.php:symbol:publishreminder",
+        ):
+            self.assertNotIn(
+                "EVIDENCE_ANCHOR_SYMBOL_ABSENT", self.anchor_case(good), good
+            )
+
+    def test_anchor_resolution_reports_unreadable_sources_without_crashing(self) -> None:
+        """A source that cannot be read yields a diagnostic, never a traceback."""
+        for anchor, prefix in (
+            ("config/vanished.php:L1-L4", "config/vanished.php"),
+            ("reports:L1", "reports"),
+            ("config/vanished.php:symbol:missingHandler", "config/vanished.php"),
+        ):
+            diagnostics: list = []
+            validator._resolve_evidence_anchor(
+                "firebase-services", anchor, prefix, self.target, diagnostics
+            )
+            self.assertEqual(
+                [item.code for item in diagnostics],
+                ["EVIDENCE_ANCHOR_UNRESOLVABLE"],
+                anchor,
+            )
 
     def test_schema_1_2_enforces_flow_contract_shape_and_coverage(self) -> None:
         self.use_schema_1_2()
@@ -976,6 +1096,84 @@ Be careful.
         self.rewrite()
         self.assertIn("EVIDENCE_CLAIM_UNSUPPORTED", self.codes())
 
+    def claim_case(self, claim: str) -> list:
+        """Attach ``claim`` to the first evidence entry over a real PHP file.
+
+        The claim is substituted everywhere the selection gate echoes it, so
+        the plan stays internally consistent - the only lie left is the
+        relationship between the claim and the code it cites, which is exactly
+        what a fabricating agent produces.
+        """
+        self.write_target("config/firebase.php", FIREBASE_SOURCE)
+        self.refingerprint("firebase-runtime")
+        self.plan["evidence"][0]["supported_claims"] = [claim]
+        condition = self.plan["skills"][0]["selection_gate"]["conditions"][0]
+        condition["requirement"] = claim
+        condition["explanation"] = f"config/firebase.php confirms: {claim}"
+        self.rewrite()
+        return [
+            item
+            for item in validator.validate(
+                self.skills, self.plan_path, self.target, self.registry_path
+            )
+            if item.code.startswith("EVIDENCE_CLAIM")
+        ]
+
+    def test_claim_made_only_of_php_language_vocabulary_is_not_grounded(self) -> None:
+        """Bag-of-words overlap is trivial to satisfy with PHP keywords.
+
+        'class' and 'function' occur in roughly three quarters of all PHP
+        files, so two of them were enough to ground an invented claim against
+        any cited source.  This claim has four such overlaps and still says
+        nothing about the file it cites, so the distinctive-vocabulary tier
+        rejects it.
+        """
+        claim = (
+            "The public class exposes a private function that returns a string "
+            "value from the configuration array"
+        )
+        diagnostics = self.claim_case(claim)
+        self.assertEqual(
+            [("error", "EVIDENCE_CLAIM_UNSUPPORTED")],
+            [(item.severity, item.code) for item in diagnostics],
+        )
+        # The old bag-of-words test was satisfied - that was the whole miss.
+        claim_tokens = validator._meaningful_tokens(claim)
+        cited_tokens = validator._meaningful_tokens(FIREBASE_SOURCE)
+        self.assertGreaterEqual(len(claim_tokens & cited_tokens), 2)
+
+    def test_claim_supported_only_by_common_lexicon_is_warned_about(self) -> None:
+        """One tier down: the claim does share a word, but only a boilerplate one.
+
+        'final' is not a PHP keyword the language tier knows, so this claim
+        clears the error tier; nothing project-specific in it ('whose', 'each',
+        'payload') appears in the cited range.  Measured on real docblock/code
+        pairs this tier costs 2.3-3.6% false positives, which is why it warns
+        instead of failing the run.
+        """
+        diagnostics = self.claim_case(
+            "The final class is a service handler whose method returns the "
+            "result value for each request option payload"
+        )
+        self.assertEqual(
+            [("warning", "EVIDENCE_CLAIM_GENERIC_SUPPORT")],
+            [(item.severity, item.code) for item in diagnostics],
+        )
+
+    def test_claim_grounded_through_a_compound_identifier_is_accepted(self) -> None:
+        """Honest prose names what the code spells as one identifier.
+
+        The cited file never writes 'reminder' on its own - only
+        ``publishReminder``.  Without splitting compound identifiers this
+        honest claim would score zero distinctive overlap and be rejected, and
+        a false rejection here blocks a correct plan.
+        """
+        self.assertNotIn("reminder", validator._meaningful_tokens(FIREBASE_SOURCE))
+        self.assertIn("reminder", validator._cited_vocabulary(FIREBASE_SOURCE))
+        self.assertEqual(
+            [], self.claim_case("The class publishes each reminder string it receives")
+        )
+
     def test_exact_schema_profile_and_evidence_bounds_are_enforced(self) -> None:
         self.plan["schema_version"] = 1
         self.plan["unexpected"] = True
@@ -1078,6 +1276,115 @@ Be careful.
         codes = [item.code for item in self.plan_diagnostics()]
         self.assertIn("OWNERSHIP_SHARED_WRITE_CONFLICT", codes)
         self.assertIn("WRITE_SURFACE_COLLISION", codes)
+
+    def write_into_review_source(self) -> str:
+        """Give the writer skill a write into the read-only neighbour's file."""
+        writer, reviewer = self.plan["skills"]
+        owned = reviewer["source_paths"][0]
+        writer["writes"].append(owned)
+        writer["path_contracts"].append(
+            {
+                "path": owned,
+                "access": "write",
+                "classification": "required-existing",
+                "evidence_ids": list(writer["evidence_ids"]),
+            }
+        )
+        return owned
+
+    def test_exclusive_ownership_rejects_a_foreign_writer(self) -> None:
+        """Exclusive ownership is exclusive against writes, not only writes.
+
+        WRITE_SURFACE_COLLISION compares ``writes`` with ``writes``, so a
+        read-only owner - whose ``writes`` is empty by contract - used to be
+        writable by any neighbour that simply declared the owned file.
+        """
+        self.use_schema_1_2()
+        owned = self.write_into_review_source()
+        self.rewrite()
+        codes = [item.code for item in self.plan_diagnostics()]
+        self.assertIn("OWNERSHIP_EXCLUSIVE_WRITE_CONFLICT", codes)
+        # The writes-versus-writes comparison is still blind here: that is
+        # precisely why the ownership guard has to exist.
+        self.assertNotIn("WRITE_SURFACE_COLLISION", codes)
+        self.assertIn(
+            "OWNERSHIP_EXCLUSIVE_WRITE_CONFLICT",
+            [item.code for item in self.plan_diagnostics()],
+        )
+        conflicts = [
+            item.message
+            for item in self.plan_diagnostics()
+            if item.code == "OWNERSHIP_EXCLUSIVE_WRITE_CONFLICT"
+        ]
+        self.assertEqual(len(conflicts), 1)
+        self.assertIn(owned, conflicts[0])
+
+    def test_exclusive_write_guard_respects_owners_and_ownership_mode(self) -> None:
+        """Negative control: legitimate write surfaces stay clean."""
+        self.use_schema_1_2()
+        # An owner writing its own exclusive paths is the normal case.
+        self.assertNotIn(
+            "OWNERSHIP_EXCLUSIVE_WRITE_CONFLICT",
+            [item.code for item in self.plan_diagnostics()],
+        )
+        # A non-exclusive zone is governed by the shared/composed rules, so the
+        # exclusive guard must not fire on it.
+        self.plan["skills"][1]["ownership"][0]["mode"] = "shared"
+        self.write_into_review_source()
+        self.rewrite()
+        self.assertNotIn(
+            "OWNERSHIP_EXCLUSIVE_WRITE_CONFLICT",
+            [item.code for item in self.plan_diagnostics()],
+        )
+
+    def test_declared_precedence_cannot_resolve_a_verbatim_boundary(self) -> None:
+        """Precedence divides a partial overlap; it cannot divide identity.
+
+        The reciprocal primary/defer sibling pair that schema 1.2 builds by
+        default used to suppress SCOPE_COLLISION and ROUTING_AMBIGUITY even
+        when the two contracts were literally the same sentence.
+        """
+        self.use_schema_1_2()
+        first, second = self.plan["skills"]
+        second["owned_scope"][0] = first["owned_scope"][0]
+        second["ownership"][0]["description"] = first["ownership"][0]["description"]
+        shared_trigger = first["triggers"]["positive"][0]
+        second["triggers"]["positive"] = [shared_trigger]
+        second["routing_cases"][0]["prompt"] = shared_trigger
+        self.rewrite()
+        diagnostics = self.plan_diagnostics()
+        codes = [item.code for item in diagnostics]
+        fields = sorted(
+            item.message.split("declare the same ")[1].split(" verbatim")[0]
+            for item in diagnostics
+            if item.code == "BOUNDARY_NOT_SEPARATING"
+        )
+        self.assertEqual(
+            fields,
+            ["owned_scope", "ownership.description", "triggers.positive"],
+        )
+        # The declared precedence still suppresses the older heuristics, which
+        # is exactly why the verbatim check must be independent of it.
+        self.assertNotIn("SCOPE_COLLISION", codes)
+        self.assertNotIn("ROUTING_AMBIGUITY", codes)
+
+    def test_partial_overlap_under_declared_precedence_stays_legitimate(self) -> None:
+        """Negative control: a real boundary with precedence is not flagged."""
+        self.use_schema_1_2()
+        first, second = self.plan["skills"]
+        # Nested, not identical: the pair still says which side owns what.
+        second["owned_scope"][0] = first["owned_scope"][0] + "/replay backlog"
+        second["ownership"][0]["description"] = (
+            first["ownership"][0]["description"] + " replay backlog"
+        )
+        second["triggers"]["positive"] = [
+            first["triggers"]["positive"][0] + " replay backlog"
+        ]
+        second["routing_cases"][0]["prompt"] = second["triggers"]["positive"][0]
+        self.rewrite()
+        codes = [item.code for item in self.plan_diagnostics()]
+        self.assertNotIn("BOUNDARY_NOT_SEPARATING", codes)
+        self.assertNotIn("SCOPE_COLLISION", codes)
 
     def test_schema_1_1_composed_ownership_requires_exactly_one_writer(self) -> None:
         self.use_schema_1_1()
@@ -1332,6 +1639,1517 @@ Be careful.
         codes = self.codes()
         self.assertIn("SKILL_PLAN_INCOMPLETE", codes)
         self.assertIn("EVIDENCE_ID_DUPLICATE", codes)
+
+    def test_triggers_as_list_is_diagnosed_not_crashed(self) -> None:
+        self.plan["skills"][0]["triggers"] = ["change Firebase messaging"]
+        self.rewrite()
+        self.assertIn(
+            "SKILL_TRIGGERS_INVALID",
+            [item.code for item in self.plan_diagnostics()],
+        )
+        self.assertIn("SKILL_TRIGGERS_INVALID", self.codes())
+
+    def test_triggers_null_positive_is_diagnosed_not_crashed(self) -> None:
+        self.plan["skills"][0]["triggers"]["positive"] = None
+        self.rewrite()
+        self.assertIn(
+            "SKILL_TRIGGERS_INVALID",
+            [item.code for item in self.plan_diagnostics()],
+        )
+        self.assertIn("SKILL_TRIGGERS_INVALID", self.codes())
+
+    def test_string_line_range_is_diagnosed_not_crashed(self) -> None:
+        self.plan["evidence"][0]["line_range"] = {"start": "1", "end": "5"}
+        self.rewrite()
+        self.assertIn(
+            "EVIDENCE_LINE_RANGE",
+            [item.code for item in self.plan_diagnostics()],
+        )
+        self.assertIn("EVIDENCE_LINE_RANGE", self.codes())
+
+    def test_schema_1_2_string_source_paths_is_diagnosed_not_crashed(self) -> None:
+        self.use_schema_1_2()
+        self.plan["skills"][0]["source_paths"] = "config/firebase.php"
+        self.rewrite()
+        self.assertIn(
+            "SKILL_PLAN_VALUE",
+            [item.code for item in self.plan_diagnostics()],
+        )
+
+    def test_non_list_nearest_siblings_is_diagnosed_not_crashed(self) -> None:
+        self.plan["skills"][0]["nearest_siblings"] = None
+        self.rewrite()
+        self.assertIn(
+            "SKILL_PLAN_VALUE",
+            [item.code for item in self.plan_diagnostics()],
+        )
+        self.plan = self.base_plan()
+        self.use_schema_1_1()
+        self.plan["skills"][0]["nearest_siblings"] = None
+        self.rewrite()
+        self.assertIn(
+            "SKILL_PLAN_VALUE",
+            [item.code for item in self.plan_diagnostics()],
+        )
+
+    def test_agents_dir_json_cli_reports_non_dict_skill_entry(self) -> None:
+        agents = self.write_agent_wrappers()
+        self.plan["skills"].append("rogue-entry")
+        self.rewrite()
+        command = [
+            sys.executable,
+            str(VALIDATOR_PATH),
+            "--skills-dir",
+            str(self.skills),
+            "--plan",
+            str(self.plan_path),
+            "--target",
+            str(self.target),
+            "--registry",
+            str(self.registry_path),
+            "--agents-dir",
+            str(agents),
+            "--json",
+        ]
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 1, result.stderr or result.stdout)
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["valid"])
+        self.assertIn(
+            "SKILL_PLAN_INVALID",
+            [item["code"] for item in payload["diagnostics"]],
+        )
+
+    def test_profile_normalization_only_rewrites_profile_identifiers(self) -> None:
+        normalize = validator._normalize_line
+        self.assertEqual(
+            normalize("review the profile before deploying"),
+            "review the profile before deploying",
+        )
+        summary = normalize(
+            "compare the code against the approved project profile summary"
+        )
+        budget = normalize(
+            "compare the code against the approved project profile budget"
+        )
+        self.assertNotEqual(summary, budget)
+        self.assertEqual(
+            summary,
+            "compare the code against the approved project profile summary",
+        )
+        self.assertEqual(
+            normalize("check the profiler output"), "check the profiler output"
+        )
+        self.assertEqual(
+            normalize("read profile-2024-alpha now"), "read profile-id now"
+        )
+        self.assertEqual(
+            normalize("apply PROFILE_A settings"), "apply profile-id settings"
+        )
+
+    def test_shared_positive_trigger_is_ambiguous_despite_low_set_overlap(self) -> None:
+        first, second = self.plan["skills"]
+        first["triggers"]["positive"] = [
+            "review Doctrine migrations",
+            "check database schema changes",
+        ]
+        second["triggers"]["positive"] = [
+            "review Doctrine migrations",
+            "design entity relationships",
+            "plan messenger transport indexes",
+        ]
+        first["nearest_siblings"][0]["boundary"] = "Adjacent scope differs."
+        second["nearest_siblings"][0]["boundary"] = "Adjacent scope differs."
+        self.rewrite()
+        left_tokens = validator._meaningful_tokens(
+            " ".join(first["triggers"]["positive"])
+        )
+        right_tokens = validator._meaningful_tokens(
+            " ".join(second["triggers"]["positive"])
+        )
+        whole_set_score = len(left_tokens & right_tokens) / len(
+            left_tokens | right_tokens
+        )
+        self.assertLess(whole_set_score, 0.75)
+        self.assertIn(
+            "ROUTING_AMBIGUITY",
+            [item.code for item in self.plan_diagnostics()],
+        )
+
+    def test_distinct_triggers_without_precedence_are_not_ambiguous(self) -> None:
+        first, second = self.plan["skills"]
+        first["nearest_siblings"][0]["boundary"] = "Adjacent scope differs."
+        second["nearest_siblings"][0]["boundary"] = "Adjacent scope differs."
+        self.rewrite()
+        self.assertNotIn(
+            "ROUTING_AMBIGUITY",
+            [item.code for item in self.plan_diagnostics()],
+        )
+
+    def test_shipped_candidate_registry_is_accepted_by_the_gate(self) -> None:
+        registry_payload = json.loads(
+            validator.DEFAULT_REGISTRY.read_text(encoding="utf-8")
+        )
+        diagnostics: list = []
+        candidates = validator._load_registry(
+            validator.DEFAULT_REGISTRY,
+            registry_payload["catalog_version"],
+            diagnostics,
+        )
+        self.assertEqual([item.code for item in diagnostics], [])
+        self.assertEqual(
+            set(candidates),
+            {item["id"] for item in registry_payload["candidates"]},
+        )
+
+    def test_registry_with_unknown_top_level_key_is_rejected(self) -> None:
+        registry = json.loads(self.registry_path.read_text(encoding="utf-8"))
+        registry["unexpected"] = True
+        self.registry_path.write_text(
+            json.dumps(registry, indent=2) + "\n", encoding="utf-8"
+        )
+        self.assertIn(
+            "REGISTRY_INVALID",
+            [item.code for item in self.plan_diagnostics()],
+        )
+
+    def test_regex_metacharacter_skill_name_does_not_crash(self) -> None:
+        old, new = "firebase-services", "firebase-(services"
+        self.plan["skills"][0]["name"] = new
+        self.skill_texts[new] = self.skill_texts.pop(old).replace(old, new)
+        self.rewrite()
+        codes = self.codes()
+        self.assertIn("SKILL_SIBLING_UNKNOWN", codes)
+        agents = self.write_agent_wrappers()
+        diagnostics = validator.validate_agent_routing(
+            agents,
+            self.plan_path,
+            self.target,
+            registry_path=self.registry_path,
+            validate_plan_first=False,
+        )
+        self.assertIsInstance(diagnostics, list)
+
+    def test_disjoint_extension_globs_do_not_collide(self) -> None:
+        self.assertFalse(validator._globs_intersect("docs/*.md", "docs/*.json"))
+        self.assertFalse(
+            validator._globs_intersect("docs/*.md", "docs/CHANGELOG.json")
+        )
+        self.assertFalse(validator._globs_intersect("docs/*.md", "src/*.md"))
+        self.assertTrue(validator._globs_intersect("docs/*.md", "docs/**"))
+        self.assertTrue(validator._globs_intersect("docs/*.md", "docs/README.md"))
+        self.assertTrue(validator._globs_intersect("docs", "docs/*.md"))
+        self.assertTrue(validator._globs_intersect("docs/*", "docs/*.md"))
+        # A bare wildcard-free subdirectory may denote a whole tree
+        # (docs/sub/notes.md is matched by fnmatch's slash-crossing "*"),
+        # so it stays a conservative collision with an ancestor-level glob.
+        self.assertTrue(validator._globs_intersect("docs/*.md", "docs/sub"))
+        self.assertTrue(validator._globs_intersect("docs/sub", "docs/*.md"))
+        self.assertTrue(validator._globs_intersect("docs/sub/", "docs/*.md"))
+        # Disjoint sibling directories still do not collide.
+        self.assertFalse(validator._globs_intersect("docs/sub", "docs/other"))
+        # A wildcard-free name WITH an extension stays a single file, so the
+        # suffix disjointness proof still applies to it.
+        self.assertFalse(
+            validator._globs_intersect("docs/*.md", "docs/sub.json")
+        )
+        self.plan["skills"][0]["writes"] = ["reports/*.md"]
+        self.plan["skills"][1]["writes"] = ["reports/*.json"]
+        self.rewrite()
+        self.assertNotIn(
+            "WRITE_SURFACE_COLLISION",
+            [item.code for item in self.plan_diagnostics()],
+        )
+
+    def test_character_class_globs_stay_conservative(self) -> None:
+        # fnmatch proves "docs/b.txt" matches both patterns, so the suffix
+        # disjointness proof must not fire when a [...] class is in the tail.
+        self.assertTrue(
+            validator._globs_intersect("docs/[ab].txt", "docs/[bc].txt")
+        )
+        self.assertTrue(
+            validator._globs_intersect("docs/[ab].txt", "docs/*.txt")
+        )
+        # A class-bearing tail is suffix-unknown; a class before the last
+        # wildcard still yields a provable literal tail.
+        self.assertIsNone(validator._glob_suffix("docs/[ab].txt"))
+        self.assertIsNone(validator._glob_suffix("docs/*.t[xy]t"))
+        self.assertEqual(validator._glob_suffix("docs/[ab]*.md"), ".md")
+        # Directory-disjoint class patterns still do not collide.
+        self.assertFalse(
+            validator._globs_intersect("src/[ab].txt", "docs/[ab].txt")
+        )
+
+    def test_glob_path_matches_do_not_follow_symlinks_out_of_target(self) -> None:
+        outside = self.base / "outside"
+        outside.mkdir()
+        (outside / "secret.txt").write_text("secret", encoding="utf-8")
+        (self.target / "link").symlink_to(outside)
+        self.assertEqual(validator._path_matches(self.target, "link/*.txt"), [])
+        (self.target / "docs").mkdir()
+        (self.target / "docs" / "a.txt").write_text("a", encoding="utf-8")
+        self.assertEqual(
+            validator._path_matches(self.target, "docs/*.txt"),
+            [self.target / "docs" / "a.txt"],
+        )
+
+    def test_symlinked_skills_dir_is_rejected(self) -> None:
+        link = self.base / "skills-link"
+        link.symlink_to(self.skills)
+        diagnostics = validator.validate(
+            link, self.plan_path, self.target, self.registry_path
+        )
+        self.assertIn(
+            "SKILLS_DIR_UNSAFE", [item.code for item in diagnostics]
+        )
+
+    def test_tokenizer_strips_sentence_punctuation(self) -> None:
+        self.assertEqual(
+            validator._tokens("The project uses config/services.yaml."),
+            ["project", "uses", "config/services.yaml"],
+        )
+        self.assertIn("doctrine", validator._meaningful_tokens("uses Doctrine."))
+        self.assertTrue(
+            validator._contract_matches(
+                ["config/services.yaml"],
+                "The project uses config/services.yaml.",
+            )
+        )
+
+    def test_frontmatter_supports_folded_and_literal_descriptions(self) -> None:
+        fields, body = validator._parse_frontmatter(
+            "---\nname: sample\ndescription: >\n  Use when reviewing\n"
+            "  folded descriptions.\n---\nBody\n"
+        )
+        self.assertEqual(fields["name"], "sample")
+        self.assertEqual(
+            fields["description"], "Use when reviewing folded descriptions."
+        )
+        self.assertEqual(body, "Body")
+        fields, _ = validator._parse_frontmatter(
+            "---\ndescription: |\n  Use when needed.\n  Second line.\n---\n"
+        )
+        self.assertEqual(fields["description"], "Use when needed. Second line.")
+        self.skill_texts["firebase-services"] = self.skill_texts[
+            "firebase-services"
+        ].replace(
+            "description: Use when changing Firebase initialization, messaging,"
+            " or provider failure handling.",
+            "description: >\n  Use when changing Firebase initialization,\n"
+            "  messaging, or provider failure handling.",
+        )
+        self.rewrite()
+        codes = self.codes()
+        self.assertNotIn("SKILL_DESCRIPTION", codes)
+        self.assertNotIn("SKILL_FRONTMATTER_NAME", codes)
+
+    def test_fixture_catalog_expected_codes_are_emitted_by_validator(self) -> None:
+        source = VALIDATOR_PATH.read_text(encoding="utf-8")
+        emitted = set(re.findall(r'"([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)"', source))
+        cases = json.loads(CASES_PATH.read_text(encoding="utf-8"))
+        for name, case in sorted(cases.items()):
+            if case["expected"] is not None:
+                self.assertIn(
+                    case["expected"],
+                    emitted,
+                    f"{name} expects a code the validator never emits",
+                )
+
+
+class SkillBodyCommandTest(SkillQualityFixture):
+    """Skill prose is executed by the agent, so it must be command-analyzed.
+
+    Before this gate existed a skill body could hand the agent a destructive or
+    provider-calling command in prose and still validate clean: the analyzer
+    ran only over ``plan.verification[].command``.
+    """
+
+    WRITER = "firebase-services"
+    REVIEWER = "availability-contract-review"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.use_schema_1_2()
+
+    def insert(self, name: str, markdown: str) -> None:
+        self.skill_texts[name] = self.skill_texts[name].replace(
+            "## Verification\n\n", f"## Verification\n\n{markdown}\n\n"
+        )
+        self.rewrite()
+
+    def diagnostics(self) -> list:
+        return validator.validate(
+            self.skills, self.plan_path, self.target, self.registry_path
+        )
+
+    def command_risks(self) -> list[str]:
+        return [
+            item.message
+            for item in self.diagnostics()
+            if item.code == "SKILL_BODY_COMMAND_RISK"
+        ]
+
+    def test_baseline_schema_1_2_bodies_stay_clean(self) -> None:
+        self.assertEqual(self.codes(), [])
+
+    def test_destructive_command_in_a_bash_block_is_blocked(self) -> None:
+        self.insert(self.WRITER, "```bash\nrm -rf var/cache/dev\n```")
+        risks = self.command_risks()
+        self.assertEqual(len(risks), 1)
+        self.assertIn(self.WRITER, risks[0])
+        self.assertIn("rm -rf var/cache/dev", risks[0])
+        self.assertIn("DESTRUCTIVE_FILESYSTEM", risks[0])
+        self.assertEqual(
+            [item.severity for item in self.diagnostics() if item.code == "SKILL_BODY_COMMAND_RISK"],
+            ["error"],
+        )
+
+    def test_a_long_chain_cannot_hide_its_dangerous_head(self) -> None:
+        """The analysis cap must not become the bypass.
+
+        A LIFO walk consumed the tail first, so a chain longer than
+        ``MAX_BODY_COMMAND_SEGMENTS`` silently dropped its head - precisely
+        where padding would hide the dangerous command.
+        """
+        padding = " && ".join(
+            f"echo step{index}"
+            for index in range(validator.MAX_BODY_COMMAND_SEGMENTS + 40)
+        )
+        destructive = "rm " + "-rf"
+        self.insert(
+            self.WRITER, f"```bash\n{destructive} var/important && {padding}\n```"
+        )
+        codes = self.codes()
+        self.assertIn("SKILL_BODY_COMMAND_RISK", codes)
+        self.assertIn("SKILL_BODY_COMMAND_UNSCANNED", codes)
+        self.assertIn(
+            f"{destructive} var/important",
+            " ".join(self.command_risks()),
+        )
+
+    def test_guardrail_prose_may_name_the_command_it_forbids(self) -> None:
+        destructive = "rm " + "-rf"
+        self.insert(
+            self.WRITER,
+            f"Never run `{destructive} var/` here; escalate to the team instead.",
+        )
+        self.assertEqual(self.codes(), [])
+
+    def test_network_post_in_skill_prose_is_blocked(self) -> None:
+        self.insert(
+            self.REVIEWER,
+            "Run `curl -X POST https://billing.example/api/invoices/void` first.",
+        )
+        risks = self.command_risks()
+        self.assertEqual(len(risks), 1)
+        self.assertIn(self.REVIEWER, risks[0])
+        self.assertIn("EXTERNAL_OR_PROVIDER", risks[0])
+        self.assertIn("https://billing.example/api/invoices/void", risks[0])
+
+    def test_composed_prose_chain_hidden_behind_a_non_breaking_space(self) -> None:
+        """The reproduced miss: composition plus a homoglyph separator."""
+        self.insert(
+            self.WRITER,
+            "Run `rm\u00a0-rf var/cache/dev && php bin/console cache:warmup "
+            "--env=prod && curl -X POST https://billing.example/api/invoices/void` "
+            "before you trust the result.",
+        )
+        risks = self.command_risks()
+        self.assertEqual(len(risks), 2)
+        self.assertTrue(any("DESTRUCTIVE_FILESYSTEM" in item for item in risks))
+        self.assertTrue(any("EXTERNAL_OR_PROVIDER" in item for item in risks))
+        self.assertTrue(any("rm -rf var/cache/dev" in item for item in risks))
+
+    def test_privilege_escalation_in_a_bash_block_is_blocked(self) -> None:
+        self.insert(self.WRITER, "```sh\nsudo php -l config/firebase.php\n```")
+        risks = self.command_risks()
+        self.assertEqual(len(risks), 1)
+        self.assertIn("SUDO_EXECUTION", risks[0])
+
+    def test_identifiers_paths_and_code_in_inline_backticks_are_not_commands(
+        self,
+    ) -> None:
+        self.insert(
+            self.REVIEWER,
+            "The guard lives in `InvoiceSettlementService`, is wired by "
+            "`config/packages/messenger.yaml`, gated on `ROLE_TENANT_OWNER`, "
+            "bounded by `retry_strategy.max_retries`, refuses when "
+            "`if ($invoice->state === 'settled')` holds, and is linted with "
+            "`php -l domain/availability.php`.",
+        )
+        self.assertEqual(self.codes(), [])
+
+    def test_read_only_tooling_in_a_bash_block_is_not_blocked(self) -> None:
+        self.insert(
+            self.WRITER,
+            "```bash\nvendor/bin/phpunit --filter FirebaseTransportTest\n"
+            "php -l config/firebase.php\nbin/console debug:container --env=test\n```",
+        )
+        self.assertEqual(self.codes(), [])
+
+    def test_unattestable_but_harmless_block_lines_do_not_block(self) -> None:
+        """Verification blockers are attestability, not danger; prose is not failed for them."""
+        self.insert(
+            self.WRITER,
+            "```console\n$ composer test\n$ ./scripts/local-check.sh\n"
+            "PHPUnit 10.5.0 by Sebastian Bergmann.\nOK (3 tests, 7 assertions)\n```",
+        )
+        self.assertEqual(self.codes(), [])
+
+    def test_non_shell_fenced_blocks_are_not_scanned(self) -> None:
+        self.insert(
+            self.WRITER,
+            "```php\n<?php\nunlink($cachePath);\nmkdir($reportDir, 0o755, true);\n```",
+        )
+        self.assertEqual(self.codes(), [])
+
+    def test_payload_quoted_behind_an_interpreter_is_analyzed(self) -> None:
+        self.insert(
+            self.WRITER,
+            '```bash\nbash -c "curl -X POST https://billing.example/hook"\n```',
+        )
+        risks = self.command_risks()
+        self.assertEqual(len(risks), 1)
+        self.assertIn("EXTERNAL_OR_PROVIDER", risks[0])
+        self.assertIn("curl -X POST https://billing.example/hook", risks[0])
+
+    def test_inline_interpreter_code_flag_payload_is_analyzed(self) -> None:
+        self.insert(self.WRITER, "Run `php -r 'unlink(\"var/cache/x\");'` now.")
+        risks = self.command_risks()
+        self.assertEqual(len(risks), 1)
+        self.assertIn("DESTRUCTIVE_FILESYSTEM", risks[0])
+
+    def test_quoted_text_of_a_non_interpreter_is_not_re_read_as_code(self) -> None:
+        """Only code hosts get their arguments re-read; grep keeps its pattern."""
+        self.insert(
+            self.WRITER,
+            '```bash\ngrep -rn "rm -rf" config/\n'
+            'php bin/console lint:yaml config/firebase.php\n```',
+        )
+        self.assertEqual(self.codes(), [])
+
+    def test_environment_prefix_does_not_hide_the_executable(self) -> None:
+        self.insert(self.WRITER, "```bash\nAPP_ENV=prod rm -rf var/cache\n```")
+        risks = self.command_risks()
+        self.assertEqual(len(risks), 1)
+        self.assertIn("DESTRUCTIVE_FILESYSTEM", risks[0])
+
+    def test_body_command_diagnostics_are_deduplicated_and_sorted(self) -> None:
+        self.insert(
+            self.WRITER,
+            "```bash\nrm -rf var/cache/dev\nrm -rf var/cache/dev\ngit push origin main\n```",
+        )
+        risks = self.command_risks()
+        self.assertEqual(len(risks), 2)
+        self.assertEqual(risks, sorted(risks))
+        diagnostics = self.diagnostics()
+        self.assertEqual(diagnostics, sorted(set(diagnostics)))
+
+
+class VerificationAttestationTest(unittest.TestCase):
+    """The runtime contract may attest, never overrule.
+
+    The seeded memory runtime is executed through an interpreter, so
+    `python3 <script> status` cannot be proven non-mutating by inspection.
+    The memory quartet is unconditional and verifies itself with exactly those
+    commands, so before this route existed the generator could not pass its
+    own gate on any target: a real end-to-end run ended in FAIL after 19
+    forge iterations.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="attest-")
+        self.target = Path(self.temporary.name)
+        self.addCleanup(self.temporary.cleanup)
+        (self.target / "composer.json").write_text("{}", encoding="utf-8")
+        self.analyzer = validator.CommandAnalyzer(self.target)
+
+    def accepted(self, command: str) -> bool:
+        analysis = self.analyzer.analyze(command, verification=True)
+        return analysis.verification_safe or validator._verification_attested(
+            command, analysis
+        )
+
+    def test_declared_read_only_commands_are_attested(self) -> None:
+        for command in validator._attested_read_only_commands():
+            with self.subTest(command=command):
+                self.assertTrue(self.accepted(command))
+
+    def test_the_attested_set_comes_from_the_generator_not_the_target(self) -> None:
+        """A scanned project must not be able to declare its own commands safe."""
+        (self.target / "runtime-contract.json").write_text(
+            json.dumps({"commands": {"read_health": ["python3 evil.py wipe"]}}),
+            encoding="utf-8",
+        )
+        self.assertNotIn(
+            "python3 evil.py wipe", validator._attested_read_only_commands()
+        )
+        self.assertFalse(self.accepted("python3 evil.py wipe"))
+
+    def test_mutating_forms_of_the_same_script_stay_blocked(self) -> None:
+        for command in (
+            "python3 memory-bank/scripts/context.py refresh",
+            "python3 memory-bank/scripts/context.py start --task-id X --goal Y",
+            "python3 memory-bank/scripts/context.py complete --task-id X --outcome Y",
+        ):
+            with self.subTest(command=command):
+                self.assertFalse(self.accepted(command))
+
+    def test_an_undeclared_script_stays_blocked(self) -> None:
+        self.assertFalse(self.accepted("python3 tools/other.py status"))
+
+    def test_attestation_cannot_launder_a_dangerous_command(self) -> None:
+        """A proven risk is never waived, whatever the contract says."""
+        destructive = "rm " + "-rf"
+        command = f"python3 memory-bank/scripts/context.py status && {destructive} var"
+        analysis = self.analyzer.analyze(command, verification=True)
+        self.assertFalse(validator._verification_attested(command, analysis))
+        self.assertFalse(self.accepted(command))
+
+
+class BodyCommandExtractionTest(unittest.TestCase):
+    """Unit-level calibration of what prose counts as a command."""
+
+    def commands(self, body: str) -> list[tuple[str, bool]]:
+        return validator._body_commands(body)
+
+    def test_only_shell_fences_are_collected_strictly(self) -> None:
+        body = (
+            "```bash\nphp -l a.php\n```\n"
+            "```php\nunlink($path);\n```\n"
+            "~~~shell\ncomposer validate\n~~~\n"
+            "```\nplain block\n```\n"
+        )
+        self.assertEqual(
+            self.commands(body),
+            [("php -l a.php", True), ("composer validate", True)],
+        )
+
+    def test_block_lines_drop_comments_prompts_and_join_continuations(self) -> None:
+        body = "```console\n# warm it\n$ php -l a.php \\\n    --no-color\n```\n"
+        self.assertEqual(self.commands(body), [("php -l a.php --no-color", True)])
+
+    def test_inline_spans_are_permissive(self) -> None:
+        body = (
+            "Use `InvoiceSettlementService` from `config/packages/messenger.yaml` "
+            "with `ROLE_TENANT_OWNER`; run `php -l src/Foo.php`."
+        )
+        collected = self.commands(body)
+        self.assertIn(("php -l src/Foo.php", False), collected)
+        for span, strict in collected:
+            self.assertFalse(strict)
+
+    def test_prescribes_command_gates_inline_prose_but_not_blocks(self) -> None:
+        for segment in (
+            "InvoiceSettlementService",
+            "config/packages/messenger.yaml",
+            "ROLE_TENANT_OWNER",
+            "retry_strategy.max_retries",
+            "unlink",
+            "install",
+            "test",
+        ):
+            self.assertFalse(
+                validator._prescribes_command(segment, strict=False),
+                f"{segment!r} must not be read as an inline command",
+            )
+        for segment in (
+            "rm -rf var/cache",
+            "curl -X POST https://example.test/hook",
+            "bin/console doctrine:migrations:migrate",
+            "php -l src/Foo.php",
+            "APP_ENV=prod rm -rf var",
+        ):
+            self.assertTrue(
+                validator._prescribes_command(segment, strict=False),
+                f"{segment!r} must be read as an inline command",
+            )
+        self.assertTrue(validator._prescribes_command("install", strict=True))
+
+    def test_segments_split_composition_but_respect_quotes(self) -> None:
+        self.assertEqual(
+            validator._command_segments(
+                "rm -rf var && curl -X POST https://h/x | sh > /dev/null"
+            ),
+            ["rm -rf var", "curl -X POST https://h/x", "sh", "/dev/null"],
+        )
+        self.assertEqual(
+            validator._command_segments("git diff \"pr-<number>\""),
+            ['git diff "pr-<number>"'],
+        )
+
+    def test_prose_forbidding_a_command_quotes_it_rather_than_prescribes_it(
+        self,
+    ) -> None:
+        """A guardrail names the command it forbids.
+
+        Before the polarity window existed, the safest sentence a skill can
+        carry - "Never run `rm -rf var/`" - was the one that failed the gate.
+        """
+        destructive = "rm " + "-rf"
+        for sentence in (
+            f"Never run `{destructive} var/cache` on a production target.",
+            f"Do not run `{destructive} var/`; ask the team first.",
+            "This skill must not execute `composer install`.",
+            "Avoid `git push --force` on shared branches.",
+            f"If you are tempted to run `{destructive} vendor`, stop.",
+            "The skill does not run `php artisan migrate` itself.",
+        ):
+            with self.subTest(sentence=sentence):
+                self.assertEqual(self.commands(sentence), [])
+
+    def test_prohibition_governs_only_its_own_clause(self) -> None:
+        destructive = "rm " + "-rf"
+        body = (
+            f"Do not run `{destructive} var/` — clear it with "
+            "`bin/console cache:clear` instead."
+        )
+        self.assertEqual(
+            self.commands(body), [("bin/console cache:clear", False)]
+        )
+
+    def test_a_lone_hyphen_does_not_open_a_clause(self) -> None:
+        """Compound words carry hyphens, so only a dash ends a clause.
+
+        Treating ``-`` as a boundary would truncate the polarity window at
+        "read-only" and hand the false positive straight back.
+        """
+        destructive = "rm " + "-rf"
+        body = f"Do not use the read-only shortcut `{destructive} var/` here."
+        self.assertEqual(self.commands(body), [])
+
+    def test_a_shell_fence_stays_an_instruction_despite_prose_polarity(
+        self,
+    ) -> None:
+        destructive = "rm " + "-rf"
+        body = f"Never do this:\n\n```bash\n{destructive} var/important\n```\n"
+        self.assertEqual(self.commands(body), [(f"{destructive} var/important", True)])
+
+    def test_only_code_hosts_expose_nested_arguments(self) -> None:
+        self.assertEqual(
+            validator._hosted_code_arguments('bash -c "curl https://h/x"'),
+            ["curl https://h/x"],
+        )
+        self.assertEqual(
+            validator._hosted_code_arguments("php -r 'unlink(\"x\");'"),
+            ['unlink("x");'],
+        )
+        self.assertEqual(
+            validator._hosted_code_arguments('grep -rn "rm -rf" config/'), []
+        )
+        self.assertEqual(
+            validator._hosted_code_arguments("php 'unterminated"), []
+        )
+
+    def test_invisible_separators_are_folded_before_analysis(self) -> None:
+        self.assertEqual(
+            validator._normalize_command_text("rm\u00a0-rf\u200b var"),
+            "rm -rf var",
+        )
+
+
+class SkillOperationalContentTest(SkillQualityFixture):
+    """A skill must tell the agent to do something, not just name the project.
+
+    Before this gate existed, a body could carry real paths, classes, and
+    constants in every sentence, trace to every plan contract, and still
+    prescribe nothing: "Consider X holistically", "Form an opinion",
+    "Confirm that the claim still looks reasonable". Traceability is lexical,
+    so all of it validated clean.
+    """
+
+    WRITER = "firebase-services"
+    REVIEWER = "availability-contract-review"
+
+    VACUOUS_STEPS = [
+        "Consider config/firebase.php and the FirebaseMessagingClient "
+        "initialization holistically.",
+        "Take into account the messaging transport and the provider API boundary.",
+        "Bear in mind the provider failures while thinking about redelivery.",
+        "Which provider failures may retry? Form an opinion, keeping in mind "
+        "that we choose retry only for transient provider failures.",
+        "Reflect on availability domain behavior belonging to "
+        "availability-contract-review; Firebase transport is owned here.",
+    ]
+    OPERATIONAL_STEPS = [
+        "Inspect initialization in config/firebase.php and record the "
+        "FirebaseMessagingClient the container builds.",
+        "Trace message transport from publishReminder() to the provider API "
+        "and note where the payload leaves the process.",
+        "Classify provider failures as transient, permanent, or configuration "
+        "faults raised from config/firebase.php.",
+        "Which provider failures may retry? Choose retry only for transient "
+        "provider failures; convert an invalid payload into a permanent failure.",
+        "Park a permanently failed payload instead of retrying it, and keep "
+        "availability-contract-review responsible for availability domain behavior.",
+    ]
+
+    def set_procedure(self, name: str, steps: list[str]) -> None:
+        head, marker, rest = self.skill_texts[name].partition(
+            "## Procedure / Process\n\n"
+        )
+        _, tail_marker, tail = rest.partition("\n\n## Verification")
+        numbered = "\n".join(
+            f"{index}. {step}" for index, step in enumerate(steps, 1)
+        )
+        self.skill_texts[name] = f"{head}{marker}{numbered}{tail_marker}{tail}"
+        self.rewrite()
+
+    def set_verification(self, name: str, text: str) -> None:
+        head, marker, rest = self.skill_texts[name].partition(
+            "## Verification\n\n"
+        )
+        _, tail_marker, tail = rest.partition("\n\n## Outputs")
+        self.skill_texts[name] = f"{head}{marker}{text}{tail_marker}{tail}"
+        self.rewrite()
+
+    def test_project_specific_but_vacuous_procedure_is_rejected(self) -> None:
+        self.set_procedure(self.WRITER, self.VACUOUS_STEPS)
+        codes = self.codes()
+        # The miss this pins: every lexical contract still traces.
+        for traced in (
+            "SKILL_PROCEDURE_TRACE",
+            "SKILL_DECISION_TRACE",
+            "SKILL_CONTENT_EMPTY",
+            "SKILL_SIMILARITY",
+            "SKILL_TARGET_REFERENCE",
+        ):
+            self.assertNotIn(traced, codes)
+        self.assertIn("SKILL_STEP_HEDGED", codes)
+        hedged = [
+            item
+            for item in validator.validate(
+                self.skills, self.plan_path, self.target, self.registry_path
+            )
+            if item.code == "SKILL_STEP_HEDGED"
+        ]
+        self.assertEqual(len(hedged), len(self.VACUOUS_STEPS))
+        self.assertTrue(all(item.severity == "error" for item in hedged))
+
+    def test_step_that_names_nouns_without_commanding_an_action_is_rejected(
+        self,
+    ) -> None:
+        steps = list(self.OPERATIONAL_STEPS)
+        steps[2] = (
+            "Provider failures, the messaging transport, and the "
+            "initialization boundary of config/firebase.php."
+        )
+        self.set_procedure(self.WRITER, steps)
+        codes = self.codes()
+        self.assertIn("SKILL_STEP_NOT_OPERATIONAL", codes)
+        self.assertNotIn("SKILL_STEP_HEDGED", codes)
+
+    def test_procedure_without_any_concrete_anchor_is_rejected(self) -> None:
+        self.set_procedure(
+            self.WRITER,
+            [
+                "Inspect the initialization before selecting the configured client.",
+                "Trace the message transport from the adapter to the provider.",
+                "Classify provider failures as transient or permanent faults.",
+                "Which provider failures may retry? Choose retry only for "
+                "transient provider failures.",
+                "Keep the availability review responsible for availability "
+                "domain behavior.",
+            ],
+        )
+        codes = self.codes()
+        self.assertIn("SKILL_PROCEDURE_UNANCHORED", codes)
+        self.assertNotIn("SKILL_STEP_NOT_OPERATIONAL", codes)
+
+    def test_verification_that_accepts_an_impression_is_rejected(self) -> None:
+        self.set_verification(
+            self.WRITER,
+            "Confirm that Firebase initialization and messaging still look "
+            "reasonable and that nothing seems broken.",
+        )
+        codes = self.codes()
+        self.assertIn("SKILL_VERIFICATION_NOT_FALSIFIABLE", codes)
+        self.assertNotIn("SKILL_SECTION_MISSING", codes)
+
+    def test_verification_that_names_no_check_is_rejected(self) -> None:
+        self.set_verification(
+            self.WRITER,
+            "Firebase initialization and the messaging boundary of "
+            "config/firebase.php: fine.",
+        )
+        self.assertIn("SKILL_VERIFICATION_NOT_OPERATIONAL", self.codes())
+
+    def test_operational_project_specific_bodies_stay_clean(self) -> None:
+        """Calibration: honest instruction must not be failed by this gate."""
+        self.use_schema_1_2()
+        self.set_procedure(self.WRITER, self.OPERATIONAL_STEPS)
+        self.assertEqual(self.codes(), [])
+
+    def test_plan_step_action_must_command_an_action(self) -> None:
+        self.use_schema_1_2()
+        step = self.plan["skills"][0]["procedure_steps"][0]
+        step["action"] = (
+            "Consider the Firebase messaging runtime boundary in "
+            "config/firebase.php holistically"
+        )
+        self.rewrite()
+        codes = [item.code for item in self.plan_diagnostics()]
+        self.assertIn("PROCEDURE_STEP_NOT_OPERATIONAL", codes)
+        self.assertNotIn("PROCEDURE_STEP_INVALID", codes)
+
+    def test_plan_step_without_path_evidence_or_anchor_is_rejected(self) -> None:
+        self.use_schema_1_2()
+        step = self.plan["skills"][0]["procedure_steps"][0]
+        step["action"] = "Review the boundary and record the outcome"
+        step["path_refs"] = []
+        step["evidence_ids"] = []
+        self.rewrite()
+        codes = [item.code for item in self.plan_diagnostics()]
+        self.assertIn("PROCEDURE_STEP_UNANCHORED", codes)
+        self.assertNotIn("PROCEDURE_STEP_NOT_OPERATIONAL", codes)
+
+    def test_plan_verification_that_accepts_an_impression_is_rejected(
+        self,
+    ) -> None:
+        self.use_schema_1_2()
+        check = self.plan["skills"][0]["verification"][0]
+        check["expected_result"] = (
+            "The Firebase messaging boundary still looks correct"
+        )
+        self.rewrite()
+        self.assertIn(
+            "VERIFICATION_NOT_FALSIFIABLE",
+            [item.code for item in self.plan_diagnostics()],
+        )
+
+    def test_operational_diagnostics_are_deduplicated_and_sorted(self) -> None:
+        self.set_procedure(self.WRITER, self.VACUOUS_STEPS)
+        self.set_procedure(self.REVIEWER, self.VACUOUS_STEPS)
+        diagnostics = validator.validate(
+            self.skills, self.plan_path, self.target, self.registry_path
+        )
+        self.assertEqual(diagnostics, sorted(set(diagnostics)))
+
+
+class OperationalContentUnitTest(unittest.TestCase):
+    """Unit-level calibration of the verb/anchor structure."""
+
+    HONEST_STEPS = (
+        "Trace the reminder payload through dunning_async: confirm "
+        "config/packages/messenger.yaml still routes App\\Message\\DunningReminder "
+        "to dunning_async and that retry_strategy.max_retries is 3.",
+        "Inspect the rejected allocation branch and confirm no partial mutation "
+        "happens before ForbiddenTransition is thrown.",
+        "Park a poison reminder in the doctrine failure queue instead of "
+        "retrying it against the broker.",
+        "Which reminder payloads may be redelivered? Redeliver only payloads "
+        "that carry an invoice id; convert every other failure into "
+        "UnrecoverableMessageHandlingException.",
+        "Leave ledger paging and tenant filtering to ledger-entry-repository-guard "
+        "rather than widening scope here.",
+        "Run `vendor/bin/phpunit --filter DunningReminderHandlerTest` and compare "
+        "the failure to config/packages/messenger.yaml.",
+    )
+    VACUOUS_STEPS = (
+        "Consider src/Service/InvoiceSettlementService.php and the allocation "
+        "guards holistically.",
+        "Take into account the settled state transition.",
+        "Bear in mind the rejected allocation branch.",
+        "Is the allocation permitted? Form an opinion about the settled state.",
+        "Reflect on dunning redelivery belonging to dunning-transport-wiring.",
+        "When the guard trips, consider the allocation history.",
+    )
+
+    def test_honest_steps_command_an_action_without_hedging(self) -> None:
+        for step in self.HONEST_STEPS:
+            self.assertIsNone(validator._hedge_phrase(step), step)
+            self.assertTrue(validator._commands_action(step), step)
+        # The anchor requirement is per procedure, never per step: an honest
+        # delegation or branch step legitimately carries no path or symbol.
+        self.assertFalse(
+            validator._has_concrete_anchor(
+                "Park a poison reminder in the doctrine failure queue instead "
+                "of retrying it against the broker."
+            )
+        )
+        self.assertTrue(
+            validator._has_concrete_anchor("\n".join(self.HONEST_STEPS))
+        )
+
+    def test_vacuous_steps_are_hedged_however_specific_they_are(self) -> None:
+        for step in self.VACUOUS_STEPS:
+            self.assertIsNotNone(validator._hedge_phrase(step), step)
+        # Naming a real file does not rescue the step.
+        self.assertTrue(validator._has_concrete_anchor(self.VACUOUS_STEPS[0]))
+        self.assertTrue(validator._has_concrete_anchor(self.VACUOUS_STEPS[4]))
+
+    def test_bare_noun_lists_command_no_action(self) -> None:
+        for step in (
+            "Allocation rules, the closed invoice, and the outstanding balance.",
+            "Source file: src/Service/InvoiceSettlementService.php.",
+            "The dunning transport declaration and its redelivery budget.",
+            "Firebase initialization and the messaging boundary: fine.",
+        ):
+            self.assertFalse(validator._commands_action(step), step)
+        for step in (
+            "Assert the settled state.",
+            "php -l src/Service/InvoiceSettlementService.php",
+        ):
+            self.assertTrue(validator._commands_action(step), step)
+
+    def test_mid_sentence_hedging_next_to_an_action_stays_legitimate(self) -> None:
+        self.assertIsNone(
+            validator._hedge_phrase(
+                "Reject the allocation once the invoice is settled, keeping in "
+                "mind the ledger paging owned by the sibling."
+            )
+        )
+
+    def test_honest_imperatives_outside_the_original_verb_list_are_kept(
+        self,
+    ) -> None:
+        """Calibration regression: these honest steps were failed as inert.
+
+        Each line is a real step from the adversarial harness's *honest*
+        five-skill baseline, which the gate must pass. They command an action
+        with a verb the first draft of `ACTION_VERBS` happened to omit, so the
+        gate rejected 5 of that baseline's 37 steps - the false-positive mode
+        that is worse than the miss the rule closes.
+        """
+        for step in (
+            "Bound delivery at three attempts.",
+            "Bound the ninety day refundable window.",
+            "Downgrade only on a permanent delivery boundary error.",
+            "Not this skill: change how a charge authorisation is sent to the "
+            "card provider.",
+            "Not this skill: recompute the anniversary anchor of a "
+            "subscription cycle.",
+            # A step may be substantively wrong and still command an action;
+            # "commands no action" must not become the complaint about it.
+            "Accept transitions that revive a cancelled slot when the actor "
+            "role is ROLE_DESK.",
+        ):
+            self.assertIsNone(validator._hedge_phrase(step), step)
+            self.assertTrue(validator._commands_action(step), step)
+
+    def test_counterparts_of_listed_verbs_are_listed_too(self) -> None:
+        """A verb whose opposite is already accepted must be accepted too."""
+        for listed, counterpart in (
+            ("upgrade", "downgrade"),
+            ("compute", "recompute"),
+            ("subscribe", "unsubscribe"),
+            ("serialize", "deserialize"),
+            ("serialise", "deserialise"),
+            ("modify", "change"),
+            ("bind", "bound"),
+            ("halt", "abort"),
+            ("disallow", "allow"),
+            ("reject", "accept"),
+            ("stop", "start"),
+        ):
+            self.assertIn(listed, validator.ACTION_VERBS)
+            self.assertIn(counterpart, validator.ACTION_VERBS)
+        # The rule stops at words that ordinarily read as adjective or noun,
+        # or the bare-noun-list reading below would collapse.
+        self.assertNotIn("close", validator.ACTION_VERBS)
+
+    def test_anchor_detection_separates_concrete_from_abstract(self) -> None:
+        for text in (
+            "config/packages/messenger.yaml",
+            "InvoiceSettlementService::allocate()",
+            "ROLE_TENANT_OWNER",
+            "retry_strategy.max_retries",
+            "max_retries is 3",
+            "ledger-entry-repository-guard",
+            "`php -l`",
+            "the state is 'settled'",
+        ):
+            self.assertTrue(validator._has_concrete_anchor(text), text)
+        for text in (
+            "Inspect the initialization before selecting the configured client.",
+            "Classify provider failures as transient or permanent faults.",
+        ):
+            self.assertFalse(validator._has_concrete_anchor(text), text)
+
+    def test_steps_keep_sub_bullets_blocks_and_drop_the_lead_in(self) -> None:
+        section = (
+            "Follow the bounded procedure:\n"
+            "\n"
+            "1. Inspect config/firebase.php and note the client.\n"
+            "   - the transport is built there\n"
+            "2. Run the linter:\n"
+            "\n"
+            "   ```bash\n"
+            "   php -l config/firebase.php\n"
+            "   ```\n"
+            "3. Report the finding.\n"
+        )
+        self.assertEqual(
+            validator._procedure_steps(section),
+            [
+                "Inspect config/firebase.php and note the client. - the "
+                "transport is built there",
+                "Run the linter: php -l config/firebase.php",
+                "Report the finding.",
+            ],
+        )
+
+    def test_unlisted_prose_procedure_is_read_as_paragraphs(self) -> None:
+        section = (
+            "Read config/firebase.php and record the client.\n"
+            "Then trace the transport.\n"
+            "\n"
+            "Report the finding.\n"
+        )
+        self.assertEqual(
+            validator._procedure_steps(section),
+            [
+                "Read config/firebase.php and record the client. Then trace "
+                "the transport.",
+                "Report the finding.",
+            ],
+        )
+
+    def test_verb_forms_cover_inflections_without_stemming_nouns(self) -> None:
+        for text in (
+            "Inspects the guard",
+            "Inspecting the guard",
+            "Traced the payload",
+            "Classifies the failures",
+            "Verifying the transition",
+        ):
+            self.assertTrue(validator._has_action_verb(text), text)
+
+    def test_verification_vocabulary_is_narrower_than_the_step_vocabulary(
+        self,
+    ) -> None:
+        impression = "Tenant scoping before offset and limit: fine."
+        self.assertTrue(validator._has_action_verb(impression))
+        self.assertFalse(
+            validator._has_action_verb(
+                impression, validator.VERIFICATION_VERB_FORMS
+            )
+        )
+        for text in (
+            "Assert from src/Service/InvoiceSettlementService.php that a "
+            "closed invoice rejects partial allocation.",
+            "Run php -l on the handler and compare the exit status.",
+        ):
+            self.assertTrue(
+                validator._has_action_verb(
+                    text, validator.VERIFICATION_VERB_FORMS
+                ),
+                text,
+            )
+
+
+class SkeletonNormalizationTest(unittest.TestCase):
+    """Unit-level calibration of what the skeleton erases and what it keeps.
+
+    The skeleton exists because a plan-conforming SKILL.md is *required* to
+    carry its own claim, paths and neighbour names: those mandatory
+    differences are exactly what a template generator varies, and they diluted
+    raw similarity below any usable threshold. Erase too little and one
+    substituted noun still hides a template; erase too much and two honest
+    skills collapse onto the same skeleton.
+    """
+
+    def skeleton(self, line: str, entities=()) -> str:
+        return validator._skeleton_line(line, entities)
+
+    def test_project_identity_collapses_to_one_placeholder(self) -> None:
+        placeholder = validator.SKELETON_PLACEHOLDER
+        for line, expected in (
+            ("Read config/packages/messenger.yaml first.", "read xid first"),
+            ("Read src/Service/InvoiceSettlementService.php first.", "read xid first"),
+            ("The DunningReminderHandler rejects it.", "the xid rejects it"),
+            ("The InvoiceSettlementService rejects it.", "the xid rejects it"),
+            ("Only ROLE_TENANT_OWNER may do it.", "only xid may do it"),
+            ("Only ROLE_BILLING_ADMIN may do it.", "only xid may do it"),
+            ("Retry up to 3 times.", "retry up to xid times"),
+            ("Retry up to 25 times.", "retry up to xid times"),
+            ("Check retry_strategy.max_retries here.", "check xid here"),
+            ("Check messenger.failure_transport here.", "check xid here"),
+            ("Mutating $invoice->state is forbidden.", "mutating xid is forbidden"),
+            ("Mutating $reminder->invoiceId is forbidden.", "mutating xid is forbidden"),
+            ("Call allocate() twice.", "call xid twice"),
+            ("Call publishReminder() twice.", "call xid twice"),
+            ("Run `php -l src/Foo.php` now.", "run xid now"),
+            ("Run `composer validate` now.", "run xid now"),
+        ):
+            self.assertEqual(self.skeleton(line), expected, line)
+            self.assertIn(placeholder, expected)
+
+    def test_neighbour_skill_names_are_erased_as_whole_words_only(self) -> None:
+        entities = ("invoice-settlement-guard", "dunning-transport-wiring")
+        self.assertEqual(
+            self.skeleton("Hand invoice-settlement-guard its part.", entities),
+            self.skeleton("Hand dunning-transport-wiring its part.", entities),
+        )
+        # A short accidental substring must not eat an ordinary word.
+        self.assertEqual(
+            self.skeleton("Guard the release note.", ("re",)),
+            "guard the release note",
+        )
+
+    def test_punctuation_and_connectives_no_longer_change_a_line(self) -> None:
+        base = "Trace the payload, mark the gap and record the deviation."
+        for variant in (
+            "Trace the payload; mark the gap plus record the deviation!",
+            "Trace the payload -- mark the gap, and record the deviation",
+            "Trace  the   payload,  mark the gap and  record the deviation.",
+        ):
+            self.assertEqual(self.skeleton(variant), self.skeleton(base), variant)
+        # ... but real wording still separates two lines.
+        self.assertNotEqual(
+            self.skeleton(base),
+            self.skeleton("Trace the payload, mark the gap and reject the request."),
+        )
+
+    def test_lines_that_are_almost_entirely_identity_are_not_compared(self) -> None:
+        body = (
+            "Read config/packages/messenger.yaml.\n"
+            "See src/Service/InvoiceSettlementService.php.\n"
+            "Trace the reminder payload through the transport and record every "
+            "redelivery the handler accepts.\n"
+        )
+        lines = validator._skeleton_body(body, [], ())
+        self.assertEqual(len(lines), 1)
+        self.assertNotIn("read xid", lines[0])
+
+    def test_fenced_code_is_excluded_from_the_skeleton(self) -> None:
+        body = (
+            "Trace the reminder payload through the transport and record the "
+            "redelivery budget.\n"
+            "```php\n"
+            "final class Foo extends Bar\n"
+            "public function handle(): bool\n"
+            "```\n"
+        )
+        self.assertEqual(len(validator._skeleton_body(body, [], ())), 1)
+
+    def test_bag_similarity_is_symmetric_and_bounded(self) -> None:
+        left = validator.Counter("a b c d e".split())
+        right = validator.Counter("a b c d f".split())
+        self.assertAlmostEqual(
+            validator._bag_similarity(left, right),
+            validator._bag_similarity(right, left),
+        )
+        self.assertAlmostEqual(validator._bag_similarity(left, left), 1.0)
+        self.assertAlmostEqual(validator._bag_similarity(left, validator.Counter()), 0.0)
+
+    def test_skeleton_line_matching_is_one_to_one(self) -> None:
+        """One boilerplate line may not answer for several partners."""
+        repeated = "trace the reminder payload through the transport and record it"
+        left = [repeated] + [f"unrelated sentence number {index} about billing states"
+                             for index in range(4)]
+        right = [repeated, repeated, repeated, repeated, repeated]
+        self.assertAlmostEqual(
+            validator._skeleton_line_similarity(left, right), 0.2
+        )
+
+
+class SkillTemplateReuseTest(SkillQualityFixture):
+    """One prose template, two subjects: the miss this class pins.
+
+    The lexical dedup compares normalized lines for equality, so it only ever
+    saw byte-identical prose. Measured on this fixture before the skeleton
+    pass existed: a byte clone scored line=0.533/token=0.442 - under the
+    0.70/0.80 fail lines, so even *that* passed; the same template with the
+    project's own nouns substituted scored 0.333/0.300, and the same template
+    with `,` swapped for `;` and `and` for `plus` scored 0.200/0.267, i.e.
+    indistinguishable from two honestly different skills at 0.200/0.069.
+    That is precisely the shape of an LLM reusing one template.
+    """
+
+    WRITER = "firebase-services"
+    REVIEWER = "availability-contract-review"
+
+    TEMPLATE_STEPS = (
+        "Begin at {path} and write down, line by line, what it guarantees "
+        "today, so that you {role_one} before you touch anything.",
+        "Hold that written description next to the incoming request and mark "
+        "every single place where the two of them disagree with each other.",
+        "Walk the file a second time to {role_two}, and then {role_three} "
+        "without ever leaving the file you started from.",
+        "{question} Apply the rule that we {branch}, and write down every "
+        "deviation from that rule you decide to accept.",
+        "Weigh the residual risk the request leaves behind and hand {sibling} "
+        "the part that belongs to it: {boundary}",
+    )
+    TEMPLATE_PURPOSE = "Hold the line described by {claim}, and nothing wider."
+    TEMPLATE_INPUTS = (
+        "Source file: {path}, read together with the plan claim {claim}."
+    )
+    TEMPLATE_VERIFICATION = (
+        "Assert from the cited source that {claim}; run the check twice and "
+        "compare the two results before you accept either of them."
+    )
+    TEMPLATE_OUTPUTS = (
+        "Produce a cited report confirming or rejecting: {claim}, with the "
+        "line numbers that carry the decision."
+    )
+    TEMPLATE_FAILURE = "{failure} Do not guess the missing part."
+
+    SLOTS = {
+        "firebase-services": {
+            "description": (
+                "Use when changing Firebase initialization, messaging, or "
+                "provider failure handling."
+            ),
+            "path": "config/firebase.php",
+            "claim": "Firebase initialization and messaging form a runtime boundary",
+            "role_one": "inspect initialization",
+            "role_two": "trace message transport",
+            "role_three": "classify provider failures",
+            "question": "Which provider failures may retry?",
+            "branch": "choose retry only for transient provider failures",
+            "sibling": "availability-contract-review",
+            "boundary": (
+                "Firebase transport is owned here; availability domain "
+                "behavior is deferred."
+            ),
+            "failure": "Stop when provider boundary evidence is unavailable.",
+        },
+        "availability-contract-review": {
+            "description": (
+                "Use when reviewing availability state, sampled dates, "
+                "cancellation, or partial failures."
+            ),
+            "path": "domain/availability.php",
+            "claim": "Availability has sampled-date and cancellation invariants",
+            "role_one": "enumerate sampled dates",
+            "role_two": "trace cancellation transitions",
+            "role_three": "inspect partial failures",
+            "question": "Is the transition valid?",
+            "branch": "reject transitions that violate the sampled-date invariant",
+            "sibling": "firebase-services",
+            "boundary": (
+                "Availability behavior is owned here; Firebase transport is "
+                "deferred."
+            ),
+            "failure": "Mark conflicting state authority unresolved and stop approval.",
+        },
+    }
+
+    def template_body(self, name: str, slots: dict, punctuation: bool = False) -> str:
+        steps = [step.format(**slots) for step in self.TEMPLATE_STEPS]
+        if punctuation:
+            steps = [
+                step.replace(", ", "; ").replace(" and ", " plus ").replace(".", " --", 1)
+                for step in steps
+            ]
+        return skill_markdown(
+            name,
+            slots["description"],
+            self.TEMPLATE_PURPOSE.format(**slots),
+            self.TEMPLATE_INPUTS.format(**slots),
+            steps,
+            self.TEMPLATE_VERIFICATION.format(**slots),
+            self.TEMPLATE_OUTPUTS.format(**slots),
+            self.TEMPLATE_FAILURE.format(**slots),
+        )
+
+    def install_template(self, *, punctuation: bool = False, clone: bool = False) -> None:
+        """Write both skills from one template.
+
+        `clone` keeps the writer's own nouns in the reviewer's body (a byte
+        clone of the procedure), `punctuation` re-punctuates the reviewer only.
+        """
+        for name, slots in self.SLOTS.items():
+            used = dict(slots)
+            if clone and name == self.REVIEWER:
+                borrowed = dict(self.SLOTS[self.WRITER])
+                borrowed["description"] = slots["description"]
+                borrowed["claim"] = slots["claim"]
+                borrowed["failure"] = slots["failure"]
+                used = borrowed
+            self.skill_texts[name] = self.template_body(
+                name, used, punctuation=punctuation and name == self.REVIEWER
+            )
+        self.rewrite()
+
+    def scores(self) -> tuple[float, float]:
+        skeletons = {}
+        for name, text in self.skill_texts.items():
+            _, body = validator._parse_frontmatter(text)
+            entry = next(
+                item for item in self.plan["skills"] if item["name"] == name
+            )
+            skeletons[name] = validator._skeleton_body(
+                body,
+                validator._fixed_block_contents(entry.get("fixed_blocks", [])),
+                frozenset(self.skill_texts),
+            )
+        left, right = (skeletons[name] for name in sorted(skeletons))
+        return (
+            validator._skeleton_line_similarity(left, right),
+            validator._token_similarity(
+                validator._tokens("\n".join(left)),
+                validator._tokens("\n".join(right)),
+            ),
+        )
+
+    def test_template_with_substituted_project_nouns_is_rejected(self) -> None:
+        self.use_schema_1_2()
+        self.install_template()
+        codes = self.codes()
+        self.assertIn("SKILL_TEMPLATE_REUSE", codes)
+        # The miss this pins: every line differs, so the lexical pass is blind.
+        self.assertNotIn("SKILL_SIMILARITY", codes)
+        self.assertNotIn("REPEATED_BLOCK", codes)
+        line, token = self.scores()
+        self.assertGreaterEqual(line, validator.SKELETON_LINE_FAIL)
+        self.assertGreaterEqual(token, validator.SKELETON_TOKEN_FAIL)
+
+    def test_template_differing_only_in_punctuation_is_rejected(self) -> None:
+        self.use_schema_1_2()
+        self.install_template(punctuation=True)
+        codes = self.codes()
+        self.assertIn("SKILL_TEMPLATE_REUSE", codes)
+        self.assertNotIn("SKILL_SIMILARITY", codes)
+        self.assertNotIn("REPEATED_BLOCK", codes)
+
+    def test_byte_identical_procedure_is_rejected(self) -> None:
+        self.use_schema_1_2()
+        self.install_template(clone=True)
+        codes = self.codes()
+        self.assertIn("SKILL_TEMPLATE_REUSE", codes)
+        self.assertIn("SKILL_TEMPLATE_BLOCK", codes)
+
+    def test_template_reuse_is_an_error_and_the_block_pass_is_a_warning(self) -> None:
+        self.use_schema_1_2()
+        self.install_template(clone=True)
+        severities = {
+            item.code: item.severity
+            for item in validator.validate(
+                self.skills, self.plan_path, self.target, self.registry_path
+            )
+        }
+        self.assertEqual(severities["SKILL_TEMPLATE_REUSE"], "error")
+        self.assertEqual(severities["SKILL_TEMPLATE_BLOCK"], "warning")
+
+    def test_honest_distinct_skills_are_never_called_a_template(self) -> None:
+        """The false positive that would make the generator unusable."""
+        self.use_schema_1_2()
+        codes = self.codes()
+        self.assertEqual(codes, [])
+        line, token = self.scores()
+        self.assertLess(line, validator.SKELETON_LINE_WARN)
+        self.assertLess(token, validator.SKELETON_TOKEN_WARN)
+
+    def test_verbatim_versioned_fixed_block_is_not_duplication(self) -> None:
+        """An approved shared safety block may repeat word for word."""
+        self.use_schema_1_2()
+        block = (
+            "Never paste customer billing identifiers, provider secrets, or "
+            "raw transport payloads into a report; redact the identifier, "
+            "keep the structural evidence, and hand back a sanitized excerpt "
+            "naming the file and the line that was withheld."
+        )
+        for entry in self.plan["skills"]:
+            entry["fixed_blocks"].append(
+                {"id": "safety.redaction", "version": "2.0", "content": block}
+            )
+            name = entry["name"]
+            self.skill_texts[name] = self.skill_texts[name].replace(
+                f"\n{SHARED_SAFETY}\n", f"\n{block}\n\n{SHARED_SAFETY}\n"
+            )
+        self.rewrite()
+        codes = self.codes()
+        self.assertNotIn("SKILL_TEMPLATE_REUSE", codes)
+        self.assertNotIn("SKILL_TEMPLATE_REUSE_WARN", codes)
+        self.assertNotIn("SKILL_TEMPLATE_BLOCK", codes)
+        self.assertEqual(codes, [])
+
+    def test_shared_fenced_code_is_not_duplication(self) -> None:
+        """Two skills may show the same framework idiom in a fence."""
+        self.use_schema_1_2()
+        fence = (
+            "\n```php\n"
+            "final class Example extends AbstractController\n"
+            "{\n"
+            "    public function handle(): bool\n"
+            "    {\n"
+            "        return $this->service->run();\n"
+            "    }\n"
+            "}\n"
+            "```\n"
+        )
+        for name in self.skill_texts:
+            self.skill_texts[name] = self.skill_texts[name].replace(
+                "\n## Verification\n", f"{fence}\n## Verification\n"
+            )
+        self.rewrite()
+        codes = self.codes()
+        self.assertNotIn("SKILL_TEMPLATE_REUSE", codes)
+        self.assertNotIn("SKILL_TEMPLATE_BLOCK", codes)
+
+    SHARED_SCAFFOLDING = [
+        "hold that written description next to the incoming request and mark the gaps",
+        "roll the change out in small increments and re read the file afterwards",
+        "record every deviation from the stated rule that you decide to accept",
+    ]
+    TRANSPORT_LINES = [
+        "inspect the redelivery budget declared by the asynchronous messenger transport",
+        "classify each provider outage into transient permanent or configuration faults",
+        "trace how a reminder leaves the process and reaches the outbound mail gateway",
+        "note which payloads consume a retry attempt and which ones are parked at once",
+        "confirm the routing entry still points at the queue named in the plan claim",
+        "list the callers that dispatch a reminder outside the documented entry point",
+        "compare the observed retry count against the configured maximum before approval",
+    ]
+    SETTLEMENT_LINES = [
+        "enumerate the allocation guards that protect a terminal settled invoice",
+        "reject any mutation that would raise an amount already marked as final",
+        "walk each branch where a partial payment updates the running balance",
+        "verify that no caller bypasses the service when adjusting stored money",
+        "collect the roles permitted to reopen a closed statement for correction",
+        "measure how many statements reach terminal status without a matching audit row",
+        "identify the currency rounding rule applied when splitting a residual amount",
+    ]
+
+    def test_partial_scaffolding_overlap_is_a_warning_not_a_failure(self) -> None:
+        """The band between honest noise and a template must not block a run.
+
+        Three shared scaffolding sentences inside otherwise unrelated bodies
+        is exactly what a legitimate family of parallel skills looks like, and
+        that is the shape the honest corpus tops out at.
+        """
+        diagnostics: list = []
+        validator._compare_skeletons(
+            "dunning-transport-wiring",
+            self.SHARED_SCAFFOLDING + self.TRANSPORT_LINES,
+            "invoice-settlement-guard",
+            self.SHARED_SCAFFOLDING + self.SETTLEMENT_LINES,
+            diagnostics,
+        )
+        self.assertEqual(
+            [(item.code, item.severity) for item in diagnostics],
+            [("SKILL_TEMPLATE_REUSE_WARN", "warning")],
+        )
+
+    def test_short_bodies_are_left_to_the_lexical_pass(self) -> None:
+        """Below the line floor the ratio is noise, so nothing is reported."""
+        diagnostics: list = []
+        validator._compare_skeletons(
+            "left",
+            ["trace the payload and record it"] * 4,
+            "right",
+            ["trace the payload and record it"] * 4,
+            diagnostics,
+        )
+        self.assertEqual(diagnostics, [])
+
+    def test_template_diagnostics_stay_sorted_and_deduplicated(self) -> None:
+        self.use_schema_1_2()
+        self.install_template()
+        diagnostics = validator.validate(
+            self.skills, self.plan_path, self.target, self.registry_path
+        )
+        self.assertEqual(diagnostics, sorted(set(diagnostics)))
+        again = validator.validate(
+            self.skills, self.plan_path, self.target, self.registry_path
+        )
+        self.assertEqual(
+            [(item.code, item.message, item.severity) for item in diagnostics],
+            [(item.code, item.message, item.severity) for item in again],
+        )
 
 
 if __name__ == "__main__":

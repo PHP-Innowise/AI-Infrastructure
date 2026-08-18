@@ -14,7 +14,7 @@ does not install project packages or use `sudo`.
 | `parity` | Mirror parity and cross-edition core parity for Laravel, Symfony, and PHP Core. |
 | `mirrors` | Every per-tool mirror matches its canon (`scripts/build_mirrors.py --check`). |
 | `installation` | Exact versioned inventories match the repository, and every Laravel/Symfony/PHP Core × Claude/Cursor/Codex selected-tool install passes isolated validate/status/index smoke tests without application, `.env`, or application-database access. Also that framework-specific skill semantics survive, and that the optional context-collection tool stays out of the editions and the installer. |
-| `lint` | `bash -n` and `shellcheck -S error` on all tracked shell scripts (including root `collect`); `python3 -m json.tool` on tracked JSON; no clock/random invalidator in Cursor working-memory render hooks; startup context budget within ceilings (`scripts/context_budget.py --check`). |
+| `lint` | `bash -n` and `shellcheck -S error` on all tracked shell scripts (including root `collect`); `python3 -m json.tool` on tracked JSON; no clock/random invalidator in Cursor working-memory render hooks; every complete PHP snippet in tracked Markdown parses (`scripts/check_php_snippets.py --require-php`); startup context budget within ceilings (`scripts/context_budget.py --check`). |
 | `changelog` | Pull requests only: a diff that touches shared-core files (memory/context core, Project Brain, hooks, `scripts/`) must also change the root `CHANGELOG.md` (`scripts/check_core_changelog.sh`). |
 | `links` | All relative markdown links in tracked `.md` files resolve (`scripts/check_links.py`). |
 
@@ -120,8 +120,18 @@ if git ls-files -z -- '*/.cursor/hooks/working-memory-write.sh' \
   exit 1
 fi
 
+# Requires php (preinstalled on GitHub ubuntu-latest runners). --require-php
+# turns a runner that lost it into a failure instead of a silent pass.
+python3 scripts/check_php_snippets.py --require-php
+
 python3 scripts/context_budget.py --check
 ```
+
+The snippet step exists because the repository tracks no `.php` files while
+its skills and examples ship hundreds of fenced PHP blocks - the blocks an
+agent copies when it writes code. Only blocks beginning with `<?php` are
+linted, since they claim to be whole files; fragments are counted and
+reported rather than checked, so the step never overstates its coverage.
 
 The budget step measures each edition's startup context price and compares it
 against the per-edition ceilings in

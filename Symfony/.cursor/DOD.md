@@ -26,13 +26,14 @@ All Minimum items, plus:
 
 - [ ] Composer metadata is valid: `composer validate --strict` if `composer.json` exists.
 - [ ] PHP syntax is clean: `php -l` on changed PHP files.
-- [ ] Tests pass: `composer test`, `vendor/bin/phpunit`, or `vendor/bin/pest`.
+- [ ] Tests pass: `composer test`, `vendor/bin/phpunit`, or `vendor/bin/pest`. Run the whole suite; a `--filter`/`--group` run is a debugging aid, not evidence, and must be reported as filtered.
 - [ ] Formatting passes: configured PHP-CS-Fixer, PHP_CodeSniffer, Easy Coding Standard, or project equivalent.
 - [ ] Static analysis passes: PHPStan or Psalm when configured.
 - [ ] Symfony container/routes are coherent when relevant: `php bin/console lint:container`, `php bin/console debug:router`.
 - [ ] Changed Symfony configuration/templates/translations are valid when relevant: `php bin/console lint:yaml config`, `php bin/console lint:twig templates`, and `php bin/console lint:xliff translations`.
 - [ ] Doctrine changes include migrations and schema validation when relevant: `php bin/console doctrine:migrations:diff --check-database-platform` or project equivalent, and `php bin/console doctrine:schema:validate --skip-sync`.
 - [ ] New behavior has focused tests covering the happy path and highest-risk failure path.
+- [ ] Tests own the rows they assert on: shared fixture records are treated as read-only, and any test that mutates state (sign-in, password change, deletion, counters) creates its own subject. A test that reads a fixture another test can write passes or fails by suite order.
 - [ ] Project Brain mutations use legal transitions, expected revisions, and the shared mutation lock; no duplicate authoritative task state was introduced.
 - [ ] Controller -> Service -> Repository boundaries are respected.
 - [ ] Pragmatic SOLID review passes: responsibilities are cohesive, dependencies point inward, contracts are narrow/substitutable, and interfaces have a concrete boundary justification.

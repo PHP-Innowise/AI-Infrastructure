@@ -2,10 +2,15 @@
 """Publish an explicitly planned staged accelerator with rollback support.
 
 The helper never walks staging or target roots.  `snapshot` records only the
-publication plan plus the manifest destination.  `publish` refuses target drift,
-copies the staged manifest last, and rolls back immediately on an I/O failure.
-The caller keeps the journal until post-publication bootstrap verification
-passes; `rollback` restores it when that verification fails.
+publication plan plus the manifest destination.  `publish` refuses target
+drift, refuses plans the manifests cannot prove safe (publication paths must
+be staged-manifest members, runtime state may only seed absent paths, and
+removals must be target-manifest members), copies the staged manifest last,
+and rolls back immediately on an I/O failure.  The caller keeps the journal
+until post-publication bootstrap verification passes; `rollback` restores it
+when that verification fails, removes directory chains the publication
+created, and preserves (and reports) any file a third party edited after
+publication instead of clobbering it.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ from infra_ownership import (
     MANIFEST_NAME,
     OwnershipError,
     confined_target_path,
+    may_be_manifest_owned,
     normalize_relative_path,
     read_write_plan,
     resolve_target,
@@ -123,6 +129,70 @@ def verify_staging(staging: Path, paths: list[str]) -> None:
             raise PublicationError(f"staged publication file missing or unsafe: {rel}")
 
 
+def manifest_members(root: Path, label: str) -> set[str]:
+    path = confined_target_path(root, MANIFEST_NAME)
+    if not path.is_file() or path.is_symlink():
+        raise PublicationError(f"{label} manifest missing: {MANIFEST_NAME}")
+    manifest = load_json(path, f"{label} manifest")
+    files = manifest.get("files")
+    if not isinstance(files, dict):
+        raise PublicationError(f"{label} manifest files must be an object")
+    return {normalize_relative_path(rel) for rel in files}
+
+
+def verify_plan_ownership(
+    target: Path, staging: Path, paths: list[str], removals: list[str]
+) -> None:
+    """Refuse plans the manifests cannot prove safe, before any target write.
+
+    Every manifest-ownable publication path must be a member of the staged
+    manifest's files map.  Non-ownable runtime state (memory-bank/project-brain
+    live data) belongs to the target team from the moment it is seeded, so it
+    may only be published into a path that does not exist yet.  Cache artifacts
+    are never publishable.  Every removal must be owned by the target manifest.
+    """
+    staged_members = manifest_members(staging, "staged")
+    caches: list[str] = []
+    runtime_overwrites: list[str] = []
+    unowned: list[str] = []
+    for rel in paths:
+        if rel == MANIFEST_NAME:
+            continue
+        if "__pycache__" in rel or rel.endswith(".pyc"):
+            caches.append(rel)
+        elif may_be_manifest_owned(rel):
+            if rel not in staged_members:
+                unowned.append(rel)
+        elif confined_target_path(target, rel).exists():
+            runtime_overwrites.append(rel)
+    if caches:
+        raise PublicationError(
+            "publication plan contains cache artifacts: " + ", ".join(sorted(caches))
+        )
+    if runtime_overwrites:
+        raise PublicationError(
+            "publication plan would overwrite non-ownable runtime state: "
+            + ", ".join(sorted(runtime_overwrites))
+        )
+    if unowned:
+        raise PublicationError(
+            "publication plan paths are missing from the staged manifest: "
+            + ", ".join(sorted(unowned))
+        )
+    if removals:
+        target_members = manifest_members(target, "target")
+        unmanifested = sorted(
+            rel
+            for rel in removals
+            if not may_be_manifest_owned(rel) or rel not in target_members
+        )
+        if unmanifested:
+            raise PublicationError(
+                "removal plan paths are not owned by the target manifest: "
+                + ", ".join(unmanifested)
+            )
+
+
 def prepare_journal(
     target: Path, paths: list[str], journal: Path, snapshot: dict
 ) -> dict:
@@ -139,11 +209,20 @@ def prepare_journal(
         backup = confined_target_path(backups, rel)
         backup.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, backup)
+    created_dirs: set[str] = set()
+    for rel in paths:
+        parent = Path(rel).parent
+        while parent.as_posix() != ".":
+            ancestor = parent.as_posix()
+            if not confined_target_path(target, ancestor).exists():
+                created_dirs.add(ancestor)
+            parent = parent.parent
     metadata = {
         "schema_version": 1,
         "target": str(target),
         "paths": paths,
         "baseline": {rel: snapshot["files"][rel] for rel in paths},
+        "created_dirs": sorted(created_dirs),
         "status": "prepared",
     }
     (journal / "journal.json").write_text(
@@ -172,14 +251,41 @@ def restore(target: Path, journal: Path, metadata: dict | None = None) -> None:
         raise PublicationError("rollback journal target mismatch")
     baseline = metadata.get("baseline")
     paths = metadata.get("paths")
-    if not isinstance(baseline, dict) or not isinstance(paths, list):
+    created_dirs = metadata.get("created_dirs", [])
+    published = metadata.get("published")
+    if (
+        not isinstance(baseline, dict)
+        or not isinstance(paths, list)
+        or not isinstance(created_dirs, list)
+        or not (published is None or isinstance(published, dict))
+    ):
         raise PublicationError("rollback journal is malformed")
+    conflicts: set[str] = set()
     for rel in reversed(paths):
         rel = normalize_relative_path(rel)
         destination = confined_target_path(target, rel)
         state = baseline.get(rel)
         if not isinstance(state, dict):
             raise PublicationError(f"rollback state missing: {rel}")
+        if published is not None:
+            # A completed publication recorded the exact content it wrote.
+            # Content matching neither that record nor the baseline is a
+            # third-party edit made after publication: never clobber it.
+            expected = published.get(rel)
+            if not isinstance(expected, dict):
+                raise PublicationError(f"rollback published state missing: {rel}")
+            try:
+                current = file_state(target, rel)
+            except (OwnershipError, PublicationError):
+                conflicts.add(rel)
+                continue
+            signature = (current.get("state"), current.get("sha256"))
+            if signature not in (
+                (expected.get("state"), expected.get("sha256")),
+                (state.get("state"), state.get("sha256")),
+            ):
+                conflicts.add(rel)
+                continue
         if state.get("state") == "missing":
             if destination.exists():
                 if destination.is_symlink() or not destination.is_file():
@@ -191,10 +297,28 @@ def restore(target: Path, journal: Path, metadata: dict | None = None) -> None:
                 raise PublicationError(f"rollback backup missing or unsafe: {rel}")
             atomic_copy(backup, destination)
             os.chmod(destination, int(state["mode"]))
-    metadata["status"] = "rolled-back"
+    for rel_dir in sorted(created_dirs, reverse=True):
+        directory = confined_target_path(target, rel_dir)
+        if (
+            directory.is_dir()
+            and not directory.is_symlink()
+            and next(directory.iterdir(), None) is None
+        ):
+            directory.rmdir()
+    if conflicts:
+        metadata["status"] = "rolled-back-with-conflicts"
+        metadata["conflicts"] = sorted(conflicts)
+    else:
+        metadata["status"] = "rolled-back"
+        metadata.pop("conflicts", None)
     (journal / "journal.json").write_text(
         json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
     )
+    if conflicts:
+        raise PublicationError(
+            "rollback preserved third-party edits made after publication; "
+            "resolve manually: " + ", ".join(sorted(conflicts))
+        )
 
 
 def publish(
@@ -220,6 +344,7 @@ def publish(
             + ", ".join(sorted(watched_overlap))
         )
     all_paths = paths + removals
+    verify_plan_ownership(target, staging, paths, removals)
     verify_baseline(target, all_paths, snapshot, baseline_only)
     verify_staging(staging, paths)
     metadata = prepare_journal(target, all_paths, journal, snapshot)
@@ -240,6 +365,16 @@ def publish(
             confined_target_path(staging, MANIFEST_NAME),
             confined_target_path(target, MANIFEST_NAME),
         )
+        published = {
+            rel: {
+                "state": "file",
+                "sha256": sha256_file(confined_target_path(target, rel)),
+            }
+            for rel in ordered
+        }
+        for rel in removals:
+            published[rel] = {"state": "missing"}
+        metadata["published"] = dict(sorted(published.items()))
     except Exception:
         restore(target, journal, metadata)
         raise

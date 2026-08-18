@@ -106,9 +106,35 @@ class GitignoreMergeTest(unittest.TestCase):
     def test_negated_entry_does_not_satisfy_positive_entry(self) -> None:
         existing = b"!cache/\ncache/\n"
         complete = self.merge(existing, ["!cache/", "cache/"])
-        partial = self.merge(b"!cache/\n", ["cache/"])
+        unrelated = self.merge(b"!other/\n", ["cache/"])
         self.assertEqual(complete.staged_bytes, existing)
-        self.assertIn(b"\ncache/\n", partial.staged_bytes)
+        self.assertIn(b"\ncache/\n", unrelated.staged_bytes)
+
+    def test_negations_are_emitted_after_positive_patterns(self) -> None:
+        result = self.merge(None, ["!logs/.gitkeep", "logs/*"])
+        self.assertEqual(
+            result.staged_bytes,
+            BEGIN + b"\nlogs/*\n!logs/.gitkeep\n" + END + b"\n",
+        )
+        self.assertEqual(
+            result.metadata["requirements"], ["!logs/.gitkeep", "logs/*"]
+        )
+        second = self.merge(result.staged_bytes, ["logs/*", "!logs/.gitkeep"])
+        self.assertEqual(second.staged_bytes, result.staged_bytes)
+        self.assertEqual(second.metadata["strategy"], "unchanged")
+
+    def test_requirement_conflicting_with_team_entry_fails_closed(self) -> None:
+        with self.assertRaisesRegex(
+            merger.GitignoreMergeError, "explicit decision.*cache/"
+        ):
+            self.merge(b"!cache/\n", ["cache/"])
+        with self.assertRaisesRegex(
+            merger.GitignoreMergeError, "explicit decision.*!cache/"
+        ):
+            self.merge(b"cache/\n", ["!cache/"])
+        satisfied = self.merge(b"!cache/\ncache/\n", ["cache/"])
+        self.assertEqual(satisfied.staged_bytes, b"!cache/\ncache/\n")
+        self.assertEqual(satisfied.metadata["strategy"], "unchanged")
 
     def test_changed_requirements_replace_only_the_managed_block(self) -> None:
         before = (

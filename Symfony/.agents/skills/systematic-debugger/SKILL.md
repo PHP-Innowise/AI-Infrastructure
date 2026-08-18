@@ -134,7 +134,22 @@ Use only commands/components installed by the consuming project. Xdebug/Blackfir
    - No other tests broken?
    - Issue actually resolved?
 
-4. **If 3+ Fixes Failed**
+4. **Sweep The Root Cause**
+   - The root cause is a shape, not a line. Search for that shape everywhere:
+     same call, same missing guard, same wrong comparison.
+   - Grep for the mechanism, not the symptom. One service left holding a
+     closed EntityManager after `wrapInTransaction()` is six services if six
+     of them catch an expected exception the same way.
+   - Report every other site found, file and line, even when fixing it is out
+     of scope. Fixing one instance and staying silent about the rest reads as
+     "fixed" and is not.
+   - This is not a "while I'm here" improvement: it is the same defect. Whether
+     to fix the rest now is the requester's scope call, but they cannot make it
+     without the list.
+   - Record the result in the bug record's `## Same Shape Elsewhere`. An empty
+     section means the search ran and found nothing, not that it was skipped.
+
+5. **If 3+ Fixes Failed**
    - STOP and question the architecture
    - 3+ failures = architectural problem
    - Discuss with human partner before continuing

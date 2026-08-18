@@ -87,13 +87,19 @@ Pick the tier that matches the work performed. Higher tiers include all lower-ti
   no staging/target root walk inferred ownership.
 - [ ] `.infra-manifest.json` was written from the explicit generation/update write plan (version from the root `VERSION` file, profile/task reference, sha256 per planned file, no runtime state tracked). Manifest membership exclusively defines ownership in both modes; a manifest-owned `AGENTS.md` carries the matching stamp, while an untracked team `AGENTS.md` remains untouched.
 - [ ] Forges emitted task-scoped root-ignore requirements only. The centralized
-  helper deterministically composed `.gitignore`; missing requirements received
-  explicit append approval (or aborted), and structured shared decision fields
-  agree with legacy decision fields and the manifest hash.
+  helper deterministically composed `.gitignore` with positive patterns before
+  `!` negations so re-includes win last-match; missing requirements received
+  explicit append approval (or aborted), a requirement exactly contradicting a
+  team entry failed for an explicit decision, and structured shared decision
+  fields agree with legacy decision fields and the manifest hash.
 - [ ] Publication rechecked baseline hashes, kept a rollback journal, copied the
-  manifest last, and passed the full post-publication gate; watch-only target
-  members were rechecked without copying/journaling, and any failure restored
-  exact previous bytes and modes.
+  manifest last, and passed the full post-publication gate; the publish gate
+  refused publication paths absent from the staged manifest, overwrites of
+  non-ownable runtime state (seeding absences only), and removals the target
+  manifest does not own; watch-only target members were rechecked without
+  copying/journaling, and any failure restored exact previous bytes and modes,
+  removed publication-created directory chains, and preserved (reporting as
+  conflicts) files third parties edited after publication.
 - [ ] For `infra-update` runs additionally: the executable ownership helper aborted cleanly if no manifest existed (legacy target); no file whose hash differed from the manifest was overwritten without an explicit per-file decision; files absent from both the manifest and staged output were not read, reported, or touched; memory state (chunks, `INDEX.md`, counters, `project-brain` records/indexes) was not regenerated; the rewritten manifest reflects the explicit final write plan and validates all decision fields including `task`.
 - [ ] `bootstrap-verifier` was run and reported no unresolved failures.
 

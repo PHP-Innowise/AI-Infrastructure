@@ -4,6 +4,287 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Fixed
+
+- The generator could not pass its own quality gate on any target. The memory
+  quartet is unconditional, its skills verify themselves with the seeded
+  runtime, and every one of those commands is an interpreter invocation -
+  `python3 memory-bank/scripts/context.py status` - which static analysis can
+  never prove non-mutating. The gate blocked all of them as
+  `INTERPRETER_EXECUTION`, so a real end-to-end run ended in FAIL after 19
+  forge iterations with 7 errors, all in the quartet.
+  The route out is attestation, not relaxation: `commands.read_health` in the
+  generator's own `runtime-contract.json` now vouches for what the analyzer
+  cannot prove. The allowance is deliberately narrow - the list is read from
+  the generator's shipped asset and never from the target, so a scanned
+  project cannot declare its own commands safe; it is exact-match, not a
+  pattern; it covers only the `read_health` group, which the contract already
+  separates from `refresh_retrieve`, `checkpoint`, `governed_task` and
+  `dynamic_records`; and it waives attestability alone. A proven risk is never
+  waived, so `context.py status && <destructive>` stays blocked, as do
+  `refresh`, `start` and `complete` on the very same script.
+  The contract was also incomplete: `memory-bank/scripts/validate.py` is in
+  `required_skeleton` and is read-only (verified against the shipped source -
+  no write, mkdir, unlink or commit in 388 lines), but was declared nowhere,
+  so the durable validator stayed blocked. It joins `read_health`, and a new
+  test asserts every declared read-only script really is read-only rather than
+  trusting the declaration.
+
+- `CommandAnalyzer` raised on the stock Symfony skeleton, so the quality gate
+  could not run at all on a normal Symfony target. Flex writes `auto-scripts`
+  as an object keyed by command (`{"cache:clear": "symfony-cmd"}`), and
+  `_normalise_script_commands` accepted only a string or a string list - it
+  raised, `validate_skill_quality.py` turned that into
+  `COMMAND_ANALYZER_UNAVAILABLE`, and every skill in the inventory failed.
+  All seven real Symfony projects available for measurement carry the object
+  form, so this was not an edge case: it made generation impossible on the
+  generator's own primary target ecosystem. The object form is now read, with
+  the command reconstructed from the key according to its handler
+  (`symfony-cmd` -> `bin/console <key>`, `php-script` -> `php <key>`), and a
+  script object with non-string values is still rejected. Found by running
+  the pipeline end to end against a real project rather than a fixture.
+
+- The skill-quality gate held the *shape* of a generated skill - contract
+  completeness, candidate registry, sha256 fingerprints, path existence - and
+  lexical duplication, but not its *meaning*. Seven reproduced ways to pass it
+  with an unusable or unsafe skill are now closed; the entries below describe
+  each one. Throughout, calibration was measured against honest corpora rather
+  than guessed, because a gate that fails a good-faith generation breaks the
+  generator outright, which is worse than the miss it closes.
+- Command safety stopped at the plan's `verification[].command`, so a
+  generated `SKILL.md` could hand the agent `rm -rf var/cache/dev` or
+  `curl -X POST https://billing.internal/api/invoices/void` in its prose and
+  still pass. Skill bodies are now analyzed too: fenced `bash`/`sh`/`shell`/
+  `console` blocks strictly (transcript prompts stripped, continuations
+  joined, comments dropped) and inline backtick spans permissively (a segment
+  counts only when it names a known executable *and* carries an argument, and
+  a bare English-word executable only when path-qualified). Chains are split
+  at quote-aware separators and classified leaf by leaf, homoglyph spaces are
+  folded first, and the argument of a code host (`bash -c`, `php -r`) is
+  re-read as a nested command. Destructive, workspace-mutating,
+  provider/network, or `sudo` behavior blocks (`SKILL_BODY_COMMAND_RISK`);
+  attestability-only findings (unknown executable, unresolved alias,
+  tokenization) do not, because prose legitimately carries placeholders and
+  sample output. That split is the measured one: on 93 hand-written
+  accelerator skills the naive "anything not provably safe" policy fired ~100
+  times on the 48 Symfony skills alone and was almost entirely noise
+  (`<number>` placeholders, heredoc fragments, JSON payload strings, `EOF`),
+  while the shipped policy fires 64 times and every hit is a real mutating or
+  networked command.
+  Two defects in that first cut were found by review and closed before it
+  shipped. Prose polarity is now read: a guardrail names the command it
+  forbids, so `Never run \`rm -rf var/\`` - the safest sentence a skill can
+  carry - was the one sentence that failed the gate. A backtick span whose
+  own clause carries a prohibition (`never`, `do not`, `must not`, `avoid`,
+  `instead of`, `tempted to`, ...) is read as a mention, not a prescription;
+  the window stops at the previous clause boundary so one prohibition cannot
+  silence a section, a lone hyphen is deliberately not a boundary (it would
+  truncate the window at "read-only" and hand the false positive back), and a
+  fenced shell block stays an instruction whatever the surrounding prose
+  claims. Second, the segment walk was LIFO against a 256-segment cap, so a
+  chain longer than the cap dropped its *head* - exactly where padding hides
+  a dangerous command; `rm -rf var/important && <300 harmless echoes>`
+  validated clean. The walk is now breadth-first over the written order, and
+  reaching the cap is itself reported (`SKILL_BODY_COMMAND_UNSCANNED`)
+  instead of silently truncating: an unscanned tail is an unproven command,
+  and unproven fails closed.
+- `evidence_anchors[].anchor` was validated for shape only, so an anchor could
+  cite line 7400 of a 60-line file or a symbol that does not exist in the
+  class it names. Anchors now resolve against the cited file - `L` ranges must
+  run forwards and lie inside its real bounds (`EVIDENCE_ANCHOR_RANGE`), and a
+  `symbol:` anchor's last segment must occur in it
+  (`EVIDENCE_ANCHOR_SYMBOL_ABSENT`, case-insensitive whole-identifier match so
+  `Ns\Class::member` resolves through `member`) - the same bound
+  `evidence[].line_range` already carried. An unreadable source is reported
+  (`EVIDENCE_ANCHOR_UNRESOLVABLE`), never raised.
+- Ownership was only ever compared writes-against-writes, so a skill could
+  write into a zone another skill holds under `mode: exclusive` whenever that
+  owner was read-only - which, by contract, every reviewer is
+  (`OWNERSHIP_EXCLUSIVE_WRITE_CONFLICT`). `shared`/`composed` zones keep their
+  own rules. Separately, a declared primary/defer precedence silenced overlap
+  unconditionally, so two skills could claim the same `owned_scope` entry,
+  `ownership[].description`, or positive trigger *word for word* and still
+  pass. Verbatim repetition is now `BOUNDARY_NOT_SEPARATING` regardless of
+  precedence - a boundary that repeats itself divides nothing - while nested
+  or otherwise partial overlap under an explicit precedence stays legitimate.
+- A skill could carry the project's real paths, classes and constants in every
+  sentence and still instruct nothing, passing every lexical traceability
+  check. Procedure steps are now read structurally: a step must command an
+  action (`SKILL_STEP_NOT_OPERATIONAL`) and must not open by deferring to
+  reflection - "consider", "bear in mind", "form an opinion"
+  (`SKILL_STEP_HEDGED`); the procedure as a whole must name a concrete anchor
+  (`SKILL_PROCEDURE_UNANCHORED`); and verification must state a check rather
+  than an impression (`SKILL_VERIFICATION_NOT_FALSIFIABLE`,
+  `SKILL_VERIFICATION_NOT_OPERATIONAL`). The plan is read the same way
+  (`PROCEDURE_STEP_NOT_OPERATIONAL`, `PROCEDURE_STEP_UNANCHORED`,
+  `VERIFICATION_NOT_FALSIFIABLE`). The `GENERIC_PHRASES` blacklist is demoted
+  to a secondary net, since one paraphrase defeats it. Calibration is
+  deliberately loose where it can only cost honest skills: the verb set is
+  open and matched anywhere in the step, mid-sentence hedging next to a real
+  action stays legitimate, and the anchor is required per procedure and never
+  per step, so honest branch and delegation steps survive.
+- The action-verb set that gate reads against was too narrow on arrival and
+  rejected honest instruction: 5 of the 37 procedure steps in the adversarial
+  harness's *honest* five-skill baseline were failed as commanding no action
+  ("Bound delivery at three attempts.", "Downgrade only on a permanent
+  delivery boundary error.", "Not this skill: recompute the anniversary
+  anchor of a subscription cycle."), and a step reading "Accept transitions
+  that revive a cancelled slot" was reported as inert rather than as wrong.
+  The set is widened by two stated rules - a verb enters when a measured
+  honest step used it, and a verb whose counterpart is already listed
+  ("upgrade"/"downgrade", "compute"/"recompute", "reject"/"accept",
+  "stop"/"start", "bind"/"bound", "modify"/"change") enters with it - stopping
+  at words that ordinarily read as adjective or noun, so "close" stays out and
+  "the closed invoice" keeps reading as a bare noun list. The honest baseline
+  is clean again at 0 findings over 271 distinct steps of every corpus
+  available.
+- Skill deduplication in `validate_skill_quality.py` was advertised as
+  semantic but compared normalized lines for *equality*, so it only ever saw
+  byte-identical prose - and since a plan-conforming `SKILL.md` must carry its
+  own claim, paths and neighbours' names, those mandated differences diluted
+  the score below the fail lines even for a byte clone of the procedure
+  (measured on the fixture: clone line 0.500 / token 0.680 against thresholds
+  0.70 / 0.80; one template with the project's nouns substituted 0.100 /
+  0.351; the same template differing only in `,`->`;` and `and`->`plus`
+  0.000 / 0.324 - indistinguishable from two honestly different skills).
+  A second pass now compares a *skeleton*: backticked spans, paths, CamelCase
+  and `UPPER_SNAKE` identifiers, dotted ids, PHP variables and calls, numbers
+  and the inventory's other skill names collapse to one placeholder, fenced
+  code and approved fixed blocks are dropped, punctuation and interchangeable
+  connectives are folded, and lines that are almost entirely project identity
+  are ignored; what remains is scored by one-to-one line matching plus token
+  trigrams (`SKILL_TEMPLATE_REUSE`, error at 0.38 / 0.26, warning at
+  0.28 / 0.20). Thresholds are measured, not guessed: across 2371 pairs of
+  honest hand-written skills the worst pair scores 0.350 / 0.154 and is a
+  deliberately parallel scanner family, while the three duplicates above
+  score 0.400 / 0.329, 0.400 / 0.311 and 0.500 / 0.471. `REPEATED_BLOCK`'s
+  three-consecutive-identical-lines rule drops to two adjacent skeleton lines
+  as `SKILL_TEMPLATE_BLOCK`, kept a *warning* because on the same honest
+  corpus it fires five times on legitimately shared policy sentences.
+- An `evidence[].supported_claims` entry was "grounded" by a bag-of-words
+  overlap with the cited range: two shared tokens (one for a claim of three
+  tokens or fewer) after subtracting five service words. `class` occurs in
+  75% of real PHP files, `function` in 77%, `public` in 74%, `string` in 56%,
+  so an invented claim - "the public class exposes a private function that
+  returns a string value from the configuration array" - was grounded by any
+  PHP file it pointed at. Support now has to come from vocabulary that
+  distinguishes *that* range: a claim sharing nothing outside PHP-keyword and
+  licence-header lexicon is `EVIDENCE_CLAIM_UNSUPPORTED` (error), and one
+  sharing nothing outside software-English boilerplate (`service`, `method`,
+  `value`, `result`, `config`) while at least 65% of its own vocabulary is
+  such boilerplate is `EVIDENCE_CLAIM_GENERIC_SUPPORT` (warning). The cited
+  side is matched with compound identifiers split into their parts, so
+  `publishReminder` grounds an honest claim about the "reminder" the file
+  never writes on its own. Both lexicons are unedited document-frequency cuts
+  (share >= 0.40 and >= 0.04) over 3997 real PHP files from the Symfony and
+  Laravel vendor trees, measured in that same identifier-split token space.
+  Calibration on 1485-2190 honest docblock/code pairs from those trees: the
+  error tier costs 0.18-0.27% false positives and catches 20-45% of
+  generic-lexicon fabrications, the warning tier costs 2.3-3.6% and takes the
+  pair to 87-99%; on the harness's honest control claims the margin is 3-10
+  project-specific tokens matched against a threshold of one. The second tier
+  warns rather than blocking because at that false-positive rate a failed
+  generation would cost more than the miss.
+  What no lexical rule can reach is *polarity*: a claim asserting the opposite
+  of the code it cites shares all the same vocabulary. That gap, the options
+  weighed for it (an LLM judge inside the gate, doing nothing, this
+  deterministic narrowing plus adjudication in the repo-root `harness/`), and
+  the decision are recorded in `docs/ADR-001-claim-adjudication.md`.
+- Six contradictions between the canonical LLM-prompt documents and the
+  shipped validators, each capable of steering an obedient agent into a
+  blocking gate or leaking non-neutral fixture data:
+  - `infra-generate` step 2 demanded a top-level `routing_cases[]` in
+    `skill-generation-plan.json`, but the schema's top-level membership is
+    exact and `validate_skill_quality.py` blocks any extra field with
+    `PLAN_FIELD_UNKNOWN`; the step now requires the per-skill
+    `routing_cases[]` (`skills[].routing_cases`) the validator actually
+    checks.
+  - `command-forge` step 8 read as an in-skill instruction to run
+    `validate_flow_contracts.py`, yet `skill-flow-composer` runs after
+    command-forge, so `SKILL FLOW.md` cannot exist and the validator exits 1
+    on the missing artifact; the step now states compiled-graph validation
+    is orchestrator-owned (`infra-generate` step 8 after the composer), must
+    not run inside command-forge, and is recorded as pending that gate.
+  - The `command-forge` frontmatter guardrail ("Cursor command only `name`,
+    `description`") carried no flow-command exception while step 7 and the
+    flow guardrail require `flow` + ordered `stages` frontmatter and one
+    fenced `json flow-contract` block in every selected command-carrying
+    edition; the guardrail now names flow commands as the sole exception, so
+    a literal reading no longer guarantees failing
+    `validate_flow_contracts.py`.
+  - The `project-profile-schema.md` exemplar skill stamped
+    `"phase": "execution"`, outside the fixed vocabulary (`understanding`,
+    `planning`, `implementation`, `verification`, `finalization`) that flow
+    stages and the composer's Phase Map accept; the example now uses
+    `implementation`.
+  - Adjacent `AGENTS.md` bullets contradicted each other on schema 1.1
+    approvability; both now state the policy DOD.md, the schema doc, and
+    `LEGACY_PLAN_PUBLICATION_INELIGIBLE` enforce: only a schema 1.2 plan is
+    approvable (1.2 carries the ownership/routing structures introduced in
+    1.1), and legacy 1.0/1.1 plans stay audit-readable but must be
+    re-synthesized.
+  - The `critical_invariants` example in `project-profile-schema.md` leaked
+    a real project's domain (`content-job.failure-terminal` /
+    `contentjobs-lifecycle-review`); it now uses the neutral acme-billing
+    fixture family (`invoice.paid-immutable`, `billing-rules-review`) like
+    every other example, preserving the example's structure.
+
+  Pinned by the new `tests/test_doc_contracts.py`, which parses the
+  documents and cross-checks them against the validators' actual field
+  sets, phase vocabulary, and diagnostics instead of trusting prose.
+
+- `analyze_commands.py` no longer fails open: unknown executables, `sudo`/
+  `env`/`timeout`/`nice`/`nohup`/`stdbuf` wrappers (unwrapped by basename),
+  `xargs` and `$VAR` indirection, clustered `-lc` interpreter flags, shell
+  invocations of script files, git global options before the subcommand,
+  `php bin/console` / `symfony console` database commands, and
+  `npm i`/`ci`/`npx`/`dlx`-family runners all classify or block instead of
+  reporting `verification_safe=true`. Blocked commands now carry an explicit
+  `verification_blocker` category instead of `non_mutating`. False positives
+  fixed (`ruff check .`, `gofmt -l .`, `pytest -W error`); alias expansion
+  is bounded (512 walks, fail-closed `EXPANSION_LIMIT`); unknown bare
+  `yarn`/`pnpm`/`bun` scripts fail closed as `UNKNOWN_ALIAS`; direct
+  `composer <builtin>` classifies the builtin, not a shadowing script.
+- `publish_staging.py` refuses to write outside its contract: publication
+  plans must be members of the staged manifest, removal plans members of
+  the target manifest, and non-ownable runtime state (memory-bank/
+  project-brain) is rejected before any mutation. Rollback now removes
+  directory chains publication created and, using post-publish content
+  hashes recorded in the journal, skips (and reports) files edited by third
+  parties instead of silently clobbering them. `classify_update` no longer
+  reports the staged `.infra-manifest.json` as a `new-file-collision`, and
+  malformed manifest/decision entries raise clean `OwnershipError`s.
+- `merge_gitignore.py` emits positive patterns before `!` negations so
+  re-includes survive git's last-match-wins, and a requirement that would
+  silently override a team `!entry` (or vice versa) is now a reported
+  conflict requiring an explicit decision.
+- `validate_skill_quality.py` diagnoses wrong-typed plan fields instead of
+  crashing (five reproduced crash sites; `--json` always emits its
+  payload), accepts the shipped five-key `candidate-registry.json`
+  (previously every default-registry `--skill-plan` run failed
+  `REGISTRY_INVALID`), no longer corrupts similarity metrics via the
+  `profile` normalization regex, and flags per-trigger routing collisions
+  that whole-set Jaccard diluted below threshold. Also fixed: unescaped
+  skill names in regexes, `_globs_intersect` false positives on disjoint
+  patterns, glob matches escaping the target through symlinks, the dead
+  pre-`resolve()` symlink guard, trailing sentence punctuation in
+  traceability tokens, and YAML folded/literal description parsing.
+- `validate_flow_contracts.py` reports structured errors instead of
+  raising on malformed routing fields and null stage `agents`, and command
+  file-set discovery follows declared flow names instead of a hardcoded
+  `flow-*.md` glob. `validate_generated.py` reports one placeholder error
+  per file/pattern. `validate_reference_catalogs.py` rejects empty
+  candidate registries and reports unreadable catalogs per file instead of
+  crashing.
+- Memory readiness in the seeded `context.py` distinguishes transient git
+  probe failures (`git-probe-failed`) from detached HEAD and makes
+  `unborn-head` genuinely detectable; the workflow-smoke repeatability hash
+  now covers recomputed outputs instead of constants.
+- CI: the reliability job is pinned to Python 3.9 (its 3.x leg duplicated
+  the tests-matrix and mirrors jobs), and `build_mirrors.py --check` now
+  detects stale mirrors of deleted canonical `only`-class files (pinned by
+  the new root `tests/test_build_mirrors.py`).
+
 ## [2.5.0] - 2026-08-14
 
 ### Added

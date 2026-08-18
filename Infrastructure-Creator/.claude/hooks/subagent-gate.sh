@@ -120,7 +120,15 @@ if printf '%s' "$ROSTER" | grep -qxF -- "$SUB_TYPE"; then
   if [ -f "$LOCK_FILE" ] \
     && [ -z "$(find "$LOCK_FILE" -mmin +"$LOCK_TTL_MINUTES" 2>/dev/null)" ]; then
     HOLDER=$(cat "$LOCK_FILE" 2>/dev/null)
-    if [ -n "$HOLDER" ] && [ "$HOLDER" != "$SUB_TYPE" ]; then
+    # Any live holder blocks, including another instance of the same agent
+    # type. Exempting the same name let N concurrent `coder` runs all pass,
+    # each merely refreshing the lock — which is how three epic builds once
+    # ran at the same time against one repository. A genuine respawn is not
+    # affected: subagent-dispatch.sh clears the lock when the holder
+    # finishes, so a fresh lock means the holder is still running. A crashed
+    # run is covered by LOCK_TTL_MINUTES, which is what keeps this from
+    # deadlocking delegation.
+    if [ -n "$HOLDER" ]; then
       {
         printf 'BLOCKED: write-capable agent "%s" is already running.\n' "$HOLDER"
         printf '  Write-capable agents run one at a time. Wait for it to\n'

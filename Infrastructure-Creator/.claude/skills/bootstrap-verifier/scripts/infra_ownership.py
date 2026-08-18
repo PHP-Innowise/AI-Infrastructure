@@ -350,7 +350,15 @@ def classify_update(target: Path, staging: Path, manifest: dict) -> list[dict]:
     decisions = manifest.get("decisions", {})
     if not isinstance(decisions, dict):
         raise OwnershipError(f"{MANIFEST_NAME} decisions must be an object")
+    for rel, entry in decisions.items():
+        if not isinstance(entry, dict):
+            raise OwnershipError(
+                f"{MANIFEST_NAME} decision entry must be an object: {rel}"
+            )
     staged = staged_files(staging)
+    # The refreshed manifest is built inside staging before publication; it can
+    # never be a member of its own files map, so it must not surface as a row.
+    staged.pop(MANIFEST_NAME, None)
     results: list[dict] = []
 
     for rel in sorted(set(files) | set(staged)):
@@ -468,6 +476,10 @@ def main(argv: list[str] | None = None) -> int:
                             f"target final-content source requires a kept decision: {rel}"
                         )
                 for rel, decision in (decisions or {}).items():
+                    if not isinstance(decision, dict):
+                        raise OwnershipError(
+                            f"decision entry must be an object: {rel}"
+                        )
                     if decision.get("decision") == "kept" and source_map.get(rel) != "target":
                         raise OwnershipError(
                             f"kept decision must hash the final target bytes: {rel}"

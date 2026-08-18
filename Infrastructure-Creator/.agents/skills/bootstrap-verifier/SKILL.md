@@ -41,9 +41,22 @@ Writes a report to `tasks/TASK-{N}/bootstrap-verifier-report.md`. Does not write
    `python3 scripts/analyze_commands.py --target <real-target> --no-scripts --verification --command '<exact-command>'`
 
    Exit 1 is blocking. Shell composition, malformed tokenization, unknown or
-   cyclic aliases, any workspace-writing fix/format mode, destructive/database/
-   deploy behavior, and provider/network behavior fail closed when used as
-   verification. Do not execute a command to discover whether it is safe.
+   cyclic aliases, shell interpreters running `-c` strings (including
+   clustered forms such as `-lc`) or script files, sudo, xargs/variable
+   indirection, executables outside the curated read-only allow-list
+   (`UNKNOWN_EXECUTABLE`), alias expansion beyond the safety cap, any
+   workspace-writing fix/format mode, destructive/database/deploy behavior,
+   and provider/network behavior fail closed when used as verification.
+   Wrapper commands (`env`, `nice`, `nohup`, `stdbuf`, `sudo`, `timeout`) are
+   unwrapped by basename and the wrapped command is classified. Blocked or
+   unresolvable commands additionally report the `verification_blocker`
+   category in JSON output instead of defaulting to `non_mutating`. Do not
+   execute a command to discover whether it is safe.
+
+   Generated skill *prose* is analyzed mechanically by
+   `validate_skill_quality.py` (step 3), so this manual pass covers `AGENTS.md`
+   and `DOD.md` commands; do not skip a skill body that the validator already
+   reported.
 3. **Run the validator:** distinguish the generation root (staging or published
    target) from the real evidence target:
 
@@ -53,13 +66,110 @@ Writes a report to `tasks/TASK-{N}/bootstrap-verifier-report.md`. Does not write
    - The plan's required evidence metadata, containment, optional fingerprints
      and ranges, one complete contract per skill, and no generator task path as
      generated runtime evidence.
+   - Every `evidence_anchors[].anchor` resolves against the file it cites, not
+     only against its shape: an `L` range must lie inside the real bounds of
+     that file and run forwards (`EVIDENCE_ANCHOR_RANGE`), and a `symbol:`
+     anchor's final segment must actually occur there
+     (`EVIDENCE_ANCHOR_SYMBOL_ABSENT`, case-insensitive whole-identifier
+     match, so a qualified `Ns\Class::member` resolves through `member`). This
+     is the same bound `evidence[].line_range` already carries. An unreadable
+     source is reported (`EVIDENCE_ANCHOR_UNRESOLVABLE`), never raised.
+   - Each `evidence[].supported_claims` entry must share with its cited range
+     wording that no other PHP file would: sharing only PHP keywords is
+     `EVIDENCE_CLAIM_UNSUPPORTED`, sharing only software-English boilerplate
+     is `EVIDENCE_CLAIM_GENERIC_SUPPORT` (warning). Cited identifiers split
+     (`publishReminder` grounds "reminder"). Polarity is beyond any such rule
+     - `docs/ADR-001-claim-adjudication.md`.
    - Every planned skill exists and no unplanned skill exists; required
      operational sections, procedure roles, decisions, outputs, failure
      handling, owned/excluded scope, sibling boundaries, and routing triggers
      are traceable to substantive skill content.
+   - That the skill *instructs*, not only that it names the project.
+     Traceability is lexical, so a body can carry the real paths, classes, and
+     constants everywhere and still prescribe nothing. Every procedure step is
+     therefore read structurally: it must command an action - a verb from the
+     open technical set (`inspect`, `trace`, `run`, `reject`, `defer`, ...) or
+     a prescribed invocation - otherwise `SKILL_STEP_NOT_OPERATIONAL`; and a
+     step (or a sentence inside it) that *opens* by deferring to reflection -
+     `consider`, `take into account`, `bear in mind`, `reflect on`,
+     `form an opinion`, `think about`, `keep in mind` - is
+     `SKILL_STEP_HEDGED`. The procedure as a whole must name at least one
+     concrete anchor (path, symbol, command, constant, quoted value, or
+     number), counted over step text only, never over the `1.` list markers
+     (`SKILL_PROCEDURE_UNANCHORED`). Verification must state a check: an
+     impression (`still looks reasonable`, `nothing seems broken`) is
+     `SKILL_VERIFICATION_NOT_FALSIFIABLE` and a section naming only subject
+     nouns is `SKILL_VERIFICATION_NOT_OPERATIONAL`. The same reading applies
+     to the plan: `procedure_steps[].action`
+     (`PROCEDURE_STEP_NOT_OPERATIONAL`), a step that names no `path_refs`, no
+     `evidence_ids`, and no anchor in its own text
+     (`PROCEDURE_STEP_UNANCHORED`), and `verification[]`
+     (`VERIFICATION_NOT_FALSIFIABLE`). The `GENERIC_PHRASES` blacklist is only
+     the secondary net; the verb/anchor structure is the mechanism, because a
+     blacklist is defeated by one paraphrase. Calibration is deliberate: the
+     verb set is open and matched anywhere in the step, mid-sentence hedging
+     next to a real action stays legitimate, and no step is required to carry
+     an anchor of its own - a gate that fails honest instruction is worse than
+     the miss it closes.
+   - Every command a skill body hands to the agent, not only the plan's
+     `verification[].command`. Fenced code blocks tagged `bash`, `sh`, `shell`,
+     or `console` are read strictly (transcript prompts stripped, backslash
+     continuations joined, `#` comments dropped). Inline single-backtick spans
+     are read permissively: a segment counts only when it names a known
+     executable and carries at least one argument, and a bare English-word
+     executable (`test`, `install`) counts only when path-qualified - so class
+     names, config paths, constants, YAML keys, and PHP fragments in backticks
+     are never mistaken for commands. Every command is split at quote-aware
+     shell separators so a composed chain is classified leaf by leaf, and
+     non-breaking/zero-width characters are folded first so a homoglyph cannot
+     hide the executable. Arguments of a code host (`bash`/`sh`/`zsh`/`dash`/
+     `fish`, `php`/`node`/`python`/`python3`) are re-read as nested commands so
+     a payload quoted behind `bash -c` or `php -r` is classified; every other
+     executable keeps its arguments as data, so `grep -rn "rm -rf" config/`
+     stays a grep. Destructive, workspace-mutating, provider/network, or
+     `sudo` behavior is blocking (`SKILL_BODY_COMMAND_RISK`); attestability-only
+     findings (unknown executable, unresolved alias, tokenization) are not,
+     because prose legitimately carries placeholders and sample output.
    - Inventory-wide ownership/write collisions, ambiguous positive routing,
      repeated substantive blocks, and line/token similarity after removing only
-     exact approved fixed safety blocks.
+     exact approved fixed safety blocks. Ownership is checked against writes,
+     not only writes against writes: no skill may write a path another skill
+     holds under `mode: exclusive` (`OWNERSHIP_EXCLUSIVE_WRITE_CONFLICT`), so
+     a read-only owner - whose own `writes` is empty by contract - is protected
+     too. `shared`/`composed` zones keep their own rules.
+   - Duplication is judged twice: once on the raw text (`SKILL_SIMILARITY`,
+     `REPEATED_BLOCK`) and once on a *skeleton* of it (`SKILL_TEMPLATE_REUSE`,
+     `SKILL_TEMPLATE_BLOCK`). The raw pass compares normalized lines for
+     equality, so it only ever saw byte-identical prose - and a
+     plan-conforming `SKILL.md` is *required* to carry its own claim, paths
+     and neighbours' names, so those mandated differences dilute raw
+     similarity below any usable threshold. The skeleton pass therefore erases
+     exactly that identity first - backticked spans, paths, CamelCase and
+     `UPPER_SNAKE` identifiers, dotted/underscored ids, PHP variables and
+     calls, numbers, and the inventory's other skill names all collapse to one
+     placeholder - drops fenced code (a shared framework idiom is legitimate)
+     and approved fixed blocks, folds punctuation and interchangeable
+     connectives (`,`/`;`, `and`/`plus`), and ignores lines that are almost
+     entirely identity. What remains is the reusable scaffolding, compared by
+     one-to-one line matching plus token trigrams. Thresholds are measured,
+     not guessed: across 2371 pairs of honest hand-written skills the worst
+     pair scores line 0.350 / token 0.154 (and that pair is a deliberately
+     parallel scanner family; unrelated skills top out at 0.231 / 0.107),
+     while one template with substituted project nouns scores 0.400 / 0.329,
+     the same template differing only in punctuation 0.400 / 0.311, and a byte
+     clone 0.500 / 0.471. `SKILL_TEMPLATE_REUSE` blocks at 0.38 / 0.26, inside
+     that gap on both axes; a warning sits at 0.28 / 0.20.
+     `SKILL_TEMPLATE_BLOCK` (two adjacent shared skeleton lines, down from
+     three byte-identical ones) is deliberately a *warning*: on the same
+     honest corpus it fires five times on legitimately shared policy
+     sentences, so it names a passage worth reading rather than failing a
+     generation.
+   - A declared primary/defer precedence resolves a *partial* overlap only. If
+     two skills claim the same `owned_scope` entry, `ownership[].description`,
+     or positive trigger word for word, that is
+     `BOUNDARY_NOT_SEPARATING` regardless of the declared precedence: a
+     boundary that repeats itself divides nothing. Nested or otherwise partial
+     overlap under an explicit precedence stays legitimate.
    - Every selected edition root exists and every unselected edition root is absent (`.claude`; `.cursor`; `.agents` + `.codex` for Codex).
    - Frontmatter validity across every generated `SKILL.md`, agent, and command.
    - Every `flow-next`/`flow-alternatives`/`related`/`invokes`/`spawns` reference resolves to a skill/agent that exists in that edition.
@@ -103,10 +213,17 @@ Writes a report to `tasks/TASK-{N}/bootstrap-verifier-report.md`. Does not write
   single-command convenience API.
 - `analyze_target(target, commands=(), verification=False)` returns
   `TargetAnalysis`.
-- `CommandAnalysis` exposes `categories`, structured `findings`,
-  `expanded_commands`, traversed `aliases`, `verification_safe`, and
-  `to_dict()`. The analyzer is standard-library-only and never starts a process
-  other than its own CLI.
+- `RUNNER_EXECUTABLES` is the public set of every executable name the module
+  recognises (including the unwrapped wrappers). Callers deciding whether a
+  token found in prose is plausibly a command at all gate on it.
+- `CODE_HOST_EXECUTABLES` is the public set of executables that run code handed
+  to them as an argument, so a caller can re-read that argument as a nested
+  command instead of treating it as opaque data.
+- `CommandAnalysis` exposes `categories` (the four risk categories, plus
+  `verification_blocker` when the command is blocked or unresolvable),
+  structured `findings`, `expanded_commands`, traversed `aliases`,
+  `verification_safe`, and `to_dict()`. The analyzer is standard-library-only
+  and never starts a process other than its own CLI.
 
 ## Manifest Refresh Recipe (after content auto-fixes)
 
@@ -147,6 +264,7 @@ A non-empty `STILL MISSING` list means a tracked file vanished - that is an esca
 - Evidence/plan completeness and fingerprints: [pass/fail]
 - Per-skill contract conformance: [pass/fail]
 - Command safety (all prescribed verification resolves + non-mutating): [pass/fail]
+- Skill-body command safety (no destructive/mutating/provider command in prose): [pass/fail]
 - Operational quality (specific procedures/anchors/pass-fail/skip): [pass/fail]
 - Provider safety (default-deny network + fake/local strategy): [pass/fail]
 - Read-only wording: [pass/fail]
@@ -186,6 +304,18 @@ A non-empty `STILL MISSING` list means a tracked file vanished - that is an esca
   target and fail closed on shell composition, tokenization uncertainty,
   unknown/cyclic aliases, mutation, destructive/database/deploy behavior, or
   external/provider/network risk.
+- MUST treat a command prescribed in a generated skill body as prescribed
+  behavior: destructive, mutating, provider/network, or `sudo` commands in
+  prose are blocking even when the plan's verification commands are clean.
+  MUST NOT widen that scan to fail a skill for an unknown executable,
+  unresolved alias, or placeholder inside prose - a gate that rejects honest
+  skills is worse than the miss it closes.
+- MUST treat a skill that names the project but commands nothing as a failed
+  generation: a procedure step that only invites reflection, a procedure that
+  anchors nothing, or a verification that accepts an impression is not
+  operational content, however project-specific its vocabulary is. MUST NOT
+  turn that reading into a style gate - an unusual project verb, a delegation
+  step, or a step without an anchor of its own is honest instruction.
 - MUST NOT execute target commands as part of command-risk analysis.
 - MUST reject bare-path evidence, generic procedures/verifications, mutating
   read-only wording, provider checks without a fake/local default, or silent
