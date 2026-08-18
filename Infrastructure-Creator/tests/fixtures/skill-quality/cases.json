@@ -103,6 +103,10 @@
     "description": "Verification must define a concrete command or manual assertion and explicit outcomes.",
     "expected": "GENERIC_VERIFICATION"
   },
+  "golden-plan-shapes": {
+    "description": "Modular, tenant-shared and provider-integration plans of thirty-six skills each validate clean, so shape-specific rules are calibrated on more than one shape.",
+    "expected": null
+  },
   "good-distinct-shared-safety": {
     "description": "Distinct procedures share one exact approved safety block.",
     "expected": null

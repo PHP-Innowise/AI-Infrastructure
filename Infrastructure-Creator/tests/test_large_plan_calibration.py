@@ -109,12 +109,23 @@ STEP_FAILURES = {
 }
 
 
-def build_corpus(root: Path, collapsed: bool = False) -> dict:
-    """Write a synthetic target and return a thirty-six skill schema 1.3 plan.
+def build_corpus(
+    root: Path, collapsed: bool = False, project_shape: str = "modular"
+) -> dict:
+    """Write a synthetic target and return a thirty-six skill schema 1.4 plan.
 
     `collapsed` produces the negative twin: the same plan with every catalog
-    obligation discharged by one step, which is the shape an externally
-    authored plan of this size actually had.
+    obligation discharged by one step, which is the shape an externally authored
+    plan of this size actually had.
+
+    `project_shape` selects what kind of project the plan describes. One shape proves
+    only that the gate admits one shape; the rules that never fire on a modular
+    application - shared ownership, provider capability, an authorized network
+    policy - would be free to stay miscalibrated forever.
+
+      modular   many small subject areas, exclusive ownership throughout
+      tenant    a central store and a per-tenant one, sharing paths
+      provider  outbound integrations under an approved sandbox policy
     """
     target = root / "target"
     task = root / "tasks/TASK-001"
@@ -138,7 +149,11 @@ def build_corpus(root: Path, collapsed: bool = False) -> dict:
         role = "implementation" if half == 0 else "review"
         name = f"{module}-{'workflow' if half == 0 else 'review'}"
         pool = WRITER_SHAPES if half == 0 else REVIEW_SHAPES
-        shape, decision_count = pool[(index // 2) % len(pool)]
+        # Named for what it is: the procedure's shape, not the project's. The
+        # first version of this called it `shape` and silently shadowed the
+        # parameter, so every project shape built the same plan and three tests
+        # passed while proving nothing.
+        procedure_shape, decision_count = pool[(index // 2) % len(pool)]
         verification_class = (
             "command" if half == 0 else ("search", "manual")[(index // 2) % 2]
         )
@@ -193,7 +208,7 @@ def build_corpus(root: Path, collapsed: bool = False) -> dict:
             "rule_short": rule,
         }
         steps = []
-        for position, archetype in enumerate(shape):
+        for position, archetype in enumerate(procedure_shape):
             steps.append(
                 {
                     "id": f"{archetype}-{module}-{half}",
@@ -249,6 +264,20 @@ def build_corpus(root: Path, collapsed: bool = False) -> dict:
 
         writes = [f"src/{noun}/**"] if half == 0 else []
         capability_mode = "workspace-write" if half == 0 else "read-only"
+        ownership_mode = "exclusive"
+        network_policy = "forbidden"
+        environment = "local"
+        authorization_required = False
+        if project_shape == "tenant" and half == 0:
+            # A central store and a per-tenant one write the same tree through
+            # different halves of it; the plan says so rather than pretending
+            # the paths do not meet.
+            ownership_mode = "shared" if index % 4 == 0 else "exclusive"
+        if project_shape == "provider" and half == 0:
+            capability_mode = "external-side-effect"
+            network_policy = "sandbox-with-approval"
+            environment = "sandbox"
+            authorization_required = True
         if verification_class == "command":
             check = {
                 "id": f"run-{module}-{half}-check",
@@ -339,7 +368,11 @@ def build_corpus(root: Path, collapsed: bool = False) -> dict:
                 "capability": {
                     "mode": capability_mode,
                     "summary": (
-                        f"May change the {module} {verb} path under src/{noun}"
+                        (
+                            f"May call the {module} provider sandbox for a {unit}"
+                            if project_shape == "provider"
+                            else f"May change the {module} {verb} path under src/{noun}"
+                        )
                         if half == 0
                         else f"Reads the {module} policy and reports without writing"
                     ),
@@ -389,7 +422,7 @@ def build_corpus(root: Path, collapsed: bool = False) -> dict:
                 "ownership": [
                     {
                         "id": ownership_id,
-                        "mode": "exclusive",
+                        "mode": ownership_mode,
                         "description": (
                             f"The {module} {verb} implementation for a {unit}"
                             if half == 0
@@ -416,12 +449,12 @@ def build_corpus(root: Path, collapsed: bool = False) -> dict:
                     else f"Never edit {source} while reviewing it",
                 ],
                 "integration_safety": {
-                    "network_policy": "forbidden",
+                    "network_policy": network_policy,
                     "test_double_strategy": (
                         f"Use the {module} fixtures the target already ships"
                     ),
-                    "environment": "local",
-                    "authorization_required": False,
+                    "environment": environment,
+                    "authorization_required": authorization_required,
                     "rollback": (
                         f"Revert src/{noun} to its prior state"
                         if half == 0
@@ -616,10 +649,14 @@ def build_corpus(root: Path, collapsed: bool = False) -> dict:
 
 
 class LargePlanCalibrationTest(unittest.TestCase):
-    def build(self, collapsed: bool = False) -> tuple[list, dict]:
+    def build(
+        self, collapsed: bool = False, project_shape: str = "modular"
+    ) -> tuple[list, dict]:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        corpus = build_corpus(Path(temporary.name), collapsed=collapsed)
+        corpus = build_corpus(
+            Path(temporary.name), collapsed=collapsed, project_shape=project_shape
+        )
         diagnostics = validator.validate_plan(
             corpus["plan_path"], corpus["target"], corpus["registry_path"]
         )
@@ -637,6 +674,47 @@ class LargePlanCalibrationTest(unittest.TestCase):
             [],
             f"{len(errors)} blocking diagnostics on an honest 36-skill plan",
         )
+
+    def test_the_three_shapes_are_actually_different_plans(self) -> None:
+        """Guards the bug that made this suite green while proving nothing.
+
+        The project shape was shadowed by a local of the same name, so all
+        three builders produced one plan and three passing tests said the gate
+        admits three shapes. Assert the difference, not the pass.
+        """
+        modes = {}
+        for shape in ("modular", "tenant", "provider"):
+            _, corpus = self.build(project_shape=shape)
+            skills = corpus["plan"]["skills"]
+            modes[shape] = (
+                {skill["capability"]["mode"] for skill in skills},
+                {
+                    item["mode"]
+                    for skill in skills
+                    for item in skill["ownership"]
+                },
+                {
+                    skill["integration_safety"]["network_policy"]
+                    for skill in skills
+                },
+            )
+        self.assertIn("shared", modes["tenant"][1])
+        self.assertNotIn("shared", modes["modular"][1])
+        self.assertIn("external-side-effect", modes["provider"][0])
+        self.assertNotIn("external-side-effect", modes["modular"][0])
+        self.assertIn("sandbox-with-approval", modes["provider"][2])
+
+    def test_a_tenant_shaped_plan_validates_too(self) -> None:
+        """Shared ownership: a central store and a per-tenant one meet."""
+        diagnostics, _ = self.build(project_shape="tenant")
+        errors = [item for item in diagnostics if item.severity == "error"]
+        self.assertEqual([f"{i.code}: {i.message}" for i in errors[:6]], [])
+
+    def test_a_provider_shaped_plan_validates_too(self) -> None:
+        """External side effects with an authorized sandbox policy."""
+        diagnostics, _ = self.build(project_shape="provider")
+        errors = [item for item in diagnostics if item.severity == "error"]
+        self.assertEqual([f"{i.code}: {i.message}" for i in errors[:6]], [])
 
     def test_the_similarity_signal_only_pairs_genuinely_adjacent_skills(self) -> None:
         """Section 5's decision, held at scale: similarity stays a signal.

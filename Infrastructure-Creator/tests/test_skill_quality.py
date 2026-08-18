@@ -870,6 +870,7 @@ class SkillQualityTest(SkillQualityFixture):
                 "claim-invariant-lost",
                 "evidence-undisposed",
                 "large-plan-calibration",
+                "golden-plan-shapes",
                 "procedure-role-collapse-calibration",
                 "procedure-role-collapsed",
                 "procedure-role-wiring",

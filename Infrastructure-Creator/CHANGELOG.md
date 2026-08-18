@@ -195,6 +195,19 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
   a catalog obligation, an obligation's wiring, a recorded baseline, or an
   invariant's only assertion is each caught by name.
 
+- **Three project shapes, not one.** A corpus of one shape proves the gate
+  admits one shape: the rules that never fire on a modular application - shared
+  ownership, provider capability, an approved network policy - would be free to
+  stay miscalibrated forever. The corpus now also builds a tenant shape (a
+  central store and a per-tenant one sharing paths, 9 shared ownership entries)
+  and a provider shape (18 external-side-effect skills under
+  `sandbox-with-approval`), and both validate with zero blocking diagnostics.
+  Writing them produced a false green worth recording: the project shape was
+  shadowed by a local variable of the same name inside the builder, so all three
+  shapes built the identical plan and three new tests passed while proving
+  nothing. It was caught by looking at the artifact rather than at the passing
+  test, and a test now asserts the three plans actually differ.
+
 - **An honest thirty-six skill plan validates with zero blocking diagnostics.**
   Every threshold in this gate was calibrated on plans of nine to thirteen
   skills, because that is what our runs produce; the failure that costs most is
