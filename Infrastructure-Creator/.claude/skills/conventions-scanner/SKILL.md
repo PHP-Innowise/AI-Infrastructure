@@ -17,7 +17,7 @@ The target project path is a **required** argument; never assume the current wor
 
 ## Outputs (MANDATORY)
 
-Per run: exactly one report `tasks/TASK-{NNN}/conventions-scanner-findings.md` and exactly one evidence ledger `tasks/TASK-{NNN}/conventions-scanner-evidence.json`, both shaped by `stack-scanner/references/scan-evidence-contract.md` - read it first, including its sibling-input fallback. Never write into the target.
+Per run: exactly one report `tasks/TASK-{NNN}/conventions-scanner-findings.md` and exactly one evidence ledger `tasks/TASK-{NNN}/conventions-scanner-evidence.json` and exactly one coverage record `tasks/TASK-{NNN}/conventions-scanner-coverage.json`, all shaped by `stack-scanner/references/scan-evidence-contract.md` - read it first, including its sibling-input fallback. Never write into the target.
 
 ## Process
 
@@ -37,7 +37,8 @@ Follow the `conventions-scanner` report template in appendix A of `stack-scanner
 
 ## Guardrails
 
-- MUST cite a real file path (and line where practical) for every finding, and MUST emit both artifacts with contract-shaped evidence records (target-relative path, `sha256:` fingerprint, supported claims).
+- MUST give every surface it saw one of the four dispositions in the coverage record; a surface nobody dispositioned is not the same as one nobody needed.
+- MUST cite a real file path (and line where practical) for every finding, and MUST emit all three artifacts with contract-shaped evidence records (target-relative path, `sha256:` fingerprint, supported claims).
 - MUST operate read-only on the target; MUST NOT read `.env`/secrets.
 - MUST take sibling `stack-scanner` input from this run's task directory and degrade with a recorded gap when it is missing; MUST NOT re-derive or invent it.
 - MUST focus on style + governance and REFERENCE `stack-scanner` for static-analysis/test/lint tooling rather than duplicating it.
@@ -48,4 +49,4 @@ Follow the `conventions-scanner` report template in appendix A of `stack-scanner
 
 ## Final Output
 
-Return both artifact paths (report and evidence ledger), the detected code style/format config, git hooks, commit conventions, docs/ADR locations, and governance files, plus a one-line confidence summary. Suggest `profile-synthesizer` (to fold conventions into the target profile) as the next step.
+Return all three artifact paths (report, evidence ledger, coverage record), the detected code style/format config, git hooks, commit conventions, docs/ADR locations, and governance files, plus a one-line confidence summary. Suggest `profile-synthesizer` (to fold conventions into the target profile) as the next step.

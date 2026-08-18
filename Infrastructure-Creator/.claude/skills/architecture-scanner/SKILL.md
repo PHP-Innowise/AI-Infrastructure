@@ -17,7 +17,7 @@ The target project path is a **required** argument; never assume the current wor
 
 ## Outputs (MANDATORY)
 
-Per run: exactly one report `tasks/TASK-{NNN}/architecture-scanner-findings.md` and exactly one evidence ledger `tasks/TASK-{NNN}/architecture-scanner-evidence.json`, both shaped by `stack-scanner/references/scan-evidence-contract.md` - read it first. Never write into the target.
+Per run: exactly one report `tasks/TASK-{NNN}/architecture-scanner-findings.md` and exactly one evidence ledger `tasks/TASK-{NNN}/architecture-scanner-evidence.json` and exactly one coverage record `tasks/TASK-{NNN}/architecture-scanner-coverage.json`, all shaped by `stack-scanner/references/scan-evidence-contract.md` - read it first. Never write into the target.
 
 ## Process
 
@@ -54,7 +54,8 @@ Follow the `architecture-scanner` report template in appendix A of `stack-scanne
 
 ## Guardrails
 
-- MUST cite a real file path (and line where practical) for every finding, and MUST emit both artifacts with contract-shaped evidence records (target-relative path, `sha256:` fingerprint, supported claims).
+- MUST give every surface it saw one of the four dispositions in the coverage record; a surface nobody dispositioned is not the same as one nobody needed.
+- MUST cite a real file path (and line where practical) for every finding, and MUST emit all three artifacts with contract-shaped evidence records (target-relative path, `sha256:` fingerprint, supported claims).
 - MUST operate read-only on the target; MUST NOT read `.env`/secrets.
 - MUST base architecture claims on PHP evidence (directory tree, PSR-4 map, composer.json count, message-bus packages, layering folders).
 - MUST report absent structure as `inferred none` rather than asserting a style without evidence.
@@ -66,4 +67,4 @@ Follow the `architecture-scanner` report template in appendix A of `stack-scanne
 
 ## Final Output
 
-Return both artifact paths (report and evidence ledger), the detected architecture style, layering approach, candidate boundaries, communication style, the framework-specialty signal summary, and the frontend verdict, plus a one-line confidence summary. Suggest `profile-synthesizer` (to fold this into the target profile) as the next step.
+Return all three artifact paths (report, evidence ledger, coverage record), the detected architecture style, layering approach, candidate boundaries, communication style, the framework-specialty signal summary, and the frontend verdict, plus a one-line confidence summary. Suggest `profile-synthesizer` (to fold this into the target profile) as the next step.

@@ -88,11 +88,12 @@ class ScannerOutputContractTest(unittest.TestCase):
         for name in SCANNERS:
             self.assertIn(CONTRACT_REF, skill_text(name), name)
 
-    def test_every_scanner_declares_both_artifacts(self) -> None:
+    def test_every_scanner_declares_all_three_artifacts(self) -> None:
         for name in SCANNERS:
             text = skill_text(name)
             self.assertIn(f"tasks/TASK-{{NNN}}/{name}-findings.md", text, name)
             self.assertIn(f"tasks/TASK-{{NNN}}/{name}-evidence.json", text, name)
+            self.assertIn(f"tasks/TASK-{{NNN}}/{name}-coverage.json", text, name)
 
     def test_report_and_ledger_are_separately_exactly_one(self) -> None:
         """`exactly one` must attach to each artifact kind, not to the pair."""
@@ -102,7 +103,9 @@ class ScannerOutputContractTest(unittest.TestCase):
                 body,
                 rf"exactly one report `tasks/TASK-\{{NNN\}}/{name}-findings\.md` "
                 rf"and exactly one evidence ledger "
-                rf"`tasks/TASK-\{{NNN\}}/{name}-evidence\.json`",
+                rf"`tasks/TASK-\{{NNN\}}/{name}-evidence\.json` "
+                rf"and exactly one coverage record "
+                rf"`tasks/TASK-\{{NNN\}}/{name}-coverage\.json`",
                 name,
             )
 
@@ -173,13 +176,71 @@ class EvidenceRecordContractTest(unittest.TestCase):
     def test_every_scanner_is_required_to_emit_the_ledger(self) -> None:
         for name in SCANNERS:
             body = collapsed(skill_text(name))
-            self.assertIn("MUST emit both artifacts", body, name)
+            self.assertIn("MUST emit all three artifacts", body, name)
             self.assertIn("`sha256:` fingerprint", body, name)
 
     def test_evidence_ids_are_namespaced_per_scanner(self) -> None:
         body = contract_text()
         for tag in ("STK", "ARC", "CNV", "DOM", "INT", "SEC", "OPS"):
             self.assertIn(f"`{tag}`", body, tag)
+
+
+
+class DiscoveryCoverageContractTest(unittest.TestCase):
+    """A scan that missed a subsystem and one that covered it look identical
+    unless the run also records what was *not* read."""
+
+    def test_contract_declares_the_coverage_record_and_its_members(self) -> None:
+        body = collapsed(contract_text())
+        self.assertIn("tasks/TASK-{NNN}/<scanner-name>-coverage.json", body)
+        for member in ("surface", "kind", "disposition", "reason", "evidence_ids"):
+            self.assertIn(f"`{member}`", body, member)
+
+    def test_contract_states_all_four_dispositions(self) -> None:
+        body = collapsed(contract_text())
+        for disposition in ("covered", "excluded", "truncated", "not-permitted"):
+            self.assertIn(f"`{disposition}`", body, disposition)
+
+    def test_documented_coverage_codes_exist_in_the_validator(self) -> None:
+        body = contract_text()
+        source = (
+            ROOT
+            / ".agents/skills/bootstrap-verifier/scripts/validate_scan_coverage.py"
+        ).read_text(encoding="utf-8")
+        for code in (
+            "SCAN_COVERED_WITHOUT_EVIDENCE",
+            "SCAN_SECRET_COVERED",
+            "SCAN_SURFACE_UNACCOUNTED",
+            "SCAN_EVIDENCE_OUTSIDE_COVERAGE",
+            "SCAN_DISPOSITION_CONFLICT",
+        ):
+            self.assertIn(code, body, code)
+            self.assertIn(f'"{code}"', source, code)
+
+    def test_contract_dispositions_match_the_validator_vocabulary(self) -> None:
+        source = (
+            ROOT
+            / ".agents/skills/bootstrap-verifier/scripts/validate_scan_coverage.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            'DISPOSITIONS = {"covered", "excluded", "truncated", "not-permitted"}',
+            source,
+        )
+
+    def test_every_scanner_must_disposition_what_it_saw(self) -> None:
+        for name in SCANNERS:
+            body = collapsed(skill_text(name))
+            self.assertIn(
+                "MUST give every surface it saw one of the four dispositions",
+                body,
+                name,
+            )
+
+    def test_contract_publishes_the_absence_entry(self) -> None:
+        body = collapsed(contract_text())
+        self.assertIn("`absence`", body)
+        self.assertIn("accounted_matches", body)
+        self.assertIn("EVIDENCE_ABSENCE_CONTRADICTED", body)
 
 
 class SiblingInputContractTest(unittest.TestCase):

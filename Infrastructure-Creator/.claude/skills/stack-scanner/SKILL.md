@@ -17,7 +17,7 @@ The target project path is a **required** argument; never assume the current wor
 
 ## Outputs (MANDATORY)
 
-Per run: exactly one report `tasks/TASK-{NNN}/stack-scanner-findings.md` and exactly one evidence ledger `tasks/TASK-{NNN}/stack-scanner-evidence.json`, both shaped by `stack-scanner/references/scan-evidence-contract.md` - read it first. Never write into the target.
+Per run: exactly one report `tasks/TASK-{NNN}/stack-scanner-findings.md` and exactly one evidence ledger `tasks/TASK-{NNN}/stack-scanner-evidence.json` and exactly one coverage record `tasks/TASK-{NNN}/stack-scanner-coverage.json`, all shaped by `stack-scanner/references/scan-evidence-contract.md` - read it first. Never write into the target.
 
 ## Process
 
@@ -46,10 +46,11 @@ Follow the `stack-scanner` report template in appendix A of `stack-scanner/refer
 - MUST report absent tooling as `N/A - not configured` rather than assuming a default.
 - MUST preserve exact command definitions and classify effects from resolved bodies, not friendly script names; MUST search every declaration site in step 7 before reporting no risky commands.
 - MUST distinguish the PHP version constraint from the pinned runtime; a constraint is never reported as the resolved version.
-- MUST emit both artifacts with contract-shaped evidence records (target-relative path, `sha256:` fingerprint, supported claims); a report with no ledger is an incomplete scan.
+- MUST give every surface it saw one of the four dispositions in the coverage record; a surface nobody dispositioned is not the same as one nobody needed.
+- MUST emit all three artifacts with contract-shaped evidence records (target-relative path, `sha256:` fingerprint, supported claims); a report with no ledger is an incomplete scan.
 - MUST capture real suite boundaries and focused commands; MUST NOT collapse materially different central, module, tenant, integration, or provider tests into one generic test directory.
 - MUST NOT deep-dive integrations, infra, security, or conventions - those belong to their own scanners.
 
 ## Final Output
 
-Return both artifact paths (report and evidence ledger), the detected PHP version + framework, the test/lint/analysis tooling, and a one-line confidence summary. Suggest `stack-researcher` (to ground the detected framework/dependencies in current docs) as the next step.
+Return all three artifact paths (report, evidence ledger, coverage record), the detected PHP version + framework, the test/lint/analysis tooling, and a one-line confidence summary. Suggest `stack-researcher` (to ground the detected framework/dependencies in current docs) as the next step.

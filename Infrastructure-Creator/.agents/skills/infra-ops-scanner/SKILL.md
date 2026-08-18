@@ -17,7 +17,7 @@ The target project path is a **required** argument; never assume the current wor
 
 ## Outputs (MANDATORY)
 
-Per run: exactly one report `tasks/TASK-{NNN}/infra-ops-scanner-findings.md` and exactly one evidence ledger `tasks/TASK-{NNN}/infra-ops-scanner-evidence.json`, both shaped by `stack-scanner/references/scan-evidence-contract.md` - read it first. Never write into the target.
+Per run: exactly one report `tasks/TASK-{NNN}/infra-ops-scanner-findings.md` and exactly one evidence ledger `tasks/TASK-{NNN}/infra-ops-scanner-evidence.json` and exactly one coverage record `tasks/TASK-{NNN}/infra-ops-scanner-coverage.json`, all shaped by `stack-scanner/references/scan-evidence-contract.md` - read it first. Never write into the target.
 
 ## Process
 
@@ -37,7 +37,8 @@ Follow the `infra-ops-scanner` report template in appendix A of `stack-scanner/r
 
 ## Guardrails
 
-- MUST cite a real file path (and line where practical) for every finding, and MUST emit both artifacts with contract-shaped evidence records (target-relative path, `sha256:` fingerprint, supported claims).
+- MUST give every surface it saw one of the four dispositions in the coverage record; a surface nobody dispositioned is not the same as one nobody needed.
+- MUST cite a real file path (and line where practical) for every finding, and MUST emit all three artifacts with contract-shaped evidence records (target-relative path, `sha256:` fingerprint, supported claims).
 - MUST operate read-only on the target; MUST NOT read `.env`/secrets.
 - MUST detect containerization and destructive commands by searching the whole contract checklist, naming what was searched before reporting absence.
 - MUST record destructive commands verbatim with location so `hook-forge` can guard them; MUST NOT execute them.
@@ -48,4 +49,4 @@ Follow the `infra-ops-scanner` report template in appendix A of `stack-scanner/r
 
 ## Final Output
 
-Return both artifact paths (report and evidence ledger), the container/orchestration/CI-CD summary, the deployment tooling and target hints, the destructive-command risk list, and a one-line confidence summary. Suggest `profile-synthesizer` as the next step.
+Return all three artifact paths (report, evidence ledger, coverage record), the container/orchestration/CI-CD summary, the deployment tooling and target hints, the destructive-command risk list, and a one-line confidence summary. Suggest `profile-synthesizer` as the next step.

@@ -22,20 +22,23 @@ folder, never in the target.
   directory, and never re-pad an existing one. If both `TASK-1` and `TASK-001`
   exist for the same run, stop and report the collision instead of guessing.
 
-## 2. Two artifacts per scanner, both required
+## 2. Three artifacts per scanner, all required
 
-A human report and a machine ledger are different artifacts with different
-readers. "Exactly one" applies to each kind separately:
+A human report, a machine ledger, and a coverage record are different artifacts
+with different readers. "Exactly one" applies to each kind separately:
 
 | Artifact | Path | Reader |
 | --- | --- | --- |
 | Report | `tasks/TASK-{NNN}/<scanner-name>-findings.md` | a human reviewing the profile |
 | Ledger | `tasks/TASK-{NNN}/<scanner-name>-evidence.json` | `profile-synthesizer` and the plan validators |
+| Coverage | `tasks/TASK-{NNN}/<scanner-name>-coverage.json` | `validate_scan_coverage.py` |
 
 Write exactly one of each, per scanner, per run. A report without its ledger is
 an incomplete scan: nothing in it can pass the evidence gate. A ledger without
-its report hides the scan from human review. Neither may be written into the
-target project.
+its report hides the scan from human review. A scan without its coverage record
+cannot be told apart from a scan that missed a subsystem - both produce a list
+of what was found, and only the coverage record says what was *not*. None may be
+written into the target project.
 
 The report follows this scanner's template in appendix A. Every factual line in
 it carries a confidence tag and cites its evidence id, so the report and the
@@ -43,6 +46,73 @@ ledger join without re-derivation - for example:
 
 ```markdown
 - Resolved PHP: 8.2.0 pinned by `composer.lock` `platform-overrides` (confirmed - EV-STK-0003; composer.lock:L11-L13)
+```
+
+## 2a. Coverage record shape
+
+```json
+{
+  "scanner": "stack-scanner",
+  "target_root": "/absolute/path/to/target",
+  "surfaces": [
+    {
+      "surface": "composer.json",
+      "kind": "file",
+      "disposition": "covered",
+      "reason": "Declares the runtime and the dependency graph",
+      "evidence_ids": ["EV-STK-0001"]
+    },
+    {
+      "surface": "src/**",
+      "kind": "tree",
+      "disposition": "covered",
+      "reason": "The target's own application modules",
+      "evidence_ids": ["EV-STK-0004"]
+    },
+    {
+      "surface": "vendor/**",
+      "kind": "tree",
+      "disposition": "excluded",
+      "reason": "Third-party code, not the target's own",
+      "evidence_ids": []
+    },
+    {
+      "surface": ".env",
+      "kind": "file",
+      "disposition": "not-permitted",
+      "reason": "Holds secret values; existence recorded, contents never read",
+      "evidence_ids": []
+    }
+  ]
+}
+```
+
+Members are exact: `surface`, `kind` (`file` or `tree`), `disposition`,
+`reason`, `evidence_ids`. The four dispositions and what each costs to claim:
+
+- **`covered`** - fully read. At least one evidence id in this scanner's own
+  ledger must cite a path inside the surface, or the claim is
+  `SCAN_COVERED_WITHOUT_EVIDENCE`. Naming a secret-bearing surface here is
+  `SCAN_SECRET_COVERED` - a claim to have done what section 6 forbids.
+- **`excluded`** - deliberately left out. Citing evidence from it contradicts
+  the exclusion.
+- **`truncated`** - the scan stopped partway, at a budget or a limit. Evidence
+  from the part that was read is expected. Always reported as a visible warning:
+  a cap nobody sees reads as complete coverage.
+- **`not-permitted`** - the contract forbids reading it.
+
+A surface may be a path, a `tree`, or a `dir/**` glob, so a large target is
+described in a handful of lines rather than a thousand. Every top-level entry of
+the target, and every immediate child of `src`, `app`, `tests`, `config` and
+their siblings, must be reached by some entry from some scanner, or it is
+`SCAN_SURFACE_UNACCOUNTED`. Evidence cited from a surface no scanner says it
+read is `SCAN_EVIDENCE_OUTSIDE_COVERAGE`; a surface one scanner covers and
+another calls forbidden is `SCAN_DISPOSITION_CONFLICT`.
+
+Run the gate yourself before returning:
+
+```bash
+python3 bootstrap-verifier/scripts/validate_scan_coverage.py --target <target> --task-dir tasks/TASK-001
 ```
 
 ## 3. Ledger shape
@@ -104,6 +174,37 @@ fields; put scanner commentary in the report.
   `config/packages/flysystem.yaml` - good: "the `default` storage uses the
   `aws` adapter"; bad: "remote file uploads are supported", which reuses
   nothing the lines say.
+
+### Recording what the target does *not* do
+
+Some of the most useful findings are negative: an analyser that is configured
+and invoked from nowhere, a queue with no consumer, a migration path with no
+rollback. These could not be recorded at all, because every entry needed a path
+and a fingerprint, and an absence has neither. Use an `absence` entry - it
+replaces `path`/`url`/`fingerprint`/`line_range`, and the remaining members are
+unchanged:
+
+```json
+{
+  "id": "EV-STK-0031",
+  "absence": {
+    "subject": "No CI workflow or composer script invokes PHPStan",
+    "search": "grep -rn phpstan .github composer.json",
+    "accounted_matches": ["composer.json"]
+  },
+  "source_type": "configuration",
+  "authority": "The only match declares the dependency; nothing runs it",
+  "confidence": "confirmed",
+  "supported_claims": ["PHPStan is installed but never invoked"]
+}
+```
+
+The `search` must be a literal search the plan validator can resolve by itself -
+no pipes, substitutions, or regular expressions - and its resolution must equal
+`accounted_matches` exactly. What the accounted matches *mean* is your
+judgement; which files exist is not. When the target later grows a CI step, the
+entry fails loudly as `EVIDENCE_ABSENCE_CONTRADICTED` instead of quietly
+staying wrong. Word the claim out of the search, not out of the subject line.
 
 ## 4. Fingerprints
 

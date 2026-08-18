@@ -19,7 +19,7 @@ The target project path is a **required** argument; never assume the current wor
 
 ## Outputs (MANDATORY)
 
-Per run: exactly one report `tasks/TASK-{NNN}/security-compliance-scanner-findings.md` and exactly one evidence ledger `tasks/TASK-{NNN}/security-compliance-scanner-evidence.json`, both shaped by `stack-scanner/references/scan-evidence-contract.md` - read it first. Never write into the target.
+Per run: exactly one report `tasks/TASK-{NNN}/security-compliance-scanner-findings.md` and exactly one evidence ledger `tasks/TASK-{NNN}/security-compliance-scanner-evidence.json` and exactly one coverage record `tasks/TASK-{NNN}/security-compliance-scanner-coverage.json`, all shaped by `stack-scanner/references/scan-evidence-contract.md` - read it first. Never write into the target.
 
 ## Process
 
@@ -42,7 +42,8 @@ Follow the `security-compliance-scanner` report template in appendix A of `stack
 
 ## Guardrails
 
-- MUST cite a real file path (and line where practical) for every finding, and MUST emit both artifacts with contract-shaped evidence records (target-relative path, `sha256:` fingerprint, supported claims).
+- MUST give every surface it saw one of the four dispositions in the coverage record; a surface nobody dispositioned is not the same as one nobody needed.
+- MUST cite a real file path (and line where practical) for every finding, and MUST emit all three artifacts with contract-shaped evidence records (target-relative path, `sha256:` fingerprint, supported claims).
 - MUST operate read-only on the target and follow the shared secrets rule: key names from non-secret committed sources only; never a value, and never `.env` itself.
 - MUST report compliance strings as textual mentions only; MUST NOT assert the project is compliant with any standard.
 - MUST report absent tooling as `N/A - not configured` rather than assuming a default.
@@ -52,4 +53,4 @@ Follow the `security-compliance-scanner` report template in appendix A of `stack
 
 ## Final Output
 
-Return both artifact paths (report and evidence ledger), the detected auth pattern, the secrets-handling approach (no values), the security tooling inventory, any compliance mentions (flagged as textual only), and a one-line confidence summary. Suggest `profile-synthesizer` as the next step.
+Return all three artifact paths (report, evidence ledger, coverage record), the detected auth pattern, the secrets-handling approach (no values), the security tooling inventory, any compliance mentions (flagged as textual only), and a one-line confidence summary. Suggest `profile-synthesizer` as the next step.

@@ -52,6 +52,33 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 [ADR-002]: ../docs/ADR-002-executable-verification-baselines.md
 
+### Added
+
+- **Discovery now records what it did *not* read.** A scan that missed a
+  subsystem and a scan that covered it produce the same artifact - a list of
+  what was found - so the omission is invisible until a generated skill turns
+  out not to know the subsystem exists. Each scanner now writes a third
+  artifact, `<scanner>-coverage.json`, giving every surface it saw one of four
+  dispositions: `covered`, `excluded`, `truncated`, `not-permitted`.
+  `scripts/validate_scan_coverage.py` holds those records against the target and
+  against each other, and blocks a surface nobody dispositioned, coverage
+  claimed with no evidence inside it, evidence cited from outside what a scanner
+  says it read, two scanners disagreeing about a forbidden surface, and any
+  claim to have covered a secret-bearing file. Truncations are warnings by
+  design and belong in the confidence summary verbatim - a cap nobody sees reads
+  as full coverage.
+  The secrets rule becomes mechanical rather than advisory, and is enforced
+  without ever opening the file: a test asserts the gate never reads a path
+  whose disposition it is judging.
+  Same invariants as the other gates here: standard library only, no execution,
+  no network, byte-stable JSON, fail-closed. Measured on three real targets
+  before release - 12, 23, and 64 surfaces requiring a disposition, most of them
+  collapsible into `dir/**` entries, so a coverage record is on the order of
+  twenty lines per scanner rather than one per file.
+  This is also where a scanner's "sibling report absent" note is revisited: by
+  reconciliation time the parallel siblings have landed, so a claim made against
+  a missing neighbour is confirmed or withdrawn rather than left standing.
+
 ### Verified
 
 - **An honest thirty-six skill plan validates with zero blocking diagnostics.**

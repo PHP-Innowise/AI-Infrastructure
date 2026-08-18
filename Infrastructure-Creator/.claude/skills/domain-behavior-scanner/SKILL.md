@@ -21,7 +21,7 @@ Every finding records the contract's `confidence` and `source_type` values. Sour
 
 ## Outputs (MANDATORY)
 
-Per run: exactly one report `tasks/TASK-{NNN}/domain-behavior-scanner-findings.md` and exactly one evidence ledger `tasks/TASK-{NNN}/domain-behavior-scanner-evidence.json`, both shaped by `stack-scanner/references/scan-evidence-contract.md` - read it first, including its sibling-input fallback. Never write into the target.
+Per run: exactly one report `tasks/TASK-{NNN}/domain-behavior-scanner-findings.md` and exactly one evidence ledger `tasks/TASK-{NNN}/domain-behavior-scanner-evidence.json` and exactly one coverage record `tasks/TASK-{NNN}/domain-behavior-scanner-coverage.json`, all shaped by `stack-scanner/references/scan-evidence-contract.md` - read it first, including its sibling-input fallback. Never write into the target.
 
 ## Process
 
@@ -46,7 +46,8 @@ Follow the `domain-behavior-scanner` report template in appendix A of `stack-sca
 ## Guardrails
 
 - MUST operate read-only on the target and MUST NOT read `.env`, secrets, customer data, or raw production payloads.
-- MUST cite a target file and source type for every finding, and MUST emit both artifacts with contract-shaped evidence records (target-relative path, `sha256:` fingerprint, supported claims).
+- MUST give every surface it saw one of the four dispositions in the coverage record; a surface nobody dispositioned is not the same as one nobody needed.
+- MUST cite a target file and source type for every finding, and MUST emit all three artifacts with contract-shaped evidence records (target-relative path, `sha256:` fingerprint, supported claims).
 - MUST take sibling `architecture-scanner`/`stack-scanner` input from this run's task directory and degrade with a recorded gap when it is missing; MUST NOT invent it.
 - MUST distinguish status discovery from confirmed transitions.
 - MUST distinguish authentication technology from product roles/permissions.
@@ -59,4 +60,4 @@ Follow the `domain-behavior-scanner` report template in appendix A of `stack-sca
 
 ## Final Output
 
-Return both artifact paths (report and evidence ledger), a short summary of confirmed invariants/transitions/permissions/risks, any domain-skill candidates, material contradictions or unknowns, and a confidence summary. Suggest `clarifying-interview` for material unresolved behavior or `profile-synthesizer` when no material ambiguity remains.
+Return all three artifact paths (report, evidence ledger, coverage record), a short summary of confirmed invariants/transitions/permissions/risks, any domain-skill candidates, material contradictions or unknowns, and a confidence summary. Suggest `clarifying-interview` for material unresolved behavior or `profile-synthesizer` when no material ambiguity remains.

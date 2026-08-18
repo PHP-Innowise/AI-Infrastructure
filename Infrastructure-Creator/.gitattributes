@@ -23,6 +23,7 @@
 .claude/skills/bootstrap-verifier/scripts/validate_flow_contracts.py -diff linguist-generated=true
 .claude/skills/bootstrap-verifier/scripts/validate_generated.py -diff linguist-generated=true
 .claude/skills/bootstrap-verifier/scripts/validate_reference_catalogs.py -diff linguist-generated=true
+.claude/skills/bootstrap-verifier/scripts/validate_scan_coverage.py -diff linguist-generated=true
 .claude/skills/bootstrap-verifier/scripts/validate_skill_quality.py -diff linguist-generated=true
 .claude/skills/clarifying-interview/SKILL.md -diff linguist-generated=true
 .claude/skills/command-forge/SKILL.md -diff linguist-generated=true
@@ -150,6 +151,7 @@
 .cursor/skills/bootstrap-verifier/scripts/validate_flow_contracts.py -diff linguist-generated=true
 .cursor/skills/bootstrap-verifier/scripts/validate_generated.py -diff linguist-generated=true
 .cursor/skills/bootstrap-verifier/scripts/validate_reference_catalogs.py -diff linguist-generated=true
+.cursor/skills/bootstrap-verifier/scripts/validate_scan_coverage.py -diff linguist-generated=true
 .cursor/skills/bootstrap-verifier/scripts/validate_skill_quality.py -diff linguist-generated=true
 .cursor/skills/clarifying-interview/SKILL.md -diff linguist-generated=true
 .cursor/skills/command-forge/SKILL.md -diff linguist-generated=true

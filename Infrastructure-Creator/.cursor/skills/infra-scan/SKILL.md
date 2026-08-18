@@ -25,7 +25,7 @@ If the target turns out not to be PHP at all, this skill does not silently fail 
 
 All output from this run lives under `tasks/TASK-{NNN}/` in Infrastructure-Creator's own folder (not the target project), where `{NNN}` is the next value from `tasks/.task-counter` zero-padded to three digits (`TASK-001`); see `stack-scanner/references/scan-evidence-contract.md`:
 
-- per scanner, a report and an evidence ledger: `stack-scanner-findings.md` + `stack-scanner-evidence.json`, and the same pair for `architecture-scanner`, `integration-scanner`, `infra-ops-scanner`, `security-compliance-scanner`, `conventions-scanner`, `domain-behavior-scanner`
+- per scanner, a report, an evidence ledger, and a coverage record: `stack-scanner-findings.md` + `stack-scanner-evidence.json` + `stack-scanner-coverage.json`, and the same three for `architecture-scanner`, `integration-scanner`, `infra-ops-scanner`, `security-compliance-scanner`, `conventions-scanner`, `domain-behavior-scanner`
 - `stack-researcher-findings.md`
 - `clarifying-interview-questions.md`, `clarifying-interview-answers.md`
 - `infra-scan-project-profile.md` (the deliverable)
@@ -34,7 +34,7 @@ All output from this run lives under `tasks/TASK-{NNN}/` in Infrastructure-Creat
 ## Process
 
 1. **Validate the target.** Require an explicit target project path (e.g. "run infra-scan against ../my-php-app"). Refuse to proceed if no path was given, if the path does not exist, or if it resolves to Infrastructure-Creator's own directory tree.
-2. **Confirm it is a PHP project - and branch if it is not.** There must be a `composer.json` and/or `*.php` files for the PHP pipeline (steps 3-9) to proceed. If there is no PHP evidence:
+2. **Confirm it is a PHP project - and branch if it is not.** There must be a `composer.json` and/or `*.php` files for the PHP pipeline (steps 3-10) to proceed. If there is no PHP evidence:
    - **Probe for a recognizable non-PHP stack** using manifest/signal evidence (this is a lightweight presence check, not deep analysis - deep analysis of the detected stack happens only inside `stack-adapter`, and only if the user opts in): `pubspec.yaml` (+ `*.dart`) -> Flutter/Dart; `package.json` -> Node.js/JavaScript/TypeScript; `requirements.txt`/`pyproject.toml`/`Pipfile` -> Python; `go.mod` -> Go; `Gemfile` -> Ruby; `pom.xml`/`build.gradle`/`build.gradle.kts` -> Java/Kotlin; `*.csproj`/`*.sln` -> .NET/C#; `Cargo.toml` -> Rust; `Package.swift` -> Swift. This list is illustrative, not exhaustive - any other clear ecosystem manifest counts too.
    - **If a recognizable non-PHP stack is found:** STOP the PHP pipeline (do not run the seven PHP scanners) and ask the user one question: *"This target uses [detected stack], not PHP. Infrastructure-Creator only generates PHP accelerators directly, but it can build you an independent sibling generator - `Infrastructure-Creator-[Stack]` - with the identical architecture, freshly researched and authored for [detected stack]. Create it?"* If yes, invoke `stack-adapter` with the target path and the detected stack name; report its result and stop (do not continue this skill's own PHP steps). If no, STOP and report the target is out of scope, same as below.
    - **If nothing recognizable is found at all:** STOP and report the target is out of scope (this tool only generates PHP accelerators, and no other stack could even be identified) rather than scanning further.
@@ -45,9 +45,21 @@ All output from this run lives under `tasks/TASK-{NNN}/` in Infrastructure-Creat
    - **If your AI tool supports parallel subagents/tool calls:** spawn all seven in one batch so they run concurrently: `stack-scanner`, `architecture-scanner`, `integration-scanner`, `infra-ops-scanner`, `security-compliance-scanner`, `conventions-scanner`, `domain-behavior-scanner`, each given the target path and the task directory. Wait for all seven before continuing.
    - **If your AI tool is single-threaded:** invoke each scanner's logic sequentially in the same session. Output is identical; only mechanics differ. Say so in the Context Summary.
    - Treat test topology, exact/resolved command definitions, stable high-priority invariant IDs, bounded evidence anchors, path authority/creatability, material adjacency, and routing cases as mandatory cross-scanner outputs. A scanner that omits its applicable portion is incomplete, not silently optional.
-6. **Run `stack-researcher`** once the scanners have written findings - it needs `integration-scanner-findings.md` (what to research) and `stack-scanner-findings.md` (the PHP framework/version to ground research in).
-7. **Run `clarifying-interview`** once research is done - it turns remaining `inferred`/`unknown` items into a short question set and always asks the mandatory AI-tool-selection question.
-8. **Run `profile-synthesizer`** last - it produces both handoff artifacts,
+6. **Reconcile discovery before anything reads it.** Once all seven have
+   returned, run
+   `python3 bootstrap-verifier/scripts/validate_scan_coverage.py --target <target> --task-dir tasks/TASK-{NNN}`.
+   A surface nobody dispositioned, coverage claimed with no evidence inside it,
+   evidence cited from outside what a scanner says it read, two scanners
+   disagreeing about a forbidden surface, or any claim to have read a secret is
+   blocking: fix the scan, do not proceed on the assumption that the missing
+   part did not matter. Truncations are reported as warnings and belong in the
+   confidence summary verbatim - a cap nobody sees reads as full coverage.
+   This is also where a scanner's "sibling report absent" note is revisited:
+   the parallel siblings have all landed by now, so a claim made against a
+   missing neighbour is either confirmed or withdrawn here.
+7. **Run `stack-researcher`** once the scanners have written findings - it needs `integration-scanner-findings.md` (what to research) and `stack-scanner-findings.md` (the PHP framework/version to ground research in).
+8. **Run `clarifying-interview`** once research is done - it turns remaining `inferred`/`unknown` items into a short question set and always asks the mandatory AI-tool-selection question.
+9. **Run `profile-synthesizer`** last - it produces both handoff artifacts,
    validates evidence paths and fingerprints, runs complete plan-level
    operational-safety, ownership/write/routing/flow diagnostics, prunes
    unjustified or conflicting skill proposals, and requires one complete schema
@@ -56,7 +68,7 @@ All output from this run lives under `tasks/TASK-{NNN}/` in Infrastructure-Creat
    runtime-fixed contracts from `memory-seed/assets/runtime-contract.json`.
    Stop before approval on any blocking diagnostic; schema migration and
    calibrated similarity warnings remain visible but non-blocking.
-9. **Stop.** Do not proceed to generation automatically - the profile is a human checkpoint by design.
+10. **Stop.** Do not proceed to generation automatically - the profile is a human checkpoint by design.
 
 ## Output Template
 

@@ -19,7 +19,7 @@ The target project path is a **required** argument; never assume the current wor
 
 ## Outputs (MANDATORY)
 
-Per run: exactly one report `tasks/TASK-{NNN}/integration-scanner-findings.md` and exactly one evidence ledger `tasks/TASK-{NNN}/integration-scanner-evidence.json`, both shaped by `stack-scanner/references/scan-evidence-contract.md` - read it first. Never write into the target.
+Per run: exactly one report `tasks/TASK-{NNN}/integration-scanner-findings.md` and exactly one evidence ledger `tasks/TASK-{NNN}/integration-scanner-evidence.json` and exactly one coverage record `tasks/TASK-{NNN}/integration-scanner-coverage.json`, all shaped by `stack-scanner/references/scan-evidence-contract.md` - read it first. Never write into the target.
 
 ## Process
 
@@ -49,7 +49,8 @@ Follow the `integration-scanner` report template in appendix A of `stack-scanner
 ## Guardrails
 
 - MUST cite the composer package AND the runtime wiring path:line to mark an integration `confirmed`.
-- MUST cite a real file path (and line where practical) for every finding, and MUST emit both artifacts with contract-shaped evidence records (target-relative path, `sha256:` fingerprint, supported claims).
+- MUST give every surface it saw one of the four dispositions in the coverage record; a surface nobody dispositioned is not the same as one nobody needed.
+- MUST cite a real file path (and line where practical) for every finding, and MUST emit all three artifacts with contract-shaped evidence records (target-relative path, `sha256:` fingerprint, supported claims).
 - MUST operate read-only on the target and follow the shared secrets rule: key names from non-secret committed sources only; never a value, and never `.env` itself.
 - MUST search every source in the integration-source checklist before reporting an empty or short integration list; `require` alone is not a complete search.
 - MUST prefer `require` over `require-dev`; only include a dev entry when it is clearly a runtime dependency, and say why.
@@ -60,4 +61,4 @@ Follow the `integration-scanner` report template in appendix A of `stack-scanner
 
 ## Final Output
 
-Return both artifact paths (report and evidence ledger), the categorized integration list with per-item confidence, any integration contracts, and a one-line confidence summary. Suggest `stack-researcher` (to ground detected integrations in current provider docs) as the next step.
+Return all three artifact paths (report, evidence ledger, coverage record), the categorized integration list with per-item confidence, any integration contracts, and a one-line confidence summary. Suggest `stack-researcher` (to ground detected integrations in current provider docs) as the next step.
