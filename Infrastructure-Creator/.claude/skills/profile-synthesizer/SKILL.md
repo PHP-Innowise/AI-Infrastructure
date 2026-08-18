@@ -40,7 +40,7 @@ Follow `references/project-profile-schema.md` exactly. The JSON is generator run
    disposition: selected (families may produce multiple concrete skills) or
    rejected with reason/missing evidence. There are no category quotas. Only
    the memory quartet is runtime-fixed.
-8. **Build `skill-generation-plan.json`.** Stamp schema `1.3` and the current
+8. **Build `skill-generation-plan.json`.** Stamp schema `1.4` and the current
    reference-corpus `catalog_version`. Normalize target evidence into
    `evidence[]` with supported claims and sha256 fingerprints for repository
    files. Local evidence needs a bounded anchor (`line_range`, `symbol`, or
@@ -63,6 +63,9 @@ Follow `references/project-profile-schema.md` exactly. The JSON is generator run
    succeeds outright. Record what the target does **not** do as `absence`
    evidence when it matters - a configured analyser nobody invokes is a fact a
    skill needs - with a literal search and the matches it accounts for.
+   Name the reconciled claims each skill rests on in `claim_ids`, and give
+   every piece of evidence inside a skill's own declared paths a decision:
+   cite it, or rule it out with a reason in `evidence_dispositions`.
    Never use a
    grouped summary. Every source path is canonical and target-relative; URLs
    remain URLs. Ownership IDs use stable lowercase kebab/dotted syntax and modes
@@ -128,7 +131,8 @@ Read the profile and correct anything wrong, then run `infra-generate`.
 - MUST provide a complete JSON contract for every selected skill; grouped or one-line descriptions are summaries only.
 - MUST cover every `roles` entry the selected candidate declares in the registry, each wired to cited evidence and to a procedure step that discharges it.
 - MUST record an observed `baseline` for every executable verification the gate cannot resolve, and phrase the expectation against it.
-- MUST emit schema 1.3 operational, ownership, invariant, path, and reciprocal routing contracts; schemas 1.0/1.1/1.2 are audit/migration input only and are not publishable.
+- MUST decide every piece of evidence that falls inside a skill's own declared paths - cited or ruled out with a reason - and name the claims it rests on.
+- MUST emit schema 1.4 operational, ownership, invariant, path, and reciprocal routing contracts; schemas 1.0-1.3 are audit/migration input only and are not publishable.
 - MUST use target-relative canonical source paths in contracts and generated target skills; generator task paths are never target evidence.
 - MUST NOT include any secret or credential value.
 - MUST keep every fact's confidence tag and source; never launder an `inferred` fact into a `confirmed` one.

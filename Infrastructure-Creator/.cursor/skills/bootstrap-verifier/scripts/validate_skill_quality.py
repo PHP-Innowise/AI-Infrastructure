@@ -81,6 +81,10 @@ SCHEMA_1_2_SKILL_FIELDS = REQUIRED_SKILL_FIELDS + (
     "evidence_anchors",
     "routing_cases",
 )
+SCHEMA_1_4_SKILL_FIELDS = SCHEMA_1_2_SKILL_FIELDS + (
+    "claim_ids",
+    "evidence_dispositions",
+)
 SECTION_ALIASES = {
     "purpose": ("purpose",),
     "inputs": ("project evidence", "inputs", "project evidence / inputs"),
@@ -312,14 +316,17 @@ BODY_PATH_CREATION_PATTERN = re.compile(
     r"|scaffold|write)(?:s|d|es|ed|ing)?\b|\b(?:new|wrote)\b",
     re.I,
 )
-CURRENT_PLAN_SCHEMA = "1.3"
-SUPPORTED_PLAN_SCHEMAS = {"1.0", "1.1", "1.2", "1.3"}
+CURRENT_PLAN_SCHEMA = "1.4"
+SUPPORTED_PLAN_SCHEMAS = {"1.0", "1.1", "1.2", "1.3", "1.4"}
 # Schemas that carry the typed operational contract. 1.3 adds nested shapes
 # only - the top level and the skill field set are 1.2's - so every typed rule
 # written for 1.2 applies unchanged.
-TYPED_PLAN_SCHEMAS = {"1.2", "1.3"}
+TYPED_PLAN_SCHEMAS = {"1.2", "1.3", "1.4"}
+# Schemas whose nested shapes carry the 1.3 additions: role wiring, recorded
+# verification baselines, absence evidence.
+WIRED_PLAN_SCHEMAS = {"1.3", "1.4"}
 # Readable for audit diagnostics, ineligible for publication.
-LEGACY_PLAN_SCHEMAS = {"1.0", "1.1", "1.2"}
+LEGACY_PLAN_SCHEMAS = {"1.0", "1.1", "1.2", "1.3"}
 # What the command did on the unmodified target, per ADR-002.  `failing` and
 # `failing-remediated` differ in what the skill is allowed to promise: the
 # first must express its expectation differentially, the second declares that
@@ -3385,6 +3392,126 @@ def _validate_search_verification(
             )
 
 
+def _territory(skill: dict) -> list[tuple[str, str]]:
+    """The paths a skill declares as its own, as (surface, kind) pairs."""
+    surfaces: list[tuple[str, str]] = []
+    for contract in _as_list(skill.get("path_contracts")):
+        if isinstance(contract, dict) and _is_nonempty_string(contract.get("path")):
+            surfaces.append((contract["path"].strip(), "file"))
+    for item in _as_list(skill.get("ownership")):
+        if not isinstance(item, dict):
+            continue
+        for owned in _as_list(item.get("paths")):
+            if _is_nonempty_string(owned):
+                surfaces.append((owned.strip(), "tree"))
+    return surfaces
+
+
+def _covers_path(surface: str, kind: str, path: str) -> bool:
+    surface = surface.rstrip("/")
+    if surface.endswith("/**"):
+        prefix = surface[:-3]
+        return path == prefix or path.startswith(prefix + "/")
+    if any(character in surface for character in "*?["):
+        return fnmatch.fnmatch(path, surface)
+    if kind == "tree":
+        return path == surface or path.startswith(surface + "/")
+    return path == surface
+
+
+def _validate_evidence_dispositions(
+    name: str,
+    skill: dict,
+    evidence_map: dict,
+    runtime_fixed: bool,
+    diagnostics: list,
+) -> None:
+    """Require a decision on every piece of evidence inside the skill's own territory.
+
+    Synthesis reads the whole ledger and writes one contract at a time, so
+    evidence that belongs to a skill's own paths can be passed over silently -
+    and the plan looks identical whether the author judged it irrelevant or
+    never saw it. This makes the two distinguishable: cite it, or say why not.
+
+    Only evidence inside the paths the skill itself declares is in scope, so the
+    obligation grows with what a skill claims rather than with the size of the
+    ledger. Measured on five real plans, that is a median of 0-3 undecided items
+    per skill and 4-47 per plan.
+    """
+    dispositions = skill.get("evidence_dispositions")
+    if not _is_string_list(skill.get("claim_ids"), allow_empty=runtime_fixed):
+        _diag(
+            diagnostics,
+            "SKILL_CLAIM_IDS_INVALID",
+            f"{name}.claim_ids must name the reconciled claims this skill rests on",
+        )
+    if not isinstance(dispositions, list):
+        _diag(
+            diagnostics,
+            "EVIDENCE_DISPOSITION_INVALID",
+            f"{name}.evidence_dispositions must be an array",
+        )
+        return
+    decided: set[str] = set()
+    for index, entry in enumerate(dispositions):
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != {"evidence_id", "disposition", "reason"}
+            or not _is_nonempty_string(entry.get("evidence_id"))
+            or entry.get("disposition") != "excluded"
+            or not _is_nonempty_string(entry.get("reason"))
+        ):
+            _diag(
+                diagnostics,
+                "EVIDENCE_DISPOSITION_INVALID",
+                f"{name}.evidence_dispositions[{index}] must exclude one "
+                "evidence id with a reason",
+            )
+            continue
+        identifier = entry["evidence_id"].strip()
+        if identifier not in evidence_map:
+            _diag(
+                diagnostics,
+                "EVIDENCE_DISPOSITION_UNKNOWN",
+                f"{name} rules out evidence the plan does not carry: {identifier}",
+            )
+            continue
+        if identifier in _as_list(skill.get("evidence_ids")):
+            _diag(
+                diagnostics,
+                "EVIDENCE_DISPOSITION_CONTRADICTED",
+                f"{name} both cites and rules out {identifier}",
+            )
+            continue
+        decided.add(identifier)
+    surfaces = _territory(skill)
+    if not surfaces:
+        return
+    cited = {
+        str(item).strip()
+        for item in _as_list(skill.get("evidence_ids"))
+        if _is_nonempty_string(item)
+    }
+    undisposed = sorted(
+        identifier
+        for identifier, location in evidence_map.items()
+        if location
+        and location[0] == "path"
+        and identifier not in cited
+        and identifier not in decided
+        and any(
+            _covers_path(surface, kind, location[1]) for surface, kind in surfaces
+        )
+    )
+    if undisposed:
+        _diag(
+            diagnostics,
+            "SKILL_EVIDENCE_UNDISPOSED",
+            f"{name} declares paths that hold evidence it neither cites nor "
+            f"rules out: {', '.join(undisposed[:6])}",
+        )
+
+
 def _validate_schema_1_2_skill(
     schema_version: str,
     name: str,
@@ -3565,6 +3692,10 @@ def _validate_schema_1_2_skill(
             )
 
     if schema_version not in LEGACY_PLAN_SCHEMAS:
+        _validate_evidence_dispositions(
+            name, skill, evidence_map, runtime_fixed, diagnostics
+        )
+    if schema_version in WIRED_PLAN_SCHEMAS:
         _validate_role_coverage_wiring(
             name, skill, procedure_ids, runtime_fixed, diagnostics
         )
@@ -3593,7 +3724,7 @@ def _validate_schema_1_2_skill(
             "skip_condition",
             "skip_reporting",
         }
-        if schema_version not in LEGACY_PLAN_SCHEMAS:
+        if schema_version in WIRED_PLAN_SCHEMAS:
             expected_fields.add("baseline")
         if (
             not isinstance(check, dict)
@@ -3635,7 +3766,7 @@ def _validate_schema_1_2_skill(
                 f"{name} repeats verification id: {check['id']}",
             )
         verification_ids.add(check["id"])
-        if schema_version not in LEGACY_PLAN_SCHEMAS:
+        if schema_version in WIRED_PLAN_SCHEMAS:
             _validate_verification_baseline(
                 name,
                 check,
@@ -4815,7 +4946,7 @@ def _validate_plan(
                 continue
             absence = (
                 entry.get("absence")
-                if schema_version not in LEGACY_PLAN_SCHEMAS
+                if schema_version in WIRED_PLAN_SCHEMAS
                 else None
             )
             location = _evidence_location(entry)
@@ -4850,7 +4981,7 @@ def _validate_plan(
                 "fingerprint",
                 "supported_claims",
             }
-            if schema_version not in LEGACY_PLAN_SCHEMAS:
+            if schema_version in WIRED_PLAN_SCHEMAS:
                 allowed_evidence_fields.add("absence")
             unknown_evidence_fields = set(entry) - allowed_evidence_fields
             if unknown_evidence_fields:
@@ -5104,11 +5235,11 @@ def _validate_plan(
         if not isinstance(skill, dict):
             _diag(diagnostics, "SKILL_PLAN_INVALID", f"skills[{index}] must be an object")
             continue
-        required_skill_fields = (
-            SCHEMA_1_2_SKILL_FIELDS
-            if schema_version in TYPED_PLAN_SCHEMAS
-            else REQUIRED_SKILL_FIELDS
-        )
+        required_skill_fields = REQUIRED_SKILL_FIELDS
+        if schema_version in TYPED_PLAN_SCHEMAS:
+            required_skill_fields = SCHEMA_1_2_SKILL_FIELDS
+        if schema_version not in LEGACY_PLAN_SCHEMAS:
+            required_skill_fields = SCHEMA_1_4_SKILL_FIELDS
         missing = [field for field in required_skill_fields if field not in skill]
         if missing:
             _diag(diagnostics, "SKILL_PLAN_INCOMPLETE", f"skills[{index}] missing: {', '.join(missing)}")

@@ -516,6 +516,51 @@ class ClaimReconciliationTest(ScanCoverageFixture):
         ]
         self.assertIn("CLAIM_INVARIANT_LOST", codes)
 
+    def test_a_skill_naming_the_claim_carries_it_without_restating_it(self) -> None:
+        """Schema 1.4 lets a plan answer the question outright."""
+        self.write()
+        path = self.task / "skill-generation-plan.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "evidence": [],
+                    "critical_invariants": [],
+                    "skills": [{"name": "billing-review", "claim_ids": ["CLM-0001"]}],
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        codes = [
+            item.code
+            for item in validator.validate(self.target, self.task, path)
+            if item.severity == "error"
+        ]
+        self.assertEqual(codes, [])
+
+    def test_a_skill_resting_on_a_claim_nobody_made_is_rejected(self) -> None:
+        self.write()
+        path = self.task / "skill-generation-plan.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "evidence": [],
+                    "critical_invariants": [],
+                    "skills": [{"name": "billing-review", "claim_ids": ["CLM-9999"]}],
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        codes = [
+            item.code
+            for item in validator.validate(self.target, self.task, path)
+            if item.severity == "error"
+        ]
+        self.assertIn("CLAIM_ID_UNKNOWN", codes)
+
     def test_only_high_priority_invariants_have_to_survive(self) -> None:
         """A medium capability claim is not something the plan owes an answer."""
         self.write()

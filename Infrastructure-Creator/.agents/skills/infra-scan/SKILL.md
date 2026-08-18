@@ -72,7 +72,7 @@ All output from this run lives under `tasks/TASK-{NNN}/` in Infrastructure-Creat
    validates evidence paths and fingerprints, runs complete plan-level
    operational-safety, ownership/write/routing/flow diagnostics, prunes
    unjustified or conflicting skill proposals, and requires one complete schema
-   1.3 contract per retained skill. It maps every high-priority confirmed
+   1.4 contract per retained skill. It maps every high-priority confirmed
    invariant to a procedure and concrete verification assertion and compiles
    runtime-fixed contracts from `memory-seed/assets/runtime-contract.json`.
    Stop before approval on any blocking diagnostic; schema migration and

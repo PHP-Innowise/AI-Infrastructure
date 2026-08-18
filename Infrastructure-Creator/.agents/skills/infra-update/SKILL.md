@@ -51,12 +51,12 @@ Allocate a new `tasks/TASK-{N}/` for the update run. Staging output goes to `tas
 
 1. **Read the manifest.** Require the target project path. Load `<target>/.infra-manifest.json`. If it is missing or unparsable, **ABORT without writing anything** and tell the user why: the target is a legacy generation (produced by a generator release before manifests existed, v1.3.x or earlier) or the manifest was deleted. Recovery options to present: (a) re-run `infra-generate` and take the collision guard's explicit overwrite/merge decision, or (b) if - and only if - the user can vouch that the generated files were never edited, hand-build a manifest with the recipe in `infra-generate`'s "Version Stamp & Generation Manifest" section and re-run `infra-update`. Never fabricate a manifest yourself from the target's current state without that explicit user confirmation - hashing user-edited files as if freshly generated would authorize overwriting their edits.
 2. **Re-validate the profile and generation plan.** The manifest names its
-   source profile; require its matching schema **1.3**
+   source profile; require its matching schema **1.4**
    `skill-generation-plan.json` with `routing_cases[]` and canonical
    `flow_contracts`. Re-run
    `infra-generate`'s evidence, containment, fingerprint, inventory-necessity,
    ownership, complete-adjacency, routing-oracle, and flow-contract checks
-   against the current target. Missing or pre-1.3 plans use a fresh
+   against the current target. Missing or pre-1.4 plans use a fresh
    scan/synthesis migration path; never reconstruct a contract from old
    generated prose. Material drift requires a fresh scan.
 3. **Compare versions.** Read this generator's root `VERSION` file and the manifest's `generator_version`; summarize the relevant `CHANGELOG.md` entries between them for the user. Equal versions are allowed (the run degrades to a drift-repair pass) but say so explicitly.
@@ -176,7 +176,7 @@ Allocate a new `tasks/TASK-{N}/` for the update run. Staging output goes to `tas
 - MUST keep staging inside this generator's own `tasks/TASK-{N}/` - the target sees only final, decided writes.
 - MUST NOT stage agents, commands, or flows until every staged skill passes
   per-contract and inventory-wide semantic validation.
-- MUST NOT classify or publish an update whose schema 1.3 routing oracle omits
+- MUST NOT classify or publish an update whose schema 1.4 routing oracle omits
   an adjacency, whose feature flow omits required code review, or whose
   `SKILL FLOW.md` and executable commands differ from canonical
   `flow_contracts`.

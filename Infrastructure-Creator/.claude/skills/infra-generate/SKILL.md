@@ -35,7 +35,7 @@ target manifest member.
    under it, and a subsystem nobody dispositioned produces an accelerator that
    looks finished and does not know the subsystem exists. Then require the
    matching schema
-   **1.3** `skill-generation-plan.json`, including per-skill
+   **1.4** `skill-generation-plan.json`, including per-skill
    `routing_cases[]` (`skills[].routing_cases`) and canonical top-level
    `flow_contracts`. Re-check every
    target-relative evidence path,
@@ -72,7 +72,7 @@ target manifest member.
    ownership, repeated-block, and similarity checks. Stop immediately on any
    failure. No agent, command, flow, manifest, or target skill may exist yet.
 8. **Wrap and compile only validated skills.** Run `agent-forge`, then
-   `command-forge`, using every adjacency and schema 1.3 routing oracle. Run
+   `command-forge`, using every adjacency and schema 1.4 routing oracle. Run
    `skill-flow-composer` after wrappers exist. Both forges MUST compile from the
    same canonical `flow_contracts`; neither may infer its own stage graph.
    Validate exact graph parity across `SKILL FLOW.md` and every executable flow:
@@ -277,7 +277,7 @@ The target now has its own working `AGENTS.md` + [selected edition folder(s)] + 
   fails; a partially published accelerator is never an acceptable result.
 - MUST NOT generate a skill absent from the validated plan or retain one whose
   evidence, operational ownership, procedure, or routing value is insufficient.
-- MUST require schema 1.3 routing/flow contracts before wrappers, and MUST
+- MUST require schema 1.4 routing/flow contracts before wrappers, and MUST
   block publication when any adjacency is dropped or when `SKILL FLOW.md` and
   executable flow commands do not compile to the same canonical graph.
 

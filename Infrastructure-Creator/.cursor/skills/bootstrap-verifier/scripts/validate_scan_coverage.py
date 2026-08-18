@@ -516,6 +516,31 @@ def _validate_invariant_carry_through(
     if plan is None:
         return
     plan_locators = _locators(plan)
+    # From schema 1.4 a skill names the claims it rests on outright, so the
+    # carry-through question stops being a guess about wording. The statement
+    # match below stays for plans written before that.
+    known = {claim["id"].strip() for claim in claims}
+    referenced: set[str] = set()
+    for skill in plan.get("skills") or []:
+        if not isinstance(skill, dict):
+            continue
+        unknown = sorted(
+            str(item).strip()
+            for item in skill.get("claim_ids") or []
+            if _is_nonempty_string(item) and str(item).strip() not in known
+        )
+        if unknown:
+            _diag(
+                diagnostics,
+                "CLAIM_ID_UNKNOWN",
+                f"{skill.get('name', '?')} rests on claims reconciliation did "
+                f"not make: {', '.join(unknown)}",
+            )
+        referenced.update(
+            str(item).strip()
+            for item in skill.get("claim_ids") or []
+            if _is_nonempty_string(item)
+        )
     carried = [
         (
             str(entry["statement"]),
@@ -534,6 +559,8 @@ def _validate_invariant_carry_through(
         sources = {
             ledger_locators.get(item.strip(), "") for item in claim["evidence_ids"]
         } - {""}
+        if claim["id"].strip() in referenced:
+            continue
         if any(
             sources & entry_sources and _same_statement(statement, claim["statement"])
             for statement, entry_sources in carried

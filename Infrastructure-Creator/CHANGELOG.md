@@ -6,6 +6,25 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Breaking
 
+- **Plan schema 1.4.** Two skill members, top level untouched again. Schema 1.3
+  joins 1.0-1.2 as readable-for-audit and publication-ineligible; new synthesis
+  emits 1.4.
+  - `claim_ids` names the reconciled claims from `project-claims.json` a skill
+    rests on. With it, the lost-invariant check stops guessing at wording: a
+    skill answers the question outright, and a claim reconciliation never made
+    is `CLAIM_ID_UNKNOWN`.
+  - `evidence_dispositions` records the evidence inside a skill's own declared
+    paths that it deliberately does not use. Synthesis reads the whole ledger
+    and writes one contract at a time, so a passed-over finding left no trace -
+    the plan looked identical whether the author judged it irrelevant or never
+    saw it. Evidence inside the skill's own `path_contracts` or `ownership`
+    paths that is neither cited nor ruled out is `SKILL_EVIDENCE_UNDISPOSED`.
+    Measured on five real plans before release: a median of 0-3 undecided items
+    per skill and 4-47 per plan, because the obligation grows with what a skill
+    claims rather than with the size of the ledger.
+  - The 36-skill honest corpus was migrated with it and still passes with zero
+    blocking diagnostics, which is what the corpus is for.
+
 - **Plan schema 1.3.** One migration, three nested shapes; the top level and the
   skill field set are 1.2's, so a 1.2 plan differs from a 1.3 plan only inside
   `required_procedure_roles[]`, `verification[]`, and `evidence[]`. Schema 1.2

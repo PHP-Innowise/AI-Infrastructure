@@ -234,15 +234,16 @@ class BootstrapVerifierDedupDocTest(unittest.TestCase):
 class AgentsPolicyDocTest(unittest.TestCase):
     def test_schema_policy_bullets_are_consistent(self) -> None:
         flat = normalized(AGENTS_DOC)
-        self.assertIn("only a schema 1.3 plan is approvable", flat)
+        self.assertIn("only a schema 1.4 plan is approvable", flat)
         self.assertIn(
-            "Legacy 1.0/1.1/1.2 plans remain readable for audit but MUST be "
+            "Legacy 1.0/1.1/1.2/1.3 plans remain readable for audit but MUST be "
             "re-synthesized",
             flat,
         )
         self.assertNotIn("schema 1.0 is migration-only", flat)
         self.assertNotIn("Schema 1.1 uses", flat)
         self.assertNotIn("only a schema 1.2 plan is approvable", flat)
+        self.assertNotIn("only a schema 1.3 plan is approvable", flat)
 
 
 class ProcessCatalogPhaseVocabularyTest(unittest.TestCase):

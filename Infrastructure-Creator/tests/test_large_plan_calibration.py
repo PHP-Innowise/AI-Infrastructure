@@ -398,6 +398,8 @@ def build_corpus(root: Path, collapsed: bool = False) -> dict:
                         "paths": writes or [source],
                     }
                 ],
+                "claim_ids": [f"CLM-{index:04d}"],
+                "evidence_dispositions": [],
                 "required_procedure_roles": required_roles,
                 "procedure_steps": steps,
                 "decision_points": decisions,
@@ -536,7 +538,7 @@ def build_corpus(root: Path, collapsed: bool = False) -> dict:
     writers = [item["agent"] for item in roster if item["writes"]]
     reviewers = [item["agent"] for item in roster if not item["writes"]]
     plan = {
-        "schema_version": "1.3",
+        "schema_version": "1.4",
         "catalog_version": "2.5.0",
         "target_root": str(target),
         "profile": "tasks/TASK-001/infra-scan-project-profile.md",

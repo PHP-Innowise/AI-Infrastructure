@@ -13,7 +13,7 @@ The JSON top level MUST contain exactly these required members (extensions requi
 
 ```json
 {
-  "schema_version": "1.3",
+  "schema_version": "1.4",
   "catalog_version": "2.5.0",
   "target_root": "/absolute/path/to/target",
   "profile": "tasks/TASK-001/infra-scan-project-profile.md",
@@ -25,17 +25,26 @@ The JSON top level MUST contain exactly these required members (extensions requi
 }
 ```
 
-Top-level membership is exact. New plans use `schema_version: "1.3"`.
-Schemas `1.0`, `1.1`, and `1.2` remain readable for plan-only audit diagnostics
+Top-level membership is exact. New plans use `schema_version: "1.4"`.
+Schemas `1.0` through `1.3` remain readable for plan-only audit diagnostics
 and produce a nonblocking `PLAN_SCHEMA_MIGRATION` warning. They are publication
 ineligible: full or partial authored-skill validation emits blocking
-`LEGACY_PLAN_PUBLICATION_INELIGIBLE`. New synthesis runs MUST emit 1.3.
+`LEGACY_PLAN_PUBLICATION_INELIGIBLE`. New synthesis runs MUST emit 1.4.
 
-**1.3 changes nested shapes only** - the top level and the skill field set are
-1.2's. Three of them, each closing a defect measured on real plans: a role entry
-now names the evidence and the procedure step that carry it; an executable
-verification records what its command does on the unmodified target; and an
-evidence entry may state an absence.
+**1.3 changed nested shapes only** - a role entry names the evidence and the
+procedure step that carry it; an executable verification records what its
+command does on the unmodified target; an evidence entry may state an absence.
+
+**1.4 adds two skill members** and leaves the top level alone: `claim_ids`,
+naming the reconciled claims from `project-claims.json` this skill rests on, and
+`evidence_dispositions`, the record of evidence inside the skill's own declared
+paths that it deliberately does not use. Synthesis reads the whole ledger and
+writes one contract at a time, so a passed-over finding used to leave no trace:
+the plan looked identical whether the author judged it irrelevant or never saw
+it. Evidence inside the skill's own `path_contracts` or `ownership` paths that is
+neither cited nor ruled out is `SKILL_EVIDENCE_UNDISPOSED`. Measured on five real
+plans, that is a median of 0-3 undecided items per skill and 4-47 per plan, so
+the obligation grows with what a skill claims rather than with the ledger.
 `catalog_version` must equal
 `skill-forge/references/candidate-registry.json`. Every registry candidate must
 appear in exactly one disposition: a selected skill's `selection_gate` or
@@ -126,6 +135,10 @@ Each `skills[]` entry is one complete, independently actionable contract:
     "negative": ["The request is only to investigate a production symptom"]
   },
   "evidence_ids": ["EV-0007", "EV-0008"],
+  "claim_ids": ["CLM-0004", "CLM-0011"],
+  "evidence_dispositions": [
+    {"evidence_id": "EV-0021", "disposition": "excluded", "reason": "A fixture factory under tests/, owned and documented by fixture-factory-generator"}
+  ],
   "source_paths": ["phpunit.xml", "tests/TestCase.php"],
   "owned_scope": ["Select and implement tests using the target's suite structure"],
   "excluded_scope": ["Root-cause investigation", "Release orchestration"],
@@ -283,7 +296,7 @@ Each `skills[]` entry is one complete, independently actionable contract:
 }
 ```
 
-All shown members except `fixed_blocks` are required under schema 1.3, including non-empty
+All shown members except `fixed_blocks` are required under schema 1.4, including non-empty
 positive and negative triggers, owned and excluded scope, structured ownership,
 required procedure roles and steps, decision points, structured verification,
 integration safety, path contracts, evidence anchors, routing cases, output,

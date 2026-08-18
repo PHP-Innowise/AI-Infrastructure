@@ -703,6 +703,17 @@ class SkillQualityFixture(unittest.TestCase):
                 )
         self.rewrite()
 
+    def use_schema_1_4(self) -> None:
+        self.use_schema_1_3()
+        self.plan["schema_version"] = "1.4"
+        for skill in self.plan["skills"]:
+            evidence_id = skill["evidence_ids"][0]
+            skill["claim_ids"] = [f"CLM-{evidence_id}"]
+            # Every other skill's evidence sits outside this skill's declared
+            # paths, so an honest contract needs no exclusions here.
+            skill["evidence_dispositions"] = []
+        self.rewrite()
+
     def write_agent_wrappers(self) -> Path:
         agents = self.base / "staging" / "agents"
         agents.mkdir()
@@ -878,8 +889,8 @@ class SkillQualityTest(SkillQualityFixture):
         self.assertIn("PLAN_SCHEMA_MIGRATION", [item.code for item in diagnostics])
         self.assertFalse(any(item.severity == "error" for item in diagnostics))
 
-    def test_schema_1_3_typed_contract_passes_plan_and_authored_validation(self) -> None:
-        self.use_schema_1_3()
+    def test_schema_1_4_typed_contract_passes_plan_and_authored_validation(self) -> None:
+        self.use_schema_1_4()
         self.assertEqual(self.plan_diagnostics(), [])
         self.assertEqual(self.codes(), [])
 
@@ -909,8 +920,8 @@ class SkillQualityTest(SkillQualityFixture):
         self.assertEqual(len(legacy), 1)
         self.assertEqual(legacy[0].severity, "error")
 
-    def test_schema_1_3_rejects_generic_verification_and_bad_step_shape(self) -> None:
-        self.use_schema_1_3()
+    def test_schema_1_4_rejects_generic_verification_and_bad_step_shape(self) -> None:
+        self.use_schema_1_4()
         first = self.plan["skills"][0]
         first["verification"][0]["instruction"] = "Run the appropriate checks."
         first["procedure_steps"][0].pop("expected_outcome")
@@ -919,8 +930,8 @@ class SkillQualityTest(SkillQualityFixture):
         self.assertIn("GENERIC_VERIFICATION", codes)
         self.assertIn("PROCEDURE_STEP_INVALID", codes)
 
-    def test_schema_1_3_enforces_provider_safety_and_read_only_language(self) -> None:
-        self.use_schema_1_3()
+    def test_schema_1_4_enforces_provider_safety_and_read_only_language(self) -> None:
+        self.use_schema_1_4()
         integration, review = self.plan["skills"]
         integration["integration_safety"]["network_policy"] = "approved-live"
         integration["integration_safety"]["authorization_required"] = False
@@ -936,8 +947,8 @@ class SkillQualityTest(SkillQualityFixture):
         self.assertIn("PROVIDER_SAFE_DEFAULT_MISSING", codes)
         self.assertIn("READ_ONLY_PROCEDURE_MUTATION", codes)
 
-    def test_schema_1_3_external_side_effect_requires_approved_policy(self) -> None:
-        self.use_schema_1_3()
+    def test_schema_1_4_external_side_effect_requires_approved_policy(self) -> None:
+        self.use_schema_1_4()
         skill = self.plan["skills"][0]
         skill["capability"]["mode"] = "external-side-effect"
         skill["integration_safety"]["network_policy"] = "forbidden"
@@ -948,8 +959,8 @@ class SkillQualityTest(SkillQualityFixture):
             [item.code for item in self.plan_diagnostics()],
         )
 
-    def test_schema_1_3_enforces_path_shape_and_classification(self) -> None:
-        self.use_schema_1_3()
+    def test_schema_1_4_enforces_path_shape_and_classification(self) -> None:
+        self.use_schema_1_4()
         contract = self.plan["skills"][0]["path_contracts"][0]
         contract["path"] = "missing/provider.php"
         contract["classification"] = "required-existing"
@@ -958,8 +969,8 @@ class SkillQualityTest(SkillQualityFixture):
         self.assertIn("PATH_EXISTING_MISSING", codes)
         self.assertIn("PATH_CONTRACT_MISSING", codes)
 
-    def test_schema_1_3_enforces_invariant_and_claim_traceability(self) -> None:
-        self.use_schema_1_3()
+    def test_schema_1_4_enforces_invariant_and_claim_traceability(self) -> None:
+        self.use_schema_1_4()
         first = self.plan["skills"][0]
         self.plan["critical_invariants"][0]["statement"] = (
             "A terminal provider failure preserves the quarantined delivery state"
@@ -970,8 +981,8 @@ class SkillQualityTest(SkillQualityFixture):
         self.assertIn("CRITICAL_INVARIANT_COVERAGE", codes)
         self.assertIn("CLAIM_TRACEABILITY_MISSING", codes)
 
-    def test_schema_1_3_enforces_evidence_anchor_and_routing_coverage(self) -> None:
-        self.use_schema_1_3()
+    def test_schema_1_4_enforces_evidence_anchor_and_routing_coverage(self) -> None:
+        self.use_schema_1_4()
         first = self.plan["skills"][0]
         first["evidence_anchors"][0]["anchor"] = "wrong.php:L1"
         first["routing_cases"] = first["routing_cases"][:1]
@@ -993,7 +1004,7 @@ class SkillQualityTest(SkillQualityFixture):
         ``config/firebase.php:L7400-L7480`` over a nine-line file passed with a
         perfectly valid prefix and a perfectly valid format.
         """
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         self.write_target("config/firebase.php", FIREBASE_SOURCE)
         self.refingerprint("firebase-runtime")
         codes = self.anchor_case("config/firebase.php:L7400-L7480")
@@ -1019,7 +1030,7 @@ class SkillQualityTest(SkillQualityFixture):
 
     def test_evidence_anchor_symbol_must_occur_in_the_cited_source(self) -> None:
         """``symbol:`` anchors are resolved by text search, not trusted."""
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         self.write_target("config/firebase.php", FIREBASE_SOURCE)
         self.refingerprint("firebase-runtime")
         codes = self.anchor_case(
@@ -1064,8 +1075,8 @@ class SkillQualityTest(SkillQualityFixture):
                 anchor,
             )
 
-    def test_schema_1_3_enforces_flow_contract_shape_and_coverage(self) -> None:
-        self.use_schema_1_3()
+    def test_schema_1_4_enforces_flow_contract_shape_and_coverage(self) -> None:
+        self.use_schema_1_4()
         self.plan["flow_contracts"]["flows"][0]["stages"][0] = {
             "phase": "implementation",
             "agents": ["unknown-agent"],
@@ -1118,7 +1129,7 @@ class SkillQualityTest(SkillQualityFixture):
         word-boundary match inside those paths called the honest purpose
         circular.
         """
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         self.set_purpose(
             "firebase-services",
             "Keep the Firebase transport contract in firebase-services/state/ "
@@ -1128,7 +1139,7 @@ class SkillQualityTest(SkillQualityFixture):
         self.assertNotIn("SKILL_CIRCULAR_PURPOSE", self.codes())
 
     def test_a_purpose_that_restates_its_own_name_is_still_circular(self) -> None:
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         self.set_purpose(
             "firebase-services",
             "Use firebase-services whenever firebase-services work is requested.",
@@ -1156,7 +1167,7 @@ class SkillQualityTest(SkillQualityFixture):
         which is exactly the shape `REPEATED_BLOCK` reports - but the sameness
         is mandated by the citation, not a reused procedure.
         """
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         self.install_evidence_table(
             "Availability keeps its sampled-date invariant and its cancellation "
             "transition in one guarded block that every citing skill repeats."
@@ -1165,7 +1176,7 @@ class SkillQualityTest(SkillQualityFixture):
 
     def test_repeated_prose_around_a_shared_table_is_still_reported(self) -> None:
         """The exemption covers the table, never the prose beside it."""
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         shared = (
             "Hold the written boundary next to the incoming request and mark "
             "each gap you find.\n"
@@ -1183,7 +1194,7 @@ class SkillQualityTest(SkillQualityFixture):
 
     def test_repeated_plain_table_rows_are_still_reported(self) -> None:
         """A table without evidence citations is ordinary duplicated content."""
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         rows = (
             "| Case | Expected |\n"
             "| --- | --- |\n"
@@ -1631,7 +1642,7 @@ Be careful.
         read-only owner - whose ``writes`` is empty by contract - used to be
         writable by any neighbour that simply declared the owned file.
         """
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         owned = self.write_into_review_source()
         self.rewrite()
         codes = [item.code for item in self.plan_diagnostics()]
@@ -1653,7 +1664,7 @@ Be careful.
 
     def test_exclusive_write_guard_respects_owners_and_ownership_mode(self) -> None:
         """Negative control: legitimate write surfaces stay clean."""
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         # An owner writing its own exclusive paths is the normal case.
         self.assertNotIn(
             "OWNERSHIP_EXCLUSIVE_WRITE_CONFLICT",
@@ -1676,7 +1687,7 @@ Be careful.
         default used to suppress SCOPE_COLLISION and ROUTING_AMBIGUITY even
         when the two contracts were literally the same sentence.
         """
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         first, second = self.plan["skills"]
         second["owned_scope"][0] = first["owned_scope"][0]
         second["ownership"][0]["description"] = first["ownership"][0]["description"]
@@ -1702,7 +1713,7 @@ Be careful.
 
     def test_partial_overlap_under_declared_precedence_stays_legitimate(self) -> None:
         """Negative control: a real boundary with precedence is not flagged."""
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         first, second = self.plan["skills"]
         # Nested, not identical: the pair still says which side owns what.
         second["owned_scope"][0] = first["owned_scope"][0] + "/replay backlog"
@@ -1999,8 +2010,8 @@ Be careful.
         )
         self.assertIn("EVIDENCE_LINE_RANGE", self.codes())
 
-    def test_schema_1_3_string_source_paths_is_diagnosed_not_crashed(self) -> None:
-        self.use_schema_1_3()
+    def test_schema_1_4_string_source_paths_is_diagnosed_not_crashed(self) -> None:
+        self.use_schema_1_4()
         self.plan["skills"][0]["source_paths"] = "config/firebase.php"
         self.rewrite()
         self.assertIn(
@@ -2301,7 +2312,7 @@ class SkillBodyCommandTest(SkillQualityFixture):
 
     def setUp(self) -> None:
         super().setUp()
-        self.use_schema_1_3()
+        self.use_schema_1_4()
 
     def insert(self, name: str, markdown: str) -> None:
         self.skill_texts[name] = self.skill_texts[name].replace(
@@ -2321,7 +2332,7 @@ class SkillBodyCommandTest(SkillQualityFixture):
             if item.code == "SKILL_BODY_COMMAND_RISK"
         ]
 
-    def test_baseline_schema_1_3_bodies_stay_clean(self) -> None:
+    def test_baseline_schema_1_4_bodies_stay_clean(self) -> None:
         self.assertEqual(self.codes(), [])
 
     def test_destructive_command_in_a_bash_block_is_blocked(self) -> None:
@@ -2835,12 +2846,12 @@ class SkillOperationalContentTest(SkillQualityFixture):
 
     def test_operational_project_specific_bodies_stay_clean(self) -> None:
         """Calibration: honest instruction must not be failed by this gate."""
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         self.set_procedure(self.WRITER, self.OPERATIONAL_STEPS)
         self.assertEqual(self.codes(), [])
 
     def test_plan_step_action_must_command_an_action(self) -> None:
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         step = self.plan["skills"][0]["procedure_steps"][0]
         step["action"] = (
             "Consider the Firebase messaging runtime boundary in "
@@ -2852,7 +2863,7 @@ class SkillOperationalContentTest(SkillQualityFixture):
         self.assertNotIn("PROCEDURE_STEP_INVALID", codes)
 
     def test_plan_step_without_path_evidence_or_anchor_is_rejected(self) -> None:
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         step = self.plan["skills"][0]["procedure_steps"][0]
         step["action"] = "Review the boundary and record the outcome"
         step["path_refs"] = []
@@ -2865,7 +2876,7 @@ class SkillOperationalContentTest(SkillQualityFixture):
     def test_plan_verification_that_accepts_an_impression_is_rejected(
         self,
     ) -> None:
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         check = self.plan["skills"][0]["verification"][0]
         check["expected_result"] = (
             "The Firebase messaging boundary still looks correct"
@@ -3345,7 +3356,7 @@ class SkillTemplateReuseTest(SkillQualityFixture):
         )
 
     def test_template_with_substituted_project_nouns_is_rejected(self) -> None:
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         self.install_template()
         codes = self.codes()
         self.assertIn("SKILL_TEMPLATE_REUSE", codes)
@@ -3357,7 +3368,7 @@ class SkillTemplateReuseTest(SkillQualityFixture):
         self.assertGreaterEqual(token, validator.SKELETON_TOKEN_FAIL)
 
     def test_template_differing_only_in_punctuation_is_rejected(self) -> None:
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         self.install_template(punctuation=True)
         codes = self.codes()
         self.assertIn("SKILL_TEMPLATE_REUSE", codes)
@@ -3365,14 +3376,14 @@ class SkillTemplateReuseTest(SkillQualityFixture):
         self.assertNotIn("REPEATED_BLOCK", codes)
 
     def test_byte_identical_procedure_is_rejected(self) -> None:
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         self.install_template(clone=True)
         codes = self.codes()
         self.assertIn("SKILL_TEMPLATE_REUSE", codes)
         self.assertIn("SKILL_TEMPLATE_BLOCK", codes)
 
     def test_template_reuse_is_an_error_and_the_block_pass_is_a_warning(self) -> None:
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         self.install_template(clone=True)
         severities = {
             item.code: item.severity
@@ -3385,7 +3396,7 @@ class SkillTemplateReuseTest(SkillQualityFixture):
 
     def test_honest_distinct_skills_are_never_called_a_template(self) -> None:
         """The false positive that would make the generator unusable."""
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         codes = self.codes()
         self.assertEqual(codes, [])
         line, token = self.scores()
@@ -3394,7 +3405,7 @@ class SkillTemplateReuseTest(SkillQualityFixture):
 
     def test_verbatim_versioned_fixed_block_is_not_duplication(self) -> None:
         """An approved shared safety block may repeat word for word."""
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         block = (
             "Never paste customer billing identifiers, provider secrets, or "
             "raw transport payloads into a report; redact the identifier, "
@@ -3418,7 +3429,7 @@ class SkillTemplateReuseTest(SkillQualityFixture):
 
     def test_shared_fenced_code_is_not_duplication(self) -> None:
         """Two skills may show the same framework idiom in a fence."""
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         fence = (
             "\n```php\n"
             "final class Example extends AbstractController\n"
@@ -3496,7 +3507,7 @@ class SkillTemplateReuseTest(SkillQualityFixture):
         self.assertEqual(diagnostics, [])
 
     def test_template_diagnostics_stay_sorted_and_deduplicated(self) -> None:
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         self.install_template()
         diagnostics = validator.validate(
             self.skills, self.plan_path, self.target, self.registry_path
@@ -3847,11 +3858,11 @@ class RuntimeFixedRoutingEvidenceTest(SkillQualityFixture):
         return [item.code for item in self.plan_diagnostics()]
 
     def test_empty_routing_evidence_blocks_an_evidence_derived_skill(self) -> None:
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         self.assertIn("ROUTING_CASE_INVALID", self.blank_first_routing_evidence())
 
     def test_empty_routing_evidence_is_legal_for_a_runtime_fixed_skill(self) -> None:
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         self.plan["skills"][0]["kind"] = "runtime-fixed"
         self.assertNotIn(
             "ROUTING_CASE_INVALID", self.blank_first_routing_evidence()
@@ -3863,7 +3874,7 @@ class SkillClassSplitTest(SkillQualityFixture):
     guides into one 'skills for your project' number."""
 
     def test_split_names_both_classes(self) -> None:
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         self.plan["skills"][1]["kind"] = "runtime-fixed"
         self.rewrite()
         self.assertEqual(
@@ -4093,7 +4104,7 @@ class SkillBodyPathTest(SkillQualityFixture):
         )
 
     def test_the_gate_reports_an_invented_body_path_end_to_end(self) -> None:
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         self.write_target("src/Kernel.php", "<?php // kernel\n")
         name = "firebase-services"
         self.skill_texts[name] = self.skill_texts[name].replace(
@@ -4191,7 +4202,7 @@ class SkillEvidenceRowTest(SkillQualityFixture):
         self.assertEqual(self.diagnose(body), [])
 
     def test_the_gate_reports_a_re_pointed_row_end_to_end(self) -> None:
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         name = "firebase-services"
         self.skill_texts[name] = self.skill_texts[name].replace(
             "\n## Procedure / Process\n",
@@ -4218,7 +4229,7 @@ class SearchVerificationTest(SkillQualityFixture):
 
     def setUp(self) -> None:
         super().setUp()
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         self.write_target("src/Entity/Article.php", self.SETTER % "Article")
         self.write_target("src/Entity/Job.php", self.SETTER % "Job")
         self.write_target(
@@ -4508,7 +4519,7 @@ class RoleCoverageWiringTest(SkillQualityFixture):
         return self.plan["skills"][index]["required_procedure_roles"]
 
     def test_an_untyped_role_entry_is_rejected(self) -> None:
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         self.roles()[0] = {"role": "inspect", "requirements": ["inspect initialization"]}
         self.rewrite()
         self.assertIn(
@@ -4519,7 +4530,7 @@ class RoleCoverageWiringTest(SkillQualityFixture):
     def test_a_role_supported_by_evidence_the_skill_does_not_cite_is_rejected(
         self,
     ) -> None:
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         self.roles()[0]["evidence_ids"] = ["availability-rules"]
         self.rewrite()
         self.assertIn(
@@ -4528,7 +4539,7 @@ class RoleCoverageWiringTest(SkillQualityFixture):
         )
 
     def test_a_role_naming_a_step_that_does_not_exist_is_rejected(self) -> None:
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         self.roles()[0]["procedure_step_ids"] = ["no-such-step"]
         self.rewrite()
         self.assertIn(
@@ -4537,7 +4548,7 @@ class RoleCoverageWiringTest(SkillQualityFixture):
         )
 
     def test_every_obligation_on_one_step_is_reported_as_collapsed(self) -> None:
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         for role in self.roles():
             role["procedure_step_ids"] = ["trace-confirmed-claim"]
         self.rewrite()
@@ -4548,7 +4559,7 @@ class RoleCoverageWiringTest(SkillQualityFixture):
 
     def test_two_obligations_sharing_one_step_are_not_called_collapsed(self) -> None:
         """The false-rejection edge: a small skill may honestly share a step."""
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         for skill in self.plan["skills"]:
             skill["required_procedure_roles"] = skill["required_procedure_roles"][:2]
             for role in skill["required_procedure_roles"]:
@@ -4573,7 +4584,7 @@ class VerificationBaselineTest(SkillQualityFixture):
         return self.plan["skills"][index]["verification"][0]
 
     def test_an_executable_check_without_a_recorded_baseline_is_rejected(self) -> None:
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         self.check()["baseline"] = None
         self.rewrite()
         self.assertIn(
@@ -4582,7 +4593,7 @@ class VerificationBaselineTest(SkillQualityFixture):
         )
 
     def test_promising_success_against_a_failing_baseline_is_rejected(self) -> None:
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         check = self.check()
         check["baseline"]["outcome"] = "failing"
         check["baseline"]["observed"] = "exit 1; 189 errors reported"
@@ -4594,7 +4605,7 @@ class VerificationBaselineTest(SkillQualityFixture):
         )
 
     def test_a_differential_expectation_against_the_same_baseline_passes(self) -> None:
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         check = self.check()
         check["baseline"]["outcome"] = "failing"
         check["baseline"]["observed"] = "exit 1; 189 errors reported"
@@ -4608,7 +4619,7 @@ class VerificationBaselineTest(SkillQualityFixture):
         )
 
     def test_a_baseline_recording_a_different_command_is_rejected(self) -> None:
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         self.check()["baseline"]["command"] = "php -l composer.json"
         self.rewrite()
         self.assertIn(
@@ -4617,7 +4628,7 @@ class VerificationBaselineTest(SkillQualityFixture):
         )
 
     def test_a_read_only_skill_may_not_claim_to_remediate_the_failure(self) -> None:
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         review = self.plan["skills"][1]
         source = review["source_paths"][0]
         check = review["verification"][0]
@@ -4638,7 +4649,7 @@ class VerificationBaselineTest(SkillQualityFixture):
         self,
     ) -> None:
         """A recorded baseline is trusted only where the gate cannot resolve."""
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         check = self.check()
         check["command"] = "grep -rn NoSuchToken config"
         check["baseline"] = {
@@ -4682,13 +4693,13 @@ class AbsenceEvidenceTest(SkillQualityFixture):
         self.rewrite()
 
     def test_a_resolved_absence_is_accepted(self) -> None:
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         self.add_absence()
         codes = [item.code for item in self.plan_diagnostics()]
         self.assertEqual([code for code in codes if code.startswith("EVIDENCE")], [])
 
     def test_an_absence_the_target_contradicts_is_rejected(self) -> None:
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         self.add_absence(
             subject="No configuration mentions Firebase",
             search="grep -rn Firebase config",
@@ -4699,7 +4710,7 @@ class AbsenceEvidenceTest(SkillQualityFixture):
         )
 
     def test_an_accounted_match_that_no_longer_exists_is_stale(self) -> None:
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         self.add_absence(accounted_matches=["config/phpstan.neon"])
         self.assertIn(
             "EVIDENCE_ABSENCE_STALE",
@@ -4707,7 +4718,7 @@ class AbsenceEvidenceTest(SkillQualityFixture):
         )
 
     def test_an_absence_this_gate_cannot_resolve_is_refused(self) -> None:
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         self.add_absence(search="composer show | grep phpstan")
         self.assertIn(
             "EVIDENCE_ABSENCE_UNRESOLVABLE",
@@ -4715,7 +4726,7 @@ class AbsenceEvidenceTest(SkillQualityFixture):
         )
 
     def test_an_absence_missing_its_search_is_refused(self) -> None:
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         self.plan["evidence"].append(
             {
                 "id": "phpstan-uninvoked",
@@ -4733,7 +4744,7 @@ class AbsenceEvidenceTest(SkillQualityFixture):
         )
 
     def test_an_absence_claim_must_name_what_was_searched_for(self) -> None:
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         self.plan["evidence"].append(
             {
                 "id": "phpstan-uninvoked",
@@ -4755,7 +4766,7 @@ class AbsenceEvidenceTest(SkillQualityFixture):
         )
 
     def test_an_absence_may_not_also_cite_a_path(self) -> None:
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         self.plan["evidence"].append(
             {
                 "id": "phpstan-uninvoked",
@@ -4782,7 +4793,7 @@ class RoutingTautologyTest(SkillQualityFixture):
     """A fixture that names its own answer tests nothing about routing."""
 
     def test_a_prompt_naming_the_expected_skill_is_rejected(self) -> None:
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         skill = self.plan["skills"][0]
         skill["routing_cases"][0]["prompt"] = (
             f"Route {skill['name']} work to {skill['name']}"
@@ -4794,7 +4805,7 @@ class RoutingTautologyTest(SkillQualityFixture):
         )
 
     def test_a_prompt_describing_the_request_is_accepted(self) -> None:
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         self.assertNotIn(
             "ROUTING_CASE_TAUTOLOGICAL",
             [item.code for item in self.plan_diagnostics()],
@@ -4802,7 +4813,7 @@ class RoutingTautologyTest(SkillQualityFixture):
 
     def test_a_runtime_fixed_skill_may_be_named_by_its_own_subject(self) -> None:
         """`memory` cannot describe a memory request without saying memory."""
-        self.use_schema_1_3()
+        self.use_schema_1_4()
         skill = self.plan["skills"][0]
         skill["kind"] = "runtime-fixed"
         skill["evidence_ids"] = []
@@ -4814,6 +4825,135 @@ class RoutingTautologyTest(SkillQualityFixture):
         self.assertNotIn(
             "ROUTING_CASE_TAUTOLOGICAL",
             [item.code for item in self.plan_diagnostics()],
+        )
+
+
+class EvidenceDispositionTest(SkillQualityFixture):
+    """Schema 1.4: evidence inside a skill's own paths needs a decision.
+
+    Synthesis reads the whole ledger and writes one contract at a time, so a
+    passed-over finding leaves no trace: the plan looks the same whether the
+    author judged it irrelevant or never saw it.
+    """
+
+    def relocate_sibling_evidence(self) -> str:
+        """Put the second skill's evidence inside the first skill's territory."""
+        first, second = self.plan["skills"]
+        contract = first["path_contracts"][0]["path"]
+        directory = contract.rsplit("/", 1)[0] if "/" in contract else "config"
+        first["ownership"][0]["paths"] = [f"{directory}/**"]
+        first["path_contracts"][0]["path"] = f"{directory}/**"
+        moved = second["evidence_ids"][0]
+        entry = next(
+            item for item in self.plan["evidence"] if item["id"] == moved
+        )
+        entry["path"] = f"{directory}/{entry['path'].rsplit('/', 1)[-1]}"
+        self.write_target(entry["path"], "<?php // relocated evidence\n")
+        self.refingerprint(moved)
+        second["source_paths"] = [entry["path"]]
+        second["path_contracts"][0]["path"] = entry["path"]
+        for anchor in second["evidence_anchors"]:
+            anchor["anchor"] = f"{entry['path']}:L1"
+        self.rewrite()
+        return moved
+
+    def test_evidence_inside_the_declared_paths_needs_a_decision(self) -> None:
+        self.use_schema_1_4()
+        self.relocate_sibling_evidence()
+        self.assertIn(
+            "SKILL_EVIDENCE_UNDISPOSED",
+            [item.code for item in self.plan_diagnostics()],
+        )
+
+    def test_ruling_it_out_with_a_reason_is_accepted(self) -> None:
+        self.use_schema_1_4()
+        moved = self.relocate_sibling_evidence()
+        self.plan["skills"][0]["evidence_dispositions"] = [
+            {
+                "evidence_id": moved,
+                "disposition": "excluded",
+                "reason": "Availability domain behavior is the sibling's subject",
+            }
+        ]
+        self.rewrite()
+        self.assertNotIn(
+            "SKILL_EVIDENCE_UNDISPOSED",
+            [item.code for item in self.plan_diagnostics()],
+        )
+
+    def test_ruling_out_evidence_the_plan_does_not_carry_is_rejected(self) -> None:
+        self.use_schema_1_4()
+        self.plan["skills"][0]["evidence_dispositions"] = [
+            {
+                "evidence_id": "no-such-evidence",
+                "disposition": "excluded",
+                "reason": "Not relevant to this skill",
+            }
+        ]
+        self.rewrite()
+        self.assertIn(
+            "EVIDENCE_DISPOSITION_UNKNOWN",
+            [item.code for item in self.plan_diagnostics()],
+        )
+
+    def test_citing_and_ruling_out_the_same_evidence_is_rejected(self) -> None:
+        self.use_schema_1_4()
+        skill = self.plan["skills"][0]
+        skill["evidence_dispositions"] = [
+            {
+                "evidence_id": skill["evidence_ids"][0],
+                "disposition": "excluded",
+                "reason": "Contradicts the citation above",
+            }
+        ]
+        self.rewrite()
+        self.assertIn(
+            "EVIDENCE_DISPOSITION_CONTRADICTED",
+            [item.code for item in self.plan_diagnostics()],
+        )
+
+    def test_an_untyped_disposition_is_rejected(self) -> None:
+        self.use_schema_1_4()
+        self.plan["skills"][0]["evidence_dispositions"] = [{"evidence_id": "x"}]
+        self.rewrite()
+        self.assertIn(
+            "EVIDENCE_DISPOSITION_INVALID",
+            [item.code for item in self.plan_diagnostics()],
+        )
+
+    def test_a_skill_must_name_the_claims_it_rests_on(self) -> None:
+        self.use_schema_1_4()
+        self.plan["skills"][0]["claim_ids"] = []
+        self.rewrite()
+        self.assertIn(
+            "SKILL_CLAIM_IDS_INVALID",
+            [item.code for item in self.plan_diagnostics()],
+        )
+
+    def test_a_runtime_fixed_skill_rests_on_no_project_claim(self) -> None:
+        self.use_schema_1_4()
+        skill = self.plan["skills"][0]
+        skill["kind"] = "runtime-fixed"
+        skill["evidence_ids"] = []
+        skill["source_paths"] = []
+        skill["claim_ids"] = []
+        self.rewrite()
+        self.assertNotIn(
+            "SKILL_CLAIM_IDS_INVALID",
+            [item.code for item in self.plan_diagnostics()],
+        )
+
+    def test_schema_1_3_is_audit_only_since_the_1_4_migration(self) -> None:
+        self.use_schema_1_3()
+        diagnostics = self.plan_diagnostics()
+        self.assertIn("PLAN_SCHEMA_MIGRATION", [item.code for item in diagnostics])
+        self.assertFalse(any(item.severity == "error" for item in diagnostics))
+        authored = validator.validate(
+            self.skills, self.plan_path, self.target, self.registry_path
+        )
+        self.assertIn(
+            "LEGACY_PLAN_PUBLICATION_INELIGIBLE",
+            [item.code for item in authored],
         )
 
 

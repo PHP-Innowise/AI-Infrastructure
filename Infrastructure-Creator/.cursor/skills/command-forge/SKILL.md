@@ -20,7 +20,7 @@ agent's positive trigger and does not match its exclusions.
 Only two editions carry a command layer: **Claude** (`.claude/commands/`, `spawns` + flow keys) and **Cursor** (`.cursor/commands/`, `name` + `description`). **Codex has no command layer** and is always skipped. A command's sole job is to spawn its matching `<name>-agent`, which in turn invokes the one skill.
 
 Consumes: `tasks/TASK-{N}/agent-forge-log.md` (validated agent/routing list),
-`tasks/TASK-{N}/skill-generation-plan.json` schema **1.3** (scope,
+`tasks/TASK-{N}/skill-generation-plan.json` schema **1.4** (scope,
 `routing_cases`, and canonical `flow_contracts`), and profile section **1**
 (selected editions). `flow_contracts` is the sole source for the flow roster,
 stage order, phases, agents, checkpoints, required code review, and writer
@@ -42,7 +42,7 @@ each validated wrapped agent and selected command-carrying edition, write
 6. **Compile all routing cases.** From the validated contracts, classify
    generated agents as core delivery roles or evidence-gated specialists.
    Record positive triggers, exclusions, evidence scope, phase, `writes`, and
-   every adjacency for each agent. Execute every schema 1.3
+   every adjacency for each agent. Execute every schema 1.4
    `routing_cases[]` entry as an oracle and require its one primary owner and
    complete ordered deferred set. Reject a missing adjacency, a singular
    sibling projection, or duplicate trigger ownership without explicit
@@ -132,7 +132,7 @@ validation stays pending until the orchestrator runs
 - MUST NOT place TWO agents carrying `writes: true` in the same `parallel: true` stage: the gate runs write-capable agents one at a time, so the stage would block itself. One write-capable agent beside read-only agents is fine.
 - MUST NOT let a flow spawn agents outside the generated roster, skip a declared checkpoint, or re-record completions the `subagent-dispatch.sh` hook already writes.
 - MUST derive flow keys from the wrapped skill's frontmatter so the generated flow graph stays consistent.
-- MUST compile SKILL FLOW and executable flows from the same schema 1.3
+- MUST compile SKILL FLOW and executable flows from the same schema 1.4
   `flow_contracts`; MUST NOT infer, reorder, omit, or independently rewrite a
   stage, checkpoint, required code-review agent, roster entry, or write flag.
 - MUST NOT place every available design, integration, or domain agent into a
