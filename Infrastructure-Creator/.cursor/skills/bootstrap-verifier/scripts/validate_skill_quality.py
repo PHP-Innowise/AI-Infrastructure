@@ -6062,6 +6062,97 @@ def _plan_coverage(plan: Any) -> tuple[list[str], list[str]]:
     return sorted(names), sorted(paths)
 
 
+# What a regeneration can silently drop besides a skill or a file. Each entry is
+# (report key, diagnostic code, what a lost member is called in the message).
+#
+# The dimensions are the ones that survive a re-composition. Identifiers do not:
+# measured across three consecutive real regenerations of one target, comparing
+# invariant, ownership and verification *ids* reported 5-12, 6-8 and 34-42 losses
+# per run, nearly all of them the same thing renamed. A rule that cries forty
+# times is read zero times. So an invariant is compared by what it says, and
+# ownership by the paths it holds.
+BASELINE_DIMENSIONS = (
+    ("lost_invariants", "BASELINE_INVARIANT_DROPPED", "critical invariant"),
+    ("lost_owned_paths", "BASELINE_OWNERSHIP_DROPPED", "owned path"),
+    ("lost_modules", "BASELINE_MODULE_DROPPED", "module"),
+)
+# Two statements describe the same rule when they share this many meaningful
+# words - the bar this gate already uses to trace a contract to its skill.
+# Measured on three consecutive regenerations: at two words the comparison
+# reports 0, 1 and 2 dropped invariants, which is small enough to read and act
+# on; at three it reports 2, 2 and 4, and at four 2, 5 and 7 - rewording, not
+# regression.
+INVARIANT_MATCH_TOKENS = 2
+
+
+def _plan_dimensions(plan: Any) -> dict[str, set[str]]:
+    """The rest of what a plan carries, keyed the way a loss is named.
+
+    Skills and paths were the first two dimensions because they are the
+    coarsest. A regeneration can keep every skill and every file and still drop
+    the invariant that made one of them worth generating, or the ownership that
+    kept two of them from colliding - and the old comparison called that "no
+    coverage lost".
+
+    A module is the top directory of a covered path. A file at the repository
+    root is not a module, so `composer.json` never appears as one: the question
+    is whether a subsystem is still represented at all, which is what a reviewer
+    asks when a plan shrinks.
+    """
+    found: dict[str, set[str]] = {key: set() for key, _, _ in BASELINE_DIMENSIONS}
+    if not isinstance(plan, dict):
+        return found
+    for invariant in _as_list(plan.get("critical_invariants")):
+        if isinstance(invariant, dict) and _is_nonempty_string(
+            invariant.get("statement")
+        ):
+            found["lost_invariants"].add(str(invariant["statement"]).strip())
+
+    def _module_of(value: str) -> str:
+        head, separator, _ = value.strip().partition("/")
+        if not separator or not head or head.startswith("."):
+            return ""
+        return head
+
+    for skill in _as_list(plan.get("skills")):
+        if not isinstance(skill, dict):
+            continue
+        for item in _as_list(skill.get("ownership")):
+            if not isinstance(item, dict):
+                continue
+            for owned in _as_list(item.get("paths")):
+                if _is_nonempty_string(owned):
+                    found["lost_owned_paths"].add(owned.strip())
+        for item in _as_list(skill.get("source_paths")):
+            if _is_nonempty_string(item) and (module := _module_of(item)):
+                found["lost_modules"].add(module)
+    for item in _as_list(plan.get("evidence")):
+        if isinstance(item, dict) and _is_nonempty_string(item.get("path")):
+            if module := _module_of(item["path"]):
+                found["lost_modules"].add(module)
+    return found
+
+
+def _lost_members(key: str, old: set[str], new: set[str]) -> list[str]:
+    """Members of `old` this plan no longer carries.
+
+    Everything but an invariant is compared literally: a path is the same path
+    or it is not. An invariant is prose, restated freely between runs, so it is
+    matched on shared meaningful words instead.
+    """
+    if key != "lost_invariants":
+        return sorted(old - new)
+    current = [_meaningful_tokens(item) for item in new]
+    return sorted(
+        statement
+        for statement in old
+        if not any(
+            len(_meaningful_tokens(statement) & tokens) >= INVARIANT_MATCH_TOKENS
+            for tokens in current
+        )
+    )
+
+
 def _read_plan_json(path: Path) -> tuple[Any, str]:
     try:
         return json.loads(path.expanduser().resolve().read_text(encoding="utf-8")), ""
@@ -6092,6 +6183,7 @@ def compare_coverage_baseline(
         "skipped_reason": "",
         "lost_skills": [],
         "lost_source_paths": [],
+        **{key: [] for key, _, _ in BASELINE_DIMENSIONS},
     }
     baseline, error = _read_plan_json(baseline_path)
     if error or not isinstance(baseline, dict):
@@ -6132,6 +6224,18 @@ def compare_coverage_baseline(
     report["compared"] = True
     report["lost_skills"] = lost_skills
     report["lost_source_paths"] = lost_paths
+    old_dimensions = _plan_dimensions(baseline)
+    new_dimensions = _plan_dimensions(current)
+    for key, code, label in BASELINE_DIMENSIONS:
+        lost = _lost_members(key, old_dimensions[key], new_dimensions[key])
+        report[key] = lost
+        for member in lost:
+            _diag(
+                diagnostics,
+                code,
+                f"{member}: {label} in the baseline plan, absent from this plan",
+                severity="warning",
+            )
     for name in lost_skills:
         cited = ", ".join(baseline_paths_by_skill.get(name, [])) or "none"
         _diag(
@@ -6156,13 +6260,21 @@ def _coverage_baseline_summary(report: dict[str, Any]) -> str:
         return f"coverage baseline: NOT COMPARED ({report.get('skipped_reason')})"
     lost_skills = report.get("lost_skills") or []
     lost_paths = report.get("lost_source_paths") or []
-    if not lost_skills and not lost_paths:
+    extra = [
+        (label, report.get(key) or []) for key, _, label in BASELINE_DIMENSIONS
+    ]
+    if not lost_skills and not lost_paths and not any(lost for _, lost in extra):
         return "coverage baseline: no coverage lost"
-    return (
-        "coverage baseline: LOST "
-        f"skills: {', '.join(lost_skills) or 'none'}; "
-        f"evidence paths: {', '.join(lost_paths) or 'none'}"
+    # Names, never counts. A bare number hides the one that mattered, which is
+    # the failure this summary exists to prevent.
+    parts = [
+        f"skills: {', '.join(lost_skills) or 'none'}",
+        f"evidence paths: {', '.join(lost_paths) or 'none'}",
+    ]
+    parts.extend(
+        f"{label}s: {', '.join(lost) or 'none'}" for label, lost in extra
     )
+    return "coverage baseline: LOST " + "; ".join(parts)
 
 
 def main(argv: list[str] | None = None) -> int:

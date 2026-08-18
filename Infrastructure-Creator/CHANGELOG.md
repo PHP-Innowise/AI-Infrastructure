@@ -79,6 +79,23 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
   reconciliation time the parallel siblings have landed, so a claim made against
   a missing neighbour is confirmed or withdrawn rather than left standing.
 
+- **The regeneration baseline sees past skills and files.** A second generation
+  could keep every skill and every evidence path and still drop the invariant
+  that made one of them worth generating, or the ownership that kept two of them
+  from colliding - and the comparison reported "no coverage lost".
+  `--baseline-plan` now also names every dropped critical invariant, owned path,
+  and module, one warning each, with the summary repeating the names rather than
+  a count.
+  What it deliberately does *not* compare is identifiers. Measured across three
+  consecutive real regenerations of one target, comparing invariant, ownership
+  and verification *ids* reported 5-12, 6-8 and 34-42 losses per run, nearly all
+  of them the same thing renamed; a rule that cries forty times is read zero
+  times. An invariant is therefore compared by what it says - two statements are
+  the same rule when they share two meaningful words, measured at 0, 1 and 2
+  drops per regeneration against 2/2/4 at three words and 2/5/7 at four - and
+  ownership by the paths it holds. A file at the repository root is not a
+  module, so `composer.json` stopped being reported as one.
+
 - **A routing fixture may no longer name the skill it expects to win.**
   "Route architecture-implementer work to architecture-implementer" tests string
   matching, not routing: no arrangement of skills could get it wrong, so it

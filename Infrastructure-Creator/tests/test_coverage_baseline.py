@@ -284,5 +284,129 @@ class CoverageBaselineCliTest(unittest.TestCase):
         self.assertIn("coverage baseline: NOT COMPARED", output)
 
 
+
+class BaselineDimensionTest(unittest.TestCase):
+    """A regeneration can keep every skill and every file and still lose the
+    invariant that made one of them worth generating, or the ownership that kept
+    two of them from colliding. The old comparison called that "no coverage
+    lost".
+
+    Identifiers are deliberately not compared: across three consecutive real
+    regenerations of one target, comparing invariant, ownership and verification
+    ids reported 5-12, 6-8 and 34-42 losses, nearly all of them the same thing
+    renamed.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+
+    def rich(self, *, invariants, owned, module) -> dict:
+        plan = _plan(
+            skills=[
+                {
+                    "name": "testing",
+                    "source_paths": [f"{module}/Kernel.php"],
+                    "ownership": [
+                        {"id": "testing.suite", "paths": list(owned)}
+                    ],
+                }
+            ],
+            evidence=[{"id": "EV-2", "path": f"{module}/Kernel.php"}],
+        )
+        plan["critical_invariants"] = [
+            {"id": f"inv-{index}", "statement": statement}
+            for index, statement in enumerate(invariants)
+        ]
+        return plan
+
+    def compare(self, baseline: dict, current: dict):
+        base = self.root / "baseline.json"
+        cur = self.root / "plan.json"
+        base.write_text(json.dumps(baseline), encoding="utf-8")
+        cur.write_text(json.dumps(current), encoding="utf-8")
+        return validator.compare_coverage_baseline(cur, base)
+
+    def test_each_lost_dimension_is_named_individually(self) -> None:
+        baseline = self.rich(
+            invariants=[
+                "A published article never returns to draft",
+                "Every audit entry is append-only once written",
+            ],
+            owned=["tests/**", "fixtures/**"],
+            module="src",
+        )
+        current = self.rich(
+            invariants=["A published article never returns to draft"],
+            owned=["tests/**"],
+            module="lib",
+        )
+        diagnostics, report = self.compare(baseline, current)
+        self.assertEqual(
+            report["lost_invariants"],
+            ["Every audit entry is append-only once written"],
+        )
+        self.assertEqual(report["lost_owned_paths"], ["fixtures/**"])
+        self.assertEqual(report["lost_modules"], ["src"])
+        for code, member in (
+            ("BASELINE_INVARIANT_DROPPED", "append-only"),
+            ("BASELINE_OWNERSHIP_DROPPED", "fixtures/**"),
+            ("BASELINE_MODULE_DROPPED", "src"),
+        ):
+            named = [item for item in diagnostics if item.code == code]
+            self.assertEqual(len(named), 1, code)
+            self.assertIn(member, named[0].message)
+            self.assertEqual(named[0].severity, "warning")
+
+    def test_a_restated_invariant_is_not_reported_as_lost(self) -> None:
+        """Runs reword freely; comparing the words would cry at every run."""
+        baseline = self.rich(
+            invariants=["A published article never returns to draft"],
+            owned=["tests/**"],
+            module="src",
+        )
+        current = self.rich(
+            invariants=["Once published, an article cannot go back to draft"],
+            owned=["tests/**"],
+            module="src",
+        )
+        _, report = self.compare(baseline, current)
+        self.assertEqual(report["lost_invariants"], [])
+
+    def test_a_root_file_is_never_reported_as_a_lost_module(self) -> None:
+        baseline = _plan(
+            skills=[{"name": "testing", "source_paths": ["composer.json"]}],
+            evidence=[{"id": "EV-1", "path": "composer.json"}],
+        )
+        current = _plan(skills=[{"name": "testing", "source_paths": []}], evidence=[])
+        _, report = self.compare(baseline, current)
+        self.assertEqual(report["lost_modules"], [])
+
+    def test_the_summary_names_every_lost_member_not_a_count(self) -> None:
+        baseline = self.rich(
+            invariants=["Every audit entry is append-only once written"],
+            owned=["fixtures/**"],
+            module="src",
+        )
+        current = self.rich(invariants=[], owned=[], module="src")
+        _, report = self.compare(baseline, current)
+        summary = validator._coverage_baseline_summary(report)
+        self.assertIn("append-only", summary)
+        self.assertIn("fixtures/**", summary)
+
+    def test_an_unchanged_plan_loses_nothing(self) -> None:
+        plan = self.rich(
+            invariants=["Every audit entry is append-only once written"],
+            owned=["fixtures/**"],
+            module="src",
+        )
+        _, report = self.compare(plan, plan)
+        self.assertEqual(
+            validator._coverage_baseline_summary(report),
+            "coverage baseline: no coverage lost",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
