@@ -47,6 +47,7 @@ Prioritize externally observable behavior. Avoid assertions against private meth
 ## Test Data
 
 - Prefer existing Foundry factories, fixtures, object mothers, builders, or project helpers.
+- Treat a seeded fixture as a read-only prop. If the test signs in as a record, changes its password, deletes it, or asserts on a counter that record owns, mint that subject inside the test. Borrowing a shared fixture makes the result depend on which other test ran first, and the failure then surfaces as an unrelated assertion.
 - Keep defaults valid, realistic, explicit, and overrideable. Seed randomness and freeze/inject clocks.
 - Model required relations, tenant ownership, roles, and entity states deliberately.
 - Respect unique/database constraints; never use production data, real credentials, or personal information.

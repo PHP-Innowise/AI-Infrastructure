@@ -107,7 +107,13 @@ if printf '%s' "$ROSTER" | grep -qxF -- "$SUB_TYPE"; then
   if [ -f "$LOCK_FILE" ] \
     && [ -z "$(find "$LOCK_FILE" -mmin +"$LOCK_TTL_MINUTES" 2>/dev/null)" ]; then
     HOLDER=$(cat "$LOCK_FILE" 2>/dev/null)
-    if [ -n "$HOLDER" ] && [ "$HOLDER" != "$SUB_TYPE" ]; then
+    # Any live holder blocks, including another instance of the same agent
+    # type. Exempting the same name let N concurrent `coder` runs all pass,
+    # each merely refreshing the lock. A fresh lock means the holder is still
+    # running — subagent-dispatch.sh clears it on completion — so a same-named
+    # spawn is a second writer, not a respawn. A crashed run is covered by
+    # LOCK_TTL_MINUTES.
+    if [ -n "$HOLDER" ]; then
       SAFE_HOLDER=$(printf '%s' "$HOLDER" | tr -cd 'A-Za-z0-9 _.:/-' | cut -c1-64)
       printf '{"permission":"deny","user_message":"Write-capable agent \\"%s\\" is already running; write-capable agents run one at a time. Wait for its completion or remove the stale lock %s."}\n' "$SAFE_HOLDER" "$LOCK_FILE"
       exit 0

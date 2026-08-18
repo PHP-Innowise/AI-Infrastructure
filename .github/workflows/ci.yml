@@ -151,6 +151,12 @@ jobs:
             echo "Per-turn invalidator in the Cursor rule render (above)." >&2
             exit 1
           fi
+      - name: PHP snippets are valid PHP
+        # The repository tracks no .php files, but its skills and examples ship
+        # hundreds of fenced PHP blocks, and those blocks are what an agent
+        # copies when it writes code. --require-php makes a runner that loses
+        # its preinstalled php fail rather than report a silent pass.
+        run: python3 scripts/check_php_snippets.py --require-php
       - name: Context budget
         run: python3 scripts/context_budget.py --check
 

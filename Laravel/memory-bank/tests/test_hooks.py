@@ -974,10 +974,16 @@ class SubagentWriteLockTest(WriteLockMixin, unittest.TestCase):
         result = self.spawn("claude", "code-reviewer")
         self.assertEqual(0, result.returncode, result.stderr)
 
-    def test_same_agent_respawn_refreshes_the_lock(self) -> None:
+    def test_a_second_instance_of_the_same_agent_is_blocked(self) -> None:
+        # The lock used to exempt its own holder's name, so N concurrent
+        # `coder` runs all passed and each refreshed the lock. A fresh lock
+        # means the holder is still running — subagent-dispatch.sh clears it
+        # on completion — so a same-named spawn is a second writer, not a
+        # respawn. Staleness stays the TTL's job (test_stale_lock_is_overwritten).
         self.assertEqual(0, self.spawn("claude", "coder").returncode)
         again = self.spawn("claude", "coder")
-        self.assertEqual(0, again.returncode, again.stderr)
+        self.assertEqual(2, again.returncode)
+        self.assertIn("already running", again.stderr)
         self.assertEqual("coder", self.lock_path("claude").read_text())
 
     def test_stale_lock_is_overwritten(self) -> None:
