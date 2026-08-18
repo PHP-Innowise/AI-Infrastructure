@@ -17,8 +17,8 @@ evidence/contract plan before running structural, routing, hook, runtime,
 ownership, and placeholder checks.
 
 It uses the bundled dependency-free `scripts/validate_generated.py`,
-`scripts/validate_scan_coverage.py`, and `scripts/analyze_commands.py` plus
-targeted manual checks.
+`scripts/validate_scan_coverage.py`, `scripts/validate_plan_review.py`, and
+`scripts/analyze_commands.py` plus targeted manual checks.
 
 ## Generated File Naming Convention (MANDATORY)
 

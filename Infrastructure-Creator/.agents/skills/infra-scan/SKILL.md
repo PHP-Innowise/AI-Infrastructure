@@ -34,7 +34,7 @@ All output from this run lives under `tasks/TASK-{NNN}/` in Infrastructure-Creat
 ## Process
 
 1. **Validate the target.** Require an explicit target project path (e.g. "run infra-scan against ../my-php-app"). Refuse to proceed if no path was given, if the path does not exist, or if it resolves to Infrastructure-Creator's own directory tree.
-2. **Confirm it is a PHP project - and branch if it is not.** There must be a `composer.json` and/or `*.php` files for the PHP pipeline (steps 3-10) to proceed. If there is no PHP evidence:
+2. **Confirm it is a PHP project - and branch if it is not.** There must be a `composer.json` and/or `*.php` files for the PHP pipeline (steps 3-11) to proceed. If there is no PHP evidence:
    - **Probe for a recognizable non-PHP stack** using manifest/signal evidence (this is a lightweight presence check, not deep analysis - deep analysis of the detected stack happens only inside `stack-adapter`, and only if the user opts in): `pubspec.yaml` (+ `*.dart`) -> Flutter/Dart; `package.json` -> Node.js/JavaScript/TypeScript; `requirements.txt`/`pyproject.toml`/`Pipfile` -> Python; `go.mod` -> Go; `Gemfile` -> Ruby; `pom.xml`/`build.gradle`/`build.gradle.kts` -> Java/Kotlin; `*.csproj`/`*.sln` -> .NET/C#; `Cargo.toml` -> Rust; `Package.swift` -> Swift. This list is illustrative, not exhaustive - any other clear ecosystem manifest counts too.
    - **If a recognizable non-PHP stack is found:** STOP the PHP pipeline (do not run the seven PHP scanners) and ask the user one question: *"This target uses [detected stack], not PHP. Infrastructure-Creator only generates PHP accelerators directly, but it can build you an independent sibling generator - `Infrastructure-Creator-[Stack]` - with the identical architecture, freshly researched and authored for [detected stack]. Create it?"* If yes, invoke `stack-adapter` with the target path and the detected stack name; report its result and stop (do not continue this skill's own PHP steps). If no, STOP and report the target is out of scope, same as below.
    - **If nothing recognizable is found at all:** STOP and report the target is out of scope (this tool only generates PHP accelerators, and no other stack could even be identified) rather than scanning further.
@@ -77,7 +77,21 @@ All output from this run lives under `tasks/TASK-{NNN}/` in Infrastructure-Creat
    runtime-fixed contracts from `memory-seed/assets/runtime-contract.json`.
    Stop before approval on any blocking diagnostic; schema migration and
    calibrated similarity warnings remain visible but non-blocking.
-10. **Stop.** Do not proceed to generation automatically - the profile is a human checkpoint by design.
+10. **Review the plan adversarially, with a reader that did not write it.**
+    For every selected skill, answer eight questions and record them in
+    `tasks/TASK-{NNN}/skill-plan-quality-report.json`: does it win a positive
+    request nobody wrote down before; does its nearest sibling win the sibling's
+    request; does an ambiguous request get a question rather than a guess; does a
+    cross-domain request get split; does the procedure carry the candidate's
+    catalog obligations; does the skill refuse what it must refuse; do the
+    prescribed checks do what the plan claims; and is the contract still
+    distinguishable once its nouns and paths are removed. Write every fixture
+    prompt in the words a person would use - a prompt that names the skill it
+    expects tests nothing. **Run the prescribed commands rather than judging
+    them from the page**: in the third preserved run the broken verification was
+    found only by the judge who ran it. Then
+    `python3 bootstrap-verifier/scripts/validate_plan_review.py --plan tasks/TASK-{NNN}/skill-generation-plan.json --review tasks/TASK-{NNN}/skill-plan-quality-report.json`.
+11. **Stop.** Do not proceed to generation automatically - the profile is a human checkpoint by design.
 
 ## Output Template
 

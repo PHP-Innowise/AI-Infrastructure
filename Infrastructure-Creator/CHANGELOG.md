@@ -153,6 +153,25 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
   is the cited source - a path, a URL, or an absence subject - which survives the
   merge.
 
+- **The plan must now survive an adversarial review, and the review must show
+  its work.** A deterministic gate proves a contract is well formed and its
+  evidence resolves; it cannot ask whether the skill would be picked for a
+  request nobody has written yet, whether the contract survives having its nouns
+  removed, or whether the prescribed command really does what the plan says.
+  Those need a reader - and what a gate can do is refuse to take the reader's
+  word for having looked. `skill-plan-quality-report.json` records eight answers
+  per selected skill, and `scripts/validate_plan_review.py` holds it against the
+  plan: every skill answered once, no dimension skipped, no fixture prompt that
+  names the skill it expects to win, and no open blocker.
+  `verification_realism` must list the commands the reviewer actually ran, and
+  they must be the ones the plan prescribes. That one is not ceremony: in the
+  third preserved run a skill's broken verification was found only by the judge
+  that executed it and missed by the judge that read it.
+  The review must also declare itself independent of the author, because a
+  contract's author is the worst judge of whether it is distinguishable from a
+  template.
+  `infra-generate` refuses to start until it passes.
+
 ### Verified
 
 - **An honest thirty-six skill plan validates with zero blocking diagnostics.**

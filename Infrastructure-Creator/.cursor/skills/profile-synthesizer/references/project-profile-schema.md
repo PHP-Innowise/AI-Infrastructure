@@ -572,6 +572,49 @@ Because the two classes are earned differently, they are reported
 differently: a generated inventory is summarized as *N project skills* plus
 *M runtime guides*, never as one combined count of skills "for your project".
 
+## Adversarial Review Record
+
+A deterministic gate proves a contract is well formed, its evidence resolves,
+and its obligations are wired to steps. It cannot ask whether the skill would be
+picked for a request nobody has written yet, whether the contract survives having
+its nouns removed, or whether the command it prescribes really does what the plan
+says. Those need a reader - one who did not write the plan.
+
+The reader's answers go in `tasks/TASK-{NNN}/skill-plan-quality-report.json`,
+which `validate_plan_review.py` holds against the plan:
+
+```json
+{
+  "plan": "tasks/TASK-001/skill-generation-plan.json",
+  "reviewer": "independent",
+  "skills": [
+    {
+      "name": "testing",
+      "unseen_positive_request": {"verdict": "pass", "prompt": "Add a case covering the draft-to-published transition", "note": "Selected on the suite it owns, not on its name"},
+      "sibling_request": {"verdict": "pass", "prompt": "Find why the nightly publish job stopped at 3am", "note": "Deferred to the debugger, as the boundary states"},
+      "ambiguous_request": {"verdict": "pass", "prompt": "The publish flow is broken, add something that catches it", "note": "Asks which is wanted rather than guessing"},
+      "cross_domain_request": {"verdict": "pass", "prompt": "Cover the paid upgrade path end to end", "note": "Takes the suite half, hands the billing half over"},
+      "catalog_role_coverage": {"verdict": "pass", "note": "Each obligation is a step, not a sentence"},
+      "refusal_branch": {"verdict": "pass", "note": "Refuses to weaken an assertion to force a pass"},
+      "verification_realism": {"verdict": "pass", "note": "Ran on the unmodified target and matched the recorded baseline", "executed": ["vendor/bin/phpunit tests/Feature/PageTest.php"]},
+      "identity_erasure": {"verdict": "pass", "note": "Still recognisable with every noun removed"}
+    }
+  ],
+  "blockers": []
+}
+```
+
+Every selected skill is answered on all eight dimensions, once. A `fail` verdict
+or a non-empty `blockers` list stops generation. A fixture prompt that names the
+skill it expects to win is `REVIEW_PROMPT_TAUTOLOGICAL` - it tests nothing the
+plan did not already assert.
+
+**`verification_realism` must list the commands the reviewer actually ran**, and
+they must be the ones the plan prescribes. This is not ceremony: in the third
+preserved run, a skill's broken verification was found only by the judge that
+executed it, and missed by the judge that read it. A command the review judged
+from the page is `REVIEW_VERIFICATION_NOT_EXECUTED`.
+
 ## Required Structure
 
 ```markdown

@@ -22,6 +22,7 @@
 .claude/skills/bootstrap-verifier/scripts/publish_staging.py -diff linguist-generated=true
 .claude/skills/bootstrap-verifier/scripts/validate_flow_contracts.py -diff linguist-generated=true
 .claude/skills/bootstrap-verifier/scripts/validate_generated.py -diff linguist-generated=true
+.claude/skills/bootstrap-verifier/scripts/validate_plan_review.py -diff linguist-generated=true
 .claude/skills/bootstrap-verifier/scripts/validate_reference_catalogs.py -diff linguist-generated=true
 .claude/skills/bootstrap-verifier/scripts/validate_scan_coverage.py -diff linguist-generated=true
 .claude/skills/bootstrap-verifier/scripts/validate_skill_quality.py -diff linguist-generated=true
@@ -150,6 +151,7 @@
 .cursor/skills/bootstrap-verifier/scripts/publish_staging.py -diff linguist-generated=true
 .cursor/skills/bootstrap-verifier/scripts/validate_flow_contracts.py -diff linguist-generated=true
 .cursor/skills/bootstrap-verifier/scripts/validate_generated.py -diff linguist-generated=true
+.cursor/skills/bootstrap-verifier/scripts/validate_plan_review.py -diff linguist-generated=true
 .cursor/skills/bootstrap-verifier/scripts/validate_reference_catalogs.py -diff linguist-generated=true
 .cursor/skills/bootstrap-verifier/scripts/validate_scan_coverage.py -diff linguist-generated=true
 .cursor/skills/bootstrap-verifier/scripts/validate_skill_quality.py -diff linguist-generated=true
