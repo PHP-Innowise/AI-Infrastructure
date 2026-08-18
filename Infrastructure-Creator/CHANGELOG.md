@@ -52,6 +52,34 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Fixed
 
+- A skill that writes could prove itself by grepping for the text it had just
+  written. Three runs against a real project shipped exactly that: `testing`
+  declared `tests/**`, promised a suite invocation and verified itself with
+  four searches, never running PHPUnit; `coder-frontend` and
+  `media-storage-integration` did the same for the code they emit. Searching
+  for your own output confirms authorship, never behaviour. A write-capable
+  skill whose verifications are all text searches is now
+  `WRITE_VERIFICATION_SEARCH_ONLY`. A read-only reviewer is exempt by nature -
+  inspecting IS its work, and all seven reviewers of the third run stay clean -
+  and a target with nothing runnable can still say so with a `manual` check,
+  so the rule has an honest way out that a fabricated command does not.
+- A runtime-fixed skill could attribute one runtime command's job to another
+  and nothing noticed. `project-brain` stated that `parity` reports drift
+  "between the governed records and the runtime index"; `parity` compares the
+  canonical mirrors across editions, and it is `validate` that inspects
+  governed records. The same misattribution sat in the first run too, unseen.
+  `runtime-contract.json` now declares a purpose per command, copied from the
+  commands' own help text so the contract is ground truth rather than
+  restatement, and `RUNTIME_COMMAND_DESCRIPTION` reports a description whose
+  vocabulary fits a *different* declared command strictly better than its own.
+  The signal is comparative on purpose: an honest paraphrase scores no better
+  against a sibling than against its own entry, so wording alone cannot trip
+  it - only borrowed subject matter can. Flag variants of one command are not
+  rivals (`status` and `status --json` are one operation), which was the
+  difference between reporting the real defect and reporting an accurate
+  description of `status` merely because it mentioned its own output.
+  Severity is warning: the contract's vocabulary is small, and a wrong
+  rejection would cost more than a named miss.
 - A verification could promise a result the target already contradicts, and
   the gate had no way to notice. It graded the *form* of
   `verification[].command` - safety, mutation class, falsifiable wording -

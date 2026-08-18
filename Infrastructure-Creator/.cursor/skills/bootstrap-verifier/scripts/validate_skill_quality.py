@@ -1194,6 +1194,171 @@ def _attested_read_only_commands() -> frozenset:
     )
 
 
+def _command_base(command: str) -> str:
+    """The command without its flags: one operation, however it is invoked."""
+    return " ".join(
+        token for token in _normalize_command_text(command).split()
+        if not token.startswith("-")
+    )
+
+
+def _singular(word: str) -> str:
+    """Fold a trailing plural so "layers" and "layer" are one word.
+
+    Deliberately crude: this comparison weighs a handful of words from one
+    sentence, where a plural mismatch is the difference between a correct
+    description and a reported one.
+    """
+    if len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
+        return word[:-1]
+    return word
+
+
+def _subcommand_tokens(command: str) -> set:
+    """The words that say what a runtime command invokes, minus its plumbing."""
+    tokens = set()
+    for raw in command.split():
+        if raw.startswith("-"):
+            token = raw.lstrip("-")
+        elif "/" in raw or raw.endswith(".py") or raw.startswith("python"):
+            token = raw.rsplit("/", 1)[-1]
+            token = token[:-3] if token.endswith(".py") else ""
+        else:
+            token = raw
+        token = token.strip().lower()
+        if token and token not in {"python", "python3", "json", "context"}:
+            tokens.add(token)
+    return tokens
+
+
+def _runtime_command_purposes() -> dict:
+    """Return the runtime contract's declared purpose per command.
+
+    The purposes are copied from the commands' own help text, so the contract
+    can be used as ground truth for what a command does - not merely for
+    whether it is safe to run.
+    """
+    try:
+        contract = json.loads(RUNTIME_CONTRACT.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    commands = contract.get("commands")
+    if not isinstance(commands, dict):
+        return {}
+    purposes = commands.get("purposes")
+    if not isinstance(purposes, dict):
+        return {}
+    return {
+        _normalize_command_text(key).strip(): value
+        for key, value in purposes.items()
+        if isinstance(key, str) and isinstance(value, str)
+    }
+
+
+def _validate_write_verification(
+    name: str,
+    skill: dict,
+    verification: list,
+    diagnostics: list,
+) -> None:
+    """Report a write-capable skill that verifies itself by search alone.
+
+    Searching for the text you just wrote proves authorship, never behaviour.
+    A read-only reviewer is exempt by nature - inspecting IS its work - and a
+    project with nothing runnable can still say so with a `manual` check, so
+    the rule has an honest way out that a fabricated command does not.
+    """
+    writes = _as_list(skill.get("writes"))
+    if not writes:
+        return
+    graded = [
+        item for item in verification
+        if isinstance(item, dict) and item.get("mode") == "command"
+    ]
+    if not graded or len(graded) != len(verification):
+        return
+    if all(
+        _SEARCH_HEAD.match(str(item.get("command") or "")) for item in graded
+    ):
+        _diag(
+            diagnostics,
+            "WRITE_VERIFICATION_SEARCH_ONLY",
+            f"{name} writes {', '.join(sorted(writes)[:3])} but every "
+            "verification is a text search, so nothing exercises what the "
+            "skill produces",
+        )
+
+
+def _validate_runtime_command_description(
+    name: str,
+    check: dict,
+    command: str,
+    diagnostics: list,
+) -> None:
+    """Report a runtime command described as doing another command's job.
+
+    A runtime-fixed skill is the operating manual for the seeded runtime, so
+    saying `parity` inspects governed records - when `validate` does that and
+    `parity` compares mirrors across editions - misinstructs every agent that
+    reads it.
+
+    The signal is comparative, not a similarity threshold: the description is
+    only reported when some OTHER declared command matches its vocabulary
+    strictly better than the command actually being run. An honest paraphrase
+    scores no better against a sibling than against its own purpose, so
+    wording alone can never trip this; only borrowed subject matter can.
+    Severity is warning, because the contract's vocabulary is small and the
+    cost of a wrong rejection is higher than the cost of a named miss.
+    """
+    purposes = _runtime_command_purposes()
+    own = purposes.get(_normalize_command_text(command).strip())
+    if not own:
+        return
+    described = _meaningful_tokens(
+        " ".join(
+            str(check.get(field) or "")
+            for field in ("instruction", "expected_result")
+        )
+    ) - CLAIM_LANGUAGE_LEXICON
+    if not described:
+        return
+
+    def vocabulary(purpose: str, source: str) -> set:
+        # A command's own subcommand is part of what it is about: the purpose
+        # of `status` never says "status", so a correct description naming it
+        # would otherwise score zero against its own entry.
+        words = (_meaningful_tokens(purpose) | _subcommand_tokens(source))
+        return {_singular(word) for word in words - CLAIM_LANGUAGE_LEXICON}
+
+    described_stems = {_singular(word) for word in described}
+
+    def overlap(purpose: str, source: str) -> int:
+        return len(vocabulary(purpose, source) & described_stems)
+
+    own_score = overlap(own, command)
+    # The same operation with a different flag is not a rival: `status` and
+    # `status --json` describe one thing, and letting them compete would
+    # report every accurate description that happens to mention its output.
+    own_base = _command_base(command)
+    rivals = [
+        (overlap(text, key), text)
+        for key, text in purposes.items()
+        if _command_base(key) != own_base
+    ]
+    if not rivals:
+        return
+    best_score, best_text = max(rivals, key=lambda item: item[0])
+    if best_score > own_score:
+        _diag(
+            diagnostics,
+            "RUNTIME_COMMAND_DESCRIPTION",
+            f"{name}.{check['id']} describes {command!r} in terms that fit a "
+            f"different runtime command better; the contract states this one "
+            f"will {own}",
+            severity="warning",
+        )
+
+
 def _verification_attested(command: str, analysis) -> bool:
     """Report whether the runtime contract vouches for an unprovable command.
 
@@ -2525,6 +2690,9 @@ SEARCH_EXCLUSIVITY_PATTERN = re.compile(
 # "confirm no debug helper remains" is a normal, useful check. Grading such a
 # verification as dead inverts its meaning and rejects honest material, so the
 # absence claim is read first and an empty result then confirms it.
+# A search command the resolver declines is still a search: the rule about
+# write-capable skills must not be escaped by an unparseable grep.
+_SEARCH_HEAD = re.compile(r"\s*(?:grep|egrep|fgrep|rg)\b")
 SEARCH_EXPECTS_ABSENCE = re.compile(
     r"\bno\s+(?:output|match|matches|result|results|hit|hits|line|lines)\b"
     r"|\bnothing\s+(?:prints|is\s+printed|matches|remains|appears|is\s+found)\b"
@@ -3185,6 +3353,10 @@ def _validate_schema_1_2_skill(
                     )
         if command:
             _validate_search_verification(name, check, command, target, diagnostics)
+            if runtime_fixed:
+                _validate_runtime_command_description(
+                    name, check, command, diagnostics
+                )
         if (
             check.get("network_class") == "external-provider"
             and capability.get("mode") != "external-side-effect"
@@ -3195,6 +3367,9 @@ def _validate_schema_1_2_skill(
                 f"{name}.{check['id']} declares provider network access without "
                 "external-side-effect capability",
             )
+
+    if isinstance(verification, list) and verification:
+        _validate_write_verification(name, skill, verification, diagnostics)
 
     integration_safety = skill.get("integration_safety")
     safety_fields = {

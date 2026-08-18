@@ -155,7 +155,15 @@
       "python3 memory-bank/scripts/context.py brain-create TYPE --external-id ID --title TITLE",
       "python3 memory-bank/scripts/context.py brain-update --record-id ID --revision N",
       "python3 memory-bank/scripts/context.py brain-get --record-id ID"
-    ]
+    ],
+    "purposes": {
+      "python3 memory-bank/scripts/context.py status": "show local context index counts for the procedural, semantic and episodic layers",
+      "python3 memory-bank/scripts/context.py status --json": "show local context index counts for the procedural, semantic and episodic layers as machine-readable output",
+      "python3 memory-bank/scripts/context.py validate": "validate active and archived Brain records, the governed control plane and the repository index",
+      "python3 memory-bank/scripts/context.py parity --json": "compare the canonical mirrors across editions and fail on drift in mirrored skills, hooks, commands, agents or governance documents",
+      "python3 memory-bank/scripts/validate.py": "validate the durable memory bank: chunk frontmatter, statuses and the bank index",
+      "python3 memory-bank/scripts/validate.py --summary": "print durable memory bank status counts from chunk frontmatter without printing chunk contents"
+    }
   },
   "runtime_fixed_skills": {
     "memory-bank": {

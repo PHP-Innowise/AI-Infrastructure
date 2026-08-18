@@ -3430,6 +3430,103 @@ class SkillTemplateReuseTest(SkillQualityFixture):
         )
 
 
+class WriteVerificationTest(unittest.TestCase):
+    """A skill that produces artifacts must exercise them, not grep for them.
+
+    Two runs against a real project shipped a skill named `testing` that wrote
+    to tests/** and verified itself with four greps, never invoking the suite.
+    Searching for the text you just wrote proves authorship, never behaviour.
+    """
+
+    def diagnose(self, writes: list, checks: list) -> list:
+        diagnostics: list = []
+        validator._validate_write_verification(
+            "sample-skill", {"writes": writes}, checks, diagnostics
+        )
+        return sorted(item.code for item in diagnostics)
+
+    SEARCH = {"mode": "command", "command": 'grep -rn "x" src'}
+    RUNNER = {"mode": "command", "command": "vendor/bin/phpunit"}
+    MANUAL = {"mode": "manual", "command": ""}
+
+    def test_a_write_capable_skill_verified_only_by_search_is_reported(self) -> None:
+        self.assertEqual(
+            self.diagnose(["tests/**"], [self.SEARCH, self.SEARCH]),
+            ["WRITE_VERIFICATION_SEARCH_ONLY"],
+        )
+
+    def test_a_read_only_reviewer_may_verify_entirely_by_search(self) -> None:
+        """Inspecting IS a reviewer's work; this must never fire on one."""
+        self.assertEqual(self.diagnose([], [self.SEARCH, self.SEARCH]), [])
+
+    def test_one_command_that_runs_something_satisfies_the_rule(self) -> None:
+        self.assertEqual(
+            self.diagnose(["tests/**"], [self.SEARCH, self.RUNNER]), []
+        )
+
+    def test_a_manual_check_is_an_honest_way_out(self) -> None:
+        """A target with nothing runnable can still say so."""
+        self.assertEqual(
+            self.diagnose(["tests/**"], [self.SEARCH, self.MANUAL]), []
+        )
+
+
+class RuntimeCommandDescriptionTest(unittest.TestCase):
+    """A runtime command may not be described as doing another one's job."""
+
+    def diagnose(self, command: str, instruction: str, expected: str) -> list:
+        diagnostics: list = []
+        validator._validate_runtime_command_description(
+            "project-brain",
+            {"id": "check", "instruction": instruction, "expected_result": expected},
+            command,
+            diagnostics,
+        )
+        return sorted(item.code for item in diagnostics)
+
+    PARITY = "python3 memory-bank/scripts/context.py parity --json"
+    STATUS = "python3 memory-bank/scripts/context.py status"
+
+    def test_borrowed_subject_matter_is_reported(self) -> None:
+        """parity compares mirrors; validate inspects governed records."""
+        self.assertEqual(
+            self.diagnose(
+                self.PARITY,
+                "Run the runtime parity command and confirm the governed "
+                "records agree with the runtime index",
+                "The parity report shows no divergence between the governed "
+                "records and the runtime index",
+            ),
+            ["RUNTIME_COMMAND_DESCRIPTION"],
+        )
+
+    def test_an_accurate_description_is_left_alone(self) -> None:
+        self.assertEqual(
+            self.diagnose(
+                self.PARITY,
+                "Run the parity command and confirm no mirror drift",
+                "No canonical mirror drift is reported across the editions",
+            ),
+            [],
+        )
+
+    def test_a_flag_variant_is_not_a_rival(self) -> None:
+        """`status` and `status --json` are one operation, not two.
+
+        Letting them compete reported an accurate description of `status`
+        merely because it mentioned the output.
+        """
+        self.assertEqual(
+            self.diagnose(
+                self.STATUS,
+                "Run the runtime status command and confirm each memory layer "
+                "reports its own state",
+                "The status output names each memory layer and its current state",
+            ),
+            [],
+        )
+
+
 class RuntimeFixedAccountabilityTest(unittest.TestCase):
     """The runtime-fixed quartet is measured by runtime accuracy, not by
     project specificity it cannot have.
