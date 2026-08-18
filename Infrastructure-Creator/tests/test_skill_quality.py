@@ -3932,5 +3932,299 @@ class SkillEvidenceRowTest(SkillQualityFixture):
         self.assertIn("SKILL_EVIDENCE_ROW_ANCHOR", self.codes())
 
 
+class SearchVerificationTest(SkillQualityFixture):
+    """A search verification is graded against what the target really holds.
+
+    The shapes below are copied from a Symfony target where a generated skill
+    shipped an exclusive claim the unchanged checkout already contradicted.
+    """
+
+    SETTER = (
+        "<?php\n\nclass %s\n{\n"
+        "    public function setState(string $state): self\n"
+        "    {\n        $this->state = $state;\n\n        return $this;\n    }\n}\n"
+    )
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.use_schema_1_2()
+        self.write_target("src/Entity/Article.php", self.SETTER % "Article")
+        self.write_target("src/Entity/Job.php", self.SETTER % "Job")
+        self.write_target(
+            "src/Entity/Page.php",
+            "<?php\n\nclass Page\n{\n    private string $title;\n}\n",
+        )
+        self.write_target(
+            "src/Importer/WordpressArticleImporter.php",
+            "<?php\n\nclass WordpressArticleImporter\n{\n"
+            "    public function import(Article $article): void\n"
+            "    {\n        $article->setState('published');\n    }\n}\n",
+        )
+        self.write_target(
+            "src/Controller/PageController.php",
+            "<?php\n\nclass PageController\n{\n"
+            "    public function show(Page $page): Response\n"
+            "    {\n        if ($page->getState() !== 'published') {\n"
+            "            throw new NotFoundHttpException();\n        }\n    }\n}\n",
+        )
+        self.write_target(
+            "src/Preprocessor/NewsPreprocessor.php",
+            "<?php\n\nclass NewsPreprocessor\n{\n"
+            "    public function filter(): array\n"
+            "    {\n        return ['state' => 'published'];\n    }\n}\n",
+        )
+
+    def search(
+        self,
+        command: str,
+        expected: str,
+        skip_condition: str = "src/ is absent from the checkout",
+    ) -> list[str]:
+        check = self.plan["skills"][0]["verification"][0]
+        check["mode"] = "command"
+        check["command"] = command
+        check["expected_result"] = expected
+        check["skip_condition"] = skip_condition
+        self.rewrite()
+        return [
+            item.code
+            for item in self.plan_diagnostics()
+            if item.code.startswith("VERIFICATION_SEARCH_")
+        ]
+
+    def test_an_expectation_of_no_output_is_not_a_dead_check(self) -> None:
+        """"Confirm nothing remains" is a normal check, not a broken one.
+
+        Grading an absence claim as dead inverts its meaning: the empty
+        result is exactly the success the author declared.
+        """
+        for expected in (
+            "Nothing prints, confirming no dump call survives.",
+            "No output at all: the debug helper is gone from src.",
+            "No matches remain, so the legacy call is fully removed.",
+        ):
+            with self.subTest(expected=expected):
+                self.assertEqual(
+                    self.search('grep -rn "var_dump" src', expected), []
+                )
+
+    def test_a_path_the_expectation_forbids_is_not_demanded(self) -> None:
+        """A contrastive expectation states the rule, it does not break it.
+
+        "Only A assigns the state; B must not appear" names B precisely so
+        that B is absent. Demanding B in the output rejects the clearest
+        possible phrasing.
+        """
+        codes = self.search(
+            'grep -rn "setState" src',
+            "src/Importer/WordpressArticleImporter.php assigns the state; "
+            "src/Entity/Article.php must not appear.",
+        )
+        # The forbidden path must not be demanded. Any exclusivity grading is
+        # a separate rule and is deliberately not asserted here.
+        self.assertNotIn("VERIFICATION_SEARCH_EXPECTATION", codes)
+
+    def test_a_prohibition_does_not_leak_to_a_neighbouring_clause(self) -> None:
+        """The negation is bounded, so an honest expectation still grades."""
+        codes = self.search(
+            'grep -rn "setState" src',
+            "src/Nowhere/Absent.php must not appear. "
+            "src/Entity/Article.php prints its declaration.",
+        )
+        self.assertEqual(codes, [])
+
+    def test_an_exclusive_claim_the_target_contradicts_is_reported(self) -> None:
+        """The reproduced defect: three files answer a claim naming one."""
+        codes = self.search(
+            'grep -rn "setState" src',
+            "Only the Wordpress importer's setState published assignment "
+            "prints, so every movement still goes through the workflow registry",
+        )
+        self.assertEqual(codes, ["VERIFICATION_SEARCH_EXCLUSIVITY"])
+
+    def test_the_surplus_files_are_named_in_sorted_order(self) -> None:
+        check = self.plan["skills"][0]["verification"][0]
+        check["mode"] = "command"
+        check["command"] = 'grep -rn "setState" src'
+        check["expected_result"] = (
+            "Only the Wordpress importer's setState published assignment prints"
+        )
+        check["skip_condition"] = "src/ is absent from the checkout"
+        self.rewrite()
+        message = next(
+            item.message
+            for item in self.plan_diagnostics()
+            if item.code == "VERIFICATION_SEARCH_EXCLUSIVITY"
+        )
+        self.assertIn("src/Entity/Article.php, src/Entity/Job.php", message)
+        self.assertNotIn("WordpressArticleImporter", message)
+
+    def test_a_search_without_an_exclusivity_claim_is_left_alone(self) -> None:
+        """Calibration: the honest sibling check from the same plan."""
+        self.assertEqual(
+            self.search(
+                'grep -rn "published" src/Controller src/Preprocessor',
+                "Every changed read path prints a published comparison, and "
+                "PageController::show together with the news listing builder "
+                "still print theirs",
+                skip_condition="src/Controller or src/Preprocessor is absent "
+                "from the checkout",
+            ),
+            [],
+        )
+
+    def test_a_hyphenated_scope_adjective_is_not_an_exclusivity_claim(self) -> None:
+        """Calibration: "admin-only" describes scope, not the printed output."""
+        self.assertEqual(
+            self.search(
+                'grep -rn "setState" src',
+                "Each entity prints its setState declaration, so the mutating "
+                "attributes stay admin-only",
+            ),
+            [],
+        )
+
+    def test_an_exclusivity_claim_that_names_no_file_is_not_graded(self) -> None:
+        self.assertEqual(
+            self.search(
+                'grep -rn "setState" src',
+                "Only three declaration lines print, and none of them assigns a "
+                "state outside a transition",
+            ),
+            [],
+        )
+
+    def test_a_search_the_clean_target_never_answers_is_a_dead_check(self) -> None:
+        self.assertEqual(
+            self.search(
+                'grep -rn "setPublicationState" src',
+                "Only the importer prints a direct publication state assignment",
+            ),
+            ["VERIFICATION_SEARCH_DEAD"],
+        )
+
+    def test_a_named_path_outside_the_output_is_reported(self) -> None:
+        self.assertEqual(
+            self.search(
+                'grep -rn "setState" src',
+                "src/Entity/Page.php prints its state assignment together with "
+                "the importer",
+            ),
+            ["VERIFICATION_SEARCH_EXPECTATION"],
+        )
+
+    def test_a_named_path_the_search_never_covers_is_not_graded(self) -> None:
+        """A path outside the searched scope is not a claim about this output."""
+        self.assertEqual(
+            self.search(
+                'grep -rn "setState" src/Importer',
+                "The importer prints its assignment; src/Entity/Job.php is "
+                "reviewed by the entity skill instead",
+                skip_condition="src/Importer is absent from the checkout",
+            ),
+            [],
+        )
+
+    def test_a_word_search_respects_word_boundaries(self) -> None:
+        self.write_target(
+            "src/Legacy/Alias.php",
+            "<?php\n\nclass Alias\n{\n    public function unsetStateFlag(): void\n"
+            "    {\n    }\n}\n",
+        )
+        self.assertEqual(
+            self.search(
+                'grep -rnw "setState" src/Legacy',
+                "Only the legacy alias prints a bare setState call",
+                skip_condition="src/Legacy is absent from the checkout",
+            ),
+            ["VERIFICATION_SEARCH_DEAD"],
+        )
+        self.assertEqual(
+            self.search(
+                'grep -rn "setState" src/Legacy',
+                "The legacy alias prints its setState substring",
+                skip_condition="src/Legacy is absent from the checkout",
+            ),
+            [],
+        )
+
+    def test_a_binary_file_is_not_line_evidence(self) -> None:
+        blob = self.target / "src/Legacy/dump.bin"
+        blob.parent.mkdir(parents=True, exist_ok=True)
+        blob.write_bytes(b"\x00\x01setState\x00")
+        self.assertEqual(
+            self.search(
+                'grep -rn "setState" src/Legacy',
+                "The legacy dump prints a setState assignment",
+                skip_condition="src/Legacy is absent from the checkout",
+            ),
+            ["VERIFICATION_SEARCH_DEAD"],
+        )
+
+    def test_skip_condition_absorbs_a_path_that_may_be_absent(self) -> None:
+        self.assertEqual(
+            self.search(
+                'grep -rn "setState" src legacy',
+                "Only the Wordpress importer's setState assignment prints",
+                skip_condition="src/ or legacy/ is absent from the checkout",
+            ),
+            ["VERIFICATION_SEARCH_EXCLUSIVITY"],
+        )
+
+    def test_a_missing_path_no_skip_condition_covers_is_not_graded(self) -> None:
+        self.assertEqual(
+            self.search(
+                'grep -rn "setState" src legacy',
+                "Only the Wordpress importer's setState assignment prints",
+                skip_condition="The working tree is dirty",
+            ),
+            [],
+        )
+
+    def test_unparseable_search_forms_are_declined(self) -> None:
+        expected = "Only the Wordpress importer's setState assignment prints"
+        for command in (
+            'grep -rn -A3 "setState" src',
+            'grep -rn -e "setState" -e "setStatus" src',
+            'grep -rvn "setState" src',
+            'grep -rn "set.*State" src',
+            'grep -rn "setState" src | head -3',
+            'grep -rn "setState" $(pwd)/src',
+            'grep -rn "setState" ../src',
+            'grep -rn "setState"',
+            'rg -n "setState" src',
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(self.search(command, expected), [])
+
+    def test_a_directory_searched_without_recursion_is_declined(self) -> None:
+        self.assertEqual(
+            self.search(
+                'grep -n "setState" src',
+                "Only the Wordpress importer's setState assignment prints",
+            ),
+            [],
+        )
+
+    def test_a_symlinked_path_is_never_followed(self) -> None:
+        link = self.target / "mirror"
+        try:
+            link.symlink_to(self.target / "src")
+        except OSError:  # pragma: no cover - platform without symlink support
+            self.skipTest("symlinks unavailable")
+        self.assertEqual(
+            self.search(
+                'grep -rn "setState" mirror',
+                "Only the Wordpress importer's setState assignment prints",
+                skip_condition="mirror is absent from the checkout",
+            ),
+            [],
+        )
+
+    def test_a_graded_search_does_not_disturb_the_rest_of_the_gate(self) -> None:
+        codes = [item.code for item in self.plan_diagnostics()]
+        self.assertEqual(codes, [])
+
+
 if __name__ == "__main__":
     unittest.main()

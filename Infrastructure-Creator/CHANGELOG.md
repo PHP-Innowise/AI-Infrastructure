@@ -4,7 +4,92 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Verified
+
+- Independent measurement of the two gate additions above (search grading and
+  `--baseline-plan`), against the question that decides whether a gate is worth
+  having: does it catch the real defect without failing honest work?
+  *Catches the real thing.* Run 2's `content-publication-review` is reported as
+  exactly one error naming the two surplus files
+  (`src/Entity/Article.php, src/Entity/Job.php`); real `grep -rn "setState" src`
+  on the target answers those two plus the importer, so the claim that *only*
+  the importer prints is false on the unchanged checkout. Run 1 scopes the same
+  question to `grep -n setState src/Importer/WordpressArticleImporter.php` and
+  stays PASS at zero diagnostics - the rule separates the two runs on wording,
+  not on skill name.
+  *Names what was lost.* Run 2 against run 1 as baseline names
+  `security-review` together with its five baseline source paths, and names all
+  eleven dropped evidence paths individually; the summary line repeats the
+  names rather than a count.
+  *Does not fail honest work.* An independent honest skill set was built on an
+  unrelated domain (courier dispatch) with eleven verifications spanning: a
+  search with no exclusivity claim; a true exclusivity claim; `-i`, `-w` and
+  `--include=` flags (the `--include` case carries a `.css` decoy holding the
+  same token, which the engine correctly excludes); a pipeline; `-A3` context;
+  an `-E` regular expression; a `skip_condition` covering a genuinely absent
+  path; and the non-mutating `vendor/bin/phpunit` and `php -l`. The engine's
+  matched-file sets were checked against real `grep` and agree exactly. In all
+  three validation modes (`full`, `--plan-only`, `--allow-partial-skills`) the
+  result is PASS, 0 errors, 0 warnings. Four honest phrasings of an exclusivity
+  claim - full paths, basenames, class names, prose subjects, and a Russian
+  wording - are all clean, while the same command with an expectation naming
+  one of two matched files fires.
+  *Never executes.* No `subprocess`, `os.system`, `popen`, `exec` or
+  `shell=True` appears anywhere in the validator; the added code reaches the
+  target only through `Path.iterdir`, `stat`, and `read_bytes`, and declines
+  every form it cannot model rather than running it.
+  *No baseline flag, no change.* With `--baseline-plan` absent, `--json` output
+  is byte-identical to the pre-change gate on every honest input measured
+  (run 1 in full mode, and the dispatch set in all three modes); the
+  `coverage_baseline` key is absent. The single behavioural difference across
+  every input measured is the one true positive on run 2. Three repeat runs of
+  the baseline command are byte-identical.
+  One pre-existing limit was separated out and is *not* attributable to this
+  work: a verification whose command contains a pipe is refused as
+  `COMMAND_RISK_BLOCKED (SHELL_COMPOSITION)` by `analyze_commands.py`, which
+  this change does not touch; the pre-change gate refuses the identical command
+  with the identical diagnostic.
+
 ### Fixed
+
+- A verification could promise a result the target already contradicts, and
+  the gate had no way to notice. It graded the *form* of
+  `verification[].command` - safety, mutation class, falsifiable wording -
+  but never asked the target what the command would actually answer. Found by
+  running the pipeline twice against the same real Symfony/UniteCMS project:
+  both runs passed, and the second shipped `content-publication-review` with
+  `grep -rn "setState" src` whose `expected_result` claims *only* the
+  Wordpress importer prints. The unchanged checkout answers three files - the
+  setter declarations in `src/Entity/Article.php` and `src/Entity/Job.php`
+  print too - so the skill would raise a blocking finding on every run over
+  clean code.
+  The gate now resolves a literal search itself, in Python, over target
+  files. It never executes anything: the static, offline, secret-free
+  invariant is the reason the gate cannot hang or harm, and an engine that
+  shelled out to `grep` would trade that away for nothing. Three readings of
+  `expected_result` follow: a search the clean target never answers is a dead
+  check (`VERIFICATION_SEARCH_DEAD`); a target path the expectation names,
+  inside the searched scope, that the search does not reach is
+  `VERIFICATION_SEARCH_EXPECTATION`; and an exclusivity claim (`only`,
+  `exclusively`, `no other`, `единственн`) that names files while the target
+  answers more is `VERIFICATION_SEARCH_EXCLUSIVITY` - exactly the defect
+  above.
+  Calibration is deliberately timid, because a gate that fails honest
+  verification is worse than the miss it closes. Only what can be modelled
+  exactly is graded: `grep`/`egrep`/`fgrep`, a literal pattern, explicit
+  paths, and the flags whose effect on the matched-file set is understood
+  (`-r/-R`, `-n`, `-i`, `-w`, `-F`, `-E`, `-l`, `--include=`). A pipeline, a
+  substitution, a regular expression, `-e`/`-v`/`-A`, a directory without
+  `-r`, a path escaping the target or reached through a symlink, `rg` (whose
+  ignore-file semantics this engine does not model) - all are declined, not
+  failed. A `skip_condition` that admits a path may be absent absorbs its
+  absence. Binary files carry no line evidence and are skipped; a scan past
+  the byte/file budget reports a warning and grades nothing. An exclusivity
+  claim is only ever contradicted when the search spans more than one file
+  and the expectation does name some of them, so `admin-only` as a scope
+  adjective and "only three lines print" both stay untouched. Both real runs
+  were re-measured: the first stays PASS at zero diagnostics, the second
+  reports exactly one error - the defect.
 
 - The body-path check made its verdict depend on where the text happened to
   wrap. Creation intent was read from the physical line carrying the code
@@ -511,6 +596,39 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
   - Measured on the real run: 98 path spans across nine generated skills, 0
     false positives, both injected defects reported, control gate still PASS.
 
+### Added
+
+- `validate_skill_quality.py --baseline-plan <previous run's plan>`: an
+  optional coverage baseline, because coverage silently shrank between two
+  runs of the same pipeline over the same real Symfony/UniteCMS project and
+  nothing said so. Run 1 shipped `security-review` carrying a live finding -
+  `GET /preview` deserializing a query parameter straight into an entity.
+  Run 2 re-composed the inventory, shipped no `security-review`, and moved
+  those findings nowhere (`deserialize` and `|raw` appear in 0 of its 11
+  skills). Both runs passed the gate: it knew nothing of any earlier run.
+  With the flag, the gate reads both plans as data - no execution, the static
+  offline invariant is untouched - and compares two sets: skill names, and
+  the union of `evidence[].path` with every `skills[].source_paths` entry (the
+  target files a run claims to have read). Everything lost is NAMED: one
+  `BASELINE_SKILL_DROPPED` per absent skill, carrying the paths that skill
+  cited, one `BASELINE_COVERAGE_DROPPED` per uncovered path, and a `coverage
+  baseline:` summary line repeating the names (`coverage_baseline` in
+  `--json`). A bare count would have hidden the one entry that mattered.
+  Severity is `warning`, deliberately, and both directions were weighed:
+  re-composition on regeneration is often legitimate (the target changed, a
+  skill merged into a sibling), so a hard error would block honest work and
+  train people to drop the flag - while silence is precisely what let the
+  vulnerability slip. Naming without failing keeps the loss unmissable and the
+  flag usable. An unreadable, missing, or malformed baseline is a diagnostic,
+  never a traceback: `BASELINE_PLAN_UNREADABLE` plus `coverage baseline: NOT
+  COMPARED (<reason>)`, so a mistyped path can never read as a clean bill of
+  health. Without the flag nothing changes - no diagnostics, no summary line,
+  no `coverage_baseline` key, same exit code.
+  Measured on the two real runs: run 2 against run 1 names `security-review`
+  and 11 lost evidence paths (including `templates/article/show.html.twig` and
+  `src/Controller/ArticleController.php`); run 2 against itself reports no
+  coverage lost; run 1 unchanged without the flag (PASS, 0 warnings).
+
 ### Verified
 
 - The tightened skill-quality gate was re-measured on a domain it has never
@@ -538,6 +656,23 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
   bare noun-list procedure step can still read as operational when a path
   segment or a noun coincides with a listed action verb ("dispatch", "states",
   "pick", "forward").
+
+- The two gate additions above were integrated and re-measured together, not
+  only apart. Canon mirrors were rebuilt (`build_mirrors.py --write --edition
+  Infrastructure-Creator`, 4 files) and `--check` passes for all four
+  editions. The generator suite is 449 tests green: 417 before this round,
+  +16 for the search-exclusivity engine, +16 for the coverage baseline. On the
+  two real pipeline runs over the same Symfony/UniteCMS target the verdicts
+  are exactly the ones the two changes predict and no others: run 1 exits 0 at
+  `PASS (0 errors, 0 warnings)`, run 2 exits 1 at `FAIL (1 errors, 0
+  warnings)` carrying only `VERIFICATION_SEARCH_EXCLUSIVITY` on
+  `content-publication-review.assert-transition-applied`
+  (`src/Entity/Article.php`, `src/Entity/Job.php`). The coverage baseline stays
+  silent without `--baseline-plan`, so neither control run changed shape. The
+  901 B of new documentation carried `Infrastructure-Creator.body_bytes` 577 B
+  past its ceiling; the ceiling was refit per the policy in
+  `scripts/token_budget.json` rather than the documentation cut, and the
+  reasoning is recorded in the root changelog.
 
 ## [2.5.0] - 2026-08-14
 

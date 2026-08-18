@@ -2492,6 +2492,371 @@ def _resolve_evidence_anchor(
         )
 
 
+# A verification whose command is a literal search can be graded offline: the
+# gate already reads target files for evidence, so it can resolve the same
+# search itself and compare the answer with expected_result.  The gate never
+# executes anything; every rule below is a read of the target tree.
+SEARCH_EXECUTABLES = frozenset({"grep", "egrep", "fgrep"})
+# Flags whose effect on the matched-file set this engine models exactly.  Any
+# other flag (-A/-B/-C context, -e multiple patterns, -v inversion, -c counts,
+# -L inversion, -P/-o) means the form is not confidently parseable.
+SEARCH_SHORT_FLAGS = frozenset("rRnHhliwFE")
+SEARCH_REGEX_METACHARACTERS = frozenset("^$.*+?()[]{}|\\")
+SEARCH_SHELL_METACHARACTERS = ("|", "&", ";", "<", ">", "$", "`", "\n", "(", ")")
+SEARCH_PATH_EXTENSIONS = frozenset(
+    {
+        "cfg", "cjs", "conf", "css", "dist", "env", "go", "gradle", "graphql",
+        "html", "ini", "java", "js", "json", "jsx", "kt", "lock", "md", "mjs",
+        "neon", "php", "properties", "py", "rb", "rs", "scss", "sh", "sql",
+        "svg", "toml", "ts", "tsx", "twig", "txt", "vue", "xml", "yaml", "yml",
+    }
+)
+# An expected_result that claims exclusivity promises that nothing else in the
+# target answers the search.  Markers are matched as standalone words, so a
+# compound such as "admin-only" is a scope adjective, not a claim about output.
+SEARCH_EXCLUSIVITY_PATTERN = re.compile(
+    r"(?<![\w-])(?:only|exclusively|solely)(?![\w-])"
+    r"|no other|nothing else"
+    r"|единственн"
+    r"|нет других",
+    re.I,
+)
+# An expectation may legitimately assert that the search finds NOTHING:
+# "confirm no debug helper remains" is a normal, useful check. Grading such a
+# verification as dead inverts its meaning and rejects honest material, so the
+# absence claim is read first and an empty result then confirms it.
+SEARCH_EXPECTS_ABSENCE = re.compile(
+    r"\bno\s+(?:output|match|matches|result|results|hit|hits|line|lines)\b"
+    r"|\bnothing\s+(?:prints|is\s+printed|matches|remains|appears|is\s+found)\b"
+    r"|\bno\s+\w+(?:\s+\w+)?\s+(?:remains|survives|appears|is\s+left)\b"
+    r"|\b(?:zero|empty)\s+(?:output|result|results|matches)\b"
+    r"|\bmust\s+not\s+(?:print|appear|match)\b"
+    r"|ничего\s+не\s+(?:выводит|печатает|находит)|нет\s+совпадени",
+    re.I,
+)
+SEARCH_ABSENCE_TOLERANT = re.compile(
+    r"absent|missing|does not exist|not present|unreadable|cannot be read"
+    r"|отсутств",
+    re.I,
+)
+# Only a distinctive word identifies a file by description rather than by path;
+# "job" or "page" would attach to any prose, "wordpress" would not.
+SEARCH_NAME_WORD_MIN = 5
+SEARCH_FILE_BUDGET = 20000
+SEARCH_FILE_BYTE_BUDGET = 4 * 1024 * 1024
+SEARCH_TOTAL_BYTE_BUDGET = 64 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class SearchQuery:
+    """A literal search this engine can resolve against target files."""
+
+    pattern: str
+    paths: tuple
+    recursive: bool
+    ignore_case: bool
+    word: bool
+    include: tuple
+
+
+def _parse_search_command(
+    command: str, skip_condition: str, target: Path
+) -> SearchQuery | None:
+    """Parse a literal-search command, or decline the form.
+
+    Declining is the honest answer for anything this engine cannot model
+    exactly: a pipeline, a substitution, a regular expression, an unknown flag,
+    a path that escapes the target, or a directory searched without -r.
+    """
+    if any(char in command for char in SEARCH_SHELL_METACHARACTERS):
+        return None
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return None
+    if len(tokens) < 3 or tokens[0] not in SEARCH_EXECUTABLES:
+        return None
+    recursive = False
+    ignore_case = False
+    word = False
+    literal = tokens[0] == "fgrep"
+    include: list[str] = []
+    operands: list[str] = []
+    end_of_flags = False
+    for token in tokens[1:]:
+        if not end_of_flags and token == "--":
+            end_of_flags = True
+            continue
+        if not end_of_flags and token.startswith("--"):
+            if not token.startswith("--include=") or token == "--include=":
+                return None
+            include.append(token[len("--include=") :])
+            continue
+        if not end_of_flags and token.startswith("-") and len(token) > 1:
+            for flag in token[1:]:
+                if flag not in SEARCH_SHORT_FLAGS:
+                    return None
+                if flag in {"r", "R"}:
+                    recursive = True
+                elif flag == "i":
+                    ignore_case = True
+                elif flag == "w":
+                    word = True
+                elif flag == "F":
+                    literal = True
+            continue
+        operands.append(token)
+    if len(operands) < 2:
+        return None
+    pattern = operands[0]
+    if not pattern:
+        return None
+    if not literal and any(char in SEARCH_REGEX_METACHARACTERS for char in pattern):
+        return None
+    tolerant = bool(SEARCH_ABSENCE_TOLERANT.search(skip_condition))
+    paths: list[str] = []
+    for raw in operands[1:]:
+        value = raw[2:] if raw.startswith("./") else raw
+        resolved = _confined(target, value)
+        if resolved is None:
+            return None
+        if not resolved.exists():
+            # skip_condition already tells the operator this path may be gone;
+            # its absence is a documented SKIP, not a defect to report here.
+            if tolerant:
+                continue
+            return None
+        if resolved.is_dir():
+            if not recursive:
+                return None
+        elif not resolved.is_file():
+            return None
+        paths.append(value)
+    if not paths:
+        return None
+    return SearchQuery(
+        pattern, tuple(paths), recursive, ignore_case, word, tuple(include)
+    )
+
+
+def _word_boundary(char: str) -> bool:
+    return bool(char) and (char == "_" or char.isalnum())
+
+
+def _literal_hit(haystack: str, needle: str, word: bool) -> bool:
+    if not word:
+        return needle in haystack
+    start = 0
+    while True:
+        index = haystack.find(needle, start)
+        if index < 0:
+            return False
+        before = haystack[index - 1] if index else ""
+        after = haystack[index + len(needle) : index + len(needle) + 1]
+        if not _word_boundary(before) and not _word_boundary(after):
+            return True
+        start = index + 1
+
+
+def _search_target(target: Path, query: SearchQuery) -> tuple | None:
+    """Resolve the search over target files.
+
+    Returns (scanned, matched) as sorted relative paths, or None when the scan
+    cannot be completed honestly (unreadable file, or a tree past the budget).
+    """
+    files: list[Path] = []
+    for value in query.paths:
+        root = target / value
+        if not root.is_dir():
+            files.append(root)
+            continue
+        stack = [root]
+        while stack:
+            current = stack.pop()
+            try:
+                children = list(current.iterdir())
+            except OSError:
+                return None
+            for child in children:
+                if child.is_symlink():
+                    continue
+                if child.is_dir():
+                    stack.append(child)
+                elif child.is_file():
+                    files.append(child)
+            if len(files) > SEARCH_FILE_BUDGET:
+                return None
+    if query.include:
+        files = [
+            path
+            for path in files
+            if any(fnmatch.fnmatch(path.name, glob) for glob in query.include)
+        ]
+    scanned: list[str] = []
+    matched: list[str] = []
+    needle = query.pattern.lower() if query.ignore_case else query.pattern
+    total = 0
+    for path in sorted(set(files), key=lambda item: item.as_posix()):
+        try:
+            size = path.stat().st_size
+            if size > SEARCH_FILE_BYTE_BUDGET:
+                return None
+            total += size
+            if total > SEARCH_TOTAL_BYTE_BUDGET:
+                return None
+            data = path.read_bytes()
+        except OSError:
+            return None
+        if b"\x00" in data:
+            # A binary file carries no line evidence an expected_result could
+            # be graded against, so it is neither scanned nor matched.
+            continue
+        relative = path.relative_to(target).as_posix()
+        scanned.append(relative)
+        text = data.decode("utf-8", "replace")
+        if _literal_hit(text.lower() if query.ignore_case else text, needle, query.word):
+            matched.append(relative)
+    return sorted(set(scanned)), sorted(set(matched))
+
+
+def _clause_forbids(text: str, position: int, length: int = 0) -> bool:
+    """Report whether the clause carrying ``position`` forbids what it names.
+
+    Used for expectation prose, where "src/X.php must not appear" states a
+    rule correctly and must not be read as a demand that src/X.php appear.
+    The clause is bounded on both sides, so a prohibition in a neighbouring
+    sentence cannot silence an honest expectation.
+    """
+    # The token itself may contain boundary characters - a file extension is
+    # a dot - so the forward scan starts past it, or the clause would be cut
+    # in half by the very path being judged.
+    after = position + length
+    boundaries = list(CLAUSE_BOUNDARY_PATTERN.finditer(text))
+    start = 0
+    end = len(text)
+    for match in boundaries:
+        if match.end() <= position:
+            start = match.end()
+        elif match.start() >= after:
+            end = match.start()
+            break
+    clause = text[start:end].lower()
+    return any(marker in clause for marker in PROHIBITION_MARKERS)
+
+
+def _named_search_paths(expected: str, scanned: set) -> list[str]:
+    """Target paths that expected_result names outright and the search covers."""
+    named: set[str] = set()
+    for raw in re.findall(r"[A-Za-z0-9_][A-Za-z0-9_./+-]*", expected):
+        token = raw.rstrip("./-")
+        if not _safe_relative(token):
+            continue
+        extension = token.rsplit(".", 1)[-1].lower() if "." in token else ""
+        if "/" not in token and extension not in SEARCH_PATH_EXTENSIONS:
+            continue
+        if token not in scanned:
+            continue
+        # A path named inside a clause that forbids it is an ANTI-expectation.
+        # The prohibition can sit on either side of the path - "src/X.php must
+        # not appear" puts it after - so the whole clause is read, unlike the
+        # command-polarity window, which only ever looks backwards.
+        position = expected.find(raw)
+        if position >= 0 and _clause_forbids(expected, position, len(raw)):
+            continue
+        named.add(token)
+    return sorted(named)
+
+
+def _word_present(text: str, word: str) -> bool:
+    return bool(
+        re.search(r"(?<![0-9A-Za-z_])" + re.escape(word) + r"(?![0-9A-Za-z_])", text)
+    )
+
+
+def _expected_references_file(expected_lower: str, relative: str) -> bool:
+    """Whether expected_result accounts for this file by path, name, or subject."""
+    if relative.lower() in expected_lower:
+        return True
+    basename = relative.rsplit("/", 1)[-1]
+    if basename.lower() in expected_lower:
+        return True
+    stem = basename.split(".", 1)[0]
+    if _word_present(expected_lower, stem.lower()):
+        return True
+    for part in re.findall(r"[A-Z]+(?![a-z])|[A-Z][a-z0-9]*|[a-z0-9]+", stem):
+        if len(part) >= SEARCH_NAME_WORD_MIN and _word_present(
+            expected_lower, part.lower()
+        ):
+            return True
+    return False
+
+
+def _validate_search_verification(
+    name: str,
+    check: dict[str, Any],
+    command: str,
+    target: Path,
+    diagnostics: list[Diagnostic],
+) -> None:
+    """Grade a literal-search verification against what the target really holds."""
+    query = _parse_search_command(
+        command, str(check.get("skip_condition") or ""), target
+    )
+    if query is None:
+        return
+    result = _search_target(target, query)
+    if result is None:
+        _diag(
+            diagnostics,
+            "VERIFICATION_SEARCH_UNRESOLVED",
+            f"{name}.{check['id']} search was not graded: the target scan hit an "
+            "unreadable file or the offline scan budget",
+            severity="warning",
+        )
+        return
+    scanned, matched = result
+    expected = str(check.get("expected_result") or "")
+    if not matched:
+        if SEARCH_EXPECTS_ABSENCE.search(expected):
+            # The expectation is that nothing is found, and nothing was.
+            return
+        _diag(
+            diagnostics,
+            "VERIFICATION_SEARCH_DEAD",
+            f"{name}.{check['id']} searches {', '.join(query.paths)} for "
+            f"'{query.pattern}' and the unchanged target answers nothing, so the "
+            "check can never fail",
+        )
+        return
+    matched_set = set(matched)
+    unreached = [
+        path for path in _named_search_paths(expected, set(scanned))
+        if path not in matched_set
+    ]
+    if unreached:
+        _diag(
+            diagnostics,
+            "VERIFICATION_SEARCH_EXPECTATION",
+            f"{name}.{check['id']} expects {', '.join(unreached)} in the output, "
+            "but the search does not match there on the unchanged target",
+        )
+    if len(matched) > 1 and SEARCH_EXCLUSIVITY_PATTERN.search(expected):
+        lowered = expected.lower()
+        referenced = {
+            path for path in matched if _expected_references_file(lowered, path)
+        }
+        surplus = [path for path in matched if path not in referenced]
+        # Only an expectation that does name files can be contradicted by the
+        # files it leaves out; an exclusivity claim about lines is not graded.
+        if referenced and surplus:
+            _diag(
+                diagnostics,
+                "VERIFICATION_SEARCH_EXCLUSIVITY",
+                f"{name}.{check['id']} claims an exclusive result, but the "
+                f"unchanged target also answers: {', '.join(surplus)}",
+            )
+
+
 def _validate_schema_1_2_skill(
     name: str,
     skill: dict[str, Any],
@@ -2818,6 +3183,8 @@ def _validate_schema_1_2_skill(
                         f"{check.get('mutation_class')} but command analysis found "
                         f"{detected_mutation}",
                     )
+        if command:
+            _validate_search_verification(name, check, command, target, diagnostics)
         if (
             check.get("network_class") == "external-provider"
             and capability.get("mode") != "external-side-effect"
@@ -5016,6 +5383,134 @@ def skill_class_split(plan_path: Path) -> dict[str, list[str]]:
     return {"project": sorted(project), "runtime_fixed": sorted(runtime_fixed)}
 
 
+def _plan_coverage(plan: Any) -> tuple[list[str], list[str]]:
+    """Name what a plan covers: its skills, and the paths its proof comes from.
+
+    Coverage is the union of `evidence[].path` and every `skills[].source_paths`
+    entry, because those are exactly the target files a run claims to have read.
+    Purely structural, read from JSON only - no command is executed here.
+    """
+    names: set[str] = set()
+    paths: set[str] = set()
+    if not isinstance(plan, dict):
+        return [], []
+    for skill in _as_list(plan.get("skills")):
+        if not isinstance(skill, dict):
+            continue
+        if _is_nonempty_string(skill.get("name")):
+            names.add(skill["name"].strip())
+        for item in _as_list(skill.get("source_paths")):
+            if _is_nonempty_string(item):
+                paths.add(item.strip())
+    for item in _as_list(plan.get("evidence")):
+        if isinstance(item, dict) and _is_nonempty_string(item.get("path")):
+            paths.add(item["path"].strip())
+    return sorted(names), sorted(paths)
+
+
+def _read_plan_json(path: Path) -> tuple[Any, str]:
+    try:
+        return json.loads(path.expanduser().resolve().read_text(encoding="utf-8")), ""
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        return None, str(error)
+
+
+def compare_coverage_baseline(
+    plan_path: Path, baseline_path: Path
+) -> tuple[list[Diagnostic], dict[str, Any]]:
+    """Report coverage this run lost relative to a previous run's plan.
+
+    Severity is `warning`, deliberately. Re-composing the inventory on a second
+    generation is often legitimate (the target changed, or a skill merged into a
+    sibling), so failing the gate would block honest regeneration. But silence is
+    exactly what let a run drop a security-review skill - and a live
+    deserialization finding with it - without anyone noticing. So every lost
+    skill and every lost evidence path is NAMED, one diagnostic each, and the
+    summary repeats the names: a bare count would hide the one that mattered.
+
+    An unreadable or malformed baseline is likewise a warning, never a
+    traceback, but it is reported as "not compared" rather than "nothing lost",
+    so a typo in the path can never read as a clean bill of health.
+    """
+    diagnostics: list[Diagnostic] = []
+    report: dict[str, Any] = {
+        "compared": False,
+        "skipped_reason": "",
+        "lost_skills": [],
+        "lost_source_paths": [],
+    }
+    baseline, error = _read_plan_json(baseline_path)
+    if error or not isinstance(baseline, dict):
+        reason = error or "baseline plan root must be an object"
+        _diag(
+            diagnostics,
+            "BASELINE_PLAN_UNREADABLE",
+            f"baseline plan is not readable JSON: {reason}",
+            severity="warning",
+        )
+        report["skipped_reason"] = reason
+        return diagnostics, report
+    current, error = _read_plan_json(plan_path)
+    if error or not isinstance(current, dict):
+        reason = error or "plan root must be an object"
+        _diag(
+            diagnostics,
+            "BASELINE_COMPARE_SKIPPED",
+            f"coverage baseline not compared, current plan is unreadable: {reason}",
+            severity="warning",
+        )
+        report["skipped_reason"] = reason
+        return diagnostics, report
+    old_names, old_paths = _plan_coverage(baseline)
+    new_names, new_paths = _plan_coverage(current)
+    baseline_paths_by_skill: dict[str, list[str]] = {}
+    for skill in _as_list(baseline.get("skills")):
+        if isinstance(skill, dict) and _is_nonempty_string(skill.get("name")):
+            baseline_paths_by_skill[skill["name"].strip()] = sorted(
+                {
+                    item.strip()
+                    for item in _as_list(skill.get("source_paths"))
+                    if _is_nonempty_string(item)
+                }
+            )
+    lost_skills = sorted(set(old_names) - set(new_names))
+    lost_paths = sorted(set(old_paths) - set(new_paths))
+    report["compared"] = True
+    report["lost_skills"] = lost_skills
+    report["lost_source_paths"] = lost_paths
+    for name in lost_skills:
+        cited = ", ".join(baseline_paths_by_skill.get(name, [])) or "none"
+        _diag(
+            diagnostics,
+            "BASELINE_SKILL_DROPPED",
+            f"{name}: in the baseline inventory, absent from this plan "
+            f"(baseline source paths: {cited})",
+            severity="warning",
+        )
+    for path in lost_paths:
+        _diag(
+            diagnostics,
+            "BASELINE_COVERAGE_DROPPED",
+            f"{path}: covered by the baseline plan, uncovered by this plan",
+            severity="warning",
+        )
+    return diagnostics, report
+
+
+def _coverage_baseline_summary(report: dict[str, Any]) -> str:
+    if not report.get("compared"):
+        return f"coverage baseline: NOT COMPARED ({report.get('skipped_reason')})"
+    lost_skills = report.get("lost_skills") or []
+    lost_paths = report.get("lost_source_paths") or []
+    if not lost_skills and not lost_paths:
+        return "coverage baseline: no coverage lost"
+    return (
+        "coverage baseline: LOST "
+        f"skills: {', '.join(lost_skills) or 'none'}; "
+        f"evidence paths: {', '.join(lost_paths) or 'none'}"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--skills-dir")
@@ -5037,6 +5532,10 @@ def main(argv: list[str] | None = None) -> int:
         "--allow-partial-skills",
         action="store_true",
         help="validate all plan contracts and only authored SKILL.md files that exist",
+    )
+    parser.add_argument(
+        "--baseline-plan",
+        help="previous run's plan; names skills and evidence paths this run lost",
     )
     parser.add_argument("--json", action="store_true", dest="as_json")
     args = parser.parse_args(argv)
@@ -5067,22 +5566,26 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 )
             )
+    baseline_report: dict[str, Any] | None = None
+    if args.baseline_plan:
+        baseline_diagnostics, baseline_report = compare_coverage_baseline(
+            Path(args.plan), Path(args.baseline_plan)
+        )
+        diagnostics = sorted(set(diagnostics + baseline_diagnostics))
     errors = [item for item in diagnostics if item.severity == "error"]
     classes = skill_class_split(Path(args.plan))
     if args.as_json:
-        print(
-            json.dumps(
-                {
-                    "valid": not errors,
-                    "error_count": len(errors),
-                    "warning_count": len(diagnostics) - len(errors),
-                    "diagnostics": [item.as_dict() for item in diagnostics],
-                    "skill_classes": classes,
-                },
-                indent=2,
-                sort_keys=True,
-            )
-        )
+        payload: dict[str, Any] = {
+            "valid": not errors,
+            "error_count": len(errors),
+            "warning_count": len(diagnostics) - len(errors),
+            "diagnostics": [item.as_dict() for item in diagnostics],
+            "skill_classes": classes,
+        }
+        # Absent flag, absent key: no baseline means byte-identical output.
+        if baseline_report is not None:
+            payload["coverage_baseline"] = baseline_report
+        print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         for item in diagnostics:
             stream = sys.stderr if item.severity == "error" else sys.stdout
@@ -5097,6 +5600,8 @@ def main(argv: list[str] | None = None) -> int:
             f"(project: {', '.join(classes['project']) or 'none'}; "
             f"runtime: {', '.join(classes['runtime_fixed']) or 'none'})"
         )
+        if baseline_report is not None:
+            print(_coverage_baseline_summary(baseline_report))
     return 1 if errors else 0
 
 

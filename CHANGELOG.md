@@ -415,6 +415,20 @@ edition's own files remain in that edition's changelog.
   race - without `flock`. Each `.claude`/`.cursor` hooks README carries the
   same limits next to the serialization it already documented.
 
+- **`Infrastructure-Creator.body_bytes` in `scripts/token_budget.json` refit
+  to 232069 B** (observed 221018 B + 5 %, the ceiling file's own policy), and
+  only that ceiling. The growth is 901 B of `bootstrap-verifier/SKILL.md`
+  documenting two new gate checks - the offline resolution of a literal
+  `grep` in `verification[].command` and the optional `--baseline-plan`
+  coverage comparison - which carried the edition 577 B past its previous
+  220441 B. Trimming was measured first and rejected on the numbers: the two
+  documentation blocks are 901 B in total, so closing a 577 B overrun inside
+  them would have deleted about two thirds of what they document, including
+  diagnostic identifiers the report text is grepped for. `body_bytes` is paid
+  per skill invocation, not at startup, and the startup categories
+  (`agents_md_bytes`, `descriptor_bytes`, `command_bytes`, `agent_bytes`),
+  `frontmatter_bytes` and `skills` are unchanged and stay where they are.
+
 ### Fixed
 
 - **The write-capable agent lock no longer exempts a second instance of the

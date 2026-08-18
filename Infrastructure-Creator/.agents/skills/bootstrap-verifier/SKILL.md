@@ -130,6 +130,10 @@ Writes a report to `tasks/TASK-{N}/bootstrap-verifier-report.md`. Does not write
      `sudo` behavior is blocking (`SKILL_BODY_COMMAND_RISK`); attestability-only
      findings (unknown executable, unresolved alias, tokenization) are not,
      because prose legitimately carries placeholders and sample output.
+   - A literal `grep` in `verification[].command` is resolved offline, never
+     run, and graded on `expected_result`: no match `VERIFICATION_SEARCH_DEAD`,
+     a named path missing `VERIFICATION_SEARCH_EXPECTATION`, an `only` claim
+     the target denies `VERIFICATION_SEARCH_EXCLUSIVITY`. Other forms skip.
    - Every target path the *rendered body* cites, not only the plan's. A bare
      path code span rooted in the target tree - first segment and parent
      directory both present - that resolves to nothing is
@@ -197,6 +201,14 @@ Writes a report to `tasks/TASK-{N}/bootstrap-verifier-report.md`. Does not write
      managed block are not placeholder-scanned. An unchanged target-sourced
      shared file must also pass the watch-only publication baseline.
    - No template placeholders (`{skill-name}`, `TODO`, literal `YYYY-MM-DD`, `[target_name]`, `TASK-{N}`, `{{TARGET_FRAMEWORK}}`, etc.) remain in any manifest-owned text file. The only approved verbatim-asset declarations are the exact manifest-relative path-plus-regex pairs `memory-bank/templates/chunk.md` + `\bYYYY-MM-DD\b` and `memory-bank/scripts/validate.py` + `\bYYYY-MM-DD\b`. Each declaration exempts only matching occurrences, not the whole file: every other placeholder in those assets and the same ISO-date token at any other path remains blocking. Unmanifested team skills, agents, commands, hooks, memory, brain, and root documents are never scanned.
+   - Optional `--baseline-plan <prior plan>` on `validate_skill_quality.py`
+     names coverage this run lost: each absent skill with the paths it cited
+     (`BASELINE_SKILL_DROPPED`), each `evidence[].path`/`source_paths` entry
+     covered there and not here (`BASELINE_COVERAGE_DROPPED`), both repeated
+     by name on the `coverage baseline:` line (`coverage_baseline` under
+     `--json`). Warnings, not errors - re-composition can be honest, silence
+     never is. An unreadable baseline reads `NOT COMPARED`
+     (`BASELINE_PLAN_UNREADABLE`), not "nothing lost". No flag, no change.
 4. **Review generated operational quality.** Confirm every skill renders
    evidence-specific structured procedures and verifications with exact
    evidence IDs and target-relative line ranges or stable symbol/config-key
