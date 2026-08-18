@@ -54,6 +54,28 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Verified
 
+- **An honest thirty-six skill plan validates with zero blocking diagnostics.**
+  Every threshold in this gate was calibrated on plans of nine to thirteen
+  skills, because that is what our runs produce; the failure that costs most is
+  not a missed defect but a false rejection at scale, and nothing in the suite
+  would have noticed one. `tests/test_large_plan_calibration.py` now builds a
+  synthetic thirty-six skill plan - eighteen subject areas, each with the skill
+  that changes it and the skill that reviews it, drawn from separate procedure
+  and verification pools - and asserts it passes clean.
+  Writing it found seven defects, all in the corpus rather than the gate, which
+  is the outcome that makes it worth keeping: a reviewer inheriting a
+  write-oriented step, a writer verified only by a text search, an exclusive
+  path swallowed by a sibling's write glob, eighteen write-capable agents in one
+  parallel stage. 124 blocking diagnostics on the first run, 0 on the seventh.
+  The collapsed twin - the same plan with every obligation discharged by one
+  step, which is the shape an externally authored plan of this size actually
+  had - is rejected 36 times over.
+  The similarity signal is pinned here too: 54 warnings across 36 skills, every
+  one naming a module's workflow beside its own review, and no unrelated pair.
+  That is the same pass that produced 1642 warnings on the external plan, and
+  the reason it stays a signal rather than a gate.
+  The corpus is synthetic and carries no client name or content.
+
 - Independent measurement of the two gate additions above (search grading and
   `--baseline-plan`), against the question that decides whether a gate is worth
   having: does it catch the real defect without failing honest work?
