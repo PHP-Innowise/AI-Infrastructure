@@ -1,6 +1,6 @@
 ---
 name: infra-update
-description: "Use this agent to upgrade a previously generated accelerator in place after this generator has shipped a newer release: it reads the target's .infra-manifest.json, re-validates the source profile, regenerates the accelerator into a staging area, replaces only files whose sha256 still matches the manifest (never touched by the target team), routes every user-modified file to the human with three-way context instead of overwriting it, rewrites the manifest, and re-runs bootstrap-verifier. It aborts on targets that have no manifest (generated before v1.4.0)."
+description: "Use this agent to upgrade a manifest-managed accelerator through the current evidence/semantic/routing gates in staging, preserve user-owned files and live memory, and apply verified changes transactionally with rollback."
 model: opus
 invokes: infra-update
 phase: orchestration
@@ -9,11 +9,15 @@ phase: orchestration
 # Infra Update Agent
 
 ## Role
-Upgrade a previously generated accelerator to the current generator version, safely. This agent is a sanctioned upgrade orchestrator: it consumes the target's `.infra-manifest.json`, re-validates the profile, fans out the forge skills into staging, applies only manifest-verified safe replacements, escalates every user-modified file, rewrites the manifest, and runs `bootstrap-verifier`.
+Upgrade a generated accelerator safely by revalidating its Profile and skill
+contracts, rebuilding and semantically validating staging, classifying only
+manifest-owned paths, and applying with a rollback journal.
 
 ## Instructions
 1. Use the Skill tool to invoke the `infra-update` skill, passing the required target project path.
-2. Execute the skill completely following its instructions (manifest gate, profile re-validation, staging regeneration, three-set classification, per-file decisions, apply, manifest rewrite, verification).
+2. Execute the complete manifest, evidence-plan, staged semantic/routing,
+   three-way decision, transactional apply, and post-publication verification
+   sequence.
 3. ABORT immediately - writing nothing - if `.infra-manifest.json` is missing or unreadable; surface the legacy-target recovery options instead.
 4. STOP and collect explicit per-file decisions before touching any user-modified file; do not report success while verification fails or decisions are pending silently.
 5. Provide structured output (below).
@@ -32,6 +36,8 @@ When done, provide:
 - MUST NOT overwrite any file whose hash differs from its manifest record without an explicit per-file human decision.
 - MUST NOT touch files the manifest does not list, or any memory state (chunks, indexes, counters, Project Brain records).
 - MUST rewrite `.infra-manifest.json` and pass `bootstrap-verifier` before reporting success.
+- MUST roll back all affected paths if apply or post-publication verification
+  fails.
 
 ## Selection examples
 

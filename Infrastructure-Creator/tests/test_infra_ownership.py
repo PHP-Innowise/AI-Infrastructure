@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
+import json
 import sys
 import tempfile
 import unittest
@@ -128,6 +131,32 @@ class ManifestOwnershipTest(OwnershipFixture):
         validator.validate_owned_placeholders(self.target, manifest["files"], errors)
         self.assertTrue(any("leftover placeholder" in error for error in errors))
 
+    def test_placeholder_ownership_matrix(self) -> None:
+        cases = (
+            "{skill-name}",
+            "{NNNN}",
+            "TODO",
+            "FIXME",
+            "YYYY-MM-DD",
+            "[target_name]",
+            "TASK-{N}",
+            "{{PROJECT_NAME}}",
+        )
+        for index, placeholder in enumerate(cases):
+            with self.subTest(placeholder=placeholder):
+                owned_rel = f"generated/{index}.md"
+                team_rel = f"team/{index}.md"
+                self.write(owned_rel, placeholder + "\n")
+                team = self.write(team_rel, placeholder + "\n")
+                manifest = self.manifest([owned_rel])
+                errors: list[str] = []
+                validator.validate_owned_placeholders(
+                    self.target, manifest["files"], errors
+                )
+                self.assertTrue(any(owned_rel in error for error in errors))
+                self.assertFalse(any(team_rel in error for error in errors))
+                self.assertEqual(team.read_text(encoding="utf-8"), placeholder + "\n")
+
     def test_missing_tracked_file_fails(self) -> None:
         path = self.write("AGENTS.md", STAMP + "generated\n")
         self.manifest(["AGENTS.md"])
@@ -219,24 +248,88 @@ class ManifestOwnershipTest(OwnershipFixture):
         )
         for entry in invalid_entries:
             with self.subTest(entry=entry):
-                self.manifest(["AGENTS.md"], decisions={"AGENTS.md": entry})
-                self.assertNotEqual(self.manifest_errors(), [])
+                with self.assertRaises(ownership.OwnershipError):
+                    self.manifest(
+                        ["AGENTS.md"], decisions={"AGENTS.md": entry}
+                    )
+
+    def test_structured_decision_schema_is_additive_and_extensible(self) -> None:
+        target_file = self.write(".gitignore", "team\n# generated\n.cache/\n")
+        proposal = "a" * 64
+        structured = {
+            ".gitignore": {
+                "decision": "merged",
+                "rejected_sha256": proposal,
+                "task": "TASK-002",
+                "origin": "shared",
+                "strategy": "append-requirements",
+                "proposal_sha256": proposal,
+                "resolved_sha256": ownership.sha256_file(target_file),
+                "requirements": [".cache/", "memory-bank/local/"],
+                "future_metadata": {"schema": 2},
+            }
+        }
+        manifest = self.manifest([".gitignore"], decisions=structured)
+        self.assertEqual(self.manifest_errors(), [])
+        self.assertEqual(manifest["manifest_version"], 1)
+        self.assertEqual(
+            manifest["decisions"][".gitignore"]["future_metadata"], {"schema": 2}
+        )
+        satisfied = {
+            ".gitignore": {
+                **structured[".gitignore"],
+                "decision": "kept",
+                "strategy": "keep",
+                "rejected_sha256": ownership.sha256_file(target_file),
+                "proposal_sha256": ownership.sha256_file(target_file),
+            }
+        }
+        self.manifest([".gitignore"], decisions=satisfied)
+        self.assertEqual(self.manifest_errors(), [])
+
+    def test_structured_decision_rejects_partial_and_contradictory_entries(self) -> None:
+        target_file = self.write(".gitignore", "team\n")
+        resolved = ownership.sha256_file(target_file)
+        base = {
+            "decision": "merged",
+            "rejected_sha256": "a" * 64,
+            "task": "TASK-002",
+            "origin": "shared",
+            "strategy": "append-requirements",
+            "proposal_sha256": "a" * 64,
+            "resolved_sha256": resolved,
+            "requirements": [".cache/"],
+        }
+        invalid = (
+            {key: value for key, value in base.items() if key != "origin"},
+            {**base, "decision": "kept"},
+            {**base, "origin": "generated"},
+            {**base, "proposal_sha256": "b" * 64},
+            {**base, "resolved_sha256": "b" * 64},
+            {**base, "requirements": [".cache/", ".cache/"]},
+            {**base, "requirements": ["memory/", ".cache/"]},
+            {**base, "requirements": []},
+        )
+        for entry in invalid:
+            with self.subTest(entry=entry):
+                with self.assertRaises(ownership.OwnershipError):
+                    self.manifest([".gitignore"], decisions={".gitignore": entry})
 
     def test_decision_for_untracked_file_fails(self) -> None:
         self.write("AGENTS.md", STAMP + "generated\n")
-        self.manifest(
-            ["AGENTS.md"],
-            decisions={
-                "team.md": {
-                    "decision": "kept",
-                    "rejected_sha256": "a" * 64,
-                    "task": "TASK-002",
-                }
-            },
-        )
-        self.assertTrue(
-            any("decisions entry for untracked file" in error for error in self.manifest_errors())
-        )
+        with self.assertRaisesRegex(
+            ownership.OwnershipError, "outside manifest membership"
+        ):
+            self.manifest(
+                ["AGENTS.md"],
+                decisions={
+                    "team.md": {
+                        "decision": "kept",
+                        "rejected_sha256": "a" * 64,
+                        "task": "TASK-002",
+                    }
+                },
+            )
 
 
 class UpdateClassificationTest(OwnershipFixture):
@@ -281,6 +374,119 @@ class UpdateClassificationTest(OwnershipFixture):
         rows = ownership.classify_update(self.target, self.staging, manifest)
         self.assertEqual(rows[0]["classification"], "requires-decision")
         self.assertEqual(rows[0]["reason"], "generator-output-changed")
+
+    def test_structured_classification_prefers_proposal_and_strategy(self) -> None:
+        target_file = self.write(".gitignore", "team\n.cache/\n")
+        staged = self.write(".gitignore", "proposed block\n", staging=True)
+        proposal = ownership.sha256_file(staged)
+        manifest = self.manifest(
+            [".gitignore"],
+            decisions={
+                ".gitignore": {
+                    "decision": "merged",
+                    "rejected_sha256": proposal,
+                    "task": "TASK-002",
+                    "origin": "shared",
+                    "strategy": "append-requirements",
+                    "proposal_sha256": proposal,
+                    "resolved_sha256": ownership.sha256_file(target_file),
+                    "requirements": [".cache/"],
+                }
+            },
+        )
+        row = ownership.classify_update(self.target, self.staging, manifest)[0]
+        self.assertEqual(row["classification"], "standing-decision-honored")
+        self.assertEqual(row["reason"], "append-requirements")
+
+    def test_staged_manifest_is_never_a_classify_row(self) -> None:
+        self.write("AGENTS.md", STAMP + "generated\n")
+        manifest = self.manifest(["AGENTS.md"])
+        self.write("AGENTS.md", STAMP + "generated\n", staging=True)
+        staged_manifest = ownership.build_manifest(
+            self.staging,
+            ["AGENTS.md"],
+            generator="Infrastructure-Creator",
+            generator_version=VERSION,
+            task="TASK-002",
+            profile="tasks/TASK-002/infra-scan-project-profile.md",
+            editions=["claude"],
+            mode="full",
+            generated_at="2026-08-06T08:00:00Z",
+        )
+        ownership.write_manifest(self.staging, staged_manifest)
+
+        rows = ownership.classify_update(self.target, self.staging, manifest)
+
+        self.assertEqual([row["path"] for row in rows], ["AGENTS.md"])
+        self.assertEqual(rows[0]["classification"], "safe-update")
+
+    def test_malformed_decision_entry_raises_ownership_error(self) -> None:
+        self.write("AGENTS.md", STAMP + "generated\n")
+        manifest = self.manifest(["AGENTS.md"])
+        manifest["decisions"] = {"AGENTS.md": "kept"}
+        ownership.write_manifest(self.target, manifest)
+        self.write("AGENTS.md", STAMP + "generated\n", staging=True)
+
+        with self.assertRaisesRegex(
+            ownership.OwnershipError, "decision entry must be an object"
+        ):
+            ownership.classify_update(
+                self.target, self.staging, ownership.load_manifest(self.target)
+            )
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            code = ownership.main(
+                [
+                    "classify",
+                    "--target",
+                    str(self.target),
+                    "--staging",
+                    str(self.staging),
+                ]
+            )
+        self.assertEqual(code, 2)
+        self.assertIn("ERROR: ", stderr.getvalue())
+        self.assertIn("decision entry must be an object", stderr.getvalue())
+
+    def test_malformed_external_decisions_json_fails_cleanly(self) -> None:
+        self.write("AGENTS.md", "generated\n", staging=True)
+        write_plan = self.base / "write-plan.txt"
+        write_plan.write_text("AGENTS.md\n", encoding="utf-8")
+        decisions = self.base / "decisions.json"
+        decisions.write_text(json.dumps({"AGENTS.md": "kept"}), encoding="utf-8")
+        source_map = self.base / "sources.json"
+        source_map.write_text(json.dumps({}), encoding="utf-8")
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            code = ownership.main(
+                [
+                    "manifest",
+                    "--target",
+                    str(self.staging),
+                    "--write-plan",
+                    str(write_plan),
+                    "--version",
+                    VERSION,
+                    "--task",
+                    "TASK-002",
+                    "--profile",
+                    "tasks/TASK-002/infra-scan-project-profile.md",
+                    "--editions",
+                    "claude",
+                    "--mode",
+                    "full",
+                    "--source-target",
+                    str(self.target),
+                    "--source-map",
+                    str(source_map),
+                    "--decisions",
+                    str(decisions),
+                ]
+            )
+        self.assertEqual(code, 2)
+        self.assertIn("ERROR: ", stderr.getvalue())
+        self.assertIn("decision entry must be an object", stderr.getvalue())
 
     def test_legacy_target_refuses_without_writes(self) -> None:
         marker = self.write(".claude/team.md", "unchanged\n")

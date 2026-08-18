@@ -45,14 +45,36 @@ A per-file human decision must outlive the run that recorded it. Re-hashing a ke
 
 ## Generated File Naming Convention (MANDATORY)
 
-Allocate a new `tasks/TASK-{N}/` for the update run. Staging output goes to `tasks/TASK-{N}/infra-update-staging/` (inside this generator's workspace, never inside the target). The run report is `tasks/TASK-{N}/infra-update-report.md`. Writes into the target happen only in step 7, only per the classification rules.
+Allocate a new `tasks/TASK-{N}/` for the update run. Staging output goes to `tasks/TASK-{N}/infra-update-staging/` (inside this generator's workspace, never inside the target). The run report is `tasks/TASK-{N}/infra-update-report.md`. Writes into the target happen only in step 9, only per the classification rules.
 
 ## Process
 
 1. **Read the manifest.** Require the target project path. Load `<target>/.infra-manifest.json`. If it is missing or unparsable, **ABORT without writing anything** and tell the user why: the target is a legacy generation (produced by a generator release before manifests existed, v1.3.x or earlier) or the manifest was deleted. Recovery options to present: (a) re-run `infra-generate` and take the collision guard's explicit overwrite/merge decision, or (b) if - and only if - the user can vouch that the generated files were never edited, hand-build a manifest with the recipe in `infra-generate`'s "Version Stamp & Generation Manifest" section and re-run `infra-update`. Never fabricate a manifest yourself from the target's current state without that explicit user confirmation - hashing user-edited files as if freshly generated would authorize overwriting their edits.
-2. **Re-validate the profile.** The manifest names its source profile (`tasks/TASK-{N}/infra-scan-project-profile.md`). Re-check its cited evidence against the target's current files exactly as `infra-generate` step 2 does. If the profile is missing or the target has drifted materially (framework change, new/removed integrations, edition selection no longer true), stop and recommend a fresh `infra-scan` - an update run must not generate from stale evidence.
+2. **Re-validate the profile and generation plan.** The manifest names its
+   source profile; require its matching schema **1.2**
+   `skill-generation-plan.json` with `routing_cases[]` and canonical
+   `flow_contracts`. Re-run
+   `infra-generate`'s evidence, containment, fingerprint, inventory-necessity,
+   ownership, complete-adjacency, routing-oracle, and flow-contract checks
+   against the current target. Missing or pre-1.2 plans use a fresh
+   scan/synthesis migration path; never reconstruct a contract from old
+   generated prose. Material drift requires a fresh scan.
 3. **Compare versions.** Read this generator's root `VERSION` file and the manifest's `generator_version`; summarize the relevant `CHANGELOG.md` entries between them for the user. Equal versions are allowed (the run degrades to a drift-repair pass) but say so explicitly.
-4. **Regenerate into staging.** Fan out the same forges `infra-generate` uses (`policy-forge`, `skill-forge`, `hook-forge`, `memory-seed`, then `agent-forge`, `command-forge`, `skill-flow-composer`) with the same profile and edition selection, but with every write redirected into `tasks/TASK-{N}/infra-update-staging/` laid out exactly like the target root. **Exception - memory state:** skip chunk seeding, `INDEX.md`, and `.memory-counter` entirely (the target's memory is live data); stage only the generator-owned memory surface (`memory-bank/scripts/`, `memory-bank/templates/`, `memory-bank/README.md`, and the `project-brain/` skeleton files the manifest tracks).
+4. **Regenerate and gate in staging.** Redirect every forge into
+   `tasks/TASK-{N}/infra-update-staging/`. Generate skills one contract or small
+   sibling group at a time, run per-batch semantic checks with
+   `--allow-partial-skills`, then rerun without partial mode for the global
+   evidence/ownership/distinctness gate. Only after PASS may `agent-forge`,
+   `command-forge`, and `skill-flow-composer` run. Carry every adjacency and
+   execute every routing oracle. Compile both `SKILL FLOW.md` and executable
+   flow commands from the one canonical `flow_contracts` graph, then run
+   `validate_flow_contracts.py` for each selected command-carrying edition.
+   Require exact order, phases, agents, checkpoints, `code-review-agent`,
+   roster, and write serialization before classification. Codex-only updates
+   validate the compiled `SKILL FLOW.md` graph and record command parity as
+   N/A. **Exception - memory
+   state:** skip live chunks, indexes, and counters; stage only generator-owned
+   runtime/templates/protocol surfaces.
 5. **Classify every relevant path** by comparing the manifest entries with staged files through `.agents/skills/bootstrap-verifier/scripts/infra_ownership.py classify --target "<target>" --staging "tasks/TASK-{N}/infra-update-staging"`. The helper resolves relative targets from the caller's working directory, supports absolute paths and spaces, and never walks the target: it reads target content only for manifest members, plus an existence-only collision check when staging introduces a new path. An unmanifested target file with no staged collision is invisible:
    | Manifest | Staged | Target state | Classification |
    | --- | --- | --- | --- |
@@ -65,10 +87,53 @@ Allocate a new `tasks/TASK-{N}/` for the update run. Staging output goes to `tas
    | not listed | staged | present in target | **Requires decision** - a user file collides with a new generator file; never overwrite. |
    | not listed | not staged | anything | **User file: untouchable.** Not read, not diffed, not reported. |
 6. **Present decisions.** For every "requires decision" file give three-way context: (a) *as generated* - the manifest hash plus, when the target is a git repo, the originally generated content recovered from history (`git log --diff-filter=A --format=%H -- <file>` or the commit matching the manifest's `generated_at`); state honestly when the original content is unrecoverable and only its hash remains; (b) *as the current generator would write it* - the staged version; (c) *as it is in the target* - the current content. Offer per-file choices: keep target version / take staged version / manual merge. Proceed only on explicit answers; an unanswered file keeps the target version and stays listed in the report. Record each outcome for step 8: keep and merge become (or refresh) `decisions` entries; take-staged removes any existing entry.
-7. **Apply.** Write safe updates, new files, approved decisions, and approved removals into the target. Re-stamp `AGENTS.md` only when it is already manifest-owned or this run explicitly adds it as a new generated file. Never open or re-stamp an untracked team `AGENTS.md`. If a tracked `AGENTS.md` was user-modified and the user chose to keep it, update its stamp only with that explicit per-file approval and record the mutation in the report.
-8. **Rewrite the manifest from an explicit update plan.** Create `tasks/TASK-{N}/infra-update-write-plan.txt` containing only the previous manifest's surviving members plus newly generated paths this run actually wrote and the user explicitly accepted. Use the `infra-generate` manifest helper with this plan, the current `VERSION`, this update task id, the same editions, and the preserved mode. Never walk a target root in either mode. Then write the `decisions` map per "Decision Memory": every keep/merge decision from step 6 - and every carried-forward standing decision - gets an entry with this run's staged sha256 as `rejected_sha256` and a valid `TASK-{N}` `task`; every take-staged decision removes its entry; entries for paths no longer in `files` are dropped. Re-hashing a kept file alone does NOT protect it: without its `decisions` entry the next run would see hash == manifest and auto-replace it.
-9. **Verify.** Run `bootstrap-verifier` against the updated target (it validates the refreshed manifest too). A failure means the update is not done.
-10. **Report.** Write `tasks/TASK-{N}/infra-update-report.md`: version from -> to, the full classification table, every decision taken (or still pending), and the verification result.
+7. **Compose shared root-ignore requirements.** Union the task-scoped
+   declarations from `memory-seed` and `hook-forge`. Use the deterministic
+   helper to classify `.gitignore` as already satisfied, append-required, or
+   invalid. An unchanged satisfied file becomes a watch-only target source; an
+   append requires explicit approval and staged merged bytes. Never offer
+   `keep` while a requirement is missing, and never scan unrelated team
+   comments as generated placeholders. The helper emits positive patterns
+   before `!` negations and fails a requirement that exactly contradicts a
+   team entry (`x` vs `!x`); such a conflict requires an explicit human
+   decision, never a silent append.
+   Persist `decision: kept`/`merged` with the legacy hash/task fields and
+   structured `origin: shared`, strategy, proposal/resolved hashes, and sorted
+   exact requirements. Unknown additive metadata is preserved; contradictory
+   combinations are rejected.
+8. **Build final explicit plans and the staged manifest.** Create
+   `infra-update-publication-plan.txt` for every accepted staged write,
+   `infra-update-removal-plan.txt` for explicitly approved obsolete removals
+   (omit the file when none), and `infra-update-write-plan.txt` for the final
+   manifest-owned members. Write `infra-update-final-sources.json`, mapping only
+   retained target paths to `"target"` (all omitted members default to
+   `"staging"`). A manual merge MUST be completed in staging and published
+   transactionally; never pre-write merged bytes into the target. Write
+   `infra-update-decisions.json` and, when needed,
+   `infra-update-watch-plan.txt`. Build the refreshed manifest inside staging
+   with `infra_ownership.py manifest --target <staging> --source-target
+   <target> --source-map <final-sources.json> --decisions
+   <decisions.json> ...`. This makes each manifest hash describe the bytes that
+   will actually remain after publication. Re-hashing a kept file without its
+   decision entry is forbidden.
+9. **Apply transactionally.** Use `publish_staging.py snapshot` with the
+   publication, optional removal, and optional watch plans, immediately recheck the baseline,
+   then use `publish_staging.py publish`. It copies the refreshed manifest last,
+   removes only approved paths, preserves every unplanned team file, and keeps
+   a rollback journal. Before writing anything it refuses publication paths
+   the staged manifest does not list, any overwrite of live runtime state
+   (non-ownable paths may only seed absences), and removals the target
+   manifest does not own. Re-stamp `AGENTS.md` only when manifest-owned or
+   explicitly accepted as new.
+10. **Verify.** Run the complete bootstrap gate, including semantic skill and
+   routing validation against the refreshed plan, on the updated target. A
+   failure MUST invoke `publish_staging.py rollback`; keep the journal until
+   PASS. Rollback removes directory chains the publication created and never
+   clobbers a file a team member edited after publication - such a file is
+   kept as-is and reported as a conflict to resolve manually.
+11. **Report.** Write `tasks/TASK-{N}/infra-update-report.md`: version
+    transition, classifications/decisions, publication/removal plan counts,
+    rollback status, and verification result.
 
 ## Output Template
 
@@ -109,6 +174,19 @@ Allocate a new `tasks/TASK-{N}/` for the update run. Staging output goes to `tas
 - MUST NOT change the edition selection during an update - adding or removing an edition is an `infra-generate` run with its collision guard, not an update.
 - MUST rewrite `.infra-manifest.json` from the explicit update write plan (current `VERSION`) and pass `bootstrap-verifier` before reporting success.
 - MUST keep staging inside this generator's own `tasks/TASK-{N}/` - the target sees only final, decided writes.
+- MUST NOT stage agents, commands, or flows until every staged skill passes
+  per-contract and inventory-wide semantic validation.
+- MUST NOT classify or publish an update whose schema 1.2 routing oracle omits
+  an adjacency, whose feature flow omits required code review, or whose
+  `SKILL FLOW.md` and executable commands differ from canonical
+  `flow_contracts`.
+- MUST preserve every unmanifested team file. Semantic overlap may require a
+  human routing decision, but it never authorizes overwrite.
+- MUST allow the shared `.gitignore` exception only through the centralized
+  requirements helper, structured decision metadata, and publication/watch
+  baseline; no forge may modify the root file directly.
+- MUST roll back the complete affected path set when publication or
+  post-publication verification fails.
 
 ## Final Output
 

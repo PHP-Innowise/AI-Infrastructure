@@ -442,7 +442,72 @@ edition's own files remain in that edition's changelog.
   wrong inventory is visible before it is committed rather than as an
   unreadable diff. Regenerating produces byte-identical output.
   `test_generation_ignores_untracked_working_tree_files` covers it.
+- `scripts/build_mirrors.py` now runs its reverse stray pass over
+  `only`-classes too (the governance documents: `DOD.md`,
+  `GOLDEN-PRINCIPLES.md`, `STABILIZATION.md`). Previously a deleted
+  canonical governance file with surviving mirrors was silently skipped:
+  deleting `.claude/DOD.md` left `--check` flagging only the stale
+  `.gitattributes`, and once `--write` refreshed that manifest the orphaned
+  `.cursor/DOD.md` and `.codex/DOD.md` would have persisted indefinitely as
+  canonical-looking files no rule accounts for. The pass examines only the
+  listed names, so canonical files other classes own inside the same mirror
+  directory are untouched; behavior for every other class is unchanged.
+  A listed `only` entry whose canonical file does not exist is now itself a
+  reported problem: previously `iter_canonical` skipped it silently, so a
+  typo in the list (or a canonical file renamed after mirrors were
+  generated) mirrored nothing while `--check` stayed green and the
+  orphaned mirrors persisted. Pinned by the new
+  `tests/test_build_mirrors.py`, which the `mirrors` CI job now runs
+  alongside `--check`.
 
+- `scripts/token_budget.json` re-baselines the Infrastructure-Creator
+  ceilings, which the 2.5.0 evidence-contract work outgrew without moving
+  them - the `lint` job had been red on every commit since. Per the file's
+  own policy (ceiling = observed + ~5%, raised only with the change that
+  justifies the growth), all six byte ceilings are re-derived from the
+  current tree: `body_bytes` 176549 -> 220441 and `agents_md_bytes` 12720 ->
+  15673 admit the new evidence, contract and semantic-gate procedures, while
+  `descriptor_bytes` 12478 -> 10811, `agent_bytes` 10342 -> 8134 and
+  `frontmatter_bytes` 18078 -> 16499 are *tightened* onto the slimming 2.5.0
+  performed, so the gate keeps its grip instead of inheriting dead slack.
+  Net effect on the surface that matters most: the startup total - paid on
+  every session whether or not anything is invoked - is 823 B *smaller* than
+  before 2.5.0 (34648 B -> 33825 B); the growth is confined to skill bodies,
+  which are paid only on invocation. `skills` stays at 25.
+
+- **`scripts/install_accelerator.py` no longer leaks untracked working-tree
+  files into the shipped inventories.** `discover_distribution_files` listed
+  `git ls-files --cached --others --exclude-standard`, so *anything* sitting
+  in an edition directory was classified and written into
+  `install/inventories/*.json` by `--write-inventories`. On a working tree
+  holding a real client application under `Task/app/` that pulled roughly
+  19700 lines - including `.env` and `var/cache/dev/**` - into `symfony.json`
+  and `laravel.json`, files that are distributed with the repository. The same
+  scan made `--verify-inventories` (the `installation` CI gate) fail with
+  `UNCLASSIFIED` records on any tree with untracked files. Discovery is now
+  `git ls-files --cached`: the inventory is a closed contract over the index,
+  which is what "tracked-file contract" already claimed. Staging is enough to
+  register a new distribution file (`git add`, no commit); an unstaged file is
+  not part of the payload. Outside a Git checkout - or when the source root
+  holds no tracked files for an edition - both modes now fail with an explicit
+  error instead of falling back to a filesystem walk, because off the index
+  there is no way to separate distribution files from client data. Writing is
+  also staged in memory and only then flushed, so a failure on the third
+  edition no longer leaves a half-written inventory set.
+
+- **`--write-inventories` accepts `--inventory-out DIR`**, writing the
+  generated inventories somewhere other than the checkout's
+  `install/inventories`. `tests/test_installation.py` used to assert
+  determinism by regenerating *in place* over the live repository and
+  comparing bytes: with the leak above, running the test suite silently
+  rewrote the committed inventories with client paths, and the assertion
+  reported the damage only after it was done. The test now regenerates into a
+  temporary directory, compares that against the committed files, and asserts
+  the checkout was left untouched. A new `UntrackedSourceTest` builds a
+  synthetic staged checkout, plants untracked `.env`, `Task/app/.env` and
+  `Task/app/var/cache/dev/**` files in it, and pins that they reach neither
+  the generated inventory nor its verification - plus that generation outside
+  a Git checkout fails loudly and writes nothing.
 ## 2.0.0 - 2026-08-07
 
 ### 2026-08-06 hook and installation hardening

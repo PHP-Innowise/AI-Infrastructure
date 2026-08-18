@@ -67,6 +67,33 @@ jobs:
           python-version: "3.x"
       - name: Verify tool mirrors against canon
         run: python3 scripts/build_mirrors.py --check
+      - name: Mirror executor regression tests
+        run: python3 -m unittest tests.test_build_mirrors
+
+  infrastructure-creator-reliability:
+    # Pinned to the 3.9 floor on purpose: a 3.x leg would only repeat the
+    # tests matrix (the "Infrastructure-Creator/tests" suite already runs
+    # on 3.x above) and the mirrors job (--check covers every edition).
+    # What this job adds is the 3.9 run itself plus the reference-catalog
+    # and edition-scoped mirror gates.
+    name: "Infrastructure-Creator reliability (Python 3.9)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - name: Run complete reliability suite
+        run: python3 -m unittest discover -s Infrastructure-Creator/tests -p "test_*.py"
+      - name: Validate canonical reference contracts
+        run: >-
+          python3
+          Infrastructure-Creator/.agents/skills/bootstrap-verifier/scripts/validate_reference_catalogs.py
+          --references-dir
+          Infrastructure-Creator/.agents/skills/skill-forge/references
+      - name: Verify Infrastructure-Creator mirrors
+        run: python3 scripts/build_mirrors.py --check --edition Infrastructure-Creator
 
   installation:
     name: installation

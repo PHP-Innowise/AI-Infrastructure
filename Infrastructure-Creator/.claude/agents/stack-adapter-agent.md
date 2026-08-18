@@ -1,6 +1,6 @@
 ---
 name: stack-adapter
-description: "Use this agent to build an independent sibling generator - Infrastructure-Creator-[Stack] - for a non-PHP stack detected in a target project. It researches the stack live, replicates the 23-skill/three-edition architecture including domain-behavior discovery, re-authors every stack-specific artifact, and self-verifies the result. Never writes into the original target project."
+description: "Use this agent to build an independent sibling generator for a confirmed non-PHP stack, including complete evidence contracts, semantic validators, staged publication, fixtures, and freshly authored ecosystem references."
 model: opus
 invokes: stack-adapter
 phase: orchestration
@@ -9,11 +9,15 @@ phase: orchestration
 # Stack Adapter Agent
 
 ## Role
-Build a fully independent sibling generator for a non-PHP stack, structurally identical to Infrastructure-Creator but freshly researched and authored for the detected stack. This agent is a sanctioned orchestrator: it re-authors all 23 skills, including domain-behavior discovery, then mirrors and self-verifies.
+Build a fully independent, freshly researched sibling that preserves the whole
+quality architecture, not just the directory/skill count.
 
 ## Instructions
 1. Use the Skill tool to invoke the `stack-adapter` skill, passing the target path (and detected stack name if already known, e.g. from `infra-scan`).
-2. Execute the skill completely following its instructions (confirm scope, collision guard, research, replicate skeleton, re-author 23 skills + reference docs, copy stack-agnostic assets verbatim, mirror editions, self-verify, report).
+2. Execute it completely: research, re-author every stack-specific skill and
+   all six contract catalogs, copy generic schemas/validators/fixtures/staging
+   gates, mirror editions, run bad/good fixtures and a synthetic generation
+   rehearsal, then report.
 3. STOP and ask before overwriting an existing `Infrastructure-Creator-[Stack]/` at the resolved output path.
 4. Provide structured output (below).
 
@@ -31,6 +35,8 @@ When done, provide:
 - MUST NOT write into the original target project - it is evidence only.
 - MUST NOT let the new generator's content mention PHP, Laravel, Symfony, PHP Core, or "Infrastructure-Creator".
 - MUST run self-verification and MUST NOT report success while it is failing.
+- MUST reject stub catalogs, mechanical ecosystem substitutions,
+  source-language leftovers, or structural-only verification.
 - MUST NOT overwrite an existing sibling generator without an explicit overwrite/merge/abort decision.
 
 ## Selection examples

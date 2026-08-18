@@ -29,9 +29,10 @@ Write exactly one findings file into the current run's task directory: `tasks/TA
    - Plain PHP: `public/index.php` or a front controller with no framework package.
 3. **Detect the package manager and PHP runtime.** Composer is expected; note the resolved PHP version from `composer.lock` `platform` or `require.php`, and any `.php-version`/Docker PHP base image if trivially visible (defer deep infra to `infra-ops-scanner`).
 4. **Detect entry points and build tooling:** front controller(s), console entry (`artisan`/`bin/console`), asset build (`package.json` scripts, Vite/Mix config) noted only as a build-tool fact, not as a JS skill.
-5. **Detect test tooling:** `phpunit.xml`/`phpunit.xml.dist` (PHPUnit), `pest` in `require-dev` + `tests/Pest.php` (Pest); note the test directory layout.
+5. **Capture test topology, not just the runner:** `phpunit.xml`/`phpunit.xml.dist` (PHPUnit), `pest` in `require-dev` + `tests/Pest.php` (Pest), every configured suite/root/bootstrap, central versus module/tenant/provider test placement, unit/integration/feature/browser conventions, fixture/factory/fake locations, and the narrowest evidenced invocation for each suite. Cite config anchors and representative test paths; do not infer topology from framework defaults.
 6. **Detect lint/format/static-analysis tooling:** `.php-cs-fixer.dist.php` (PHP-CS-Fixer), `pint.json` (Pint), `phpcs.xml`/`.phpcs.xml.dist` (PHP_CodeSniffer), `phpstan.neon(.dist)` (PHPStan/Larastan), `psalm.xml` (Psalm), `rector.php` (Rector).
-7. **Mark confidence** per finding: `confirmed` (direct evidence), `inferred` (indirect signal), or `unknown`. Never present a guess as fact.
+7. **Compile repository command definitions.** Record the exact Composer and package-manager script body, resolve aliases transitively where possible, and classify each command as non-mutating, workspace-mutating, network-capable, or external-side-effect-capable. Mark wrappers containing `--fix`, formatter writes, migrations, deploy/provider calls, or unresolved indirection; never label a script safe from its name alone.
+8. **Mark confidence** per finding: `confirmed` (direct evidence), `inferred` (indirect signal), or `unknown`. Never present a guess as fact.
 
 ## Output Template
 
@@ -54,13 +55,14 @@ Write exactly one findings file into the current run's task directory: `tasks/TA
 - [public/index.php, artisan, bin/console, ...] (confirmed - path)
 
 ## Testing
-- [PHPUnit/Pest + config path] (confirmed/inferred)
+- Suites: [name -> config/root/bootstrap -> level/scope -> focused invocation] (confirmed/inferred - bounded anchors)
+- Fixtures/factories/fakes: [paths and applicable suites] | none
 
 ## Lint / Format / Static Analysis
 - [tool: config path] for each detected; "N/A - not configured" where none
 
 ## Composer Scripts
-- [script name: command] for test/lint/analyse-relevant scripts
+- [script name -> exact body -> resolved command/alias chain -> mutation/network class] for test/lint/analyse/build-relevant scripts
 
 ## Confidence Summary
 [X confirmed, Y inferred, Z unknown]
@@ -72,6 +74,8 @@ Write exactly one findings file into the current run's task directory: `tasks/TA
 - MUST operate read-only on the target; MUST NOT read `.env`/secrets.
 - MUST distinguish `require` from `require-dev`.
 - MUST report absent tooling as `N/A - not configured` rather than assuming a default.
+- MUST preserve exact command definitions and classify effects from resolved bodies, not friendly script names.
+- MUST capture real suite boundaries and focused commands; MUST NOT collapse materially different central, module, tenant, integration, or provider tests into one generic test directory.
 - MUST NOT deep-dive integrations, infra, security, or conventions - those belong to their own scanners.
 
 ## Final Output

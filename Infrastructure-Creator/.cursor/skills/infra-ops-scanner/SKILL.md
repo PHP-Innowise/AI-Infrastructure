@@ -23,12 +23,13 @@ Write exactly one findings file into the current run's task directory: `tasks/TA
 
 1. **Detect containers.** Look for `Dockerfile`(s), `docker-compose.yml`/`compose.yaml`, and `.dockerignore`. From the `Dockerfile`, cite the PHP base image (e.g. `FROM php:8.2-fpm`) and enabled extensions (`docker-php-ext-install`, `pecl install`), plus any multi-stage build and Composer install steps.
 2. **Detect orchestration.** Look for Kubernetes manifests (`*.yaml` with `kind:` Deployment/Service/Ingress, a `k8s/` or `deploy/` dir) and Helm charts (`Chart.yaml`, `values.yaml`, `templates/`). Cite the concrete files.
-3. **Detect CI/CD.** Look for `.github/workflows/*.yml`, `.gitlab-ci.yml`, `bitbucket-pipelines.yml`, `Jenkinsfile`, `azure-pipelines.yml`. Summarize the PHP-relevant stages (composer install, test, lint/static analysis, build, deploy) with file+line citations.
+3. **Detect CI/CD and compile command definitions.** Look for `.github/workflows/*.yml`, `.gitlab-ci.yml`, `bitbucket-pipelines.yml`, `Jenkinsfile`, `azure-pipelines.yml`. Record the exact PHP-relevant stage command, working directory, prerequisites/services, environment class, and bounded anchor; resolve referenced Composer/npm scripts through stack findings. Classify each command as non-mutating, workspace-mutating, network-capable, or external-side-effect-capable rather than trusting job/step names.
 4. **Detect IaC.** Look for Terraform (`*.tf`, `*.tfvars`, `.terraform/`), Ansible (`playbook*.yml`, `roles/`, `inventory`), and Pulumi (`Pulumi.yaml`, `__main__.php`/language runtime). Note providers/resources only from visible files.
 5. **Detect PHP deployment tooling.** Deployer (`deploy.php` with `Deployer\` usage), Laravel Envoy (`Envoy.blade.php`), Capistrano (`Capfile`, `config/deploy.rb`), and Forge/Ploi hints (deploy scripts, `.forge`/provider comments).
 6. **Detect deployment-target hints.** Serverless/Bref (`serverless.yml`, `bref/bref` in composer), Platform.sh (`.platform.app.yaml`, `.platform/`), Heroku (`Procfile`, `app.json`), and generic PaaS config.
-7. **Flag destructive-command risks.** Record any presence of `kubectl` (apply/delete), `terraform apply`/`destroy`, `helm upgrade`/`uninstall`, `php artisan migrate:fresh`/`migrate --force`/`db:wipe`, `docker system prune`, or force-push deploy steps - with file+line - so `hook-forge` can guard them.
-8. **Mark confidence** per finding: `confirmed` (direct evidence), `inferred` (indirect signal), or `unknown`. Never present a guess as fact.
+7. **Flag destructive-command risks.** Record any presence of `kubectl` (apply/delete), `terraform apply`/`destroy`, `helm upgrade`/`uninstall`, `php artisan migrate:fresh`/`migrate --force`/`db:wipe`, `docker system prune`, force-push deploy steps, formatter/fixer writes, or credential-backed provider commands - with bounded anchors - so later contracts can deny them by default.
+8. **Map operational path authority and adjacency.** Identify which deployment/config paths are required-existing versus explicitly creatable/generated, and map release, migration, async/provider, security, and domain owners for each material operation. Capture representative requests that should route to each primary/deferred owner.
+9. **Mark confidence** per finding: `confirmed` (direct evidence), `inferred` (indirect signal), or `unknown`. Never present a guess as fact.
 
 ## Output Template
 
@@ -45,7 +46,7 @@ Write exactly one findings file into the current run's task directory: `tasks/TA
 - Kubernetes / Helm: [manifests/charts or "N/A - not configured"] (confirmed - path)
 
 ## CI/CD
-- [provider]: stages [install/test/lint/build/deploy] (confirmed - path:L#)
+- [provider]: [stage -> exact/resolved command -> working directory/prerequisites -> mutation/network class] (confirmed - bounded anchor)
 
 ## Infrastructure as Code
 - Terraform / Ansible / Pulumi: [resources or "N/A - not configured"] (confirmed - path)
@@ -59,6 +60,10 @@ Write exactly one findings file into the current run's task directory: `tasks/TA
 ## Destructive-Command Risks (for hook-forge)
 - [command: file:L# + risk] for each; "None detected" if absent
 
+## Operational Path Authority & Adjacency
+- [path -> required-existing | generated-runtime | creatable -> authority anchor]
+- [operation/request -> primary owner -> material defer/fallback owners -> routing cases]
+
 ## Confidence Summary
 [X confirmed, Y inferred, Z unknown]
 ```
@@ -68,6 +73,8 @@ Write exactly one findings file into the current run's task directory: `tasks/TA
 - MUST cite a real file path (and line where practical) for every finding.
 - MUST operate read-only on the target; MUST NOT read `.env`/secrets.
 - MUST record destructive commands verbatim with location so `hook-forge` can guard them; MUST NOT execute them.
+- MUST classify resolved commands by effects; a command named `lint`, `test`, or `check` is not automatically non-mutating.
+- MUST NOT claim deploy, rollback, restart, balancing, or provisioning ownership unless target evidence proves that operation and its authority.
 - MUST report absent tooling as `N/A - not configured` rather than assuming a default.
 - MUST NOT deep-dive framework identity, integrations, security, or conventions - those belong to their own scanners.
 

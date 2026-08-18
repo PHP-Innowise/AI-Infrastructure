@@ -2018,6 +2018,206 @@ def git_output(repository: Path, arguments: list[str], label: str) -> bytes:
     return result.stdout
 
 
+def _readiness_git_probe(
+    repository: Path, arguments: list[str]
+) -> tuple[Optional[str], Optional[str]]:
+    """Run a bounded Git metadata probe without making status fail."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repository), *arguments],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+            timeout=2,
+        )
+    except FileNotFoundError:
+        return None, "git-unavailable"
+    except (OSError, subprocess.TimeoutExpired):
+        return None, "git-probe-failed"
+    if result.returncode != 0:
+        return None, "not-a-worktree"
+    return result.stdout.strip(), None
+
+
+def automatic_memory_readiness(repository: Path) -> dict[str, object]:
+    """Report task identity and Git readiness without mutating runtime state."""
+    worktree, git_error = _readiness_git_probe(
+        repository, ["rev-parse", "--show-toplevel"]
+    )
+    branch: Optional[str] = None
+    git_state = git_error or "worktree"
+    probe_failures = ("git-unavailable", "git-probe-failed")
+    failed_probe: Optional[str] = None
+    if git_error is None:
+        branch, branch_error = _readiness_git_probe(
+            repository, ["symbolic-ref", "--quiet", "--short", "HEAD"]
+        )
+        if branch_error in probe_failures:
+            # A transient probe failure says nothing about HEAD, so report the
+            # failed probe itself instead of guessing detached or unborn.
+            branch = None
+            git_state = branch_error
+            failed_probe = "branch"
+        else:
+            head, head_error = _readiness_git_probe(
+                repository, ["rev-parse", "--verify", "HEAD"]
+            )
+            if head_error in probe_failures:
+                if branch_error is None:
+                    # The branch probe already supplied a usable identity; a
+                    # transient HEAD-classification failure must not discard
+                    # it, so keep the pre-classification worktree report.
+                    git_state = "worktree"
+                else:
+                    branch = None
+                    git_state = head_error
+                    failed_probe = "HEAD-classification"
+            elif head_error is None and head:
+                git_state = "worktree" if branch_error is None else "detached-head"
+            else:
+                # HEAD does not resolve to a commit: the branch is unborn
+                # (fresh init, zero commits) or HEAD itself is broken.
+                git_state = "unborn-head"
+
+    if git_error is not None:
+        git_metadata = {
+            "status": "degraded",
+            "state": git_state,
+            "worktree": None,
+            "branch": None,
+            "reason": "Git changed-path metadata is unavailable; turn checkpointing cannot run.",
+            "remediation": "Run the accelerator inside its Git worktree.",
+        }
+    elif git_state in probe_failures:
+        git_metadata = {
+            "status": "degraded",
+            "state": git_state,
+            "worktree": worktree,
+            "branch": None,
+            "reason": {
+                "branch": (
+                    "The Git branch probe failed before HEAD could be "
+                    "classified, so branch state is unknown for this report."
+                ),
+                "HEAD-classification": (
+                    "The Git HEAD-classification probe failed after no "
+                    "branch was found, so HEAD state is unknown for this "
+                    "report."
+                ),
+            }[failed_probe],
+            "remediation": (
+                "Retry when Git responds within the probe timeout, or set "
+                "CONTEXT_TASK_ID for task-aware automation."
+            ),
+        }
+    else:
+        git_metadata = {
+            "status": "active",
+            "state": git_state,
+            "worktree": worktree,
+            "branch": branch,
+            "reason": {
+                "worktree": "Git changed-path metadata is available.",
+                "detached-head": (
+                    "Git changed-path metadata is available, but HEAD is "
+                    "detached and cannot supply task identity."
+                ),
+                "unborn-head": (
+                    "Git changed-path metadata is available, but HEAD does "
+                    "not resolve to a commit yet (unborn branch)."
+                ),
+            }[git_state],
+            "remediation": (
+                "Set CONTEXT_TASK_ID for task-aware automation while HEAD is detached."
+                if git_state == "detached-head"
+                else None
+            ),
+        }
+
+    explicit_identity = os.environ.get("CONTEXT_TASK_ID", "").strip()
+    if explicit_identity:
+        try:
+            identity = validate_task_id(explicit_identity)
+        except ContextError:
+            task_identity = {
+                "status": "degraded",
+                "source": "environment",
+                "task_id": None,
+                "reason": "CONTEXT_TASK_ID is present but invalid.",
+                "remediation": "Set CONTEXT_TASK_ID to a valid task identifier.",
+            }
+        else:
+            task_identity = {
+                "status": "active",
+                "source": "environment",
+                "task_id": identity,
+                "reason": "Explicit task identity is available for retrieval and dispatch.",
+                "remediation": None,
+            }
+    elif branch:
+        try:
+            identity = validate_task_id(branch)
+        except ContextError:
+            task_identity = {
+                "status": "degraded",
+                "source": "git-branch",
+                "task_id": None,
+                "reason": "The current Git branch is not a valid task identifier.",
+                "remediation": "Set CONTEXT_TASK_ID to a valid task identifier.",
+            }
+        else:
+            task_identity = {
+                "status": "active",
+                "source": "git-branch",
+                "task_id": identity,
+                "reason": "The current Git branch supplies task identity.",
+                "remediation": None,
+            }
+    else:
+        task_identity = {
+            "status": "degraded",
+            "source": None,
+            "task_id": None,
+            "reason": "No task identity is available for task-aware retrieval, writes, or dispatch.",
+            "remediation": (
+                "Set CONTEXT_TASK_ID explicitly."
+                if git_error is None
+                else "Set CONTEXT_TASK_ID, and use a Git worktree to enable turn checkpointing."
+            ),
+        }
+
+    identity_active = task_identity["status"] == "active"
+    git_active = git_metadata["status"] == "active"
+    if identity_active and git_active:
+        overall = {
+            "status": "active",
+            "reason": "Task identity and Git metadata are available; automatic memory is active.",
+            "remediation": None,
+        }
+    elif identity_active:
+        overall = {
+            "status": "retrieval-only",
+            "reason": (
+                "Task identity supports retrieval and dispatch, but Git metadata is "
+                "unavailable so turn checkpointing is disabled."
+            ),
+            "remediation": "Run the accelerator inside its Git worktree.",
+        }
+    else:
+        overall = {
+            "status": "degraded",
+            "reason": (
+                "Automatic task-aware memory is degraded because no usable task "
+                "identity is available."
+            ),
+            "remediation": task_identity["remediation"],
+        }
+    overall["task_identity"] = task_identity
+    overall["git_metadata"] = git_metadata
+    return overall
+
+
 def derive_goal(task_id: str) -> str:
     """Build a task goal from a branch name.
 
@@ -3794,6 +3994,7 @@ def main() -> int:
                     ),
                     "layers": layers,
                     "database": str(database),
+                    "automatic_memory": automatic_memory_readiness(repository),
                 }
                 if arguments.json:
                     print(json.dumps(result, ensure_ascii=False))
@@ -3804,6 +4005,13 @@ def main() -> int:
                         f"({', '.join(f'{layer}: {count}' for layer, count in layers.items())}; "
                         f"{result['database']})."
                     )
+                    readiness = result["automatic_memory"]
+                    print(
+                        f"Automatic memory: {readiness['status']} — "
+                        f"{readiness['reason']}"
+                    )
+                    if readiness["remediation"]:
+                        print(f"Remediation: {readiness['remediation']}")
                 return 0
 
             if arguments.command == "search":

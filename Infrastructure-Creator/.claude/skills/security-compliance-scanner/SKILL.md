@@ -29,8 +29,10 @@ Write exactly one findings file into the current run's task directory: `tasks/TA
 2. **Detect the secrets-handling approach WITHOUT reading values.** Note `.env`/`.env.example` presence and *which keys* are referenced via `env()`/`getenv()`/`$_ENV` (key names only), `config/secrets/` (Symfony vault), and vault SDKs (`hashicorp/vault-*`, AWS/GCP/Azure secret-manager SDKs). Never open or echo secret values.
 3. **Detect existing security tooling.** `composer audit` in CI, `roave/security-advisories` in `require-dev`, `enlightn/enlightn`, `enlightn/security-checker`, Psalm taint analysis (`--taint-analysis`/config), and PHPStan security rules/extensions. Cite the config or CI line.
 4. **Detect textual compliance mentions ONLY.** Grep docs/config/README for GDPR/PCI(-DSS)/HIPAA/SOC 2/ISO 27001 strings and report the mention with location. Do **not** assert or evaluate actual compliance - report only that the text appears.
-5. **Note relevant hardening signals** if trivially visible (CSRF config, security headers middleware, encryption config presence) as `inferred` unless directly configured.
-6. **Mark confidence** per finding: `confirmed` (direct evidence), `inferred` (indirect signal), or `unknown`. Never present a guess as fact.
+5. **Capture security test topology and invariants.** Locate authentication, authorization, tenant/object-ownership, validation, audit-integrity, and redaction tests; record suite/root, focused repository command, fixture/fake prerequisites, denied-path assertion, and bounded anchor. Map each confirmed high-priority security invariant ID from domain findings to a concrete test/assertion owner, while preserving incomplete coverage as a gap.
+6. **Note relevant hardening signals** if trivially visible (CSRF config, security headers middleware, encryption config presence) as `inferred` unless directly configured. External security/compliance standards remain review requirements, not confirmed target behavior, unless target policy explicitly adopts them.
+7. **Map material adjacency.** Record when local authorization, provider identity mechanics, domain permission outcomes, audit behavior, and general code review have different primary owners; include positive, negative, ambiguous, and cross-domain routing cases.
+8. **Mark confidence** per finding: `confirmed` (direct evidence), `inferred` (indirect signal), or `unknown`. Never present a guess as fact.
 
 ## Output Template
 
@@ -54,6 +56,10 @@ Write exactly one findings file into the current run's task directory: `tasks/TA
 ## Hardening Signals
 - [CSRF / headers / encryption config] (confirmed/inferred - path)
 
+## Security Test Topology & Invariant Mapping
+- [suite/focused command -> fixture/fake -> allowed/denied assertion -> invariant IDs -> bounded anchor]
+- Adjacency/routing: [request -> primary owner -> defer/fallback owner]
+
 ## Confidence Summary
 [X confirmed, Y inferred, Z unknown]
 ```
@@ -64,6 +70,8 @@ Write exactly one findings file into the current run's task directory: `tasks/TA
 - MUST operate read-only on the target; MUST NEVER read or print secret VALUES - detect only the handling approach and key names.
 - MUST report compliance strings as textual mentions only; MUST NOT assert the project is compliant with any standard.
 - MUST report absent tooling as `N/A - not configured` rather than assuming a default.
+- MUST NOT elevate a hardening signal, package capability, or external standard into confirmed target policy without a bounded target-policy anchor.
+- MUST preserve missing denied-path coverage and unowned high-priority invariants as synthesis gaps.
 - MUST NOT deep-dive framework identity, integrations, infra, or conventions - those belong to their own scanners.
 
 ## Final Output

@@ -1,0 +1,154 @@
+{
+  "duplicate-shared-template": {
+    "expected": "SKILL_SIMILARITY",
+    "description": "Unrelated skills reuse the same generic five-step procedure."
+  },
+  "noun-substituted-template": {
+    "expected": "SKILL_TEMPLATE_REUSE",
+    "description": "One prose template serves two skills, differing only in the project nouns each plan contract forces it to carry; every line is lexically distinct."
+  },
+  "repunctuated-template": {
+    "expected": "SKILL_TEMPLATE_REUSE",
+    "description": "The same template again, the second skill differing from the first only in punctuation and interchangeable connectives."
+  },
+  "template-reuse-calibration": {
+    "expected": null,
+    "description": "Honest inventories stay clean: two genuinely different skills, an approved versioned fixed block repeated word for word, and the same framework idiom shown in a fenced code block."
+  },
+  "paraphrased-empty": {
+    "expected": "SKILL_CONTENT_EMPTY",
+    "description": "Headings are present but the operational contract is filler."
+  },
+  "lexically-unique-empty": {
+    "expected": "SKILL_PROCEDURE_TRACE",
+    "description": "Long varied prose has no traceable project procedure or contract decisions."
+  },
+  "invalid-evidence": {
+    "expected": "EVIDENCE_PATH_INVALID",
+    "description": "Evidence attempts target traversal or names a missing file."
+  },
+  "irrelevant-evidence-reuse": {
+    "expected": "SKILL_EVIDENCE_IRRELEVANT",
+    "description": "An integration reuses valid evidence that does not identify it."
+  },
+  "missing-evidence": {
+    "expected": "SKILL_EVIDENCE_UNKNOWN",
+    "description": "A skill references an evidence ID absent from the plan."
+  },
+  "unsupported-evidence-claim": {
+    "expected": "EVIDENCE_CLAIM_UNSUPPORTED",
+    "description": "A selection condition repeats a claim that the cited source/range does not support."
+  },
+  "claim-language-lexicon-only": {
+    "expected": "EVIDENCE_CLAIM_UNSUPPORTED",
+    "description": "An invented claim overlaps the cited source only through PHP keywords ('class', 'function', 'public', 'string'), which occur in most PHP files and therefore ground nothing."
+  },
+  "claim-common-lexicon-only": {
+    "expected": "EVIDENCE_CLAIM_GENERIC_SUPPORT",
+    "description": "A claim clears the language tier but nothing project-specific in it appears in the cited range; support rests entirely on software-English boilerplate ('service', 'method', 'result', 'value')."
+  },
+  "claim-compound-identifier-calibration": {
+    "expected": null,
+    "description": "Honest prose stays clean when the code spells its subject as one identifier: a claim about the 'reminder' the file only ever writes as publishReminder is accepted."
+  },
+  "scope-collision": {
+    "expected": "SCOPE_COLLISION",
+    "description": "Sibling skills claim the same owned scope."
+  },
+  "ambiguous-routing": {
+    "expected": "ROUTING_AMBIGUITY",
+    "description": "Two skills claim the same positive request without explicit primary ownership."
+  },
+  "unjustified-inventory-growth": {
+    "expected": "SKILL_SELECTION_CONDITION",
+    "description": "A catalog candidate is added without a satisfied evidence-backed selection condition."
+  },
+  "registry-coverage-bypass": {
+    "expected": "INVENTORY_CANDIDATE_UNACCOUNTED",
+    "description": "A canonical candidate is neither selected nor rejected, or its catalog anchor is invalid."
+  },
+  "nonconforming-agent-file": {
+    "expected": "AGENT_ROUTING_NONCONFORMING_FILE",
+    "description": "An extra Markdown wrapper outside the planned <skill>-agent naming contract is rejected."
+  },
+  "good-distinct-shared-safety": {
+    "expected": null,
+    "description": "Distinct procedures share one exact approved safety block."
+  },
+  "deterministic-output": {
+    "expected": "SKILL_SIMILARITY",
+    "description": "Repeated runs emit byte-identical sorted JSON diagnostics."
+  },
+  "schema-1.2-valid": {
+    "expected": null,
+    "description": "A complete typed 1.2 plan passes plan-only and authored validation."
+  },
+  "legacy-publication-ineligible": {
+    "expected": "LEGACY_PLAN_PUBLICATION_INELIGIBLE",
+    "description": "Schema 1.0 and 1.1 remain auditable but cannot validate authored publication output."
+  },
+  "generic-verification": {
+    "expected": "GENERIC_VERIFICATION",
+    "description": "Verification must define a concrete command or manual assertion and explicit outcomes."
+  },
+  "provider-safety": {
+    "expected": "PROVIDER_AUTHORIZATION_REQUIRED",
+    "description": "Provider access requires a safe default and explicit authorization."
+  },
+  "read-only-mutation": {
+    "expected": "READ_ONLY_PROCEDURE_MUTATION",
+    "description": "Read-only contracts cannot use write-oriented procedure language."
+  },
+  "path-contract-classification": {
+    "expected": "PATH_EXISTING_MISSING",
+    "description": "Every path is normalized and classified as resolving, generated, or safely creatable."
+  },
+  "critical-invariant-coverage": {
+    "expected": "CRITICAL_INVARIANT_COVERAGE",
+    "description": "Every critical invariant reaches a selected skill procedure and verification assertion."
+  },
+  "claim-traceability": {
+    "expected": "CLAIM_TRACEABILITY_MISSING",
+    "description": "Evidence claims trace through scope, procedure, verification, and output."
+  },
+  "evidence-anchor": {
+    "expected": "EVIDENCE_ANCHOR_LOCATION",
+    "description": "Skill evidence carries a bounded canonical source anchor."
+  },
+  "evidence-anchor-resolution": {
+    "expected": "EVIDENCE_ANCHOR_RANGE",
+    "description": "A well-formed anchor must resolve inside the file it cites: a line range past EOF, an inverted range, or an absent symbol cites nothing."
+  },
+  "exclusive-ownership-write": {
+    "expected": "OWNERSHIP_EXCLUSIVE_WRITE_CONFLICT",
+    "description": "A skill writes a path another skill owns exclusively, including a read-only owner whose own writes are empty."
+  },
+  "verbatim-boundary": {
+    "expected": "BOUNDARY_NOT_SEPARATING",
+    "description": "A declared primary/defer precedence cannot resolve an owned scope, ownership description, or positive trigger that both skills claim word for word."
+  },
+  "routing-case-coverage": {
+    "expected": "ROUTING_CASE_COVERAGE",
+    "description": "Routing fixtures cover self-selection and every adjacent owner."
+  },
+  "flow-contract-shape": {
+    "expected": "FLOW_CONTRACT_INVALID",
+    "description": "Declared flows use typed stages and resolve every selected skill."
+  },
+  "skill-body-command-risk": {
+    "expected": "SKILL_BODY_COMMAND_RISK",
+    "description": "Skill prose hands the agent a destructive, mutating, or provider-calling command."
+  },
+  "skill-body-command-calibration": {
+    "expected": null,
+    "description": "Class names, config paths, constants, and read-only tooling in backticks are not commands."
+  },
+  "vacuous-operational-content": {
+    "expected": "SKILL_STEP_HEDGED",
+    "description": "A skill names real project files, classes, and constants in every section, traces to every plan contract, and still commands nothing: procedure steps hedge instead of acting and verification accepts an impression."
+  },
+  "operational-content-calibration": {
+    "expected": null,
+    "description": "Honest instruction stays clean: project-specific verbs outside the whitelist, delegation and decision steps, and steps carrying no anchor of their own."
+  }
+}

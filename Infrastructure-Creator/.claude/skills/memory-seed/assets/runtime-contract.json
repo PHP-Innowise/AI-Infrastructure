@@ -1,0 +1,189 @@
+{
+  "schema_version": "1.0",
+  "contract_id": "context-brain-runtime",
+  "authority": {
+    "canonical_sources": [
+      "memory-bank/scripts/context.py",
+      "memory-bank/scripts/brain_runtime.py",
+      "memory-bank/scripts/context_retrieval.py",
+      "project-brain/PROTOCOL.md"
+    ],
+    "precedence": [
+      "current project policy/specs/code/migrations/tests",
+      "project-brain",
+      "memory-bank",
+      "memory-bank/local/context.db"
+    ]
+  },
+  "sqlite": {
+    "path": "memory-bank/local/context.db",
+    "classification": "creatable",
+    "created_by": "python3 memory-bank/scripts/context.py status",
+    "requirements": [
+      "Python standard library sqlite3",
+      "SQLite FTS5"
+    ],
+    "checkpoint_tables": {
+      "working_tasks": {
+        "authority": "lightweight-mode active working state; compatibility cache in governed mode",
+        "columns": [
+          "task_id",
+          "goal",
+          "progress",
+          "auto_checkpoint",
+          "next_steps",
+          "files",
+          "sources",
+          "created_at",
+          "updated_at"
+        ]
+      },
+      "turn_deltas": {
+        "authority": "buffered per-turn changed-path deltas awaiting a flush",
+        "columns": [
+          "id",
+          "task_id",
+          "created_at",
+          "files"
+        ]
+      }
+    }
+  },
+  "path_contracts": {
+    "required_skeleton": [
+      "memory-bank/README.md",
+      "memory-bank/INDEX.md",
+      "memory-bank/templates/chunk.md",
+      "memory-bank/scripts/context.py",
+      "memory-bank/scripts/brain_runtime.py",
+      "memory-bank/scripts/context_retrieval.py",
+      "memory-bank/scripts/validate.py",
+      "memory-bank/local/",
+      "memory-bank/chunks/",
+      "project-brain/PROTOCOL.md",
+      "project-brain/README.md",
+      "project-brain/config/runtime.json",
+      "project-brain/config/providers.json",
+      "project-brain/config/telemetry.json",
+      "project-brain/schemas/",
+      "project-brain/templates/",
+      "project-brain/indexes/active.json",
+      "project-brain/indexes/archive.json",
+      "project-brain/dynamic/tasks/",
+      "project-brain/dynamic/findings/",
+      "project-brain/dynamic/bugs/",
+      "project-brain/dynamic/incidents/",
+      "project-brain/dynamic/decisions/",
+      "project-brain/dynamic/events/",
+      "project-brain/control/handoffs/",
+      "project-brain/control/messages/",
+      "project-brain/control/promotions/",
+      "project-brain/control/retrieval-manifests/",
+      "project-brain/archive/",
+      "project-brain/local/"
+    ],
+    "creatable": [
+      {
+        "path": "memory-bank/local/context.db",
+        "via": "any context.py command that opens the runtime"
+      },
+      {
+        "path": "memory-bank/chunks/MEM-*.md",
+        "via": "approved Memory Bank capture or promotion"
+      },
+      {
+        "path": "project-brain/dynamic/{tasks,findings,bugs,incidents,decisions,events}/*.md",
+        "via": "context.py start, brain-create, or supported update operations"
+      },
+      {
+        "path": "project-brain/control/handoffs/*.md",
+        "via": "supported governed task mutation"
+      },
+      {
+        "path": "project-brain/control/messages/*.jsonl",
+        "via": "context.py msg-send or msg-dispatch"
+      },
+      {
+        "path": "project-brain/control/promotions/*.json",
+        "via": "context.py promote-propose"
+      },
+      {
+        "path": "project-brain/control/retrieval-manifests/*.json",
+        "via": "context.py retrieve without --ephemeral"
+      },
+      {
+        "path": "project-brain/archive/**",
+        "via": "context.py compact"
+      },
+      {
+        "path": "project-brain/local/runtime.lock",
+        "via": "supported Project Brain mutation"
+      }
+    ],
+    "forbidden_invented_paths": [
+      "memory-bank/local/context-index.sqlite",
+      "memory-bank/local/checkpoints.jsonl",
+      "project-brain/records/**"
+    ]
+  },
+  "commands": {
+    "read_health": [
+      "python3 memory-bank/scripts/context.py status",
+      "python3 memory-bank/scripts/context.py status --json",
+      "python3 memory-bank/scripts/context.py validate",
+      "python3 memory-bank/scripts/context.py parity --json"
+    ],
+    "refresh_retrieve": [
+      "python3 memory-bank/scripts/context.py refresh",
+      "python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID"
+    ],
+    "checkpoint": {
+      "automatic_or_manual_flush": "python3 memory-bank/scripts/context.py turn --task-id ID --flush",
+      "buffered_turn": "python3 memory-bank/scripts/context.py turn --task-id ID",
+      "governed_authority": "turn updates the governed task auto-checkpoint through the runtime; it never completes the task",
+      "lightweight_authority": "start/update/get/clear/complete operate SQLite working_tasks; checkpointing is CLI-backed and no checkpoints.jsonl file exists"
+    },
+    "governed_task": [
+      "python3 memory-bank/scripts/context.py start --task-id ID --goal GOAL",
+      "python3 memory-bank/scripts/context.py update --task-id ID",
+      "python3 memory-bank/scripts/context.py get --task-id ID",
+      "python3 memory-bank/scripts/context.py complete --task-id ID --outcome OUTCOME"
+    ],
+    "dynamic_records": [
+      "python3 memory-bank/scripts/context.py brain-create TYPE --external-id ID --title TITLE",
+      "python3 memory-bank/scripts/context.py brain-update --record-id ID --revision N",
+      "python3 memory-bank/scripts/context.py brain-get --record-id ID"
+    ]
+  },
+  "runtime_fixed_skills": {
+    "memory-bank": {
+      "owns": [
+        "durable chunk retrieval",
+        "capture",
+        "supersession",
+        "audit"
+      ]
+    },
+    "project-brain": {
+      "owns": [
+        "governed active work",
+        "dynamic records",
+        "handoffs",
+        "messages",
+        "retrieval manifests",
+        "promotions"
+      ]
+    },
+    "checkpoint": {
+      "owns": [
+        "sanitized CLI-backed turn checkpoint or explicit governed skip"
+      ]
+    },
+    "memory": {
+      "owns": [
+        "manual refresh",
+        "status and layer-health reporting"
+      ]
+    }
+  }
+}

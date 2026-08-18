@@ -27,6 +27,8 @@ Never generate one skill per rule, role, entity, status, risk, test, or table.
 
 Every enrichment must cite section 8's canonical source. If section 8 says `unknown`, the generated skill must ask/verify rather than state a rule.
 
+Every high-priority confirmed invariant has a stable ID and is publication-blocking until at least one selected skill contract references that ID in an ordered procedure step and a concrete verification assertion. The assertion must use the scanned test topology/command definition or a bounded manual check, name expected success and failure behavior, and preserve any required failure state plus forbidden later state. Catalog concerns and external standards never create target invariants; unsupported claims remain questions. Invariant owners must also carry path authority and all material adjacent owners into positive, negative, ambiguous, and cross-domain routing cases.
+
 ## Evidence-Gated Domain Skill Shape
 
 A domain skill such as `billing-rules-review` should contain:
@@ -44,6 +46,21 @@ A domain skill such as `billing-rules-review` should contain:
 - explicit unknowns/contradictions that require human confirmation.
 
 Its frontmatter `related` should point to generated `requirements-analyst`, `code-review`, `testing`, `security-review`, `memory-bank`, and relevant architecture/integration/specialty skills.
+
+### Enforceable Domain-Review Contract
+
+- **Selection trigger:** a proposed/reviewed change intersects one named bounded context and section 8.11 supplies multiple coherent confirmed rules plus a distinct review purpose. A central entity, status list, role name, or single test does not satisfy the trigger.
+- **Required evidence:** at least two independent confirmed rule claims with stable invariant IDs and bounded canonical target-relative anchors; source type and authority for each; any proven transition guards, permission-enforcement points and completeness caveat, audit obligations, critical tests/test topology/command definitions, contradictions, and unknowns relevant to the scope.
+- **Owned scope:** trace changes through the bounded context's evidenced invariants, transitions, permissions, side effects, audit consequences, and regression scenarios.
+- **Excluded scope:** generic PHP review, framework mechanics, integration SDK operation, invented transition graphs, unobserved permissions, severity/approval policy, and unrelated bounded contexts.
+- **Procedure roles:** (1) load only cited authority and vocabulary; (2) identify changed entry points/entities; (3) trace preconditions, transition, side effects, failure/rollback, authorization and audit; (4) compare all affected confirmed rules and critical scenarios; (5) surface contradictions/unknowns for human decision; (6) issue findings or an explicit pass with evidence.
+- **Decision points:** source disagreement -> preserve and escalate; status without transition proof -> do not infer edge; partial permission matrix -> review only observed surface; rule crossing an integration -> delegate provider mechanics to its skill while retaining business outcome review.
+- **Verification:** map every high-priority invariant ID to a cited regression assertion, then run or prescribe the applicable focused command plus allowed/denied, invalid-transition, idempotency/partial-failure, and audit checks that the evidence supports. State required and forbidden post-failure states. Never invent a test command.
+- **Output contract:** bounded scope, evidence map, affected rules, prioritized findings with concrete consequence, unknowns/contradictions, tests/results, and required human decisions.
+- **Failure handling:** stop when canonical evidence cannot be read, rules are mutually inconsistent without authority, or the candidate has fewer than multiple coherent confirmed rules; route back to profile correction instead of writing a generic domain skill.
+- **Sibling boundaries:** `code-review` owns broad diff quality; `security-review` owns technical threats; `testing` implements regression coverage; integration/specialty skills own mechanisms. Reference every material sibling present in the plan and compile positive, negative, ambiguous, and cross-domain routing cases.
+- **Positive example:** an availability review traces sampled dates, stable identifiers, cancellation states, ownership enforcement, partial provider failure, and the tests proving each, all from cited target files.
+- **Negative generic example:** “Review business logic, check edge cases, run tests, and document findings.” This is invalid even if preceded by a paragraph listing domain nouns.
 
 ## Operational `memory-bank` Skill (Always Generated)
 
@@ -65,6 +82,16 @@ Authority and safety:
 - one cohesive concept per chunk, with sources and consequences;
 - distinguish confirmed repository evidence from interview answers;
 - surface contradictions rather than resolving them silently.
+
+### Enforceable `memory-bank` Contract
+
+- **Selection/evidence:** unconditional only because `memory-seed` installs `memory-bank/INDEX.md`, chunk schema/template, and `memory-bank/scripts/validate.py`; cite these generated-runtime contracts, not the task plan, in the skill.
+- **Owned/excluded:** owns durable reusable confirmed knowledge, retrieval, capture, supersession, and audit; excludes active tasks/handoffs, raw working context, canonical policy, and self-approval of promotions.
+- **Procedure:** select exactly one mode; retrieve index-first and revalidate sources; capture one cohesive concept; supersede append-only with reciprocal links; audit structure and source freshness; initialize only when runtime is absent and authorized.
+- **Decision points:** stale source -> supersede or report; conflicting sources -> preserve contradiction; governed promotion -> apply only after independent approval; sensitive/raw content -> reject.
+- **Verification/output:** run the shipped validator and verify source existence; output mode, chunks read/changed, evidence revalidation, validator result, and stale/conflict findings.
+- **Failure/siblings:** stop on invalid runtime/schema or unverifiable source. `project-brain` owns active work; `checkpoint` and `memory` own manual working-context controls; `reflect` owns behavioral rules.
+- **Positive:** retrieve one active architecture concept and verify its cited namespace still exists. **Negative:** paste a whole spec, production log, or current task transcript into a chunk.
 
 ## Memory Selection
 

@@ -22,9 +22,16 @@ No new file naming of its own. It relies on `infra-scan` (which writes `tasks/TA
 ## Process
 
 1. **Validate the target** exactly as `infra-scan` does (path exists, is PHP, is not this folder).
-2. **Run `infra-scan`** against the target, producing the Project Profile.
+2. **Run `infra-scan`** against the target, producing the human Project Profile
+   and validated `skill-generation-plan.json`.
 3. **Evaluate the checkpoint gate:**
-   - If the profile has unresolved `unknown` items that affect what gets generated, OR the AI-tool selection is somehow unset, STOP and hand the profile to the user for review before continuing.
+   - If the profile has unresolved `unknown` items that affect generation, the
+     AI-tool selection is unset, or any evidence/skill contract is incomplete,
+     STOP and hand both artifacts to the user for review.
+   - Require schema 1.2 and zero blocking diagnostics across the complete
+     operational-safety, ownership/write/routing/flow inventory. Legacy 1.0/1.1
+     plans may be audited but require re-synthesis before this build can
+     continue. Calibrated similarity warnings remain visible.
    - Otherwise, surface a one-line summary of the profile and proceed.
 4. **Run `infra-generate`** against the same target.
    - If the collision guard trips (target already has an accelerator), STOP and ask overwrite/merge/abort - never auto-decide.

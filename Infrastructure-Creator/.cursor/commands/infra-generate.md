@@ -1,12 +1,15 @@
 ---
 name: infra-generate
-description: Turn an approved Project Profile into a working accelerator inside the target PHP project, for the selected AI-tool edition(s) only.
+description: Build an approved evidence-contracted accelerator in staging, validate semantics and routing, then publish selected editions with rollback.
 ---
 
 # /infra-generate
 
-Turn an approved Project Profile into a working accelerator inside the target PHP project, for only the selected AI-tool edition(s).
+Build the approved evidence-contracted accelerator in staging, validate it, and
+publish only the selected editions transactionally.
 
 Usage: `/infra-generate <path-to-target-php-project>`
 
-The target path is passed as `$ARGUMENTS` and is required. This spawns the `infra-generate-agent`, which re-validates the profile, runs the collision guard, fans out the forges, wraps skills as agents/commands, composes the flow, and runs `bootstrap-verifier`. Run `/infra-scan <path>` first and review its profile.
+The agent re-validates profile evidence and per-skill contracts, rejects generic
+or duplicated staged skills, derives routing, verifies the complete bundle,
+then publishes explicit paths with rollback and verifies the target again.

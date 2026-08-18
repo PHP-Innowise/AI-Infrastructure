@@ -32,10 +32,12 @@ Write exactly one findings file into the current run's task directory: `tasks/TA
    - Auth/identity: `laravel/sanctum`, `laravel/passport`, `lexik/jwt-authentication-bundle`, `firebase/php-jwt`.
    - Observability: `sentry/sentry`, `open-telemetry/*`.
    - Feature flags, CDN, ML/AI, secondary database: category by package purpose.
-3. **Find runtime wiring** for each candidate: config file (`config/services.yaml`, `config/*.php`), provider/bundle registration, DI service definition, or client instantiation. Cite the wiring path:line.
+3. **Find runtime wiring and bounded call sites** for each candidate: config file (`config/services.yaml`, `config/*.php`), provider/bundle registration, DI service definition, client instantiation, and at least one real request/response or producer/consumer call path. Cite bounded line ranges, symbols, or JSON pointers. Package/config presence may confirm installation, but only call-site evidence can support owned runtime behavior.
 4. **Assign confidence:** `confirmed` = package + wiring both cited; `inferred` = package only; `unknown` = ambiguous signal (e.g. a generic HTTP client used for an unnamed API).
-5. **Capture non-PHP neighbors as contracts.** When config references an external service without a PHP client (e.g. a base URL, a broker DSN), record it as an integration contract with its config citation, not as a PHP dependency.
-6. **Mark confidence** per finding and never present a guess as fact.
+5. **Capture provider test topology and safety.** Find provider fakes, fixtures, mock transports, sandbox configuration names, contract/integration tests, and focused test commands without reading credentials. Record whether network execution is default-deny, what explicit environment/authorization would be required, and what rollback/sanitization boundary exists. Absence stays `unknown`; do not invent a safe sandbox.
+6. **Map claims and material adjacency.** Separate behavior directly supported by target evidence from catalog review questions/external provider requirements. Record the primary provider-mechanics owner and every material adjacent owner (domain outcome, async reliability, local authorization, storage/cache correctness, security, or testing), with positive, negative, ambiguous, and cross-domain routing cases.
+7. **Capture non-PHP neighbors as contracts.** When config references an external service without a PHP client (e.g. a base URL, a broker DSN), record it as an integration contract with its config citation, not as a PHP dependency.
+8. **Mark confidence** per finding and never present a guess as fact.
 
 ## Output Template
 
@@ -46,7 +48,9 @@ Write exactly one findings file into the current run's task directory: `tasks/TA
 
 ## Integrations by Category
 ### [Category, e.g. Payment]
-- [package] - wiring: [config path:L#] (confirmed/inferred)
+- [package] - wiring/call sites: [bounded anchors] - supported claims: [...] - review questions/external requirements: [...] (confirmed/inferred)
+- Test/safety: [fake/fixture/sandbox, focused command, network policy, authorization, rollback, sanitization]
+- Adjacency/routing: [primary provider owner; material defer/fallback owners; positive/negative/ambiguous/cross-domain cases]
 
 ### [Next category ...]
 - ...
@@ -68,6 +72,8 @@ Write exactly one findings file into the current run's task directory: `tasks/TA
 - MUST operate read-only on the target; MUST NOT read `.env`/secrets (env-var names only, never values).
 - MUST prefer `require` over `require-dev`; only include a dev entry when it is clearly a runtime dependency, and say why.
 - MUST record non-PHP neighbors as integration contracts, never as PHP stacks.
+- MUST NOT elevate catalog capabilities (timeouts, retries, deduplication, retention, model choice, or similar) into confirmed target behavior without call-site evidence.
+- MUST capture provider-safe test topology and all material adjacent owners; a single generic sibling is insufficient.
 - MUST NOT deep-dive stack identity, architecture, infra, security, or conventions - those belong to their own scanners.
 
 ## Final Output
