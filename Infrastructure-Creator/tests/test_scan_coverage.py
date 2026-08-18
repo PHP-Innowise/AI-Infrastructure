@@ -50,6 +50,7 @@ class ScanCoverageFixture(unittest.TestCase):
             path.write_text(text, encoding="utf-8")
         self.coverage = self.honest_coverage()
         self.ledger = self.honest_ledger()
+        self.claims = self.honest_claims()
         self.write()
 
     def honest_coverage(self) -> dict:
@@ -142,7 +143,60 @@ class ScanCoverageFixture(unittest.TestCase):
             ],
         }
 
+    def honest_claims(self) -> dict:
+        return {
+            "target_root": str(self.target),
+            "claims": [
+                {
+                    "id": "CLM-0001",
+                    "statement": "Billing runs through BillingService only",
+                    "claim_class": "invariant",
+                    "priority": "high",
+                    "evidence_ids": ["EV-STK-0002"],
+                    "scanners": ["stack-scanner"],
+                    "status": "confirmed",
+                },
+                {
+                    "id": "CLM-0002",
+                    "statement": "The feature suite covers billing",
+                    "claim_class": "capability",
+                    "priority": "medium",
+                    "evidence_ids": ["EV-STK-0003"],
+                    "scanners": ["stack-scanner"],
+                    "status": "confirmed",
+                },
+            ],
+            "contradictions": [],
+        }
+
+    def plan_with(self, invariants: list[dict]) -> Path:
+        """A plan whose evidence ids are renumbered, as a real merge does.
+
+        `profile-synthesizer` merges seven ledgers and may renumber; the join
+        between discovery and the plan therefore has to be the cited source,
+        not the id. `EV-0001` here is the plan's name for `EV-STK-0002`.
+        """
+        path = self.task / "skill-generation-plan.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "evidence": [
+                        {"id": "EV-0001", "path": "src/Billing/BillingService.php"},
+                        {"id": "EV-0002", "path": "config/services.yaml"},
+                    ],
+                    "critical_invariants": invariants,
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return path
+
     def write(self) -> None:
+        (self.task / "project-claims.json").write_text(
+            json.dumps(self.claims, indent=2) + "\n", encoding="utf-8"
+        )
         (self.task / "stack-scanner-coverage.json").write_text(
             json.dumps(self.coverage, indent=2) + "\n", encoding="utf-8"
         )
@@ -329,6 +383,157 @@ class ScanCoverageTest(ScanCoverageFixture):
                 )
             outputs.append(buffer.getvalue())
         self.assertEqual(outputs[0], outputs[1])
+
+
+
+class ClaimReconciliationTest(ScanCoverageFixture):
+    """Seven scanners state their findings in prose, in seven ledgers.
+
+    Nothing merged them, nothing noticed when two contradicted each other, and
+    nothing noticed when an invariant one of them confirmed never reached the
+    plan. These cases pin the promotion that fixes that.
+    """
+
+    def test_an_honest_claim_set_passes(self) -> None:
+        self.assertEqual(self.codes(), [])
+
+    def test_a_run_without_a_claim_set_fails_closed(self) -> None:
+        (self.task / "project-claims.json").unlink()
+        codes = [
+            item.code
+            for item in validator.validate(self.target, self.task)
+            if item.severity == "error"
+        ]
+        self.assertIn("CLAIMS_MISSING", codes)
+
+    def test_a_claim_resting_on_evidence_no_ledger_carries_is_rejected(self) -> None:
+        self.claims["claims"][0]["evidence_ids"] = ["EV-STK-9999"]
+        self.assertIn("CLAIM_EVIDENCE_UNKNOWN", self.codes())
+
+    def test_a_claim_attributed_to_a_silent_scanner_is_rejected(self) -> None:
+        self.claims["claims"][0]["scanners"] = ["integration-scanner"]
+        self.assertIn("CLAIM_SCANNER_UNKNOWN", self.codes())
+
+    def test_a_repeated_claim_id_is_rejected(self) -> None:
+        self.claims["claims"].append(dict(self.claims["claims"][0]))
+        self.assertIn("CLAIM_ID_DUPLICATE", self.codes())
+
+    def test_an_unresolved_contradiction_below_an_invariant_is_a_warning(self) -> None:
+        """Visible, not blocking: nothing a skill must honour is in doubt."""
+        self.claims["claims"][0]["claim_class"] = "convention"
+        self.claims["claims"][0]["priority"] = "medium"
+        self.claims["contradictions"] = [
+            {
+                "id": "CTR-0001",
+                "claim_ids": ["CLM-0001", "CLM-0002"],
+                "statement": "The suite exercises a path the convention forbids",
+                "resolution": "unresolved",
+            }
+        ]
+        self.assertIn("CONTRADICTION_UNRESOLVED", self.codes("warning"))
+        self.assertEqual(self.codes(), [])
+
+    def test_a_contradiction_touching_a_high_priority_invariant_is_blocking(
+        self,
+    ) -> None:
+        self.claims["contradictions"] = [
+            {
+                "id": "CTR-0002",
+                "claim_ids": ["CLM-0001", "CLM-0002"],
+                "statement": "The suite exercises the path the invariant forbids",
+                "resolution": "unresolved",
+            }
+        ]
+        self.assertIn("CONTRADICTION_UNRESOLVED_INVARIANT", self.codes())
+
+    def test_a_contradiction_naming_a_claim_that_does_not_exist_is_rejected(
+        self,
+    ) -> None:
+        self.claims["contradictions"] = [
+            {
+                "id": "CTR-0003",
+                "claim_ids": ["CLM-0001", "CLM-4242"],
+                "statement": "Names a claim nobody made",
+                "resolution": "unresolved",
+            }
+        ]
+        self.assertIn("CONTRADICTION_CLAIM_UNKNOWN", self.codes())
+
+    def test_an_invariant_the_plan_carries_is_accepted(self) -> None:
+        self.write()
+        plan = self.plan_with(
+            [
+                {
+                    "id": "billing.entry",
+                    "statement": "Billing always runs through BillingService",
+                    "evidence_ids": ["EV-0001"],
+                }
+            ]
+        )
+        codes = [
+            item.code
+            for item in validator.validate(self.target, self.task, plan)
+            if item.severity == "error"
+        ]
+        self.assertEqual(codes, [])
+
+    def test_an_invariant_the_plan_dropped_is_reported(self) -> None:
+        self.write()
+        plan = self.plan_with(
+            [
+                {
+                    "id": "unrelated",
+                    "statement": "Exports never leave a partial file in place",
+                    "evidence_ids": ["EV-0002"],
+                }
+            ]
+        )
+        codes = [
+            item.code
+            for item in validator.validate(self.target, self.task, plan)
+            if item.severity == "error"
+        ]
+        self.assertIn("CLAIM_INVARIANT_LOST", codes)
+
+    def test_an_invariant_restated_about_a_different_source_is_not_carried(
+        self,
+    ) -> None:
+        """Sharing an evidence id is not enough; the statement must match too."""
+        self.write()
+        plan = self.plan_with(
+            [
+                {
+                    "id": "billing.unrelated",
+                    "statement": "The deployment pipeline requires manual approval",
+                    "evidence_ids": ["EV-0001"],
+                }
+            ]
+        )
+        codes = [
+            item.code
+            for item in validator.validate(self.target, self.task, plan)
+            if item.severity == "error"
+        ]
+        self.assertIn("CLAIM_INVARIANT_LOST", codes)
+
+    def test_only_high_priority_invariants_have_to_survive(self) -> None:
+        """A medium capability claim is not something the plan owes an answer."""
+        self.write()
+        plan = self.plan_with(
+            [
+                {
+                    "id": "billing.entry",
+                    "statement": "Billing always runs through BillingService",
+                    "evidence_ids": ["EV-0001"],
+                }
+            ]
+        )
+        codes = [
+            item.code
+            for item in validator.validate(self.target, self.task, plan)
+            if item.severity == "error"
+        ]
+        self.assertNotIn("CLAIM_INVARIANT_LOST", codes)
 
 
 if __name__ == "__main__":

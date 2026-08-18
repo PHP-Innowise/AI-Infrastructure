@@ -46,7 +46,11 @@ All output from this run lives under `tasks/TASK-{NNN}/` in Infrastructure-Creat
    - **If your AI tool is single-threaded:** invoke each scanner's logic sequentially in the same session. Output is identical; only mechanics differ. Say so in the Context Summary.
    - Treat test topology, exact/resolved command definitions, stable high-priority invariant IDs, bounded evidence anchors, path authority/creatability, material adjacency, and routing cases as mandatory cross-scanner outputs. A scanner that omits its applicable portion is incomplete, not silently optional.
 6. **Reconcile discovery before anything reads it.** Once all seven have
-   returned, run
+   returned, promote their prose claims into one
+   `tasks/TASK-{NNN}/project-claims.json` - typed, deduplicated, each claim
+   naming the evidence ids it came from and the scanners that made it, with
+   every contradiction between them recorded rather than silently picked. Then
+   run
    `python3 bootstrap-verifier/scripts/validate_scan_coverage.py --target <target> --task-dir tasks/TASK-{NNN}`.
    A surface nobody dispositioned, coverage claimed with no evidence inside it,
    evidence cited from outside what a scanner says it read, two scanners
@@ -59,7 +63,12 @@ All output from this run lives under `tasks/TASK-{NNN}/` in Infrastructure-Creat
    missing neighbour is either confirmed or withdrawn here.
 7. **Run `stack-researcher`** once the scanners have written findings - it needs `integration-scanner-findings.md` (what to research) and `stack-scanner-findings.md` (the PHP framework/version to ground research in).
 8. **Run `clarifying-interview`** once research is done - it turns remaining `inferred`/`unknown` items into a short question set and always asks the mandatory AI-tool-selection question.
-9. **Run `profile-synthesizer`** last - it produces both handoff artifacts,
+9. **Run `profile-synthesizer`** last, then re-run the discovery gate with
+   `--plan tasks/TASK-{NNN}/skill-generation-plan.json`: a high-priority
+   invariant discovery confirmed and the plan does not carry is
+   `CLAIM_INVARIANT_LOST`. Dropping one may be right, but it is a decision, and
+   an undocumented decision cannot be told apart from an oversight.
+   `profile-synthesizer` produces both handoff artifacts,
    validates evidence paths and fingerprints, runs complete plan-level
    operational-safety, ownership/write/routing/flow diagnostics, prunes
    unjustified or conflicting skill proposals, and requires one complete schema

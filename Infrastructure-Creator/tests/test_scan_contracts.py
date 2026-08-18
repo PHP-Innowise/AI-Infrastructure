@@ -236,6 +236,30 @@ class DiscoveryCoverageContractTest(unittest.TestCase):
                 name,
             )
 
+    def test_contract_publishes_the_reconciled_claim_set(self) -> None:
+        body = collapsed(contract_text())
+        self.assertIn("tasks/TASK-{NNN}/project-claims.json", body)
+        for member in ("claim_class", "priority", "evidence_ids", "scanners"):
+            self.assertIn(f"`{member}`", body, member)
+        for value in ("invariant", "capability", "convention", "risk"):
+            self.assertIn(f"`{value}`", body, value)
+
+    def test_documented_claim_codes_exist_in_the_validator(self) -> None:
+        body = contract_text()
+        source = (
+            ROOT
+            / ".agents/skills/bootstrap-verifier/scripts/validate_scan_coverage.py"
+        ).read_text(encoding="utf-8")
+        for code in ("CLAIM_EVIDENCE_UNKNOWN", "CLAIM_INVARIANT_LOST"):
+            self.assertIn(code, body, code)
+            self.assertIn(f'"{code}"', source, code)
+
+    def test_reconciliation_is_a_step_of_the_scan_not_an_afterthought(self) -> None:
+        body = collapsed(skill_text("infra-scan"))
+        self.assertIn("project-claims.json", body)
+        self.assertIn("validate_scan_coverage.py", body)
+        self.assertIn("--plan", body)
+
     def test_contract_publishes_the_absence_entry(self) -> None:
         body = collapsed(contract_text())
         self.assertIn("`absence`", body)

@@ -115,6 +115,76 @@ Run the gate yourself before returning:
 python3 bootstrap-verifier/scripts/validate_scan_coverage.py --target <target> --task-dir tasks/TASK-001
 ```
 
+## 2b. The reconciled claim set
+
+Seven scanners run in parallel and each states its findings in prose inside its
+own ledger. Nothing merges them, so nothing notices that two contradict each
+other, and nothing notices when an invariant one of them confirmed never reaches
+the plan. Reconciliation - the step in `infra-scan` that runs once all seven have
+returned - promotes those prose claims into one
+`tasks/TASK-{NNN}/project-claims.json`:
+
+```json
+{
+  "target_root": "/absolute/path/to/target",
+  "claims": [
+    {
+      "id": "CLM-0007",
+      "statement": "A sealed document bundle rejects further pages",
+      "claim_class": "invariant",
+      "priority": "high",
+      "evidence_ids": ["EV-DOM-0012"],
+      "scanners": ["domain-behavior-scanner"],
+      "status": "confirmed"
+    }
+  ],
+  "contradictions": [
+    {
+      "id": "CTR-0001",
+      "claim_ids": ["CLM-0007", "CLM-0019"],
+      "statement": "The importer appends to bundles the domain calls sealed",
+      "resolution": "unresolved"
+    }
+  ]
+}
+```
+
+Claim members are exact: `id`, `statement`, `claim_class`, `priority`,
+`evidence_ids`, `scanners`, `status`. A contradiction carries exactly `id`,
+`claim_ids`, `statement`, `resolution`.
+
+`claim_class` is one of `invariant`, `capability`, `convention`, `risk`,
+`integration`, `command`; `priority` is `high`, `medium`, or `low`; `status`
+reuses the ledger's `confirmed` / `inferred` / `unknown`. Nothing here is a new
+finding - every claim names the evidence ids it was promoted from, and a claim
+resting on evidence no ledger carries is `CLAIM_EVIDENCE_UNKNOWN`.
+
+`priority: high` is not a fresh judgement: it is the `priority: high` the
+domain-behavior-scanner already assigned to a business invariant in its own
+report. Promoting a capability or a convention to `high` inflates the population
+this gate blocks on, which is how a rule meant to catch one dropped invariant
+turns into a rule that stops generation. Measured on four real runs, the honest
+population is seven to twelve high-priority invariants per target, and all of
+them were already carried into the plan.
+
+An unresolved contradiction is always reported. It blocks when it touches a
+high-priority invariant: a skill cannot be told to honour something discovery is
+still arguing about. Otherwise it is a warning that belongs in the confidence
+summary.
+
+**A high-priority invariant must survive into the plan.** Dropping one may well
+be right - it may intersect no selected skill - but that is a decision, and an
+undocumented decision cannot be told apart from an oversight. After synthesis,
+run the gate with the plan:
+
+```bash
+python3 bootstrap-verifier/scripts/validate_scan_coverage.py --target <target> --task-dir tasks/TASK-001 --plan tasks/TASK-001/skill-generation-plan.json
+```
+
+An invariant the plan states against at least one of the same evidence ids, in
+words that share the statement, is carried; anything else is
+`CLAIM_INVARIANT_LOST`.
+
 ## 3. Ledger shape
 
 ```json

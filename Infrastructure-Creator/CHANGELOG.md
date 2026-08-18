@@ -79,6 +79,30 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
   reconciliation time the parallel siblings have landed, so a claim made against
   a missing neighbour is confirmed or withdrawn rather than left standing.
 
+- **Seven parallel scanners now produce one reconciled claim set.** Each stated
+  its findings in prose inside its own ledger; nothing merged them, so nothing
+  noticed when two contradicted each other, and nothing noticed when an
+  invariant one of them confirmed never reached the plan. Reconciliation
+  promotes those claims into `project-claims.json` - typed by class
+  (`invariant`, `capability`, `convention`, `risk`, `integration`, `command`),
+  priority and status, each naming the evidence it came from and the scanners
+  that made it. Nothing there is a new finding: a claim resting on evidence no
+  ledger carries is `CLAIM_EVIDENCE_UNKNOWN`.
+  Unresolved contradictions are always reported, and block when they touch a
+  high-priority invariant - a skill cannot be told to honour something discovery
+  is still arguing about.
+  `CLAIM_INVARIANT_LOST` reports a high-priority invariant discovery confirmed
+  and the plan does not carry. Dropping one may be right; leaving no trace of
+  the decision is what makes it indistinguishable from an oversight.
+  Calibrated on four real runs before release: 9, 12, 7 and 8 high-priority
+  invariants, and 0 of the 36 lost - the rule does not tax honest work, it
+  catches the one that goes missing.
+  Designing it corrected the join once: `profile-synthesizer` renumbers evidence
+  when it merges seven ledgers, so matching discovery to the plan by evidence id
+  would have reported every honest plan as having lost every invariant. The join
+  is the cited source - a path, a URL, or an absence subject - which survives the
+  merge.
+
 ### Verified
 
 - **An honest thirty-six skill plan validates with zero blocking diagnostics.**
