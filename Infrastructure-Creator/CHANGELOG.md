@@ -6,6 +6,30 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Fixed
 
+- The generator could not pass its own quality gate on any target. The memory
+  quartet is unconditional, its skills verify themselves with the seeded
+  runtime, and every one of those commands is an interpreter invocation -
+  `python3 memory-bank/scripts/context.py status` - which static analysis can
+  never prove non-mutating. The gate blocked all of them as
+  `INTERPRETER_EXECUTION`, so a real end-to-end run ended in FAIL after 19
+  forge iterations with 7 errors, all in the quartet.
+  The route out is attestation, not relaxation: `commands.read_health` in the
+  generator's own `runtime-contract.json` now vouches for what the analyzer
+  cannot prove. The allowance is deliberately narrow - the list is read from
+  the generator's shipped asset and never from the target, so a scanned
+  project cannot declare its own commands safe; it is exact-match, not a
+  pattern; it covers only the `read_health` group, which the contract already
+  separates from `refresh_retrieve`, `checkpoint`, `governed_task` and
+  `dynamic_records`; and it waives attestability alone. A proven risk is never
+  waived, so `context.py status && <destructive>` stays blocked, as do
+  `refresh`, `start` and `complete` on the very same script.
+  The contract was also incomplete: `memory-bank/scripts/validate.py` is in
+  `required_skeleton` and is read-only (verified against the shipped source -
+  no write, mkdir, unlink or commit in 388 lines), but was declared nowhere,
+  so the durable validator stayed blocked. It joins `read_health`, and a new
+  test asserts every declared read-only script really is read-only rather than
+  trusting the declaration.
+
 - `CommandAnalyzer` raised on the stock Symfony skeleton, so the quality gate
   could not run at all on a normal Symfony target. Flex writes `auto-scripts`
   as an object keyed by command (`{"cache:clear": "symfony-cmd"}`), and

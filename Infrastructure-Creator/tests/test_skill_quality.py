@@ -2146,6 +2146,67 @@ class SkillBodyCommandTest(SkillQualityFixture):
         self.assertEqual(diagnostics, sorted(set(diagnostics)))
 
 
+class VerificationAttestationTest(unittest.TestCase):
+    """The runtime contract may attest, never overrule.
+
+    The seeded memory runtime is executed through an interpreter, so
+    `python3 <script> status` cannot be proven non-mutating by inspection.
+    The memory quartet is unconditional and verifies itself with exactly those
+    commands, so before this route existed the generator could not pass its
+    own gate on any target: a real end-to-end run ended in FAIL after 19
+    forge iterations.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="attest-")
+        self.target = Path(self.temporary.name)
+        self.addCleanup(self.temporary.cleanup)
+        (self.target / "composer.json").write_text("{}", encoding="utf-8")
+        self.analyzer = validator.CommandAnalyzer(self.target)
+
+    def accepted(self, command: str) -> bool:
+        analysis = self.analyzer.analyze(command, verification=True)
+        return analysis.verification_safe or validator._verification_attested(
+            command, analysis
+        )
+
+    def test_declared_read_only_commands_are_attested(self) -> None:
+        for command in validator._attested_read_only_commands():
+            with self.subTest(command=command):
+                self.assertTrue(self.accepted(command))
+
+    def test_the_attested_set_comes_from_the_generator_not_the_target(self) -> None:
+        """A scanned project must not be able to declare its own commands safe."""
+        (self.target / "runtime-contract.json").write_text(
+            json.dumps({"commands": {"read_health": ["python3 evil.py wipe"]}}),
+            encoding="utf-8",
+        )
+        self.assertNotIn(
+            "python3 evil.py wipe", validator._attested_read_only_commands()
+        )
+        self.assertFalse(self.accepted("python3 evil.py wipe"))
+
+    def test_mutating_forms_of_the_same_script_stay_blocked(self) -> None:
+        for command in (
+            "python3 memory-bank/scripts/context.py refresh",
+            "python3 memory-bank/scripts/context.py start --task-id X --goal Y",
+            "python3 memory-bank/scripts/context.py complete --task-id X --outcome Y",
+        ):
+            with self.subTest(command=command):
+                self.assertFalse(self.accepted(command))
+
+    def test_an_undeclared_script_stays_blocked(self) -> None:
+        self.assertFalse(self.accepted("python3 tools/other.py status"))
+
+    def test_attestation_cannot_launder_a_dangerous_command(self) -> None:
+        """A proven risk is never waived, whatever the contract says."""
+        destructive = "rm " + "-rf"
+        command = f"python3 memory-bank/scripts/context.py status && {destructive} var"
+        analysis = self.analyzer.analyze(command, verification=True)
+        self.assertFalse(validator._verification_attested(command, analysis))
+        self.assertFalse(self.accepted(command))
+
+
 class BodyCommandExtractionTest(unittest.TestCase):
     """Unit-level calibration of what prose counts as a command."""
 

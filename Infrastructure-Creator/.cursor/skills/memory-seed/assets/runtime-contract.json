@@ -131,7 +131,9 @@
       "python3 memory-bank/scripts/context.py status",
       "python3 memory-bank/scripts/context.py status --json",
       "python3 memory-bank/scripts/context.py validate",
-      "python3 memory-bank/scripts/context.py parity --json"
+      "python3 memory-bank/scripts/context.py parity --json",
+      "python3 memory-bank/scripts/validate.py",
+      "python3 memory-bank/scripts/validate.py --summary"
     ],
     "refresh_retrieve": [
       "python3 memory-bank/scripts/context.py refresh",

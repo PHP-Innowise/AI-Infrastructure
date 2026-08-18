@@ -1083,6 +1083,58 @@ def _shell_block_commands(lines: list[str]) -> list[str]:
     return commands
 
 
+def _attested_read_only_commands() -> frozenset:
+    """Return the runtime contract's declared read-only command surface.
+
+    The seeded memory runtime is executed through an interpreter, which static
+    analysis can never prove non-mutating: `python3 <script> status` is opaque
+    by construction. The generator nevertheless MUST emit the memory quartet on
+    every target, and those skills verify themselves with exactly those
+    commands - so without an attestation route the gate rejects the one
+    inventory the generator is required to produce.
+
+    The attestation is deliberately narrow. It is read from the generator's OWN
+    shipped asset, never from the target, so a scanned project cannot declare
+    its own commands safe; it is an exact-match list, not a pattern; and it
+    covers only `commands.read_health`, the group the contract itself separates
+    from `refresh_retrieve`, `checkpoint`, `governed_task` and
+    `dynamic_records`, all of which mutate. It waives attestability alone -
+    never a risk category (see _verification_attested).
+    """
+    try:
+        contract = json.loads(RUNTIME_CONTRACT.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return frozenset()
+    commands = contract.get("commands")
+    if not isinstance(commands, dict):
+        return frozenset()
+    read_health = commands.get("read_health")
+    if not isinstance(read_health, list):
+        return frozenset()
+    return frozenset(
+        _normalize_command_text(item).strip()
+        for item in read_health
+        if isinstance(item, str) and item.strip()
+    )
+
+
+def _verification_attested(command: str, analysis) -> bool:
+    """Report whether the runtime contract vouches for an unprovable command.
+
+    True only when the command is verbatim in the contract's read-only surface
+    AND the analysis found no risk category at all. A destructive or networked
+    command stays blocked however it is declared: the contract can attest what
+    the analyzer cannot prove, it cannot overrule what the analyzer proved.
+    """
+    # Any category other than these two is a proven risk the contract may not
+    # overrule: 'non_mutating' is the benign default and 'verification_blocker'
+    # is the attestability marker this function exists to answer.
+    non_risk = {"non_mutating", "verification_blocker"}
+    if set(analysis.categories) - non_risk:
+        return False
+    return _normalize_command_text(command).strip() in _attested_read_only_commands()
+
+
 def _forbids_span(body: str, start: int) -> bool:
     """Report whether the clause carrying ``start`` forbids its command.
 
@@ -2129,7 +2181,9 @@ def _validate_schema_1_2_skill(
                     f"{name}.{check['id']} command cannot be resolved: {error}",
                 )
             else:
-                if not command_analysis.verification_safe:
+                if not command_analysis.verification_safe and not (
+                    _verification_attested(command, command_analysis)
+                ):
                     findings = ", ".join(
                         sorted({item.code for item in command_analysis.findings})
                     )
