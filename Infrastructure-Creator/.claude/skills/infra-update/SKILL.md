@@ -50,7 +50,15 @@ Allocate a new `tasks/TASK-{N}/` for the update run. Staging output goes to `tas
 ## Process
 
 1. **Read the manifest.** Require the target project path. Load `<target>/.infra-manifest.json`. If it is missing or unparsable, **ABORT without writing anything** and tell the user why: the target is a legacy generation (produced by a generator release before manifests existed, v1.3.x or earlier) or the manifest was deleted. Recovery options to present: (a) re-run `infra-generate` and take the collision guard's explicit overwrite/merge decision, or (b) if - and only if - the user can vouch that the generated files were never edited, hand-build a manifest with the recipe in `infra-generate`'s "Version Stamp & Generation Manifest" section and re-run `infra-update`. Never fabricate a manifest yourself from the target's current state without that explicit user confirmation - hashing user-edited files as if freshly generated would authorize overwriting their edits.
-2. **Re-validate the profile and generation plan.** The manifest names its
+2. **Re-validate the profile and generation plan.** Require the same two
+   preconditions `infra-generate` does, against the task directory the manifest
+   names:
+   `python3 bootstrap-verifier/scripts/validate_scan_coverage.py --target <target> --task-dir <task> --plan <task>/skill-generation-plan.json`
+   and
+   `python3 bootstrap-verifier/scripts/validate_plan_review.py --plan <task>/skill-generation-plan.json --review <task>/skill-plan-quality-report.json`.
+   An update publishes into a target someone is already relying on, so it may
+   not accept discovery or a review that generation itself would have refused.
+   The manifest names its
    source profile; require its matching schema **1.4**
    `skill-generation-plan.json` with `routing_cases[]` and canonical
    `flow_contracts`. Re-run

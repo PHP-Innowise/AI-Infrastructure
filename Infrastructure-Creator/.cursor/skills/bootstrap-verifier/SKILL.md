@@ -58,6 +58,19 @@ Writes a report to `tasks/TASK-{N}/bootstrap-verifier-report.md`. Does not write
    `validate_skill_quality.py` (step 3), so this manual pass covers `AGENTS.md`
    and `DOD.md` commands; do not skip a skill body that the validator already
    reported.
+
+   The same evidence-to-content bar the skills are held to applies here by
+   hand, because no gate enforces it yet: `AGENTS.md`, `DOD.md`, the principles,
+   the hooks, and the seeded memory must name the target's own paths, commands,
+   and invariants. A generated document that would read identically against a
+   different PHP repository has not been generated from this target's evidence -
+   it has been copied. Report it as a blocker rather than passing it because the
+   skills happened to pass.
+   Before publishing, also require the discovery and review gates the generator
+   required:
+   `python3 scripts/validate_scan_coverage.py --target <real-target> --task-dir <task> --plan <task>/skill-generation-plan.json`
+   and
+   `python3 scripts/validate_plan_review.py --plan <task>/skill-generation-plan.json --review <task>/skill-plan-quality-report.json`.
 3. **Run the validator:** distinguish the generation root (staging or published
    target) from the real evidence target:
 
