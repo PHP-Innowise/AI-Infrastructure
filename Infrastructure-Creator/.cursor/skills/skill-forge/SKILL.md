@@ -71,7 +71,12 @@ orchestration step. The log maps every staged skill to exactly one plan entry.
      dependency>; impact: <unverified behavior>; evidence: <anchor>` and keep a
      required check blocking when its contract cannot otherwise be proved.
    Procedure text must materially reflect the evidence, not merely mention it
-   in a generic preface.
+   in a generic preface. Render every planned `required_procedure_roles` entry
+   as the step it is wired to, so each catalog obligation is visible as an
+   operational instruction; do not collapse them into one inspection step.
+   Where a check carries a `baseline`, carry its recorded observation into the
+   skill so the reader knows what the command already reports on untouched
+   code.
 5. **Preserve boundaries.** If a nearest sibling is planned, state what routes to each and cross-reference it without copying its procedure. If it is not planned, do not create a dangling reference or silently absorb unsupported scope.
 6. **Write valid frontmatter:** `name`, one-line trigger-aware `description`, `phase`, `flow-next`, `flow-alternatives`, and `related`. Every reference resolves within the plan.
 7. **Review substance, not length.** Reject a skill that could serve an unrelated PHP repository after renaming nouns; reject generic five-step loops, unsupported commands, decorative evidence lists, grouped procedures, and line padding. There is no minimum line count.

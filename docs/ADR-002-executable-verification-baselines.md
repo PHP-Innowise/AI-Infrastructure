@@ -9,7 +9,8 @@
 > записью статически. Ожидание при этом становится разностным, а не абсолютным.
 > Пример в схеме, который учит абсолютной форме, переписывается вместе с правилом.
 
-**Status:** proposed
+**Status:** accepted, implemented as schema 1.3 (see section 7 for what changed
+between the proposal and the implementation)
 **Supersedes:** nothing
 **Related:** [ADR-001](ADR-001-claim-adjudication.md) — the same shape of problem
 (a claim the deterministic gate cannot settle) resolved a different way.
@@ -143,3 +144,41 @@ would need the field added before they validate again.
 - **Do nothing and document the limit.** The defect is not rare: it appeared in
   three of four runs, in two different command shapes, and the schema's own
   exemplar teaches it.
+
+## 7. What changed when this was implemented
+
+Three deviations from section 3, each decided while writing the rules rather
+than before.
+
+**The state fingerprint was dropped.** Section 3 asked for a target fingerprint
+so a stale baseline would be detectable the way stale evidence is. There is
+nothing honest to hash. The result of `eslint assets` or `bin/phpunit` depends on
+the installed toolchain, the container, and the database - none of which are in
+the target's bytes - so a hash over the scanned paths would report "unchanged"
+for a baseline invalidated by a dependency bump. A fingerprint that is wrong in
+the direction of confidence is worse than none. Staleness is instead surfaced
+where it already was: a baseline is re-recorded whenever the plan is
+re-synthesized, and the existing regeneration-baseline diagnostics report a plan
+that changed without one.
+
+**`failing-remediated` was added, because rule 2 as written had a false
+rejection in it.** A skill whose declared job is to eliminate the recorded
+failures is *right* to promise the command exits zero. Rule 2 would have
+rejected it. The distinction is made structurally rather than lexically - a
+third `outcome` value the author states outright - so the lexical pattern only
+has to be sensitive, and a reviewer can see and challenge the claim. A read-only
+skill may not declare it.
+
+**A cross-check the proposal did not have.** Where the command is a literal
+search, this gate resolves it itself, so the recorded baseline is compared
+against that resolution instead of being trusted, and a contradiction is an
+error. That is the one place a fabricated baseline is mechanically detectable,
+and it costs nothing: the machinery was already there for grading search
+expectations.
+
+**Measured before release.** Across four real runs and one externally authored
+39-skill plan, the checks that would now require a baseline number 24, 7, 4, 13,
+and 6. Every command expectation in all five plans is written in the absolute
+form and none in the differential form - 16 absolute against 0 differential -
+which is what section 1 predicted from the exemplar, and why the exemplar was
+rewritten along with the rule.

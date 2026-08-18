@@ -17,7 +17,7 @@ It shows primary ownership, evidence-gated specialist entry points, explicit
 sibling deferrals, and handoff artifacts; it never invents a universal chain
 or routes every request through every available skill.
 
-Consumes the validated **skill-forge log** and schema **1.2**
+Consumes the validated **skill-forge log** and schema **1.3**
 `tasks/TASK-{N}/skill-generation-plan.json` as its source of truth, including
 all `routing_cases[]` and the canonical `flow_contracts`, plus profile section
 1 for the selected editions. The canonical graph is shared with
@@ -37,7 +37,7 @@ Keep the evidence target path separate from the generation root.
 2. **Read the validated contracts** to obtain the exact generated set,
    category, phase, positive/negative triggers, owned/excluded scope, every
    adjacency, routing oracle, output, and declared relationship. Reject a
-   schema 1.0/1.1 plan; flow compilation requires schema 1.2.
+   schema 1.0/1.1/1.2 plan; flow compilation requires schema 1.3.
 3. **Compile the Main Flow from `flow_contracts`.** Preserve canonical roster
    order and each flow's ordered `{phase, agents, parallel, checkpoint}` stages
    exactly. Render skill names for navigation, but never infer a second graph
@@ -74,7 +74,7 @@ Keep the evidence target path separate from the generation root.
 
 ## Canonical Flow Graph
 ```json flow-contract
-[exact schema 1.2 flow_contracts object]
+[exact schema 1.3 flow_contracts object]
 ```
 
 ## Shortcuts
@@ -98,7 +98,7 @@ Keep the evidence target path separate from the generation root.
 - MUST reflect each skill's real declared `phase`/`flow-next` when wiring edges.
 - MUST derive routing and handoffs from the validated generation plan and MUST
   NOT make every generated specialist part of the default flow.
-- MUST preserve every adjacency and every schema 1.2 routing oracle; circular
+- MUST preserve every adjacency and every schema 1.3 routing oracle; circular
   "use X for X" shortcuts and singular-sibling projections fail.
 - MUST compile the human navigation and canonical JSON block from the same
   `flow_contracts` consumed by `command-forge`; independent flow authoring is

@@ -13,7 +13,7 @@ The JSON top level MUST contain exactly these required members (extensions requi
 
 ```json
 {
-  "schema_version": "1.2",
+  "schema_version": "1.3",
   "catalog_version": "2.5.0",
   "target_root": "/absolute/path/to/target",
   "profile": "tasks/TASK-001/infra-scan-project-profile.md",
@@ -25,11 +25,17 @@ The JSON top level MUST contain exactly these required members (extensions requi
 }
 ```
 
-Top-level membership is exact. New plans use `schema_version: "1.2"`.
-Schemas `1.0` and `1.1` remain readable for plan-only audit diagnostics and
-produce a nonblocking `PLAN_SCHEMA_MIGRATION` warning. They are publication
+Top-level membership is exact. New plans use `schema_version: "1.3"`.
+Schemas `1.0`, `1.1`, and `1.2` remain readable for plan-only audit diagnostics
+and produce a nonblocking `PLAN_SCHEMA_MIGRATION` warning. They are publication
 ineligible: full or partial authored-skill validation emits blocking
-`LEGACY_PLAN_PUBLICATION_INELIGIBLE`. New synthesis runs MUST emit 1.2.
+`LEGACY_PLAN_PUBLICATION_INELIGIBLE`. New synthesis runs MUST emit 1.3.
+
+**1.3 changes nested shapes only** - the top level and the skill field set are
+1.2's. Three of them, each closing a defect measured on real plans: a role entry
+now names the evidence and the procedure step that carry it; an executable
+verification records what its command does on the unmodified target; and an
+evidence entry may state an absence.
 `catalog_version` must equal
 `skill-forge/references/candidate-registry.json`. Every registry candidate must
 appear in exactly one disposition: a selected skill's `selection_gate` or
@@ -54,7 +60,35 @@ Each `evidence[]` entry is:
 }
 ```
 
-Exactly one of `path` or `url` is required. `id`, `source_type`, `authority`,
+An evidence entry may instead record an **absence** - something the target does
+not do, such as an analyser that is configured and invoked from nowhere. The
+entry then carries `absence` with exactly `subject`, `search`, and
+`accounted_matches`, and no `path`, `url`, `fingerprint`, or `line_range`:
+
+```json
+{
+  "id": "EV-0031",
+  "absence": {
+    "subject": "No CI workflow or composer script invokes PHPStan",
+    "search": "grep -rn phpstan .github composer.json",
+    "accounted_matches": ["composer.json"]
+  },
+  "source_type": "absence",
+  "authority": "The only match declares the dependency; nothing runs it",
+  "confidence": "confirmed",
+  "supported_claims": ["PHPStan is installed but never invoked"]
+}
+```
+
+The search must be one this gate can resolve literally, and its resolution must
+equal `accounted_matches` exactly: a match outside the set is
+`EVIDENCE_ABSENCE_CONTRADICTED`, and an accounted path that stops matching is
+`EVIDENCE_ABSENCE_STALE`. What the accounted matches *mean* stays the author's
+judgement, but the file set is pinned, so the finding goes stale loudly when the
+target changes. Claims on an absence entry are grounded against the search, not
+against the subject line, which would be circular.
+
+Otherwise exactly one of `path` or `url` is required. `id`, `source_type`, `authority`,
 `confidence`, and non-empty `supported_claims` are required. Repository-path
 evidence also requires the current `sha256:<digest>` fingerprint; `line_range`
 is optional but may not exceed the source. URLs rely on their recorded
@@ -104,22 +138,58 @@ Each `skills[]` entry is one complete, independently actionable contract:
     }
   ],
   "required_procedure_roles": [
-    {"role": "select-suite-and-focused-scope", "requirements": ["Read the cited PHPUnit configuration and pick the suite the change belongs to"]},
-    {"role": "derive-critical-scenarios-from-invariants", "requirements": ["Turn each intersecting high-priority invariant into a named case"]},
-    {"role": "cover-denied-and-forbidden-paths", "requirements": ["Assert the transitions and permissions the target refuses"]},
-    {"role": "arrange-fixtures-and-test-doubles", "requirements": ["Build rows through the target's own factories and fakes"]},
-    {"role": "execute-the-evidenced-focused-command", "requirements": ["Run the command the scan proved, not a composed one"]},
-    {"role": "assert-expected-and-forbidden-outcomes", "requirements": ["State what must hold and what must never appear"]}
+    {"role": "select-suite-and-focused-scope", "requirements": ["Read the cited PHPUnit configuration and pick the suite the change belongs to"], "evidence_ids": ["EV-0007"], "procedure_step_ids": ["inspect-test-topology"]},
+    {"role": "derive-critical-scenarios-from-invariants", "requirements": ["Turn each intersecting high-priority invariant into a named case"], "evidence_ids": ["EV-0008"], "procedure_step_ids": ["name-cases-from-invariants"]},
+    {"role": "cover-denied-and-forbidden-paths", "requirements": ["Assert the transitions and permissions the target refuses"], "evidence_ids": ["EV-0008"], "procedure_step_ids": ["assert-refused-transitions"]},
+    {"role": "arrange-fixtures-and-test-doubles", "requirements": ["Build rows through the target's own factories and fakes"], "evidence_ids": ["EV-0008"], "procedure_step_ids": ["arrange-through-target-factories"]},
+    {"role": "execute-the-evidenced-focused-command", "requirements": ["Run the command the scan proved, not a composed one"], "evidence_ids": ["EV-0007"], "procedure_step_ids": ["run-the-evidenced-command"]},
+    {"role": "assert-expected-and-forbidden-outcomes", "requirements": ["State what must hold and what must never appear"], "evidence_ids": ["EV-0008"], "procedure_step_ids": ["assert-refused-transitions", "run-the-evidenced-command"]}
   ],
   "procedure_steps": [
     {
       "id": "inspect-test-topology",
       "action": "Inspect the PHPUnit configuration and base test case before selecting a test level",
-      "evidence_ids": ["EV-0007", "EV-0008"],
+      "evidence_ids": ["EV-0007"],
       "path_refs": ["phpunit.xml", "tests/TestCase.php"],
       "decision_refs": ["choose-test-level"],
       "expected_outcome": "The selected unit, integration, or feature boundary matches the target suite",
       "failure_branch": "Stop and report unresolved test authority when no branch is evidenced"
+    },
+    {
+      "id": "name-cases-from-invariants",
+      "action": "Name one case per intersecting invariant from section 8.4 of the Profile",
+      "evidence_ids": ["EV-0008"],
+      "path_refs": ["tests/TestCase.php"],
+      "decision_refs": ["choose-test-level"],
+      "expected_outcome": "Every intersecting invariant has a named case",
+      "failure_branch": "Report the invariant that no case can reach and stop"
+    },
+    {
+      "id": "assert-refused-transitions",
+      "action": "Assert the transitions and permissions the target refuses, not only the ones it allows",
+      "evidence_ids": ["EV-0008"],
+      "path_refs": ["tests/TestCase.php"],
+      "decision_refs": ["choose-test-level"],
+      "expected_outcome": "Each denied path fails for the target's own reason",
+      "failure_branch": "Report the refusal the suite cannot express and stop"
+    },
+    {
+      "id": "arrange-through-target-factories",
+      "action": "Arrange rows through the target's own factories and fakes rather than literal fixtures",
+      "evidence_ids": ["EV-0008"],
+      "path_refs": ["tests/TestCase.php"],
+      "decision_refs": ["choose-test-level"],
+      "expected_outcome": "Arrangement uses the factories the scan proved",
+      "failure_branch": "Report the missing factory and stop rather than inlining data"
+    },
+    {
+      "id": "run-the-evidenced-command",
+      "action": "Run the focused command the scan proved against the changed file only",
+      "evidence_ids": ["EV-0007"],
+      "path_refs": ["phpunit.xml"],
+      "decision_refs": ["choose-test-level"],
+      "expected_outcome": "The focused command runs and its output is recorded",
+      "failure_branch": "Report SKIPPED with the missing dependency when the command cannot run"
     }
   ],
   "decision_points": [
@@ -131,12 +201,17 @@ Each `skills[]` entry is one complete, independently actionable contract:
       "mode": "command",
       "instruction": "Run the focused PHPUnit file that covers the changed behavior",
       "command": "vendor/bin/phpunit tests/Feature/ExampleTest.php",
+      "baseline": {
+        "command": "vendor/bin/phpunit tests/Feature/ExampleTest.php",
+        "observed": "exit 1; 42 passed, 3 failed (ExampleTest::testLegacyImport and 2 others)",
+        "outcome": "failing"
+      },
       "prerequisites": ["Local dependencies are installed"],
       "safe_scope": "Local test process with no provider or production access",
       "mutation_class": "none",
       "network_class": "none",
-      "expected_result": "The focused test exits zero and reports no failed assertions",
-      "failure_result": "Any nonzero exit or failed assertion blocks completion",
+      "expected_result": "No failure outside the three recorded in the baseline, and every case named for this change passes",
+      "failure_result": "Any new failure, or a recorded failure that changes shape, blocks completion",
       "skip_condition": "vendor/bin/phpunit is absent or the required local dependency is unavailable",
       "skip_reporting": "Report SKIPPED with the missing dependency and the unverified assertion"
     }
@@ -208,7 +283,7 @@ Each `skills[]` entry is one complete, independently actionable contract:
 }
 ```
 
-All shown members except `fixed_blocks` are required under schema 1.2, including non-empty
+All shown members except `fixed_blocks` are required under schema 1.3, including non-empty
 positive and negative triggers, owned and excluded scope, structured ownership,
 required procedure roles and steps, decision points, structured verification,
 integration safety, path contracts, evidence anchors, routing cases, output,
@@ -231,7 +306,7 @@ External-side-effect skills require an explicitly authorized
 `sandbox-with-approval` or `approved-live` integration policy; target writes,
 when any, remain bounded by `writes` and path contracts.
 
-Each schema 1.2 `decision_points[]` item has exactly `id`, `question`, and
+Each `decision_points[]` item has exactly `id`, `question`, and
 non-empty `branches`. Each `procedure_steps[]` item has exactly `id`, `action`,
 `evidence_ids`, `path_refs`, `decision_refs`, `expected_outcome`, and
 `failure_branch`. IDs are stable dotted/kebab lowercase, and every decision
@@ -247,8 +322,36 @@ covers denied paths. `load-evidence`/`execute`/`verify` describes every skill ev
 written and therefore describes none - two measured plans filled this field with
 exactly that trio for 9 of 9 and 35 of 35 skills.
 
+Each role entry has exactly `role`, `requirements`, `evidence_ids`, and
+`procedure_step_ids`. Declaring an obligation is not carrying it, so every role
+names the evidence that grounds it and the operational step that discharges it;
+both must resolve inside the skill, and a runtime-fixed skill wires steps only.
+Three or more obligations discharged by one and the same step is
+`PROCEDURE_ROLE_COLLAPSED` - the "one general inspection step" shape. Measured
+before release: 0 of 45 skills across four real runs sit at one step, against 37
+of 39 in an externally authored plan, so the rule separates a template from
+honest work rather than taxing it.
+
 `safe_scope`, `mutation_class`, `network_class`, `expected_result`,
 `failure_result`, `skip_condition`, and `skip_reporting`.
+`baseline` records what the command does on the **unmodified** target - exactly
+`command` (identical to the check's own), `observed`, and `outcome`, one of
+`passing`, `failing`, or `failing-remediated`. Manual checks and checks this gate
+resolves literally may use JSON `null`; any other command check without a
+baseline is `VERIFICATION_BASELINE_MISSING`, because an expectation may not be
+declared for a command nobody observed. See
+[ADR-002](../../../../../docs/ADR-002-executable-verification-baselines.md).
+
+**Write the expectation differentially.** Against a `failing` baseline, promising
+that the command succeeds outright is `VERIFICATION_BASELINE_CONTRADICTED`: on a
+target whose linter or suite does not currently pass, "exits zero" is false the
+moment it is written, and the skill then raises a blocking finding on untouched
+code every time it runs. Say "no failure outside the recorded baseline" instead.
+Use `failing-remediated` only when eliminating the recorded failure is this
+skill's own declared job; a read-only skill may not claim it. Where the gate can
+resolve the command itself, a recorded baseline is cross-checked against that
+resolution rather than trusted.
+
 `mode` is `command` or `manual`; command checks require a concrete command,
 while manual checks use JSON `null`. Generic references to an "evidenced",
 "configured", "appropriate", or "narrow" command are invalid. Verification

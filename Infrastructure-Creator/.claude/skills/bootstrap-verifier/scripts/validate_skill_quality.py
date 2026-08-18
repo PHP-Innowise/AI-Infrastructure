@@ -312,7 +312,19 @@ BODY_PATH_CREATION_PATTERN = re.compile(
     r"|scaffold|write)(?:s|d|es|ed|ing)?\b|\b(?:new|wrote)\b",
     re.I,
 )
-SUPPORTED_PLAN_SCHEMAS = {"1.0", "1.1", "1.2"}
+CURRENT_PLAN_SCHEMA = "1.3"
+SUPPORTED_PLAN_SCHEMAS = {"1.0", "1.1", "1.2", "1.3"}
+# Schemas that carry the typed operational contract. 1.3 adds nested shapes
+# only - the top level and the skill field set are 1.2's - so every typed rule
+# written for 1.2 applies unchanged.
+TYPED_PLAN_SCHEMAS = {"1.2", "1.3"}
+# Readable for audit diagnostics, ineligible for publication.
+LEGACY_PLAN_SCHEMAS = {"1.0", "1.1", "1.2"}
+# What the command did on the unmodified target, per ADR-002.  `failing` and
+# `failing-remediated` differ in what the skill is allowed to promise: the
+# first must express its expectation differentially, the second declares that
+# eliminating the recorded failure is this skill's own job.
+VERIFICATION_BASELINE_OUTCOMES = {"passing", "failing", "failing-remediated"}
 ROUTING_ROLES = {"primary", "defer", "fallback"}
 OWNERSHIP_MODES = {"exclusive", "shared", "composed"}
 CAPABILITY_MODES = {"read-only", "workspace-write", "external-side-effect"}
@@ -579,6 +591,32 @@ NON_FALSIFIABLE_VERIFICATION_PATTERN = re.compile(
     r"suspicious|unusual|wrong)\b"
     r"|\beverything\s+(?:appears|is|looks|seems)\s+(?:correct|fine|good|"
     r"in order|ok|okay|right|as expected)\b",
+    re.I,
+)
+# An expectation that promises the whole command succeeds, project-wide.  On a
+# target whose linter or suite does not currently pass - which is most targets -
+# that promise is false the moment it is written, and the skill raises a
+# blocking finding on untouched code every time it runs.  Graded only against a
+# recorded failing baseline, so the pattern only has to be sensitive: the
+# escape hatch is structural (`failing-remediated`), not lexical.
+ABSOLUTE_SUCCESS_PATTERN = re.compile(
+    r"\bexits?\s+(?:with\s+)?(?:zero|0|code\s+(?:zero|0))\b"
+    r"|\bexit\s+(?:status|code)\s+(?:of\s+)?(?:zero|0)\b"
+    r"|\bno\s+(?:reported\s+|remaining\s+)?"
+    r"(?:error|errors|failure|failures|violation|violations|problem|problems|"
+    r"warning|warnings|offence|offences|offense|offenses)\b"
+    r"|\breports?\s+no\s+\w+"
+    r"|\b(?:all|every)\s+(?:test|tests|check|checks|assertion|assertions)\s+"
+    r"(?:pass|passes|passed|succeed|succeeds)\b"
+    r"|\bthe\s+(?:suite|command|linter|analyser|analyzer)\s+"
+    r"(?:passes|is\s+clean|is\s+green)\b",
+    re.I,
+)
+# The differential form the recorded baseline makes available: not "eslint
+# exits zero" but "no error outside the recorded baseline".
+DIFFERENTIAL_EXPECTATION_PATTERN = re.compile(
+    r"\bbaseline\b|\bpre-?existing\b|\balready\s+(?:present|recorded|failing)\b"
+    r"|\bnewly\s+introduced\b|\bno\s+new\b|\bnot\s+present\s+before\b",
     re.I,
 )
 MAX_DIAGNOSTIC_EXCERPT = 72
@@ -1282,6 +1320,275 @@ def _validate_catalog_role_coverage(
             f"{name} does not carry the catalog obligations of its candidate: "
             f"{', '.join(uncovered)}",
         )
+
+
+def _validate_role_coverage_wiring(
+    name: str,
+    skill: dict,
+    step_ids: set,
+    runtime_fixed: bool,
+    diagnostics: list,
+) -> None:
+    """Require every declared obligation to name its evidence and its step.
+
+    Declaring an obligation is not carrying it: schema 1.2 accepted a role and
+    a sentence of requirements, so a role could be satisfied by writing it
+    down. The plan's criterion is stricter - a selected candidate matches every
+    mandatory role to evidence and to an operational step - and schema 1.3
+    types the entry so the match can be resolved rather than trusted.
+
+    A runtime-fixed skill declares no target evidence by construction, so its
+    roles are wired to steps only; the memory quartet is judged by runtime
+    contract accuracy, not by project specificity.
+    """
+    declared_evidence = {
+        str(item).strip()
+        for item in _as_list(skill.get("evidence_ids"))
+        if _is_nonempty_string(item)
+    }
+    referenced_steps: list[set] = []
+    for index, entry in enumerate(_as_list(skill.get("required_procedure_roles"))):
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != {
+                "role",
+                "requirements",
+                "evidence_ids",
+                "procedure_step_ids",
+            }
+            or not _is_nonempty_string(entry.get("role"))
+            or not _is_string_list(entry.get("requirements"))
+            or not _is_string_list(entry.get("evidence_ids"), allow_empty=runtime_fixed)
+            or not _is_string_list(entry.get("procedure_step_ids"))
+        ):
+            _diag(
+                diagnostics,
+                "PROCEDURE_ROLE_CONTRACT_INVALID",
+                f"{name}.required_procedure_roles[{index}] must be a typed "
+                "schema 1.3 role with its evidence and procedure steps",
+            )
+            continue
+        role = entry["role"].strip()
+        unknown_evidence = sorted(
+            str(item).strip()
+            for item in entry["evidence_ids"]
+            if str(item).strip() not in declared_evidence
+        )
+        if unknown_evidence:
+            _diag(
+                diagnostics,
+                "PROCEDURE_ROLE_EVIDENCE_UNKNOWN",
+                f"{name}.{role} is supported by evidence the skill does not "
+                f"cite: {', '.join(unknown_evidence)}",
+            )
+        unknown_steps = sorted(
+            str(item).strip()
+            for item in entry["procedure_step_ids"]
+            if str(item).strip() not in step_ids
+        )
+        if unknown_steps:
+            _diag(
+                diagnostics,
+                "PROCEDURE_ROLE_STEP_UNKNOWN",
+                f"{name}.{role} names procedure steps that do not exist: "
+                f"{', '.join(unknown_steps)}",
+            )
+        referenced_steps.append(
+            {str(item).strip() for item in entry["procedure_step_ids"]}
+        )
+    # Three or more distinct obligations discharged by one and the same step is
+    # the template shape the plan's readiness criteria name outright: a complex
+    # skill must not pass with a single general inspection step. Only the
+    # unambiguous form blocks - every role pointing at exactly one step - since
+    # any ratio beyond that would be calibrated on a corpus that does not exist
+    # yet.
+    if len(referenced_steps) >= 3:
+        union = set().union(*referenced_steps)
+        if len(union) == 1:
+            _diag(
+                diagnostics,
+                "PROCEDURE_ROLE_COLLAPSED",
+                f"{name} discharges {len(referenced_steps)} catalog obligations "
+                f"with the single step {sorted(union)[0]}",
+            )
+
+
+def _validate_verification_baseline(
+    name: str,
+    check: dict,
+    target: Path,
+    capability_mode: str,
+    diagnostics: list,
+) -> None:
+    """Grade a recorded baseline against ADR-002.
+
+    The gate cannot run `eslint` or `phpunit`: their result is a function of
+    the installed toolchain, not of the target's bytes, and executing would
+    cost the gate its dependency-freedom, byte-stable output, offline CI and
+    fail-closed behaviour. So the observation is recorded where it is already
+    being made - by the agent holding the target, which has to run the command
+    anyway to write a truthful expectation - and the gate compares two strings.
+
+    A search-shaped command is different: the gate resolves it itself, so a
+    baseline recorded for one is cross-checked rather than trusted, and is
+    optional because the resolution is already authoritative.
+    """
+    baseline = check.get("baseline")
+    command = check.get("command")
+    resolvable = bool(command) and _parse_search_command(
+        str(command), str(check.get("skip_condition") or ""), target
+    ) is not None
+    if baseline is None:
+        if check.get("mode") == "command" and not resolvable:
+            _diag(
+                diagnostics,
+                "VERIFICATION_BASELINE_MISSING",
+                f"{name}.{check['id']} declares an expectation for a command "
+                "nobody observed; record what it does on the unmodified target",
+            )
+        return
+    if (
+        not isinstance(baseline, dict)
+        or set(baseline) != {"command", "observed", "outcome"}
+        or not _is_nonempty_string(baseline.get("observed"))
+        or baseline.get("outcome") not in VERIFICATION_BASELINE_OUTCOMES
+        or not _is_nonempty_string(baseline.get("command"))
+    ):
+        _diag(
+            diagnostics,
+            "VERIFICATION_BASELINE_INVALID",
+            f"{name}.{check['id']} baseline must record the command, what it "
+            "did, and one of "
+            f"{', '.join(sorted(VERIFICATION_BASELINE_OUTCOMES))}",
+        )
+        return
+    if check.get("mode") != "command":
+        _diag(
+            diagnostics,
+            "VERIFICATION_BASELINE_INVALID",
+            f"{name}.{check['id']} is a manual check and cannot carry an "
+            "executed baseline",
+        )
+        return
+    if str(baseline["command"]).strip() != str(command).strip():
+        _diag(
+            diagnostics,
+            "VERIFICATION_BASELINE_COMMAND_MISMATCH",
+            f"{name}.{check['id']} baseline records a different command than "
+            "the one the check runs",
+        )
+        return
+    expected = str(check.get("expected_result") or "")
+    if baseline["outcome"] == "failing" and ABSOLUTE_SUCCESS_PATTERN.search(
+        expected
+    ) and not DIFFERENTIAL_EXPECTATION_PATTERN.search(expected):
+        _diag(
+            diagnostics,
+            "VERIFICATION_BASELINE_CONTRADICTED",
+            f"{name}.{check['id']} promises the command succeeds outright "
+            "while its recorded baseline fails on the unmodified target; "
+            "state the expectation against the baseline",
+        )
+    if baseline["outcome"] == "failing-remediated" and capability_mode == "read-only":
+        _diag(
+            diagnostics,
+            "VERIFICATION_BASELINE_REMEDIATION_CONFLICT",
+            f"{name}.{check['id']} claims to eliminate the recorded failure "
+            "but the skill is read-only",
+        )
+    if not resolvable:
+        return
+    query = _parse_search_command(
+        str(command), str(check.get("skip_condition") or ""), target
+    )
+    resolution = _search_target(target, query) if query is not None else None
+    if resolution is None:
+        return
+    _, matched = resolution
+    observed_success = bool(matched)
+    if observed_success != (baseline["outcome"] == "passing"):
+        _diag(
+            diagnostics,
+            "VERIFICATION_BASELINE_CONTRADICTED",
+            f"{name}.{check['id']} records a "
+            f"{baseline['outcome']} baseline for a search this gate resolves "
+            f"to {len(matched)} match(es)",
+        )
+
+
+def _validate_absence_evidence(
+    evidence_id: str,
+    absence: Any,
+    target: Path,
+    diagnostics: list,
+) -> bool:
+    """Grade evidence of something the target does not do.
+
+    "PHPStan is installed and invoked from nowhere" could not enter the ledger
+    at all: every entry needed a path and a fingerprint, and an absence has
+    neither. It was therefore the one class of finding the scanners could not
+    record, which is unfortunate, because a missing invocation is exactly the
+    kind of fact a skill needs to know.
+
+    The entry carries a search this gate resolves itself, plus the matches the
+    author accounted for. The file set is then pinned: a match outside the
+    accounted set contradicts the absence, and an accounted path that stops
+    matching makes the entry stale. What the matches mean stays the author's
+    judgement - but it is judgement on a set of files the gate agrees with.
+    """
+    if (
+        not isinstance(absence, dict)
+        or set(absence) != {"subject", "search", "accounted_matches"}
+        or not _is_nonempty_string(absence.get("subject"))
+        or not _is_nonempty_string(absence.get("search"))
+        or not _is_string_list(absence.get("accounted_matches"), allow_empty=True)
+    ):
+        _diag(
+            diagnostics,
+            "EVIDENCE_ABSENCE_INVALID",
+            f"evidence {evidence_id} must state the subject, the search that "
+            "establishes it, and the matches it accounts for",
+        )
+        return False
+    query = _parse_search_command(str(absence["search"]), "", target)
+    if query is None:
+        _diag(
+            diagnostics,
+            "EVIDENCE_ABSENCE_UNRESOLVABLE",
+            f"evidence {evidence_id} rests on a search this gate cannot "
+            "resolve, so the absence would be an assertion",
+        )
+        return False
+    resolution = _search_target(target, query)
+    if resolution is None:
+        _diag(
+            diagnostics,
+            "EVIDENCE_ABSENCE_UNRESOLVABLE",
+            f"evidence {evidence_id} search exceeds the scan budget or reads "
+            "an unreadable file, so the absence cannot be established",
+        )
+        return False
+    _, matched = resolution
+    accounted = {str(item).strip() for item in absence["accounted_matches"]}
+    contradicting = sorted(set(matched) - accounted)
+    if contradicting:
+        _diag(
+            diagnostics,
+            "EVIDENCE_ABSENCE_CONTRADICTED",
+            f"evidence {evidence_id} claims an absence the target contradicts "
+            f"at: {', '.join(contradicting[:5])}",
+        )
+        return False
+    stale = sorted(accounted - set(matched))
+    if stale:
+        _diag(
+            diagnostics,
+            "EVIDENCE_ABSENCE_STALE",
+            f"evidence {evidence_id} accounts for matches that no longer "
+            f"exist: {', '.join(stale[:5])}",
+        )
+        return False
+    return True
 
 
 def _runtime_command_purposes() -> dict:
@@ -3079,6 +3386,7 @@ def _validate_search_verification(
 
 
 def _validate_schema_1_2_skill(
+    schema_version: str,
     name: str,
     skill: dict[str, Any],
     evidence_claims: dict[str, list[str]],
@@ -3150,7 +3458,7 @@ def _validate_schema_1_2_skill(
             _diag(
                 diagnostics,
                 "DECISION_POINT_INVALID",
-                f"{name}.decision_points[{index}] must be a typed schema 1.2 decision",
+                f"{name}.decision_points[{index}] must be a typed decision",
             )
             continue
         if decision["id"] in decision_ids:
@@ -3256,6 +3564,11 @@ def _validate_schema_1_2_skill(
                 f"{name}.{step['id']} references unknown decisions: {unknown_decisions}",
             )
 
+    if schema_version not in LEGACY_PLAN_SCHEMAS:
+        _validate_role_coverage_wiring(
+            name, skill, procedure_ids, runtime_fixed, diagnostics
+        )
+
     verification = skill.get("verification")
     verification_ids: set[str] = set()
     if not isinstance(verification, list) or not verification:
@@ -3280,6 +3593,8 @@ def _validate_schema_1_2_skill(
             "skip_condition",
             "skip_reporting",
         }
+        if schema_version not in LEGACY_PLAN_SCHEMAS:
+            expected_fields.add("baseline")
         if (
             not isinstance(check, dict)
             or set(check) != expected_fields
@@ -3296,6 +3611,7 @@ def _validate_schema_1_2_skill(
                     "id",
                     "mode",
                     "command",
+                    "baseline",
                     "prerequisites",
                     "mutation_class",
                     "network_class",
@@ -3319,6 +3635,14 @@ def _validate_schema_1_2_skill(
                 f"{name} repeats verification id: {check['id']}",
             )
         verification_ids.add(check["id"])
+        if schema_version not in LEGACY_PLAN_SCHEMAS:
+            _validate_verification_baseline(
+                name,
+                check,
+                target,
+                str(capability.get("mode") or ""),
+                diagnostics,
+            )
         verification_text = " ".join(
             str(check[field])
             for field in (
@@ -3979,7 +4303,7 @@ def _validate_contract_inventory(
     if schema_version == "1.0":
         _adapt_schema_1_0(plan_skills)
 
-    if schema_version in {"1.1", "1.2"}:
+    if schema_version in {"1.1"} | TYPED_PLAN_SCHEMAS:
         ownership_owners: defaultdict[str, set[str]] = defaultdict(set)
         ownership_entries: defaultdict[str, list[tuple[str, dict[str, Any]]]] = (
             defaultdict(list)
@@ -4247,7 +4571,7 @@ def _validate_contract_inventory(
                 relation = _routing_relation(left, right_name)
                 reciprocal = _routing_relation(right, left_name)
                 resolved = (
-                    schema_version in {"1.1", "1.2"}
+                    schema_version in {"1.1"} | TYPED_PLAN_SCHEMAS
                     and relation is not None
                     and reciprocal is not None
                     and _valid_reciprocal_roles(
@@ -4357,7 +4681,7 @@ def _validate_plan(
     schema_version = plan.get("schema_version")
     required_plan_fields = (
         SCHEMA_1_2_PLAN_FIELDS
-        if schema_version == "1.2"
+        if schema_version in TYPED_PLAN_SCHEMAS
         else LEGACY_PLAN_FIELDS
     )
     for field in required_plan_fields:
@@ -4376,14 +4700,15 @@ def _validate_plan(
         _diag(
             diagnostics,
             "PLAN_SCHEMA_VERSION",
-            "schema_version must equal '1.0', '1.1', or '1.2'",
+            "schema_version must be one of "
+            f"{', '.join(sorted(SUPPORTED_PLAN_SCHEMAS))}",
         )
-    elif schema_version in {"1.0", "1.1"}:
+    elif schema_version in LEGACY_PLAN_SCHEMAS:
         _diag(
             diagnostics,
             "PLAN_SCHEMA_MIGRATION",
             f"schema {schema_version} is accepted for audit diagnostics only; "
-            "new plans must use schema 1.2",
+            f"new plans must use schema {CURRENT_PLAN_SCHEMA}",
             "warning",
         )
     if not _is_nonempty_string(plan["catalog_version"]):
@@ -4437,11 +4762,32 @@ def _validate_plan(
             if evidence_id in evidence_map:
                 _diag(diagnostics, "EVIDENCE_ID_DUPLICATE", f"duplicate evidence id: {evidence_id}")
                 continue
+            absence = (
+                entry.get("absence")
+                if schema_version not in LEGACY_PLAN_SCHEMAS
+                else None
+            )
             location = _evidence_location(entry)
-            if location is None:
+            resolved: Path | None = None
+            if absence is not None:
+                if location is not None:
+                    _diag(
+                        diagnostics,
+                        "EVIDENCE_LOCATION",
+                        f"evidence {evidence_id} states an absence and cannot "
+                        "also cite a path or URL",
+                    )
+                    continue
+                if not _validate_absence_evidence(
+                    evidence_id, absence, target, diagnostics
+                ):
+                    continue
+                kind, value = "absence", str(absence["subject"]).strip()
+            elif location is None:
                 _diag(diagnostics, "EVIDENCE_LOCATION", f"evidence {evidence_id} must define exactly one path or URL")
                 continue
-            kind, value = location
+            else:
+                kind, value = location
             allowed_evidence_fields = {
                 "id",
                 "path",
@@ -4453,6 +4799,8 @@ def _validate_plan(
                 "fingerprint",
                 "supported_claims",
             }
+            if schema_version not in LEGACY_PLAN_SCHEMAS:
+                allowed_evidence_fields.add("absence")
             unknown_evidence_fields = set(entry) - allowed_evidence_fields
             if unknown_evidence_fields:
                 _diag(
@@ -4474,7 +4822,11 @@ def _validate_plan(
                     "EVIDENCE_CONFIDENCE",
                     f"evidence {evidence_id} has invalid confidence",
                 )
-            if kind == "url":
+            if kind == "absence":
+                # The subject is prose, not a location: the search already
+                # resolved, so there is no file to fingerprint or range.
+                pass
+            elif kind == "url":
                 if not _approved_url(value):
                     _diag(diagnostics, "EVIDENCE_URL_INVALID", f"evidence {evidence_id} has an unapproved URL: {value}")
                     continue
@@ -4538,7 +4890,24 @@ def _validate_plan(
                 )
             else:
                 evidence_claims[evidence_id] = entry["supported_claims"]
-                if kind == "path" and resolved is not None and resolved.is_file():
+                if kind == "absence":
+                    # The claim has to be about the thing that was actually
+                    # searched for. Grounding it in the author's own subject
+                    # line would be circular; the search expression is the one
+                    # part of the entry this gate resolved itself.
+                    searched = _cited_vocabulary(str(absence["search"]))
+                    for claim in entry["supported_claims"]:
+                        claim_tokens = (
+                            _meaningful_tokens(claim) - CLAIM_SERVICE_WORDS
+                        )
+                        if not claim_tokens & searched:
+                            _diag(
+                                diagnostics,
+                                "EVIDENCE_CLAIM_UNSUPPORTED",
+                                f"evidence {evidence_id} claim names nothing "
+                                f"the absence search establishes: {claim}",
+                            )
+                elif kind == "path" and resolved is not None and resolved.is_file():
                     lines = resolved.read_text(
                         encoding="utf-8", errors="replace"
                     ).splitlines()
@@ -4686,7 +5055,7 @@ def _validate_plan(
             continue
         required_skill_fields = (
             SCHEMA_1_2_SKILL_FIELDS
-            if schema_version == "1.2"
+            if schema_version in TYPED_PLAN_SCHEMAS
             else REQUIRED_SKILL_FIELDS
         )
         missing = [field for field in required_skill_fields if field not in skill]
@@ -4878,8 +5247,9 @@ def _validate_plan(
                     "SKILL_WRITE_INVALID",
                     f"{name} write glob must be normalized: {write}",
                 )
-        if schema_version == "1.2":
+        if schema_version in TYPED_PLAN_SCHEMAS:
             _validate_schema_1_2_skill(
+                schema_version,
                 name,
                 skill,
                 evidence_claims,
@@ -4961,7 +5331,7 @@ def _validate_plan(
                     "SKILL_SELECTION_BOUNDARY_UNKNOWN",
                     f"{name} distinguishes unknown candidate: {candidate}",
                 )
-    if schema_version == "1.2":
+    if schema_version in TYPED_PLAN_SCHEMAS:
         _validate_schema_1_2_plan_contracts(
             plan,
             plan_skills,
@@ -5336,12 +5706,13 @@ def validate(
         if plan
         else ({}, {})
     )
-    if plan.get("schema_version") in {"1.0", "1.1"}:
+    if plan.get("schema_version") in LEGACY_PLAN_SCHEMAS:
         _diag(
             diagnostics,
             "LEGACY_PLAN_PUBLICATION_INELIGIBLE",
             f"schema {plan['schema_version']} is audit-only and cannot validate "
-            "authored or partially authored generation output; migrate to schema 1.2",
+            "authored or partially authored generation output; migrate to "
+            f"schema {CURRENT_PLAN_SCHEMA}",
         )
     _validate_authored_inventory(
         skills_dir,

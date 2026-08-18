@@ -77,7 +77,7 @@ Not everything needs to be rewritten - some of Infrastructure-Creator's own bund
    reduced-frontmatter agents/commands from Claude's canonical wrapper layer;
    skip agents/commands for Codex.
 9. **Prove the sibling carries the quality architecture.** Verify its profile
-   synthesizer emits a complete schema 1.2 evidence ledger and one operational
+   synthesizer emits a complete schema 1.3 evidence ledger and one operational
    contract per planned
    skill; its forge generates into staging in small evidence-scoped batches;
    wrappers and every flow artifact derive routing from one contract graph; and

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Validate schema 1.2 routing and compiled generated flow contracts."""
+"""Validate typed routing and compiled generated flow contracts.
+
+The routing oracle and the canonical graph are unchanged between schema 1.2
+and 1.3: 1.3 alters nested shapes the flow layer does not read.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +13,11 @@ import re
 import sys
 from pathlib import Path
 from typing import Any
+
+# Schemas carrying the typed routing oracle. This validator is standalone by
+# design - it ships inside any accelerator - so the set is declared here
+# rather than imported from the quality gate.
+TYPED_PLAN_SCHEMAS = {"1.2", "1.3"}
 
 GRAPH_BLOCK = re.compile(
     r"```json flow-contract\s*\n(?P<payload>.*?)\n```", re.DOTALL
@@ -99,7 +108,7 @@ def _frontmatter_stages(path: Path) -> tuple[str, list[dict[str, Any]]]:
 def _validate_routing(plan: dict[str, Any], errors: list[str]) -> None:
     skills = plan.get("skills")
     if not isinstance(skills, list):
-        errors.append("plan: schema 1.2 requires skills[]")
+        errors.append("plan: a typed plan requires skills[]")
         return
     names = {
         item.get("name")
@@ -352,13 +361,16 @@ def _validate_graph(
 
 
 def validate_plan_graph(plan: dict[str, Any]) -> list[str]:
-    """Validate only the schema 1.2 routing oracle and canonical graph."""
+    """Validate only the typed routing oracle and canonical graph."""
     errors: list[str] = []
-    if plan.get("schema_version") != "1.2":
-        return ["plan: flow validation requires schema_version 1.2"]
+    if plan.get("schema_version") not in TYPED_PLAN_SCHEMAS:
+        return [
+            "plan: flow validation requires schema_version "
+            f"{' or '.join(sorted(TYPED_PLAN_SCHEMAS))}"
+        ]
     graph = plan.get("flow_contracts")
     if not isinstance(graph, dict):
-        return ["plan: schema 1.2 requires canonical flow_contracts"]
+        return ["plan: a typed plan requires canonical flow_contracts"]
     _validate_routing(plan, errors)
     _validate_graph(plan, graph, errors)
     return sorted(set(errors))

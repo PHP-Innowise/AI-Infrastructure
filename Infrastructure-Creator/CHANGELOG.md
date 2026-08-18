@@ -4,6 +4,54 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Breaking
+
+- **Plan schema 1.3.** One migration, three nested shapes; the top level and the
+  skill field set are 1.2's, so a 1.2 plan differs from a 1.3 plan only inside
+  `required_procedure_roles[]`, `verification[]`, and `evidence[]`. Schema 1.2
+  joins 1.0 and 1.1 as readable-for-audit and publication-ineligible; new
+  synthesis emits 1.3.
+  - *A catalog obligation now names what carries it.* A role entry has exactly
+    `role`, `requirements`, `evidence_ids`, and `procedure_step_ids`, and both
+    reference sets must resolve inside the skill. Declaring an obligation was
+    not carrying it: 1.2 accepted a role plus a sentence, so the field could be
+    satisfied by writing it down.
+  - *Three or more obligations discharged by one step is `PROCEDURE_ROLE_COLLAPSED`* -
+    the "one general inspection step" shape the readiness criteria name.
+    Calibrated before release on both honest corpora: 0 of 45 skills across four
+    real runs, against 37 of 39 in an externally authored plan. Median procedure
+    length is 5 steps in our runs and 1 in theirs, so the rule separates a
+    template from honest work instead of taxing it. Only the unambiguous form
+    blocks; any ratio beyond it would be calibrated on a corpus that does not
+    exist yet.
+  - *An executable check records what its command already does* ([ADR-002]).
+    `verification[].baseline` carries the command, the observation, and one of
+    `passing` / `failing` / `failing-remediated`. The gate cannot run `eslint`:
+    the result is a function of the installed toolchain, not of the target's
+    bytes, and executing would cost the gate its dependency-freedom, byte-stable
+    output, offline CI, and fail-closed behaviour. So the observation is recorded
+    by the agent that has to run it anyway, and the gate compares two strings.
+    Promising outright success against a `failing` baseline is
+    `VERIFICATION_BASELINE_CONTRADICTED` - the measured defect: a generated skill
+    declared `eslint assets` exits zero on a target where it reports 189 errors,
+    so it raised a blocking finding on untouched code on every run. Where the
+    command is a literal search the gate resolves it and cross-checks the
+    recorded baseline rather than trusting it.
+  - *Evidence may state an absence.* "PHPStan is installed and invoked from
+    nowhere" could not enter the ledger at all, because every entry needed a path
+    and a fingerprint. An `absence` entry carries a subject, a literal search the
+    gate resolves itself, and the matches it accounts for; the resolution must
+    equal that set exactly, so the negative is pinned to a file set and goes
+    stale loudly rather than being asserted once.
+  - Migration cost, measured: the checks that now require a baseline number 24,
+    7, 4, 13, and 6 across the five plans. Every command expectation in all five
+    is written in the absolute form and none in the differential one, which is
+    what the schema's own exemplar taught - so the exemplar was rewritten with
+    the rule, and its procedure expanded to one step per obligation rather than
+    six obligations on one step.
+
+[ADR-002]: ../docs/ADR-002-executable-verification-baselines.md
+
 ### Verified
 
 - Independent measurement of the two gate additions above (search grading and
