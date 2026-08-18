@@ -136,6 +136,7 @@ For new backend behavior, cover:
   - Avoid over-mocking: mocking everything tests your mocks, not your code. Prefer real objects and fakes at boundaries.
 - **Data providers** for the same logic across many inputs (`@dataProvider` / Pest `->with([...])`), instead of copy-pasted tests.
 - **Determinism:** inject a `Clock` for time, seed randomness, and never depend on real network/filesystem/order. Fakes over the network.
+- **Own your subject:** a seeded fixture is a read-only prop. Any record the test authenticates as or mutates is built by the test itself. Borrowing a shared record makes the result depend on which other test ran first, and the failure then surfaces as an unrelated assertion.
 - **Coverage that matters:** target meaningful branch coverage of business logic (a pragmatic ~80% on core code), not 100% everywhere. Every bug fix gets a regression test first.
 - **Mutation testing:** if configured, run Infection (`vendor/bin/infection`) to check tests actually catch changes; a high MSI beats a high line-coverage number.
 - **Keep them fast:** unit tests in milliseconds; reserve slow DB/integration tests for behavior that needs them.

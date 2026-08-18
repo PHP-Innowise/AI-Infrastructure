@@ -12,4 +12,6 @@ These five POSIX-bash hooks guard the generator's own operation. Four are identi
 
 All scripts read the tool-input JSON on stdin and communicate via exit codes: `0` pass, `1` warn (continue), `2` block. The four shared scripts avoid external dependencies (no `jq`) so they run anywhere Python-free bash runs; `subagent-gate.sh` prefers `jq` and falls back to `php`/`python3`, failing open when none is available.
 
+In the Claude and Cursor editions `subagent-gate.sh` also serializes agents marked `writes: true`: one runs at a time, behind a `/tmp` lock keyed by the repository path (TTL 30 min, override with `SUBAGENT_WRITE_LOCK_TTL_MINUTES`), released when the holder finishes or by expiry. The Codex edition holds no lock - it denies multi-agent spawning outright, so there is nothing to serialize. The lock is advisory and machine-local, so two containers or two machines working the same branch are not serialized against each other. It covers subagent spawns only - the main conversation's own edits are not gated, and nothing running outside the tool is. It fails open with no JSON extractor, with an unreadable agent roster, and - for the check-and-take race only - without `flock`. Past the TTL the holder stops blocking.
+
 To tighten `file-naming-validator.sh` from warn to block, change its final `exit 1` to `exit 2`.

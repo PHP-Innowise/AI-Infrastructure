@@ -26,6 +26,35 @@ make dev
 
 Use the project's documented command. Do not invent a dev server setup if none exists.
 
+## What To Walk (MANDATORY)
+
+The checklist below verifies a page. Defects live in journeys. Build the walk
+list before opening the browser, and walk it in this order:
+
+1. **List every role the change can reach** - not the role it was developed
+   as, but every role whose screens the changed code renders or guards.
+2. **For each role, name the first thing a brand-new account of that role
+   does.** A parent with a zero balance pressing the pay button; a trainer who
+   has just uploaded a logo. That first action is the likeliest path in the
+   product and the least likely to have been exercised while building it.
+3. **Order by blast radius, not by proximity to the diff.** Money, access
+   control, and account creation before layout and copy.
+4. **Walk each journey in its empty state as well as its populated one.**
+   Seeded demo data hides the zero, the one, and the rejected case, and that
+   is where the crashes are.
+
+Two failures this catches that a page-level check cannot:
+
+- **The feature that saves and never renders.** A setting written to a table
+  no template reads looks identical to a working one from the form's side.
+  Verify the value on the screen it is meant to change, not on the screen that
+  set it. The same goes for a feature present on one screen and missing from
+  the other hundred.
+- **The mechanism behind the button.** Authorization enforced in a controller
+  is not enforced in the framework's own shortcut for the same action, and a
+  link removed from the navigation is not a route removed. Reach the behavior
+  the way the mechanism allows, not only the way the UI offers.
+
 ## Verification Checklist
 
 - Page loads without server errors (check the PHP error log) or browser console errors.
@@ -49,7 +78,7 @@ session. Stay inside these bounds regardless of which browser tool is wired:
 - Prefer a targeted read - one element, one selector, the page title, the
   form error - over a full-page snapshot. Take a full snapshot only when a
   targeted read cannot answer the question.
-- At most three screenshots per verification, each scoped to the element or
+- At most three screenshots per journey, each scoped to the element or
   viewport under test rather than the full page, unless layout itself is what
   is being verified.
 - Filter console and network reads to errors and the request under test;
@@ -61,7 +90,10 @@ session. Stay inside these bounds regardless of which browser tool is wired:
   carried into the next turn.
 
 When a bound would prevent answering the question, say so in the report
-rather than silently exceeding it.
+rather than silently exceeding it. When the budget runs out before the walk
+list does, name the journeys left unwalked. A short report that says what it
+did not reach is worth more than a full one that implies it reached
+everything.
 
 ## Evidence
 
@@ -83,6 +115,28 @@ Stop and report if blocked by:
 - Broken dev server.
 - Destructive confirmation.
 
+## Defect Report
+
+Write down every deviation found, before fixing anything, whether or not
+fixing it falls in scope. One entry each:
+
+| Field | Content |
+| --- | --- |
+| Id | `DEF-01`, sequential within this verification |
+| Journey | The role, and the steps that reach it |
+| Expected | What the spec or the surrounding product implies |
+| Actual | What the screen did, including the exact error text or status code |
+| Evidence | URL, element, log line |
+| Severity | Blocking / broken behavior / cosmetic |
+
+Do not fix defects inside this skill. A verifier that repairs what it finds
+reports green and hands back no list - and the list is the deliverable, because
+it is what tells the requester what a passing test suite is and is not worth.
+Hand the report to `systematic-debugger` or `coder`.
+
+A verification that found nothing says so explicitly, next to the journeys it
+walked. "Verified" without a walk list is not a result.
+
 ## Final Output
 
-Return verified flows, evidence, blockers or risks, Context Summary, and next step.
+Return the walk list (walked and unwalked), the defect report, evidence, blockers or risks, Context Summary, and next step.

@@ -289,6 +289,27 @@ def build_inventory(root: Path, edition: str) -> dict:
     }
 
 
+def inventory_paths(data: dict) -> set[str]:
+    return {
+        *(path for paths in data["installed"].values() for path in paths),
+        *data["excluded_tracked_paths"],
+    }
+
+
+DELTA_SAMPLE = 10
+
+
+def report_delta(label: str, paths: set[str]) -> None:
+    """Name what changed, so a wrong inventory is visible before it is committed."""
+    if not paths:
+        return
+    listed = sorted(paths)
+    for path in listed[:DELTA_SAMPLE]:
+        print(f"\t{label}\t{path}")
+    if len(listed) > DELTA_SAMPLE:
+        print(f"\t{label}\t... and {len(listed) - DELTA_SAMPLE} more")
+
+
 def write_inventories(root: Path, destination: Path | None = None) -> None:
     """Generate every edition inventory into ``destination``.
 
@@ -304,15 +325,31 @@ def write_inventories(root: Path, destination: Path | None = None) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     for edition in EDITIONS:
         path = destination / inventory_path(edition).name
+        previous: set[str] = set()
+        if path.is_file():
+            try:
+                previous = inventory_paths(json.loads(path.read_text(encoding="utf-8")))
+            except (ValueError, KeyError, AttributeError, TypeError):
+                # An unreadable predecessor is not a reason to refuse to write
+                # a correct successor; it only costs the delta.
+                previous = set()
+        data = generated[edition]
         path.write_text(
-            json.dumps(generated[edition], indent=2, ensure_ascii=False) + "\n",
+            json.dumps(data, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
+        current = inventory_paths(data)
+        added, removed = current - previous, previous - current
         try:
             label = path.relative_to(root).as_posix()
         except ValueError:
             label = path.as_posix()
-        print(f"WROTE\t{label}")
+        print(
+            f"WROTE\t{label}"
+            f"\t{len(current)} path(s)\t+{len(added)}\t-{len(removed)}"
+        )
+        report_delta("+", added)
+        report_delta("-", removed)
 
 
 def verify_inventory(root: Path, edition: str) -> None:
