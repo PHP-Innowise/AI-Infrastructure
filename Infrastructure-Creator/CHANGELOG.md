@@ -365,6 +365,20 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Fixed
 
+- **Two shipped gates required mutually exclusive encodings of the same
+  frontmatter, so no generated flow command could pass both.** `validate_generated.py`
+  reads a flow's stages as inline mappings - `- { phase: ..., agents: [...] }`,
+  the form every shipped edition writes - while `validate_flow_contracts.py`
+  parsed only the block form. Measured on the reference command a shipped
+  edition carries: the flow-contract parser saw 0 stages where the publication
+  gate saw 8, and on the block form the counts inverted. Since `infra-generate`
+  runs both, generation could not have completed on any target.
+  Found by building a publishable bundle for the first time rather than by
+  reading either gate. The flow-contract parser now reads the inline form as
+  well, treating a named checkpoint as a checkpoint - the stage stops either
+  way - and a test pins the two parsers to the same count on both forms.
+
+
 - A selected candidate could ignore every obligation its catalog places on it.
   `required_procedure_roles` existed in schema 1.2, but nothing said what
   belonged there, so both measured plans filled it with one universal trio -

@@ -66,6 +66,51 @@ def _compiled_block(path: Path) -> dict[str, Any]:
     return value
 
 
+INLINE_STAGE_RE = re.compile(r"^-\s*\{(?P<body>.*)\}$")
+
+
+def _split_inline(body: str) -> list[str]:
+    """Split an inline mapping on commas that are not inside a list."""
+    parts, depth, current = [], 0, []
+    for character in body:
+        if character == "[":
+            depth += 1
+        elif character == "]":
+            depth -= 1
+        if character == "," and depth == 0:
+            parts.append("".join(current))
+            current = []
+            continue
+        current.append(character)
+    if current:
+        parts.append("".join(current))
+    return [part.strip() for part in parts if part.strip()]
+
+
+def _parse_inline_stage(path: Path, body: str) -> dict[str, Any]:
+    stage: dict[str, Any] = {}
+    for part in _split_inline(body):
+        if ":" not in part:
+            raise ContractError(f"{path}: stage entry is not a key/value pair: {part}")
+        key, raw_value = (piece.strip() for piece in part.split(":", 1))
+        if key == "agents":
+            if not (raw_value.startswith("[") and raw_value.endswith("]")):
+                raise ContractError(f"{path}: agents must use an inline list")
+            inner = raw_value[1:-1].strip()
+            stage[key] = (
+                [item.strip() for item in inner.split(",") if item.strip()]
+                if inner
+                else []
+            )
+        elif key in {"parallel", "checkpoint"}:
+            # A shipped command may name a checkpoint instead of flagging one;
+            # either way the stage stops, which is what the graph records.
+            stage[key] = raw_value not in {"false", ""}
+        elif key == "phase":
+            stage[key] = raw_value
+    return stage
+
+
 def _frontmatter_stages(path: Path) -> tuple[str, list[dict[str, Any]]]:
     text = path.read_text(encoding="utf-8")
     if not text.startswith("---\n"):
@@ -81,6 +126,17 @@ def _frontmatter_stages(path: Path) -> tuple[str, list[dict[str, Any]]]:
         stripped = raw.strip()
         if stripped.startswith("flow:"):
             flow = stripped.split(":", 1)[1].strip()
+        elif INLINE_STAGE_RE.match(stripped):
+            # The form every shipped edition writes, and the one
+            # `validate_generated.py` reads. Parsing only the block form made
+            # the two gates require mutually exclusive encodings of the same
+            # frontmatter, so no flow command could satisfy both and generation
+            # could never complete: measured on the shipped reference command,
+            # this parser saw 0 stages where the other saw 8.
+            if current is not None:
+                stages.append(current)
+                current = None
+            stages.append(_parse_inline_stage(path, INLINE_STAGE_RE.match(stripped).group("body")))
         elif stripped.startswith("- phase:"):
             if current is not None:
                 stages.append(current)

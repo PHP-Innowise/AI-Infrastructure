@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import importlib.util
 import io
 import json
 import sys
@@ -16,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / ".agents/skills/bootstrap-verifier/scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+import validate_flow_contracts as validator  # noqa: E402
 from validate_flow_contracts import main, validate  # noqa: E402
 
 
@@ -488,6 +490,89 @@ class CommandFileSetTests(FlowContractFixture):
                 for error in self.errors()
             )
         )
+
+
+
+
+class FlowFrontmatterEncodingTest(unittest.TestCase):
+    """Both gates must read the same frontmatter, or no flow can be generated.
+
+    `validate_generated.py` reads stages as inline mappings - the form every
+    shipped edition writes - while this module used to parse only the block
+    form. Measured on the shipped reference command, this parser saw 0 stages
+    where the other saw 8, so a flow command could satisfy one gate or the
+    other and never both, and generation could not complete on any target.
+    """
+
+    INLINE = """---
+flow: feature
+stages:
+  - { phase: understanding, agents: [requirements-analyst] }
+  - { phase: verification, agents: [code-reviewer, security-reviewer], parallel: true }
+  - { phase: finalization, agents: [finishing-branch], checkpoint: integration }
+---
+
+# Flow: Feature
+"""
+    BLOCK = """---
+flow: flow-review
+stages:
+  - phase: verification
+    agents: [security-review-agent]
+    parallel: false
+    checkpoint: true
+---
+
+# flow-review
+"""
+
+    def write(self, text: str) -> Path:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = Path(temporary.name) / "flow.md"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_the_shipped_inline_form_parses(self) -> None:
+        flow, stages = validator._frontmatter_stages(self.write(self.INLINE))
+        self.assertEqual(flow, "feature")
+        self.assertEqual(len(stages), 3)
+        self.assertEqual(stages[0], {"phase": "understanding",
+                                     "agents": ["requirements-analyst"]})
+        self.assertTrue(stages[1]["parallel"])
+        self.assertEqual(stages[1]["agents"], ["code-reviewer", "security-reviewer"])
+        # A named checkpoint is still a checkpoint: the stage stops.
+        self.assertTrue(stages[2]["checkpoint"])
+
+    def test_the_block_form_still_parses(self) -> None:
+        flow, stages = validator._frontmatter_stages(self.write(self.BLOCK))
+        self.assertEqual(flow, "flow-review")
+        self.assertEqual(len(stages), 1)
+        self.assertFalse(stages[0]["parallel"])
+
+    def test_both_gates_count_the_same_stages(self) -> None:
+        """The property that was broken: agreement, not either parser alone."""
+        generated = importlib.util.spec_from_file_location(
+            "validate_generated_for_flow",
+            ROOT / ".agents/skills/bootstrap-verifier/scripts/validate_generated.py",
+        )
+        module = importlib.util.module_from_spec(generated)
+        sys.modules[generated.name] = module
+        generated.loader.exec_module(module)
+        for text in (self.INLINE, self.BLOCK):
+            path = self.write(text)
+            _, mine = validator._frontmatter_stages(path)
+            body = path.read_text(encoding="utf-8")
+            end = body.find("\n---", 3)
+            theirs = sum(
+                1
+                for line in body[3:end].splitlines()
+                if module.STAGE_RE.match(line)
+            )
+            if theirs:
+                self.assertEqual(len(mine), theirs, text[:40])
+            else:
+                self.assertTrue(mine, "block form must still parse somewhere")
 
 
 if __name__ == "__main__":
