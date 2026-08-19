@@ -3717,6 +3717,17 @@ class RejectionAccountabilityTest(SkillQualityFixture):
                      "No surface, i.e. none."):
             self.assertEqual(validator._rejection_path_tokens(text), [], text)
 
+    def test_a_link_is_not_a_place_in_the_target(self) -> None:
+        # Found adversarially: any slash test reads `https://example.com/docs`
+        # as a path, so a rejection could cite a web page and say nothing about
+        # where in the project anybody looked.
+        for text in (
+            "See https://example.com/docs/cache for why",
+            "git@github.com:acme/app.git has none",
+            "ssh://build.internal/repo carries it instead",
+        ):
+            self.assertEqual(validator._rejection_path_tokens(text), [], text)
+
     def test_real_paths_are_anchors_in_bare_prose(self) -> None:
         tokens = validator._rejection_path_tokens(
             "no config/packages/cache.yaml, no .eslintrc, nothing under assets/"
@@ -3860,6 +3871,47 @@ class RejectionFalsifierTest(SkillQualityFixture):
         self.write_target("app/Cache/Warmer.php", "<?php\nuse CacheInterface;\n")
         codes = self.falsify(None, reason="the trigger is a request, not a file")
         self.assertNotIn("REJECTION_CONTRADICTED", codes)
+
+
+class ReviewedRejectionStillFacesTheTargetTest(SkillQualityFixture):
+    """A person waving a rejection through does not exempt it from the target.
+
+    The review gate accepts a flagged rejection classified `not-applicable` on
+    a note alone - that is its design, since a team may genuinely not want a
+    skill. Measured on a real plan: `container-review` filed that way passed
+    the review gate untouched while the target held `config/services.yaml`.
+    The two mechanisms are meant to compose, so the deterministic check must
+    keep firing on a rejection a human already blessed.
+    """
+
+    def test_an_escalating_candidate_is_still_checked_against_the_target(self) -> None:
+        registry = json.loads(self.registry_path.read_text(encoding="utf-8"))
+        for candidate in registry["candidates"]:
+            if candidate["id"] == "generic-cache":
+                candidate["escalates_on_rejection"] = True
+                candidate["falsifier"] = {
+                    "surface": "an in-app caching layer with real call sites",
+                    "requires": "any",
+                    "probes": [{"paths": ["app/**/*.php"], "pattern": "CacheInterface"}],
+                }
+        self.registry_path.write_text(
+            json.dumps(registry, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        cache = self.target / "app/Cache/Warmer.php"
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text("<?php\nuse CacheInterface;\n", encoding="utf-8")
+        self.plan["rejected_candidates"] = [
+            {
+                "candidate_id": "generic-cache",
+                "name": "generic-cache",
+                "category": "integration",
+                "reason": "The team does not want cache guidance under app/",
+                "missing_evidence": ["a request for cache guidance under app/"],
+            }
+        ]
+        self.write_fixture()
+        codes = [item.code for item in self.plan_diagnostics()]
+        self.assertIn("REJECTION_CONTRADICTED", codes)
 
 
 class FalsifierGlobTest(unittest.TestCase):

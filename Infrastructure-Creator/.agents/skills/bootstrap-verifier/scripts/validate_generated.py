@@ -219,7 +219,8 @@ def flow_stage_bodies(block: str) -> list[str]:
             if keyed:
                 current.append(f"{keyed.group('key')}: {keyed.group('value')}")
                 continue
-            current, _ = None, bodies.append(", ".join(current))
+            bodies.append(", ".join(current))
+            current = None
     if current is not None:
         bodies.append(", ".join(current))
     return bodies

@@ -680,12 +680,13 @@
               "phpunit.xml.dist",
               "pest.php",
               "behat.yml",
-              "composer.json"
+              "behat.yml.dist",
+              "tests/**/*.php"
             ]
           }
         ],
         "requires": "all",
-        "surface": "identifiable files, tests and validation commands a plan can name"
+        "surface": "identifiable files together with the tests and commands a plan can name"
       },
       "id": "writing-plans",
       "mode": "static"

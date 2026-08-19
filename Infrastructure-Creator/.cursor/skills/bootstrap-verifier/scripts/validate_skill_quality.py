@@ -3200,6 +3200,7 @@ REJECTION_EXTENSIONS = frozenset(
 # no frontend layer" covers every frontend candidate at once. A sentence that
 # spans families is not a judgement about any of them.
 SHARED_REJECTION_LIMIT = 2
+_REMOTE_LOCATION_PATTERN = re.compile(r"(?:[a-z][a-z0-9+.-]*://|[\w.-]+@)", re.I)
 
 
 def _rejection_path_tokens(text: str) -> list[str]:
@@ -3216,6 +3217,11 @@ def _rejection_path_tokens(text: str) -> list[str]:
         # a root dotfile into a bare word and lose the anchor it carries.
         value = raw.strip().rstrip(".,;:!?")
         if not value or len(value) < 3:
+            continue
+        # A link is not a place in the target: `https://example.com/docs` reads
+        # as a path to any slash test, and citing one would satisfy the rule
+        # without saying where anybody looked.
+        if _REMOTE_LOCATION_PATTERN.match(value):
             continue
         if "/" in value:
             tokens.append(value)

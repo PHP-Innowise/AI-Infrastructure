@@ -140,6 +140,20 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
     request needs: the accelerator is generated once, for all later work. That
     rule is now written into `skill-forge/SKILL.md` and the profile schema
     reference.
+  - A test pass over three honest targets - a bare library, a two-file script
+    project, and a full Symfony application - found and fixed two holes:
+    `writing-plans` accepted `composer.json` in place of a test suite, so it
+    contradicted a true rejection on a library with no tests, and a URL read as
+    a target path, so a rejection could cite a web page instead of saying where
+    in the project anybody looked. After both fixes the falsifiers fire for 0 of
+    43 candidates on the script project, 1 on the library (`package-authoring`,
+    correctly), and 29 on the full application.
+  - The two rejection mechanisms compose rather than overlap. On the same real
+    plan, 8 rejections are caught by both, 17 only by falsification (including
+    `api-designer`, `code-review` and `database-designer`), and 1 only by
+    escalation (`migration-safety`, whose absence this target confirms). A
+    flagged rejection filed as `not-applicable` passes the review gate on a note
+    alone and is still refuted by the target - pinned by a regression test.
 
 - **`infra-validate` - a mandatory content review-and-repair phase between the
   wrappers and publication, with a deterministic gate that refuses to take the
