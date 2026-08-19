@@ -132,7 +132,7 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
   runtime, no open blockers, escalations, or accepted blocking findings,
   reviewer independence, and the repair-round bound - stdlib-only,
   fail-closed, byte-stable, like its siblings. `infra-generate` runs the phase
-  as step 9 (before the manifest, so repairs never invalidate hashes),
+  as step 10 (before the manifest, so repairs never invalidate hashes),
   `infra-update` runs it over its update staging, `infra-build` treats an
   escalation as a checkpoint, `bootstrap-verifier` requires the record next to
   the scan-coverage and plan-review gates, and standalone
