@@ -4,7 +4,7 @@ description: Run the blocking staged/published QA gate for evidence and per-skil
 phase: verification
 flow-next: null
 flow-alternatives: []
-related: [infra-generate, infra-update, skill-forge, agent-forge, command-forge, hook-forge, memory-seed, skill-flow-composer]
+related: [infra-generate, infra-update, infra-validate, content-reviewer, skill-forge, agent-forge, command-forge, hook-forge, memory-seed, skill-flow-composer]
 ---
 
 # Bootstrap Verifier
@@ -17,8 +17,9 @@ evidence/contract plan before running structural, routing, hook, runtime,
 ownership, and placeholder checks.
 
 It uses the bundled dependency-free `scripts/validate_generated.py`,
-`scripts/validate_scan_coverage.py`, `scripts/validate_plan_review.py`, and
-`scripts/analyze_commands.py` plus targeted manual checks.
+`scripts/validate_scan_coverage.py`, `scripts/validate_plan_review.py`,
+`scripts/validate_content_review.py`, and `scripts/analyze_commands.py` plus
+targeted manual checks.
 
 ## Generated File Naming Convention (MANDATORY)
 
@@ -59,18 +60,21 @@ Writes a report to `tasks/TASK-{N}/bootstrap-verifier-report.md`. Does not write
    and `DOD.md` commands; do not skip a skill body that the validator already
    reported.
 
-   The same evidence-to-content bar the skills are held to applies here by
-   hand, because no gate enforces it yet: `AGENTS.md`, `DOD.md`, the principles,
-   the hooks, and the seeded memory must name the target's own paths, commands,
-   and invariants. A generated document that would read identically against a
-   different PHP repository has not been generated from this target's evidence -
-   it has been copied. Report it as a blocker rather than passing it because the
-   skills happened to pass.
-   Before publishing, also require the discovery and review gates the generator
-   required:
-   `python3 scripts/validate_scan_coverage.py --target <real-target> --task-dir <task> --plan <task>/skill-generation-plan.json`
+   The evidence-to-content bar for `AGENTS.md`, `DOD.md`, the principles, the
+   hooks, and the seeded memory - they must name the target's own paths,
+   commands, and invariants - is read systematically by `infra-validate`'s
+   content reviewers, and this gate verifies the record of that reading. A
+   generated document that would read identically against a different PHP
+   repository has not been generated from this target's evidence - it has
+   been copied. Spot-check the worst-scoring file per lane by hand; if the
+   record says pass and the file reads generic, that is a blocker against the
+   review itself.
+   Before publishing, also require the discovery, review, and content gates
+   the generator required:
+   `python3 scripts/validate_scan_coverage.py --target <real-target> --task-dir <task> --plan <task>/skill-generation-plan.json`,
+   `python3 scripts/validate_plan_review.py --plan <task>/skill-generation-plan.json --review <task>/skill-plan-quality-report.json`,
    and
-   `python3 scripts/validate_plan_review.py --plan <task>/skill-generation-plan.json --review <task>/skill-plan-quality-report.json`.
+   `python3 scripts/validate_content_review.py --publication-plan <task>/infra-generate-publication-plan.txt --review <task>/infra-validate-review.json`.
 3. **Run the validator:** distinguish the generation root (staging or published
    target) from the real evidence target:
 
@@ -300,6 +304,7 @@ A non-empty `STILL MISSING` list means a tracked file vanished - that is an esca
 ## Checks
 - Evidence/plan completeness and fingerprints: [pass/fail]
 - Per-skill contract conformance: [pass/fail]
+- Content review record (validate_content_review.py: coverage + no open findings): [pass/fail]
 - Command safety (all prescribed verification resolves + non-mutating): [pass/fail]
 - Skill-body command safety (no destructive/mutating/provider command in prose): [pass/fail]
 - Operational quality (specific procedures/anchors/pass-fail/skip): [pass/fail]
@@ -332,6 +337,9 @@ A non-empty `STILL MISSING` list means a tracked file vanished - that is an esca
 - MUST require `--skill-plan` and `--evidence-target` for every generation or
   update gate; structural-only invocation is for validator maintenance tests,
   not release approval.
+- MUST require a passing `validate_content_review.py` record for every
+  generation or update gate - a bundle nobody read is not verified, however
+  many mechanical checks it passed.
 - MUST confirm no unselected edition was generated.
 - MUST run the seeded memory bank's own validator, not a substitute.
 - MUST keep placeholder exemptions occurrence-scoped to an explicitly approved manifest-relative path-plus-regex declaration; MUST NOT exempt a whole file or a placeholder pattern globally.

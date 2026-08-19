@@ -73,6 +73,40 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Added
 
+- **`infra-validate` - a mandatory content review-and-repair phase between the
+  wrappers and publication, with a deterministic gate that refuses to take the
+  reader's word for having looked.** The mechanical validators prove form -
+  evidence resolves, skeletons differ, routing parses - and the adversarial
+  plan review covers the plan; nothing systematically read the *content* of
+  every generated file. `bootstrap-verifier`'s own text admitted the gap: the
+  evidence-to-content bar for `AGENTS.md`, `DOD.md`, the hooks, and the seeded
+  memory "applies here by hand, because no gate enforces it yet".
+  Now it does. `infra-validate` (the sixth sanctioned orchestrator) partitions
+  the publication plan into lanes - skills, wrappers, policy, hooks, memory,
+  the run's own profile and plan - and fans out parallel read-only
+  `content-reviewer` instances (the 25th skill), each judging every file on
+  four dimensions the deterministic gates provably cannot ask: uniqueness
+  (identity-erasure: scaffolding that would read identically against another
+  PHP repository was copied, not generated), completeness (executable end to
+  end without its author), accuracy (claims match the current target), and
+  coherence (siblings agree). Blocking findings are repaired through the
+  owning forge as contract amendments - never in place, never by invention;
+  what evidence cannot settle escalates - bounded at two rounds, with
+  `validate_skill_quality.py` and `validate_generated.py` re-run after any
+  repair. The review record (`infra-validate-review.json`) is held by the new
+  `validate_content_review.py`: full surface coverage, all dimensions
+  answered, verbatim exemptions limited to the sanctioned stack-agnostic
+  runtime, no open blockers, escalations, or accepted blocking findings,
+  reviewer independence, and the repair-round bound - stdlib-only,
+  fail-closed, byte-stable, like its siblings. `infra-generate` runs the phase
+  as step 9 (before the manifest, so repairs never invalidate hashes),
+  `infra-update` runs it over its update staging, `infra-build` treats an
+  escalation as a checkpoint, `bootstrap-verifier` requires the record next to
+  the scan-coverage and plan-review gates, and standalone
+  `/infra-validate <target>` reviews a published accelerator through its
+  manifest and publishes repairs transactionally with a manifest hash refresh.
+  Sixteen regression tests pin the gate (`tests/test_content_review.py`).
+
 - **A runtime command is now graded against its contract, closing the one hole
   the fifth end-to-end run found in ADR-002.** The memory quartet verifies itself
   with the seeded runtime, and on a first generation that runtime does not exist

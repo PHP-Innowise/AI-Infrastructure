@@ -105,14 +105,14 @@ Pick the tier that matches the work performed. Higher tiers include all lower-ti
 
 ## Tier 2.5 - Edition Mirroring
 
-- [ ] Exactly 23 generator skills exist in `.claude/skills`, `.cursor/skills`, and `.agents/skills`, including `domain-behavior-scanner`.
+- [ ] Exactly 25 generator skills exist in `.claude/skills`, `.cursor/skills`, and `.agents/skills`, including `domain-behavior-scanner`, `infra-validate`, and `content-reviewer`.
 - [ ] Corresponding skill files and nested references/assets/scripts are byte-identical across all three editions.
-- [ ] Cursor has 23 matching reduced-frontmatter agents; Codex has no agents or commands.
+- [ ] Cursor has 25 matching reduced-frontmatter agents; Codex has no agents or commands.
 - [ ] Scanner/profile/forge/policy/memory documentation is internally consistent across editions.
 
 ## Tier 3 - Release of this generator itself
 
-- [ ] All 23 skills exist in `.claude/skills`, `.cursor/skills`, and `.agents/skills`, byte-identical where required.
+- [ ] All 25 skills exist in `.claude/skills`, `.cursor/skills`, and `.agents/skills`, byte-identical where required.
 - [ ] Agents/commands exist for the editions that carry them; Cursor frontmatter is the reduced form.
 - [ ] Hooks are present and wired in all three editions (`settings.json`, `.cursor/hooks.json`, `.codex/hooks.json` + `config.toml`).
 - [ ] The root `VERSION` file was bumped and matches the new `CHANGELOG.md` entry - it is the single version source everything else reads.
@@ -124,7 +124,7 @@ Pick the tier that matches the work performed. Higher tiers include all lower-ti
 - [ ] The collision guard passed on the sibling folder path (overwrite/merge/abort decided explicitly, not assumed).
 - [ ] Every stack-specific claim (framework, tooling, integration categories, architecture patterns) is grounded in this run's own research, cited to an authoritative source - never carried over from PHP knowledge.
 - [ ] The sibling generator contains zero mentions of PHP, Laravel, Symfony, PHP Core, or "Infrastructure-Creator" anywhere in its own content.
-- [ ] All 23 skills were re-authored (not left as PHP copies), including `domain-behavior-scanner` and `stack-adapter`'s own identity-swapped copy, and mirrored byte-identically across its three editions.
+- [ ] All 25 skills were re-authored (not left as PHP copies), including `domain-behavior-scanner` and `stack-adapter`'s own identity-swapped copy, and mirrored byte-identically across its three editions.
 - [ ] All six stack-specific reference catalogs are substantive and complete;
   no stub, mechanical source-language substitution, or source-stack leftover
   remains.

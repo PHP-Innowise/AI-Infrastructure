@@ -4,7 +4,7 @@ description: Compile an approved Project Profile and skill-generation plan into 
 phase: orchestration
 flow-next: null
 flow-alternatives: []
-related: [policy-forge, skill-forge, agent-forge, command-forge, hook-forge, memory-seed, skill-flow-composer, bootstrap-verifier, infra-scan, infra-update]
+related: [policy-forge, skill-forge, agent-forge, command-forge, hook-forge, memory-seed, skill-flow-composer, infra-validate, bootstrap-verifier, infra-scan, infra-update]
 ---
 
 # Infra Generate
@@ -93,7 +93,24 @@ target manifest member.
    Substitute the selected edition path. For Codex-only generation, validate
    its compiled `SKILL FLOW.md` against the canonical graph and record that
    executable command parity is N/A because Codex has no command layer.
-9. **Compose the shared root `.gitignore`.** Union and validate the exact
+9. **Run the content review-and-repair phase.** Invoke `infra-validate`
+   against the complete staged bundle: parallel `content-reviewer` lanes judge
+   every publication-plan file (and this run's profile and plan) on
+   uniqueness, completeness, accuracy, and coherence; blocking findings are
+   repaired through the owning forges within two bounded rounds or escalated,
+   and the mechanical validators re-run after any repair. Require
+
+   ```bash
+   python3 .agents/skills/bootstrap-verifier/scripts/validate_content_review.py \
+     --publication-plan "tasks/TASK-003/infra-generate-publication-plan.txt" \
+     --review "tasks/TASK-003/infra-validate-review.json"
+   ```
+
+   to exit 0 before any manifest or publication work. A file that would read
+   identically against a different PHP repository, or a procedure an agent
+   could not execute without its author, is generation failure here - not a
+   style note.
+10. **Compose the shared root `.gitignore`.** Union and validate the exact
    task-scoped requirements from `memory-seed` and `hook-forge`, then run the
    bundled deterministic merge helper against the target file. If the existing
    file already satisfies every requirement, `keep` is allowed and the path
@@ -123,25 +140,27 @@ target manifest member.
    plain-sorted), and a requirement that exactly contradicts a team entry
    (`x` vs `!x`) fails the merge for an explicit human decision instead of
    being appended silently.
-10. **Stamp and stage the manifest.** Stamp only a staged `AGENTS.md` produced
+11. **Stamp and stage the manifest.** Stamp only a staged `AGENTS.md` produced
    by this run. Build `.infra-manifest.json` against staging from the explicit
    write plan, final source map, and decisions. Runtime state remains excluded
    from ownership.
-11. **Verify the complete staged bundle.** Run `bootstrap-verifier` against
+12. **Verify the complete staged bundle.** Run `bootstrap-verifier` against
     staging while validating skill evidence against the real target root.
-    Treat every semantic, adjacency, routing-oracle, flow-contract, structural,
-    hash, hook, runtime, or placeholder failure as generation failure.
-12. **Recheck and publish transactionally.** Recompute publication, removal,
+    Treat every semantic, adjacency, routing-oracle, flow-contract,
+    content-review, structural, hash, hook, runtime, or placeholder failure
+    as generation failure.
+13. **Recheck and publish transactionally.** Recompute publication, removal,
    and watch baselines immediately
     before publication. If any candidate destination changed, stop and rerun
     collision handling. Create a rollback journal, publish only explicit
     approved publication-plan paths, remove no team-owned path, and restore the
     previous state on any copy/rename failure. Copy the staged manifest last.
-13. **Verify the published target.** Run the complete bootstrap gate again
+14. **Verify the published target.** Run the complete bootstrap gate again
     against the real target. A failure triggers rollback and cannot be reported
     as success.
-14. **Report.** Record evidence/plan, per-category skill quality, routing,
-    staged bundle, publication, rollback, and post-publication results.
+15. **Report.** Record evidence/plan, per-category skill quality, routing,
+    content review (findings, repairs, escalations), staged bundle,
+    publication, rollback, and post-publication results.
 
 ## Version Stamp & Generation Manifest (MANDATORY)
 
@@ -243,6 +262,9 @@ python3 .agents/skills/bootstrap-verifier/scripts/publish_staging.py rollback \
 ## Verification
 [bootstrap-verifier pass/fail summary]
 
+## Content Review
+[infra-validate summary: files reviewed per lane, blocking findings repaired/escalated, repair rounds, deterministic gate result]
+
 ## Upgrade Contract
 `.infra-manifest.json` written: [file count] files, mode [full / merge], generator version [from VERSION], profile [TASK id]. `AGENTS.md` [stamped / pre-existing, untouched]. Future generator releases can be applied with `infra-update`.
 
@@ -282,6 +304,9 @@ The target now has its own working `AGENTS.md` + [selected edition folder(s)] + 
 - MUST require schema 1.4 routing/flow contracts before wrappers, and MUST
   block publication when any adjacency is dropped or when `SKILL FLOW.md` and
   executable flow commands do not compile to the same canonical graph.
+- MUST run `infra-validate` against the complete staged bundle and require
+  `validate_content_review.py` to exit 0 before manifest stamping or
+  publication; repairs go through the owning forges, never in-place edits.
 
 ## Final Output
 

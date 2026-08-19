@@ -4,7 +4,7 @@ description: Upgrade a previously generated accelerator in place, safely - re-va
 phase: orchestration
 flow-next: null
 flow-alternatives: [infra-generate, infra-scan]
-related: [infra-generate, infra-scan, infra-build, bootstrap-verifier, policy-forge, skill-forge, agent-forge, command-forge, hook-forge, memory-seed, skill-flow-composer]
+related: [infra-generate, infra-scan, infra-build, infra-validate, bootstrap-verifier, policy-forge, skill-forge, agent-forge, command-forge, hook-forge, memory-seed, skill-flow-composer]
 ---
 
 # Infra Update
@@ -82,7 +82,14 @@ Allocate a new `tasks/TASK-{N}/` for the update run. Staging output goes to `tas
    validate the compiled `SKILL FLOW.md` graph and record command parity as
    N/A. **Exception - memory
    state:** skip live chunks, indexes, and counters; stage only generator-owned
-   runtime/templates/protocol surfaces.
+   runtime/templates/protocol surfaces. Once the flow gate passes, run
+   `infra-validate` against the complete update staging exactly as
+   `infra-generate` does - parallel content reviewers over every staged file,
+   forge-routed repairs within two rounds, mechanical gates re-run after any
+   repair - and require `validate_content_review.py` (against
+   `infra-update-publication-plan.txt` once step 8 has built it, or the staged
+   surface list before then) to exit 0 before classification proceeds to
+   publication.
 5. **Classify every relevant path** by comparing the manifest entries with staged files through `.agents/skills/bootstrap-verifier/scripts/infra_ownership.py classify --target "<target>" --staging "tasks/TASK-{N}/infra-update-staging"`. The helper resolves relative targets from the caller's working directory, supports absolute paths and spaces, and never walks the target: it reads target content only for manifest members, plus an existence-only collision check when staging introduces a new path. An unmanifested target file with no staged collision is invisible:
    | Manifest | Staged | Target state | Classification |
    | --- | --- | --- | --- |
@@ -181,6 +188,7 @@ Allocate a new `tasks/TASK-{N}/` for the update run. Staging output goes to `tas
 - MUST NOT touch memory state ever: `memory-bank/chunks/`, `memory-bank/INDEX.md`, `memory-bank/.memory-counter`, `memory-bank/local/`, `project-brain/indexes/`, and Project Brain record/state directories are the target team's live data and stay out of staging, the manifest, and the diff entirely.
 - MUST NOT change the edition selection during an update - adding or removing an edition is an `infra-generate` run with its collision guard, not an update.
 - MUST rewrite `.infra-manifest.json` from the explicit update write plan (current `VERSION`) and pass `bootstrap-verifier` before reporting success.
+- MUST run `infra-validate` over the complete update staging and require a passing `validate_content_review.py` record before publication; repairs go through the owning forges, never in-place edits.
 - MUST keep staging inside this generator's own `tasks/TASK-{N}/` - the target sees only final, decided writes.
 - MUST NOT stage agents, commands, or flows until every staged skill passes
   per-contract and inventory-wide semantic validation.

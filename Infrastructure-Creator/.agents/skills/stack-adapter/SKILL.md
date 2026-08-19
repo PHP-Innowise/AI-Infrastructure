@@ -1,6 +1,6 @@
 ---
 name: stack-adapter
-description: Produce an independent sibling generator - Infrastructure-Creator-[Stack] - with the identical 23-skill, three-edition architecture as this generator, including domain-behavior discovery, freshly researched and authored for a non-PHP stack detected in a target project. Use when infra-scan detects a recognizable non-PHP stack and the user opts in, or when the user directly asks to adapt the generator. Triggers on "stack-adapter", "adapt the generator for Flutter", "build a sibling generator", "generate an accelerator generator for Node/Python/Go".
+description: Produce an independent sibling generator - Infrastructure-Creator-[Stack] - with the identical 25-skill, three-edition architecture as this generator, including domain-behavior discovery, freshly researched and authored for a non-PHP stack detected in a target project. Use when infra-scan detects a recognizable non-PHP stack and the user opts in, or when the user directly asks to adapt the generator. Triggers on "stack-adapter", "adapt the generator for Flutter", "build a sibling generator", "generate an accelerator generator for Node/Python/Go".
 phase: orchestration
 flow-next: null
 flow-alternatives: []
@@ -11,9 +11,9 @@ related: [infra-scan]
 
 ## Overview
 
-`stack-adapter` is one of the five sanctioned orchestrator skills (see `AGENTS.md`'s "Orchestration Exception"). It does not generate an accelerator for a target project - it generates an entire **new, independent generator**, structurally identical to Infrastructure-Creator, but fully re-authored for a different technology stack than PHP.
+`stack-adapter` is one of the six sanctioned orchestrator skills (see `AGENTS.md`'s "Orchestration Exception"). It does not generate an accelerator for a target project - it generates an entire **new, independent generator**, structurally identical to Infrastructure-Creator, but fully re-authored for a different technology stack than PHP.
 
-This is a meta-generation task: the same discipline `skill-forge` applies to one skill, this skill applies to an entire 23-skill tool - including `domain-behavior-scanner` and a re-authored copy of `stack-adapter` itself. Nothing about the new stack is pre-written or hardcoded here.
+This is a meta-generation task: the same discipline `skill-forge` applies to one skill, this skill applies to an entire 25-skill tool - including `domain-behavior-scanner` and a re-authored copy of `stack-adapter` itself. Nothing about the new stack is pre-written or hardcoded here.
 
 The produced sibling generator MUST be exactly as independent as Infrastructure-Creator itself: it must never mention PHP, Laravel, Symfony, PHP Core, or "Infrastructure-Creator" (this tool) anywhere in its own content. It is a standalone tool that happens to share an architecture by construction, not a fork or a themed copy.
 
@@ -51,7 +51,7 @@ Not everything needs to be rewritten - some of Infrastructure-Creator's own bund
    - 2-4 common architecture patterns used in that ecosystem and their detection signals.
    - Cite official/authoritative sources for each of the above, the same way `stack-researcher` cites sources.
 4. **Replicate the structural skeleton** into the new folder: root `AGENTS.md`/`README.md`/`CHANGELOG.md`/`.gitignore`, a fresh `VERSION` file reset to `1.0.0` (the sibling's own single version source, consumed by its profile schema and its `.infra-manifest.json` stamping - it does not inherit this generator's version), `specs/`, `tasks/` (+ `.task-counter` set to `1`), `examples/`, and the three edition trees (`.claude/`, `.cursor/`, `.codex/` + `.agents/`) with their wiring files (`settings.json`, `.cursor/hooks.json` + `rules/*.mdc`, `.codex/config.toml` + `hooks.json`) - copying Infrastructure-Creator's own wiring files as-is, since hook *registration mechanics* do not depend on the target stack.
-5. **Re-author all 23 skills** for the new stack (including its own
+5. **Re-author all 25 skills** for the new stack (including its own
    domain-behavior scanner and identity-swapped `stack-adapter`), using this
    generator's canonical `.agents/skills/*/SKILL.md` files as structural
    exemplars only - never copying PHP content. Parallelize in logical batches.
@@ -105,7 +105,7 @@ Not everything needs to be rewritten - some of Infrastructure-Creator's own bund
 
 **Detected stack:** [Stack] (evidence: [file])
 **New generator path:** [path]
-**Skills generated:** 23 (mirrored across .claude/.cursor/.codex+.agents)
+**Skills generated:** 25 (mirrored across .claude/.cursor/.codex+.agents)
 **Self-verification:** [pass/fail summary]
 
 ## What It Covers
@@ -124,7 +124,7 @@ Open [new generator path] as its own workspace (sibling to your target project, 
 - MUST NOT let the new generator's content mention PHP, Laravel, Symfony, PHP Core, or "Infrastructure-Creator" anywhere - it must read as fully standalone.
 - MUST ground every re-authored artifact in step 3's research, never in assumption; cite sources the same way `stack-researcher` does.
 - MUST run self-verification and treat unresolved failures as "not done yet," exactly as `bootstrap-verifier` does for a normal generation run.
-- MUST NOT skip re-authoring any of the 23 skills (including `domain-behavior-scanner` and `stack-adapter`'s identity-swapped copy) - a partial sibling generator is not a valid result.
+- MUST NOT skip re-authoring any of the 25 skills (including `domain-behavior-scanner` and `stack-adapter`'s identity-swapped copy) - a partial sibling generator is not a valid result.
 - MUST NOT accept stub references, grouped skill plans, structural-only
   verification, or a sibling that omits the evidence/contract/semantic/staging
   architecture.

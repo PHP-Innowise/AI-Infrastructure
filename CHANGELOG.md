@@ -184,6 +184,14 @@ edition's own files remain in that edition's changelog.
 
 ### Changed
 
+- **Infrastructure-Creator's context-budget ceilings were raised for the
+  content review-and-repair phase** (`scripts/token_budget.json`, observed
+  values + ~5%): the generator gained the `infra-validate` and
+  `content-reviewer` skills with their agent wrappers and the
+  `/infra-validate` command, growing the edition's startup surface and skill
+  bodies. The change that justifies the growth is recorded in
+  `Infrastructure-Creator/CHANGELOG.md`.
+
 - **The ready-made accelerator installer can now adopt standard existing
   project root files without destructive overwrites.** The new
   `--merge-existing` mode preserves project `.gitignore`, `.gitattributes`, and

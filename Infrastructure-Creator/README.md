@@ -76,6 +76,9 @@ infra-generate <path-to-php-project>
    -> semantic gate: evidence-anchored procedures, concrete safe verification,
       provider policy, capabilities, outputs, scope, distinctness, flow parity
    -> only then generates agents, commands, and adaptive flows
+   -> infra-validate: parallel content reviewers read every staged file
+      (uniqueness / completeness / accuracy / coherence); blocking findings
+      are repaired through the owning forges or escalated, never shipped
    -> verifies the complete staged bundle
    -> centrally composes approved shared .gitignore requirements
    -> publishes explicit write/watch paths with rollback, manifest last,
@@ -258,8 +261,18 @@ current session.
 
 ## Verification
 
-`bootstrap-verifier` runs automatically at the end of `infra-generate` (and
+Two gates run automatically before anything is published. `infra-validate` is
+the content phase: parallel read-only reviewers walk every staged file - and
+the run's own profile and plan - judging uniqueness, completeness, accuracy,
+and coherence; blocking findings are repaired through the owning forge
+(bounded at two rounds) or escalated, and the deterministic
+`validate_content_review.py` gate refuses publication until every file is
+dispositioned. Standalone, `/infra-validate <target>` reviews and repairs a
+previously generated accelerator through its `.infra-manifest.json`.
+
+`bootstrap-verifier` runs at the end of `infra-generate` (and
 `infra-update`) and checks plan-level inventory conflicts before authoring,
+the content-review record,
 manifest-owned frontmatter/cross-references, hooks and wiring, the generated
 memory/runtime surface, every manifest member's existence and hash, a tracked
 `AGENTS.md` stamp, and placeholders across generated text. The immutable

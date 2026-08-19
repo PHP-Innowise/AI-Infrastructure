@@ -107,13 +107,14 @@ Infrastructure-Creator intentionally has no `memory-bank/` of its own: its job i
 
 ## Orchestration Exception (MANDATORY, SCOPED)
 
-The general accelerator rule is "an agent executes exactly one skill, then stops; it never auto-chains." Five skills in this folder are a deliberate, narrowly scoped exception, because pipeline orchestration is their entire purpose:
+The general accelerator rule is "an agent executes exactly one skill, then stops; it never auto-chains." Six skills in this folder are a deliberate, narrowly scoped exception, because pipeline orchestration is their entire purpose:
 
 - `infra-scan` MAY fan out to the seven scanner skills (including `domain-behavior-scanner`), `stack-researcher`, `clarifying-interview`, and `profile-synthesizer` in one run. It MAY also hand off to `stack-adapter` when a non-PHP stack is detected and the user opts in.
 - `infra-generate` MAY fan out evidence-independent forges into staging, but
   MUST generate skills in bounded contract-driven batches and pass semantic
   validation in partial mode after each batch and complete mode before
   agent/command/flow generation, publication, or success.
+- `infra-validate` MAY fan out parallel read-only `content-reviewer` instances over the staged (or manifest-listed published) surface and re-invoke the owning forges to repair blocking findings, bounded at two repair rounds; reviewers themselves never write, and a finding evidence cannot settle escalates instead of being repaired by invention.
 - `infra-build` MAY chain `infra-scan` then `infra-generate` in one run, pausing at the profile checkpoint only when a blocking ambiguity or a collision is detected.
 - `infra-update` MAY re-validate the profile, fan out the forge skills into its staging directory, apply manifest-verified safe replacements, rewrite `.infra-manifest.json`, and run `bootstrap-verifier` in one run. It writes into the target only what the target's `.infra-manifest.json` proves untouched (sha256 match) or what the user explicitly approved per file; without that manifest it MUST abort.
 - `stack-adapter` MAY research, replicate, re-author, mirror, and self-verify an entire sibling generator in one run, after explicit user confirmation.
@@ -123,7 +124,7 @@ Fan-out runs in parallel when the AI tool supports concurrent subagents/tool cal
 ## Agent Behavior
 
 - MUST output a Context Summary and Next Steps at the end of every skill.
-- MUST NOT make workflow decisions for the user beyond the five sanctioned orchestrators above.
+- MUST NOT make workflow decisions for the user beyond the six sanctioned orchestrators above.
 - MUST read the target's actual `composer.json`/config/PHP source/CI/IaC before making any claim about it.
 - MUST NOT read, print, or write the target's `.env` files, credentials, or anything under a `secrets/`-style path.
 - MUST re-validate a `profile-synthesizer` profile against the target's current files before `infra-generate` consumes it, and MUST flag drift if the target changed since the scan.
@@ -147,11 +148,17 @@ Fan-out runs in parallel when the AI tool supports concurrent subagents/tool cal
 ## Verification
 
 - MUST run the applicable checks in `DOD.md` before claiming a scan or generation is complete.
+- MUST run `infra-validate` (the content review-and-repair phase: every
+  staged file read for uniqueness, completeness, accuracy, and coherence,
+  blocking findings repaired through the owning forges or escalated, recorded
+  in a review record `validate_content_review.py` accepts) against the
+  complete staged bundle before manifest stamping or publication in
+  `infra-generate` and `infra-update`.
 - MUST run `bootstrap-verifier` (evidence and per-skill contract conformance,
-  semantic distinctness, routing, frontmatter/cross-references, hook
-  syntax/wiring, memory runtime, manifest ownership/hashes, and placeholders)
-  against staging and again after publication before reporting
-  `infra-generate` or `infra-update` as done.
+  semantic distinctness, routing, content-review record,
+  frontmatter/cross-references, hook syntax/wiring, memory runtime, manifest
+  ownership/hashes, and placeholders) against staging and again after
+  publication before reporting `infra-generate` or `infra-update` as done.
 - MUST report unavailable tooling as `N/A - tooling not configured`; do not install tooling without user approval.
 
 ## Git Safety

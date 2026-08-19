@@ -84,6 +84,11 @@ MIRROR_RULES = {
                             "human Profile plus validated evidence and "
                             "per-skill generation contracts."
                         ),
+                        "infra-validate.md": (
+                            "Review every generated file for uniqueness, "
+                            "completeness, accuracy, and coherence, repairing "
+                            "blocking findings through the owning forges."
+                        ),
                         "infra-update.md": (
                             "Upgrade a previously generated accelerator to "
                             "the current evidence/semantic quality contract "

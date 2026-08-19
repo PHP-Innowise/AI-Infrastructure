@@ -4,7 +4,7 @@ description: One-shot convenience orchestrator that chains infra-scan then infra
 phase: orchestration
 flow-next: null
 flow-alternatives: [infra-scan, infra-generate]
-related: [infra-scan, infra-generate, infra-update, profile-synthesizer, bootstrap-verifier]
+related: [infra-scan, infra-generate, infra-update, profile-synthesizer, infra-validate, bootstrap-verifier]
 ---
 
 # Infra Build
@@ -36,7 +36,11 @@ No new file naming of its own. It relies on `infra-scan` (which writes `tasks/TA
 4. **Run `infra-generate`** against the same target.
    - If the collision guard trips (target already has an accelerator), STOP and ask overwrite/merge/abort - never auto-decide.
    - The one-shot changes nothing about the upgrade contract: `infra-generate` still stamps the target's `AGENTS.md` and writes `.infra-manifest.json` before verification, so a target built via `infra-build` is upgradeable with `infra-update` like any other.
-5. **Verify** via `infra-generate`'s built-in `bootstrap-verifier` step (which includes the manifest checks); do not report success on failure.
+5. **Verify** via `infra-generate`'s built-in `infra-validate` content
+   review-and-repair phase and `bootstrap-verifier` step (which includes the
+   manifest checks); do not report success on failure. An `infra-validate`
+   escalation - a finding evidence cannot settle - is a checkpoint like any
+   blocking ambiguity: STOP and hand it to the user.
 6. **Report** the combined result in `tasks/TASK-{N}/infra-build-report.md`.
 
 ## Output Template
