@@ -182,3 +182,27 @@ and 6. Every command expectation in all five plans is written in the absolute
 form and none in the differential form - 16 absolute against 0 differential -
 which is what section 1 predicted from the exemplar, and why the exemplar was
 rewritten along with the rule.
+
+## 8. The case the model did not have
+
+The fifth end-to-end run found one: a verification whose subject the generation
+itself creates. The memory quartet verifies itself with the seeded runtime, so
+on a first generation there is no unmodified target to observe - the runtime
+arrives with the accelerator. That run recorded the baselines on a different
+tree that already had the runtime, and said so in prose, which is exactly the
+kind of unverifiable statement this ADR exists to remove.
+
+The resolution keeps the ADR's shape and changes the authority. For a target's
+own toolchain the observation is the authority, because nothing else knows what
+`eslint` will do on that project. For the seeded runtime the *contract* is the
+authority, because the runtime is fixed and shipped by this generator:
+`memory-seed/assets/runtime-contract.json` now declares what each command's exit
+codes mean, read out of the scripts rather than from one run. A runtime-fixed
+skill therefore records no baseline and is graded against that declaration, and
+a baseline recorded anyway - which `infra-update` legitimately can, since the
+runtime exists by then - may not contradict it.
+
+Measured across five runs: 2 of 23 runtime checks fail the new rule, both of
+them skills promising `context.py validate` exits zero. The contract declares
+exit 1 whenever an index is stale, which is the state this repository is in as
+this is written.

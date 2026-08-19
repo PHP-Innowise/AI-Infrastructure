@@ -163,6 +163,56 @@
       "python3 memory-bank/scripts/context.py parity --json": "compare the canonical mirrors across editions and fail on drift in mirrored skills, hooks, commands, agents or governance documents",
       "python3 memory-bank/scripts/validate.py": "validate the durable memory bank: chunk frontmatter, statuses and the bank index",
       "python3 memory-bank/scripts/validate.py --summary": "print durable memory bank status counts from chunk frontmatter without printing chunk contents"
+    },
+    "outcomes": {
+      "python3 memory-bank/scripts/context.py status": [
+        {
+          "exit": 0,
+          "meaning": "prints the document, episode and working-task counts per layer"
+        }
+      ],
+      "python3 memory-bank/scripts/context.py status --json": [
+        {
+          "exit": 0,
+          "meaning": "prints the same counts as JSON with the mode and the authority"
+        }
+      ],
+      "python3 memory-bank/scripts/context.py validate": [
+        {
+          "exit": 0,
+          "meaning": "every Brain record and index is canonical and it says validation passed"
+        },
+        {
+          "exit": 1,
+          "meaning": "prints each record or index that is stale or non-canonical"
+        }
+      ],
+      "python3 memory-bank/scripts/context.py parity --json": [
+        {
+          "exit": 0,
+          "meaning": "the canonical mirrors agree, or the edition is standalone and parity is skipped"
+        },
+        {
+          "exit": 1,
+          "meaning": "prints the mirrored files that drifted between editions"
+        }
+      ],
+      "python3 memory-bank/scripts/validate.py": [
+        {
+          "exit": 0,
+          "meaning": "the durable memory bank passes chunk frontmatter and status validation"
+        },
+        {
+          "exit": 1,
+          "meaning": "prints each chunk error that failed validation"
+        }
+      ],
+      "python3 memory-bank/scripts/validate.py --summary": [
+        {
+          "exit": 0,
+          "meaning": "prints the durable memory bank chunk status counts"
+        }
+      ]
     }
   },
   "runtime_fixed_skills": {

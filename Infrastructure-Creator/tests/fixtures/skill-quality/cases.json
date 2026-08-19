@@ -199,6 +199,14 @@
     "description": "A runtime-fixed skill may be named by its own subject; a memory request cannot avoid the word memory.",
     "expected": null
   },
+  "runtime-baseline-contradicted": {
+    "description": "A baseline recorded for a runtime command says something the runtime contract does not declare.",
+    "expected": "RUNTIME_BASELINE_CONTRADICTED"
+  },
+  "runtime-expectation-contradicted": {
+    "description": "A runtime-fixed skill promises its runtime command exits zero while the runtime contract declares a nonzero exit for it.",
+    "expected": "RUNTIME_EXPECTATION_CONTRADICTED"
+  },
   "scan-secret-covered": {
     "description": "A scanner claims to have covered a secret-bearing file, which the contract forbids reading.",
     "expected": "SCAN_SECRET_COVERED"

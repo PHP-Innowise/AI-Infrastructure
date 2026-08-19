@@ -876,6 +876,8 @@ class SkillQualityTest(SkillQualityFixture):
                 "procedure-role-wiring",
                 "review-verification-not-executed",
                 "routing-tautology",
+                "runtime-baseline-contradicted",
+                "runtime-expectation-contradicted",
                 "routing-tautology-calibration",
                 "scan-secret-covered",
                 "scan-surface-unaccounted",
@@ -5053,6 +5055,96 @@ class ContractRenderingTest(SkillQualityFixture):
         )
         self.rewrite()
         self.assertIn("SKILL_ROLE_NOT_RENDERED", self.codes())
+
+
+class RuntimeExpectationTest(SkillQualityFixture):
+    """A runtime command has no unmodified target to be observed on.
+
+    The runtime the memory quartet verifies itself with is installed by the
+    generation, so on a first run there is nothing to record a baseline
+    against - ADR-002's model has no subject. The runtime is fixed and shipped
+    by this generator, though, so its behaviour belongs to the contract, and
+    the contract states what each exit code means.
+    """
+
+    def runtime_check(self, command: str, expected: str, baseline=None) -> list:
+        self.use_schema_1_4()
+        skill = self.plan["skills"][0]
+        skill["kind"] = "runtime-fixed"
+        skill["evidence_ids"] = []
+        skill["source_paths"] = []
+        skill["claim_ids"] = []
+        skill["evidence_anchors"] = []
+        check = skill["verification"][0]
+        check["mode"] = "command"
+        check["command"] = command
+        check["expected_result"] = expected
+        check["baseline"] = baseline
+        self.rewrite()
+        return [item.code for item in self.plan_diagnostics()]
+
+    def test_promising_zero_against_a_declared_nonzero_exit_is_rejected(self) -> None:
+        """The defect this closes, measured on a real run: a quartet skill
+        promised `context.py validate` exits zero, and the contract declares
+        exit 1 whenever an index is stale."""
+        codes = self.runtime_check(
+            "python3 memory-bank/scripts/context.py validate",
+            "Validation exits zero and reports no schema or index error",
+        )
+        self.assertIn("RUNTIME_EXPECTATION_CONTRADICTED", codes)
+
+    def test_an_expectation_that_admits_the_declared_failure_passes(self) -> None:
+        codes = self.runtime_check(
+            "python3 memory-bank/scripts/context.py validate",
+            "Validation either passes or names each stale record, and the named "
+            "records are reported rather than treated as a skill failure",
+        )
+        self.assertNotIn("RUNTIME_EXPECTATION_CONTRADICTED", codes)
+
+    def test_a_runtime_command_needs_no_baseline(self) -> None:
+        """On a first generation the runtime does not exist on the target yet."""
+        codes = self.runtime_check(
+            "python3 memory-bank/scripts/context.py status",
+            "The counts for each layer are printed and recorded",
+        )
+        self.assertNotIn("VERIFICATION_BASELINE_MISSING", codes)
+
+    def test_a_recorded_baseline_must_agree_with_the_contract(self) -> None:
+        """An update runs against a target that already has the runtime, so a
+        baseline is legitimate there - but not one the contract contradicts."""
+        codes = self.runtime_check(
+            "python3 memory-bank/scripts/context.py status",
+            "The counts for each layer are printed and recorded",
+            baseline={
+                "command": "python3 memory-bank/scripts/context.py status",
+                "observed": "exit 1; the runtime refused to report",
+                "outcome": "failing",
+            },
+        )
+        self.assertIn("RUNTIME_BASELINE_CONTRADICTED", codes)
+
+    def test_a_baseline_the_contract_allows_is_accepted(self) -> None:
+        codes = self.runtime_check(
+            "python3 memory-bank/scripts/context.py validate",
+            "Validation either passes or names each stale record",
+            baseline={
+                "command": "python3 memory-bank/scripts/context.py validate",
+                "observed": "exit 1; named the stale project-brain index",
+                "outcome": "failing",
+            },
+        )
+        self.assertNotIn("RUNTIME_BASELINE_CONTRADICTED", codes)
+
+    def test_every_attested_runtime_command_declares_its_outcomes(self) -> None:
+        """The contract cannot be the authority for a command it says nothing
+        about, so the two lists may not drift apart."""
+        contract = json.loads(
+            (ROOT / ".agents/skills/memory-seed/assets/runtime-contract.json")
+            .read_text(encoding="utf-8")
+        )
+        declared = set(contract["commands"]["outcomes"])
+        for command in contract["commands"]["read_health"]:
+            self.assertIn(command, declared, command)
 
 
 if __name__ == "__main__":

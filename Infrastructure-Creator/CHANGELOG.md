@@ -73,6 +73,25 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Added
 
+- **A runtime command is now graded against its contract, closing the one hole
+  the fifth end-to-end run found in ADR-002.** The memory quartet verifies itself
+  with the seeded runtime, and on a first generation that runtime does not exist
+  on the target yet - the generation installs it. So a baseline "recorded on the
+  unmodified target" was either impossible or, as in that run, taken on a
+  different tree and explained in prose no gate could check.
+  The runtime is fixed and shipped by this generator, so its behaviour belongs to
+  `runtime-contract.json`, which now declares what each command's exit codes
+  mean, read out of the scripts themselves rather than from one observation.
+  A runtime-fixed skill needs no baseline for such a command; its expectation may
+  not promise the command succeeds outright when the contract declares a nonzero
+  exit; and a baseline recorded anyway - which an update legitimately can, since
+  by then the runtime exists - may not say what the contract does not declare.
+  Calibrated on all five runs: 2 of 23 runtime checks fire, both of them skills
+  promising `context.py validate` exits zero, which the contract declares it does
+  not whenever an index is stale - the state this repository is in right now.
+  A test also pins the two lists together, so a command may not be attested
+  read-only without declaring what its exits mean.
+
 - **A narrower disposition now overrules a broader one.** Running the discovery
   gate against a real Symfony target on the first end-to-end run of schema 1.4
   reported `config` as "both covered and forbidden": the architecture scanner had

@@ -365,6 +365,22 @@ skill's own declared job; a read-only skill may not claim it. Where the gate can
 resolve the command itself, a recorded baseline is cross-checked against that
 resolution rather than trusted.
 
+**A runtime command is graded against its contract, not against the target.**
+The memory quartet verifies itself with the seeded runtime, and on a first
+generation that runtime does not exist on the target yet - the generation
+installs it - so there is no unmodified target to observe and ADR-002's model
+has no subject. The runtime is fixed and shipped by this generator, so its
+behaviour belongs to `memory-seed/assets/runtime-contract.json`, which declares
+what each command's exit codes mean. A runtime-fixed skill therefore needs no
+baseline for such a command; its `expected_result` may not promise the command
+succeeds outright when the contract declares a nonzero exit
+(`RUNTIME_EXPECTATION_CONTRADICTED`), and a baseline recorded anyway - which an
+update legitimately can, since the runtime exists by then - may not say what the
+contract does not declare (`RUNTIME_BASELINE_CONTRADICTED`).
+Measured on five real runs before release: 2 of 23 runtime checks fire, both of
+them skills promising `context.py validate` exits zero, which the contract
+declares it does not whenever an index is stale.
+
 `mode` is `command` or `manual`; command checks require a concrete command,
 while manual checks use JSON `null`. Generic references to an "evidenced",
 "configured", "appropriate", or "narrow" command are invalid. Verification

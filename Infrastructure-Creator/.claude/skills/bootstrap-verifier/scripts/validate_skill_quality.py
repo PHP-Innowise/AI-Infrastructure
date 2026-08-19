@@ -1420,11 +1420,80 @@ def _validate_role_coverage_wiring(
             )
 
 
+def _validate_runtime_expectation(
+    name: str,
+    check: dict,
+    declared: list,
+    baseline: Any,
+    diagnostics: list,
+) -> None:
+    """Grade a runtime command against the outcomes its contract declares.
+
+    Two things can go wrong. The expectation can promise the command succeeds
+    outright when the contract declares a nonzero exit for it - which is the
+    ADR-002 defect with the authority moved from an observation to the
+    contract: `context.py validate` exits 1 whenever an index is stale, so a
+    skill promising zero raises a blocking finding on a normal state.
+
+    And a baseline can still be recorded, because an update runs against a
+    target where the runtime already exists. That is legitimate, but it may not
+    say something the contract does not declare.
+    """
+    exits = {entry["exit"] for entry in declared}
+    expected = str(check.get("expected_result") or "")
+    if (
+        exits - {0}
+        and ABSOLUTE_SUCCESS_PATTERN.search(expected)
+        and not DIFFERENTIAL_EXPECTATION_PATTERN.search(expected)
+    ):
+        meanings = "; ".join(
+            f"exit {entry['exit']}: {entry['meaning']}"
+            for entry in declared
+            if entry["exit"] != 0
+        )
+        _diag(
+            diagnostics,
+            "RUNTIME_EXPECTATION_CONTRADICTED",
+            f"{name}.{check['id']} promises the runtime command succeeds "
+            f"outright, but its contract declares {meanings}",
+        )
+    if baseline is None:
+        return
+    if (
+        not isinstance(baseline, dict)
+        or set(baseline) != {"command", "observed", "outcome"}
+        or baseline.get("outcome") not in VERIFICATION_BASELINE_OUTCOMES
+    ):
+        _diag(
+            diagnostics,
+            "VERIFICATION_BASELINE_INVALID",
+            f"{name}.{check['id']} baseline must record the command, what it "
+            "did, and one of "
+            f"{', '.join(sorted(VERIFICATION_BASELINE_OUTCOMES))}",
+        )
+        return
+    wanted = 0 if baseline["outcome"] == "passing" else 1
+    if wanted == 0 and 0 not in exits:
+        contradiction = "the contract declares no zero exit for it"
+    elif wanted != 0 and not exits - {0}:
+        contradiction = "the contract declares only a zero exit for it"
+    else:
+        contradiction = ""
+    if contradiction:
+        _diag(
+            diagnostics,
+            "RUNTIME_BASELINE_CONTRADICTED",
+            f"{name}.{check['id']} records a {baseline['outcome']} baseline "
+            f"for a runtime command and {contradiction}",
+        )
+
+
 def _validate_verification_baseline(
     name: str,
     check: dict,
     target: Path,
     capability_mode: str,
+    runtime_fixed: bool,
     diagnostics: list,
 ) -> None:
     """Grade a recorded baseline against ADR-002.
@@ -1445,6 +1514,19 @@ def _validate_verification_baseline(
     resolvable = bool(command) and _parse_search_command(
         str(command), str(check.get("skip_condition") or ""), target
     ) is not None
+    declared = (
+        _runtime_command_outcomes().get(
+            _normalize_command_text(str(command)).strip()
+        )
+        if runtime_fixed and command
+        else None
+    )
+    if declared:
+        _validate_runtime_expectation(name, check, declared, baseline, diagnostics)
+        # The runtime this command reads is installed by this generation, so a
+        # first run has nothing to observe. The contract is the authority
+        # instead, and it was just consulted.
+        return
     if baseline is None:
         if check.get("mode") == "command" and not resolvable:
             _diag(
@@ -1596,6 +1678,47 @@ def _validate_absence_evidence(
         )
         return False
     return True
+
+
+def _runtime_command_outcomes() -> dict:
+    """Return the runtime contract's declared exit outcomes per command.
+
+    A runtime-fixed skill verifies itself with the seeded runtime, and on a
+    first generation that runtime does not exist on the target yet: the
+    generation installs it. So there is no unmodified target to observe a
+    baseline on, and ADR-002's model - record what the command does before the
+    change - has nothing to record.
+
+    The runtime is fixed, though, and shipped by this generator, so its
+    behaviour is a property of the contract rather than of the target. The
+    contract therefore states what each command's exit codes mean, read out of
+    the scripts themselves, and that becomes the authority the expectation is
+    graded against.
+    """
+    try:
+        contract = json.loads(RUNTIME_CONTRACT.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    commands = contract.get("commands")
+    if not isinstance(commands, dict):
+        return {}
+    declared = commands.get("outcomes")
+    if not isinstance(declared, dict):
+        return {}
+    resolved: dict[str, list] = {}
+    for command, entries in declared.items():
+        if not isinstance(command, str) or not isinstance(entries, list):
+            continue
+        exits = [
+            entry
+            for entry in entries
+            if isinstance(entry, dict)
+            and type(entry.get("exit")) is int
+            and _is_nonempty_string(entry.get("meaning"))
+        ]
+        if exits:
+            resolved[_normalize_command_text(command).strip()] = exits
+    return resolved
 
 
 def _runtime_command_purposes() -> dict:
@@ -3772,6 +3895,7 @@ def _validate_schema_1_2_skill(
                 check,
                 target,
                 str(capability.get("mode") or ""),
+                runtime_fixed,
                 diagnostics,
             )
         verification_text = " ".join(
