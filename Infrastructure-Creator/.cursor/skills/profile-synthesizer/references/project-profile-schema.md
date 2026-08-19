@@ -573,6 +573,17 @@ gap gets hidden behind a name, so widen that skill's `ownership` and
 }
 ```
 
+A selection condition reports one of two statuses. `satisfied` is the ordinary
+one. `absent-golden` says the requirement is **not** met and the skill is
+generated anyway, which only a candidate the registry marks `golden` may do: the
+development loop does not wait for a profiler to be installed. Such a condition
+cites an absence evidence entry - the kind carrying `absence: {subject, search,
+accounted_matches}`, whose search this gate runs itself - and the skill carries
+`narrow_scope`, one sentence naming what it still does and what it cannot do
+until the surface exists. A skill that narrows without an absent condition is
+`NARROW_SCOPE_UNEXPECTED`; one that reports an absence it cannot prove is
+`ABSENT_GOLDEN_UNPROVEN`.
+
 A rejection is a judgement about the target and is held to the target:
 
 - **It must say where the surface was looked for.** `reason` and

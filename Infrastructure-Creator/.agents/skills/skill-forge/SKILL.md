@@ -42,6 +42,15 @@ orchestration step. The log maps every staged skill to exactly one plan entry.
    paths, and plan/profile inventory equality. Stop before authoring when any
    blocking contract-inventory diagnostic exists; surface nonblocking contract
    similarity/repeated-block warnings for review.
+   A golden candidate is generated whether or not the target carries what its
+   catalog gate asks for, and the honest form is narrow, not silent. Its
+   selection condition reports `status: "absent-golden"`, cites an absence
+   evidence entry whose search this gate resolves itself, and the skill carries
+   `narrow_scope`: what it still does, and what it cannot do until the surface
+   exists. Marking the condition satisfied against evidence that does not
+   support it, or writing a full contract over a surface the project has not
+   got, is the failure this replaces (`ABSENT_GOLDEN_NOT_PERMITTED`,
+   `ABSENT_GOLDEN_UNPROVEN`, `NARROW_SCOPE_MISSING`).
    A rejection is graded like a selection, because dropping a candidate is a
    claim about the target: it names where the surface was looked for
    (`REJECTION_UNANCHORED` otherwise), it may not be one sentence stamped

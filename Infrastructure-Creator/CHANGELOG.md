@@ -99,6 +99,36 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Added
 
+- **A golden skill on a target without its surface says so, narrowly.** The
+  golden set generates the development loop regardless of what the target
+  carries, which collides with the evidence rules: a selected skill needs a
+  satisfied selection gate, anchored claims and verification with baselines, and
+  a project with no profiler has none of that for `performance`. The choice was
+  either to exempt golden skills from evidence, or to let them be honest about
+  what is missing. This is the second.
+  - A selection condition may now report `absent-golden` instead of `satisfied`:
+    the requirement is openly unmet, the skill is generated because policy says
+    the loop is unconditional, and the condition cites an absence evidence entry
+    whose search this gate resolves itself. Only a candidate the registry marks
+    `golden` may do it (`ABSENT_GOLDEN_NOT_PERMITTED`), the absence must be
+    proved rather than asserted (`ABSENT_GOLDEN_UNPROVEN`), and the skill must
+    carry `narrow_scope` - what it still does and what it cannot do until the
+    surface exists (`NARROW_SCOPE_MISSING`). Narrowing a skill whose surface is
+    present is `NARROW_SCOPE_UNEXPECTED`.
+  - Two defects surfaced in the absence machinery while wiring this, both from
+    1.3 and both silent until now: an absence entry lost its kind in the
+    evidence map, which stored the `None` location it has instead of the
+    `absence` it is - so every later rule saw an entry it could not classify,
+    and one of them indexes that tuple; and the anchor rule demanded a bounded
+    line range from an absence, which by definition has no line to bound. A
+    skill could therefore not rest on the one evidence class built for recording
+    what a target does not do.
+  - Measured on a real target while writing it: `phpstan/phpstan` 1.10.57 is in
+    `require-dev` with no `phpstan.neon` and no script that runs it. The scan
+    had recorded "no static analysis configuration", which is true and useless;
+    the honest claim is that the analyser is installed and invoked from nowhere,
+    and that is what the refactoring skill's absence evidence now says.
+
 - **The golden development set: eight skills that generate on every run, in
   any weather.** The escalation and disposition machinery made rejections honest,
   and the next real run showed honesty is not enough: it selected the

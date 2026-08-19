@@ -3813,6 +3813,88 @@ class GoldenCandidateTest(SkillQualityFixture):
         self.assertNotIn("REGISTRY_CANDIDATE_INVALID", codes)
 
 
+class AbsentGoldenTest(SkillQualityFixture):
+    """A golden skill on a target that lacks its surface says so, narrowly.
+
+    Policy generates the development loop whether or not the target carries
+    what a catalog gate asks for. That leaves one honest shape - the
+    requirement is openly unmet, the absence is proved by a search this gate
+    runs itself, and the skill states the reduced job it still does - and two
+    dishonest ones: a condition marked satisfied against evidence that does not
+    support it, and a full contract over a surface the project has not got.
+    """
+
+    ABSENCE = {
+        "id": "EV-ABS-0001",
+        "source_type": "configuration",
+        "authority": "No profiler is wired into this project",
+        "confidence": "confirmed",
+        "absence": {
+            "subject": "a profiler in the dependency manifest",
+            "search": "grep -rl blackfire composer.json",
+            "accounted_matches": [],
+        },
+        # The claim names what the search establishes, not a paraphrase of it.
+        "supported_claims": ["no blackfire profiler is named in composer.json"],
+    }
+
+    def mark_golden(self, candidate_id: str) -> None:
+        registry = json.loads(self.registry_path.read_text(encoding="utf-8"))
+        for item in registry["candidates"]:
+            if item["id"] == candidate_id:
+                item["golden"] = True
+        self.registry_path.write_text(json.dumps(registry, indent=2), encoding="utf-8")
+
+    def narrow(self, *, golden: bool = True, narrow_scope: str | None = "Until a profile exists this skill establishes the measurement rather than the fix", evidence_id: str = "EV-ABS-0001") -> list[str]:
+        self.use_schema_1_5()
+        if golden:
+            self.mark_golden("firebase-services")
+        (self.target / "composer.json").write_text('{"require": {}}\n', encoding="utf-8")
+        self.plan["evidence"].append(self.ABSENCE)
+        skill = self.plan["skills"][0]
+        skill["selection_gate"]["conditions"] = [
+            {
+                "requirement": "A measurable hot path or profiling record exists",
+                "evidence_ids": [evidence_id],
+                "status": "absent-golden",
+                "explanation": "no blackfire profiler is named in composer.json",
+            }
+        ]
+        skill["evidence_ids"] = list(dict.fromkeys(skill["evidence_ids"] + [evidence_id]))
+        if narrow_scope is None:
+            skill.pop("narrow_scope", None)
+        else:
+            skill["narrow_scope"] = narrow_scope
+        self.write_fixture()
+        return [item.code for item in self.plan_diagnostics()]
+
+    def test_an_honest_narrow_contract_is_accepted(self) -> None:
+        codes = self.narrow()
+        for code in ("ABSENT_GOLDEN_NOT_PERMITTED", "ABSENT_GOLDEN_UNPROVEN",
+                     "NARROW_SCOPE_MISSING", "SKILL_SELECTION_CONDITION"):
+            self.assertNotIn(code, codes)
+
+    def test_only_a_golden_candidate_may_report_its_surface_absent(self) -> None:
+        self.assertIn("ABSENT_GOLDEN_NOT_PERMITTED", self.narrow(golden=False))
+
+    def test_a_narrow_contract_must_say_what_it_still_does(self) -> None:
+        self.assertIn("NARROW_SCOPE_MISSING", self.narrow(narrow_scope=None))
+
+    def test_the_absence_must_be_proved_not_asserted(self) -> None:
+        # EV-0001 records something the target has, so it cannot establish
+        # that something else is missing.
+        self.assertIn("ABSENT_GOLDEN_UNPROVEN", self.narrow(evidence_id="EV-0001"))
+
+    def test_narrowing_a_skill_whose_surface_is_there_is_reported(self) -> None:
+        self.use_schema_1_5()
+        self.plan["skills"][0]["narrow_scope"] = "narrowed for a surface that is present"
+        self.write_fixture()
+        self.assertIn(
+            "NARROW_SCOPE_UNEXPECTED",
+            [item.code for item in self.plan_diagnostics()],
+        )
+
+
 class RejectionDispositionTest(SkillQualityFixture):
     """A rejection says which kind of rejection it is.
 

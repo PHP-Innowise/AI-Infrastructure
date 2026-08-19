@@ -85,6 +85,9 @@ SCHEMA_1_4_SKILL_FIELDS = SCHEMA_1_2_SKILL_FIELDS + (
     "claim_ids",
     "evidence_dispositions",
 )
+# A selection condition is either met, or - for a skill policy generates
+# regardless - openly unmet against an absence this gate resolves itself.
+SELECTION_CONDITION_STATUSES = {"satisfied", "absent-golden"}
 SECTION_ALIASES = {
     "purpose": ("purpose",),
     "inputs": ("project evidence", "inputs", "project evidence / inputs"),
@@ -3299,6 +3302,82 @@ def _validate_rejection_dispositions(
             )
 
 
+def _validate_absent_golden(
+    name: str,
+    skill: dict[str, Any],
+    registry: dict[str, dict[str, Any]],
+    evidence_map: dict[str, tuple[str, str]],
+    absence_evidence: set[str],
+    diagnostics: list[Diagnostic],
+) -> None:
+    """Grade a golden skill generated onto a target that lacks its surface.
+
+    A golden candidate is generated whether or not the target carries what its
+    catalog gate asks for - the loop every codebase lives in does not wait for
+    a profiler to be installed. That leaves one honest shape and several
+    dishonest ones. The honest shape says the requirement is unmet, proves the
+    absence with a search this gate runs itself, and states what the skill still
+    does until the surface exists. The dishonest ones are a condition marked
+    satisfied against evidence that does not support it, and a skill that claims
+    a full contract over a surface the project has not got.
+    """
+    conditions = [
+        item
+        for item in _as_list(skill.get("selection_gate", {}).get("conditions"))
+        if isinstance(item, dict)
+    ]
+    absent = [item for item in conditions if item.get("status") == "absent-golden"]
+    if not absent:
+        if _is_nonempty_string(skill.get("narrow_scope")):
+            _diag(
+                diagnostics,
+                "NARROW_SCOPE_UNEXPECTED",
+                f"{name} narrows its scope for a missing surface while every "
+                f"selection condition reports the surface is there",
+            )
+        return
+
+    candidate_id = str(skill.get("selection_gate", {}).get("candidate_id", "")).strip()
+    entry = registry.get(candidate_id)
+    if not isinstance(entry, dict) or entry.get("golden") is not True:
+        _diag(
+            diagnostics,
+            "ABSENT_GOLDEN_NOT_PERMITTED",
+            f"{name} reports its surface absent and generates anyway, which "
+            f"only a golden candidate may do: {candidate_id or '?'} is not one",
+        )
+    if not _is_nonempty_string(skill.get("narrow_scope")):
+        _diag(
+            diagnostics,
+            "NARROW_SCOPE_MISSING",
+            f"{name} is generated onto a target without its surface and must "
+            f"state what it still does and what it cannot do until that surface "
+            f"exists",
+        )
+    for condition in absent:
+        cited = [
+            item for item in _as_list(condition.get("evidence_ids"))
+            if _is_nonempty_string(item)
+        ]
+        if not cited:
+            _diag(
+                diagnostics,
+                "ABSENT_GOLDEN_UNPROVEN",
+                f"{name} reports a surface absent without citing the absence "
+                f"evidence that establishes it",
+            )
+            continue
+        for identifier in cited:
+            if identifier not in absence_evidence:
+                _diag(
+                    diagnostics,
+                    "ABSENT_GOLDEN_UNPROVEN",
+                    f"{name} rests an absent surface on {identifier}, which "
+                    f"records something the target has rather than something it "
+                    f"does not",
+                )
+
+
 def _validate_rejections_against_target(
     rejected: list[dict[str, Any]],
     registry: dict[str, dict[str, Any]],
@@ -4741,12 +4820,19 @@ def _validate_schema_1_2_skill(
                 f"{name} claim is not traceable through scope, procedure, verification, and output: {claim}",
             )
     for evidence_id in skill.get("evidence_ids", []):
-        if evidence_id not in anchored_evidence:
-            _diag(
-                diagnostics,
-                "EVIDENCE_ANCHOR_MISSING",
-                f"{name} has no bounded anchor for evidence: {evidence_id}",
-            )
+        if evidence_id in anchored_evidence:
+            continue
+        # An absence has no line range to bound: what pins it is the search the
+        # gate resolves itself, over the file set it agrees with. Demanding an
+        # anchor here would make the one evidence class that records a missing
+        # thing impossible for a skill to rest on.
+        if (evidence_map.get(evidence_id) or ("", ""))[0] == "absence":
+            continue
+        _diag(
+            diagnostics,
+            "EVIDENCE_ANCHOR_MISSING",
+            f"{name} has no bounded anchor for evidence: {evidence_id}",
+        )
 
     routing_cases = skill.get("routing_cases")
     if not isinstance(routing_cases, list) or not routing_cases:
@@ -5714,7 +5800,11 @@ def _validate_plan(
                                 f"the cited source/range: {claim}",
                                 severity="warning",
                             )
-            evidence_map[evidence_id] = location
+            # An absence has no location, but it does have a kind: storing the
+            # `None` that `_evidence_location` returns for it threw the fact
+            # away, so every later rule saw an entry it could not classify - and
+            # one of them indexes this tuple.
+            evidence_map[evidence_id] = (kind, value) if location is None else location
 
     plan_skills: dict[str, dict[str, Any]] = {}
     rejected = plan["rejected_candidates"]
@@ -5942,13 +6032,25 @@ def _validate_plan(
                     f"{name}.selection_gate is incomplete",
                 )
             else:
+                _validate_absent_golden(
+                    name,
+                    skill,
+                    registry,
+                    evidence_map,
+                    {
+                        identifier
+                        for identifier, location in evidence_map.items()
+                        if location and location[0] == "absence"
+                    },
+                    diagnostics,
+                )
                 for condition in selection_gate["conditions"]:
                     if (
                         not isinstance(condition, dict)
                         or set(condition)
                         != {"requirement", "evidence_ids", "status", "explanation"}
                         or not _is_nonempty_string(condition.get("requirement"))
-                        or condition.get("status") != "satisfied"
+                        or condition.get("status") not in SELECTION_CONDITION_STATUSES
                         or not _is_nonempty_string(condition.get("explanation"))
                         or not _is_string_list(
                             condition.get("evidence_ids"),
@@ -5974,6 +6076,11 @@ def _validate_plan(
                         for condition_evidence in condition.get("evidence_ids", [])
                         for claim in evidence_claims.get(condition_evidence, [])
                     ]
+                    if condition.get("status") == "absent-golden":
+                        # The requirement is openly unmet; asking the explanation
+                        # to echo a claim about a surface that is not there would
+                        # ask for the opposite of the truth.
+                        continue
                     if claims and not _contract_matches(
                         claims,
                         condition.get("requirement", "")
