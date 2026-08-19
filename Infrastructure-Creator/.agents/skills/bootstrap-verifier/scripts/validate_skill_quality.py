@@ -811,14 +811,16 @@ def _load_registry(
         if (
             not isinstance(item, dict)
             or not {"id", "catalog", "category", "mode"} <= set(item)
-            or set(item) - {"id", "catalog", "category", "mode", "roles"}
+            or set(item)
+            - {"id", "catalog", "category", "mode", "roles", "escalates_on_rejection"}
             or not all(
                 _is_nonempty_string(item.get(key))
                 for key in item
-                if key != "roles"
+                if key not in ("roles", "escalates_on_rejection")
             )
             or item.get("mode") not in {"static", "runtime-fixed", "family"}
             or not _is_optional_role_list(item.get("roles"))
+            or not isinstance(item.get("escalates_on_rejection", False), bool)
         ):
             _diag(
                 diagnostics,

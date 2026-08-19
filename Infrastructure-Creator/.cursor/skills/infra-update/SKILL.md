@@ -55,7 +55,7 @@ Allocate a new `tasks/TASK-{N}/` for the update run. Staging output goes to `tas
    names:
    `python3 bootstrap-verifier/scripts/validate_scan_coverage.py --target <target> --task-dir <task> --plan <task>/skill-generation-plan.json`
    and
-   `python3 bootstrap-verifier/scripts/validate_plan_review.py --plan <task>/skill-generation-plan.json --review <task>/skill-plan-quality-report.json`.
+   `python3 bootstrap-verifier/scripts/validate_plan_review.py --plan <task>/skill-generation-plan.json --review <task>/skill-plan-quality-report.json --registry .agents/skills/skill-forge/references/candidate-registry.json`.
    An update publishes into a target someone is already relying on, so it may
    not accept discovery or a review that generation itself would have refused.
    The manifest names its

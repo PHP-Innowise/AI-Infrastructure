@@ -14,6 +14,16 @@ answer, and every prescribed command actually run rather than judged from the
 page - which is the one thing that separated the judge who found a broken
 verification from the judge who did not.
 
+Rejections get the same treatment. A candidate the plan turns down is not
+reviewed by anyone by default, and a silently dropped `migration-safety` on a
+target full of migrations is a miss no selected-skill review can catch. Every
+registry candidate flagged `escalates_on_rejection` that the plan rejects must
+therefore carry a reviewed disposition: consolidated entries must name the
+selected skill that really absorbs them, insufficient-evidence entries must
+show the gap was escalated to the user (and why not even a narrow read-only
+variant), and unresolved-safety entries must carry the human decision - an
+undecided safety gap belongs in `blockers`, which blocks.
+
 Invariants shared with the other gates here: standard library only, no
 execution, no network, byte-stable JSON output, fail-closed.
 """
@@ -46,6 +56,16 @@ REQUEST_FIELDS = {"verdict", "prompt", "note"}
 JUDGED_FIELDS = {"verdict", "note"}
 REALISM_FIELDS = {"verdict", "note", "executed"}
 RUNTIME_FIXED_KIND = "runtime-fixed"
+
+# How a reviewed rejection may be classified, and what each class must show.
+# The base fields are shared; a class earns its extra obligations.
+REJECTION_BASE_FIELDS = {"name", "classification", "note"}
+REJECTION_CLASS_FIELDS = {
+    "consolidated": {"absorbed_by"},
+    "insufficient-evidence": {"narrow_scope", "interview_reference"},
+    "unresolved-safety": {"narrow_scope", "decision_reference"},
+    "not-applicable": set(),
+}
 
 
 @dataclass(frozen=True)
@@ -101,17 +121,179 @@ def _skill_commands(skill: dict) -> set[str]:
     }
 
 
-def validate(plan_path: Path, review_path: Path) -> list[Diagnostic]:
+def _load_flagged_candidates(
+    path: Path, diagnostics: list[Diagnostic]
+) -> set[str] | None:
+    """Registry candidate ids whose rejection must be escalated and reviewed."""
+    try:
+        registry = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        _diag(
+            diagnostics,
+            "REGISTRY_UNREADABLE",
+            f"{path.name} is not readable JSON: {error}",
+        )
+        return None
+    candidates = registry.get("candidates") if isinstance(registry, dict) else None
+    if not isinstance(candidates, list):
+        _diag(diagnostics, "REGISTRY_UNREADABLE", f"{path.name} lists no candidates")
+        return None
+    return {
+        str(item["id"]).strip()
+        for item in candidates
+        if isinstance(item, dict)
+        and _is_nonempty_string(item.get("id"))
+        and item.get("escalates_on_rejection") is True
+    }
+
+
+def _check_rejections(
+    plan: dict,
+    review: dict,
+    flagged: set[str],
+    selected_names: set[str],
+    diagnostics: list[Diagnostic],
+) -> None:
+    plan_rejected: dict[str, str] = {}
+    for item in plan.get("rejected_candidates") or []:
+        if isinstance(item, dict) and _is_nonempty_string(item.get("name")):
+            plan_rejected[str(item["name"]).strip()] = str(
+                item.get("candidate_id") or ""
+            ).strip()
+    required = {
+        name
+        for name, candidate_id in plan_rejected.items()
+        if candidate_id in flagged
+    }
+    entries = review.get("rejected")
+    if not isinstance(entries, list):
+        _diag(diagnostics, "REVIEW_INVALID", "rejected must be an array")
+        entries = []
+    reviewed: set[str] = set()
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict) or not _is_nonempty_string(entry.get("name")):
+            _diag(
+                diagnostics,
+                "REJECTION_ANSWER_INVALID",
+                f"rejected[{index}] must name the candidate it reviews",
+            )
+            continue
+        name = str(entry["name"]).strip()
+        if name not in plan_rejected:
+            _diag(
+                diagnostics,
+                "REJECTION_REVIEW_UNKNOWN",
+                f"the review covers rejected candidate {name}, which the plan "
+                "does not reject",
+            )
+            continue
+        if name in reviewed:
+            _diag(
+                diagnostics,
+                "REJECTION_REVIEW_DUPLICATE",
+                f"the review covers rejected candidate {name} more than once",
+            )
+            continue
+        reviewed.add(name)
+        classification = entry.get("classification")
+        extra = REJECTION_CLASS_FIELDS.get(classification)
+        if extra is None:
+            _diag(
+                diagnostics,
+                "REJECTION_ANSWER_INVALID",
+                f"{name} must classify its rejection as one of "
+                + ", ".join(sorted(REJECTION_CLASS_FIELDS)),
+            )
+            continue
+        expected = REJECTION_BASE_FIELDS | extra
+        if set(entry) != expected or not _is_nonempty_string(entry.get("note")):
+            _diag(
+                diagnostics,
+                "REJECTION_ANSWER_INVALID",
+                f"{name} ({classification}) must carry exactly "
+                + ", ".join(sorted(expected))
+                + " with a substantive note",
+            )
+            continue
+        if classification == "consolidated":
+            absorbed = entry["absorbed_by"]
+            if not isinstance(absorbed, list) or not absorbed or any(
+                not _is_nonempty_string(item) for item in absorbed
+            ):
+                _diag(
+                    diagnostics,
+                    "REJECTION_ANSWER_INVALID",
+                    f"{name} must list the selected skills that absorb it",
+                )
+                continue
+            for owner in absorbed:
+                if str(owner).strip() not in selected_names:
+                    _diag(
+                        diagnostics,
+                        "REJECTION_CONSOLIDATION_PHANTOM",
+                        f"{name} claims to be absorbed by {owner}, which the "
+                        "plan does not select - a consolidation into nothing "
+                        "is a silent drop",
+                    )
+        elif classification == "insufficient-evidence":
+            if not _is_nonempty_string(entry.get("narrow_scope")):
+                _diag(
+                    diagnostics,
+                    "REJECTION_ANSWER_INVALID",
+                    f"{name} must state why not even a narrow read-only "
+                    "variant is generatable",
+                )
+            if not _is_nonempty_string(entry.get("interview_reference")):
+                _diag(
+                    diagnostics,
+                    "REJECTION_NOT_ESCALATED",
+                    f"{name} was rejected for missing evidence without the "
+                    "gap ever being escalated to the user - cite the "
+                    "clarifying-interview question and answer",
+                )
+        elif classification == "unresolved-safety":
+            if not _is_nonempty_string(entry.get("narrow_scope")):
+                _diag(
+                    diagnostics,
+                    "REJECTION_ANSWER_INVALID",
+                    f"{name} must state why not even a narrow read-only "
+                    "variant is generatable",
+                )
+            if not _is_nonempty_string(entry.get("decision_reference")):
+                _diag(
+                    diagnostics,
+                    "REJECTION_SAFETY_UNRESOLVED",
+                    f"{name} is a safety gap with no recorded human decision; "
+                    "an undecided one belongs in blockers, which blocks",
+                )
+    for name in sorted(required - reviewed):
+        _diag(
+            diagnostics,
+            "REJECTION_REVIEW_MISSING",
+            f"{name} is a risk-flagged candidate the plan rejects, and nobody "
+            "reviewed the rejection",
+        )
+
+
+def validate(
+    plan_path: Path, review_path: Path, registry_path: Path | None = None
+) -> list[Diagnostic]:
     diagnostics: list[Diagnostic] = []
     plan = _load(plan_path, plan_path.name, diagnostics)
     review = _load(review_path, review_path.name, diagnostics)
     if plan is None or review is None:
         return diagnostics
-    if set(review) != {"plan", "reviewer", "skills", "blockers"}:
+    flagged: set[str] | None = set()
+    if registry_path is not None:
+        flagged = _load_flagged_candidates(registry_path, diagnostics)
+        if flagged is None:
+            return diagnostics
+    if set(review) != {"plan", "reviewer", "skills", "rejected", "blockers"}:
         _diag(
             diagnostics,
             "REVIEW_INVALID",
-            "review must define exactly plan, reviewer, skills, and blockers",
+            "review must define exactly plan, reviewer, skills, rejected, "
+            "and blockers",
         )
         return diagnostics
     if review.get("reviewer") != "independent":
@@ -247,6 +429,7 @@ def validate(plan_path: Path, review_path: Path) -> list[Diagnostic]:
             "REVIEW_SKILL_MISSING",
             f"{name} was selected but never reviewed",
         )
+    _check_rejections(plan, review, flagged, set(planned), diagnostics)
     return diagnostics
 
 
@@ -254,9 +437,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan", required=True)
     parser.add_argument("--review", required=True)
+    parser.add_argument(
+        "--registry",
+        default=None,
+        help="candidate-registry.json; enables the risk-flagged rejection "
+        "coverage requirement. Without it, rejection entries are still "
+        "validated but none are required.",
+    )
     parser.add_argument("--json", action="store_true", dest="as_json")
     args = parser.parse_args(argv)
-    diagnostics = validate(Path(args.plan), Path(args.review))
+    diagnostics = validate(
+        Path(args.plan),
+        Path(args.review),
+        Path(args.registry) if args.registry else None,
+    )
     errors = [item for item in diagnostics if item.severity == "error"]
     if args.as_json:
         print(

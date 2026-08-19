@@ -30,6 +30,7 @@ All output from this run lives under `tasks/TASK-{NNN}/` in Infrastructure-Creat
 - `clarifying-interview-questions.md`, `clarifying-interview-answers.md`
 - `infra-scan-project-profile.md` (the deliverable)
 - `skill-generation-plan.json` (validated evidence ledger and per-skill contracts)
+- `infra-scan-rejection-report.md` (every rejected candidate, bucketed, with what would change the decision)
 
 ## Process
 
@@ -77,7 +78,24 @@ All output from this run lives under `tasks/TASK-{NNN}/` in Infrastructure-Creat
    runtime-fixed contracts from `memory-seed/assets/runtime-contract.json`.
    Stop before approval on any blocking diagnostic; schema migration and
    calibrated similarity warnings remain visible but non-blocking.
-10. **Review the plan adversarially, with a reader that did not write it.**
+10. **Escalate risk-flagged rejections before the dispositions freeze.** If
+    the drafted plan rejects any candidate whose registry entry declares
+    `escalates_on_rejection` (`skill-forge/references/candidate-registry.json`
+    flags the families whose absence leaves a confirmed operational surface
+    unguarded - migrations, command catalogs, deployment, containers, admin
+    panels, caching, dependencies, debugging, auth, file storage), run one
+    bounded second `clarifying-interview` round: one concrete question per
+    such rejection, phrased as a decision - *"Migrations are present
+    (database/migrations/, N files) but no creation authority was found: (a)
+    name the owner and allowed paths so a narrow skill can be generated, (b)
+    confirm the rejection."* Feed the answers back into `profile-synthesizer`
+    for re-synthesis; an answer that supplies the missing authority converts
+    the rejection into a bounded (often read-only) selected contract, and a
+    confirmed rejection is recorded with its interview reference. Skip this
+    step entirely when no risk-flagged candidate was rejected - the
+    low-friction principle stands. A silently dropped `migration-safety` on a
+    target full of migrations is the miss this step exists to close.
+11. **Review the plan adversarially, with a reader that did not write it.**
     For every selected skill, answer eight questions and record them in
     `tasks/TASK-{NNN}/skill-plan-quality-report.json`: does it win a positive
     request nobody wrote down before; does its nearest sibling win the sibling's
@@ -89,9 +107,15 @@ All output from this run lives under `tasks/TASK-{NNN}/` in Infrastructure-Creat
     prompt in the words a person would use - a prompt that names the skill it
     expects tests nothing. **Run the prescribed commands rather than judging
     them from the page**: in the third preserved run the broken verification was
-    found only by the judge who ran it. Then
-    `python3 bootstrap-verifier/scripts/validate_plan_review.py --plan tasks/TASK-{NNN}/skill-generation-plan.json --review tasks/TASK-{NNN}/skill-plan-quality-report.json`.
-11. **Stop.** Do not proceed to generation automatically - the profile is a human checkpoint by design.
+    found only by the judge who ran it. The same reader also reviews every
+    risk-flagged rejection into the record's `rejected` section: a
+    consolidated entry names the selected skill that really absorbs it, an
+    insufficient-evidence entry cites the step-10 interview exchange and states
+    why not even a narrow read-only variant is generatable, and an
+    unresolved-safety entry carries the recorded human decision (an undecided
+    one goes in `blockers` instead, which blocks). Then
+    `python3 bootstrap-verifier/scripts/validate_plan_review.py --plan tasks/TASK-{NNN}/skill-generation-plan.json --review tasks/TASK-{NNN}/skill-plan-quality-report.json --registry skill-forge/references/candidate-registry.json`.
+12. **Stop.** Do not proceed to generation automatically - the profile is a human checkpoint by design.
 
 ## Output Template
 
@@ -117,10 +141,16 @@ All output from this run lives under `tasks/TASK-{NNN}/` in Infrastructure-Creat
 ## Open Items
 [Anything still `unknown` after the interview, or flagged for the user to double check]
 
+## Rejected Candidates
+[count] rejected - see `infra-scan-rejection-report.md` for the bucketed
+dispositions and what would change each decision; [count] risk-flagged
+rejections were escalated through the interview.
+
 ## Review This Before Generating
 Read the Project Profile and review the proposed inventory. Inspect
 `skill-generation-plan.json` when checking evidence, ownership boundaries, or
-routing. Correct anything wrong, then run `infra-generate`.
+routing, and `infra-scan-rejection-report.md` for what was deliberately not
+generated. Correct anything wrong, then run `infra-generate`.
 ```
 
 ## Guardrails
@@ -132,6 +162,7 @@ routing. Correct anything wrong, then run `infra-generate`.
 - MUST NOT skip the interview's mandatory AI-tool-selection question, even if an edition folder already exists elsewhere - confirm explicitly.
 - MUST NOT let a slow/failed scanner silently drop from the profile - report it as a gap in the confidence summary.
 - MUST NOT approve synthesis with missing applicable test topology, command definitions, evidence anchors, path authority, invariant mapping, or material routing adjacency.
+- MUST NOT finalize the plan while a risk-flagged candidate's rejection was never escalated to the user - the disposition round is skippable only when no such rejection exists.
 - MUST NOT re-run scanners against an unchanged target just to double-check - one scan per invocation is the contract.
 
 ## Final Output

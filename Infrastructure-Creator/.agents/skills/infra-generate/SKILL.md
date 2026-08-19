@@ -31,8 +31,9 @@ target manifest member.
 2. **Validate evidence and the generation plan.** Require the scan's coverage
    gate to have passed -
    `python3 bootstrap-verifier/scripts/validate_scan_coverage.py --target <target> --task-dir <task> --plan <task>/skill-generation-plan.json`
-   and the adversarial review to have passed -
-   `python3 bootstrap-verifier/scripts/validate_plan_review.py --plan <task>/skill-generation-plan.json --review <task>/skill-plan-quality-report.json` -
+   and the adversarial review (selected skills and risk-flagged rejections
+   alike) to have passed -
+   `python3 bootstrap-verifier/scripts/validate_plan_review.py --plan <task>/skill-generation-plan.json --review <task>/skill-plan-quality-report.json --registry .agents/skills/skill-forge/references/candidate-registry.json` -
    before reading the plan at all: a plan is only as complete as the discovery
    under it, and a subsystem nobody dispositioned produces an accelerator that
    looks finished and does not know the subsystem exists. Then require the

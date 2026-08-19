@@ -19,12 +19,13 @@ The target project path is a **required** argument. This skill reads only the cu
 
 ## Generated File Naming Convention (MANDATORY)
 
-Write exactly two sibling files:
+Write exactly three sibling files:
 
 - `tasks/TASK-{N}/infra-scan-project-profile.md`
 - `tasks/TASK-{N}/skill-generation-plan.json`
+- `tasks/TASK-{N}/infra-scan-rejection-report.md`
 
-Follow `references/project-profile-schema.md` exactly. The JSON is generator runtime input, not a target artifact, and MUST NOT be copied into a generated skill tree or cited as a generated target skill's source.
+Follow `references/project-profile-schema.md` exactly. The JSON is generator runtime input, not a target artifact, and MUST NOT be copied into a generated skill tree or cited as a generated target skill's source. The rejection report is the human-readable account of everything deliberately not generated; rejection means "no separate skill contract yet", never "the concern is unimportant", and the report must read that way.
 
 ## Process
 
@@ -39,7 +40,15 @@ Follow `references/project-profile-schema.md` exactly. The JSON is generator run
    against its real catalog anchor. Every registry ID must receive exactly one
    disposition: selected (families may produce multiple concrete skills) or
    rejected with reason/missing evidence. There are no category quotas. Only
-   the memory quartet is runtime-fixed.
+   the memory quartet is runtime-fixed. Rejecting a candidate whose registry
+   entry declares `escalates_on_rejection` is a decision the user must see
+   before it freezes: report each such draft rejection to the orchestrator so
+   `infra-scan` can run its bounded disposition interview round, and consume
+   the answers on re-synthesis - an answer that supplies the missing authority
+   or scope becomes a bounded (often read-only) selected contract with
+   `interview answer` provenance; a confirmed rejection keeps the interview
+   reference in its reason. Never resolve such a rejection by inventing the
+   missing authority, and never silently drop it.
 8. **Build `skill-generation-plan.json`.** Stamp schema `1.4` and the current
    reference-corpus `catalog_version`. Normalize target evidence into
    `evidence[]` with supported claims and sha256 fingerprints for repository
@@ -100,7 +109,16 @@ Follow `references/project-profile-schema.md` exactly. The JSON is generator run
     The human checkpoint requires zero blocking contract-inventory diagnostics;
     report nonblocking contract-similarity warnings for review rather than
     silently discarding them.
-12. **Write both files atomically for the run** and report both paths.
+12. **Write the rejection report.** `infra-scan-rejection-report.md` covers
+    every rejected candidate, bucketed by primary cause - *consolidated into a
+    selected owner*, *insufficient project-specific evidence or authority*,
+    *unresolved operational or safety boundary*, *not applicable* - each with
+    its reason and one concrete "what would change the decision" line, plus a
+    ranked reconsideration table for the strongest candidates (risk-flagged
+    rejections first) naming the exact evidence each still needs. Mark every
+    risk-flagged rejection with its interview reference from the disposition
+    round.
+13. **Write all three files atomically for the run** and report their paths.
 
 ## Output Template
 
@@ -109,6 +127,7 @@ Follow `references/project-profile-schema.md` exactly. The JSON is generator run
 
 **File:** tasks/TASK-{N}/infra-scan-project-profile.md
 **Generation plan:** tasks/TASK-{N}/skill-generation-plan.json
+**Rejection report:** tasks/TASK-{N}/infra-scan-rejection-report.md ([count] rejected, [count] risk-flagged and escalated)
 **Editions:** [selected]
 **Skills to generate:** [count] ([list]) - see section 11.1 for what each one will actually do
 **Agents/commands preview:** [counts from section 11.2]
@@ -127,6 +146,7 @@ Read the profile and correct anything wrong, then run `infra-generate`.
 - MUST conform to `references/project-profile-schema.md` exactly.
 - MUST NOT assume the AI-tool selection - it comes only from the interview.
 - MUST NOT propose any skill whose reference trigger and required evidence are unsatisfied. Familiarity, category symmetry, and a preferred baseline are not evidence.
+- MUST surface every draft rejection of an `escalates_on_rejection` candidate for the disposition interview round before finalizing, and MUST write the rejection report for every run - a silent rejection is indistinguishable from an oversight.
 - MUST generate only the memory quartet unconditionally, because its runtime is always installed.
 - MUST provide a complete JSON contract for every selected skill; grouped or one-line descriptions are summaries only.
 - MUST cover every `roles` entry the selected candidate declares in the registry, each wired to cited evidence and to a procedure step that discharges it.
@@ -144,4 +164,4 @@ Read the profile and correct anything wrong, then run `infra-generate`.
 
 ## Final Output
 
-Return both artifact paths, the selected editions, the behavioral-contract summary (including contradictions), the selected and rejected skill inventory with reasons, the dynamic agents/commands preview counts, the memory-bank concept preview count, the confidence summary, and the next step (user reviews both artifacts, then runs `infra-generate`).
+Return all three artifact paths, the selected editions, the behavioral-contract summary (including contradictions), the selected and rejected skill inventory with reasons (risk-flagged rejections called out with their interview references), the dynamic agents/commands preview counts, the memory-bank concept preview count, the confidence summary, and the next step (user reviews the artifacts, then runs `infra-generate`).

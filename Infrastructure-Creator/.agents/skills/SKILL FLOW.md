@@ -73,7 +73,7 @@ How the generator's 25 skills fit together. This describes the generator itself,
 ## Context Handoff
 
 - The scanners each write `tasks/TASK-{N}/<name>-findings.md`.
-- `profile-synthesizer` merges everything into `tasks/TASK-{N}/infra-scan-project-profile.md` - the single contract between phases.
+- `profile-synthesizer` merges everything into `tasks/TASK-{N}/infra-scan-project-profile.md` - the single contract between phases - plus `infra-scan-rejection-report.md`, the bucketed account of every candidate deliberately not generated. When a draft rejection hits a registry candidate flagged `escalates_on_rejection`, `infra-scan` loops one bounded `clarifying-interview` disposition round before the plan freezes, and the adversarial review record must cover those rejections (`validate_plan_review.py --registry`).
 - `infra-generate` re-validates that profile against the target's current files, then the forges consume it. `skill-forge`'s log drives `agent-forge`, `command-forge`, and `skill-flow-composer`.
 - `infra-validate` runs after the wrappers and flows exist and before the manifest: parallel `content-reviewer` lanes read every staged file (and the run's own profile and plan), blocking findings are repaired through the owning forges within two rounds or escalated, and `validate_content_review.py` must accept the review record (`tasks/TASK-{N}/infra-validate-review.json`) before publication.
 - `bootstrap-verifier` gates success; a failure means generation is not done.

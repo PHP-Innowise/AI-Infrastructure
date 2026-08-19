@@ -28,6 +28,12 @@ No new file naming of its own. It relies on `infra-scan` (which writes `tasks/TA
    - If the profile has unresolved `unknown` items that affect generation, the
      AI-tool selection is unset, or any evidence/skill contract is incomplete,
      STOP and hand both artifacts to the user for review.
+   - If the rejection review left a risk-flagged rejection unresolved - an
+     `unresolved-safety` entry with no recorded decision, or an
+     `insufficient-evidence` entry never escalated through the disposition
+     interview round - STOP and hand the rejection report to the user; a
+     silently dropped operational skill is a checkpoint condition, not a
+     detail.
    - Require schema 1.4 and zero blocking diagnostics across the complete
      operational-safety, ownership/write/routing/flow inventory. Legacy 1.0/1.1
      plans may be audited but require re-synthesis before this build can

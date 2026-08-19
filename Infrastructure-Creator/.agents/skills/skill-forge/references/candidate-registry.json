@@ -141,7 +141,8 @@
         "verify-release-preconditions",
         "execute-the-evidenced-release-procedure",
         "define-rollback"
-      ]
+      ],
+      "escalates_on_rejection": true
     },
     {
       "id": "debugging",
@@ -152,7 +153,8 @@
         "locate-the-targets-error-and-log-surfaces",
         "read-the-targets-own-debug-tooling",
         "defer-methodology-to-systematic-debugger"
-      ]
+      ],
+      "escalates_on_rejection": true
     },
     {
       "id": "frontend-design",
@@ -237,7 +239,8 @@
       "id": "systematic-debugger",
       "catalog": "php-process-skills.md#systematic-debugger",
       "category": "process",
-      "mode": "static"
+      "mode": "static",
+      "escalates_on_rejection": true
     },
     {
       "id": "refactorer",
@@ -249,7 +252,8 @@
       "id": "dependency-manager",
       "catalog": "php-process-skills.md#dependency-manager",
       "category": "process",
-      "mode": "static"
+      "mode": "static",
+      "escalates_on_rejection": true
     },
     {
       "id": "review-pr",
@@ -321,7 +325,8 @@
       "id": "migration-safety",
       "catalog": "php-specialty-skills.md#migration-safety",
       "category": "specialty",
-      "mode": "static"
+      "mode": "static",
+      "escalates_on_rejection": true
     },
     {
       "id": "async-jobs",
@@ -345,19 +350,22 @@
       "id": "caching-strategy",
       "catalog": "php-specialty-skills.md#caching-strategy",
       "category": "specialty",
-      "mode": "static"
+      "mode": "static",
+      "escalates_on_rejection": true
     },
     {
       "id": "file-storage",
       "catalog": "php-specialty-skills.md#file-storage",
       "category": "specialty",
-      "mode": "static"
+      "mode": "static",
+      "escalates_on_rejection": true
     },
     {
       "id": "auth-scaffolding",
       "catalog": "php-specialty-skills.md#auth-scaffolding",
       "category": "specialty",
-      "mode": "static"
+      "mode": "static",
+      "escalates_on_rejection": true
     },
     {
       "id": "form-validation-design",
@@ -369,7 +377,8 @@
       "id": "admin-panel",
       "catalog": "php-specialty-skills.md#admin-panel",
       "category": "specialty",
-      "mode": "static"
+      "mode": "static",
+      "escalates_on_rejection": true
     },
     {
       "id": "api-platform-design",
@@ -381,7 +390,8 @@
       "id": "console-commands",
       "catalog": "php-specialty-skills.md#console-commands",
       "category": "specialty",
-      "mode": "static"
+      "mode": "static",
+      "escalates_on_rejection": true
     },
     {
       "id": "repository-review",
@@ -393,7 +403,8 @@
       "id": "container-review",
       "catalog": "php-specialty-skills.md#container-review",
       "category": "specialty",
-      "mode": "static"
+      "mode": "static",
+      "escalates_on_rejection": true
     },
     {
       "id": "test-data-factories",

@@ -73,7 +73,7 @@ Writes a report to `tasks/TASK-{N}/bootstrap-verifier-report.md`. Does not write
    Before publishing, also require the discovery, review, and content gates
    the generator required:
    `python3 scripts/validate_scan_coverage.py --target <real-target> --task-dir <task> --plan <task>/skill-generation-plan.json`,
-   `python3 scripts/validate_plan_review.py --plan <task>/skill-generation-plan.json --review <task>/skill-plan-quality-report.json`,
+   `python3 scripts/validate_plan_review.py --plan <task>/skill-generation-plan.json --review <task>/skill-plan-quality-report.json --registry <generator>/skill-forge/references/candidate-registry.json`,
    and
    `python3 scripts/validate_content_review.py --publication-plan <task>/infra-generate-publication-plan.txt --review <task>/infra-validate-review.json`.
 3. **Run the validator:** distinguish the generation root (staging or published

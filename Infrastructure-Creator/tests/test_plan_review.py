@@ -47,8 +47,10 @@ class PlanReviewFixture(unittest.TestCase):
             "plan": "tasks/TASK-001/skill-generation-plan.json",
             "reviewer": "independent",
             "skills": [self.entry("testing")],
+            "rejected": [],
             "blockers": [],
         }
+        self.registry = None
 
     def entry(self, name: str) -> dict:
         return {
@@ -97,9 +99,15 @@ class PlanReviewFixture(unittest.TestCase):
         review_path = self.base / "review.json"
         plan_path.write_text(json.dumps(self.plan, indent=2), encoding="utf-8")
         review_path.write_text(json.dumps(self.review, indent=2), encoding="utf-8")
+        registry_path = None
+        if self.registry is not None:
+            registry_path = self.base / "registry.json"
+            registry_path.write_text(
+                json.dumps(self.registry, indent=2), encoding="utf-8"
+            )
         return [
             item.code
-            for item in validator.validate(plan_path, review_path)
+            for item in validator.validate(plan_path, review_path, registry_path)
             if item.severity == "error"
         ]
 
@@ -155,6 +163,10 @@ class PlanReviewTest(PlanReviewFixture):
         self.review["reviewer"] = "author"
         self.assertIn("REVIEW_NOT_INDEPENDENT", self.codes())
 
+    def test_a_record_without_the_rejected_section_is_refused(self) -> None:
+        del self.review["rejected"]
+        self.assertIn("REVIEW_INVALID", self.codes())
+
     def test_a_missing_review_fails_closed(self) -> None:
         plan_path = self.base / "plan.json"
         plan_path.write_text(json.dumps(self.plan), encoding="utf-8")
@@ -182,6 +194,140 @@ class PlanReviewTest(PlanReviewFixture):
                 )
             outputs.append(buffer.getvalue())
         self.assertEqual(outputs[0], outputs[1])
+
+
+class RejectionReviewFixture(PlanReviewFixture):
+    """A plan that rejects one risk-flagged and one ordinary candidate."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.plan["rejected_candidates"] = [
+            {
+                "candidate_id": "migration-safety",
+                "name": "migration-safety",
+                "category": "specialty",
+                "reason": "Creation authority is unresolved",
+                "missing_evidence": ["migration ownership decision"],
+            },
+            {
+                "candidate_id": "brainstorming",
+                "name": "brainstorming",
+                "category": "process",
+                "reason": "No ideation procedure was evidenced",
+                "missing_evidence": ["a documented discovery workflow"],
+            },
+        ]
+        self.registry = {
+            "schema_version": "1.0",
+            "catalog_version": "test",
+            "candidates": [
+                {
+                    "id": "migration-safety",
+                    "catalog": "php-specialty-skills.md#migration-safety",
+                    "category": "specialty",
+                    "mode": "static",
+                    "escalates_on_rejection": True,
+                },
+                {
+                    "id": "brainstorming",
+                    "catalog": "php-process-skills.md#brainstorming",
+                    "category": "process",
+                    "mode": "static",
+                },
+            ],
+        }
+        self.review["rejected"] = [
+            {
+                "name": "migration-safety",
+                "classification": "insufficient-evidence",
+                "note": "Migrations exist but no owner or allowed paths",
+                "narrow_scope": "Even a read-only reviewer needs the authority "
+                "decision to know which paths are in scope",
+                "interview_reference": "clarifying-interview-answers.md:L40-L47",
+            }
+        ]
+
+
+class RejectionReviewTest(RejectionReviewFixture):
+    def test_a_reviewed_flagged_rejection_passes(self) -> None:
+        self.assertEqual(self.codes(), [])
+
+    def test_a_flagged_rejection_nobody_reviewed_is_reported(self) -> None:
+        self.review["rejected"] = []
+        self.assertIn("REJECTION_REVIEW_MISSING", self.codes())
+
+    def test_an_unflagged_rejection_needs_no_review(self) -> None:
+        # brainstorming is rejected but not flagged; its absence is fine.
+        self.assertNotIn("REJECTION_REVIEW_MISSING", self.codes())
+
+    def test_a_review_of_a_candidate_the_plan_keeps_is_reported(self) -> None:
+        self.review["rejected"].append(
+            {
+                "name": "testing",
+                "classification": "not-applicable",
+                "note": "phantom entry",
+            }
+        )
+        self.assertIn("REJECTION_REVIEW_UNKNOWN", self.codes())
+
+    def test_a_duplicate_rejection_entry_is_reported(self) -> None:
+        self.review["rejected"].append(dict(self.review["rejected"][0]))
+        self.assertIn("REJECTION_REVIEW_DUPLICATE", self.codes())
+
+    def test_an_unknown_classification_is_refused(self) -> None:
+        self.review["rejected"][0] = {
+            "name": "migration-safety",
+            "classification": "seems-fine",
+            "note": "hand-wave",
+        }
+        self.assertIn("REJECTION_ANSWER_INVALID", self.codes())
+
+    def test_a_consolidation_into_an_unselected_skill_is_reported(self) -> None:
+        self.review["rejected"][0] = {
+            "name": "migration-safety",
+            "classification": "consolidated",
+            "note": "Handled elsewhere",
+            "absorbed_by": ["database-designer"],
+        }
+        self.assertIn("REJECTION_CONSOLIDATION_PHANTOM", self.codes())
+
+    def test_a_consolidation_into_a_selected_skill_passes(self) -> None:
+        self.review["rejected"][0] = {
+            "name": "migration-safety",
+            "classification": "consolidated",
+            "note": "The testing skill owns migration regression checks",
+            "absorbed_by": ["testing"],
+        }
+        self.assertEqual(self.codes(), [])
+
+    def test_an_unescalated_evidence_gap_is_reported(self) -> None:
+        self.review["rejected"][0]["interview_reference"] = ""
+        self.assertIn("REJECTION_NOT_ESCALATED", self.codes())
+
+    def test_a_safety_gap_without_a_human_decision_is_reported(self) -> None:
+        self.review["rejected"][0] = {
+            "name": "migration-safety",
+            "classification": "unresolved-safety",
+            "note": "Two deploy paths contradict",
+            "narrow_scope": "No safe verification baseline either way",
+            "decision_reference": "",
+        }
+        self.assertIn("REJECTION_SAFETY_UNRESOLVED", self.codes())
+
+    def test_a_safety_gap_with_a_recorded_decision_passes(self) -> None:
+        self.review["rejected"][0] = {
+            "name": "migration-safety",
+            "classification": "unresolved-safety",
+            "note": "Two deploy paths contradict",
+            "narrow_scope": "No safe verification baseline either way",
+            "decision_reference": "clarifying-interview-answers.md:L52",
+        }
+        self.assertEqual(self.codes(), [])
+
+    def test_without_a_registry_no_rejection_coverage_is_required(self) -> None:
+        self.registry = None
+        self.review["rejected"] = []
+        self.assertEqual(self.codes(), [])
 
 
 if __name__ == "__main__":

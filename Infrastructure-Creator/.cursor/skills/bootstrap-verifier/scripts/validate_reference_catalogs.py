@@ -92,9 +92,13 @@ def validate(directory: Path, forbidden: list[str] | None = None) -> list[str]:
                 # `roles` is the optional machine-readable form of the
                 # catalog's obligations for this candidate; it is filled in
                 # tranches, so an entry without it stays valid.
+                # `escalates_on_rejection` marks a risk-bearing family whose
+                # rejection must be escalated and adversarially reviewed.
                 or not {"id", "catalog", "category", "mode"} <= set(candidate)
-                or set(candidate) - {"id", "catalog", "category", "mode", "roles"}
+                or set(candidate)
+                - {"id", "catalog", "category", "mode", "roles", "escalates_on_rejection"}
                 or not _valid_roles(candidate.get("roles"))
+                or not isinstance(candidate.get("escalates_on_rejection", False), bool)
                 or candidate.get("mode") not in {"static", "family", "runtime-fixed"}
                 or not all(
                     isinstance(candidate.get(field), str)

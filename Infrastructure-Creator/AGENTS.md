@@ -63,6 +63,14 @@ Infrastructure-Creator intentionally has no `memory-bank/` of its own: its job i
 - Every proposed skill MUST prove distinct selection, owned scope, procedure,
   output, evidence, and routing value. Catalog membership alone is not a reason
   to generate it; unsupported or overlapping skills are pruned or merged.
+- Rejection is never silent. Every run writes a rejection report covering all
+  turned-down candidates, and rejecting a candidate the registry flags
+  `escalates_on_rejection` MUST be escalated to the user through the
+  disposition interview round and adversarially reviewed
+  (`validate_plan_review.py`'s `rejected` section) before the plan freezes -
+  a consolidation must name its real absorbing owner, an evidence gap must
+  show it was asked about (and why not even a narrow read-only variant), and
+  a safety gap must carry the recorded human decision.
 - Plan approval MUST validate the complete selected inventory before any skill
   is authored, and only a schema 1.4 plan is approvable. Schema 1.4 carries
   the stable ownership IDs/modes, normalized write surfaces, and reciprocal

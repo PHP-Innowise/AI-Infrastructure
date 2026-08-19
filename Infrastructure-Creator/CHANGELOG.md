@@ -73,6 +73,39 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Added
 
+- **Rejected candidates are escalated, reported, and adversarially reviewed -
+  a rejection can no longer be silent.** A real scan run rejected 39 of 53
+  catalog candidates and was right about most of them - consolidations and
+  absent capabilities are correct rejections - but among them sat
+  `migration-safety` on a target full of migrations, `console-commands` on a
+  target with a broad mutating command catalog, `admin-panel` with Nova wired,
+  and `release` with two contradicting deploy configs. Each was dropped for a
+  missing *authority decision* nobody was ever asked to make: the clarifying
+  interview runs before dispositions exist, so a rejection-shaped question had
+  no place to be asked, and the adversarial review only ever read the selected
+  skills.
+  Three changes close this. **Registry risk flags**: eleven candidate families
+  whose absence leaves a confirmed operational surface unguarded
+  (`migration-safety`, `console-commands`, `release`, `container-review`,
+  `admin-panel`, `caching-strategy`, `dependency-manager`, `debugging`,
+  `systematic-debugger`, `auth-scaffolding`, `file-storage`) now carry
+  `escalates_on_rejection` in `candidate-registry.json`. **A bounded
+  disposition interview round**: when `profile-synthesizer` drafts a rejection
+  of a flagged family, `infra-scan` asks the user one decision question per
+  rejection - supply the missing authority (converting it into a bounded,
+  often read-only selected contract) or confirm the rejection on record; no
+  flagged rejections, no second round. **Review with teeth**:
+  `skill-plan-quality-report.json` gains a `rejected` section and
+  `validate_plan_review.py --registry` enforces it - every flagged rejection
+  classified (`consolidated` must name a selected skill that really absorbs
+  it, `insufficient-evidence` must cite the interview exchange and say why
+  not even a narrow read-only variant, `unresolved-safety` must carry the
+  recorded human decision, an undecided one belongs in `blockers`). Every run
+  also writes `infra-scan-rejection-report.md` - all rejections bucketed with
+  "what would change the decision" and a ranked reconsideration table - and
+  `infra-build` treats an unresolved flagged rejection as a checkpoint.
+  Thirteen new regression tests pin the gate (`tests/test_plan_review.py`).
+
 - **`infra-validate` - a mandatory content review-and-repair phase between the
   wrappers and publication, with a deterministic gate that refuses to take the
   reader's word for having looked.** The mechanical validators prove form -

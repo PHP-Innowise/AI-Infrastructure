@@ -65,6 +65,10 @@ infra-scan <path-to-php-project>          (read-only; never writes into the targ
    -> profile-synthesizer -> human Project Profile
       + machine-readable skill-generation-plan.json
       (one evidence/ownership/procedure/routing contract per proposed skill)
+      + rejection report: every turned-down candidate, bucketed, with what
+        would change the decision; rejecting a risk-flagged family
+        (migrations, commands, deployment, admin panel, ...) triggers one
+        bounded follow-up interview round instead of a silent drop
 
    <-- REVIEW THE PROFILE (what you read here is what infra-generate will build) -->
 
