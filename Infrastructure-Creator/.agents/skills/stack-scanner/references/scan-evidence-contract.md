@@ -172,6 +172,39 @@ high-priority invariant: a skill cannot be told to honour something discovery is
 still arguing about. Otherwise it is a warning that belongs in the confidence
 summary.
 
+## 2c. What the selection leaves unowned
+
+Discovery says what was read; the plan says what is owned. Until the two are
+joined, a subsystem every scanner covered can reach publication with no skill
+responsible for it and no diagnostic anywhere - measured on a real run, the CI
+pipeline the scan had just found belonged to nobody, and so did the stored
+GraphQL documents. Both were invisible, because the only question ever asked was
+whether a *selected* skill was justified, never whether the selection left a
+hole.
+
+After synthesis, every surface a scanner reports `covered` or `truncated` must be
+reachable from some selected skill's `ownership`, `writes`, or `path_contracts`,
+or be recorded in `tasks/TASK-{NNN}/plan-ownership.json`:
+
+```json
+{
+  "target_root": "/absolute/path/to/target",
+  "unowned": [
+    {
+      "surface": "graphql/**",
+      "reason": "Stored query documents run by hand against the schema; no generated skill executes or maintains them"
+    }
+  ]
+}
+```
+
+Members are exact: `surface`, `reason`. A covered surface that is neither owned
+nor declared is `OWNERSHIP_SURFACE_UNOWNED`; a declaration naming a surface no
+scanner read, or one a skill does declare, is `OWNERSHIP_DECLARATION_UNKNOWN`.
+`excluded` and `not-permitted` surfaces owe no owner - they are outside the
+project's own material by construction. A surface may honestly have no owner;
+what it may not do is have none silently.
+
 **A high-priority invariant must survive into the plan.** Dropping one may well
 be right - it may intersect no selected skill - but that is a decision, and an
 undocumented decision cannot be told apart from an oversight. After synthesis,

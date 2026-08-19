@@ -590,6 +590,161 @@ def _validate_invariant_carry_through(
         )
 
 
+# Named so it cannot be mistaken for a scanner's own `*-coverage.json`.
+OWNERSHIP_ARTIFACT = "plan-ownership.json"
+OWNERSHIP_FIELDS = {"surface", "reason"}
+# Dispositions that put a surface inside the project's own material. `excluded`
+# and `not-permitted` are outside it by construction, so no skill owes them an
+# owner.
+OWNED_DISPOSITIONS = {"covered", "truncated"}
+
+
+def _surface_root(value: str) -> str:
+    """A surface or ownership glob reduced to the path it speaks about."""
+    value = value.strip().rstrip("/")
+    for suffix in ("/**", "/*"):
+        if value.endswith(suffix):
+            return value[: -len(suffix)]
+    return value
+
+
+def _paths_meet(left: str, right: str) -> bool:
+    """Whether two declared paths touch the same part of the target."""
+    first, second = _surface_root(left), _surface_root(right)
+    if not first or not second:
+        return False
+    if first == second or first.startswith(second + "/") or second.startswith(first + "/"):
+        return True
+    return fnmatch.fnmatch(first, second) or fnmatch.fnmatch(second, first)
+
+
+def _declared_paths(plan: dict[str, Any]) -> list[str]:
+    """Every path the selected skills say they read or write."""
+    paths: list[str] = []
+    for skill in plan.get("skills") or []:
+        if not isinstance(skill, dict):
+            continue
+        for ownership in skill.get("ownership") or []:
+            if isinstance(ownership, dict):
+                paths.extend(
+                    item for item in ownership.get("paths") or []
+                    if _is_nonempty_string(item)
+                )
+        paths.extend(item for item in skill.get("writes") or [] if _is_nonempty_string(item))
+        for contract in skill.get("path_contracts") or []:
+            if isinstance(contract, dict) and _is_nonempty_string(contract.get("path")):
+                paths.append(contract["path"])
+    return paths
+
+
+def _validate_ownership_coverage(
+    declared_surfaces: list[tuple[str, str, str]],
+    task_dir: Path,
+    plan_path: Path,
+    diagnostics: list[Diagnostic],
+) -> None:
+    """Ask what the selected skills leave unowned, and make the answer explicit.
+
+    Discovery says what was read; the plan says what is owned. Nothing joined
+    the two, so a subsystem every scanner covered could reach publication with
+    no skill responsible for it and no diagnostic anywhere. Measured on a real
+    run: the CI pipeline the scan had just found belonged to nobody, and so did
+    the stored GraphQL documents - both invisible, because the only question
+    ever asked was whether a selected skill was justified, never whether the
+    selection left a hole.
+
+    A surface may honestly have no owner. What it may not do is have none
+    silently.
+    """
+    plan = _load(plan_path, diagnostics)
+    if plan is None:
+        return
+    # A document with no skills is not making ownership claims - a real plan
+    # without them is already refused by the plan gate, so nothing can hide here.
+    if not isinstance(plan.get("skills"), list) or not plan["skills"]:
+        return
+    owned = _declared_paths(plan)
+    # Likewise a plan whose skills declare no path at all: the plan gate refuses
+    # that separately, and judging ownership here would only echo it.
+    if not owned:
+        return
+    needing_owner = sorted({
+        surface
+        for _, surface, disposition in declared_surfaces
+        if disposition in OWNED_DISPOSITIONS and not _is_secret_surface(surface)
+    })
+    unowned = [
+        surface
+        for surface in needing_owner
+        if not any(_paths_meet(surface, path) for path in owned)
+    ]
+
+    artifact = task_dir / OWNERSHIP_ARTIFACT
+    if not artifact.is_file():
+        if unowned:
+            _diag(
+                diagnostics,
+                "OWNERSHIP_COVERAGE_MISSING",
+                f"{len(unowned)} surface(s) discovery read have no owner among the "
+                f"selected skills and no {OWNERSHIP_ARTIFACT} says that is deliberate: "
+                + ", ".join(unowned[:8]),
+            )
+        return
+    record = _load(artifact, diagnostics)
+    if record is None:
+        return
+    entries = record.get("unowned")
+    if not isinstance(record, dict) or set(record) - {"target_root", "unowned"} or not isinstance(entries, list):
+        _diag(
+            diagnostics,
+            "OWNERSHIP_COVERAGE_INVALID",
+            f"{OWNERSHIP_ARTIFACT} must carry exactly target_root and unowned",
+        )
+        return
+    declared_unowned: set[str] = set()
+    for index, entry in enumerate(entries):
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != OWNERSHIP_FIELDS
+            or not all(_is_nonempty_string(entry.get(field)) for field in OWNERSHIP_FIELDS)
+        ):
+            _diag(
+                diagnostics,
+                "OWNERSHIP_COVERAGE_INVALID",
+                f"{OWNERSHIP_ARTIFACT}[{index}] must name one surface and why nothing owns it",
+            )
+            continue
+        surface = entry["surface"].strip()
+        if surface in declared_unowned:
+            _diag(
+                diagnostics,
+                "OWNERSHIP_COVERAGE_INVALID",
+                f"{OWNERSHIP_ARTIFACT} declares {surface} unowned twice",
+            )
+            continue
+        declared_unowned.add(surface)
+        if surface not in needing_owner:
+            _diag(
+                diagnostics,
+                "OWNERSHIP_DECLARATION_UNKNOWN",
+                f"{surface} is declared unowned, but no scanner reports reading it",
+            )
+        elif surface not in unowned:
+            _diag(
+                diagnostics,
+                "OWNERSHIP_DECLARATION_UNKNOWN",
+                f"{surface} is declared unowned while a selected skill declares it",
+            )
+    for surface in unowned:
+        if surface not in declared_unowned:
+            _diag(
+                diagnostics,
+                "OWNERSHIP_SURFACE_UNOWNED",
+                f"discovery read {surface} and no selected skill declares it; "
+                f"say so in {OWNERSHIP_ARTIFACT} or give it an owner",
+            )
+
+
 def validate(
     target: Path, task_dir: Path, plan_path: Path | None = None
 ) -> list[Diagnostic]:
@@ -606,6 +761,7 @@ def validate(
 
     surfaces = target_surfaces(target, diagnostics)
     accounted: dict[str, list[tuple[str, str, int]]] = {name: [] for name in surfaces}
+    declared_surfaces: list[tuple[str, str, str]] = []
     seen_scanners: set[str] = set()
     known_evidence: dict[str, set[str]] = {}
     ledger_locators: dict[str, str] = {}
@@ -645,6 +801,7 @@ def validate(
         for entry in entries:
             surface = str(entry["surface"]).strip()
             disposition = str(entry["disposition"])
+            declared_surfaces.append((scanner, surface, disposition))
             if disposition == "covered" and _is_secret_surface(surface):
                 _diag(
                     diagnostics,
@@ -739,6 +896,10 @@ def validate(
             )
 
     claims = _validate_claims(task_dir, known_evidence, diagnostics)
+    if plan_path is not None and plan_path.is_file():
+        _validate_ownership_coverage(
+            declared_surfaces, task_dir, plan_path, diagnostics
+        )
     if plan_path is not None:
         if not plan_path.is_file():
             _diag(

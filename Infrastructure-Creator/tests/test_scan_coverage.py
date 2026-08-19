@@ -677,5 +677,97 @@ class ClaimReconciliationTest(ScanCoverageFixture):
         self.assertNotIn("CLAIM_INVARIANT_LOST", codes)
 
 
+class OwnershipCoverageTest(ScanCoverageFixture):
+    """What the selected skills leave unowned has to be said out loud.
+
+    Discovery says what was read; the plan says what is owned; nothing joined
+    the two. Measured on a real run: the CI pipeline the scan had just found
+    belonged to nobody, and so did the stored GraphQL documents - both
+    invisible, because the only question ever asked was whether a selected
+    skill was justified, never whether the selection left a hole.
+    """
+
+    def plan_owning(self, paths: list[str]) -> Path:
+        path = self.task / "skill-generation-plan.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "evidence": [{"id": "EV-0001", "path": "src/Billing/BillingService.php"}],
+                    "critical_invariants": [],
+                    "skills": [
+                        {
+                            "name": "coding",
+                            "ownership": [{"id": "app.source", "mode": "exclusive",
+                                           "description": "the application", "paths": paths}],
+                            "writes": paths,
+                            "path_contracts": [],
+                        }
+                    ],
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def declare(self, entries: list[dict]) -> None:
+        (self.task / "plan-ownership.json").write_text(
+            json.dumps({"target_root": str(self.target), "unowned": entries}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    def ownership_codes(self, plan: Path) -> list[str]:
+        return sorted({
+            item.code
+            for item in validator.validate(self.target, self.task, plan)
+            if item.code.startswith("OWNERSHIP")
+        })
+
+    def test_a_plan_that_owns_everything_read_is_silent(self) -> None:
+        self.write()
+        plan = self.plan_owning(["**"])
+        self.assertEqual(self.ownership_codes(plan), [])
+
+    def test_a_surface_nobody_owns_is_reported(self) -> None:
+        self.write()
+        plan = self.plan_owning(["src/**"])
+        self.assertIn("OWNERSHIP_COVERAGE_MISSING", self.ownership_codes(plan))
+
+    def test_declaring_it_unowned_settles_it(self) -> None:
+        self.write()
+        plan = self.plan_owning(["src/**"])
+        self.declare([
+            {"surface": "composer.json", "reason": "The manifest is not this accelerator's to change"},
+            {"surface": "tests/**", "reason": "No test skill was justified for this target"},
+            {"surface": "config/**", "reason": "Framework configuration nobody generated a skill for"},
+        ])
+        self.assertEqual(self.ownership_codes(plan), [])
+
+    def test_declaring_an_owned_surface_unowned_is_reported(self) -> None:
+        self.write()
+        plan = self.plan_owning(["src/**"])
+        self.declare([{"surface": "src/**", "reason": "claimed unowned while a skill owns it"}])
+        self.assertIn("OWNERSHIP_DECLARATION_UNKNOWN", self.ownership_codes(plan))
+
+    def test_declaring_a_surface_nobody_read_is_reported(self) -> None:
+        self.write()
+        plan = self.plan_owning(["**"])
+        self.declare([{"surface": "docs/**", "reason": "no scanner ever reported reading this"}])
+        self.assertIn("OWNERSHIP_DECLARATION_UNKNOWN", self.ownership_codes(plan))
+
+    def test_a_forbidden_surface_owes_no_owner(self) -> None:
+        # `.env` is not-permitted, so nobody has to own it.
+        self.write()
+        plan = self.plan_owning(["**"])
+        self.assertEqual(self.ownership_codes(plan), [])
+
+    def test_a_malformed_declaration_is_refused(self) -> None:
+        self.write()
+        plan = self.plan_owning(["src/**"])
+        self.declare([{"surface": "composer.json"}])
+        self.assertIn("OWNERSHIP_COVERAGE_INVALID", self.ownership_codes(plan))
+
+
 if __name__ == "__main__":
     unittest.main()

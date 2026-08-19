@@ -65,15 +65,21 @@ All output from this run lives under `tasks/TASK-{NNN}/` in Infrastructure-Creat
 7. **Run `stack-researcher`** once the scanners have written findings - it needs `integration-scanner-findings.md` (what to research) and `stack-scanner-findings.md` (the PHP framework/version to ground research in).
 8. **Run `clarifying-interview`** once research is done - it turns remaining `inferred`/`unknown` items into a short question set and always asks the mandatory AI-tool-selection question.
 9. **Run `profile-synthesizer`** last, then re-run the discovery gate with
-   `--plan tasks/TASK-{NNN}/skill-generation-plan.json`: a high-priority
-   invariant discovery confirmed and the plan does not carry is
-   `CLAIM_INVARIANT_LOST`. Dropping one may be right, but it is a decision, and
-   an undocumented decision cannot be told apart from an oversight.
+   `--plan tasks/TASK-{NNN}/skill-generation-plan.json`. It asks two questions
+   of the finished plan, and both are about what the plan left behind:
+   - A high-priority invariant discovery confirmed and the plan does not carry
+     is `CLAIM_INVARIANT_LOST`. Dropping one may be right, but it is a decision,
+     and an undocumented decision cannot be told apart from an oversight.
+   - A surface a scanner read that no selected skill declares is
+     `OWNERSHIP_SURFACE_UNOWNED`, unless `tasks/TASK-{NNN}/plan-ownership.json`
+     says so and why. Rejections are argued one candidate at a time; nothing
+     asked what the selection as a whole failed to cover, so a subsystem could
+     be discovered, described in the profile, and owned by nobody.
    `profile-synthesizer` produces both handoff artifacts,
    validates evidence paths and fingerprints, runs complete plan-level
    operational-safety, ownership/write/routing/flow diagnostics, prunes
    unjustified or conflicting skill proposals, and requires one complete schema
-   1.4 contract per retained skill. It maps every high-priority confirmed
+   1.5 contract per retained skill. It maps every high-priority confirmed
    invariant to a procedure and concrete verification assertion and compiles
    runtime-fixed contracts from `memory-seed/assets/runtime-contract.json`.
    Stop before approval on any blocking diagnostic; schema migration and

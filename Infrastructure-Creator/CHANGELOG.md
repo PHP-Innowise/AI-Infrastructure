@@ -129,6 +129,34 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
   dropped quietly. Together with the runtime-fixed memory quartet, every
   generated accelerator now starts from twelve guaranteed skills; the rest
   of the catalog stays evidence-gated exactly as before.
+- **The gate now asks what the selection left behind, not only whether each
+  selection was justified.** Rejections are argued one candidate at a time, and
+  every rule added so far grades a skill that *is* in the plan. Nothing ever
+  asked whether the plan as a whole covered the target, so a subsystem could be
+  discovered, written into the profile, and owned by nobody - with no diagnostic
+  anywhere. Found by re-planning a real run by hand: `coding` claimed three
+  directories of a fifteen-directory source tree, and `coder-frontend`
+  disclaimed the templates it renders.
+  - `validate_scan_coverage.py --plan` now joins the two artifacts it already
+    reads: every surface a scanner reports `covered` or `truncated` must be
+    reachable from some selected skill's `ownership`, `writes` or
+    `path_contracts`, or be recorded in `tasks/TASK-{N}/plan-ownership.json`
+    with a reason. `OWNERSHIP_SURFACE_UNOWNED` when neither;
+    `OWNERSHIP_DECLARATION_UNKNOWN` when the declaration names a surface nobody
+    read or one a skill does declare. `excluded` and `not-permitted` surfaces
+    owe no owner - they are outside the project's own material by construction.
+  - Measured on the run-9 plan: **14 surfaces had no owner at all**, including
+    `deploy/**` - the CI pipeline discovery had just found - the stored GraphQL
+    documents, and the CORS and JWT configuration. Eight were given the owner
+    they belong to (`release` gained `deploy/**`, `security-review` the two
+    access-boundary files, `coder-frontend` the build definition, `coding` the
+    routing, mapping and bundle wiring it reads); six are recorded unowned with
+    a reason.
+  - Calibration: a plan that owns everything discovery read is silent; removing
+    the artifact from a plan with holes reports them; declaring an owned surface
+    unowned, or one nobody read, is refused. The rule judges only a plan whose
+    skills declare paths, so the plan gate's own emptiness diagnostics are not
+    echoed here.
 
 - **Rejected candidates are escalated, reported, and adversarially reviewed -
   a rejection can no longer be silent.** A real scan run rejected 39 of 53
