@@ -41,7 +41,7 @@ class ReferenceContractTest(unittest.TestCase):
                 if path.is_file():
                     shutil.copy2(path, references / path.name)
             (references / "candidate-registry.json").write_text(
-                '{"schema_version": "1.0", "candidates": []}\n', encoding="utf-8"
+                '{"schema_version": "1.1", "candidates": []}\n', encoding="utf-8"
             )
             errors = validate(references)
         self.assertTrue(

@@ -568,6 +568,49 @@ def build_corpus(
             }
         )
 
+    # Honest rejections belong in the corpus too: the two rejection rules are
+    # blocking, so the calibration has to show what an argued, true rejection
+    # looks like as well as what a stamped one looks like.
+    rejected_candidates = [
+        {
+            "candidate_id": "synthetic-admin-panel",
+            "name": "synthetic-admin-panel",
+            "category": "specialty",
+            "reason": (
+                "No back-office surface: nothing under src/Controller/Admin/ and "
+                "composer.json requires no admin package"
+            ),
+            "missing_evidence": ["an admin controller under src/Controller/Admin/"],
+        },
+        {
+            "candidate_id": "synthetic-async-jobs",
+            "name": "synthetic-async-jobs",
+            "category": "specialty",
+            "reason": (
+                "No background work: config/queue.php is absent and no handler "
+                "under src/MessageHandler/ exists"
+            ),
+            "missing_evidence": ["a configured transport in config/queue.php"],
+        },
+    ]
+    for rejection in rejected_candidates:
+        registry_candidates.append(
+            {
+                "id": rejection["candidate_id"],
+                "catalog": f"synthetic-catalog.md#{rejection['candidate_id']}",
+                "category": rejection["category"],
+                "mode": "static",
+                "falsifier": {
+                    "surface": "a back-office or background-work surface",
+                    "requires": "any",
+                    "probes": [
+                        {"paths": ["src/Controller/Admin/**/*.php"]},
+                        {"paths": ["config/queue.php", "src/MessageHandler/**/*.php"]},
+                    ],
+                },
+            }
+        )
+
     writers = [item["agent"] for item in roster if item["writes"]]
     reviewers = [item["agent"] for item in roster if not item["writes"]]
     plan = {
@@ -577,7 +620,7 @@ def build_corpus(
         "profile": "tasks/TASK-001/infra-scan-project-profile.md",
         "evidence": evidence,
         "skills": skills,
-        "rejected_candidates": [],
+        "rejected_candidates": rejected_candidates,
         "critical_invariants": invariants,
         "flow_contracts": {
             "roster": roster,
@@ -621,7 +664,7 @@ def build_corpus(
         },
     }
     registry = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "catalog_version": "2.5.0",
         "candidates": registry_candidates,
     }
@@ -804,6 +847,61 @@ class LargePlanCalibrationTest(unittest.TestCase):
         diagnostics, _ = self.build(collapsed=True)
         codes = [item.code for item in diagnostics if item.severity == "error"]
         self.assertIn("PROCEDURE_ROLE_COLLAPSED", codes)
+
+
+class HonestRejectionCalibrationTest(unittest.TestCase):
+    """Two argued, true rejections in the corpus must stay silent.
+
+    Both rejection rules block, so the corpus has to prove they cost an honest
+    author nothing: each rejection here names where the surface was looked for,
+    the two sentences differ, and the falsifiers do not fire on this target.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="rejection-corpus-")
+        self.addCleanup(self.temporary.cleanup)
+        self.corpus = build_corpus(Path(self.temporary.name))
+
+    def test_argued_rejections_raise_nothing(self) -> None:
+        diagnostics = validator.validate_plan(
+            self.corpus["plan_path"], self.corpus["target"], self.corpus["registry_path"]
+        )
+        rejection_codes = sorted(
+            {item.code for item in diagnostics if item.code.startswith("REJECTION_")}
+        )
+        self.assertEqual(rejection_codes, [])
+
+    def test_the_same_rejections_stamped_are_caught(self) -> None:
+        plan = json.loads(self.corpus["plan_path"].read_text(encoding="utf-8"))
+        for rejection in plan["rejected_candidates"]:
+            rejection["reason"] = "No evidence in this target requires it"
+            rejection["missing_evidence"] = ["A target surface this candidate would own"]
+        self.corpus["plan_path"].write_text(
+            json.dumps(plan, indent=2) + "\n", encoding="utf-8"
+        )
+        codes = {
+            item.code
+            for item in validator.validate_plan(
+                self.corpus["plan_path"],
+                self.corpus["target"],
+                self.corpus["registry_path"],
+            )
+        }
+        self.assertIn("REJECTION_UNANCHORED", codes)
+
+    def test_a_target_that_grows_the_surface_contradicts_the_rejection(self) -> None:
+        admin = self.corpus["target"] / "src/Controller/Admin/DashboardController.php"
+        admin.parent.mkdir(parents=True, exist_ok=True)
+        admin.write_text("<?php\nclass DashboardController {}\n", encoding="utf-8")
+        codes = {
+            item.code
+            for item in validator.validate_plan(
+                self.corpus["plan_path"],
+                self.corpus["target"],
+                self.corpus["registry_path"],
+            )
+        }
+        self.assertIn("REJECTION_CONTRADICTED", codes)
 
 
 if __name__ == "__main__":

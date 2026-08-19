@@ -536,10 +536,30 @@ Each rejected catalog candidate is recorded so inventory pruning is auditable:
   "candidate_id": "caching-strategy",
   "name": "caching-strategy",
   "category": "specialty",
-  "reason": "No confirmed cache usage or invalidation ownership",
-  "missing_evidence": ["runtime cache calls", "write-path invalidation"]
+  "reason": "No cache runtime wiring: config/packages/cache.yaml holds only the skeleton default and no cache client is constructed under src/",
+  "missing_evidence": ["cache call sites under src/", "write-path invalidation"]
 }
 ```
+
+A rejection is a judgement about the target and is held to the target:
+
+- **It must say where the surface was looked for.** `reason` and
+  `missing_evidence` together must name at least one concrete path, glob or
+  root-level file, exactly as a selection must cite where its evidence was
+  found. A rejection naming nothing is `REJECTION_UNANCHORED`.
+- **One sentence may not judge a whole catalog.** Sibling candidates in one
+  family can honestly share a sentence ("this project renders no HTML" covers
+  every frontend candidate), but the same sentence spread across categories
+  judges none of them and is `REJECTION_TEMPLATED`.
+- **It must rest on what the target is, never on what the current request
+  wants.** The accelerator is generated once, for all later work; "no one asked
+  for a review yet" is not a property of the project and is not a ground for
+  dropping a skill.
+- **It is checked.** Every registry candidate carries the signal whose presence
+  makes "no surface here" false, and the gate runs those signals against the
+  real target: a rejection the target contradicts is `REJECTION_CONTRADICTED`.
+  Candidates whose trigger no repository could show (an open design question, a
+  recorded agent mistake) carry no signal and say so in `falsifier_absent`.
 
 `candidate_id` and `catalog` must resolve exactly to the registry entry and its
 real Markdown anchor. This prevents a plan from inventing a catalog reference

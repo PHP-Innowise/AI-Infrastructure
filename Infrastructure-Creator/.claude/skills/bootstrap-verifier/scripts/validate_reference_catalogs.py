@@ -29,6 +29,47 @@ def heading_slug(value: str) -> str:
     return re.sub(r"-+", "-", re.sub(r"\s+", "-", value)).strip("-")
 
 
+def _valid_falsifier(candidate: dict) -> bool:
+    falsifier = candidate.get("falsifier", None)
+    if falsifier is None:
+        return "falsifier" not in candidate or bool(
+            isinstance(candidate.get("falsifier_absent"), str)
+            and candidate["falsifier_absent"].strip()
+        )
+    if "falsifier_absent" in candidate:
+        return False
+    if not isinstance(falsifier, dict) or set(falsifier) - {
+        "surface", "requires", "probes", "at_least"
+    }:
+        return False
+    if not isinstance(falsifier.get("surface"), str) or not falsifier["surface"].strip():
+        return False
+    if falsifier.get("requires") not in {"any", "all"}:
+        return False
+    at_least = falsifier.get("at_least", 1)
+    if not isinstance(at_least, int) or isinstance(at_least, bool) or at_least < 1:
+        return False
+    probes = falsifier.get("probes")
+    if not isinstance(probes, list) or not probes:
+        return False
+    for probe in probes:
+        if not isinstance(probe, dict) or set(probe) - {"paths", "pattern"}:
+            return False
+        paths = probe.get("paths")
+        if not isinstance(paths, list) or not paths or not all(
+            isinstance(item, str) and item.strip() for item in paths
+        ):
+            return False
+        if "pattern" in probe:
+            if not isinstance(probe["pattern"], str) or not probe["pattern"].strip():
+                return False
+            try:
+                re.compile(probe["pattern"])
+            except re.error:
+                return False
+    return True
+
+
 def _valid_roles(value) -> bool:
     """A candidate declares its mandatory reasoning roles, or declares none."""
     if value is None:
@@ -76,7 +117,7 @@ def validate(directory: Path, forbidden: list[str] | None = None) -> list[str]:
     candidates = registry.get("candidates") if isinstance(registry, dict) else None
     if (
         not isinstance(registry, dict)
-        or registry.get("schema_version") != "1.0"
+        or registry.get("schema_version") != "1.1"
         or not isinstance(candidates, list)
     ):
         errors.append("candidate-registry.json: invalid schema")
@@ -95,10 +136,16 @@ def validate(directory: Path, forbidden: list[str] | None = None) -> list[str]:
                 # `escalates_on_rejection` marks a risk-bearing family whose
                 # rejection must be escalated and adversarially reviewed.
                 or not {"id", "catalog", "category", "mode"} <= set(candidate)
-                or set(candidate)
-                - {"id", "catalog", "category", "mode", "roles", "escalates_on_rejection"}
+                or set(candidate) - {
+                    "id", "catalog", "category", "mode", "roles",
+                    # Whether a rejection has to reach a person, and the signal
+                    # whose presence in a target makes "no surface here" false -
+                    # or a stated reason why no target artifact could show it.
+                    "escalates_on_rejection", "falsifier", "falsifier_absent",
+                }
                 or not _valid_roles(candidate.get("roles"))
                 or not isinstance(candidate.get("escalates_on_rejection", False), bool)
+                or not _valid_falsifier(candidate)
                 or candidate.get("mode") not in {"static", "family", "runtime-fixed"}
                 or not all(
                     isinstance(candidate.get(field), str)

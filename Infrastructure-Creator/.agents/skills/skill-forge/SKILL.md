@@ -37,11 +37,19 @@ orchestration step. The log maps every staged skill to exactly one plan entry.
 1. **Validate inputs.** Run the plan-only gate. Require exact schema/catalog
    versions, Profile sibling identity, current fingerprints/ranges, supported
    claims, a satisfied evidence-backed `selection_gate` for every selected
-   skill, auditable rejected candidates, structured ownership, reciprocal
-   routing, resolved references, normalized write globs, canonical paths, and
-   plan/profile inventory equality. Stop before authoring when any blocking
-   contract-inventory diagnostic exists; surface nonblocking contract
+   skill, rejected candidates that argue for themselves, structured ownership,
+   reciprocal routing, resolved references, normalized write globs, canonical
+   paths, and plan/profile inventory equality. Stop before authoring when any
+   blocking contract-inventory diagnostic exists; surface nonblocking contract
    similarity/repeated-block warnings for review.
+   A rejection is graded like a selection, because dropping a candidate is a
+   claim about the target: it names where the surface was looked for
+   (`REJECTION_UNANCHORED` otherwise), it may not be one sentence stamped
+   across categories (`REJECTION_TEMPLATED`), and it is tested against the real
+   target through the registry's per-candidate signal
+   (`REJECTION_CONTRADICTED`). A rejection may rest only on what the target is -
+   never on what the current request happens to need, since the accelerator is
+   generated once for all later work.
 2. **Choose one authoring unit.** Default to one skill. A group may contain only a small set of nearest siblings whose contracts explicitly define their ownership boundary (for example `debugging`/`systematic-debugger`). Never batch a whole category.
 3. **Load the minimum slice.** Provide the authoring pass only the selected contract(s), referenced `evidence[]`, cited target files/excerpts, and applicable reference contract. Do not feed unrelated profile prose or prior generated skill bodies.
 4. **Author into staging.** Implement every contract field as operational

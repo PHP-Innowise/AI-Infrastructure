@@ -774,6 +774,162 @@ def _heading_slug(value: str) -> str:
     return re.sub(r"[- ]+", "-", value).strip("-")
 
 
+REGISTRY_SCHEMA_VERSION = "1.1"
+# Reading a whole target for one rejection must stay bounded and identical run
+# to run: a sorted walk, ignored trees pruned, and caps on what is opened.
+FALSIFIER_IGNORED_DIRECTORIES = frozenset(
+    {
+        ".git", ".idea", ".vscode", "node_modules", "vendor", "var", "cache",
+        "storage", "build", "dist", "coverage", "__pycache__", ".venv",
+        # Third-party code lives outside `vendor/` too: a tool pinned under
+        # `bin/`, a container definition, a compiled asset bundle. Measured on a
+        # real target, a content probe over `**/*.php` matched PHPUnit's own
+        # sources under `bin/.phpunit` and reported a caching layer the project
+        # does not have.
+        ".phpunit", ".phpunit.cache", ".ddev", "bundles", "public/build",
+    }
+)
+# The two Git files a probe may name; the rest of `.git` is pruned.
+FALSIFIER_GIT_FILES = (".git/HEAD", ".git/config")
+FALSIFIER_MAX_FILES = 20000
+FALSIFIER_MAX_READS = 4000
+FALSIFIER_MAX_BYTES = 512 * 1024
+
+
+def _is_valid_falsifier(item: dict[str, Any]) -> bool:
+    """A registry entry either carries a usable falsifier or says why it cannot."""
+    falsifier = item.get("falsifier", None)
+    if falsifier is None:
+        return "falsifier" not in item or _is_nonempty_string(
+            item.get("falsifier_absent")
+        )
+    if "falsifier_absent" in item:
+        return False
+    if not isinstance(falsifier, dict) or set(falsifier) - {
+        "surface", "requires", "probes", "at_least"
+    }:
+        return False
+    if not _is_nonempty_string(falsifier.get("surface")):
+        return False
+    if falsifier.get("requires") not in {"any", "all"}:
+        return False
+    at_least = falsifier.get("at_least", 1)
+    if not isinstance(at_least, int) or isinstance(at_least, bool) or at_least < 1:
+        return False
+    probes = falsifier.get("probes")
+    if not isinstance(probes, list) or not probes:
+        return False
+    for probe in probes:
+        if (
+            not isinstance(probe, dict)
+            or set(probe) - {"paths", "pattern"}
+            or not _is_string_list(probe.get("paths"))
+        ):
+            return False
+        if "pattern" in probe:
+            if not _is_nonempty_string(probe["pattern"]):
+                return False
+            try:
+                re.compile(probe["pattern"])
+            except re.error:
+                return False
+    return True
+
+
+def _glob_to_regex(glob: str) -> re.Pattern[str]:
+    """Translate one target-relative glob, giving `**` its cross-segment meaning."""
+    parts: list[str] = []
+    index = 0
+    while index < len(glob):
+        char = glob[index]
+        if glob.startswith("**/", index):
+            parts.append("(?:[^/]+/)*")
+            index += 3
+        elif glob.startswith("**", index):
+            parts.append(".*")
+            index += 2
+        elif char == "*":
+            parts.append("[^/]*")
+            index += 1
+        elif char == "?":
+            parts.append("[^/]")
+            index += 1
+        else:
+            parts.append(re.escape(char))
+            index += 1
+    return re.compile("".join(parts) + r"\Z")
+
+
+def _target_file_index(target: Path) -> list[str]:
+    """Every candidate-visible file in the target, target-relative and sorted."""
+    files: list[str] = []
+    root = target.resolve()
+    for directory, subdirectories, names in os.walk(root):
+        subdirectories[:] = sorted(
+            name for name in subdirectories
+            if name not in FALSIFIER_IGNORED_DIRECTORIES
+        )
+        base = Path(directory)
+        for name in sorted(names):
+            path = base / name
+            if path.is_symlink():
+                continue
+            try:
+                relative = path.relative_to(root).as_posix()
+            except ValueError:
+                continue
+            files.append(relative)
+            if len(files) >= FALSIFIER_MAX_FILES:
+                return sorted(set(files + _existing_git_files(root)))
+    return sorted(set(files + _existing_git_files(root)))
+
+
+def _existing_git_files(root: Path) -> list[str]:
+    return [
+        relative
+        for relative in FALSIFIER_GIT_FILES
+        if (root / relative).is_file() and not (root / relative).is_symlink()
+    ]
+
+
+def _probe_fires(probe: dict[str, Any], target: Path, index: list[str]) -> bool:
+    patterns = [_glob_to_regex(glob) for glob in probe["paths"]]
+    matched = [
+        relative
+        for relative in index
+        if any(pattern.match(relative) for pattern in patterns)
+    ]
+    if not matched:
+        return False
+    if "pattern" not in probe:
+        return True
+    content = re.compile(probe["pattern"])
+    for relative in matched[:FALSIFIER_MAX_READS]:
+        path = target / relative
+        try:
+            if path.stat().st_size > FALSIFIER_MAX_BYTES:
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if content.search(text):
+            return True
+    return False
+
+
+def _falsifier_fires(
+    falsifier: dict[str, Any], target: Path, index: list[str]
+) -> bool:
+    """True when the target demonstrably holds the surface a rejection denied."""
+    hits = 0
+    for probe in falsifier["probes"]:
+        if _probe_fires(probe, target, index):
+            hits += 1
+        elif falsifier["requires"] == "all":
+            return False
+    return hits >= max(int(falsifier.get("at_least", 1)), 1)
+
+
 def _load_registry(
     path: Path, catalog_version: Any, diagnostics: list[Diagnostic]
 ) -> dict[str, dict[str, str]]:
@@ -796,7 +952,7 @@ def _load_registry(
         _diag(diagnostics, "REGISTRY_INVALID", "candidate registry fields are invalid")
         return {}
     if (
-        registry.get("schema_version") != "1.0"
+        registry.get("schema_version") != REGISTRY_SCHEMA_VERSION
         or registry.get("catalog_version") != catalog_version
         or not isinstance(registry.get("candidates"), list)
     ):
@@ -811,16 +967,22 @@ def _load_registry(
         if (
             not isinstance(item, dict)
             or not {"id", "catalog", "category", "mode"} <= set(item)
-            or set(item)
-            - {"id", "catalog", "category", "mode", "roles", "escalates_on_rejection"}
+            or set(item) - {
+                "id", "catalog", "category", "mode", "roles",
+                "escalates_on_rejection", "falsifier", "falsifier_absent",
+            }
             or not all(
                 _is_nonempty_string(item.get(key))
                 for key in item
-                if key not in ("roles", "escalates_on_rejection")
+                if key not in {
+                    "roles", "escalates_on_rejection", "falsifier",
+                    "falsifier_absent",
+                }
             )
             or item.get("mode") not in {"static", "runtime-fixed", "family"}
             or not _is_optional_role_list(item.get("roles"))
             or not isinstance(item.get("escalates_on_rejection", False), bool)
+            or not _is_valid_falsifier(item)
         ):
             _diag(
                 diagnostics,
@@ -3020,6 +3182,124 @@ def _evidence_table_rows(
         if identifier and paths:
             rows.append((identifier, paths))
     return rows
+
+
+# A rejection is the one plan decision that costs a sentence while a selection
+# costs a full contract, and until now only its shape was checked. Measured on
+# a real run: 40 of 52 candidates rejected, all 40 carrying one identical
+# sentence and not one naming a file of the target. These two rules make a
+# rejection argue for itself the way a selection has to.
+REJECTION_EXTENSIONS = frozenset(
+    {
+        "php", "json", "yaml", "yml", "xml", "dist", "lock", "md", "js", "ts",
+        "jsx", "tsx", "vue", "twig", "blade", "env", "toml", "ini", "neon",
+        "sh", "sql", "csv", "cfg", "conf", "lock", "txt",
+    }
+)
+# Honest rejections do share a sentence inside one family - "this project has
+# no frontend layer" covers every frontend candidate at once. A sentence that
+# spans families is not a judgement about any of them.
+SHARED_REJECTION_LIMIT = 2
+
+
+def _rejection_path_tokens(text: str) -> list[str]:
+    """Path-like tokens in a plain-prose rejection, backticks optional.
+
+    Stricter than the code-span reader: prose is full of abbreviations, and
+    `e.g.` must not read as a file with a `.g` extension. A token counts only
+    when it carries a directory separator, is a repository-root dotfile, or
+    ends in an extension this project could actually have.
+    """
+    tokens: list[str] = []
+    for raw in re.split(r"[\s,;()\[\]`\"']+", text):
+        # Only sentence punctuation at the end: stripping both ends would turn
+        # a root dotfile into a bare word and lose the anchor it carries.
+        value = raw.strip().rstrip(".,;:!?")
+        if not value or len(value) < 3:
+            continue
+        if "/" in value:
+            tokens.append(value)
+            continue
+        if _DOTFILE_SPAN_PATTERN.fullmatch(value):
+            tokens.append(value)
+            continue
+        suffix = value.rsplit(".", 1)
+        if len(suffix) == 2 and suffix[1].lower() in REJECTION_EXTENSIONS:
+            tokens.append(value)
+    return tokens
+
+
+def _validate_rejections_against_target(
+    rejected: list[dict[str, Any]],
+    registry: dict[str, dict[str, Any]],
+    target: Path,
+    diagnostics: list[Diagnostic],
+) -> None:
+    """Try to falsify each rejection against the project it was made about.
+
+    Selecting a skill has to survive the whole plan gate; rejecting one used to
+    cost a sentence nobody checked, so a wrong rejection was invisible and the
+    inventory could only be repaired by hand, one skill per commit. Each
+    registry candidate now carries the signal whose presence in the target makes
+    "no surface here" false, and the claim is tested rather than trusted.
+
+    A rejection may rest only on what the target is. "The task did not ask for
+    it" is not a ground: the accelerator is generated once, for all later work.
+    """
+    checkable = [
+        item
+        for item in rejected
+        if isinstance(registry.get(str(item.get("candidate_id"))), dict)
+        and registry[str(item["candidate_id"])].get("falsifier")
+    ]
+    if not checkable:
+        return
+    index = _target_file_index(target)
+    for item in checkable:
+        candidate = registry[str(item["candidate_id"])]
+        falsifier = candidate["falsifier"]
+        if _falsifier_fires(falsifier, target, index):
+            _diag(
+                diagnostics,
+                "REJECTION_CONTRADICTED",
+                f"{item['candidate_id']} was rejected for having no surface in "
+                f"this target, but the target holds one: {falsifier['surface']}",
+            )
+
+
+def _validate_rejection_accountability(
+    rejected: list[dict[str, Any]], diagnostics: list[Diagnostic]
+) -> None:
+    """Hold a rejection to the same standard of evidence as a selection."""
+    shared: dict[str, list[dict[str, Any]]] = {}
+    for item in rejected:
+        reason = str(item.get("reason", ""))
+        missing = _as_list(item.get("missing_evidence"))
+        anchored = _rejection_path_tokens(
+            " ".join([reason] + [str(entry) for entry in missing])
+        )
+        if not anchored:
+            _diag(
+                diagnostics,
+                "REJECTION_UNANCHORED",
+                f"rejected candidate {item.get('candidate_id')} names nothing in "
+                f"the target: a rejection must say where the surface would have "
+                f"been looked for, as a selection must cite where it was found",
+            )
+        key = " ".join(reason.split()).casefold()
+        if key:
+            shared.setdefault(key, []).append(item)
+    for reason, items in sorted(shared.items()):
+        categories = {str(item.get("category", "")).casefold() for item in items}
+        if len(items) > SHARED_REJECTION_LIMIT and len(categories) > 1:
+            names = ", ".join(sorted(str(item.get("candidate_id")) for item in items))
+            _diag(
+                diagnostics,
+                "REJECTION_TEMPLATED",
+                f"one rejection sentence covers {len(items)} candidates across "
+                f"{len(categories)} categories, so it judges none of them: "
+                f"{names}",
+            )
 
 
 def _validate_evidence_rows(
@@ -5430,6 +5710,11 @@ def _validate_plan(
                         f"rejected candidate does not satisfy registry disposition "
                         f"rules: {item['candidate_id']}",
                     )
+    if isinstance(rejected, list):
+        items = [item for item in rejected if isinstance(item, dict)]
+        _validate_rejection_accountability(items, diagnostics)
+        _validate_rejections_against_target(items, registry, target, diagnostics)
+
     skills = plan["skills"]
     if not isinstance(skills, list) or not skills:
         _diag(diagnostics, "SKILL_PLAN_EMPTY", "skills must be a non-empty array")

@@ -1,34 +1,86 @@
 {
-  "schema_version": "1.0",
-  "catalog_version": "2.5.0",
-  "runtime_contract": "../../memory-seed/assets/runtime-contract.json",
-  "compilation_requirements": {
-    "bounded_evidence_anchor_required": true,
-    "unsupported_claim_policy": "question-or-external-requirement",
-    "high_priority_invariant_mapping": {
-      "procedure_steps_minimum": 1,
-      "verification_assertions_minimum": 1
-    },
-    "material_adjacency_required": true,
-    "routing_case_kinds": [
-      "positive",
-      "negative",
-      "ambiguous",
-      "cross-domain"
-    ],
-    "runtime_fixed_source": "runtime_contract"
-  },
   "candidates": [
     {
-      "id": "architecture-pattern",
       "catalog": "php-architecture-patterns.md#enforceable-architecture-skill-contract",
       "category": "architecture",
+      "falsifier": {
+        "at_least": 2,
+        "probes": [
+          {
+            "paths": [
+              "src/Domain/**",
+              "app/Domain/**",
+              "src/*/Domain/**"
+            ]
+          },
+          {
+            "paths": [
+              "src/Application/**",
+              "app/Application/**",
+              "src/*/Application/**"
+            ]
+          },
+          {
+            "paths": [
+              "src/Infrastructure/**",
+              "app/Infrastructure/**",
+              "src/*/Infrastructure/**"
+            ]
+          },
+          {
+            "paths": [
+              "src/Service/**",
+              "src/Services/**",
+              "app/Services/**"
+            ]
+          },
+          {
+            "paths": [
+              "src/Repository/**",
+              "src/Repositories/**",
+              "app/Repositories/**"
+            ]
+          },
+          {
+            "paths": [
+              "src/Controller/**",
+              "app/Http/Controllers/**"
+            ]
+          }
+        ],
+        "requires": "any",
+        "surface": "source separated into two or more named architectural layers"
+      },
+      "id": "architecture-pattern",
       "mode": "family"
     },
     {
-      "id": "architecture-implementer",
       "catalog": "php-frameworks.md#architecture-implementer",
       "category": "design",
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "src/Controller/**/*.php",
+              "app/Http/Controllers/**/*.php"
+            ]
+          },
+          {
+            "paths": [
+              "src/Service/**/*.php",
+              "src/Services/**/*.php",
+              "app/Services/**/*.php",
+              "src/Repository/**/*.php",
+              "app/Repositories/**/*.php",
+              "src/Handler/**/*.php",
+              "src/UseCase/**/*.php"
+            ]
+          }
+        ],
+        "requires": "all",
+        "surface": "an existing multi-layer feature skeleton a new feature would be scaffolded into"
+      },
+      "id": "architecture-implementer",
       "mode": "static",
       "roles": [
         "locate-target-architecture-pattern",
@@ -38,9 +90,33 @@
       ]
     },
     {
-      "id": "api-designer",
       "catalog": "php-frameworks.md#api-designer",
       "category": "design",
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "src/**/*.php",
+              "app/**/*.php",
+              "lib/**/*.php",
+              "config/**/*.php",
+              "routes/**/*.php"
+            ],
+            "pattern": "#\\[Route\\(|@Route\\(|Route::(get|post|put|patch|delete|resource|apiResource)\\("
+          },
+          {
+            "paths": [
+              "config/routes.yaml",
+              "config/routes/*.yaml",
+              "config/routes.php",
+              "routes/*.php"
+            ]
+          }
+        ],
+        "requires": "any",
+        "surface": "HTTP routes the project declares"
+      },
+      "id": "api-designer",
       "mode": "static",
       "roles": [
         "derive-route-and-operation-shape",
@@ -51,9 +127,38 @@
       ]
     },
     {
-      "id": "database-designer",
       "catalog": "php-frameworks.md#database-designer",
       "category": "design",
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "migrations/**/*.php",
+              "database/migrations/**/*.php",
+              "src/Migrations/**/*.php"
+            ]
+          },
+          {
+            "paths": [
+              "src/**/*.php",
+              "app/**/*.php",
+              "lib/**/*.php",
+              "config/**/*.php",
+              "routes/**/*.php"
+            ],
+            "pattern": "#\\[ORM\\\\\\\\Entity|@ORM\\\\\\\\Entity|extends Model\\b|use Illuminate\\\\\\\\Database\\\\\\\\Eloquent"
+          },
+          {
+            "paths": [
+              "src/Entity/**/*.php",
+              "app/Models/**/*.php"
+            ]
+          }
+        ],
+        "requires": "any",
+        "surface": "a persistent store with schema, entity or migration evidence"
+      },
+      "id": "database-designer",
       "mode": "static",
       "roles": [
         "derive-persistence-boundary",
@@ -68,9 +173,41 @@
       ]
     },
     {
-      "id": "coding",
       "catalog": "php-frameworks.md#coding",
       "category": "universal",
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "src/**/*.php",
+              "app/**/*.php",
+              "lib/**/*.php"
+            ]
+          },
+          {
+            "paths": [
+              ".php-cs-fixer.php",
+              ".php-cs-fixer.dist.php",
+              ".php_cs",
+              ".php_cs.dist",
+              "phpcs.xml",
+              "phpcs.xml.dist",
+              "phpstan.neon",
+              "phpstan.neon.dist",
+              "phpstan.dist.neon",
+              "psalm.xml",
+              "psalm.xml.dist",
+              "rector.php",
+              "ecs.php",
+              "pint.json",
+              ".editorconfig"
+            ]
+          }
+        ],
+        "requires": "all",
+        "surface": "PHP source together with the formatter or static-analysis configuration it is held to"
+      },
+      "id": "coding",
       "mode": "static",
       "roles": [
         "locate-owning-module-and-conventions",
@@ -80,9 +217,33 @@
       ]
     },
     {
-      "id": "testing",
       "catalog": "php-frameworks.md#testing",
       "category": "universal",
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "phpunit.xml",
+              "phpunit.xml.dist",
+              "phpunit.dist.xml",
+              "pest.php",
+              "behat.yml",
+              "behat.yml.dist",
+              "codeception.yml"
+            ]
+          },
+          {
+            "paths": [
+              "tests/**/*Test.php",
+              "tests/**/*Cest.php",
+              "test/**/*Test.php"
+            ]
+          }
+        ],
+        "requires": "any",
+        "surface": "a configured test suite the project can run"
+      },
+      "id": "testing",
       "mode": "static",
       "roles": [
         "select-suite-and-focused-scope",
@@ -94,9 +255,44 @@
       ]
     },
     {
-      "id": "code-review",
       "catalog": "php-frameworks.md#code-review",
       "category": "universal",
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "src/**/*.php",
+              "app/**/*.php",
+              "lib/**/*.php"
+            ]
+          },
+          {
+            "paths": [
+              "CONTRIBUTING.md",
+              "CONTRIBUTING.rst",
+              "AGENTS.md",
+              ".editorconfig",
+              ".github/workflows/*.yml",
+              ".github/workflows/*.yaml",
+              "phpstan.neon",
+              "phpstan.neon.dist",
+              "phpstan.dist.neon",
+              "phpcs.xml",
+              "phpcs.xml.dist",
+              "psalm.xml",
+              "psalm.xml.dist",
+              ".php-cs-fixer.dist.php",
+              ".php-cs-fixer.php",
+              "rector.php",
+              "phpunit.xml",
+              "phpunit.xml.dist"
+            ]
+          }
+        ],
+        "requires": "all",
+        "surface": "a source tree with rules a review is read against"
+      },
+      "id": "code-review",
       "mode": "static",
       "roles": [
         "identify-affected-invariants",
@@ -107,9 +303,39 @@
       ]
     },
     {
-      "id": "security-review",
       "catalog": "php-frameworks.md#security-review",
       "category": "universal",
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "config/packages/security.yaml",
+              "config/auth.php",
+              "config/packages/security/*.yaml"
+            ]
+          },
+          {
+            "paths": [
+              "src/Security/**/*.php",
+              "app/Policies/**/*.php",
+              "src/**/Voter/**/*.php"
+            ]
+          },
+          {
+            "paths": [
+              "src/**/*.php",
+              "app/**/*.php",
+              "lib/**/*.php",
+              "config/**/*.php",
+              "routes/**/*.php"
+            ],
+            "pattern": "isGranted\\(|denyAccessUnlessGranted\\(|Gate::|->authorize\\("
+          }
+        ],
+        "requires": "any",
+        "surface": "an authentication, authorization or untrusted-input boundary in the target"
+      },
+      "id": "security-review",
       "mode": "static",
       "roles": [
         "verify-object-and-tenant-ownership",
@@ -120,9 +346,32 @@
       ]
     },
     {
-      "id": "performance",
       "catalog": "php-frameworks.md#performance",
       "category": "universal",
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              ".blackfire.yaml",
+              "blackfire.yaml",
+              "*.spx",
+              "phpbench.json",
+              "phpbench.json.dist",
+              ".phpbench/**"
+            ]
+          },
+          {
+            "paths": [
+              "docs/**/*.md",
+              "*.md"
+            ],
+            "pattern": "\\bSLO\\b|\\bp9[59]\\b|latency budget|performance budget"
+          }
+        ],
+        "requires": "any",
+        "surface": "profiling, benchmarking or budget evidence the project already keeps"
+      },
+      "id": "performance",
       "mode": "static",
       "roles": [
         "establish-a-baseline-measurement",
@@ -132,40 +381,134 @@
       ]
     },
     {
-      "id": "release",
       "catalog": "php-frameworks.md#release",
       "category": "universal",
+      "escalates_on_rejection": true,
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              ".github/workflows/*.yml",
+              ".github/workflows/*.yaml",
+              ".gitlab-ci.yml",
+              "Jenkinsfile",
+              ".circleci/config.yml"
+            ]
+          },
+          {
+            "paths": [
+              "deploy.sh",
+              "deploy/**",
+              "Dockerfile",
+              "docker-compose.yml",
+              "docker-compose.yaml",
+              "Makefile",
+              "*.deployer.php",
+              "deploy.php"
+            ]
+          },
+          {
+            "paths": [
+              "CHANGELOG.md",
+              "VERSION"
+            ]
+          }
+        ],
+        "requires": "any",
+        "surface": "a release or deployment procedure the project already performs"
+      },
+      "id": "release",
       "mode": "static",
       "roles": [
         "assemble-the-change-set",
         "verify-release-preconditions",
         "execute-the-evidenced-release-procedure",
         "define-rollback"
-      ],
-      "escalates_on_rejection": true
+      ]
     },
     {
-      "id": "debugging",
       "catalog": "php-frameworks.md#debugging",
       "category": "universal",
+      "escalates_on_rejection": true,
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "config/packages/monolog.yaml",
+              "config/packages/*/monolog.yaml",
+              "config/logging.php"
+            ]
+          },
+          {
+            "paths": [
+              "composer.json"
+            ],
+            "pattern": "sentry|bugsnag|rollbar|whoops"
+          }
+        ],
+        "requires": "any",
+        "surface": "logging, error tracking or debug configuration the target ships"
+      },
+      "id": "debugging",
       "mode": "static",
       "roles": [
         "locate-the-targets-error-and-log-surfaces",
         "read-the-targets-own-debug-tooling",
         "defer-methodology-to-systematic-debugger"
-      ],
-      "escalates_on_rejection": true
+      ]
     },
     {
-      "id": "frontend-design",
       "catalog": "php-frameworks.md#frontend-design",
       "category": "frontend",
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "templates/**/*.twig",
+              "resources/views/**/*.blade.php",
+              "views/**/*.php"
+            ]
+          },
+          {
+            "paths": [
+              "assets/**",
+              "resources/js/**",
+              "resources/css/**",
+              "resources/sass/**"
+            ]
+          }
+        ],
+        "requires": "any",
+        "surface": "a rendering layer with real template or asset sources"
+      },
+      "id": "frontend-design",
       "mode": "static"
     },
     {
-      "id": "coder-frontend",
       "catalog": "php-frameworks.md#coder-frontend",
       "category": "frontend",
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "templates/**/*.twig",
+              "resources/views/**/*.blade.php"
+            ]
+          },
+          {
+            "paths": [
+              "package.json",
+              "webpack.config.js",
+              "vite.config.js",
+              "rollup.config.js",
+              "webpack.mix.js"
+            ]
+          }
+        ],
+        "requires": "any",
+        "surface": "a template and asset stack a change would be written into"
+      },
+      "id": "coder-frontend",
       "mode": "static",
       "roles": [
         "locate-templating-and-asset-build",
@@ -175,27 +518,102 @@
       ]
     },
     {
-      "id": "wcag-accessibility",
       "catalog": "php-frameworks.md#wcag-accessibility",
       "category": "frontend",
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "templates/**/*.twig",
+              "resources/views/**/*.blade.php",
+              "views/**/*.php",
+              "public/**/*.html",
+              "**/*.vue"
+            ]
+          }
+        ],
+        "requires": "any",
+        "surface": "rendered markup a user reads"
+      },
+      "id": "wcag-accessibility",
       "mode": "static"
     },
     {
-      "id": "web-design-guidelines",
       "catalog": "php-frameworks.md#web-design-guidelines",
       "category": "frontend",
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "templates/**/*.twig",
+              "resources/views/**/*.blade.php",
+              "**/*.vue",
+              "resources/css/**",
+              "assets/styles/**",
+              "assets/css/**"
+            ]
+          }
+        ],
+        "requires": "any",
+        "surface": "a user-facing interface the project renders"
+      },
+      "id": "web-design-guidelines",
       "mode": "static"
     },
     {
-      "id": "browser-verify",
       "catalog": "php-frameworks.md#browser-verify",
       "category": "frontend",
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "package.json"
+            ],
+            "pattern": "\\\"(dev|serve|dev-server|start|watch)\\\"\\s*:"
+          },
+          {
+            "paths": [
+              "public/index.php",
+              "public/index.html",
+              "docker-compose.yml",
+              "docker-compose.yaml",
+              ".ddev/config.yaml",
+              "Procfile"
+            ]
+          }
+        ],
+        "requires": "any",
+        "surface": "a runnable UI route or dev server the project declares"
+      },
+      "id": "browser-verify",
       "mode": "static"
     },
     {
-      "id": "requirements-analyst",
       "catalog": "php-process-skills.md#requirements-analyst",
       "category": "process",
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "docs/**/*.md",
+              "doc/**/*.md",
+              "adr/**/*.md",
+              "docs/adr/**",
+              "specs/**/*.md",
+              "requirements/**"
+            ]
+          },
+          {
+            "paths": [
+              ".github/ISSUE_TEMPLATE/**",
+              ".github/PULL_REQUEST_TEMPLATE.md"
+            ]
+          }
+        ],
+        "requires": "any",
+        "surface": "a place requirements or acceptance criteria are written down"
+      },
+      "id": "requirements-analyst",
       "mode": "static",
       "roles": [
         "load-project-vocabulary-and-known-invariants",
@@ -206,113 +624,312 @@
       ]
     },
     {
-      "id": "researcher",
       "catalog": "php-process-skills.md#researcher",
       "category": "process",
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "composer.json"
+            ],
+            "pattern": "\\\"[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*\\\"\\s*:"
+          },
+          {
+            "paths": [
+              "composer.lock"
+            ]
+          }
+        ],
+        "requires": "all",
+        "surface": "third-party dependencies whose behaviour has to be looked up"
+      },
+      "id": "researcher",
       "mode": "static"
     },
     {
-      "id": "brainstorming",
       "catalog": "php-process-skills.md#brainstorming",
       "category": "process",
+      "falsifier": null,
+      "falsifier_absent": "an open product or design choice is a property of the request, not of the repository",
+      "id": "brainstorming",
       "mode": "static"
     },
     {
-      "id": "council",
       "catalog": "php-process-skills.md#council",
       "category": "process",
+      "falsifier": null,
+      "falsifier_absent": "whether a decision spans two risk disciplines cannot be read off the tree",
+      "id": "council",
       "mode": "static"
     },
     {
-      "id": "writing-plans",
       "catalog": "php-process-skills.md#writing-plans",
       "category": "process",
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "src/**/*.php",
+              "app/**/*.php",
+              "lib/**/*.php"
+            ]
+          },
+          {
+            "paths": [
+              "phpunit.xml",
+              "phpunit.xml.dist",
+              "pest.php",
+              "behat.yml",
+              "composer.json"
+            ]
+          }
+        ],
+        "requires": "all",
+        "surface": "identifiable files, tests and validation commands a plan can name"
+      },
+      "id": "writing-plans",
       "mode": "static"
     },
     {
-      "id": "using-git-worktrees",
       "catalog": "php-process-skills.md#using-git-worktrees",
       "category": "process",
+      "falsifier": null,
+      "falsifier_absent": "isolated parallel work is asked for by a person; a repository cannot show that it was",
+      "id": "using-git-worktrees",
       "mode": "static"
     },
     {
-      "id": "systematic-debugger",
       "catalog": "php-process-skills.md#systematic-debugger",
       "category": "process",
-      "mode": "static",
-      "escalates_on_rejection": true
+      "escalates_on_rejection": true,
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "phpunit.xml",
+              "phpunit.xml.dist",
+              "pest.php",
+              "behat.yml"
+            ]
+          },
+          {
+            "paths": [
+              "tests/**/*.php",
+              "test/**/*.php"
+            ]
+          }
+        ],
+        "requires": "any",
+        "surface": "a runnable test or diagnostic surface a defect can be reproduced against"
+      },
+      "id": "systematic-debugger",
+      "mode": "static"
     },
     {
-      "id": "refactorer",
       "catalog": "php-process-skills.md#refactorer",
       "category": "process",
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "src/**/*.php",
+              "app/**/*.php",
+              "lib/**/*.php"
+            ]
+          },
+          {
+            "paths": [
+              "phpunit.xml",
+              "phpunit.xml.dist",
+              "pest.php",
+              "behat.yml",
+              "tests/**/*Test.php"
+            ]
+          }
+        ],
+        "requires": "all",
+        "surface": "source under a runnable safety net a behaviour-preserving change can lean on"
+      },
+      "id": "refactorer",
       "mode": "static"
     },
     {
-      "id": "dependency-manager",
       "catalog": "php-process-skills.md#dependency-manager",
       "category": "process",
-      "mode": "static",
-      "escalates_on_rejection": true
+      "escalates_on_rejection": true,
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "composer.json"
+            ]
+          },
+          {
+            "paths": [
+              "composer.lock"
+            ]
+          }
+        ],
+        "requires": "all",
+        "surface": "Composer manifests the project's dependencies are declared in"
+      },
+      "id": "dependency-manager",
+      "mode": "static"
     },
     {
-      "id": "review-pr",
       "catalog": "php-process-skills.md#review-pr",
       "category": "process",
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              ".git/config"
+            ],
+            "pattern": "\\[remote "
+          },
+          {
+            "paths": [
+              ".github/**"
+            ]
+          }
+        ],
+        "requires": "any",
+        "surface": "a remote the project's pull requests live on"
+      },
+      "id": "review-pr",
       "mode": "static"
     },
     {
-      "id": "finishing-branch",
       "catalog": "php-process-skills.md#finishing-branch",
       "category": "process",
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              ".git/HEAD",
+              ".gitignore"
+            ]
+          },
+          {
+            "paths": [
+              "phpunit.xml",
+              "phpunit.xml.dist",
+              "pest.php",
+              "behat.yml",
+              "tests/**/*Test.php"
+            ]
+          }
+        ],
+        "requires": "all",
+        "surface": "a Git repository whose work can be finished against a runnable suite"
+      },
+      "id": "finishing-branch",
       "mode": "static"
     },
     {
-      "id": "documentation-generator",
       "catalog": "php-process-skills.md#documentation-generator",
       "category": "process",
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "docs/**/*.md",
+              "doc/**/*.md",
+              "adr/**/*.md",
+              "docs/adr/**"
+            ]
+          },
+          {
+            "paths": [
+              "CHANGELOG.md",
+              "openapi.yaml",
+              "openapi.json",
+              "swagger.yaml",
+              "*.openapi.yaml"
+            ]
+          }
+        ],
+        "requires": "any",
+        "surface": "canonical documentation locations the project already maintains"
+      },
+      "id": "documentation-generator",
       "mode": "static"
     },
     {
-      "id": "skill-creator",
       "catalog": "php-process-skills.md#skill-creator",
       "category": "process",
+      "falsifier": null,
+      "falsifier_absent": "the trigger is a request to author a skill, not anything the target contains",
+      "id": "skill-creator",
       "mode": "static"
     },
     {
-      "id": "reflect",
       "catalog": "php-process-skills.md#reflect",
       "category": "process",
+      "falsifier": null,
+      "falsifier_absent": "the trigger is a recorded agent mistake, which no target artifact carries",
+      "id": "reflect",
       "mode": "static"
     },
     {
-      "id": "memory-bank",
       "catalog": "php-process-skills.md#memory-bank",
       "category": "process",
+      "falsifier": null,
+      "falsifier_absent": "runtime-fixed: always generated, never rejected",
+      "id": "memory-bank",
       "mode": "runtime-fixed"
     },
     {
-      "id": "project-brain",
       "catalog": "php-process-skills.md#project-brain",
       "category": "process",
+      "falsifier": null,
+      "falsifier_absent": "runtime-fixed: always generated, never rejected",
+      "id": "project-brain",
       "mode": "runtime-fixed"
     },
     {
-      "id": "checkpoint",
       "catalog": "php-process-skills.md#checkpoint",
       "category": "process",
+      "falsifier": null,
+      "falsifier_absent": "runtime-fixed: always generated, never rejected",
+      "id": "checkpoint",
       "mode": "runtime-fixed"
     },
     {
-      "id": "memory",
       "catalog": "php-process-skills.md#memory",
       "category": "process",
+      "falsifier": null,
+      "falsifier_absent": "runtime-fixed: always generated, never rejected",
+      "id": "memory",
       "mode": "runtime-fixed"
     },
     {
-      "id": "orm-patterns",
       "catalog": "php-specialty-skills.md#orm-patterns",
       "category": "specialty",
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "src/**/*.php",
+              "app/**/*.php",
+              "lib/**/*.php",
+              "config/**/*.php",
+              "routes/**/*.php"
+            ],
+            "pattern": "#\\[ORM\\\\\\\\|@ORM\\\\\\\\|extends Model\\b|Illuminate\\\\\\\\Database\\\\\\\\Eloquent"
+          },
+          {
+            "paths": [
+              "src/Entity/**/*.php",
+              "app/Models/**/*.php",
+              "config/doctrine/**"
+            ]
+          }
+        ],
+        "requires": "any",
+        "surface": "an ORM mapping layer the application queries through"
+      },
+      "id": "orm-patterns",
       "mode": "static",
       "roles": [
         "read-mapping-and-relation-definitions",
@@ -322,113 +939,495 @@
       ]
     },
     {
-      "id": "migration-safety",
       "catalog": "php-specialty-skills.md#migration-safety",
       "category": "specialty",
-      "mode": "static",
-      "escalates_on_rejection": true
+      "escalates_on_rejection": true,
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "migrations/Version*.php",
+              "database/migrations/*.php",
+              "src/Migrations/*.php",
+              "db/migrate/**"
+            ]
+          },
+          {
+            "paths": [
+              "phinx.yml",
+              "phinx.php",
+              "config/packages/doctrine_migrations.yaml"
+            ]
+          }
+        ],
+        "requires": "any",
+        "surface": "a migration tool with real migration history"
+      },
+      "id": "migration-safety",
+      "mode": "static"
     },
     {
-      "id": "async-jobs",
       "catalog": "php-specialty-skills.md#async-jobs",
       "category": "specialty",
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "src/**/*.php",
+              "app/**/*.php",
+              "lib/**/*.php",
+              "config/**/*.php",
+              "routes/**/*.php"
+            ],
+            "pattern": "implements\\s+ShouldQueue|MessageHandlerInterface|#\\[AsMessageHandler\\]"
+          },
+          {
+            "paths": [
+              "app/Jobs/**/*.php",
+              "src/Message/**/*.php",
+              "src/MessageHandler/**/*.php",
+              "config/queue.php"
+            ]
+          },
+          {
+            "paths": [
+              "config/packages/messenger.yaml"
+            ],
+            "pattern": "^\\s{8,}[a-z_]+:\\s*['\\\"]?(amqp|redis|doctrine|sqs|sync|%env)"
+          }
+        ],
+        "requires": "any",
+        "surface": "a wired background-work mechanism with a real transport or scheduler"
+      },
+      "id": "async-jobs",
       "mode": "static"
     },
     {
-      "id": "event-boundary-review",
       "catalog": "php-specialty-skills.md#event-boundary-review",
       "category": "specialty",
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "src/**/*.php",
+              "app/**/*.php",
+              "lib/**/*.php",
+              "config/**/*.php",
+              "routes/**/*.php"
+            ],
+            "pattern": "implements\\s+EventSubscriberInterface|#\\[AsEventListener\\]|extends\\s+\\w*Observer\\b|Event::listen\\("
+          },
+          {
+            "paths": [
+              "src/EventSubscriber/**/*.php",
+              "src/EventListener/**/*.php",
+              "app/Listeners/**/*.php",
+              "app/Observers/**/*.php"
+            ]
+          }
+        ],
+        "requires": "any",
+        "surface": "event listeners or subscribers the project registers"
+      },
+      "id": "event-boundary-review",
       "mode": "static"
     },
     {
-      "id": "notification-delivery",
       "catalog": "php-specialty-skills.md#notification-delivery",
       "category": "specialty",
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "app/Notifications/**/*.php",
+              "src/Notification/**/*.php",
+              "src/Notifier/**/*.php"
+            ]
+          },
+          {
+            "paths": [
+              "src/**/*.php",
+              "app/**/*.php",
+              "lib/**/*.php",
+              "config/**/*.php",
+              "routes/**/*.php"
+            ],
+            "pattern": "extends\\s+Notification\\b|NotifierInterface|via\\(\\$notifiable\\)"
+          }
+        ],
+        "requires": "any",
+        "surface": "multi-channel outbound notifications the project sends"
+      },
+      "id": "notification-delivery",
       "mode": "static"
     },
     {
-      "id": "caching-strategy",
       "catalog": "php-specialty-skills.md#caching-strategy",
       "category": "specialty",
-      "mode": "static",
-      "escalates_on_rejection": true
+      "escalates_on_rejection": true,
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "src/**/*.php",
+              "app/**/*.php",
+              "lib/**/*.php",
+              "config/**/*.php",
+              "routes/**/*.php"
+            ],
+            "pattern": "CacheInterface|CacheItemPoolInterface|Cache::(get|put|remember|tags)\\(|->getItem\\("
+          }
+        ],
+        "requires": "any",
+        "surface": "an in-app caching layer with real call sites"
+      },
+      "id": "caching-strategy",
+      "mode": "static"
     },
     {
-      "id": "file-storage",
       "catalog": "php-specialty-skills.md#file-storage",
       "category": "specialty",
-      "mode": "static",
-      "escalates_on_rejection": true
+      "escalates_on_rejection": true,
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "config/packages/flysystem.yaml",
+              "config/filesystems.php",
+              "config/packages/oneup_flysystem.yaml"
+            ]
+          },
+          {
+            "paths": [
+              "src/**/*.php",
+              "app/**/*.php",
+              "lib/**/*.php",
+              "config/**/*.php",
+              "routes/**/*.php"
+            ],
+            "pattern": "FilesystemOperator|Storage::(disk|put|get)\\(|League\\\\\\\\Flysystem|UploadedFile"
+          }
+        ],
+        "requires": "any",
+        "surface": "a filesystem or object-storage abstraction used for uploads or generated files"
+      },
+      "id": "file-storage",
+      "mode": "static"
     },
     {
-      "id": "auth-scaffolding",
       "catalog": "php-specialty-skills.md#auth-scaffolding",
       "category": "specialty",
-      "mode": "static",
-      "escalates_on_rejection": true
+      "escalates_on_rejection": true,
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "src/Security/**/*.php",
+              "app/Policies/**/*.php",
+              "src/**/Voter/**/*.php"
+            ]
+          },
+          {
+            "paths": [
+              "config/packages/security.yaml",
+              "config/auth.php"
+            ],
+            "pattern": "firewalls:|providers:|guards"
+          }
+        ],
+        "requires": "any",
+        "surface": "session authentication or an object-level authorization layer"
+      },
+      "id": "auth-scaffolding",
+      "mode": "static"
     },
     {
-      "id": "form-validation-design",
       "catalog": "php-specialty-skills.md#form-validation-design",
       "category": "specialty",
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "src/Form/**/*.php",
+              "app/Http/Requests/**/*.php",
+              "src/Dto/**/*.php",
+              "src/DTO/**/*.php"
+            ]
+          },
+          {
+            "paths": [
+              "src/**/*.php",
+              "app/**/*.php",
+              "lib/**/*.php",
+              "config/**/*.php",
+              "routes/**/*.php"
+            ],
+            "pattern": "AbstractType\\b|#\\[Assert\\\\\\\\|@Assert\\\\\\\\|extends FormRequest\\b"
+          }
+        ],
+        "requires": "any",
+        "surface": "a dedicated form, request or DTO validation layer"
+      },
+      "id": "form-validation-design",
       "mode": "static"
     },
     {
-      "id": "admin-panel",
       "catalog": "php-specialty-skills.md#admin-panel",
       "category": "specialty",
-      "mode": "static",
-      "escalates_on_rejection": true
+      "escalates_on_rejection": true,
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "composer.json"
+            ],
+            "pattern": "easycorp/easyadmin|sonata-project/admin|filament/filament|orchid/platform|unite-cms"
+          },
+          {
+            "paths": [
+              "src/Controller/Admin/**/*.php",
+              "app/Filament/**/*.php",
+              "src/Admin/**/*.php"
+            ]
+          }
+        ],
+        "requires": "any",
+        "surface": "a back-office admin package wired into the project"
+      },
+      "id": "admin-panel",
+      "mode": "static"
     },
     {
-      "id": "api-platform-design",
       "catalog": "php-specialty-skills.md#api-platform-design",
       "category": "specialty",
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "composer.json"
+            ],
+            "pattern": "api-platform/"
+          },
+          {
+            "paths": [
+              "**/*.php"
+            ],
+            "pattern": "#\\[ApiResource|@ApiResource"
+          }
+        ],
+        "requires": "any",
+        "surface": "a declarative, metadata-driven API resource framework"
+      },
+      "id": "api-platform-design",
       "mode": "static"
     },
     {
-      "id": "console-commands",
       "catalog": "php-specialty-skills.md#console-commands",
       "category": "specialty",
-      "mode": "static",
-      "escalates_on_rejection": true
+      "escalates_on_rejection": true,
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "src/Command/**/*.php",
+              "app/Console/Commands/**/*.php",
+              "src/Console/**/*.php"
+            ]
+          },
+          {
+            "paths": [
+              "src/**/*.php",
+              "app/**/*.php",
+              "lib/**/*.php",
+              "config/**/*.php",
+              "routes/**/*.php"
+            ],
+            "pattern": "#\\[AsCommand\\("
+          }
+        ],
+        "requires": "any",
+        "surface": "custom CLI commands the project ships"
+      },
+      "id": "console-commands",
+      "mode": "static"
     },
     {
-      "id": "repository-review",
       "catalog": "php-specialty-skills.md#repository-review",
       "category": "specialty",
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "src/Repository/**/*.php",
+              "src/Repositories/**/*.php",
+              "app/Repositories/**/*.php"
+            ]
+          },
+          {
+            "paths": [
+              "src/**/*.php",
+              "app/**/*.php",
+              "lib/**/*.php",
+              "config/**/*.php",
+              "routes/**/*.php"
+            ],
+            "pattern": "extends\\s+ServiceEntityRepository|implements\\s+\\w*RepositoryInterface"
+          }
+        ],
+        "requires": "any",
+        "surface": "a data-access layer between domain code and persistence"
+      },
+      "id": "repository-review",
       "mode": "static"
     },
     {
-      "id": "container-review",
       "catalog": "php-specialty-skills.md#container-review",
       "category": "specialty",
-      "mode": "static",
-      "escalates_on_rejection": true
+      "escalates_on_rejection": true,
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "config/services.yaml",
+              "config/services.php",
+              "config/services/**"
+            ]
+          },
+          {
+            "paths": [
+              "src/**/*.php",
+              "app/**/*.php",
+              "lib/**/*.php",
+              "config/**/*.php",
+              "routes/**/*.php"
+            ],
+            "pattern": "CompilerPassInterface|extends\\s+ServiceProvider\\b"
+          }
+        ],
+        "requires": "any",
+        "surface": "declarative dependency-injection configuration"
+      },
+      "id": "container-review",
+      "mode": "static"
     },
     {
-      "id": "test-data-factories",
       "catalog": "php-specialty-skills.md#test-data-factories",
       "category": "specialty",
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "database/factories/**/*.php",
+              "tests/Factory/**/*.php",
+              "tests/Fixtures/**/*.php",
+              "src/DataFixtures/**/*.php"
+            ]
+          },
+          {
+            "paths": [
+              "tests/**/*.php"
+            ],
+            "pattern": "extends\\s+Factory\\b|ModelFactory|FixtureInterface|Foundry"
+          }
+        ],
+        "requires": "any",
+        "surface": "test-data helpers the suite builds its fixtures from"
+      },
+      "id": "test-data-factories",
       "mode": "static"
     },
     {
-      "id": "package-authoring",
       "catalog": "php-specialty-skills.md#package-authoring",
       "category": "specialty",
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "composer.json"
+            ],
+            "pattern": "\\\"type\\\"\\s*:\\s*\\\"(library|symfony-bundle|laravel-package|composer-plugin)\\\""
+          }
+        ],
+        "requires": "any",
+        "surface": "a library-shaped composer manifest rather than a deployed application"
+      },
+      "id": "package-authoring",
       "mode": "static"
     },
     {
-      "id": "integration-provider",
       "catalog": "php-integration-catalog.md#enforceable-integration-contracts",
       "category": "integration",
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "composer.json"
+            ],
+            "pattern": "aws/|google/|stripe/|twilio/|sentry/|firebase/|elasticsearch/|predis/|league/flysystem-"
+          },
+          {
+            "paths": [
+              "src/**/*.php",
+              "app/**/*.php",
+              "lib/**/*.php",
+              "config/**/*.php",
+              "routes/**/*.php"
+            ],
+            "pattern": "HttpClientInterface|GuzzleHttp\\\\\\\\Client"
+          }
+        ],
+        "requires": "any",
+        "surface": "a third-party provider SDK or client the project calls out through"
+      },
+      "id": "integration-provider",
       "mode": "family"
     },
     {
-      "id": "domain-review",
       "catalog": "php-domain-behavior.md#enforceable-domain-review-contract",
       "category": "domain-review",
+      "falsifier": {
+        "probes": [
+          {
+            "paths": [
+              "config/packages/workflow.yaml",
+              "config/packages/*/workflow.yaml"
+            ]
+          },
+          {
+            "paths": [
+              "src/**/*.php",
+              "app/**/*.php",
+              "lib/**/*.php",
+              "config/**/*.php",
+              "routes/**/*.php"
+            ],
+            "pattern": "WorkflowInterface|StateMachine|enum\\s+\\w+Status\\b|enum\\s+\\w+State\\b"
+          }
+        ],
+        "requires": "any",
+        "surface": "encoded domain rules - a state machine, lifecycle or policy the project enforces"
+      },
+      "id": "domain-review",
       "mode": "family"
     }
-  ]
+  ],
+  "catalog_version": "2.5.0",
+  "compilation_requirements": {
+    "bounded_evidence_anchor_required": true,
+    "high_priority_invariant_mapping": {
+      "procedure_steps_minimum": 1,
+      "verification_assertions_minimum": 1
+    },
+    "material_adjacency_required": true,
+    "routing_case_kinds": [
+      "positive",
+      "negative",
+      "ambiguous",
+      "cross-domain"
+    ],
+    "runtime_fixed_source": "runtime_contract",
+    "unsupported_claim_policy": "question-or-external-requirement"
+  },
+  "runtime_contract": "../../memory-seed/assets/runtime-contract.json",
+  "schema_version": "1.1"
 }

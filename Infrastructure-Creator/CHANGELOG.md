@@ -105,6 +105,41 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
   "what would change the decision" and a ranked reconsideration table - and
   `infra-build` treats an unresolved flagged rejection as a checkpoint.
   Thirteen new regression tests pin the gate (`tests/test_plan_review.py`).
+- **A rejected candidate is now graded like a selected one.** Selecting a skill
+  costs a full schema 1.4 contract and has to survive the whole plan gate;
+  rejecting one cost four strings that nothing checked - the gate confirmed the
+  fields were present, the id was in the registry and the category matched, and
+  never asked whether the rejection was true. So a false selection met twenty
+  rules while a false rejection met none, and the only way to find one was a
+  person reading the list. Measured on a real 52-candidate run: 40 rejected, all
+  40 carrying one identical sentence, not one naming a file of the target.
+  - `REJECTION_UNANCHORED` - the reason and `missing_evidence` together must
+    name at least one concrete path, glob or root-level file, so a rejection
+    says where the surface was looked for exactly as a selection says where its
+    evidence was found.
+  - `REJECTION_TEMPLATED` - one sentence may cover a family (a project that
+    renders no HTML rejects every frontend candidate for the same reason) but
+    not several categories at once, which judges none of them.
+  - `REJECTION_CONTRADICTED` - `candidate-registry.json` (schema 1.1) carries,
+    per candidate, the `falsifier`: the signal whose presence in the target makes
+    "no surface here" false. The gate runs those signals against the real target.
+    43 of 52 candidates are falsifiable; the other 9 record in
+    `falsifier_absent` why no repository could show their trigger (an open
+    design question, a recorded agent mistake, a request to author a skill).
+  - Calibration on the run above: 25 of 40 rejections contradicted by the
+    target's own files, 10 confirmed by it (no API Platform, no async
+    transport, no migrations, no form layer, no factories, not a library), 5
+    unfalsifiable by construction. The two argued rejections added to the
+    36-skill honest corpus raise nothing, and stamping their sentences raises
+    both rules. Falsifiers were tightened twice during calibration: probes must
+    read first-party code, since a `**/*.php` content probe matched PHPUnit's
+    own sources under `bin/.phpunit`, and skeleton defaults
+    (`config/packages/cache.yaml`, `web_profiler.yaml`) do not establish a
+    surface the project chose.
+  - A rejection may rest only on what the target is, never on what the current
+    request needs: the accelerator is generated once, for all later work. That
+    rule is now written into `skill-forge/SKILL.md` and the profile schema
+    reference.
 
 - **`infra-validate` - a mandatory content review-and-repair phase between the
   wrappers and publication, with a deterministic gate that refuses to take the

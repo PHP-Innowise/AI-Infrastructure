@@ -139,7 +139,7 @@ class SkillQualityFixture(unittest.TestCase):
         self.registry_path.write_text(
             json.dumps(
                 {
-                    "schema_version": "1.0",
+                    "schema_version": "1.1",
                     "catalog_version": "2.5.0",
                     "candidates": [
                         {
@@ -361,8 +361,14 @@ class SkillQualityFixture(unittest.TestCase):
                     "candidate_id": "generic-cache",
                     "name": "generic-cache",
                     "category": "integration",
-                    "reason": "No confirmed cache runtime wiring",
-                    "missing_evidence": ["cache initialization and call sites"],
+                    "reason": (
+                        "No cache runtime wiring: config/cache.php is absent and "
+                        "no cache client is constructed under app/"
+                    ),
+                    "missing_evidence": [
+                        "cache initialization in config/cache.php",
+                        "cache call sites under app/",
+                    ],
                 }
             ],
         }
@@ -3654,6 +3660,223 @@ class SkillTemplateReuseTest(SkillQualityFixture):
             [(item.code, item.message, item.severity) for item in diagnostics],
             [(item.code, item.message, item.severity) for item in again],
         )
+
+
+class RejectionAccountabilityTest(SkillQualityFixture):
+    """A rejection must argue for itself the way a selection has to.
+
+    Measured on a real run before this existed: 40 of 52 candidates rejected,
+    all 40 carrying one identical sentence, none naming a file of the target.
+    Every gate validated the selections exhaustively and nothing looked at the
+    rejections, so a wrong one was invisible until a human read the list.
+    """
+
+    def reject(self, *items: dict) -> list[str]:
+        self.plan["rejected_candidates"] = list(items)
+        self.write_fixture()
+        return [item.code for item in self.plan_diagnostics()]
+
+    @staticmethod
+    def rejection(candidate: str, category: str, reason: str, missing: list[str]):
+        return {
+            "candidate_id": candidate,
+            "name": candidate,
+            "category": category,
+            "reason": reason,
+            "missing_evidence": missing,
+        }
+
+    def test_an_anchored_rejection_passes(self) -> None:
+        codes = self.reject(
+            self.rejection(
+                "generic-cache",
+                "integration",
+                "No cache runtime wiring: config/cache.php is absent and no cache "
+                "client is constructed under app/",
+                ["cache initialization in config/cache.php"],
+            )
+        )
+        self.assertNotIn("REJECTION_UNANCHORED", codes)
+        self.assertNotIn("REJECTION_TEMPLATED", codes)
+
+    def test_a_rejection_naming_nothing_in_the_target_fails(self) -> None:
+        codes = self.reject(
+            self.rejection(
+                "generic-cache",
+                "integration",
+                "No evidence in this target requires distinct operational guidance",
+                ["A target surface this candidate would own"],
+            )
+        )
+        self.assertIn("REJECTION_UNANCHORED", codes)
+
+    def test_prose_abbreviations_are_not_anchors(self) -> None:
+        # `e.g.` ends in a dot and two letters; a loose extension test would
+        # read it as a file and pass an unanchored rejection.
+        for text in ("Nothing here, e.g. no caching at all.", "Not applicable.",
+                     "No surface, i.e. none."):
+            self.assertEqual(validator._rejection_path_tokens(text), [], text)
+
+    def test_real_paths_are_anchors_in_bare_prose(self) -> None:
+        tokens = validator._rejection_path_tokens(
+            "no config/packages/cache.yaml, no .eslintrc, nothing under assets/"
+        )
+        self.assertIn("config/packages/cache.yaml", tokens)
+        self.assertIn(".eslintrc", tokens)
+
+    def test_one_family_may_share_a_sentence(self) -> None:
+        # "This project renders no HTML" is one honest judgement about every
+        # frontend candidate at once, and it stays one judgement.
+        shared = "No rendering layer: no resources/views/, no assets/, no package.json"
+        codes = self.reject(
+            self.rejection("frontend-design", "frontend", shared, ["assets/"]),
+            self.rejection("wcag-accessibility", "frontend", shared, ["assets/"]),
+            self.rejection("browser-verify", "frontend", shared, ["assets/"]),
+        )
+        self.assertNotIn("REJECTION_TEMPLATED", codes)
+
+    def test_a_sentence_spanning_families_judges_none_of_them(self) -> None:
+        shared = "No surface here: nothing under src/ requires it"
+        codes = self.reject(
+            self.rejection("frontend-design", "frontend", shared, ["src/"]),
+            self.rejection("api-designer", "design", shared, ["src/"]),
+            self.rejection("performance", "universal", shared, ["src/"]),
+        )
+        self.assertIn("REJECTION_TEMPLATED", codes)
+
+    def test_two_candidates_never_trip_the_shared_sentence_rule(self) -> None:
+        shared = "No surface here: nothing under src/ requires it"
+        codes = self.reject(
+            self.rejection("frontend-design", "frontend", shared, ["src/"]),
+            self.rejection("api-designer", "design", shared, ["src/"]),
+        )
+        self.assertNotIn("REJECTION_TEMPLATED", codes)
+
+
+class RejectionFalsifierTest(SkillQualityFixture):
+    """A rejection is checked against the project it was made about.
+
+    The registry carries, per candidate, the signal whose presence makes "no
+    surface here" false. Measured on a real 52-candidate run: 25 of 40
+    rejections were contradicted by the target's own files, 10 were confirmed,
+    and 5 rest on things no repository can show.
+    """
+
+    def falsify(self, falsifier: dict | None, **absent: str) -> list[str]:
+        registry = json.loads(self.registry_path.read_text(encoding="utf-8"))
+        for candidate in registry["candidates"]:
+            if candidate["id"] == "generic-cache":
+                candidate["falsifier"] = falsifier
+                if falsifier is None:
+                    candidate["falsifier_absent"] = absent.get(
+                        "reason", "nothing in a repository could show this"
+                    )
+        self.registry_path.write_text(
+            json.dumps(registry, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        self.plan["rejected_candidates"] = [
+            {
+                "candidate_id": "generic-cache",
+                "name": "generic-cache",
+                "category": "integration",
+                "reason": "No cache runtime wiring: config/cache.php is absent",
+                "missing_evidence": ["cache call sites under app/"],
+            }
+        ]
+        self.write_fixture()
+        return [item.code for item in self.plan_diagnostics()]
+
+    def write_target(self, relative: str, text: str) -> None:
+        path = self.target / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def test_a_rejection_the_target_contradicts_is_reported(self) -> None:
+        self.write_target("app/Cache/Warmer.php", "<?php\nuse CacheInterface;\n")
+        codes = self.falsify(
+            {
+                "surface": "an in-app caching layer with real call sites",
+                "requires": "any",
+                "probes": [{"paths": ["app/**/*.php"], "pattern": "CacheInterface"}],
+            }
+        )
+        self.assertIn("REJECTION_CONTRADICTED", codes)
+
+    def test_a_rejection_the_target_confirms_is_left_alone(self) -> None:
+        codes = self.falsify(
+            {
+                "surface": "an in-app caching layer with real call sites",
+                "requires": "any",
+                "probes": [{"paths": ["app/**/*.php"], "pattern": "CacheInterface"}],
+            }
+        )
+        self.assertNotIn("REJECTION_CONTRADICTED", codes)
+
+    def test_third_party_trees_do_not_establish_a_surface(self) -> None:
+        # Measured: a `**/*.php` probe matched PHPUnit's own sources under
+        # `bin/.phpunit` and reported a caching layer the project never wrote.
+        self.write_target("vendor/acme/src/Cache.php", "<?php\nuse CacheInterface;\n")
+        self.write_target("bin/.phpunit/src/Cache.php", "<?php\nuse CacheInterface;\n")
+        self.write_target("node_modules/x/y.php", "<?php\nuse CacheInterface;\n")
+        codes = self.falsify(
+            {
+                "surface": "an in-app caching layer with real call sites",
+                "requires": "any",
+                "probes": [{"paths": ["**/*.php"], "pattern": "CacheInterface"}],
+            }
+        )
+        self.assertNotIn("REJECTION_CONTRADICTED", codes)
+
+    def test_requires_all_needs_every_probe(self) -> None:
+        self.write_target("app/Cache/Warmer.php", "<?php\n")
+        falsifier = {
+            "surface": "cache configuration together with call sites",
+            "requires": "all",
+            "probes": [
+                {"paths": ["app/**/*.php"]},
+                {"paths": ["config/cache.php"]},
+            ],
+        }
+        self.assertNotIn("REJECTION_CONTRADICTED", self.falsify(falsifier))
+        self.write_target("config/cache.php", "<?php\nreturn [];\n")
+        self.assertIn("REJECTION_CONTRADICTED", self.falsify(falsifier))
+
+    def test_at_least_counts_distinct_probes(self) -> None:
+        self.write_target("app/Domain/Order.php", "<?php\n")
+        falsifier = {
+            "surface": "two or more named layers",
+            "requires": "any",
+            "at_least": 2,
+            "probes": [
+                {"paths": ["app/Domain/**"]},
+                {"paths": ["app/Infrastructure/**"]},
+            ],
+        }
+        self.assertNotIn("REJECTION_CONTRADICTED", self.falsify(falsifier))
+        self.write_target("app/Infrastructure/Db.php", "<?php\n")
+        self.assertIn("REJECTION_CONTRADICTED", self.falsify(falsifier))
+
+    def test_a_candidate_without_a_falsifier_is_never_contradicted(self) -> None:
+        self.write_target("app/Cache/Warmer.php", "<?php\nuse CacheInterface;\n")
+        codes = self.falsify(None, reason="the trigger is a request, not a file")
+        self.assertNotIn("REJECTION_CONTRADICTED", codes)
+
+
+class FalsifierGlobTest(unittest.TestCase):
+    def match(self, glob: str, path: str) -> bool:
+        return bool(validator._glob_to_regex(glob).match(path))
+
+    def test_double_star_crosses_directories(self) -> None:
+        self.assertTrue(self.match("src/**/*.php", "src/a/b/C.php"))
+        self.assertTrue(self.match("src/**/*.php", "src/C.php"))
+
+    def test_single_star_stays_inside_one_segment(self) -> None:
+        self.assertTrue(self.match("config/*.yaml", "config/cache.yaml"))
+        self.assertFalse(self.match("config/*.yaml", "config/packages/cache.yaml"))
+
+    def test_a_glob_anchors_at_both_ends(self) -> None:
+        self.assertFalse(self.match("composer.json", "app/composer.json"))
+        self.assertFalse(self.match("src/**/*.php", "src/a/b/C.phtml"))
 
 
 class CatalogRoleCoverageTest(unittest.TestCase):
