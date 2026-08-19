@@ -17,7 +17,7 @@ from typing import Any
 # Schemas carrying the typed routing oracle. This validator is standalone by
 # design - it ships inside any accelerator - so the set is declared here
 # rather than imported from the quality gate.
-TYPED_PLAN_SCHEMAS = {"1.2", "1.3", "1.4"}
+TYPED_PLAN_SCHEMAS = {"1.2", "1.3", "1.4", "1.5"}
 
 GRAPH_BLOCK = re.compile(
     r"```json flow-contract\s*\n(?P<payload>.*?)\n```", re.DOTALL

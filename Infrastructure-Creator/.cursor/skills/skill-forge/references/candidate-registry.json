@@ -434,20 +434,20 @@
         "probes": [
           {
             "paths": [
-              "config/packages/monolog.yaml",
-              "config/packages/*/monolog.yaml",
-              "config/logging.php"
-            ]
+              "composer.json"
+            ],
+            "pattern": "sentry|bugsnag|rollbar|whoops|clockwork|blackfire"
           },
           {
             "paths": [
-              "composer.json"
+              "src/**/*.php",
+              "app/**/*.php"
             ],
-            "pattern": "sentry|bugsnag|rollbar|whoops"
+            "pattern": "class \\w*(Log|Debug)\\w*(Handler|Processor)\\b"
           }
         ],
         "requires": "any",
-        "surface": "logging, error tracking or debug configuration the target ships"
+        "surface": "an error tracker or debug tooling the project chose to wire"
       },
       "id": "debugging",
       "mode": "static",
@@ -626,23 +626,8 @@
     {
       "catalog": "php-process-skills.md#researcher",
       "category": "process",
-      "falsifier": {
-        "probes": [
-          {
-            "paths": [
-              "composer.json"
-            ],
-            "pattern": "\\\"[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*\\\"\\s*:"
-          },
-          {
-            "paths": [
-              "composer.lock"
-            ]
-          }
-        ],
-        "requires": "all",
-        "surface": "third-party dependencies whose behaviour has to be looked up"
-      },
+      "falsifier": null,
+      "falsifier_absent": "the gate is an unresolved question someone raises; composer manifests are only its precondition",
       "id": "researcher",
       "mode": "static"
     },
@@ -665,29 +650,8 @@
     {
       "catalog": "php-process-skills.md#writing-plans",
       "category": "process",
-      "falsifier": {
-        "probes": [
-          {
-            "paths": [
-              "src/**/*.php",
-              "app/**/*.php",
-              "lib/**/*.php"
-            ]
-          },
-          {
-            "paths": [
-              "phpunit.xml",
-              "phpunit.xml.dist",
-              "pest.php",
-              "behat.yml",
-              "behat.yml.dist",
-              "tests/**/*.php"
-            ]
-          }
-        ],
-        "requires": "all",
-        "surface": "identifiable files together with the tests and commands a plan can name"
-      },
+      "falsifier": null,
+      "falsifier_absent": "the gate is an approved design waiting to be broken down, not the files it would touch",
       "id": "writing-plans",
       "mode": "static"
     },
@@ -703,54 +667,16 @@
       "catalog": "php-process-skills.md#systematic-debugger",
       "category": "process",
       "escalates_on_rejection": true,
-      "falsifier": {
-        "probes": [
-          {
-            "paths": [
-              "phpunit.xml",
-              "phpunit.xml.dist",
-              "pest.php",
-              "behat.yml"
-            ]
-          },
-          {
-            "paths": [
-              "tests/**/*.php",
-              "test/**/*.php"
-            ]
-          }
-        ],
-        "requires": "any",
-        "surface": "a runnable test or diagnostic surface a defect can be reproduced against"
-      },
+      "falsifier": null,
+      "falsifier_absent": "the gate is a defect that reproduces; a suite proves only that one could be written",
       "id": "systematic-debugger",
       "mode": "static"
     },
     {
       "catalog": "php-process-skills.md#refactorer",
       "category": "process",
-      "falsifier": {
-        "probes": [
-          {
-            "paths": [
-              "src/**/*.php",
-              "app/**/*.php",
-              "lib/**/*.php"
-            ]
-          },
-          {
-            "paths": [
-              "phpunit.xml",
-              "phpunit.xml.dist",
-              "pest.php",
-              "behat.yml",
-              "tests/**/*Test.php"
-            ]
-          }
-        ],
-        "requires": "all",
-        "surface": "source under a runnable safety net a behaviour-preserving change can lean on"
-      },
+      "falsifier": null,
+      "falsifier_absent": "the gate is an approved structural objective; the safety net alone does not call for one",
       "id": "refactorer",
       "mode": "static"
     },
@@ -780,50 +706,16 @@
     {
       "catalog": "php-process-skills.md#review-pr",
       "category": "process",
-      "falsifier": {
-        "probes": [
-          {
-            "paths": [
-              ".git/config"
-            ],
-            "pattern": "\\[remote "
-          },
-          {
-            "paths": [
-              ".github/**"
-            ]
-          }
-        ],
-        "requires": "any",
-        "surface": "a remote the project's pull requests live on"
-      },
+      "falsifier": null,
+      "falsifier_absent": "the gate is a pull request number in hand, which no checkout carries",
       "id": "review-pr",
       "mode": "static"
     },
     {
       "catalog": "php-process-skills.md#finishing-branch",
       "category": "process",
-      "falsifier": {
-        "probes": [
-          {
-            "paths": [
-              ".git/HEAD",
-              ".gitignore"
-            ]
-          },
-          {
-            "paths": [
-              "phpunit.xml",
-              "phpunit.xml.dist",
-              "pest.php",
-              "behat.yml",
-              "tests/**/*Test.php"
-            ]
-          }
-        ],
-        "requires": "all",
-        "surface": "a Git repository whose work can be finished against a runnable suite"
-      },
+      "falsifier": null,
+      "falsifier_absent": "the gate is work declared complete on a branch, which a tree cannot show",
       "id": "finishing-branch",
       "mode": "static"
     },
@@ -1180,20 +1072,21 @@
         "probes": [
           {
             "paths": [
-              "composer.json"
-            ],
-            "pattern": "easycorp/easyadmin|sonata-project/admin|filament/filament|orchid/platform|unite-cms"
+              "src/Controller/Admin/**/*.php",
+              "app/Filament/**/*.php",
+              "src/Admin/**/*.php",
+              "app/Nova/**/*.php"
+            ]
           },
           {
             "paths": [
-              "src/Controller/Admin/**/*.php",
-              "app/Filament/**/*.php",
-              "src/Admin/**/*.php"
+              "config/packages/easy_admin.yaml",
+              "config/packages/sonata_admin.yaml"
             ]
           }
         ],
         "requires": "any",
-        "surface": "a back-office admin package wired into the project"
+        "surface": "admin resources this project writes for its own back office"
       },
       "id": "admin-panel",
       "mode": "static"

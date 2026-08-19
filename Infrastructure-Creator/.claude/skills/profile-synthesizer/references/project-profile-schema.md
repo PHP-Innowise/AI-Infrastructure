@@ -13,7 +13,7 @@ The JSON top level MUST contain exactly these required members (extensions requi
 
 ```json
 {
-  "schema_version": "1.4",
+  "schema_version": "1.5",
   "catalog_version": "2.5.0",
   "target_root": "/absolute/path/to/target",
   "profile": "tasks/TASK-001/infra-scan-project-profile.md",
@@ -25,7 +25,10 @@ The JSON top level MUST contain exactly these required members (extensions requi
 }
 ```
 
-Top-level membership is exact. New plans use `schema_version: "1.4"`.
+Top-level membership is exact. New plans use `schema_version": "1.5"`, which
+adds nothing to a skill and one typed field to a rejection: `disposition`, the
+kind of rejection it is. 1.4 and earlier stay readable for audit diagnostics and
+are ineligible for publication.
 Schemas `1.0` through `1.3` remain readable for plan-only audit diagnostics
 and produce a nonblocking `PLAN_SCHEMA_MIGRATION` warning. They are publication
 ineligible: full or partial authored-skill validation emits blocking
@@ -296,7 +299,7 @@ Each `skills[]` entry is one complete, independently actionable contract:
 }
 ```
 
-All shown members except `fixed_blocks` are required under schema 1.4, including non-empty
+All shown members except `fixed_blocks` are required under schema 1.5, including non-empty
 positive and negative triggers, owned and excluded scope, structured ownership,
 required procedure roles and steps, decision points, structured verification,
 integration safety, path contracts, evidence anchors, routing cases, output,
@@ -536,8 +539,37 @@ Each rejected catalog candidate is recorded so inventory pruning is auditable:
   "candidate_id": "caching-strategy",
   "name": "caching-strategy",
   "category": "specialty",
+  "disposition": "absent",
   "reason": "No cache runtime wiring: config/packages/cache.yaml holds only the skeleton default and no cache client is constructed under src/",
   "missing_evidence": ["cache call sites under src/", "write-path invalidation"]
+}
+```
+
+A rejection declares which kind of rejection it is, and each kind carries its
+own exact fields on top of `candidate_id`, `name`, `category`, `reason` and
+`disposition`:
+
+- **`absent`** - nothing in the target holds this concern; carries
+  `missing_evidence`. This is the falsifiable kind: the registry's signal for
+  the candidate is run against the target, and a target that holds the surface
+  refutes the rejection.
+- **`consolidated`** - the concern exists and a skill this plan selects already
+  owns it; carries `absorbed_by`, which must name one of those skills. It is not
+  refuted by the target, because it concedes the surface; what is checked is
+  that the owner is real (`REJECTION_ABSORBER_UNKNOWN` otherwise).
+
+Consolidating into a skill whose own scope does not reach the concern is how a
+gap gets hidden behind a name, so widen that skill's `ownership` and
+`owned_scope` in the same plan or record the rejection as `absent`.
+
+```json
+{
+  "candidate_id": "orm-patterns",
+  "name": "orm-patterns",
+  "category": "specialty",
+  "disposition": "consolidated",
+  "reason": "Doctrine mappings live in src/Entity/, which coding owns and changes",
+  "absorbed_by": "coding"
 }
 ```
 

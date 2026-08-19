@@ -91,7 +91,7 @@ target manifest member.
    ownership, repeated-block, and similarity checks. Stop immediately on any
    failure. No agent, command, flow, manifest, or target skill may exist yet.
 9. **Wrap and compile only validated skills.** Run `agent-forge`, then
-   `command-forge`, using every adjacency and schema 1.4 routing oracle. Run
+   `command-forge`, using every adjacency and schema 1.5 routing oracle. Run
    `skill-flow-composer` after wrappers exist. Both forges MUST compile from the
    same canonical `flow_contracts`; neither may infer its own stage graph.
    Validate exact graph parity across `SKILL FLOW.md` and every executable flow:
@@ -318,7 +318,7 @@ The target now has its own working `AGENTS.md` + [selected edition folder(s)] + 
   fails; a partially published accelerator is never an acceptable result.
 - MUST NOT generate a skill absent from the validated plan or retain one whose
   evidence, operational ownership, procedure, or routing value is insufficient.
-- MUST require schema 1.4 routing/flow contracts before wrappers, and MUST
+- MUST require schema 1.5 routing/flow contracts before wrappers, and MUST
   block publication when any adjacency is dropped or when `SKILL FLOW.md` and
   executable flow commands do not compile to the same canonical graph.
 - MUST run `infra-validate` against the complete staged bundle and require

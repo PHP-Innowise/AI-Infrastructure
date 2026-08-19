@@ -6,6 +6,32 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Breaking
 
+- **Plan schema 1.5: a rejection says which kind of rejection it is.** 1.4 joins
+  1.0-1.3 as readable-for-audit and publication-ineligible; new synthesis emits
+  1.5. Nothing about a skill changes - the one new field is on a rejection.
+  - `disposition` is `absent` or `consolidated`, and each carries its own exact
+    fields: `absent` keeps `missing_evidence`, `consolidated` names
+    `absorbed_by`. The two mirror the review record's own classes, so the plan
+    and the adversarial review now speak the same vocabulary.
+  - Before this, every rejection read as "there is nothing here", so a concern
+    an already-selected skill covers had no honest way to be recorded - and the
+    target check, which can only refute absence, refuted it. Measured while
+    re-planning a real run: of 17 rejections the target contradicted, 15 were
+    concerns a selected skill owned once its scope was stated honestly.
+  - `consolidated` is not refuted by the target, because it concedes the
+    surface; what is checked is that the owner is real
+    (`REJECTION_ABSORBER_UNKNOWN`) and that no candidate absorbs itself.
+  - Re-planned a real run end to end under the new rules: 40 stamped rejections
+    became 38 argued ones - 15 consolidated into an owner whose scope was
+    widened to match what it genuinely covers, 23 absent with the place each was
+    looked for named - and 2 became selections, because nothing owned them.
+    `code-review` had no absorber and the flow graph had been asking for it by
+    name; `dependency-manager` owns manifests no other skill may touch. The
+    exercise also surfaced that the run's `coding` claimed three directories of
+    a fifteen-directory source tree and `coder-frontend` disclaimed the
+    templates it renders - holes no rule had reported, because nothing had asked
+    what the selected skills failed to cover. All six gates pass on the result.
+
 - **Plan schema 1.4.** Two skill members, top level untouched again. Schema 1.3
   joins 1.0-1.2 as readable-for-audit and publication-ineligible; new synthesis
   emits 1.4.

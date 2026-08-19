@@ -320,17 +320,33 @@ BODY_PATH_CREATION_PATTERN = re.compile(
     r"|scaffold|write)(?:s|d|es|ed|ing)?\b|\b(?:new|wrote)\b",
     re.I,
 )
-CURRENT_PLAN_SCHEMA = "1.4"
-SUPPORTED_PLAN_SCHEMAS = {"1.0", "1.1", "1.2", "1.3", "1.4"}
+CURRENT_PLAN_SCHEMA = "1.5"
+SUPPORTED_PLAN_SCHEMAS = {"1.0", "1.1", "1.2", "1.3", "1.4", "1.5"}
 # Schemas that carry the typed operational contract. 1.3 adds nested shapes
 # only - the top level and the skill field set are 1.2's - so every typed rule
 # written for 1.2 applies unchanged.
-TYPED_PLAN_SCHEMAS = {"1.2", "1.3", "1.4"}
+TYPED_PLAN_SCHEMAS = {"1.2", "1.3", "1.4", "1.5"}
 # Schemas whose nested shapes carry the 1.3 additions: role wiring, recorded
 # verification baselines, absence evidence.
-WIRED_PLAN_SCHEMAS = {"1.3", "1.4"}
+WIRED_PLAN_SCHEMAS = {"1.3", "1.4", "1.5"}
+# Schemas whose rejections say which kind of rejection they are. Before 1.5
+# every rejection read as "there is nothing here", so a candidate whose concern
+# an already-selected skill covers had no honest way to be recorded - and the
+# target check, which can only refute absence, refuted it.
+DISPOSED_PLAN_SCHEMAS = {"1.5"}
 # Readable for audit diagnostics, ineligible for publication.
-LEGACY_PLAN_SCHEMAS = {"1.0", "1.1", "1.2", "1.3"}
+LEGACY_PLAN_SCHEMAS = {"1.0", "1.1", "1.2", "1.3", "1.4"}
+# What each kind of rejection has to show, beyond the fields every one carries.
+REJECTION_BASE_FIELDS = {"candidate_id", "name", "category", "reason", "disposition"}
+REJECTION_DISPOSITION_FIELDS = {
+    # Nothing in the target holds this concern. Falsifiable: the registry's
+    # signal for the candidate is run against the target.
+    "absent": {"missing_evidence"},
+    # The concern exists and a selected skill already owns it. Not falsifiable
+    # by the target - it concedes the surface - so the named owner is checked
+    # against the plan instead.
+    "consolidated": {"absorbed_by"},
+}
 # What the command did on the unmodified target, per ADR-002.  `failing` and
 # `failing-remediated` differ in what the skill is allowed to promise: the
 # first must express its expectation differentially, the second declares that
@@ -3235,6 +3251,52 @@ def _rejection_path_tokens(text: str) -> list[str]:
     return tokens
 
 
+def _rejection_fields(item: dict[str, Any] | None, disposed: bool) -> set[str]:
+    """The exact field set a rejection must carry, by the kind it declares."""
+    if not disposed:
+        return {"candidate_id", "name", "category", "reason", "missing_evidence"}
+    disposition = (item or {}).get("disposition")
+    extra = REJECTION_DISPOSITION_FIELDS.get(
+        disposition if isinstance(disposition, str) else "", {"missing_evidence"}
+    )
+    return REJECTION_BASE_FIELDS | extra
+
+
+def _validate_rejection_dispositions(
+    rejected: list[dict[str, Any]],
+    plan_skills: set[str],
+    diagnostics: list[Diagnostic],
+) -> None:
+    """Each rejection says which kind it is, and consolidation names its owner."""
+    for item in rejected:
+        disposition = item.get("disposition")
+        if disposition not in REJECTION_DISPOSITION_FIELDS:
+            _diag(
+                diagnostics,
+                "REJECTION_DISPOSITION_INVALID",
+                f"{item.get('candidate_id')} must declare its rejection as one of "
+                + ", ".join(sorted(REJECTION_DISPOSITION_FIELDS)),
+            )
+            continue
+        if disposition != "consolidated":
+            continue
+        owner = item.get("absorbed_by")
+        if not _is_nonempty_string(owner) or owner not in plan_skills:
+            _diag(
+                diagnostics,
+                "REJECTION_ABSORBER_UNKNOWN",
+                f"{item.get('candidate_id')} is recorded as absorbed by "
+                f"{owner!r}, which this plan does not select - a concern cannot "
+                f"be consolidated into a skill nobody generates",
+            )
+        elif owner == item.get("name"):
+            _diag(
+                diagnostics,
+                "REJECTION_ABSORBER_UNKNOWN",
+                f"{item.get('candidate_id')} cannot absorb itself",
+            )
+
+
 def _validate_rejections_against_target(
     rejected: list[dict[str, Any]],
     registry: dict[str, dict[str, Any]],
@@ -3255,7 +3317,8 @@ def _validate_rejections_against_target(
     checkable = [
         item
         for item in rejected
-        if isinstance(registry.get(str(item.get("candidate_id"))), dict)
+        if item.get("disposition", "absent") == "absent"
+        and isinstance(registry.get(str(item.get("candidate_id"))), dict)
         and registry[str(item["candidate_id"])].get("falsifier")
     ]
     if not checkable:
@@ -5662,10 +5725,11 @@ def _validate_plan(
             "rejected_candidates must be an array",
         )
     else:
+        disposed = schema_version in DISPOSED_PLAN_SCHEMAS
         for index, item in enumerate(rejected):
-            if not isinstance(item, dict) or set(item) != {
-                "candidate_id", "name", "category", "reason", "missing_evidence"
-            }:
+            if not isinstance(item, dict) or set(item) != _rejection_fields(
+                item if disposed else None, disposed
+            ):
                 _diag(
                     diagnostics,
                     "REJECTED_CANDIDATE_INVALID",
@@ -5676,7 +5740,9 @@ def _validate_plan(
                     _is_nonempty_string(item.get(field))
                     for field in ("candidate_id", "name", "category", "reason")
                 )
-                or not _is_string_list(item.get("missing_evidence"), allow_empty=True)
+                or ("missing_evidence" in item
+                    and not _is_string_list(item.get("missing_evidence"), allow_empty=True))
+                or ("absorbed_by" in item and not _is_nonempty_string(item["absorbed_by"]))
             ):
                 _diag(
                     diagnostics,
@@ -5708,7 +5774,7 @@ def _validate_plan(
                         and item["name"] != item["candidate_id"]
                     )
                     or registry_candidate["mode"] == "runtime-fixed"
-                    or not item["missing_evidence"]
+                    or ("missing_evidence" in item and not item["missing_evidence"])
                 ):
                     _diag(
                         diagnostics,
@@ -5719,6 +5785,16 @@ def _validate_plan(
     if isinstance(rejected, list):
         items = [item for item in rejected if isinstance(item, dict)]
         _validate_rejection_accountability(items, diagnostics)
+        if schema_version in DISPOSED_PLAN_SCHEMAS:
+            _validate_rejection_dispositions(
+                items,
+                {
+                    str(skill.get("name"))
+                    for skill in plan.get("skills", [])
+                    if isinstance(skill, dict)
+                },
+                diagnostics,
+            )
         _validate_rejections_against_target(items, registry, target, diagnostics)
 
     skills = plan["skills"]

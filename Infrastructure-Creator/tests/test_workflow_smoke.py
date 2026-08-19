@@ -53,7 +53,7 @@ class WorkflowSmokeTests(unittest.TestCase):
         case = SkillQualityFixture(methodName="runTest")
         case.setUp()
         try:
-            case.use_schema_1_4()
+            case.use_schema_1_5()
             case.rewrite()
             approval = case.plan_diagnostics()
             self.assertFalse(blocking(approval))

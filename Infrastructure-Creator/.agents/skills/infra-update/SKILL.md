@@ -59,7 +59,7 @@ Allocate a new `tasks/TASK-{N}/` for the update run. Staging output goes to `tas
    An update publishes into a target someone is already relying on, so it may
    not accept discovery or a review that generation itself would have refused.
    The manifest names its
-   source profile; require its matching schema **1.4**
+   source profile; require its matching schema **1.5**
    `skill-generation-plan.json` with `routing_cases[]` and canonical
    `flow_contracts`. Re-run
    `infra-generate`'s evidence, containment, fingerprint, inventory-necessity,
@@ -192,7 +192,7 @@ Allocate a new `tasks/TASK-{N}/` for the update run. Staging output goes to `tas
 - MUST keep staging inside this generator's own `tasks/TASK-{N}/` - the target sees only final, decided writes.
 - MUST NOT stage agents, commands, or flows until every staged skill passes
   per-contract and inventory-wide semantic validation.
-- MUST NOT classify or publish an update whose schema 1.4 routing oracle omits
+- MUST NOT classify or publish an update whose schema 1.5 routing oracle omits
   an adjacency, whose feature flow omits required code review, or whose
   `SKILL FLOW.md` and executable commands differ from canonical
   `flow_contracts`.

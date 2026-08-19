@@ -72,13 +72,16 @@ Infrastructure-Creator intentionally has no `memory-bank/` of its own: its job i
   show it was asked about (and why not even a narrow read-only variant), and
   a safety gap must carry the recorded human decision.
 - Plan approval MUST validate the complete selected inventory before any skill
-  is authored, and only a schema 1.4 plan is approvable. Schema 1.4 carries
+  is authored, and only a schema 1.5 plan is approvable. Schema 1.5 carries
   the stable ownership IDs/modes, normalized write surfaces, and reciprocal
   sibling routing introduced in 1.1, the operational contracts of 1.2, the
   role-to-step wiring, executable verification baselines, and absence evidence
-  added in 1.3, and the claim references and evidence dispositions added in 1.4.
-- New generation and publication require schema 1.4 operational contracts.
-  Legacy 1.0/1.1/1.2/1.3 plans remain readable for audit but MUST be re-synthesized;
+  added in 1.3, the claim references and evidence dispositions added in 1.4,
+  and the typed rejection dispositions added in 1.5: a rejection declares
+  whether the target holds no such surface or a selected skill already owns it,
+  and names that owner.
+- New generation and publication require schema 1.5 operational contracts.
+  Legacy 1.0/1.1/1.2/1.3/1.4 plans remain readable for audit but MUST be re-synthesized;
   missing verification, provider-safety, invariant, path, or routing facts are
   never invented by a migration adapter.
 - Generated skills MUST cite canonical target-relative sources and contain

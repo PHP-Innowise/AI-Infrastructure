@@ -580,6 +580,7 @@ def build_corpus(
                 "No back-office surface: nothing under src/Controller/Admin/ and "
                 "composer.json requires no admin package"
             ),
+            "disposition": "absent",
             "missing_evidence": ["an admin controller under src/Controller/Admin/"],
         },
         {
@@ -590,6 +591,7 @@ def build_corpus(
                 "No background work: config/queue.php is absent and no handler "
                 "under src/MessageHandler/ exists"
             ),
+            "disposition": "absent",
             "missing_evidence": ["a configured transport in config/queue.php"],
         },
     ]
@@ -614,7 +616,7 @@ def build_corpus(
     writers = [item["agent"] for item in roster if item["writes"]]
     reviewers = [item["agent"] for item in roster if not item["writes"]]
     plan = {
-        "schema_version": "1.4",
+        "schema_version": "1.5",
         "catalog_version": "2.5.0",
         "target_root": str(target),
         "profile": "tasks/TASK-001/infra-scan-project-profile.md",

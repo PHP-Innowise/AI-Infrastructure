@@ -152,7 +152,7 @@ Read the profile and correct anything wrong, then run `infra-generate`.
 - MUST cover every `roles` entry the selected candidate declares in the registry, each wired to cited evidence and to a procedure step that discharges it.
 - MUST record an observed `baseline` for every executable verification the gate cannot resolve, and phrase the expectation against it.
 - MUST decide every piece of evidence that falls inside a skill's own declared paths - cited or ruled out with a reason - and name the claims it rests on.
-- MUST emit schema 1.4 operational, ownership, invariant, path, and reciprocal routing contracts; schemas 1.0-1.3 are audit/migration input only and are not publishable.
+- MUST emit schema 1.5 operational, ownership, invariant, path, and reciprocal routing contracts; schemas 1.0-1.3 are audit/migration input only and are not publishable.
 - MUST use target-relative canonical source paths in contracts and generated target skills; generator task paths are never target evidence.
 - MUST NOT include any secret or credential value.
 - MUST keep every fact's confidence tag and source; never launder an `inferred` fact into a `confirmed` one.
