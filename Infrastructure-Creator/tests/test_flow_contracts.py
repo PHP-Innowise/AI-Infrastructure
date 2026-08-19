@@ -564,15 +564,42 @@ stages:
             _, mine = validator._frontmatter_stages(path)
             body = path.read_text(encoding="utf-8")
             end = body.find("\n---", 3)
-            theirs = sum(
-                1
-                for line in body[3:end].splitlines()
-                if module.STAGE_RE.match(line)
-            )
-            if theirs:
-                self.assertEqual(len(mine), theirs, text[:40])
-            else:
-                self.assertTrue(mine, "block form must still parse somewhere")
+            theirs = module.flow_stage_bodies(body[3:end])
+            # Exact agreement in both directions: tolerating a zero-count on
+            # one side is what let the two gates demand different encodings.
+            self.assertEqual(len(mine), len(theirs), text[:40])
+            self.assertTrue(mine, text[:40])
+
+    def test_the_publication_gate_reads_the_block_form(self) -> None:
+        generated = importlib.util.spec_from_file_location(
+            "validate_generated_block_form",
+            ROOT / ".agents/skills/bootstrap-verifier/scripts/validate_generated.py",
+        )
+        module = importlib.util.module_from_spec(generated)
+        sys.modules[generated.name] = module
+        generated.loader.exec_module(module)
+        bodies = module.flow_stage_bodies(
+            "flow: flow-review\n"
+            "stages:\n"
+            "  - phase: verification\n"
+            "    agents: [security-review-agent]\n"
+            "    parallel: false\n"
+            "    checkpoint: true\n"
+        )
+        self.assertEqual(len(bodies), 1)
+        self.assertIn("agents: [security-review-agent]", bodies[0])
+        self.assertIn("checkpoint: true", bodies[0])
+
+        errors: list = []
+        module.validate_flow(
+            "claude",
+            Path("flow-review.md"),
+            self.BLOCK,
+            {"security-review-agent"},
+            set(),
+            errors,
+        )
+        self.assertEqual(errors, [])
 
 
 if __name__ == "__main__":

@@ -303,6 +303,10 @@ _RUNTIME_BODY_COMMAND = re.compile(
 _CODE_SPAN_CONTENT = re.compile(r"`([^`\n]+)`")
 _LINE_ANCHOR_SUFFIX = re.compile(r":L\d+(?:\s*-\s*L?\d+)?$")
 _PATH_SPAN_PATTERN = re.compile(r"[A-Za-z0-9_@*][A-Za-z0-9_.@*{},/-]*")
+# A repository-root dotfile is a real path with no extension and no directory
+# part: `.eslintrc`, `.env`, `.php-version`, `.gitignore`. Without this a skill
+# that correctly cites one is told its own declared evidence path is missing.
+_DOTFILE_SPAN_PATTERN = re.compile(r"\.[A-Za-z][A-Za-z0-9_.-]*$")
 _PATH_EXTENSION_PATTERN = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,7}$")
 _SYMBOL_ANCHOR_SUFFIX = ":symbol:"
 # Trees that are installed or generated rather than committed, so their
@@ -891,22 +895,54 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
 
 
 def _sections(body: str) -> dict[str, str]:
+    """Map each heading to its content, nested subsections included.
+
+    A skill that writes one `###` heading per procedure step is ordinary, valid
+    Markdown, and its steps belong to the `## Procedure` that contains them.
+    Assigning every line to the nearest heading alone would leave that skill's
+    procedure empty and report every planned step as never rendered - a
+    rejection earned by formatting, not by missing work. Each heading therefore
+    collects its own lines plus everything under deeper headings, up to the next
+    heading at its level or above; subsections stay addressable under their own
+    names as well.
+    """
     found: dict[str, list[str]] = {}
-    current = ""
+    open_headings: list[tuple[int, str]] = []
     for line in body.splitlines():
-        heading = re.match(r"^#{2,6}\s+(.+?)\s*$", line)
+        heading = re.match(r"^(#{2,6})\s+(.+?)\s*$", line)
         if heading:
-            current = re.sub(r"[*_`]", "", heading.group(1)).strip().lower()
-            found.setdefault(current, [])
-        elif current:
-            found[current].append(line)
+            level = len(heading.group(1))
+            title = re.sub(r"[*_`]", "", heading.group(2)).strip().lower()
+            while open_headings and open_headings[-1][0] >= level:
+                open_headings.pop()
+            found.setdefault(title, [])
+            for _, ancestor in open_headings:
+                found[ancestor].append(line)
+            open_headings.append((level, title))
+            continue
+        for _, title in open_headings:
+            found[title].append(line)
     return {name: "\n".join(lines).strip() for name, lines in found.items()}
 
 
 def _section(sections: dict[str, str], aliases: Iterable[str]) -> str:
+    """Find a section by name, tolerating an author's own wording.
+
+    "Canonical inputs", "Project evidence and inputs" and "Verification checks"
+    are the same sections as "Inputs", "Project evidence" and "Verification";
+    demanding the bare alias would reject a skill for its heading text rather
+    than its content. Exact names win first, so a body carrying both an exact
+    and a qualified heading still resolves to the exact one.
+    """
+    aliases = list(aliases)
     for alias in aliases:
         if alias in sections:
             return sections[alias]
+    for alias in aliases:
+        pattern = re.compile(rf"(?:^|\W){re.escape(alias)}(?:\W|$)")
+        for title, content in sections.items():
+            if pattern.search(title):
+                return content
     return ""
 
 
@@ -1026,6 +1062,9 @@ def _excerpt(value: str) -> str:
     return repr(collapsed)
 
 
+HEADING_LINE_PATTERN = re.compile(r"^#{2,6}\s+(?P<title>.+?)\s*$")
+
+
 def _procedure_steps(section: str) -> list[str]:
     """Split a procedure section into the steps an agent would follow.
 
@@ -1035,11 +1074,33 @@ def _procedure_steps(section: str) -> list[str]:
     as prose falls back to blank-line paragraphs, so an unlisted procedure is
     read as one instruction rather than as many fragments.
     """
+    lines = section.splitlines()
+    # A procedure that gives each step its own heading is delimited by those
+    # headings: the bullets beneath one heading are that step's parts - anchor,
+    # inspection, decision, expected result - not four steps of their own. Read
+    # flush-left, an anchor citation commands no action and the step it belongs
+    # to would be reported as unactionable for being formatted with headings.
+    headings = [line for line in lines if HEADING_LINE_PATTERN.match(line)]
+    if headings:
+        steps: list[list[str]] = []
+        held: list[str] | None = None
+        for raw in lines:
+            heading = HEADING_LINE_PATTERN.match(raw)
+            if heading:
+                held = [re.sub(r"[*_`]", "", heading.group("title")).strip()]
+                steps.append(held)
+                continue
+            stripped = raw.strip()
+            if stripped and held is not None:
+                held.append(stripped)
+        return [
+            text for text in (" ".join(step).strip() for step in steps) if text
+        ]
     listed: list[list[str]] = []
     paragraphs: list[list[str]] = []
     current: list[str] | None = None
     fence = ""
-    for raw in section.splitlines():
+    for raw in lines:
         stripped = raw.strip()
         if fence:
             if (
@@ -2769,7 +2830,11 @@ def _named_runtime_path(value: str) -> str:
 def _named_path_candidate(span: str) -> str | None:
     """A code span that is itself a path, or `None` when it is prose."""
     value = _LINE_ANCHOR_SUFFIX.sub("", span.strip()).strip().rstrip(".,;:")
-    if not value or not _PATH_SPAN_PATTERN.fullmatch(value):
+    if not value:
+        return None
+    if _DOTFILE_SPAN_PATTERN.fullmatch(value):
+        return value
+    if not _PATH_SPAN_PATTERN.fullmatch(value):
         return None
     if "/" not in value and not _PATH_EXTENSION_PATTERN.search(value):
         return None
@@ -3005,6 +3070,18 @@ def _validate_runtime_fixed_body(
     for raw in sorted({match.group(0) for match in _RUNTIME_BODY_PATH.finditer(body)}):
         path = _named_runtime_path(raw)
         if not path:
+            continue
+        # The contract itself writes one creatable path in brace form, and its
+        # loader expands it. A body quoting that exact string must be read the
+        # same way, or the runtime's own wording fails the runtime check.
+        alternatives = _expand_braces(path)
+        if len(alternatives) > 1 and all(
+            any(
+                _segment_run_matches(_path_segments(alternative), item)
+                for item in contract["paths"]
+            )
+            for alternative in alternatives
+        ):
             continue
         if any(
             _segment_prefix_matches(_path_segments(path), item)

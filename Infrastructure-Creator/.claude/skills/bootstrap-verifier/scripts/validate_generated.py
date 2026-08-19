@@ -185,7 +185,44 @@ def read_frontmatter(path: Path) -> tuple[dict, str]:
 
 
 STAGE_RE = re.compile(r"^\s*-\s*\{(?P<body>.*)\}\s*$")
+BLOCK_STAGE_RE = re.compile(r"^\s*-\s*phase:\s*(?P<phase>.+?)\s*$")
+BLOCK_KEY_RE = re.compile(r"^\s{2,}(?P<key>agents|parallel|checkpoint):\s*(?P<value>.+?)\s*$")
 AGENTS_RE = re.compile(r"agents:\s*\[(?P<names>[^\]]*)\]")
+
+
+def flow_stage_bodies(block: str) -> list[str]:
+    """Stage bodies from either YAML encoding of the same frontmatter.
+
+    A flow command may write its stages inline (`- {phase: ..., agents: [...]}`)
+    or as an indented block. Both are the same mapping; reading only one form
+    made this gate and `validate_flow_contracts.py` demand mutually exclusive
+    encodings, and `infra-generate` runs both - so one of them always failed.
+    """
+    bodies: list[str] = []
+    current: list[str] | None = None
+    for line in block.splitlines():
+        inline = STAGE_RE.match(line)
+        if inline:
+            if current is not None:
+                bodies.append(", ".join(current))
+                current = None
+            bodies.append(inline.group("body"))
+            continue
+        opening = BLOCK_STAGE_RE.match(line)
+        if opening:
+            if current is not None:
+                bodies.append(", ".join(current))
+            current = [f"phase: {opening.group('phase')}"]
+            continue
+        if current is not None:
+            keyed = BLOCK_KEY_RE.match(line)
+            if keyed:
+                current.append(f"{keyed.group('key')}: {keyed.group('value')}")
+                continue
+            current, _ = None, bodies.append(", ".join(current))
+    if current is not None:
+        bodies.append(", ".join(current))
+    return bodies
 
 
 def validate_flow(
@@ -201,8 +238,7 @@ def validate_flow(
     """
     end = text.find("\n---", 3)
     block = text[3:end] if end != -1 else ""
-    stages = [m.group("body") for m in
-              (STAGE_RE.match(line) for line in block.splitlines()) if m]
+    stages = flow_stage_bodies(block)
     if not stages:
         errors.append(f"[{edition}] {path}: flow declares no stages")
         return
@@ -840,15 +876,23 @@ def validate_manifest(target: Path, errors: list) -> dict:
     return manifest
 
 
-def validate_memory_bank(target: Path, files: dict, errors: list) -> None:
+def validate_memory_bank(
+    target: Path, files: dict, errors: list, source_root: Path | None = None
+) -> None:
     bank = target / "memory-bank"
     validator = bank / "scripts" / "validate.py"
     validator_rel = "memory-bank/scripts/validate.py"
     if not is_owned(files, validator_rel):
         errors.append(f"{validator_rel} is not manifest-owned")
         return
+    command = [sys.executable, str(validator), str(bank)]
+    # A seeded chunk cites the project's own files. While the bundle is staged
+    # those files live in the evidence target, not beside the bank, so a bank
+    # seeded exactly as memory-seed prescribes would fail here for being staged.
+    if source_root is not None and source_root.resolve() != target.resolve():
+        command += ["--source-root", str(source_root)]
     result = subprocess.run(
-        [sys.executable, str(validator), str(bank)],
+        command,
         capture_output=True,
         text=True,
     )
@@ -895,6 +939,10 @@ def main() -> int:
         )
         return 2
 
+    # Resolved before any validator runs: the staged bundle describes a project
+    # that lives elsewhere, and more than one check needs that other tree.
+    evidence_target = resolve_target(args.evidence_target) if args.evidence_target else None
+
     errors: list = []
     manifest = validate_manifest(target, errors)
     if errors:
@@ -915,11 +963,15 @@ def main() -> int:
         validate_edition(target, edition, files, errors)
     validate_hooks(target, editions, files, errors)
     validate_hook_wiring(target, editions, files, errors)
-    validate_memory_bank(target, files, errors)
+    validate_memory_bank(
+        target,
+        files,
+        errors,
+        evidence_target if evidence_target and evidence_target.is_dir() else None,
+    )
     validate_memory_runtime(target, files, errors)
     validate_owned_placeholders(target, files, errors)
     if args.skill_plan:
-        evidence_target = resolve_target(args.evidence_target)
         if not evidence_target.is_dir():
             errors.append(f"evidence target not found: {evidence_target}")
         else:

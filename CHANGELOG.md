@@ -439,6 +439,23 @@ edition's own files remain in that edition's changelog.
 
 ### Fixed
 
+- **The memory-bank validator can now be told which tree its chunks cite,
+  so an honestly seeded bank stops failing for being staged.**
+  `memory-bank/scripts/validate.py` resolved every chunk source against the
+  bank's parent directory. That is right once the bank is published beside the
+  project it describes, but during `infra-generate` the bank sits in a staging
+  root while the files it cites live in the target - so every chunk reported
+  "source path does not exist" and the publication gate refused a bundle whose
+  only fault was not having been published yet. Seeding zero chunks passed;
+  seeding the chunks `memory-seed` prescribes did not. `validate.py` gained
+  `--source-root` (default unchanged: the bank's parent), and
+  `validate_generated.py` passes the `--evidence-target` it already resolves,
+  so the same bank is checked against the project it actually describes. The
+  regression is covered in
+  `Infrastructure-Creator/tests/test_memory_readiness.py`, which asserts both
+  directions: staged-and-unaided fails, staged-and-told passes, and a published
+  bank still needs no flag.
+
 - **The write-capable agent lock no longer exempts a second instance of the
   same agent.** The gate blocked a different write-capable agent while one
   held the lock but let a same-named one through, so N concurrent `coder`

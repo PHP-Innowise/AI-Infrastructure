@@ -365,6 +365,49 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Fixed
 
+- **Five quality gates rejected output their own forge instructions
+  prescribe.** Found by executing the forges by hand against a real target -
+  authoring every skill, agent, command and flow from the plan contracts
+  instead of from a builder script - and each one blocked a bundle whose only
+  fault was its formatting:
+  - **A section lost its subsections.** `_sections` assigned each line to the
+    nearest heading, so a procedure written with one `###` per step left
+    `## Procedure` empty, `SKILL_SECTION_MISSING` fired, and every planned step
+    was reported as never rendered. A heading now collects its own lines plus
+    everything under deeper headings.
+  - **Heading-delimited steps were graded as loose bullets.** `skill-forge`
+    prescribes anchor / inspect / decision / expected result per step; read
+    flush-left those four bullets are four steps, and the anchor - a citation -
+    commands no action, so an honest step was reported unactionable. Where a
+    procedure gives each step a heading, the bullets beneath it are that step's
+    parts.
+  - **A qualified section name did not resolve.** "Canonical inputs" was not
+    "inputs". Section aliases now match a heading that contains the alias as a
+    whole word, with exact names still winning.
+  - **A repository-root dotfile was not a path.** `.eslintrc` failed
+    `_anchor_path` (no slash, no extension), so a correct evidence row was told
+    it anchored evidence to a path the plan does not declare - while
+    `vue/html-indent`, a lint rule, was accepted as a path because it has a
+    slash.
+  - **The runtime contract's own brace form failed the runtime check.** The
+    contract writes `project-brain/dynamic/{tasks,...}/*.md` and its loader
+    expands it; the body check did not, so a runtime guide quoting the contract
+    verbatim was told it named an unsupported path.
+- **The two flow gates still disagreed, in the opposite direction.**
+  `validate_flow_contracts.py` was taught both stage encodings earlier;
+  `validate_generated.validate_flow` still read only the inline
+  `- {phase: ..., agents: [...]}` form, so a block-form flow command passed one
+  gate and failed the other - and `infra-generate` runs both. It now reads both
+  forms, and the agreement test no longer tolerates a zero count on either
+  side, which is what let the disagreement survive the first fix.
+- **`command-forge` demanded a reviewer the plan may not have.** Its
+  instruction said `flow-feature.required_code_review` MUST be
+  `code-review-agent`, while `validate_flow_contracts.py` expects `null`
+  whenever the roster carries no such agent. A target for which no `code-review`
+  skill was justified could not be compiled without inventing an agent the plan
+  never selected. The instruction now states the conditional rule the gate
+  enforces.
+
 - **Two shipped gates required mutually exclusive encodings of the same
   frontmatter, so no generated flow command could pass both.** `validate_generated.py`
   reads a flow's stages as inline mappings - `- { phase: ..., agents: [...] }`,

@@ -3109,6 +3109,90 @@ class OperationalContentUnitTest(unittest.TestCase):
             ],
         )
 
+    def test_a_root_dotfile_is_a_path_not_prose(self) -> None:
+        for span, expected in (
+            (".eslintrc:L1-L20", ".eslintrc"),
+            (".eslintrc", ".eslintrc"),
+            (".php-version", ".php-version"),
+            (".env.local", ".env.local"),
+        ):
+            self.assertEqual(validator._anchor_path(span), expected, span)
+
+    def test_prose_is_still_not_mistaken_for_a_dotfile(self) -> None:
+        for span in ("indent", "...", ".4 spaces", ".", ".."):
+            self.assertIsNone(validator._anchor_path(span), span)
+
+    def test_headings_delimit_steps_and_own_their_bullets(self) -> None:
+        # The forge prescribes anchor/inspect/decision/expected per step. Read
+        # flush-left those four bullets are four steps, and the anchor line -
+        # a citation - commands no action.
+        section = (
+            "### 1. Read the suite declaration\n"
+            "\n"
+            "- **Anchor.** `phpunit.xml.dist:L21-L25` (EV-0020).\n"
+            "- **Inspect.** The block declares one suite over tests.\n"
+            "\n"
+            "### 2. Run the configured suite\n"
+            "\n"
+            "- **Anchor.** `phpunit.xml.dist:L21-L25` (EV-0020).\n"
+            "- **Inspect.** Run vendor/bin/phpunit and read its output.\n"
+        )
+        steps = validator._procedure_steps(section)
+        self.assertEqual(len(steps), 2)
+        self.assertTrue(all(validator._commands_action(step) for step in steps))
+        self.assertIn("phpunit.xml.dist:L21-L25", steps[0])
+
+    def test_heading_delimited_step_without_an_action_still_fails(self) -> None:
+        section = (
+            "### 1. The suite declaration\n"
+            "\n"
+            "- **Anchor.** `phpunit.xml.dist:L21-L25` (EV-0020).\n"
+        )
+        steps = validator._procedure_steps(section)
+        self.assertEqual(len(steps), 1)
+        self.assertFalse(validator._commands_action(steps[0]))
+
+    def test_a_section_owns_the_content_of_its_subsections(self) -> None:
+        body = (
+            "## Procedure\n"
+            "\n"
+            "### 1. Read the suite declaration\n"
+            "\n"
+            "Inspect phpunit.xml.dist and place the case in the one suite.\n"
+            "\n"
+            "## Verification\n"
+            "\n"
+            "Run vendor/bin/phpunit.\n"
+        )
+        sections = validator._sections(body)
+        procedure = validator._section(sections, ("procedure",))
+        self.assertIn("phpunit.xml.dist", procedure)
+        self.assertNotIn("vendor/bin/phpunit", procedure)
+        self.assertIn(
+            "phpunit.xml.dist",
+            validator._section(sections, ("1. read the suite declaration",)),
+        )
+
+    def test_a_qualified_heading_resolves_to_its_section(self) -> None:
+        sections = validator._sections(
+            "## Canonical inputs\n\nEV-0020 anchors phpunit.xml.dist:L21-L25.\n"
+        )
+        self.assertIn(
+            "EV-0020", validator._section(sections, ("project evidence", "inputs"))
+        )
+
+    def test_an_exact_heading_wins_over_a_qualified_one(self) -> None:
+        sections = validator._sections(
+            "## Canonical inputs\n\nqualified body\n\n## Inputs\n\nexact body\n"
+        )
+        self.assertEqual(
+            validator._section(sections, ("project evidence", "inputs")), "exact body"
+        )
+
+    def test_an_unrelated_heading_does_not_answer_for_a_missing_section(self) -> None:
+        sections = validator._sections("## Boundaries\n\nRoute judgement elsewhere.\n")
+        self.assertEqual(validator._section(sections, ("verification",)), "")
+
     def test_unlisted_prose_procedure_is_read_as_paragraphs(self) -> None:
         section = (
             "Read config/firebase.php and record the client.\n"
@@ -3811,6 +3895,20 @@ class RuntimeFixedAccountabilityTest(unittest.TestCase):
     def test_creatable_brace_group_is_expanded(self) -> None:
         body = "Task records are written to `project-brain/dynamic/tasks/`."
         self.assertEqual(self.diagnose(body), [])
+
+    def test_the_contracts_own_brace_form_is_accepted_verbatim(self) -> None:
+        # The contract writes this creatable path in brace form; a guide that
+        # quotes it exactly must not be told it named an unsupported path.
+        body = (
+            "Records are written under "
+            "`project-brain/dynamic/{tasks,findings,bugs,incidents,decisions,"
+            "events}/*.md`."
+        )
+        self.assertEqual(self.diagnose(body), [])
+
+    def test_a_brace_group_with_an_unsupported_member_still_blocks(self) -> None:
+        body = "Records are written under `project-brain/dynamic/{tasks,rumours}/*.md`."
+        self.assertEqual(self.diagnose(body), ["RUNTIME_PATH_UNSUPPORTED"])
 
     def test_forbidden_invented_runtime_path_blocks(self) -> None:
         body = "Checkpoints append to `memory-bank/local/checkpoints.jsonl`."

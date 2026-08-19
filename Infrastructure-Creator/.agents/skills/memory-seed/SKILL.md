@@ -72,7 +72,7 @@ All other `runtime.json` values are shipped defaults (`mode: governed`, `automat
 7. **Declare root-ignore requirements** in the task-scoped JSON file above;
    never append to `.gitignore` directly.
 8. **Run the validators and smoke checks** from the staged generation root; fix any structural error before declaring success:
-   - `python3 memory-bank/scripts/validate.py` (bank structure)
+   - `python3 memory-bank/scripts/validate.py memory-bank --source-root <target>` (bank structure). The chunks cite the target's files, which are not in the staging root; without `--source-root` every seeded chunk reports `source path does not exist`. Once published beside the project the flag is unnecessary, and `bootstrap-verifier` passes it for you from `--evidence-target`.
    - `python3 memory-bank/scripts/context.py validate` (Project Brain records - passes on the empty skeleton)
    - `python3 memory-bank/scripts/context.py status` (runtime imports and index health; exit 0 proves the four scripts and the skeleton are wired correctly)
    - compare `memory-bank/runtime-contract.json` byte-for-byte with the bundled asset and verify its required skeleton paths exist while its creatable paths are accepted as intentionally absent

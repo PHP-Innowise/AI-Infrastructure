@@ -250,9 +250,13 @@ def summarize_bank(bank_root: Path) -> str:
     return summary + (f", {expired} past valid_to)." if expired else ").")
 
 
-def validate_bank(bank_root: Path) -> list[str]:
+def validate_bank(bank_root: Path, source_root: Path | None = None) -> list[str]:
     errors: list[str] = []
-    repository_root = bank_root.parent
+    # Chunks cite the project's own files, which sit beside the bank once it is
+    # published. During generation the bank is staged apart from the project it
+    # describes, so the caller passes the tree those citations resolve against;
+    # without it a correctly seeded bank fails purely for being staged.
+    repository_root = (source_root or bank_root.parent).resolve()
     index_path = bank_root / "INDEX.md"
     chunks_dir = bank_root / "chunks"
     # `.memory-counter` is intentionally absent from the required files and
@@ -368,13 +372,24 @@ def main() -> int:
         action="store_true",
         help="print status counts from chunk frontmatter without printing chunk contents",
     )
+    parser.add_argument(
+        "--source-root",
+        type=Path,
+        default=None,
+        help=(
+            "tree the chunk sources resolve against (default: the bank's parent). "
+            "Pass the real project root when validating a staged bank."
+        ),
+    )
     args = parser.parse_args()
     bank_root = args.bank.resolve()
     if args.summary:
         print(summarize_bank(bank_root))
         return 0
 
-    errors = validate_bank(bank_root)
+    errors = validate_bank(
+        bank_root, args.source_root.resolve() if args.source_root else None
+    )
     if errors:
         print(f"Memory bank validation failed ({len(errors)} error(s)):", file=sys.stderr)
         for error in errors:

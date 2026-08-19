@@ -61,9 +61,14 @@ each validated wrapped agent and selected command-carrying edition, write
    - Add exactly one fenced `json flow-contract` block containing
      `{"roster": <canonical roster>, "flow": <matching canonical flow>}`. This
      machine-readable block is generated, not hand-maintained.
-   - `flow-feature.required_code_review` MUST be `code-review-agent`, and that
-     agent MUST occur in an ordered verification stage after implementation.
-     Omitting review is a compile failure, not an adaptive routing choice.
+   - `flow-feature.required_code_review` MUST name `code-review-agent` whenever
+     that agent is in the canonical roster, and that agent MUST then occur in an
+     ordered verification stage after implementation. Dropping a review the
+     roster can supply is a compile failure, not an adaptive routing choice.
+     When the plan justified no `code-review` skill, the roster has no such
+     agent and the canonical value is `null`: compile the flow with the
+     verification stages the graph does declare, and do not invent a reviewer
+     the plan never selected.
    - `flow-feature` uses only applicable core roles in its declared stages:
      understand, plan, explicit approval, one write-capable implementation role
      at a time, targeted verification/review, and finalization. Its body carries

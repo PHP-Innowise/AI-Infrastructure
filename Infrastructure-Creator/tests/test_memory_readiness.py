@@ -264,5 +264,112 @@ class MemoryReadinessTest(unittest.TestCase):
         )
 
 
+class StagedBankSourceResolutionTest(unittest.TestCase):
+    """A seeded bank cites the target's files while living apart from them."""
+
+    BANK_VALIDATOR = ROOT / ".agents/skills/memory-seed/assets/scripts/validate.py"
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="staged-bank-")
+        self.addCleanup(self._tmp.cleanup)
+        base = Path(self._tmp.name)
+
+        # The project the bundle describes: it owns the cited file.
+        self.evidence_target = base / "target"
+        (self.evidence_target / "src").mkdir(parents=True)
+        (self.evidence_target / "src/Publisher.php").write_text(
+            "<?php\nclass Publisher {}\n", encoding="utf-8"
+        )
+
+        # The staged bundle: a bank beside nothing else.
+        self.staging = base / "staging"
+        bank = self.staging / "memory-bank"
+        (bank / "chunks").mkdir(parents=True)
+        (bank / "scripts").mkdir(parents=True)
+        (bank / "scripts/validate.py").write_text(
+            self.BANK_VALIDATOR.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        frontmatter = {
+            "id": "MEM-0001",
+            "title": "Publishing writes only under an explicit flag",
+            "type": "domain",
+            "status": "active",
+            "scope": ["publication"],
+            "tags": ["publishing"],
+            "created": "2026-08-19",
+            "last_verified": "2026-08-19",
+            "review_after": "2027-02-19",
+            "sources": ["src/Publisher.php"],
+            "supersedes": [],
+            "superseded_by": None,
+            "valid_from": "2026-08-19",
+            "valid_to": None,
+        }
+        (bank / "chunks/MEM-0001-publishing.md").write_text(
+            "---\n"
+            + json.dumps(frontmatter, indent=2)
+            + "\n---\n\n# Publishing writes only under an explicit flag\n\n"
+            "## Durable Context\n\nThe publisher flushes only when asked to.\n\n"
+            "## Consequences\n\nA default flush changes what the cron job does.\n\n"
+            "## Verification\n\nsrc/Publisher.php declares the guard.\n",
+            encoding="utf-8",
+        )
+        (bank / "INDEX.md").write_text(
+            "# Memory Index\n\n"
+            "| ID | Title | Type | Scope | Tags | Status | Last Verified | File |\n"
+            "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+            "| MEM-0001 | Publishing writes only under an explicit flag | domain | "
+            "publication | publishing | active | 2026-08-19 | "
+            "chunks/MEM-0001-publishing.md |\n",
+            encoding="utf-8",
+        )
+        (bank / ".memory-counter").write_text("2\n", encoding="utf-8")
+        (bank / "README.md").write_text("# Memory Bank\n", encoding="utf-8")
+        self.bank = bank
+
+    def run_validator(self, *arguments: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(self.bank / "scripts/validate.py"), str(self.bank)]
+            + list(arguments),
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT,
+        )
+
+    def test_staged_bank_without_source_root_cannot_see_the_cited_file(self) -> None:
+        result = self.run_validator()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "source path does not exist: src/Publisher.php",
+            result.stdout + result.stderr,
+        )
+
+    def test_source_root_points_the_bank_at_the_project_it_describes(self) -> None:
+        result = self.run_validator("--source-root", str(self.evidence_target))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_published_bank_still_resolves_against_its_own_parent(self) -> None:
+        # Default behaviour is unchanged: beside the project, no flag needed.
+        (self.staging / "src").mkdir()
+        (self.staging / "src/Publisher.php").write_text("<?php\n", encoding="utf-8")
+        result = self.run_validator()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_generation_gate_passes_the_evidence_target_through(self) -> None:
+        files = {"memory-bank/scripts/validate.py": {}}
+
+        staged_errors: list = []
+        validator.validate_memory_bank(self.staging, files, staged_errors)
+        self.assertTrue(
+            staged_errors, "a staged bank citing the target must fail unaided"
+        )
+
+        threaded_errors: list = []
+        validator.validate_memory_bank(
+            self.staging, files, threaded_errors, self.evidence_target
+        )
+        self.assertEqual(threaded_errors, [])
+
+
 if __name__ == "__main__":
     unittest.main()
