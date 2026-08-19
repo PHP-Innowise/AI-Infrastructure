@@ -573,11 +573,15 @@
     "memory-bank/tests/test_memory.py",
     "memory-bank/tests/test_parity.py",
     "memory-bank/tests/test_validate.py",
+    "project-brain/.install/active.json",
+    "project-brain/.install/archive.json",
     "project-brain/tests/__init__.py",
     "project-brain/tests/fixtures/retrieval-golden.json",
     "project-brain/tests/test_runtime.py"
   ],
   "source_overrides": {
-    "memory-bank/INDEX.md": "memory-bank/.install/INDEX.md"
+    "memory-bank/INDEX.md": "memory-bank/.install/INDEX.md",
+    "project-brain/indexes/active.json": "project-brain/.install/active.json",
+    "project-brain/indexes/archive.json": "project-brain/.install/archive.json"
   }
 }

@@ -18,8 +18,17 @@ TOOLS = ("claude", "cursor", "codex")
 COMPONENTS = ("shared", *TOOLS)
 INVENTORY_DIR = ROOT / "install" / "inventories"
 ADDITIVE_FILES = {".gitattributes", ".gitignore"}
+# Files the accelerator's own runtime rewrites in this repository, which must
+# still install in their pristine state. A developer who has run a task here
+# carries a Brain index listing that task's records; those records are this
+# repository's, not the target's, and copying the index without them installs
+# an index pointing at files that do not exist - which the target's own
+# validator then reports as stale. The memory index has the same shape of
+# problem and set the precedent.
 PRODUCTION_SOURCE_OVERRIDES = {
     "memory-bank/INDEX.md": "memory-bank/.install/INDEX.md",
+    "project-brain/indexes/active.json": "project-brain/.install/active.json",
+    "project-brain/indexes/archive.json": "project-brain/.install/archive.json",
 }
 EXCLUDED_EXACT_PATHS = {
     "CHANGELOG.md",
@@ -27,6 +36,8 @@ EXCLUDED_EXACT_PATHS = {
     "examples/pr-description.md",
     "memory-bank/.install/INDEX.md",
     "memory-bank/.memory-counter",
+    "project-brain/.install/active.json",
+    "project-brain/.install/archive.json",
     "memory-bank/chunks/MEM-0001-cross-edition-sync.md",
 }
 EXCLUDED_PATH_PATTERNS = (
@@ -275,6 +286,7 @@ def build_inventory(root: Path, edition: str) -> dict:
             excluded.append(path)
         else:
             components[component_for(path)].append(path)
+    installed = {path for paths in components.values() for path in paths}
     version_file = root / edition / "VERSION"
     release = version_file.read_text(encoding="utf-8").strip()
     return {
@@ -285,7 +297,14 @@ def build_inventory(root: Path, edition: str) -> dict:
         "scope": "closed tracked-file contract for production installation",
         "installed": components,
         "excluded_tracked_paths": excluded,
-        "source_overrides": dict(sorted(PRODUCTION_SOURCE_OVERRIDES.items())),
+        # The override table is global while editions differ: an edition that
+        # ships no Project Brain has nothing to override, and naming a path it
+        # does not install would make its own inventory invalid.
+        "source_overrides": {
+            destination: source
+            for destination, source in sorted(PRODUCTION_SOURCE_OVERRIDES.items())
+            if destination in installed and source in excluded
+        },
     }
 
 

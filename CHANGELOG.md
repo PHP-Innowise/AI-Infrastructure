@@ -439,6 +439,23 @@ edition's own files remain in that edition's changelog.
 
 ### Fixed
 
+- **A developer's own Project Brain index no longer ships into an install.**
+  The accelerator's runtime rewrites `project-brain/indexes/active.json` inside
+  this repository whenever a task is opened here, and the records it then lists
+  are this repository's own - untracked, and never part of the payload. The
+  installer copies working-tree bytes for every inventory path, so a target
+  received an index pointing at files it does not have, and its own
+  `context.py validate` reported it stale. Measured on a working checkout:
+  three clean-install subtests failed for that reason alone, with nothing wrong
+  in any committed file, while a fresh clone of the same commit passed.
+  `memory-bank/INDEX.md` had already met this problem and set the precedent, so
+  both Brain indexes now install from a pristine
+  `project-brain/.install/*.json` the same way. Inventory generation also stopped
+  emitting an override for a path the edition does not install, since the
+  override table is shared while editions differ. Covered by
+  `tests/test_installation.py`, which dirties the index and asserts the target
+  still receives `[]`.
+
 - **The memory-bank validator can now be told which tree its chunks cite,
   so an honestly seeded bank stops failing for being staged.**
   `memory-bank/scripts/validate.py` resolved every chunk source against the

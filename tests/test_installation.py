@@ -143,8 +143,14 @@ class InventoryTest(unittest.TestCase):
             self.assertEqual(len(installed), len(set(installed)))
             self.assertEqual(excluded, sorted(set(excluded)))
             self.assertTrue(set(installed).isdisjoint(excluded))
+            # Every file the accelerator's own runtime rewrites here installs
+            # from a pristine source instead of the developer's working copy.
             self.assertEqual(
-                {"memory-bank/INDEX.md": "memory-bank/.install/INDEX.md"},
+                {
+                    "memory-bank/INDEX.md": "memory-bank/.install/INDEX.md",
+                    "project-brain/indexes/active.json": "project-brain/.install/active.json",
+                    "project-brain/indexes/archive.json": "project-brain/.install/archive.json",
+                },
                 data["source_overrides"],
             )
 
@@ -627,6 +633,47 @@ class CleanInstallTest(unittest.TestCase):
                     self._run_clean_install(edition, tool, data)
                     self.assertEqual(baseline_digest, source_digest(edition, data))
                     self.assertEqual(baseline_status, source_status())
+
+    def test_local_runtime_state_never_ships_into_an_install(self) -> None:
+        """A developer's own Brain index must not reach a target.
+
+        The accelerator's runtime rewrites `project-brain/indexes/active.json`
+        in this repository whenever a task is opened here, and the records it
+        then lists are this repository's - untracked, and never installed. A
+        target that received that index held one pointing at files it does not
+        have, which its own `context.py validate` reports as stale. Measured on
+        a working checkout: three clean-install subtests failed for that reason
+        alone, with nothing wrong in any committed file.
+        """
+        index = ROOT / "Symfony" / "project-brain" / "indexes" / "active.json"
+        pristine = index.read_bytes()
+        index.write_text(
+            json.dumps(
+                [{"type": "task", "external_id": "local-session",
+                  "path": "project-brain/dynamic/tasks/local-session.md"}],
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self.addCleanup(index.write_bytes, pristine)
+        with tempfile.TemporaryDirectory(prefix="runtime state install ") as raw:
+            target = Path(raw).resolve()
+            installed = run(
+                sys.executable,
+                str(INSTALLER),
+                "--edition",
+                "Symfony",
+                "--tool",
+                "claude",
+                "--target",
+                str(target),
+            )
+            self.assertEqual(0, installed.returncode, installed.stderr)
+            shipped = (target / "project-brain" / "indexes" / "active.json").read_text(
+                encoding="utf-8"
+            )
+        self.assertEqual("[]", shipped.strip())
 
     def _run_clean_install(self, edition: str, tool: str, data: dict) -> None:
         with tempfile.TemporaryDirectory(prefix="clean install ") as raw:
