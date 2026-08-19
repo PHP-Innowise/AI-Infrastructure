@@ -46,6 +46,10 @@ All output from this run lives under `tasks/TASK-{NNN}/` in Infrastructure-Creat
    - **If your AI tool supports parallel subagents/tool calls:** spawn all seven in one batch so they run concurrently: `stack-scanner`, `architecture-scanner`, `integration-scanner`, `infra-ops-scanner`, `security-compliance-scanner`, `conventions-scanner`, `domain-behavior-scanner`, each given the target path and the task directory. Wait for all seven before continuing.
    - **If your AI tool is single-threaded:** invoke each scanner's logic sequentially in the same session. Output is identical; only mechanics differ. Say so in the Context Summary.
    - Treat test topology, exact/resolved command definitions, stable high-priority invariant IDs, bounded evidence anchors, path authority/creatability, material adjacency, and routing cases as mandatory cross-scanner outputs. A scanner that omits its applicable portion is incomplete, not silently optional.
+   - **Scan to a budget.** Completeness is every surface having a disposition,
+     not every file being opened: name a tree, read the exemplars a claim rests
+     on, and mark what you stopped short of `truncated` with the reason. An
+     over-enumerated coverage record and an over-long report are warned about.
 6. **Reconcile discovery before anything reads it.** Once all seven have
    returned, promote their prose claims into one
    `tasks/TASK-{NNN}/project-claims.json` - typed, deduplicated, each claim
@@ -72,9 +76,8 @@ All output from this run lives under `tasks/TASK-{NNN}/` in Infrastructure-Creat
      and an undocumented decision cannot be told apart from an oversight.
    - A surface a scanner read that no selected skill declares is
      `OWNERSHIP_SURFACE_UNOWNED`, unless `tasks/TASK-{NNN}/plan-ownership.json`
-     says so and why. Rejections are argued one candidate at a time; nothing
-     asked what the selection as a whole failed to cover, so a subsystem could
-     be discovered, described in the profile, and owned by nobody.
+     says so and why: rejections are argued one at a time, and nothing else asks
+     what the selection as a whole left uncovered.
    `profile-synthesizer` produces both handoff artifacts,
    validates evidence paths and fingerprints, runs complete plan-level
    operational-safety, ownership/write/routing/flow diagnostics, prunes

@@ -99,6 +99,35 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Added
 
+- **Consolidation stopped being free, and the scan stopped being exhaustive.**
+  Reported from a real run: "it creates a million files with evidence and
+  reports, but the output says it will create 11 skills and reject 41, because
+  those 41 can be grouped into `code-review`" - with genuinely important skills
+  skipped and a scan taking forty minutes. Two separate faults, one in each
+  direction.
+  - **Grouping.** `consolidated` checked that `absorbed_by` names a selected
+    skill and nothing else, so folding a catalog into whatever skill happened to
+    be generated cost one sentence and read as judgement. A consolidated concern
+    must now be present in the target
+    (`REJECTION_CONSOLIDATION_WITHOUT_SURFACE` - a concern that is not here is
+    `absent`, not absorbed) and inside the absorbing skill's own declared paths
+    (`REJECTION_ABSORBER_OUT_OF_REACH`). Measured: on an honest plan all fifteen
+    consolidations already passed both, so the bar costs a real one nothing;
+    folding that plan's twenty-three absent concerns into `code-review` is
+    caught in full - twelve for having no surface, six out of reach, and the
+    rest by the anchor and template rules that were already there.
+  - **Volume.** One tree disposition has always accounted for everything under
+    it - three coverage entries describe a small target completely - so an
+    enumerated coverage record and a report that restates the ledger were
+    choices nobody was told they were making. `SCAN_COVERAGE_VERBOSE` past 30
+    surfaces and `SCAN_REPORT_OVERLONG` past 80 lines name them, as warnings:
+    lightening must not block a run. Measured on a real seven-scanner run, the
+    honest range is 5-17 surfaces and 12-23 lines each, so both thresholds sit
+    well clear of honest work. The scan contract and `infra-scan` now say the
+    same thing in words: completeness is every surface having a disposition, not
+    every file being opened - name a tree, read the exemplars a claim rests on,
+    and mark what you stopped short of `truncated` with the reason.
+
 - **A golden skill on a target without its surface says so, narrowly.** The
   golden set generates the development loop regardless of what the target
   carries, which collides with the evidence rules: a selected skill needs a

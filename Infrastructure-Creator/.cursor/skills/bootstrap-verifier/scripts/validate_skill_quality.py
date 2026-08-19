@@ -3267,9 +3267,48 @@ def _rejection_fields(item: dict[str, Any] | None, disposed: bool) -> set[str]:
     return REJECTION_BASE_FIELDS | extra
 
 
+def _absorber_reaches(
+    candidate: dict[str, Any] | None, owner: dict[str, Any] | None
+) -> bool | None:
+    """Whether the absorbing skill's declared paths reach the absorbed concern.
+
+    `None` when the registry carries no signal for the candidate and the
+    question cannot be answered either way.
+    """
+    falsifier = (candidate or {}).get("falsifier")
+    if not falsifier or not isinstance(owner, dict):
+        return None
+    surfaces = [
+        path
+        for probe in falsifier.get("probes", [])
+        for path in probe.get("paths", [])
+        if _is_nonempty_string(path)
+    ]
+    if not surfaces:
+        return None
+    declared = [
+        path
+        for ownership in owner.get("ownership") or []
+        if isinstance(ownership, dict)
+        for path in ownership.get("paths") or []
+        if _is_nonempty_string(path)
+    ]
+    declared += [item for item in owner.get("writes") or [] if _is_nonempty_string(item)]
+    declared += [
+        contract["path"]
+        for contract in owner.get("path_contracts") or []
+        if isinstance(contract, dict) and _is_nonempty_string(contract.get("path"))
+    ]
+    if not declared:
+        return False
+    return any(_globs_intersect(surface, path) for surface in surfaces for path in declared)
+
+
 def _validate_rejection_dispositions(
     rejected: list[dict[str, Any]],
     plan_skills: set[str],
+    plan_contracts: dict[str, dict[str, Any]],
+    registry: dict[str, dict[str, Any]],
     diagnostics: list[Diagnostic],
 ) -> None:
     """Each rejection says which kind it is, and consolidation names its owner."""
@@ -3299,6 +3338,16 @@ def _validate_rejection_dispositions(
                 diagnostics,
                 "REJECTION_ABSORBER_UNKNOWN",
                 f"{item.get('candidate_id')} cannot absorb itself",
+            )
+        elif _absorber_reaches(
+            registry.get(str(item.get("candidate_id"))), plan_contracts.get(owner)
+        ) is False:
+            _diag(
+                diagnostics,
+                "REJECTION_ABSORBER_OUT_OF_REACH",
+                f"{item.get('candidate_id')} is recorded as absorbed by "
+                f"{owner}, whose declared paths do not reach it - widen that "
+                f"skill's scope and say so, or record the rejection as absent",
             )
 
 
@@ -3398,8 +3447,7 @@ def _validate_rejections_against_target(
     checkable = [
         item
         for item in rejected
-        if item.get("disposition", "absent") == "absent"
-        and isinstance(registry.get(str(item.get("candidate_id"))), dict)
+        if isinstance(registry.get(str(item.get("candidate_id"))), dict)
         and registry[str(item["candidate_id"])].get("falsifier")
     ]
     if not checkable:
@@ -3408,12 +3456,30 @@ def _validate_rejections_against_target(
     for item in checkable:
         candidate = registry[str(item["candidate_id"])]
         falsifier = candidate["falsifier"]
-        if _falsifier_fires(falsifier, target, index):
+        fires = _falsifier_fires(falsifier, target, index)
+        disposition = item.get("disposition", "absent")
+        if disposition == "absent":
+            if fires:
+                _diag(
+                    diagnostics,
+                    "REJECTION_CONTRADICTED",
+                    f"{item['candidate_id']} was rejected for having no surface "
+                    f"in this target, but the target holds one: "
+                    f"{falsifier['surface']}",
+                )
+        # Consolidation concedes the surface and hands it to an owner, so the
+        # surface has to be there. Folding a concern the target does not have
+        # into whatever skill happens to be selected is how a catalog gets
+        # grouped into one review skill: it costs a sentence and reads as
+        # judgement.
+        elif disposition == "consolidated" and not fires:
             _diag(
                 diagnostics,
-                "REJECTION_CONTRADICTED",
-                f"{item['candidate_id']} was rejected for having no surface in "
-                f"this target, but the target holds one: {falsifier['surface']}",
+                "REJECTION_CONSOLIDATION_WITHOUT_SURFACE",
+                f"{item['candidate_id']} is recorded as absorbed by "
+                f"{item.get('absorbed_by')}, but this target holds no "
+                f"{falsifier['surface']} for anyone to absorb - a concern that "
+                f"is not here is absent, not consolidated",
             )
 
 
@@ -5888,14 +5954,13 @@ def _validate_plan(
         items = [item for item in rejected if isinstance(item, dict)]
         _validate_rejection_accountability(items, diagnostics)
         if schema_version in DISPOSED_PLAN_SCHEMAS:
+            contracts = {
+                str(skill.get("name")): skill
+                for skill in plan.get("skills", [])
+                if isinstance(skill, dict) and _is_nonempty_string(skill.get("name"))
+            }
             _validate_rejection_dispositions(
-                items,
-                {
-                    str(skill.get("name"))
-                    for skill in plan.get("skills", [])
-                    if isinstance(skill, dict)
-                },
-                diagnostics,
+                items, set(contracts), contracts, registry, diagnostics
             )
         _validate_rejections_against_target(items, registry, target, diagnostics)
 

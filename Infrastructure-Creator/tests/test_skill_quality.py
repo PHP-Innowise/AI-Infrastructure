@@ -4005,6 +4005,96 @@ class RejectionDispositionTest(SkillQualityFixture):
         self.assertIn("REJECTION_CONTRADICTED", absent)
 
 
+class ConsolidationReachTest(SkillQualityFixture):
+    """Naming an owner is cheap; reaching what you absorb is not.
+
+    Reported from a real run: "I will create 11 skills and reject 41, because
+    those 41 can be grouped into code-review." Until now that passed, because
+    the only test was whether code-review was selected. Two questions fix it -
+    is the concern even here, and does the owner touch it. Measured on an honest
+    plan, all fifteen consolidations answered both, so the bar costs a real one
+    nothing; folding twenty-three absent concerns into one review skill is
+    caught in full.
+    """
+
+    def consolidate(self, owner_paths: list[str], surface_paths: list[str],
+                    owner: str = "firebase-services") -> list[str]:
+        self.use_schema_1_5()
+        registry = json.loads(self.registry_path.read_text(encoding="utf-8"))
+        for candidate in registry["candidates"]:
+            if candidate["id"] == "generic-cache":
+                candidate["falsifier"] = {
+                    "surface": "an in-app caching layer",
+                    "requires": "any",
+                    "probes": [{"paths": surface_paths}],
+                }
+        self.registry_path.write_text(
+            json.dumps(registry, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        skill = next(item for item in self.plan["skills"] if item["name"] == owner)
+        skill["ownership"][0]["paths"] = owner_paths
+        skill["writes"] = [path for path in owner_paths if not path.endswith(".php")]
+        self.plan["rejected_candidates"] = [
+            {
+                "candidate_id": "generic-cache",
+                "name": "generic-cache",
+                "category": "integration",
+                "disposition": "consolidated",
+                "reason": "Cache call sites under app/ sit inside this owner's paths",
+                "absorbed_by": owner,
+            }
+        ]
+        self.write_fixture()
+        return [item.code for item in self.plan_diagnostics()]
+
+    def plant(self, relative: str) -> None:
+        path = self.target / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("<?php\n", encoding="utf-8")
+
+    def test_an_owner_that_reaches_the_concern_is_accepted(self) -> None:
+        self.plant("app/Cache/Warmer.php")
+        codes = self.consolidate(["app/**"], ["app/Cache/**"])
+        self.assertNotIn("REJECTION_ABSORBER_OUT_OF_REACH", codes)
+        self.assertNotIn("REJECTION_CONSOLIDATION_WITHOUT_SURFACE", codes)
+
+    def test_an_owner_that_never_touches_it_is_reported(self) -> None:
+        self.plant("app/Cache/Warmer.php")
+        codes = self.consolidate(["config/firebase.php"], ["app/Cache/**"])
+        self.assertIn("REJECTION_ABSORBER_OUT_OF_REACH", codes)
+
+    def test_absorbing_a_concern_the_target_lacks_is_reported(self) -> None:
+        # Nothing under app/Cache exists, so there is nothing to absorb: that
+        # rejection is absent, not consolidated.
+        codes = self.consolidate(["app/**"], ["app/Cache/**"])
+        self.assertIn("REJECTION_CONSOLIDATION_WITHOUT_SURFACE", codes)
+
+    def test_a_candidate_without_a_signal_is_left_to_its_argument(self) -> None:
+        self.use_schema_1_5()
+        registry = json.loads(self.registry_path.read_text(encoding="utf-8"))
+        for candidate in registry["candidates"]:
+            if candidate["id"] == "generic-cache":
+                candidate["falsifier"] = None
+                candidate["falsifier_absent"] = "the trigger is a request, not a file"
+        self.registry_path.write_text(
+            json.dumps(registry, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        self.plan["rejected_candidates"] = [
+            {
+                "candidate_id": "generic-cache",
+                "name": "generic-cache",
+                "category": "integration",
+                "disposition": "consolidated",
+                "reason": "Cache guidance under app/ belongs to the owner of that code",
+                "absorbed_by": "firebase-services",
+            }
+        ]
+        self.write_fixture()
+        codes = [item.code for item in self.plan_diagnostics()]
+        self.assertNotIn("REJECTION_CONSOLIDATION_WITHOUT_SURFACE", codes)
+        self.assertNotIn("REJECTION_ABSORBER_OUT_OF_REACH", codes)
+
+
 class RejectionFalsifierTest(SkillQualityFixture):
     """A rejection is checked against the project it was made about.
 

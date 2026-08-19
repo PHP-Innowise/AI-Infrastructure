@@ -555,8 +555,14 @@ own exact fields on top of `candidate_id`, `name`, `category`, `reason` and
   refutes the rejection.
 - **`consolidated`** - the concern exists and a skill this plan selects already
   owns it; carries `absorbed_by`, which must name one of those skills. It is not
-  refuted by the target, because it concedes the surface; what is checked is
-  that the owner is real (`REJECTION_ABSORBER_UNKNOWN` otherwise).
+  refuted by the target the way `absent` is, because it concedes the surface -
+  and that concession is what gets checked. Three questions, all mechanical:
+  the owner must be a selected skill (`REJECTION_ABSORBER_UNKNOWN`), the surface
+  must actually be in this target (`REJECTION_CONSOLIDATION_WITHOUT_SURFACE` -
+  a concern that is not here is `absent`, not absorbed), and the owner's own
+  declared paths must reach it (`REJECTION_ABSORBER_OUT_OF_REACH`). Naming a
+  selected skill used to be the whole test, which is how a catalog gets folded
+  into one review skill: it cost a sentence and read as judgement.
 
 Consolidating into a skill whose own scope does not reach the concern is how a
 gap gets hidden behind a name, so widen that skill's `ownership` and

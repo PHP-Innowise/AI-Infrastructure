@@ -591,6 +591,16 @@ def _validate_invariant_carry_through(
 
 
 # Named so it cannot be mistaken for a scanner's own `*-coverage.json`.
+# One tree disposition accounts for everything under it, so a whole target is
+# describable in a handful of lines - measured on a real run, seven scanners
+# needed 5 to 17 surfaces each. Past this a coverage record is enumerating a
+# tree it could have named, which costs the run time and the reviewer attention
+# without saying anything more.
+COVERAGE_VERBOSE_LIMIT = 30
+# The report is the human's way in, not a second ledger. Measured on the same
+# run: 12 to 23 lines each. Past this it is restating what the ledger already
+# carries in a form nobody can diff.
+REPORT_OVERLONG_LIMIT = 80
 OWNERSHIP_ARTIFACT = "plan-ownership.json"
 OWNERSHIP_FIELDS = {"surface", "reason"}
 # Dispositions that put a surface inside the project's own material. `excluded`
@@ -893,6 +903,32 @@ def validate(
                 diagnostics,
                 "SCAN_DISPOSITION_CONFLICT",
                 f"{name} is both covered and forbidden: {owners}",
+            )
+
+    for coverage_path in coverage_files:
+        document = _load(coverage_path, diagnostics)
+        entries = (document or {}).get("surfaces")
+        if isinstance(entries, list) and len(entries) > COVERAGE_VERBOSE_LIMIT:
+            _diag(
+                diagnostics,
+                "SCAN_COVERAGE_VERBOSE",
+                f"{coverage_path.name} declares {len(entries)} surfaces; one "
+                f"tree disposition accounts for everything under it, so this is "
+                f"enumerating what it could have named",
+                "warning",
+            )
+    for report_path in sorted(task_dir.glob("*-findings.md")):
+        try:
+            length = len(report_path.read_text(encoding="utf-8").splitlines())
+        except OSError:
+            continue
+        if length > REPORT_OVERLONG_LIMIT:
+            _diag(
+                diagnostics,
+                "SCAN_REPORT_OVERLONG",
+                f"{report_path.name} runs to {length} lines; the report is the "
+                f"way into the ledger, not a second copy of it",
+                "warning",
             )
 
     claims = _validate_claims(task_dir, known_evidence, diagnostics)

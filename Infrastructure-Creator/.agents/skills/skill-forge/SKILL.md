@@ -43,13 +43,10 @@ orchestration step. The log maps every staged skill to exactly one plan entry.
    blocking contract-inventory diagnostic exists; surface nonblocking contract
    similarity/repeated-block warnings for review.
    A golden candidate is generated whether or not the target carries what its
-   catalog gate asks for, and the honest form is narrow, not silent. Its
-   selection condition reports `status: "absent-golden"`, cites an absence
-   evidence entry whose search this gate resolves itself, and the skill carries
-   `narrow_scope`: what it still does, and what it cannot do until the surface
-   exists. Marking the condition satisfied against evidence that does not
-   support it, or writing a full contract over a surface the project has not
-   got, is the failure this replaces (`ABSENT_GOLDEN_NOT_PERMITTED`,
+   catalog gate asks for, and the honest form is narrow, not silent: the
+   condition reports `status: "absent-golden"`, cites an absence entry whose
+   search this gate resolves itself, and the skill carries `narrow_scope` - what
+   it still does until the surface exists (`ABSENT_GOLDEN_NOT_PERMITTED`,
    `ABSENT_GOLDEN_UNPROVEN`, `NARROW_SCOPE_MISSING`).
    A rejection is graded like a selection, because dropping a candidate is a
    claim about the target: it names where the surface was looked for
@@ -59,6 +56,10 @@ orchestration step. The log maps every staged skill to exactly one plan entry.
    (`REJECTION_CONTRADICTED`). A rejection may rest only on what the target is -
    never on what the current request happens to need, since the accelerator is
    generated once for all later work.
+   Consolidation is not a grouping argument: the concern must be present in this
+   target (`REJECTION_CONSOLIDATION_WITHOUT_SURFACE` - one that is not here is
+   `absent`) and inside the absorbing skill's declared paths
+   (`REJECTION_ABSORBER_OUT_OF_REACH` - widen that scope and say so).
 2. **Choose one authoring unit.** Default to one skill. A group may contain only a small set of nearest siblings whose contracts explicitly define their ownership boundary (for example `debugging`/`systematic-debugger`). Never batch a whole category.
 3. **Load the minimum slice.** Provide the authoring pass only the selected contract(s), referenced `evidence[]`, cited target files/excerpts, and applicable reference contract. Do not feed unrelated profile prose or prior generated skill bodies.
 4. **Author into staging.** Implement every contract field as operational

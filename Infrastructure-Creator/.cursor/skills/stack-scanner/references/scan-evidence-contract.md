@@ -40,6 +40,12 @@ cannot be told apart from a scan that missed a subsystem - both produce a list
 of what was found, and only the coverage record says what was *not*. None may be
 written into the target project.
 
+The report is the human's way into the ledger, not a second copy of it: a
+summary a reviewer reads in a minute, with the detail left in the JSON beside
+it. Past **80 lines** it is restating what the ledger already carries, and is
+reported as `SCAN_REPORT_OVERLONG`; measured on a real run, the honest range is
+12 to 23 lines each.
+
 The report follows this scanner's template in appendix A. Every factual line in
 it carries a confidence tag and cites its evidence id, so the report and the
 ledger join without re-derivation - for example:
@@ -102,7 +108,19 @@ Members are exact: `surface`, `kind` (`file` or `tree`), `disposition`,
 - **`not-permitted`** - the contract forbids reading it.
 
 A surface may be a path, a `tree`, or a `dir/**` glob, so a large target is
-described in a handful of lines rather than a thousand. Every top-level entry of
+described in a handful of lines rather than a thousand. **One tree disposition
+accounts for everything under it** - `src/**` covered, with one evidence entry
+inside `src`, answers for every module in it, and nothing has to be enumerated
+directory by directory. Three entries can describe a whole small target. A
+coverage record past **30 surfaces** is enumerating a tree it could have named,
+and is reported as `SCAN_COVERAGE_VERBOSE`; measured on a real seven-scanner
+run, the honest range is 5 to 17 each.
+
+**Read to a budget and say where it ran out.** A scanner is not required to open
+every file: it is required to say what it did with every surface. Reading the
+first files of a large tree and marking the rest `truncated`, with the reason,
+is a complete scan. Reading all of it slowly is not more complete - it is the
+same coverage record, later. Every top-level entry of
 the target, and every immediate child of `src`, `app`, `tests`, `config` and
 their siblings, must be reached by some entry from some scanner, or it is
 `SCAN_SURFACE_UNACCOUNTED`. Evidence cited from a surface no scanner says it

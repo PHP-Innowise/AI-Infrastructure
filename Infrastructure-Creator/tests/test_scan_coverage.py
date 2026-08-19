@@ -677,6 +677,48 @@ class ClaimReconciliationTest(ScanCoverageFixture):
         self.assertNotIn("CLAIM_INVARIANT_LOST", codes)
 
 
+class ScanVolumeTest(ScanCoverageFixture):
+    """A scan is complete when every surface has a disposition, not when every
+    file was opened.
+
+    Reported from a real run: scanning takes forty minutes and the reports are
+    enormous. One tree disposition already accounts for everything under it -
+    three entries describe a small target in full - so an enumerated coverage
+    record and a report that restates the ledger are choices, and both are now
+    named as choices.
+    """
+
+    def test_a_tree_disposition_accounts_for_its_children(self) -> None:
+        # The honest minimum: nothing is enumerated directory by directory.
+        self.assertEqual([code for code in self.codes() if code.startswith("SCAN_")], [])
+
+    def test_an_enumerated_coverage_record_is_reported(self) -> None:
+        for index in range(validator.COVERAGE_VERBOSE_LIMIT + 1):
+            self.coverage["surfaces"].append({
+                "surface": f"src/Module{index}/**",
+                "kind": "tree",
+                "disposition": "excluded",
+                "reason": "enumerated one by one instead of named as a tree",
+                "evidence_ids": [],
+            })
+        self.assertIn("SCAN_COVERAGE_VERBOSE", self.codes("warning"))
+
+    def test_a_report_that_restates_the_ledger_is_reported(self) -> None:
+        self.write()
+        (self.task / "stack-scanner-findings.md").write_text(
+            "\n".join(f"- line {index}" for index in range(validator.REPORT_OVERLONG_LIMIT + 5)),
+            encoding="utf-8",
+        )
+        self.assertIn("SCAN_REPORT_OVERLONG", self.codes("warning"))
+
+    def test_a_short_report_is_left_alone(self) -> None:
+        self.write()
+        (self.task / "stack-scanner-findings.md").write_text(
+            "# Stack Scan\n\n- PHP 8.3 (confirmed - EV-STK-0001)\n", encoding="utf-8"
+        )
+        self.assertNotIn("SCAN_REPORT_OVERLONG", self.codes("warning"))
+
+
 class OwnershipCoverageTest(ScanCoverageFixture):
     """What the selected skills leave unowned has to be said out loud.
 
