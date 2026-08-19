@@ -23,6 +23,7 @@
 .claude/skills/bootstrap-verifier/scripts/validate_content_review.py -diff linguist-generated=true
 .claude/skills/bootstrap-verifier/scripts/validate_flow_contracts.py -diff linguist-generated=true
 .claude/skills/bootstrap-verifier/scripts/validate_generated.py -diff linguist-generated=true
+.claude/skills/bootstrap-verifier/scripts/validate_plan_mutations.py -diff linguist-generated=true
 .claude/skills/bootstrap-verifier/scripts/validate_plan_review.py -diff linguist-generated=true
 .claude/skills/bootstrap-verifier/scripts/validate_reference_catalogs.py -diff linguist-generated=true
 .claude/skills/bootstrap-verifier/scripts/validate_scan_coverage.py -diff linguist-generated=true
@@ -158,6 +159,7 @@
 .cursor/skills/bootstrap-verifier/scripts/validate_content_review.py -diff linguist-generated=true
 .cursor/skills/bootstrap-verifier/scripts/validate_flow_contracts.py -diff linguist-generated=true
 .cursor/skills/bootstrap-verifier/scripts/validate_generated.py -diff linguist-generated=true
+.cursor/skills/bootstrap-verifier/scripts/validate_plan_mutations.py -diff linguist-generated=true
 .cursor/skills/bootstrap-verifier/scripts/validate_plan_review.py -diff linguist-generated=true
 .cursor/skills/bootstrap-verifier/scripts/validate_reference_catalogs.py -diff linguist-generated=true
 .cursor/skills/bootstrap-verifier/scripts/validate_scan_coverage.py -diff linguist-generated=true

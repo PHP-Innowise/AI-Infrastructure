@@ -18,7 +18,8 @@ ownership, and placeholder checks.
 
 It uses the bundled dependency-free `scripts/validate_generated.py`,
 `scripts/validate_scan_coverage.py`, `scripts/validate_plan_review.py`,
-`scripts/validate_content_review.py`, and `scripts/analyze_commands.py` plus
+`scripts/validate_content_review.py`, `scripts/validate_plan_mutations.py`,
+and `scripts/analyze_commands.py` plus
 targeted manual checks.
 
 ## Generated File Naming Convention (MANDATORY)

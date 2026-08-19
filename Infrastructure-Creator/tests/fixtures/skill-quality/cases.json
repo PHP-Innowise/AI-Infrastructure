@@ -155,6 +155,10 @@
     "description": "Every path is normalized and classified as resolving, generated, or safely creatable.",
     "expected": "PATH_EXISTING_MISSING"
   },
+  "plan-mutation-step": {
+    "description": "The pre-publication step damages the plan one way at a time; a damage the gate accepts means a rule stopped firing.",
+    "expected": "MUTATION_UNCAUGHT"
+  },
   "procedure-role-collapse-calibration": {
     "description": "Two obligations honestly sharing one step in a small skill stay clean; only the unambiguous collapse blocks.",
     "expected": null

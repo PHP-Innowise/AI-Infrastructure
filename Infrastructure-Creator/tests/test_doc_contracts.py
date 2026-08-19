@@ -160,7 +160,7 @@ class CommandForgeDocTest(unittest.TestCase):
         )
         flat = normalized(COMMAND_FORGE_DOC)
         self.assertIn("do NOT run it here", flat)
-        self.assertIn("`infra-generate` step 8", flat)
+        self.assertIn("`infra-generate` step 9", flat)
 
     def test_frontmatter_guardrail_carries_the_flow_command_exception(
         self,

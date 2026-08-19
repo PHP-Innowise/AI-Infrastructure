@@ -844,6 +844,7 @@ class SkillQualityTest(SkillQualityFixture):
                 "provider-safety",
                 "read-only-mutation",
                 "path-contract-classification",
+                "plan-mutation-step",
                 "critical-invariant-coverage",
                 "claim-traceability",
                 "evidence-anchor",

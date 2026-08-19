@@ -106,6 +106,30 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
   `/infra-validate <target>` reviews a published accelerator through its
   manifest and publishes repairs transactionally with a manifest hash refresh.
   Sixteen regression tests pin the gate (`tests/test_content_review.py`).
+- **The plan is damaged on purpose before it is published.** A plan that passes
+  every gate proves one half of the bargain - that the rules are satisfiable. It
+  says nothing about the other half: whether the rules would have noticed had the
+  plan been worse. A gate can decay in ways nothing reports - a rule made
+  conditional on a field that stopped being emitted, a pattern that stopped
+  matching after a rename, an exemption that widened - and every plan still
+  passes, which is what a reviewer reads.
+  `scripts/validate_plan_mutations.py` damages the plan one way at a time and
+  requires the gate to object by name: a dropped catalog obligation, every
+  obligation collapsed onto one step, a lost verification baseline, an
+  expectation promising success against a failing one, a runtime check promising
+  zero where the contract declares otherwise, a routing fixture naming its own
+  answer, a skill that stops naming its claims, and one that stops ruling out the
+  evidence inside its own paths. `MUTATION_UNCAUGHT` means a rule stopped firing,
+  and the plan may not be published on it.
+  The damages are derived from the plan rather than hardcoded, so the step
+  travels to any target, and a damage the plan has no shape for is reported as
+  `MUTATION_NOT_APPLICABLE` - a warning, deliberately visible, because a silently
+  skipped check reads exactly like a passing one. `MUTATION_CONTROL_DIRTY` says
+  the plan was not clean to begin with, so the check proves nothing.
+  Verified on both corpora: 8 of 8 damages exercised and caught on a plan built
+  from a real Symfony project, and 5 of 8 on the synthetic 36-skill corpus, whose
+  three inapplicable damages are named rather than dropped. The mutated plans go
+  to a scratch copy, and a test asserts the real plan's bytes are untouched.
 
 - **A runtime command is now graded against its contract, closing the one hole
   the fifth end-to-end run found in ADR-002.** The memory quartet verifies itself

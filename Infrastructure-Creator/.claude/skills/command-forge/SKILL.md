@@ -91,7 +91,7 @@ each validated wrapped agent and selected command-carrying edition, write
    `skill-flow-composer` runs after command-forge, so `SKILL FLOW.md` does not
    exist yet when this skill finishes; invoking `validate_flow_contracts.py`
    now would fail on the missing artifact instead of validating anything.
-   After `skill-flow-composer` writes its artifact, `infra-generate` step 8
+   After `skill-flow-composer` writes its artifact, `infra-generate` step 9
    runs that validator against each selected command-carrying edition, and any
    graph, order, phase, agent, checkpoint, required-review, roster, writer
    serialization, adjacency, or routing-oracle mismatch blocks publication.

@@ -48,14 +48,30 @@ target manifest member.
    invalid flow rosters, and stale evidence. Every `nearest_siblings[]` entry
    must be covered by `routing_cases[]`. If anything drifted, stop for re-scan
    rather than accepting generic fallback content.
-3. **Read the selected editions** from the profile's section 1 (AI Tool Selection). Only these editions will be produced.
-4. **Collision guard and baseline.** If the target already has `AGENTS.md` or
+3. **Damage the plan on purpose before publishing it.**
+   `python3 bootstrap-verifier/scripts/validate_plan_mutations.py --plan <task>/skill-generation-plan.json --target <target> --registry <generator>/skill-forge/references/candidate-registry.json`
+   A plan that passes every gate proves the rules are satisfiable; it says
+   nothing about whether they would have noticed had the plan been worse, and a
+   gate can decay in ways nothing reports - a rule made conditional on a field
+   that stopped being emitted, a pattern that stopped matching after a rename.
+   The step damages the plan one way at a time and requires the gate to object
+   by name. `MUTATION_UNCAUGHT` means a rule stopped firing and the plan must
+   not be published on it; `MUTATION_CONTROL_DIRTY` means the plan was not clean
+   to begin with, so the check proves nothing. `MUTATION_NOT_APPLICABLE` is a
+   warning and belongs in the report verbatim: it names a rule this plan leaves
+   unexercised, and a silently skipped check reads exactly like a passing one.
+   This is the plan-level counterpart of step 10: `infra-validate` proves the
+   generated content is sound, this step proves the gate would still object if
+   it were not.
+
+4. **Read the selected editions** from the profile's section 1 (AI Tool Selection). Only these editions will be produced.
+5. **Collision guard and baseline.** If the target already has `AGENTS.md` or
    any selected edition folder, STOP and ask: overwrite, merge, or abort. Record
    the choice. Snapshot the existence and sha256 of every path the candidate
    may replace in `collision-baseline.json`; in merge mode also record the
    full pre-existing surface and exclude it from both writes and ownership,
    except the separately approved shared root `.gitignore` contract below.
-5. **Create clean staging and explicit plans.** Refuse a non-empty staging root
+6. **Create clean staging and explicit plans.** Refuse a non-empty staging root
    unless it belongs to this task and the user approved clearing it. Create
    `infra-generate-publication-plan.txt` for every staged file and
    `infra-generate-write-plan.txt` for the manifest-ownable subset. Every forge
@@ -65,15 +81,15 @@ target manifest member.
    manifest members that must be drift-checked without copying, plus
    `gitignore-requirements/` for forge declarations. Never infer a plan by
    walking the target.
-6. **Forge evidence-independent surfaces.** Policy, hooks, and initial memory
+7. **Forge evidence-independent surfaces.** Policy, hooks, and initial memory
    surfaces may run in parallel, but all writes are redirected to staging.
-7. **Generate skills in evidence-scoped batches.** `skill-forge` authors one
+8. **Generate skills in evidence-scoped batches.** `skill-forge` authors one
    skill or a small sibling set from each validated contract. After every batch,
    run the semantic validator with `--allow-partial-skills`; after all batches,
    run it again without partial mode for inventory-wide evidence,
    ownership, repeated-block, and similarity checks. Stop immediately on any
    failure. No agent, command, flow, manifest, or target skill may exist yet.
-8. **Wrap and compile only validated skills.** Run `agent-forge`, then
+9. **Wrap and compile only validated skills.** Run `agent-forge`, then
    `command-forge`, using every adjacency and schema 1.4 routing oracle. Run
    `skill-flow-composer` after wrappers exist. Both forges MUST compile from the
    same canonical `flow_contracts`; neither may infer its own stage graph.
@@ -93,7 +109,7 @@ target manifest member.
    Substitute the selected edition path. For Codex-only generation, validate
    its compiled `SKILL FLOW.md` against the canonical graph and record that
    executable command parity is N/A because Codex has no command layer.
-9. **Run the content review-and-repair phase.** Invoke `infra-validate`
+10. **Run the content review-and-repair phase.** Invoke `infra-validate`
    against the complete staged bundle: parallel `content-reviewer` lanes judge
    every publication-plan file (and this run's profile and plan) on
    uniqueness, completeness, accuracy, and coherence; blocking findings are
@@ -110,7 +126,7 @@ target manifest member.
    identically against a different PHP repository, or a procedure an agent
    could not execute without its author, is generation failure here - not a
    style note.
-10. **Compose the shared root `.gitignore`.** Union and validate the exact
+11. **Compose the shared root `.gitignore`.** Union and validate the exact
    task-scoped requirements from `memory-seed` and `hook-forge`, then run the
    bundled deterministic merge helper against the target file. If the existing
    file already satisfies every requirement, `keep` is allowed and the path
@@ -140,25 +156,25 @@ target manifest member.
    plain-sorted), and a requirement that exactly contradicts a team entry
    (`x` vs `!x`) fails the merge for an explicit human decision instead of
    being appended silently.
-11. **Stamp and stage the manifest.** Stamp only a staged `AGENTS.md` produced
+12. **Stamp and stage the manifest.** Stamp only a staged `AGENTS.md` produced
    by this run. Build `.infra-manifest.json` against staging from the explicit
    write plan, final source map, and decisions. Runtime state remains excluded
    from ownership.
-12. **Verify the complete staged bundle.** Run `bootstrap-verifier` against
+13. **Verify the complete staged bundle.** Run `bootstrap-verifier` against
     staging while validating skill evidence against the real target root.
     Treat every semantic, adjacency, routing-oracle, flow-contract,
     content-review, structural, hash, hook, runtime, or placeholder failure
     as generation failure.
-13. **Recheck and publish transactionally.** Recompute publication, removal,
+14. **Recheck and publish transactionally.** Recompute publication, removal,
    and watch baselines immediately
     before publication. If any candidate destination changed, stop and rerun
     collision handling. Create a rollback journal, publish only explicit
     approved publication-plan paths, remove no team-owned path, and restore the
     previous state on any copy/rename failure. Copy the staged manifest last.
-14. **Verify the published target.** Run the complete bootstrap gate again
+15. **Verify the published target.** Run the complete bootstrap gate again
     against the real target. A failure triggers rollback and cannot be reported
     as success.
-15. **Report.** Record evidence/plan, per-category skill quality, routing,
+16. **Report.** Record evidence/plan, per-category skill quality, routing,
     content review (findings, repairs, escalations), staged bundle,
     publication, rollback, and post-publication results.
 
