@@ -99,6 +99,37 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Added
 
+- **The golden development set: eight skills that generate on every run, in
+  any weather.** The escalation and disposition machinery made rejections honest,
+  and the next real run showed honesty is not enough: it selected the
+  risk-flagged infrastructure families the user was asked about - and
+  rejected `testing` on a target with a full test suite ("its dedicated write
+  authority remains unassigned"), `debugging` on a target full of code ("no
+  wired error tracker"), plus `requirements-analyst` and `security-review` as
+  "absorbed" into `code-review`. The loop every codebase lives in - plan,
+  code, test, debug, review - had become a per-run judgment call, and the
+  judgment was wrong.
+  Eight registry candidates now carry `golden: true`: `requirements-analyst`,
+  `coding`, `refactorer`, `testing`, `debugging`, `performance`,
+  `code-review`, `security-review` - the whole `universal` category except
+  `release`, which genuinely requires a deployment-authority decision and
+  stays escalation-gated. Where two golden skills share a write surface, the
+  boundary is declared (`coding` = new behavior, `refactorer` =
+  behavior-preserving restructuring, `shared` ownership with reciprocal
+  routing) rather than resolved by dropping one. Their
+  *selection* is unconditional; their *contracts* stay fully evidence-driven -
+  built from the target's own paths, namespaces, test topology, runner
+  commands, CI jobs, lint/static-analysis tooling, conventions, and domain
+  invariants, narrowing scope honestly when evidence is thin (no error
+  tracker means `debugging` teaches the target's own exception paths and log
+  configuration, not a tracker it does not have) while still passing every
+  schema gate. `GOLDEN_CANDIDATE_REJECTED` blocks any plan that rejects one,
+  consolidation into a sibling is not a legal disposition for them, and
+  `test_reference_contracts.py` pins the shipped set so a flag cannot be
+  dropped quietly. Together with the runtime-fixed memory quartet, every
+  generated accelerator now starts from twelve guaranteed skills; the rest
+  of the catalog stays evidence-gated exactly as before.
+
 - **Rejected candidates are escalated, reported, and adversarially reviewed -
   a rejection can no longer be silent.** A real scan run rejected 39 of 53
   catalog candidates and was right about most of them - consolidations and

@@ -40,7 +40,32 @@ Follow `references/project-profile-schema.md` exactly. The JSON is generator run
    against its real catalog anchor. Every registry ID must receive exactly one
    disposition: selected (families may produce multiple concrete skills) or
    rejected with reason/missing evidence. There are no category quotas. Only
-   the memory quartet is runtime-fixed. Rejecting a candidate whose registry
+   the memory quartet is runtime-fixed.
+   **The golden set is always selected.** Candidates the registry marks
+   `golden` (`requirements-analyst`, `coding`, `refactorer`, `testing`,
+   `debugging`, `performance`, `code-review`, `security-review` - the loop
+   every codebase lives in: plan, code, refactor, test, debug, measure,
+   review) are never rejected, never consolidated
+   into one another, and never traded away in an interview - the gate
+   (`GOLDEN_CANDIDATE_REJECTED`) refuses a plan that drops one. Where two
+   golden skills share a write surface, declare it honestly: `coding` owns
+   new behavior and `refactorer` owns behavior-preserving restructuring over
+   the same paths under `shared` ownership with reciprocal sibling routing -
+   overlap is resolved by boundary, never by dropping one of them. What evidence
+   controls for a golden skill is its *contract*, not its existence: build
+   each one from everything this run discovered about the target - real
+   paths and namespaces, the actual test topology and runner commands, CI
+   jobs, lint/static-analysis tooling, conventions, domain invariants, and
+   risk surfaces. Thin evidence narrows the scope honestly (no configured
+   error tracker means `debugging` teaches the target's own exception paths,
+   log configuration, and safe reproduction - not a tracker it does not
+   have; no test suite means `testing` starts from the framework's real
+   skeleton and the project's own composer scripts), and a golden contract
+   still passes every schema gate: anchored evidence, owned scope
+   distinguishable from its siblings, falsifiable verification. "A selected
+   skill absorbs its evidence evaluation" is never a legitimate disposition
+   against a golden candidate.
+   Rejecting a candidate whose registry
    entry declares `escalates_on_rejection` is a decision the user must see
    before it freezes: report each such draft rejection to the orchestrator so
    `infra-scan` can run its bounded disposition interview round, and consume
@@ -146,6 +171,7 @@ Read the profile and correct anything wrong, then run `infra-generate`.
 - MUST conform to `references/project-profile-schema.md` exactly.
 - MUST NOT assume the AI-tool selection - it comes only from the interview.
 - MUST NOT propose any skill whose reference trigger and required evidence are unsatisfied. Familiarity, category symmetry, and a preferred baseline are not evidence.
+- MUST select every `golden` registry candidate in every run and build its contract from this target's own evidence - all of it: paths, commands, test topology, CI, conventions, invariants. Thin evidence narrows a golden skill's scope; it never removes the skill, and consolidation into a sibling is not a legal disposition for it.
 - MUST surface every draft rejection of an `escalates_on_rejection` candidate for the disposition interview round before finalizing, and MUST write the rejection report for every run - a silent rejection is indistinguishable from an oversight.
 - MUST generate only the memory quartet unconditionally, because its runtime is always installed.
 - MUST provide a complete JSON contract for every selected skill; grouped or one-line descriptions are summaries only.

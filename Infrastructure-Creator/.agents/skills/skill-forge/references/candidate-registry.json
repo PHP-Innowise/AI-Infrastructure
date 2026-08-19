@@ -214,7 +214,8 @@
         "implement-against-target-idiom",
         "respect-path-and-write-authority",
         "select-verification-command"
-      ]
+      ],
+      "golden": true
     },
     {
       "catalog": "php-frameworks.md#testing",
@@ -252,7 +253,8 @@
         "arrange-fixtures-and-test-doubles",
         "execute-the-evidenced-focused-command",
         "assert-expected-and-forbidden-outcomes"
-      ]
+      ],
+      "golden": true
     },
     {
       "catalog": "php-frameworks.md#code-review",
@@ -300,7 +302,8 @@
         "identify-affected-lifecycle-transitions",
         "check-audit-obligations",
         "check-sources-of-truth"
-      ]
+      ],
+      "golden": true
     },
     {
       "catalog": "php-frameworks.md#security-review",
@@ -343,7 +346,8 @@
         "verify-sensitive-state-transitions",
         "verify-audit-integrity",
         "verify-sensitive-values-are-not-logged"
-      ]
+      ],
+      "golden": true
     },
     {
       "catalog": "php-frameworks.md#performance",
@@ -378,7 +382,8 @@
         "profile-the-hot-path",
         "fix-the-top-hotspot",
         "re-measure-and-lock-a-budget"
-      ]
+      ],
+      "golden": true
     },
     {
       "catalog": "php-frameworks.md#release",
@@ -455,7 +460,8 @@
         "locate-the-targets-error-and-log-surfaces",
         "read-the-targets-own-debug-tooling",
         "defer-methodology-to-systematic-debugger"
-      ]
+      ],
+      "golden": true
     },
     {
       "catalog": "php-frameworks.md#frontend-design",
@@ -621,7 +627,8 @@
         "state-observable-acceptance-criteria",
         "surface-contradictions-and-assumptions",
         "record-unresolved-decisions"
-      ]
+      ],
+      "golden": true
     },
     {
       "catalog": "php-process-skills.md#researcher",
@@ -678,7 +685,8 @@
       "falsifier": null,
       "falsifier_absent": "the gate is an approved structural objective; the safety net alone does not call for one",
       "id": "refactorer",
-      "mode": "static"
+      "mode": "static",
+      "golden": true
     },
     {
       "catalog": "php-process-skills.md#dependency-manager",

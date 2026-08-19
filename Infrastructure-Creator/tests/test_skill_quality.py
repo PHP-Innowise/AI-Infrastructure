@@ -3771,6 +3771,48 @@ class RejectionAccountabilityTest(SkillQualityFixture):
         self.assertNotIn("REJECTION_TEMPLATED", codes)
 
 
+class GoldenCandidateTest(SkillQualityFixture):
+    """The golden development loop is never rejected.
+
+    A real run rejected `testing` on a target with a full tests/ tree because
+    its "write authority remained unassigned", and `debugging` because no
+    error tracker was wired. Selection of plan/code/test/debug/review is not
+    a per-run judgment call; only the contract's scope adapts to evidence.
+    """
+
+    def mark_golden(self, candidate_id: str) -> None:
+        registry = json.loads(self.registry_path.read_text(encoding="utf-8"))
+        for item in registry["candidates"]:
+            if item["id"] == candidate_id:
+                item["golden"] = True
+        self.registry_path.write_text(
+            json.dumps(registry, indent=2), encoding="utf-8"
+        )
+
+    def test_rejecting_a_golden_candidate_is_refused(self) -> None:
+        self.use_schema_1_5()
+        self.mark_golden("generic-cache")
+        self.plan["rejected_candidates"] = [
+            {
+                "candidate_id": "generic-cache",
+                "name": "generic-cache",
+                "category": "integration",
+                "reason": "A selected owner absorbs its evidence evaluation",
+                "disposition": "consolidated",
+                "absorbed_by": "firebase-services",
+            }
+        ]
+        self.write_fixture()
+        codes = [item.code for item in self.plan_diagnostics()]
+        self.assertIn("GOLDEN_CANDIDATE_REJECTED", codes)
+
+    def test_a_golden_flag_in_the_registry_is_valid(self) -> None:
+        self.mark_golden("firebase-services")
+        self.write_fixture()
+        codes = [item.code for item in self.plan_diagnostics()]
+        self.assertNotIn("REGISTRY_CANDIDATE_INVALID", codes)
+
+
 class RejectionDispositionTest(SkillQualityFixture):
     """A rejection says which kind of rejection it is.
 

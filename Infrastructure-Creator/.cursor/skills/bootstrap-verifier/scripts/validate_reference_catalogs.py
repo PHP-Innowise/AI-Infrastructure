@@ -142,9 +142,14 @@ def validate(directory: Path, forbidden: list[str] | None = None) -> list[str]:
                     # whose presence in a target makes "no surface here" false -
                     # or a stated reason why no target artifact could show it.
                     "escalates_on_rejection", "falsifier", "falsifier_absent",
+                    # `golden` marks the core development loop (plan, code,
+                    # test, debug, review): always selected, never rejected;
+                    # only the contract's scope adapts to the evidence.
+                    "golden",
                 }
                 or not _valid_roles(candidate.get("roles"))
                 or not isinstance(candidate.get("escalates_on_rejection", False), bool)
+                or not isinstance(candidate.get("golden", False), bool)
                 or not _valid_falsifier(candidate)
                 or candidate.get("mode") not in {"static", "family", "runtime-fixed"}
                 or not all(

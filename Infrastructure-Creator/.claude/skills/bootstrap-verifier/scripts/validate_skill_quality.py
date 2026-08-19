@@ -986,18 +986,20 @@ def _load_registry(
             or set(item) - {
                 "id", "catalog", "category", "mode", "roles",
                 "escalates_on_rejection", "falsifier", "falsifier_absent",
+                "golden",
             }
             or not all(
                 _is_nonempty_string(item.get(key))
                 for key in item
                 if key not in {
                     "roles", "escalates_on_rejection", "falsifier",
-                    "falsifier_absent",
+                    "falsifier_absent", "golden",
                 }
             )
             or item.get("mode") not in {"static", "runtime-fixed", "family"}
             or not _is_optional_role_list(item.get("roles"))
             or not isinstance(item.get("escalates_on_rejection", False), bool)
+            or not isinstance(item.get("golden", False), bool)
             or not _is_valid_falsifier(item)
         ):
             _diag(
@@ -5765,6 +5767,16 @@ def _validate_plan(
                         "REJECTED_CANDIDATE_UNKNOWN",
                         f"rejected candidate is absent from registry: "
                         f"{item['candidate_id']}",
+                    )
+                elif registry_candidate.get("golden") is True:
+                    _diag(
+                        diagnostics,
+                        "GOLDEN_CANDIDATE_REJECTED",
+                        f"{item['candidate_id']} is a golden development "
+                        "skill and is never rejected: every project that has "
+                        "code gets planned, coded, tested, debugged, and "
+                        "reviewed - narrow the contract to the evidence the "
+                        "target actually carries, do not drop the skill",
                     )
                 elif (
                     item["category"].lower()

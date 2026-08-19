@@ -63,6 +63,14 @@ Infrastructure-Creator intentionally has no `memory-bank/` of its own: its job i
 - Every proposed skill MUST prove distinct selection, owned scope, procedure,
   output, evidence, and routing value. Catalog membership alone is not a reason
   to generate it; unsupported or overlapping skills are pruned or merged.
+  Two exceptions are unconditional by design: the runtime-fixed memory
+  quartet, and the **golden development set** (`requirements-analyst`,
+  `coding`, `refactorer`, `testing`, `debugging`, `performance`,
+  `code-review`, `security-review`) - the
+  loop every codebase lives in is always generated, in any weather. Evidence
+  controls a golden skill's contract (its scope, procedures, commands, and
+  verification are built from the target's own details), never its
+  existence; `GOLDEN_CANDIDATE_REJECTED` blocks a plan that drops one.
 - Rejection is never silent. Every run writes a rejection report covering all
   turned-down candidates, and rejecting a candidate the registry flags
   `escalates_on_rejection` MUST be escalated to the user through the

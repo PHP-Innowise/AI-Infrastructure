@@ -15,11 +15,41 @@ sys.path.insert(0, str(SCRIPTS))
 
 from validate_reference_catalogs import validate  # noqa: E402
 
+# The golden development loop: always selected, never rejected, in any
+# weather. Only the contract's scope adapts to the target's evidence.
+GOLDEN_SET = {
+    "requirements-analyst",
+    "coding",
+    "refactorer",
+    "testing",
+    "debugging",
+    "performance",
+    "code-review",
+    "security-review",
+}
+
 
 class ReferenceContractTest(unittest.TestCase):
     def test_canonical_six_catalogs_are_complete(self) -> None:
         references = ROOT / ".agents/skills/skill-forge/references"
         self.assertEqual(validate(references), [])
+
+    def test_the_shipped_registry_marks_exactly_the_golden_set(self) -> None:
+        """Dropping a golden flag would quietly re-open per-run rejection of
+        the core development loop; adding one belongs in a reviewed change."""
+        import json
+
+        registry = json.loads(
+            (
+                ROOT / ".agents/skills/skill-forge/references/candidate-registry.json"
+            ).read_text(encoding="utf-8")
+        )
+        golden = {
+            item["id"]
+            for item in registry["candidates"]
+            if item.get("golden") is True
+        }
+        self.assertEqual(golden, GOLDEN_SET)
 
     def test_stub_and_source_stack_leftover_fail(self) -> None:
         with tempfile.TemporaryDirectory(prefix="reference-contract-") as temporary:

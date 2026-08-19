@@ -69,6 +69,12 @@ infra-scan <path-to-php-project>          (read-only; never writes into the targ
         would change the decision; rejecting a risk-flagged family
         (migrations, commands, deployment, admin panel, ...) triggers one
         bounded follow-up interview round instead of a silent drop
+      + the golden development set is always in the plan: requirements-analyst,
+        coding, refactorer, testing, debugging, performance, code-review, and
+        security-review generate on every run, tailored to this target's own
+        paths, commands, test topology, CI, and conventions - evidence narrows
+        their scope, never removes them (plus the always-installed memory
+        quartet: twelve guaranteed skills)
 
    <-- REVIEW THE PROFILE (what you read here is what infra-generate will build) -->
 
