@@ -328,6 +328,102 @@ class ScanCoverageTest(ScanCoverageFixture):
         self.assertIn("SCAN_DISPOSITION_CONFLICT", codes)
         self.assertIn("SCAN_SECRET_COVERED", codes)
 
+    def test_a_forbidden_file_inside_a_covered_tree_is_not_a_contradiction(
+        self,
+    ) -> None:
+        """"All of config is covered, except the keys nobody may read."
+
+        Found by running the gate against a real target: reading this as a
+        contradiction would force every scanner to enumerate a tree file by
+        file, which is what the glob surfaces exist to avoid.
+        """
+        (self.target / "config/jwt").mkdir(parents=True)
+        (self.target / "config/jwt/private.pem").write_text("x\n", encoding="utf-8")
+        self.coverage["surfaces"].insert(
+            0,
+            {
+                "surface": "config",
+                "kind": "tree",
+                "disposition": "covered",
+                "reason": "Framework configuration for the application",
+                "evidence_ids": ["EV-STK-0004"],
+            },
+        )
+        self.coverage["surfaces"].append(
+            {
+                "surface": "config/jwt",
+                "kind": "tree",
+                "disposition": "not-permitted",
+                "reason": "Private and public signing keys",
+                "evidence_ids": [],
+            }
+        )
+        self.ledger["evidence"].append(
+            {
+                "id": "EV-STK-0004",
+                "path": "config/services.yaml",
+                "source_type": "configuration",
+                "authority": "Declares autowiring defaults",
+                "confidence": "confirmed",
+                "supported_claims": ["services.yaml enables autowire"],
+            }
+        )
+        self.assertNotIn("SCAN_DISPOSITION_CONFLICT", self.codes())
+
+    def test_claiming_to_have_read_inside_a_forbidden_tree_is_a_contradiction(
+        self,
+    ) -> None:
+        """The other direction stays blocking: narrow claim, broad refusal."""
+        (self.target / "config/jwt").mkdir(parents=True)
+        (self.target / "config/jwt/private.pem").write_text("x\n", encoding="utf-8")
+        self.coverage["surfaces"].append(
+            {
+                "surface": "config",
+                "kind": "tree",
+                "disposition": "not-permitted",
+                "reason": "Treated as secret-bearing for this run",
+                "evidence_ids": [],
+            }
+        )
+        second = {
+            "scanner": "security-compliance-scanner",
+            "target_root": str(self.target),
+            "surfaces": [
+                {
+                    "surface": "config/jwt/private.pem",
+                    "kind": "file",
+                    "disposition": "covered",
+                    "reason": "Read the signing key",
+                    "evidence_ids": ["EV-SEC-0001"],
+                }
+            ],
+        }
+        (self.task / "security-compliance-scanner-coverage.json").write_text(
+            json.dumps(second, indent=2) + "\n", encoding="utf-8"
+        )
+        (self.task / "security-compliance-scanner-evidence.json").write_text(
+            json.dumps(
+                {
+                    "scanner": "security-compliance-scanner",
+                    "target_root": str(self.target),
+                    "evidence": [
+                        {
+                            "id": "EV-SEC-0001",
+                            "path": "config/jwt/private.pem",
+                            "source_type": "configuration",
+                            "authority": "Signing key",
+                            "confidence": "confirmed",
+                            "supported_claims": ["the key is present"],
+                        }
+                    ],
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self.assertIn("SCAN_DISPOSITION_CONFLICT", self.codes())
+
     def test_coverage_without_its_ledger_is_reported(self) -> None:
         (self.task / "stack-scanner-evidence.json").unlink()
         codes = [

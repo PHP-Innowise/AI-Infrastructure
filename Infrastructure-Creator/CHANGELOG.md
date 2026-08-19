@@ -73,6 +73,18 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Added
 
+- **A narrower disposition now overrules a broader one.** Running the discovery
+  gate against a real Symfony target on the first end-to-end run of schema 1.4
+  reported `config` as "both covered and forbidden": the architecture scanner had
+  covered the configuration tree, and the security scanner had marked
+  `config/jwt` not-permitted. That pair is how a scan says the right thing -
+  everything in config except the signing keys - and reading it as a
+  contradiction would force every scanner to enumerate a tree file by file,
+  which is exactly what the glob surfaces exist to avoid. The most specific
+  statement about a path now wins; what stays blocking is two statements at the
+  same specificity, and a narrow claim to have read inside something broader
+  that forbids it.
+
 - **Discovery now records what it did *not* read.** A scan that missed a
   subsystem and a scan that covered it produce the same artifact - a list of
   what was found - so the omission is invisible until a generated skill turns

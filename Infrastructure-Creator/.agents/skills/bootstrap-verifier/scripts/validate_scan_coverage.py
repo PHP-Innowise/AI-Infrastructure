@@ -160,6 +160,22 @@ def _matches(surface: str, kind: str, path: str) -> bool:
     return path == surface
 
 
+def _specificity(surface: str, path: str) -> int:
+    """How narrowly a declared surface speaks about one target path.
+
+    An exact path is the last word on itself; a tree or glob speaks about
+    everything under it and is overruled by anything more precise.
+    """
+    surface = surface.strip().rstrip("/")
+    if surface in {"**", "*"}:
+        return 0
+    if surface.endswith("/**"):
+        return len(surface[:-3].split("/"))
+    if surface == path:
+        return len(path.split("/")) + 1
+    return len(surface.split("/"))
+
+
 def _is_secret_surface(surface: str) -> bool:
     name = surface.strip().rstrip("/").split("/")[-1]
     return any(fnmatch.fnmatch(name, pattern) for pattern in SECRET_SURFACE_PATTERNS)
@@ -589,7 +605,7 @@ def validate(
         return diagnostics
 
     surfaces = target_surfaces(target, diagnostics)
-    accounted: dict[str, list[tuple[str, str]]] = {name: [] for name in surfaces}
+    accounted: dict[str, list[tuple[str, str, int]]] = {name: [] for name in surfaces}
     seen_scanners: set[str] = set()
     known_evidence: dict[str, set[str]] = {}
     ledger_locators: dict[str, str] = {}
@@ -667,7 +683,9 @@ def validate(
                 )
             for name in surfaces:
                 if _matches(surface, str(entry["kind"]), name):
-                    accounted[name].append((scanner, disposition))
+                    accounted[name].append(
+                        (scanner, disposition, _specificity(surface, name))
+                    )
 
         for identifier, cited_path in sorted(cited.items()):
             if not any(
@@ -691,10 +709,28 @@ def validate(
                 "looked at is not the same as one nobody needed",
             )
             continue
-        kinds = {disposition for _, disposition in dispositions}
-        if "covered" in kinds and "not-permitted" in kinds:
+        # The most specific statement wins. "The whole of config is covered,
+        # except config/jwt which nobody may read" is how a scan says the right
+        # thing, and reading it as a contradiction would force every scanner to
+        # enumerate a tree file by file. What remains a contradiction is two
+        # statements at the same specificity, or a narrow claim to have read
+        # inside something broader that forbids it.
+        finest = max(specificity for _, _, specificity in dispositions)
+        decisive = {
+            disposition
+            for _, disposition, specificity in dispositions
+            if specificity == finest
+        }
+        broader_forbids = any(
+            disposition == "not-permitted" and specificity < finest
+            for _, disposition, specificity in dispositions
+        )
+        if ("covered" in decisive and "not-permitted" in decisive) or (
+            "covered" in decisive and broader_forbids
+        ):
             owners = ", ".join(
-                f"{scanner}:{disposition}" for scanner, disposition in dispositions
+                f"{scanner}:{disposition}"
+                for scanner, disposition, _ in dispositions
             )
             _diag(
                 diagnostics,
