@@ -52,6 +52,9 @@ SCHEMA_1_2_PLAN_FIELDS = LEGACY_PLAN_FIELDS + (
     "critical_invariants",
     "flow_contracts",
 )
+SCHEMA_1_6_PLAN_FIELDS = SCHEMA_1_2_PLAN_FIELDS + (
+    "preexisting_team_skills",
+)
 REQUIRED_SKILL_FIELDS = (
     "name",
     "category",
@@ -323,22 +326,22 @@ BODY_PATH_CREATION_PATTERN = re.compile(
     r"|scaffold|write)(?:s|d|es|ed|ing)?\b|\b(?:new|wrote)\b",
     re.I,
 )
-CURRENT_PLAN_SCHEMA = "1.5"
-SUPPORTED_PLAN_SCHEMAS = {"1.0", "1.1", "1.2", "1.3", "1.4", "1.5"}
+CURRENT_PLAN_SCHEMA = "1.6"
+SUPPORTED_PLAN_SCHEMAS = {"1.0", "1.1", "1.2", "1.3", "1.4", "1.5", "1.6"}
 # Schemas that carry the typed operational contract. 1.3 adds nested shapes
 # only - the top level and the skill field set are 1.2's - so every typed rule
 # written for 1.2 applies unchanged.
-TYPED_PLAN_SCHEMAS = {"1.2", "1.3", "1.4", "1.5"}
+TYPED_PLAN_SCHEMAS = {"1.2", "1.3", "1.4", "1.5", "1.6"}
 # Schemas whose nested shapes carry the 1.3 additions: role wiring, recorded
 # verification baselines, absence evidence.
-WIRED_PLAN_SCHEMAS = {"1.3", "1.4", "1.5"}
+WIRED_PLAN_SCHEMAS = {"1.3", "1.4", "1.5", "1.6"}
 # Schemas whose rejections say which kind of rejection they are. Before 1.5
 # every rejection read as "there is nothing here", so a candidate whose concern
 # an already-selected skill covers had no honest way to be recorded - and the
 # target check, which can only refute absence, refuted it.
-DISPOSED_PLAN_SCHEMAS = {"1.5"}
+DISPOSED_PLAN_SCHEMAS = {"1.5", "1.6"}
 # Readable for audit diagnostics, ineligible for publication.
-LEGACY_PLAN_SCHEMAS = {"1.0", "1.1", "1.2", "1.3", "1.4"}
+LEGACY_PLAN_SCHEMAS = {"1.0", "1.1", "1.2", "1.3", "1.4", "1.5"}
 # What each kind of rejection has to show, beyond the fields every one carries.
 REJECTION_BASE_FIELDS = {"candidate_id", "name", "category", "reason", "disposition"}
 REJECTION_DISPOSITION_FIELDS = {
@@ -5566,6 +5569,159 @@ def _validate_contract_inventory(
         )
 
 
+def _validate_preexisting_team_skills(
+    value: Any,
+    target: Path,
+    diagnostics: list[Diagnostic],
+) -> dict[str, dict[str, Any]]:
+    """Validate narrow merge-only records for team-owned skill collisions.
+
+    These records are target facts, never generated-skill bodies.  They pin the
+    symlink identity and every protected file the plan relies on, while naming
+    a distinct generated alias that receives the project-adapted contract.
+    """
+    if not isinstance(value, list):
+        _diag(
+            diagnostics,
+            "PREEXISTING_TEAM_SKILLS_INVALID",
+            "preexisting_team_skills must be an array",
+        )
+        return {}
+    records: dict[str, dict[str, Any]] = {}
+    required = {
+        "name",
+        "candidate_id",
+        "edition",
+        "path",
+        "kind",
+        "mode",
+        "ownership",
+        "publication",
+        "generated_alias",
+        "symlink_target",
+        "symlink_sha256",
+        "files",
+    }
+    root = target.resolve()
+    for index, record in enumerate(value):
+        label = f"preexisting_team_skills[{index}]"
+        if not isinstance(record, dict) or set(record) != required:
+            _diag(
+                diagnostics,
+                "PREEXISTING_TEAM_SKILL_INVALID",
+                f"{label} must contain exactly {sorted(required)}",
+            )
+            continue
+        if not all(
+            _is_nonempty_string(record.get(field))
+            for field in required - {"files"}
+        ):
+            _diag(
+                diagnostics,
+                "PREEXISTING_TEAM_SKILL_INVALID",
+                f"{label} contains an empty scalar field",
+            )
+            continue
+        name = record["name"].strip()
+        if name in records:
+            _diag(
+                diagnostics,
+                "PREEXISTING_TEAM_SKILL_DUPLICATE",
+                f"duplicate pre-existing team skill: {name}",
+            )
+            continue
+        if (
+            record["kind"] != "preexisting-team"
+            or record["mode"] != "merge"
+            or record["ownership"] != "team"
+            or record["publication"] != "watch-only"
+            or record["edition"] not in {"claude", "cursor", "codex"}
+            or not _safe_relative(record["path"])
+            or not _safe_relative(record["generated_alias"])
+            or "/" in record["generated_alias"]
+        ):
+            _diag(
+                diagnostics,
+                "PREEXISTING_TEAM_SKILL_INVALID",
+                f"{label} must be merge-only, team-owned, watch-only, and target-relative",
+            )
+            continue
+        candidate = Path(os.path.abspath(str(root / record["path"])))
+        try:
+            candidate.parent.resolve().relative_to(root)
+        except (OSError, ValueError):
+            _diag(
+                diagnostics,
+                "PREEXISTING_TEAM_SKILL_PATH",
+                f"{name} protected path escapes the target: {record['path']}",
+            )
+            continue
+        if not candidate.is_symlink():
+            _diag(
+                diagnostics,
+                "PREEXISTING_TEAM_SKILL_DRIFT",
+                f"{name} protected path is no longer the approved symlink",
+            )
+            continue
+        actual_target = os.readlink(candidate)
+        actual_link_hash = hashlib.sha256(actual_target.encode("utf-8")).hexdigest()
+        if (
+            actual_target != record["symlink_target"]
+            or record["symlink_sha256"] != actual_link_hash
+        ):
+            _diag(
+                diagnostics,
+                "PREEXISTING_TEAM_SKILL_DRIFT",
+                f"{name} symlink identity or target drifted",
+            )
+        files = record["files"]
+        if not isinstance(files, list) or not files:
+            _diag(
+                diagnostics,
+                "PREEXISTING_TEAM_SKILL_INVALID",
+                f"{name}.files must be a non-empty array",
+            )
+            continue
+        seen_files: set[str] = set()
+        for file_index, item in enumerate(files):
+            if (
+                not isinstance(item, dict)
+                or set(item) != {"path", "sha256"}
+                or not _safe_relative(item.get("path"))
+                or not re.fullmatch(r"[0-9a-f]{64}", str(item.get("sha256", "")))
+            ):
+                _diag(
+                    diagnostics,
+                    "PREEXISTING_TEAM_SKILL_INVALID",
+                    f"{name}.files[{file_index}] must contain a safe path and SHA-256",
+                )
+                continue
+            rel = item["path"]
+            if rel in seen_files:
+                _diag(
+                    diagnostics,
+                    "PREEXISTING_TEAM_SKILL_INVALID",
+                    f"{name} repeats protected file {rel}",
+                )
+                continue
+            seen_files.add(rel)
+            protected = _confined(target, rel)
+            if protected is None or not protected.is_file() or protected.is_symlink():
+                _diag(
+                    diagnostics,
+                    "PREEXISTING_TEAM_SKILL_DRIFT",
+                    f"{name} protected file is missing or unsafe: {rel}",
+                )
+            elif hashlib.sha256(protected.read_bytes()).hexdigest() != item["sha256"]:
+                _diag(
+                    diagnostics,
+                    "PREEXISTING_TEAM_SKILL_DRIFT",
+                    f"{name} protected file fingerprint drifted: {rel}",
+                )
+        records[name] = record
+    return records
+
+
 def _validate_plan(
     plan: dict[str, Any],
     plan_path: Path,
@@ -5575,7 +5731,9 @@ def _validate_plan(
 ) -> tuple[dict[str, dict[str, Any]], dict[str, tuple[str, str]]]:
     schema_version = plan.get("schema_version")
     required_plan_fields = (
-        SCHEMA_1_2_PLAN_FIELDS
+        SCHEMA_1_6_PLAN_FIELDS
+        if schema_version == "1.6"
+        else SCHEMA_1_2_PLAN_FIELDS
         if schema_version in TYPED_PLAN_SCHEMAS
         else LEGACY_PLAN_FIELDS
     )
@@ -5971,6 +6129,18 @@ def _validate_plan(
             )
         _validate_rejections_against_target(items, registry, target, diagnostics)
 
+    preexisting_team_skills = (
+        _validate_preexisting_team_skills(
+            plan.get("preexisting_team_skills"), target, diagnostics
+        )
+        if schema_version == "1.6"
+        else {}
+    )
+    preexisting_by_alias = {
+        record["generated_alias"]: record
+        for record in preexisting_team_skills.values()
+    }
+
     skills = plan["skills"]
     if not isinstance(skills, list) or not skills:
         _diag(diagnostics, "SKILL_PLAN_EMPTY", "skills must be a non-empty array")
@@ -6073,6 +6243,16 @@ def _validate_plan(
                 or (
                     registry_candidate["mode"] in {"static", "runtime-fixed"}
                     and selection_gate.get("candidate_id") != name
+                    and not (
+                        schema_version == "1.6"
+                        and name in preexisting_by_alias
+                        and preexisting_by_alias[name]["candidate_id"]
+                        == selection_gate.get("candidate_id")
+                        and preexisting_by_alias[name]["name"]
+                        == selection_gate.get("candidate_id")
+                        and skill.get("preexisting_team_replacement")
+                        == preexisting_by_alias[name]["name"]
+                    )
                 )
                 or (
                     registry_candidate["mode"] == "runtime-fixed"
@@ -6213,6 +6393,44 @@ def _validate_plan(
         plan_skills[name] = skill
 
     names = set(plan_skills)
+    if schema_version == "1.6":
+        for original_name, record in preexisting_team_skills.items():
+            alias = record["generated_alias"]
+            if original_name in names:
+                _diag(
+                    diagnostics,
+                    "PREEXISTING_TEAM_SKILL_COLLISION",
+                    f"{original_name} remains selected at its protected team-owned name",
+                )
+            replacement = plan_skills.get(alias)
+            if replacement is None:
+                _diag(
+                    diagnostics,
+                    "PREEXISTING_TEAM_SKILL_REPLACEMENT_MISSING",
+                    f"{original_name} has no generated replacement contract: {alias}",
+                )
+            elif (
+                replacement.get("preexisting_team_replacement") != original_name
+                or replacement.get("selection_gate", {}).get("candidate_id")
+                != record["candidate_id"]
+            ):
+                _diag(
+                    diagnostics,
+                    "PREEXISTING_TEAM_SKILL_REPLACEMENT_INVALID",
+                    f"{alias} does not explicitly replace {original_name}",
+                )
+        for name, skill in plan_skills.items():
+            replacement_name = skill.get("preexisting_team_replacement")
+            if replacement_name is not None and (
+                not _is_nonempty_string(replacement_name)
+                or replacement_name not in preexisting_team_skills
+                or preexisting_team_skills[replacement_name]["generated_alias"] != name
+            ):
+                _diag(
+                    diagnostics,
+                    "PREEXISTING_TEAM_SKILL_REPLACEMENT_INVALID",
+                    f"{name} names an unknown or mismatched team-owned replacement",
+                )
     selected_candidate_ids = [
         skill.get("selection_gate", {}).get("candidate_id")
         for skill in plan_skills.values()

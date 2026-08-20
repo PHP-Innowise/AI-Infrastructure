@@ -13,11 +13,12 @@ The JSON top level MUST contain exactly these required members (extensions requi
 
 ```json
 {
-  "schema_version": "1.5",
+  "schema_version": "1.6",
   "catalog_version": "2.5.0",
   "target_root": "/absolute/path/to/target",
   "profile": "tasks/TASK-001/infra-scan-project-profile.md",
   "evidence": [],
+  "preexisting_team_skills": [],
   "skills": [],
   "rejected_candidates": [],
   "critical_invariants": [],
@@ -25,14 +26,28 @@ The JSON top level MUST contain exactly these required members (extensions requi
 }
 ```
 
-Top-level membership is exact. New plans use `schema_version": "1.5"`, which
-adds nothing to a skill and one typed field to a rejection: `disposition`, the
-kind of rejection it is. 1.4 and earlier stay readable for audit diagnostics and
-are ineligible for publication.
-Schemas `1.0` through `1.3` remain readable for plan-only audit diagnostics
+Top-level membership is exact. New plans use `schema_version": "1.6"`, which
+adds the typed `preexisting_team_skills` collision contract. Schema 1.5 added
+the rejection `disposition` field. 1.5 and earlier stay readable for audit
+diagnostics and are ineligible for publication.
+Schemas `1.0` through `1.5` remain readable for plan-only audit diagnostics
 and produce a nonblocking `PLAN_SCHEMA_MIGRATION` warning. They are publication
 ineligible: full or partial authored-skill validation emits blocking
-`LEGACY_PLAN_PUBLICATION_INELIGIBLE`. New synthesis runs MUST emit 1.4.
+`LEGACY_PLAN_PUBLICATION_INELIGIBLE`. New synthesis runs MUST emit 1.6.
+
+**1.6 adds one top-level merge collision contract.** Each
+`preexisting_team_skills[]` record exists only when a selected-edition skill
+path already resolves to a team-owned symlink that merge mode must preserve.
+It pins the original name/candidate, edition, target-relative symlink path,
+literal link target and SHA-256, every protected regular file and SHA-256, and
+a distinct `generated_alias`. Its fixed values are `kind:
+preexisting-team`, `mode: merge`, `ownership: team`, and `publication:
+watch-only`. The aliased generated skill carries
+`preexisting_team_replacement: <original-name>` and remains fully subject to
+the normal evidence, semantic, routing, and generated-path checks. The
+protected path and files enter the watch plan only; they never enter staging,
+publication, write-plan, or manifest ownership. Symlink safety is not relaxed
+for generated or owned paths.
 
 **1.3 changed nested shapes only** - a role entry names the evidence and the
 procedure step that carry it; an executable verification records what its
@@ -299,7 +314,7 @@ Each `skills[]` entry is one complete, independently actionable contract:
 }
 ```
 
-All shown members except `fixed_blocks` are required under schema 1.5, including non-empty
+All shown members except `fixed_blocks` are required under schema 1.6, including non-empty
 positive and negative triggers, owned and excluded scope, structured ownership,
 required procedure roles and steps, decision points, structured verification,
 integration safety, path contracts, evidence anchors, routing cases, output,

@@ -722,7 +722,8 @@ class SkillQualityFixture(unittest.TestCase):
 
     def use_schema_1_5(self) -> None:
         self.use_schema_1_4()
-        self.plan["schema_version"] = "1.5"
+        self.plan["schema_version"] = "1.6"
+        self.plan["preexisting_team_skills"] = []
         for rejection in self.plan["rejected_candidates"]:
             rejection.setdefault("disposition", "absent")
         self.rewrite()
@@ -946,7 +947,7 @@ class SkillQualityTest(SkillQualityFixture):
         self.assertIn("PLAN_SCHEMA_MIGRATION", [item.code for item in diagnostics])
         self.assertFalse(any(item.severity == "error" for item in diagnostics))
 
-    def test_schema_1_4_typed_contract_passes_plan_and_authored_validation(self) -> None:
+    def test_schema_1_6_typed_contract_passes_plan_and_authored_validation(self) -> None:
         self.use_schema_1_5()
         self.assertEqual(self.plan_diagnostics(), [])
         self.assertEqual(self.codes(), [])

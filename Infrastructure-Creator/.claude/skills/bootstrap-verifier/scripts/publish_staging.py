@@ -16,6 +16,7 @@ publication instead of clobbering it.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -56,8 +57,29 @@ def removal_paths(plan: Path | None) -> list[str]:
     return paths
 
 
-def file_state(root: Path, rel: str) -> dict:
-    path = confined_target_path(root, rel)
+def file_state(root: Path, rel: str, *, allow_final_symlink: bool = False) -> dict:
+    if allow_final_symlink:
+        root = resolve_target(root)
+        rel = normalize_relative_path(rel)
+        path = root / rel
+        parent = root
+        for part in Path(rel).parts[:-1]:
+            parent = parent / part
+            if parent.is_symlink():
+                raise PublicationError(f"watched path has a symlink parent: {rel}")
+        try:
+            parent.resolve().relative_to(root)
+        except ValueError as error:
+            raise PublicationError(f"watched path escapes target root: {rel}") from error
+        if path.is_symlink():
+            link_target = os.readlink(path)
+            return {
+                "state": "symlink",
+                "target": link_target,
+                "sha256": hashlib.sha256(link_target.encode("utf-8")).hexdigest(),
+            }
+    else:
+        path = confined_target_path(root, rel)
     if not path.exists():
         return {"state": "missing"}
     if path.is_symlink() or not path.is_file():
@@ -83,7 +105,12 @@ def build_snapshot(
     return {
         "schema_version": 1,
         "target": str(target),
-        "files": {rel: file_state(target, rel) for rel in sorted(set(all_paths))},
+        "files": {
+            rel: file_state(
+                target, rel, allow_final_symlink=rel in set(baseline_only)
+            )
+            for rel in sorted(set(all_paths))
+        },
         "baseline_only": sorted(set(baseline_only)),
     }
 
@@ -117,8 +144,11 @@ def verify_baseline(
     all_paths = paths + baseline_only
     if not isinstance(expected, dict) or set(expected) != set(all_paths):
         raise PublicationError("baseline membership does not match publication plan")
+    baseline_set = set(baseline_only)
     for rel in all_paths:
-        if file_state(target, rel) != expected[rel]:
+        if file_state(
+            target, rel, allow_final_symlink=rel in baseline_set
+        ) != expected[rel]:
             raise PublicationError(f"target changed after collision review: {rel}")
 
 

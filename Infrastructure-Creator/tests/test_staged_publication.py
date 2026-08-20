@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import subprocess
 import sys
@@ -196,6 +197,39 @@ class StagedPublicationTest(unittest.TestCase):
         self.assertEqual(
             (self.target / "config/policy.md").read_text(encoding="utf-8"), "old\n"
         )
+
+    def test_baseline_only_symlink_identity_is_watched_without_publication(self) -> None:
+        team_skill = self.target / ".agents/skills/frontend-design"
+        team_skill.mkdir(parents=True)
+        (team_skill / "SKILL.md").write_text("team skill\n", encoding="utf-8")
+        claude_skills = self.target / ".claude/skills"
+        claude_skills.mkdir(parents=True)
+        watched = claude_skills / "frontend-design"
+        watched.symlink_to("../../.agents/skills/frontend-design")
+        paths = planned_paths(self.plan)
+        snapshot = build_snapshot(
+            self.target, paths, [".claude/skills/frontend-design"]
+        )
+        self.assertEqual(
+            snapshot["files"][".claude/skills/frontend-design"],
+            {
+                "state": "symlink",
+                "target": "../../.agents/skills/frontend-design",
+                "sha256": hashlib.sha256(
+                    b"../../.agents/skills/frontend-design"
+                ).hexdigest(),
+            },
+        )
+
+        watched.unlink()
+        watched.symlink_to("../../.agents/skills/other")
+        with self.assertRaisesRegex(PublicationError, "target changed"):
+            verify_baseline(
+                self.target,
+                paths,
+                snapshot,
+                [".claude/skills/frontend-design"],
+            )
 
     def test_baseline_only_overlap_is_rejected(self) -> None:
         paths = planned_paths(self.plan)

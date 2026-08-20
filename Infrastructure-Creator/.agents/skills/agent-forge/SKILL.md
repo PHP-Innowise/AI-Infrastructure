@@ -21,7 +21,7 @@ skills distinguishable using the target's actual concerns.
 Only two editions carry an agent layer: **Claude** (`.claude/agents/`, full frontmatter) and **Cursor** (`.cursor/agents/`, reduced frontmatter). **Codex has no agent layer** and is always skipped. The agent body is identical across the two editions; only the frontmatter differs.
 
 Consumes: `tasks/TASK-{N}/skill-forge-log.md` (validated skill list),
-`tasks/TASK-{N}/skill-generation-plan.json` schema **1.5** (`routing_cases`,
+`tasks/TASK-{N}/skill-generation-plan.json` schema **1.6** (`routing_cases`,
 every `nearest_siblings[]` adjacency, `flow_contracts`, and write contracts),
 and profile section **1** (selected editions). If the skill log does not record
 a passing semantic validation result, stop; wrappers must never legitimize an
@@ -68,7 +68,7 @@ each validated skill `<name>` and selected agent-carrying edition, write
    it into the wrapper.
 6. **Validate all adjacency and routing oracles.** Carry every
    `nearest_siblings[]` entry into the wrapper's negative deferrals; never
-   collapse the list to one convenient sibling. Execute every schema 1.5
+   collapse the list to one convenient sibling. Execute every schema 1.6
    `routing_cases[]` oracle. Each case must preserve its prompt, one primary
    owner, and the complete ordered deferred set. Fail on an omitted adjacency,
    an undeclared owner, or two agents claiming the same example without an

@@ -16,8 +16,8 @@ actual validation gates so a doc edit cannot quietly contradict a validator:
   documented (with the runnable recipe) in infra-generate.
 - The command-forge frontmatter guardrail must carry the flow-command
   exception that the flow-contract validator mechanically enforces.
-- AGENTS.md must state one consistent schema policy: only 1.2 is
-  approvable; 1.0/1.1 are audit-readable and must be re-synthesized.
+- AGENTS.md must state one consistent schema policy: only 1.6 is
+  approvable; 1.0 through 1.5 are audit-readable and must be re-synthesized.
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ import validate_skill_quality  # noqa: E402
 from validate_skill_quality import (  # noqa: E402
     OWNERSHIP_ID_PATTERN,
     SCHEMA_1_2_PLAN_FIELDS,
+    SCHEMA_1_6_PLAN_FIELDS,
     SCHEMA_1_2_SKILL_FIELDS,
 )
 
@@ -90,7 +91,7 @@ class SchemaDocExemplarTest(unittest.TestCase):
 
     def test_plan_top_level_example_matches_validator_membership(self) -> None:
         plan = self._only(lambda block: "schema_version" in block)
-        self.assertEqual(set(plan), set(SCHEMA_1_2_PLAN_FIELDS))
+        self.assertEqual(set(plan), set(SCHEMA_1_6_PLAN_FIELDS))
 
     def test_skill_exemplar_carries_schema_1_2_fields(self) -> None:
         skill = self._only(lambda block: block.get("name") == "testing")
@@ -234,9 +235,9 @@ class BootstrapVerifierDedupDocTest(unittest.TestCase):
 class AgentsPolicyDocTest(unittest.TestCase):
     def test_schema_policy_bullets_are_consistent(self) -> None:
         flat = normalized(AGENTS_DOC)
-        self.assertIn("only a schema 1.5 plan is approvable", flat)
+        self.assertIn("only a schema 1.6 plan is approvable", flat)
         self.assertIn(
-            "Legacy 1.0/1.1/1.2/1.3/1.4 plans remain readable for audit but MUST "
+            "Legacy 1.0/1.1/1.2/1.3/1.4/1.5 plans remain readable for audit but MUST "
             "be re-synthesized",
             flat,
         )

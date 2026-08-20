@@ -34,7 +34,7 @@ No new file naming of its own. It relies on `infra-scan` (which writes `tasks/TA
      interview round - STOP and hand the rejection report to the user; a
      silently dropped operational skill is a checkpoint condition, not a
      detail.
-   - Require schema 1.5 and zero blocking diagnostics across the complete
+   - Require schema 1.6 and zero blocking diagnostics across the complete
      operational-safety, ownership/write/routing/flow inventory. Legacy 1.0/1.1
      plans may be audited but require re-synthesis before this build can
      continue. Calibrated similarity warnings remain visible.

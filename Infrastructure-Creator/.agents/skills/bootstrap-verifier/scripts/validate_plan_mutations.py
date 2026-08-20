@@ -179,6 +179,17 @@ def _drop_evidence_dispositions(plan, gate, roles) -> str | None:
     return None
 
 
+def _damage_preexisting_team_fingerprint(plan, gate, roles) -> str | None:
+    for record in plan.get("preexisting_team_skills") or []:
+        if not isinstance(record, dict):
+            continue
+        files = record.get("files") or []
+        if files and isinstance(files[0], dict) and files[0].get("sha256"):
+            files[0]["sha256"] = "0" * 64
+            return str(record.get("name") or "preexisting-team")
+    return None
+
+
 MUTATIONS: tuple[tuple[str, str, Callable], ...] = (
     (
         "a catalog obligation is dropped from a skill whose candidate declares them",
@@ -219,6 +230,11 @@ MUTATIONS: tuple[tuple[str, str, Callable], ...] = (
         "a skill stops ruling out the evidence inside its own paths",
         "SKILL_EVIDENCE_UNDISPOSED",
         _drop_evidence_dispositions,
+    ),
+    (
+        "a protected pre-existing team skill fingerprint changes",
+        "PREEXISTING_TEAM_SKILL_DRIFT",
+        _damage_preexisting_team_fingerprint,
     ),
 )
 
