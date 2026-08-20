@@ -628,6 +628,26 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Fixed
 
+- **Promoting 1.6 switched two 1.5 rules off.** `LEGACY_PLAN_SCHEMAS` means
+  "readable for audit, ineligible for publication", and demoting 1.5 into it
+  when 1.6 became current is right. Two call sites, though, were using that set
+  as a stand-in for a *feature* set, because under the old constants
+  `not in LEGACY` happened to equal `{1.5}`:
+  - the guard around `_validate_evidence_dispositions`, which carries
+    `SKILL_CLAIM_IDS_INVALID` and `SKILL_EVIDENCE_UNDISPOSED`;
+  - the required-field selection, which is what makes `claim_ids` and
+    `evidence_dispositions` mandatory members at all.
+  So every schema-1.5 plan silently stopped being checked for either. The
+  mutation step is what noticed: it damaged a plan by emptying a skill's
+  `claim_ids`, the gate raised nothing, and `MUTATION_UNCAUGHT` said so by name.
+  Both sites now key on `DISPOSED_PLAN_SCHEMAS` - the set that actually names
+  the schemas carrying dispositions - so a future demotion cannot repeat this.
+- **The 1.6 mutation had no expectation recorded for it.** Schema 1.6 added a
+  damage - a protected pre-existing team skill's fingerprint changes - and the
+  corpus has no such skill, so the step correctly reports it unexercised. The
+  test that counts inapplicable damages still expected three; it expects four,
+  and its comment names the fourth.
+
 - **A narrow golden skill was told to anchor evidence that has no anchor.**
   `EVIDENCE_ANCHORS_INVALID` refused an empty `evidence_anchors` array whenever
   a skill declared any evidence at all. The per-evidence rule directly below it

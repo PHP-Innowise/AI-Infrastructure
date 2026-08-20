@@ -4392,7 +4392,12 @@ def _validate_schema_1_2_skill(
                 f"{name}.{step['id']} references unknown decisions: {unknown_decisions}",
             )
 
-    if schema_version not in LEGACY_PLAN_SCHEMAS:
+    # Keyed on the schemas that actually carry dispositions, not on whichever
+    # ones are still current. `claim_ids` and `evidence_dispositions` arrived
+    # with 1.5; demoting 1.5 to audit-only says nothing about whether a 1.5 plan
+    # has them, and reading the demotion as an answer silently switched this
+    # rule off for every 1.5 plan.
+    if schema_version in DISPOSED_PLAN_SCHEMAS:
         _validate_evidence_dispositions(
             name, skill, evidence_map, runtime_fixed, diagnostics
         )
@@ -6152,7 +6157,7 @@ def _validate_plan(
         required_skill_fields = REQUIRED_SKILL_FIELDS
         if schema_version in TYPED_PLAN_SCHEMAS:
             required_skill_fields = SCHEMA_1_2_SKILL_FIELDS
-        if schema_version not in LEGACY_PLAN_SCHEMAS:
+        if schema_version in DISPOSED_PLAN_SCHEMAS:
             required_skill_fields = SCHEMA_1_4_SKILL_FIELDS
         missing = [field for field in required_skill_fields if field not in skill]
         if missing:
