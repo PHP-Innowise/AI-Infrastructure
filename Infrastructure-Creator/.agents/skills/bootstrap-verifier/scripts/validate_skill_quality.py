@@ -4787,9 +4787,16 @@ def _validate_schema_1_2_skill(
 
     anchors = skill.get("evidence_anchors")
     anchored_evidence: set[str] = set()
-    if not isinstance(anchors, list) or (
-        skill.get("evidence_ids") and not anchors
-    ):
+    # A skill that rests only on absences has nothing to anchor: an absence is
+    # pinned by the search this gate resolves, not by a line range. The
+    # per-evidence rule below already says so; demanding a non-empty list here
+    # would contradict it for the one skill shape that cites nothing else.
+    anchorable = [
+        identifier
+        for identifier in _as_list(skill.get("evidence_ids"))
+        if (evidence_map.get(str(identifier)) or ("", ""))[0] != "absence"
+    ]
+    if not isinstance(anchors, list) or (anchorable and not anchors):
         _diag(
             diagnostics,
             "EVIDENCE_ANCHORS_INVALID",

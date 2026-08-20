@@ -591,6 +591,18 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Fixed
 
+- **A narrow golden skill was told to anchor evidence that has no anchor.**
+  `EVIDENCE_ANCHORS_INVALID` refused an empty `evidence_anchors` array whenever
+  a skill declared any evidence at all. The per-evidence rule directly below it
+  had already granted the exemption the shape needs - an absence is pinned by
+  the search this gate resolves, not by a line range, so there is nothing to
+  quote - but the list-level check ran first and never saw it. The result was
+  that the one contract shape schema 1.5 exists to make possible, a golden
+  candidate resting on nothing but the absence that narrows it, could not be
+  written. The list is now required only when the skill cites evidence that has
+  a location; both directions carry a regression test, and the failing one was
+  observed against the pre-change gate.
+
 - **Five quality gates rejected output their own forge instructions
   prescribe.** Found by executing the forges by hand against a real target -
   authoring every skill, agent, command and flow from the plan contracts

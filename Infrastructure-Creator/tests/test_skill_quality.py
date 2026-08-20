@@ -3885,6 +3885,48 @@ class AbsentGoldenTest(SkillQualityFixture):
         # that something else is missing.
         self.assertIn("ABSENT_GOLDEN_UNPROVEN", self.narrow(evidence_id="EV-0001"))
 
+    def test_a_contract_resting_only_on_absences_needs_no_anchor(self) -> None:
+        """The one skill shape that has nothing to anchor is not punished for it.
+
+        An absence is pinned by the search this gate resolves, not by a line
+        range; the per-evidence rule says so and skips it. The non-empty check
+        on the list did not, so a narrow golden skill citing nothing but its
+        absence was told its `evidence_anchors` array must not be empty - the
+        opposite of what the rule below it grants.
+        """
+        self.use_schema_1_5()
+        self.mark_golden("firebase-services")
+        (self.target / "composer.json").write_text('{"require": {}}\n', encoding="utf-8")
+        self.plan["evidence"].append(self.ABSENCE)
+        skill = self.plan["skills"][0]
+        skill["selection_gate"]["conditions"] = [
+            {
+                "requirement": "A measurable hot path or profiling record exists",
+                "evidence_ids": ["EV-ABS-0001"],
+                "status": "absent-golden",
+                "explanation": "no blackfire profiler is named in composer.json",
+            }
+        ]
+        skill["narrow_scope"] = "Until a profile exists this skill establishes the measurement rather than the fix"
+        skill["evidence_ids"] = ["EV-ABS-0001"]
+        skill["evidence_anchors"] = []
+        self.write_fixture()
+        codes = [item.code for item in self.plan_diagnostics()]
+        self.assertNotIn("EVIDENCE_ANCHORS_INVALID", codes)
+        self.assertNotIn("EVIDENCE_ANCHOR_MISSING", codes)
+
+    def test_an_empty_anchor_list_is_still_refused_for_located_evidence(self) -> None:
+        # The exemption is for absences alone: evidence with a path still has
+        # a line range to quote, and dropping the list stays a defect.
+        self.use_schema_1_5()
+        skill = self.plan["skills"][0]
+        skill["evidence_anchors"] = []
+        self.write_fixture()
+        self.assertIn(
+            "EVIDENCE_ANCHORS_INVALID",
+            [item.code for item in self.plan_diagnostics()],
+        )
+
     def test_narrowing_a_skill_whose_surface_is_there_is_reported(self) -> None:
         self.use_schema_1_5()
         self.plan["skills"][0]["narrow_scope"] = "narrowed for a surface that is present"
