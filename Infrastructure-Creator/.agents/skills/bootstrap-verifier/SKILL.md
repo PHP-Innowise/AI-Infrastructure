@@ -19,7 +19,7 @@ ownership, and placeholder checks.
 It uses the bundled dependency-free `scripts/validate_generated.py`,
 `scripts/validate_scan_coverage.py`, `scripts/validate_plan_review.py`,
 `scripts/validate_content_review.py`, `scripts/validate_plan_mutations.py`,
-and `scripts/analyze_commands.py` plus
+`scripts/validate_memory_content.py`, and `scripts/analyze_commands.py` plus
 targeted manual checks.
 
 ## Generated File Naming Convention (MANDATORY)
@@ -213,6 +213,7 @@ Writes a report to `tasks/TASK-{N}/bootstrap-verifier-report.md`. Does not write
    - Orchestration parity, when the run generated flows: every `stages` entry in a flow command names an agent that exists in that edition, no `parallel: true` stage contains more than one agent carrying `writes: true`, and each multi-stage flow declares at least one checkpoint (a single-stage read-only flow needs none). A generated accelerator whose flows name absent agents is a failed generation, not a warning.
    - Every hook wiring file (`.claude/settings.json`, `.cursor/hooks.json`, `.codex/hooks.json` + `config.toml`) references only hook scripts that exist and are executable - no dead hooks; every `.sh` token in a wired command is resolved, so an interpreter-prefixed `bash .claude/hooks/x.sh` cannot slip through.
    - The seeded `memory-bank/` passes its own `scripts/validate.py`, run against `--evidence-target` as the source root: the chunks cite the target's files, and during generation the bank is staged apart from them.
+   - The seeded chunks pass `scripts/validate_memory_content.py --bank <generation-root>/memory-bank --target <evidence-target>`: every body states a rule with concrete anchors, no two bodies share a skeleton, no known boilerplate phrase survives, every cited source is explained with a range its file can contain, and contradiction chunks record both claims as `needs-review`. The structural validator proves shape; this gate proves the bank preserves knowledge.
    - The context-brain runtime is complete (`context.py`, `brain_runtime.py`, `context_retrieval.py`, `validate.py` under `memory-bank/scripts/`), the `project-brain/` skeleton exists, and `config/runtime.json` parses with a substituted, non-empty framework slug and a `canonical_edition` whose skills tree actually exists in the target (otherwise `context.py parity` would report false total drift).
    - Smoke: `python3 memory-bank/scripts/context.py status` and `python3 memory-bank/scripts/context.py validate` both exit 0 inside the generated tree.
    - Every selected edition contains the memory quartet skills (`memory-bank`, `project-brain`, `checkpoint`, `memory`) and their agent/command wrappers where applicable.
@@ -320,6 +321,7 @@ A non-empty `STILL MISSING` list means a tracked file vanished - that is an esca
 - Hook wiring (all wired scripts exist + executable): [pass/fail]
 - Edition scope (selected present, unselected absent): [pass/fail]
 - Memory bank validate.py: [pass/fail]
+- Memory chunk substance (validate_memory_content.py): [pass/fail]
 - Context-brain runtime + project-brain skeleton: [pass/fail]
 - Smoke (context.py status / validate): [pass/fail]
 - Manifest (.infra-manifest.json membership + hashes + tracked AGENTS.md stamp): [pass/fail]
@@ -344,7 +346,7 @@ A non-empty `STILL MISSING` list means a tracked file vanished - that is an esca
   generation or update gate - a bundle nobody read is not verified, however
   many mechanical checks it passed.
 - MUST confirm no unselected edition was generated.
-- MUST run the seeded memory bank's own validator, not a substitute.
+- MUST run the seeded memory bank's own validator, not a substitute, and MUST also run `validate_memory_content.py` - a bank that validates structurally while every body restates its title is a failed seed, not a passing one.
 - MUST keep placeholder exemptions occurrence-scoped to an explicitly approved manifest-relative path-plus-regex declaration; MUST NOT exempt a whole file or a placeholder pattern globally.
 - MUST refresh the manifest hashes (recipe above) after any auto-fix that changed file content, and re-run the validator - a manifest describing pre-fix content is a broken upgrade contract.
 - MUST NOT add or remove manifest entries merely to make the validator pass. Membership changes require the explicit `infra-generate` or `infra-update` write plan; unmanifested on-disk files are team-owned and are not a validation failure.

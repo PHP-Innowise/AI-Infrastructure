@@ -99,6 +99,43 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Added
 
+- **Seeded memory chunks must carry the rule, not a template -
+  `validate_memory_content.py` joins the gates.** A reviewed publication
+  showed the failure exactly: all fifteen seeded chunks passed the structural
+  validator while carrying one identical body ("X is a confirmed authority
+  boundary recorded by TASK-001; re-open the cited sources...") with the
+  title and paths substituted, and the one real contradiction in the target -
+  a `finally` promoting FAILED to FINISHED with completion side effects - was
+  named by a title and stated by nothing, marked `active` as if settled.
+  `memory-seed` now has a content contract for every body: Durable Context
+  states the smallest concrete rule (condition, required behavior, forbidden
+  behavior, consequence, with real symbols and `path:Lrange` citations),
+  Consequences names what future code and tests must preserve including a
+  forbidden outcome, Verification explains per cited source what its exact
+  range proves and what change triggers re-review, and a contradiction chunk
+  records both competing claims with the current safe operating rule and a
+  resolution owner under `needs-review` - never as settled `active`
+  knowledge. The new dependency-free gate enforces it: `MEMORY_RULE_MISSING`
+  (no behavioral modality plus concrete anchor), `MEMORY_BODY_TEMPLATED`
+  (two bodies collapsing to one skeleton once identity is erased),
+  `MEMORY_GENERIC_PHRASE` (the shipped boilerplate, blacklisted verbatim),
+  `MEMORY_SOURCE_UNEXPLAINED`/`MEMORY_SOURCE_DUPLICATE`/
+  `MEMORY_VERIFICATION_RANGE`, and `MEMORY_CONTRADICTION_SETTLED`/
+  `MEMORY_CONTRADICTION_IMPLICIT`. Run against the reviewed publication it
+  fires 146 errors across all six classes; twelve regression tests pin it
+  (`tests/test_memory_content.py`). Wired in three places: `memory-seed`
+  blocks its own seed on exit 1, `bootstrap-verifier` requires it beside the
+  bank's structural validator, and `infra-validate`'s memory lane runs it in
+  staged and standalone mode alike - standalone additionally covers the
+  deliberately unmanifested seeded chunks (`memory-bank/chunks/MEM-*.md` +
+  `INDEX.md`, and only those), treating them as team-owned live data:
+  per-chunk approval before any rewrite, `memory-seed` rebuilds bodies from
+  the task's own evidence, team edits are superseded rather than
+  overwritten, and unsupported chunks are flagged `needs-review`, never
+  deleted. So re-running one command - `/infra-validate <target>` - now
+  checks the bank's substance and refills it from the evidence when there is
+  reason to.
+
 - **Consolidation stopped being free, and the scan stopped being exhaustive.**
   Reported from a real run: "it creates a million files with evidence and
   reports, but the output says it will create 11 skills and reject 41, because

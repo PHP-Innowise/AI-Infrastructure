@@ -55,7 +55,12 @@ documentation, not a substitute for running the gate.
    update staging equivalent). Standalone: require the target path and its
    `.infra-manifest.json`; the manifest's `files` map is the review surface,
    and a missing manifest aborts - a legacy target is `infra-update`'s
-   problem, not a reason to walk the tree.
+   problem, not a reason to walk the tree. One sanctioned addition to that
+   surface: the seeded `memory-bank/chunks/MEM-*.md` and `INDEX.md` are
+   deliberately unmanifested runtime state, yet they are generator-seeded
+   content - standalone mode reviews them in the `memory` lane (glob those
+   two shapes only, never a broader walk), because a templated bank is
+   exactly the defect a re-run of this one command must catch and fix.
 2. **Partition the surface into lanes** from the explicit plan - never a tree
    walk: `skills` (generated `SKILL.md` files), `wrappers` (agents, commands,
    flows, `SKILL FLOW.md`), `policy` (`AGENTS.md`, `DOD.md`,
@@ -70,6 +75,22 @@ documentation, not a substitute for running the gate.
    serialization. Each gets its lane, explicit file list, the real target
    path, and the plan. Large skill inventories may split the `skills` lane
    into batches; every batch is still an explicit list.
+   The `memory` lane runs its deterministic gate first and folds the result
+   into the lane's findings:
+
+   ```bash
+   python3 .agents/skills/bootstrap-verifier/scripts/validate_memory_content.py \
+     --bank "tasks/TASK-003/infra-generate-staging/memory-bank" \
+     --target "<path-to-real-target>"
+   ```
+
+   It refuses a chunk body that states no rule, bodies collapsing to one
+   shared skeleton, known boilerplate, a cited source Verification never
+   explains, a range the file cannot contain, and a contradiction chunk that
+   records no competing claims or presents itself as settled. Each error is a
+   blocking `memory`-lane finding repaired through `memory-seed`, which
+   rewrites the chunk from the run's own evidence (domain findings,
+   `project-claims.json`, the plan contracts that cite the same sources).
 4. **Merge lane findings into the review record.** Every advisory finding is
    recorded with `action: accepted` and a reason, or repaired alongside the
    blockers. Every blocking finding must end `reforged` or `escalated`.
@@ -92,10 +113,11 @@ documentation, not a substitute for running the gate.
      --registry ".agents/skills/skill-forge/references/candidate-registry.json"
    ```
 
-   plus `validate_generated.py` with the run's usual arguments, and re-review
-   each repaired file (its reviewer entry reflects the repaired content, with
-   the finding's `resolution.round` recording when it was fixed). Record the
-   re-run gates in `post_repair_gates`.
+   plus `validate_generated.py` with the run's usual arguments, and
+   `validate_memory_content.py` whenever a repair touched the `memory` lane.
+   Re-review each repaired file (its reviewer entry reflects the repaired
+   content, with the finding's `resolution.round` recording when it was
+   fixed). Record the re-run gates in `post_repair_gates`.
 7. **Run the deterministic gate** and require exit 0:
 
    ```bash
@@ -112,6 +134,17 @@ documentation, not a substitute for running the gate.
    rollback journal, the manifest hashes are refreshed with
    `bootstrap-verifier`'s recipe, and `bootstrap-verifier` runs afterwards.
    Never edit a manifest-owned file in place.
+   **Memory chunks are the exception that needs consent, not a walk-in.**
+   They are team-owned live data from the moment they are seeded: the team
+   may have edited or added chunks since generation. Standalone repair of a
+   chunk therefore requires an explicit per-chunk decision - show the current
+   body next to the `memory-seed` rewrite (built from the task's evidence:
+   the profile, `project-claims.json`, and the plan contracts citing the
+   same sources) and apply only approved rewrites, appending new knowledge
+   as a superseding chunk rather than overwriting a team edit. A chunk the
+   evidence can no longer support is flagged `needs-review`, never silently
+   deleted. Re-run `validate_memory_content.py` and the bank's own
+   `validate.py` against the published bank afterwards.
 9. **Report** per-lane counts, findings, repairs, escalations, and the gate
    result in `infra-validate-report.md`.
 
@@ -142,6 +175,13 @@ documentation, not a substitute for running the gate.
 - MUST review every file the publication plan (or manifest) lists - a file
   too boring to review is still dispositioned, and the verbatim exemption
   covers only the sanctioned runtime surface.
+- MUST run `validate_memory_content.py` for the `memory` lane in every mode -
+  a bank whose chunks share one body template has preserved nothing, however
+  clean its structure - and in standalone mode MUST cover the unmanifested
+  seeded chunks (`memory-bank/chunks/MEM-*.md` + `INDEX.md` only) while
+  treating them as team-owned: per-chunk approval before any rewrite, team
+  edits superseded rather than overwritten, unsupported chunks flagged
+  `needs-review` rather than deleted.
 - MUST keep reviewers read-only and repairs inside the owning forges; this
   skill never edits generated content itself.
 - MUST bound repairs at two rounds and escalate what survives them; MUST NOT

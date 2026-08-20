@@ -45,7 +45,15 @@ target.
    contract for each skill; for `wrappers`, the plan's `routing_cases[]` and
    `flow_contracts`; for `policy`/`hooks`/`memory`, the approved Project
    Profile sections they were forged from; for `reports`, the staged inventory
-   they claim to describe.
+   they claim to describe. For the `memory` lane, additionally open the code
+   each chunk cites: a chunk is judged against the source it claims to
+   preserve, and its Durable Context must state the rule that range actually
+   proves - conditions, required behavior, forbidden behavior, consequence -
+   not restate its own title. A contradiction chunk must record both
+   competing claims with their citations, the current safe operating rule,
+   and a resolution owner, under status `needs-review`; a bank whose bodies
+   share one sentence skeleton with substituted nouns fails uniqueness as a
+   set, not per file.
 3. **Judge every file on the four dimensions**, in this order, recording a
    verdict and one concrete note each:
    - **Uniqueness** - erase the file's identity mentally: with the project's

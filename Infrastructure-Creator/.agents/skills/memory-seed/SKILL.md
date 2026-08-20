@@ -67,12 +67,41 @@ All other `runtime.json` values are shipped defaults (`mode: governed`, `automat
 2. **Bootstrap `memory-bank/`:** write `README.md` (fresh prose naming the target and its memory contract: authority hierarchy, layout, what belongs here, retrieval, creating/updating a chunk, lifecycle, security, and the runtime CLI - `python3 memory-bank/scripts/context.py --help`), copy `assets/runtime-contract.json` to `memory-bank/runtime-contract.json`, copy `templates/chunk.md` and all four `assets/scripts/*.py` verbatim, and create empty gitignored `local/`. Treat the contract's `required_skeleton` paths as required generation outputs and its `creatable` paths as runtime-created; do not require creatable files to pre-exist.
 3. **Bootstrap `project-brain/`:** copy the whole `assets/project-brain/` skeleton verbatim (including `.gitkeep` placeholders and both empty `[]` indexes), then materialize `config/runtime.json` from the template with the two substitutions above (framework slug + canonical edition).
 4. **Seed one chunk per row in section 12's preview table**, starting at `MEM-0001`, in the same order. Fill frontmatter exactly per `templates/chunk.md` (JSON frontmatter; `valid_from`/`valid_to` are optional temporal-validity keys - seed chunks normally set `valid_from` to the seed date and leave `valid_to` null). Each chunk represents one cohesive concept and links all canonical sources that prove it. It may group tightly related facts (for example, a lifecycle's statuses, confirmed transitions, guards, permission, and audit consequence) but MUST NOT copy full specs, schemas, permission matrices, test inventories, incident narratives, or logs. If revalidation surfaces a new confirmed concept or invalidates a previewed one, report drift rather than silently reconciling it.
+
+   **The body serializes the rule itself - a chunk whose body could be
+   regenerated from its own title has preserved nothing.** A measured
+   publication seeded fifteen chunks that all carried the same sentence with
+   the title and paths substituted; `validate_memory_content.py` now refuses
+   that, and this is what each section must actually hold, drawn from the
+   run's own evidence (the domain findings, `project-claims.json`, and the
+   plan contracts that cite these sources):
+   - **Durable Context** - the smallest concrete rule, stated as behavior:
+     the condition, the required outcome, the forbidden outcome, and the
+     consequence, with real symbols, statuses, values, and `path:Lrange`
+     citations inline. *"When the integration export throws, the persisted
+     status must remain FAILED and no FINISHED completion effects may run"* -
+     not *"X is a confirmed authority boundary; use only the cited ranges."*
+   - **Consequences** - what future code and tests must preserve, named
+     concretely, including at least one forbidden outcome a regression test
+     should assert. Never process instructions like "re-open the sources."
+   - **Verification** - per cited source: what that exact range proves, and
+     which file or behavior change triggers re-review of this chunk.
+   - **A contradiction chunk records the conflict, not a verdict**: claim A
+     with its cited range, claim B with its cited range, the current safe
+     operating rule, and the owner or condition for resolution - and its
+     status is `needs-review`, because an unresolved conflict presented as
+     `active` settled knowledge is a lie with a citation. The same applies
+     to any finding the profile carries as contradictory.
+   - Bodies are written one concept at a time from that concept's own
+     evidence; no two chunks may share sentence scaffolding once their
+     nouns are erased.
 5. **Write `INDEX.md`** with the exact 8-column table: `ID | Title | Type | Scope | Tags | Status | Last Verified | File`.
 6. **Set `.memory-counter`** to one past the highest allocated ID.
 7. **Declare root-ignore requirements** in the task-scoped JSON file above;
    never append to `.gitignore` directly.
 8. **Run the validators and smoke checks** from the staged generation root; fix any structural error before declaring success:
    - `python3 memory-bank/scripts/validate.py memory-bank --source-root <target>` (bank structure). The chunks cite the target's files, which are not in the staging root; without `--source-root` every seeded chunk reports `source path does not exist`. Once published beside the project the flag is unnecessary, and `bootstrap-verifier` passes it for you from `--evidence-target`.
+   - `python3 <generator>/.agents/skills/bootstrap-verifier/scripts/validate_memory_content.py --bank <staging>/memory-bank --target <real-target>` (chunk substance: a stated rule per chunk, no shared body skeleton, no known boilerplate, every source explained with a valid range, contradictions recording both claims as `needs-review`). The structural validator proves shape; this one proves the body says something. Exit 1 blocks the seed.
    - `python3 memory-bank/scripts/context.py validate` (Project Brain records - passes on the empty skeleton)
    - `python3 memory-bank/scripts/context.py status` (runtime imports and index health; exit 0 proves the four scripts and the skeleton are wired correctly)
    - compare `memory-bank/runtime-contract.json` byte-for-byte with the bundled asset and verify its required skeleton paths exist while its creatable paths are accepted as intentionally absent
@@ -107,6 +136,9 @@ skill-flow-composer, once all forges have finished.
 - MUST NOT duplicate a canonical spec/schema/test inventory/permission matrix or include raw incident logs, customer data, payloads, or sensitive operational detail.
 - MUST preserve authority: current policy, canonical specs, code, migrations, constraints, and tests outrank memory; `project-brain/` outranks retrieval caches; `PROTOCOL.md` governs every Brain mutation.
 - MUST NOT include any secret or credential value in any chunk.
+- MUST serialize the actual rule in every chunk body - condition, required behavior, forbidden behavior, consequence, with concrete symbols and cited ranges - and MUST NOT reuse one body template across chunks or restate the title as content; `validate_memory_content.py` exit 1 blocks the seed.
+- MUST record a contradiction as both competing claims with their sources, the current safe operating rule, and a resolution owner/condition, under status `needs-review` - never as settled `active` knowledge.
+- MUST explain in Verification, per cited source, what its exact range proves and what change triggers re-review; a bare list of paths explains nothing.
 - MUST run all three checks in step 7 and fix every reported error before reporting success.
 - MUST create ONE shared `memory-bank/` and ONE shared `project-brain/` at the target root, not per edition, and MUST NOT rename any runtime path (`hook-forge`'s working-memory hooks call `memory-bank/scripts/context.py` at exactly that path).
 - MUST make the runtime-fixed quartet compile from `assets/runtime-contract.json`; generic prose, guessed flags, and paths not listed as required or creatable cannot override it.
