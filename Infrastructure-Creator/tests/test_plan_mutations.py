@@ -52,9 +52,10 @@ class PlanMutationTest(PlanMutationFixture):
         skipped = [
             item for item in diagnostics if item.code == "MUTATION_NOT_APPLICABLE"
         ]
-        # The corpus carries no failing baseline, no runtime-fixed skill and no
-        # evidence disposition, so three damages have nothing to act on.
-        self.assertEqual(len(skipped), 3)
+        # The corpus carries no failing baseline, no runtime-fixed skill, no
+        # evidence disposition, and no pre-existing team skill, so four
+        # damages have nothing to act on.
+        self.assertEqual(len(skipped), 4)
 
     def test_an_inapplicable_damage_is_reported_rather_than_skipped(self) -> None:
         """A silently skipped check reads exactly like a passing one."""

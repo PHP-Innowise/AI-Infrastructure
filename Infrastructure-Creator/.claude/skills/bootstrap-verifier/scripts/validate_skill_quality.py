@@ -6745,12 +6745,19 @@ def _validate_authored_inventory(
     diagnostics: list[Diagnostic],
     *,
     allow_partial_skills: bool,
+    allowed_team_symlink_paths: frozenset[Path] = frozenset(),
 ) -> None:
     """Validate existing SKILL.md bodies; plan contracts are already validated."""
     actual: dict[str, Path] = {}
     for child in sorted(skills_dir.iterdir(), key=lambda item: item.name):
         if child.is_symlink():
-            _diag(diagnostics, "SKILL_PATH_UNSAFE", f"skill path must not be a symlink: {child.name}")
+            lexical_path = child.parent.resolve() / child.name
+            if lexical_path not in allowed_team_symlink_paths:
+                _diag(
+                    diagnostics,
+                    "SKILL_PATH_UNSAFE",
+                    f"skill path must not be a symlink: {child.name}",
+                )
         elif child.is_dir() and (child / "SKILL.md").is_file():
             actual[child.name] = child / "SKILL.md"
     if not allow_partial_skills:
@@ -6905,6 +6912,19 @@ def validate(
             "authored or partially authored generation output; migrate to "
             f"schema {CURRENT_PLAN_SCHEMA}",
         )
+    allowed_team_symlink_paths = frozenset(
+        target / ".claude" / "skills" / record["name"]
+        for record in plan.get("preexisting_team_skills", [])
+        if (
+            isinstance(record, dict)
+            and isinstance(record.get("name"), str)
+            and record.get("path") == f".claude/skills/{record['name']}"
+            and record.get("kind") == "preexisting-team"
+            and record.get("mode") == "merge"
+            and record.get("ownership") == "team"
+            and record.get("publication") == "watch-only"
+        )
+    )
     _validate_authored_inventory(
         skills_dir,
         plan_skills,
@@ -6912,6 +6932,7 @@ def validate(
         target,
         diagnostics,
         allow_partial_skills=allow_partial_skills,
+        allowed_team_symlink_paths=allowed_team_symlink_paths,
     )
     return sorted(set(diagnostics))
 

@@ -616,12 +616,13 @@ def build_corpus(
     writers = [item["agent"] for item in roster if item["writes"]]
     reviewers = [item["agent"] for item in roster if not item["writes"]]
     plan = {
-        "schema_version": "1.5",
+        "schema_version": "1.6",
         "catalog_version": "2.5.0",
         "target_root": str(target),
         "profile": "tasks/TASK-001/infra-scan-project-profile.md",
         "evidence": evidence,
         "skills": skills,
+        "preexisting_team_skills": [],
         "rejected_candidates": rejected_candidates,
         "critical_invariants": invariants,
         "flow_contracts": {
