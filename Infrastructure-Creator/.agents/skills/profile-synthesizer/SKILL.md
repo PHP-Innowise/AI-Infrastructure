@@ -1,6 +1,6 @@
 ---
 name: profile-synthesizer
-description: Merge all seven scanner findings (including domain behavior), stack-researcher's results, and clarifying-interview's answers into the single canonical, schema-conformant Project Profile that is the sole contract between Phase 1 (scanning) and Phase 2 (generation). Takes a required target-project-path argument. Use as the last step of infra-scan, after clarifying-interview. Triggers on "synthesize the profile", "build the project profile", "profile-synthesizer", "merge the findings".
+description: Compile all discovery findings into a human Project Profile plus a machine-readable evidence ledger and one complete generation contract per justified skill. Use as the final read-only infra-scan step.
 phase: synthesis
 flow-next: infra-generate
 flow-alternatives: []
@@ -11,38 +11,139 @@ related: [infra-scan, stack-scanner, architecture-scanner, integration-scanner, 
 
 ## Overview
 
-`profile-synthesizer` produces the one artifact Phase 2 consumes: `infra-scan-project-profile.md`. It merges the seven scanners' findings, `stack-researcher`'s sourced notes, and `clarifying-interview`'s answers into a single, schema-conformant document. Technical conflicts prefer higher-confidence direct evidence; behavioral conflicts preserve both source type and confidence and are surfaced rather than silently collapsed, because a test, ADR, database constraint, code path, and interview answer are not equal authorities.
+`profile-synthesizer` produces the two artifacts Phase 2 consumes: the human-reviewable `infra-scan-project-profile.md` and the machine-readable `skill-generation-plan.json`. It merges the seven scanners' findings, `stack-researcher`'s sourced notes, and `clarifying-interview`'s answers into a schema-conformant profile and one complete generation contract per proposed skill. Technical conflicts prefer higher-confidence direct evidence; behavioral conflicts preserve both source type and confidence and are surfaced rather than silently collapsed, because a test, ADR, database constraint, code path, and interview answer are not equal authorities.
 
-Crucially, the profile is not just a dry evidence dump - it is the user's one chance to review *what will actually be generated* before committing to `infra-generate`. Section 8 shows the discovered behavioral contract; section 11 gives a target-specific, one-line description of every skill about to be written (including any evidence-gated domain skills), an explicit agent/command count for the selected edition(s); and section 12 previews the exact memory-bank concepts that will be seeded.
+Crucially, the profile is not just a dry evidence dump - it is the user's one chance to review *what will actually be generated* before committing to `infra-generate`. Section 8 shows the discovered behavioral contract; section 11 summarizes the evidence-gated inventory and points to the complete JSON contracts; section 12 previews the exact memory-bank concepts that will be seeded.
 
 The target project path is a **required** argument. This skill reads only the current run's `tasks/TASK-{N}/` findings files (plus, if needed, the target's files to break a tie); it never writes into the target.
 
 ## Generated File Naming Convention (MANDATORY)
 
-Write exactly one file: `tasks/TASK-{N}/infra-scan-project-profile.md`, following `references/project-profile-schema.md` exactly.
+Write exactly three sibling files:
+
+- `tasks/TASK-{N}/infra-scan-project-profile.md`
+- `tasks/TASK-{N}/skill-generation-plan.json`
+- `tasks/TASK-{N}/infra-scan-rejection-report.md`
+
+Follow `references/project-profile-schema.md` exactly. The JSON is generator runtime input, not a target artifact, and MUST NOT be copied into a generated skill tree or cited as a generated target skill's source. The rejection report is the human-readable account of everything deliberately not generated; rejection means "no separate skill contract yet", never "the concern is unimportant", and the report must read that way.
 
 ## Process
 
 1. **Load all inputs** from `tasks/TASK-{N}/`: the seven `*-findings.md` (including `domain-behavior-scanner-findings.md`), `stack-researcher-findings.md`, and `clarifying-interview-answers.md`. Fill section 0's "Generator version" from the `VERSION` file at this generator's root - it is the single source of the version (the same value `infra-generate` later stamps into the target's `AGENTS.md` and `.infra-manifest.json`); never hardcode it or recall it from the changelog.
 2. **Populate section 1 (AI Tool Selection)** strictly from the interview answer. If it is missing, STOP and re-run `clarifying-interview` - never assume an edition.
-3. **Merge sections 2-7** from the six technical scanners, preserving each fact's confidence tag and source path. When two technical scanners disagree, prefer the higher-confidence, more direct evidence and note the resolution. Sections 3.1 (Framework-Specialty Signals) and 3.2 (Frontend Presence) come from `architecture-scanner-findings.md`'s dedicated sections - carry every signal through even when its value is "none".
-4. **Build section 8 ("Domain & Behavioral Contract")** from `domain-behavior-scanner-findings.md`. Preserve both confidence and source type. Keep status discovery separate from confirmed transitions, authentication technology separate from product permissions, risk indicators separate from documented severity/approval, and contradictory sources visible. Carry only bounded central entities and representative critical scenarios.
+3. **Merge sections 2-7** from the six technical scanners, preserving each fact's confidence tag and source path. Compile the scanners' command definitions (including resolved Composer/npm aliases and mutation/network classification), test topology (suite/config/root, central-vs-domain placement, fixtures/fakes, and focused invocation), path-authority declarations, and material adjacency candidates without filling gaps from framework convention. When two technical scanners disagree, prefer the higher-confidence, more direct evidence and note the resolution. Sections 3.1 (Framework-Specialty Signals) and 3.2 (Frontend Presence) come from `architecture-scanner-findings.md`'s dedicated sections - carry every signal through even when its value is "none".
+4. **Build section 8 ("Domain & Behavioral Contract")** from `domain-behavior-scanner-findings.md`. Preserve both confidence and source type. Assign stable invariant IDs to every confirmed invariant, mark high-priority failure invariants explicitly, and retain their bounded evidence anchors and named regression scenarios. Keep status discovery separate from confirmed transitions, authentication technology separate from product permissions, risk indicators separate from documented severity/approval, and contradictory sources visible. Carry only bounded central entities and representative critical scenarios.
 5. **Fold in research notes (section 9)** from `stack-researcher`, keeping source URLs.
 6. **Resolve open items (section 10)** using interview answers; anything still unresolved stays `unknown`, explicitly listed. Preserve `interview answer` as its source type rather than making it indistinguishable from repository evidence.
-7. **Derive section 11.1 ("Skills To Generate")** in eight groups, cross-referencing `skill-forge/references/` for what each group actually contains:
-   - **Architecture** (1): from section 3, as before.
-   - **Design & Interaction** (3, always): `architecture-implementer`, `api-designer`, `database-designer` - each grounded in sections 2-3's real framework/persistence evidence (see `skill-forge/references/php-frameworks.md`'s "Design & Interaction Skills").
-   - **Frontend** (0 or 5): only if section 3.2's verdict is "applies" - `frontend-design`, `coder-frontend`, `wcag-accessibility`, `web-design-guidelines`, `browser-verify`; otherwise write "No UI surface detected - frontend skill group skipped" and generate none.
-   - **Process & Workflow** (18, always, fixed list): the skills named in `skill-forge/references/php-process-skills.md`, including the memory quartet (`memory-bank`, `project-brain`, `checkpoint`, `memory`) that operates the shared memory layer - list all 18 by name; one shared sentence suffices since this group's mechanic never varies by target.
-   - **Universal PHP** (7): `coding`, `testing`, `code-review`, `security-review`, `performance`, `release`, `debugging`, as before.
-   - **Framework-Specialty** (one per `confirmed`/`inferred` line in section 3.1, per `skill-forge/references/php-specialty-skills.md`'s mapping table): skip every `none`/`unknown` signal - never generate one speculatively.
-   - **Integrations** (one per `confirmed` integration in section 4), as before.
-   - **Domain** (0 or more): one skill per cohesive candidate in section 8.11 only when multiple confirmed rules form a bounded context and the skill has a distinct review purpose. Never generate one skill per rule, status, entity, role, risk, or test.
-   For EVERY non-fixed entry, write a one-line description specific to this target - name the real detected pattern/tool/package/domain rules, never generic boilerplate. Record non-PHP neighbors in 11.3 as integration contracts only.
-8. **Derive section 11.2 ("Agents & Commands Preview")** by first stating the group-by-group skill count breakdown (architecture + design + frontend + 18 process + 7 universal + specialty + integrations + domain = total), then the skill total from 11.1, times the number of selected editions (section 1) that carry an agent layer (Claude, Cursor), for the agent total; the same count again for commands (Claude and Cursor carry command layers; Codex has no command layer). State Codex's direct-skill invocation model explicitly if it was selected.
-9. **Derive section 12 ("Memory Bank Preview")** using the exact same selection rule `memory-seed` applies: one planned chunk per cohesive durable concept composed only from confirmed facts across sections 2-8. Group tightly related facts (such as one lifecycle's statuses, transitions, guards, permissions, and audit consequence) rather than producing tiny per-line chunks. Link canonical sources; do not copy full specs, schemas, permission matrices, test inventories, incident narratives, or sensitive data. This becomes the authoritative seed plan.
-10. **Self-validate** against `references/project-profile-schema.md`: every line in sections 2-8 has confidence; every section 8 finding also has source type; statuses are not presented as transitions without evidence; permission completeness is stated; risk indicators do not invent severity/approval; section 1 lists >=1 edition sourced from the interview; no skill is proposed for absent evidence; every non-fixed 11.1 entry has a target-specific description; 11.2 counts are arithmetically consistent; section 12 contains only confirmed, source-linked cohesive concepts; no secrets/customer data anywhere; a `confirmed` integration cites runtime wiring.
-11. **Write the profile** and report.
+7. **Derive the evidence-gated skill inventory.** Load
+   `skill-forge/references/candidate-registry.json` and evaluate every candidate
+   against its real catalog anchor. Every registry ID must receive exactly one
+   disposition: selected (families may produce multiple concrete skills) or
+   rejected with reason/missing evidence. There are no category quotas. Only
+   the memory quartet is runtime-fixed.
+   **The golden set is always selected.** Candidates the registry marks
+   `golden` (`requirements-analyst`, `coding`, `refactorer`, `testing`,
+   `debugging`, `performance`, `code-review`, `security-review` - the loop
+   every codebase lives in: plan, code, refactor, test, debug, measure,
+   review) are never rejected, never consolidated
+   into one another, and never traded away in an interview - the gate
+   (`GOLDEN_CANDIDATE_REJECTED`) refuses a plan that drops one. Where two
+   golden skills share a write surface, declare it honestly: `coding` owns
+   new behavior and `refactorer` owns behavior-preserving restructuring over
+   the same paths under `shared` ownership with reciprocal sibling routing -
+   overlap is resolved by boundary, never by dropping one of them. What evidence
+   controls for a golden skill is its *contract*, not its existence: build
+   each one from everything this run discovered about the target - real
+   paths and namespaces, the actual test topology and runner commands, CI
+   jobs, lint/static-analysis tooling, conventions, domain invariants, and
+   risk surfaces. Thin evidence narrows the scope honestly (no configured
+   error tracker means `debugging` teaches the target's own exception paths,
+   log configuration, and safe reproduction - not a tracker it does not
+   have; no test suite means `testing` starts from the framework's real
+   skeleton and the project's own composer scripts), and a golden contract
+   still passes every schema gate: anchored evidence, owned scope
+   distinguishable from its siblings, falsifiable verification. "A selected
+   skill absorbs its evidence evaluation" is never a legitimate disposition
+   against a golden candidate.
+   Rejecting a candidate whose registry
+   entry declares `escalates_on_rejection` is a decision the user must see
+   before it freezes: report each such draft rejection to the orchestrator so
+   `infra-scan` can run its bounded disposition interview round, and consume
+   the answers on re-synthesis - an answer that supplies the missing authority
+   or scope becomes a bounded (often read-only) selected contract with
+   `interview answer` provenance; a confirmed rejection keeps the interview
+   reference in its reason. Never resolve such a rejection by inventing the
+   missing authority, and never silently drop it.
+8. **Build `skill-generation-plan.json`.** Stamp schema `1.4` and the current
+   reference-corpus `catalog_version`. Normalize target evidence into
+   `evidence[]` with supported claims and sha256 fingerprints for repository
+   files. Local evidence needs a bounded anchor (`line_range`, `symbol`, or
+   `json_pointer`); a bare path is insufficient. Create exactly one complete
+   contract per selected skill, including a
+   `selection_gate` whose satisfied conditions cite the skill's own evidence
+   and distinguish adjacent candidates, structured `ownership[]`, normalized
+   path contracts (`required-existing`, `generated-runtime`, or `creatable`),
+   command/test-topology references, and reciprocal routing entries for every
+   material adjacent owner. Add positive, negative, ambiguous, and cross-domain
+   routing cases with one primary owner or an explicitly approved ambiguity.
+   Take `required_procedure_roles` from the candidate's own `roles` in
+   `candidate-registry.json` - never the universal
+   `load-evidence`/`execute`/`verify` trio - and wire each role to the evidence
+   that grounds it and the procedure step that discharges it. Three or more
+   obligations pointing at one step is a template and is rejected.
+   Run every executable verification command against the unmodified target once
+   and record what it did in that check's `baseline`; then state
+   `expected_result` against that baseline rather than promising the command
+   succeeds outright. Record what the target does **not** do as `absence`
+   evidence when it matters - a configured analyser nobody invokes is a fact a
+   skill needs - with a literal search and the matches it accounts for.
+   Name the reconciled claims each skill rests on in `claim_ids`, and give
+   every piece of evidence inside a skill's own declared paths a decision:
+   cite it, or rule it out with a reason in `evidence_dispositions`.
+   Never use a
+   grouped summary. Every source path is canonical and target-relative; URLs
+   remain URLs. Ownership IDs use stable lowercase kebab/dotted syntax and modes
+   `exclusive`, `shared`, or `composed`; enforce the single-owner,
+   non-overlapping-shared-writer, and exactly-one-composer invariants before the
+   checkpoint.
+   Every high-priority confirmed invariant ID must map to at least one selected
+   skill procedure step and one concrete verification assertion. If no
+   selected skill can own both, stop and correct the inventory. A catalog
+   capability (for example deduplication, retention, timeout handling, or WCAG
+   conformance) is not confirmed target behavior unless the cited target
+   evidence anchor proves it; otherwise encode it as a review question,
+   external-standard requirement, or excluded unsupported claim.
+   Load `memory-seed/assets/runtime-contract.json` for the runtime-fixed
+   quartet. Compile those four contracts from its exact paths, SQLite tables,
+   commands, ownership, required skeleton, and creatable artifacts; never
+   synthesize runtime paths from catalog prose.
+9. **Derive section 11.2 ("Agents & Commands Preview")** from `skills.length`, with a dynamic category breakdown. Multiply by selected editions carrying agent/command layers; Codex has neither. Do not embed baseline numbers in the arithmetic.
+10. **Derive section 12 ("Memory Bank Preview")** using the exact same selection rule `memory-seed` applies: one planned chunk per cohesive durable concept composed only from confirmed facts across sections 2-8. Group tightly related facts rather than producing tiny per-line chunks. Link canonical sources; do not copy full specs, schemas, permission matrices, test inventories, incident narratives, or sensitive data.
+11. **Self-validate both artifacts** against
+    `references/project-profile-schema.md` and the plan-only semantic validator.
+    Require exact top-level/schema membership, the sibling Profile path, catalog
+    version, fingerprints and bounded ranges, supported claims, complete
+    selection gates, auditable rejected candidates, structured ownership,
+    reciprocal routing roles, normalized non-overlapping globs, unique/resolved
+    references, complete skill contracts, command definitions, test topology,
+    invariant procedure/assertion coverage, path authority/creatability,
+    material adjacency and routing cases, dynamic count equality, canonical
+    paths, no sensitive data, and runtime wiring for confirmed integrations.
+    Confirm the runtime-fixed contracts match
+    `memory-seed/assets/runtime-contract.json` exactly.
+    The human checkpoint requires zero blocking contract-inventory diagnostics;
+    report nonblocking contract-similarity warnings for review rather than
+    silently discarding them.
+12. **Write the rejection report.** `infra-scan-rejection-report.md` covers
+    every rejected candidate, bucketed by primary cause - *consolidated into a
+    selected owner*, *insufficient project-specific evidence or authority*,
+    *unresolved operational or safety boundary*, *not applicable* - each with
+    its reason and one concrete "what would change the decision" line, plus a
+    ranked reconsideration table for the strongest candidates (risk-flagged
+    rejections first) naming the exact evidence each still needs. Mark every
+    risk-flagged rejection with its interview reference from the disposition
+    round.
+13. **Write all three files atomically for the run** and report their paths.
 
 ## Output Template
 
@@ -50,6 +151,8 @@ Write exactly one file: `tasks/TASK-{N}/infra-scan-project-profile.md`, followin
 # Profile Synthesized: [target_name]
 
 **File:** tasks/TASK-{N}/infra-scan-project-profile.md
+**Generation plan:** tasks/TASK-{N}/skill-generation-plan.json
+**Rejection report:** tasks/TASK-{N}/infra-scan-rejection-report.md ([count] rejected, [count] risk-flagged and escalated)
 **Editions:** [selected]
 **Skills to generate:** [count] ([list]) - see section 11.1 for what each one will actually do
 **Agents/commands preview:** [counts from section 11.2]
@@ -67,13 +170,24 @@ Read the profile and correct anything wrong, then run `infra-generate`.
 
 - MUST conform to `references/project-profile-schema.md` exactly.
 - MUST NOT assume the AI-tool selection - it comes only from the interview.
-- MUST NOT propose a skill for an integration with no evidence, a framework-specialty skill for a `none`/`unknown` section 3.1 signal, the frontend group when section 3.2's verdict says it doesn't apply, or a domain skill without a cohesive section 8.11 candidate.
-- MUST NOT write a generic, boilerplate description for any 11.1 skill entry - each one must name what was actually found in this target.
+- MUST NOT propose any skill whose reference trigger and required evidence are unsatisfied. Familiarity, category symmetry, and a preferred baseline are not evidence.
+- MUST select every `golden` registry candidate in every run and build its contract from this target's own evidence - all of it: paths, commands, test topology, CI, conventions, invariants. Thin evidence narrows a golden skill's scope; it never removes the skill, and consolidation into a sibling is not a legal disposition for it.
+- MUST surface every draft rejection of an `escalates_on_rejection` candidate for the disposition interview round before finalizing, and MUST write the rejection report for every run - a silent rejection is indistinguishable from an oversight.
+- MUST generate only the memory quartet unconditionally, because its runtime is always installed.
+- MUST provide a complete JSON contract for every selected skill; grouped or one-line descriptions are summaries only.
+- MUST cover every `roles` entry the selected candidate declares in the registry, each wired to cited evidence and to a procedure step that discharges it.
+- MUST record an observed `baseline` for every executable verification the gate cannot resolve, and phrase the expectation against it.
+- MUST decide every piece of evidence that falls inside a skill's own declared paths - cited or ruled out with a reason - and name the claims it rests on.
+- MUST emit schema 1.6 operational, ownership, invariant, path, and reciprocal routing contracts; schemas 1.0-1.5 are audit/migration input only and are not publishable.
+- MUST use target-relative canonical source paths in contracts and generated target skills; generator task paths are never target evidence.
 - MUST NOT include any secret or credential value.
 - MUST keep every fact's confidence tag and source; never launder an `inferred` fact into a `confirmed` one.
 - MUST NOT let section 12 include an `inferred`/`unknown` fact, raw incident detail, customer data, or copied canonical source content.
 - MUST preserve source type and contradictions for behavioral findings; confidence alone is not enough.
+- MUST NOT elevate a catalog concern, inferred convention, package feature, or external standard into confirmed target behavior without a bounded target evidence anchor.
+- MUST map every high-priority confirmed invariant to a selected skill procedure and concrete verification assertion.
+- MUST compile the memory quartet from `memory-seed/assets/runtime-contract.json`, including `memory-bank/local/context.db`, SQLite `working_tasks`/`turn_deltas`, `project-brain/dynamic/**`, `project-brain/control/**`, required skeleton paths, creatable paths, and exact CLI commands.
 
 ## Final Output
 
-Return the profile path, the selected editions, the behavioral-contract summary (including contradictions), the derived skill list with a one-line summary of each (from 11.1), the agents/commands preview counts (from 11.2), the memory-bank concept preview count (from 12), the confidence summary, and the next step (user reviews, then runs `infra-generate`).
+Return all three artifact paths, the selected editions, the behavioral-contract summary (including contradictions), the selected and rejected skill inventory with reasons (risk-flagged rejections called out with their interview references), the dynamic agents/commands preview counts, the memory-bank concept preview count, the confidence summary, and the next step (user reviews the artifacts, then runs `infra-generate`).

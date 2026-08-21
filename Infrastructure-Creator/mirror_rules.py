@@ -65,31 +65,34 @@ MIRROR_RULES = {
                     "quote_description": False,
                     "description_overrides": {
                         "infra-adapt.md": (
-                            "Build and verify an independent 23-skill, "
-                            "three-edition generator for a confirmed non-PHP "
-                            "target stack."
+                            "Build an independent generator with complete "
+                            "evidence contracts, semantic gates, fixtures, and "
+                            "fresh references for a confirmed non-PHP stack."
                         ),
                         "infra-build.md": (
-                            "One-shot path that scans then generates in a "
-                            "single command, pausing only when a blocking "
-                            "ambiguity or a collision is detected."
+                            "One-shot scan, contract compilation, staged "
+                            "semantic generation, and transactional publication "
+                            "with required ambiguity/collision checkpoints."
                         ),
                         "infra-generate.md": (
-                            "Turn an approved Project Profile into a working "
-                            "accelerator inside the target PHP project, for "
-                            "the selected AI-tool edition(s) only."
+                            "Build an approved evidence-contracted accelerator "
+                            "in staging, validate semantics and routing, then "
+                            "publish selected editions with rollback."
                         ),
                         "infra-scan.md": (
-                            "Scan a target PHP project read-only through "
-                            "seven scanners, grounded research, clarifying "
-                            "questions, and one reviewable Project Profile."
+                            "Scan a target PHP project read-only and compile a "
+                            "human Profile plus validated evidence and "
+                            "per-skill generation contracts."
+                        ),
+                        "infra-validate.md": (
+                            "Review every generated file for uniqueness, "
+                            "completeness, accuracy, and coherence, repairing "
+                            "blocking findings through the owning forges."
                         ),
                         "infra-update.md": (
                             "Upgrade a previously generated accelerator to "
-                            "the current generator version via its "
-                            ".infra-manifest.json, never overwriting "
-                            "user-modified files without an explicit "
-                            "decision."
+                            "the current evidence/semantic quality contract "
+                            "through staging, manifest ownership, and rollback."
                         ),
                     },
                 },

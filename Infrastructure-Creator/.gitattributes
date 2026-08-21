@@ -16,10 +16,22 @@
 .claude/skills/agent-forge/SKILL.md -diff linguist-generated=true
 .claude/skills/architecture-scanner/SKILL.md -diff linguist-generated=true
 .claude/skills/bootstrap-verifier/SKILL.md -diff linguist-generated=true
+.claude/skills/bootstrap-verifier/scripts/analyze_commands.py -diff linguist-generated=true
 .claude/skills/bootstrap-verifier/scripts/infra_ownership.py -diff linguist-generated=true
+.claude/skills/bootstrap-verifier/scripts/merge_gitignore.py -diff linguist-generated=true
+.claude/skills/bootstrap-verifier/scripts/publish_staging.py -diff linguist-generated=true
+.claude/skills/bootstrap-verifier/scripts/validate_content_review.py -diff linguist-generated=true
+.claude/skills/bootstrap-verifier/scripts/validate_flow_contracts.py -diff linguist-generated=true
 .claude/skills/bootstrap-verifier/scripts/validate_generated.py -diff linguist-generated=true
+.claude/skills/bootstrap-verifier/scripts/validate_memory_content.py -diff linguist-generated=true
+.claude/skills/bootstrap-verifier/scripts/validate_plan_mutations.py -diff linguist-generated=true
+.claude/skills/bootstrap-verifier/scripts/validate_plan_review.py -diff linguist-generated=true
+.claude/skills/bootstrap-verifier/scripts/validate_reference_catalogs.py -diff linguist-generated=true
+.claude/skills/bootstrap-verifier/scripts/validate_scan_coverage.py -diff linguist-generated=true
+.claude/skills/bootstrap-verifier/scripts/validate_skill_quality.py -diff linguist-generated=true
 .claude/skills/clarifying-interview/SKILL.md -diff linguist-generated=true
 .claude/skills/command-forge/SKILL.md -diff linguist-generated=true
+.claude/skills/content-reviewer/SKILL.md -diff linguist-generated=true
 .claude/skills/conventions-scanner/SKILL.md -diff linguist-generated=true
 .claude/skills/domain-behavior-scanner/SKILL.md -diff linguist-generated=true
 .claude/skills/hook-forge/SKILL.md -diff linguist-generated=true
@@ -28,6 +40,7 @@
 .claude/skills/infra-ops-scanner/SKILL.md -diff linguist-generated=true
 .claude/skills/infra-scan/SKILL.md -diff linguist-generated=true
 .claude/skills/infra-update/SKILL.md -diff linguist-generated=true
+.claude/skills/infra-validate/SKILL.md -diff linguist-generated=true
 .claude/skills/integration-scanner/SKILL.md -diff linguist-generated=true
 .claude/skills/memory-seed/SKILL.md -diff linguist-generated=true
 .claude/skills/memory-seed/assets/project-brain/.gitignore -diff linguist-generated=true
@@ -66,6 +79,7 @@
 .claude/skills/memory-seed/assets/project-brain/templates/promotion.json -diff linguist-generated=true
 .claude/skills/memory-seed/assets/project-brain/templates/retrieval-manifest.json -diff linguist-generated=true
 .claude/skills/memory-seed/assets/project-brain/templates/task.md -diff linguist-generated=true
+.claude/skills/memory-seed/assets/runtime-contract.json -diff linguist-generated=true
 .claude/skills/memory-seed/assets/scripts/brain_runtime.py -diff linguist-generated=true
 .claude/skills/memory-seed/assets/scripts/context.py -diff linguist-generated=true
 .claude/skills/memory-seed/assets/scripts/context_retrieval.py -diff linguist-generated=true
@@ -77,6 +91,7 @@
 .claude/skills/security-compliance-scanner/SKILL.md -diff linguist-generated=true
 .claude/skills/skill-flow-composer/SKILL.md -diff linguist-generated=true
 .claude/skills/skill-forge/SKILL.md -diff linguist-generated=true
+.claude/skills/skill-forge/references/candidate-registry.json -diff linguist-generated=true
 .claude/skills/skill-forge/references/php-architecture-patterns.md -diff linguist-generated=true
 .claude/skills/skill-forge/references/php-domain-behavior.md -diff linguist-generated=true
 .claude/skills/skill-forge/references/php-frameworks.md -diff linguist-generated=true
@@ -86,6 +101,7 @@
 .claude/skills/stack-adapter/SKILL.md -diff linguist-generated=true
 .claude/skills/stack-researcher/SKILL.md -diff linguist-generated=true
 .claude/skills/stack-scanner/SKILL.md -diff linguist-generated=true
+.claude/skills/stack-scanner/references/scan-evidence-contract.md -diff linguist-generated=true
 .codex/DOD.md -diff linguist-generated=true
 .codex/GOLDEN-PRINCIPLES.md -diff linguist-generated=true
 .codex/STABILIZATION.md -diff linguist-generated=true
@@ -102,6 +118,7 @@
 .cursor/agents/bootstrap-verifier-agent.md -diff linguist-generated=true
 .cursor/agents/clarifying-interview-agent.md -diff linguist-generated=true
 .cursor/agents/command-forge-agent.md -diff linguist-generated=true
+.cursor/agents/content-reviewer-agent.md -diff linguist-generated=true
 .cursor/agents/conventions-scanner-agent.md -diff linguist-generated=true
 .cursor/agents/domain-behavior-scanner-agent.md -diff linguist-generated=true
 .cursor/agents/hook-forge-agent.md -diff linguist-generated=true
@@ -110,6 +127,7 @@
 .cursor/agents/infra-ops-scanner-agent.md -diff linguist-generated=true
 .cursor/agents/infra-scan-agent.md -diff linguist-generated=true
 .cursor/agents/infra-update-agent.md -diff linguist-generated=true
+.cursor/agents/infra-validate-agent.md -diff linguist-generated=true
 .cursor/agents/integration-scanner-agent.md -diff linguist-generated=true
 .cursor/agents/memory-seed-agent.md -diff linguist-generated=true
 .cursor/agents/policy-forge-agent.md -diff linguist-generated=true
@@ -125,6 +143,7 @@
 .cursor/commands/infra-generate.md -diff linguist-generated=true
 .cursor/commands/infra-scan.md -diff linguist-generated=true
 .cursor/commands/infra-update.md -diff linguist-generated=true
+.cursor/commands/infra-validate.md -diff linguist-generated=true
 .cursor/hooks/README.md -diff linguist-generated=true
 .cursor/hooks/bash-validator.sh -diff linguist-generated=true
 .cursor/hooks/file-naming-validator.sh -diff linguist-generated=true
@@ -134,10 +153,22 @@
 .cursor/skills/agent-forge/SKILL.md -diff linguist-generated=true
 .cursor/skills/architecture-scanner/SKILL.md -diff linguist-generated=true
 .cursor/skills/bootstrap-verifier/SKILL.md -diff linguist-generated=true
+.cursor/skills/bootstrap-verifier/scripts/analyze_commands.py -diff linguist-generated=true
 .cursor/skills/bootstrap-verifier/scripts/infra_ownership.py -diff linguist-generated=true
+.cursor/skills/bootstrap-verifier/scripts/merge_gitignore.py -diff linguist-generated=true
+.cursor/skills/bootstrap-verifier/scripts/publish_staging.py -diff linguist-generated=true
+.cursor/skills/bootstrap-verifier/scripts/validate_content_review.py -diff linguist-generated=true
+.cursor/skills/bootstrap-verifier/scripts/validate_flow_contracts.py -diff linguist-generated=true
 .cursor/skills/bootstrap-verifier/scripts/validate_generated.py -diff linguist-generated=true
+.cursor/skills/bootstrap-verifier/scripts/validate_memory_content.py -diff linguist-generated=true
+.cursor/skills/bootstrap-verifier/scripts/validate_plan_mutations.py -diff linguist-generated=true
+.cursor/skills/bootstrap-verifier/scripts/validate_plan_review.py -diff linguist-generated=true
+.cursor/skills/bootstrap-verifier/scripts/validate_reference_catalogs.py -diff linguist-generated=true
+.cursor/skills/bootstrap-verifier/scripts/validate_scan_coverage.py -diff linguist-generated=true
+.cursor/skills/bootstrap-verifier/scripts/validate_skill_quality.py -diff linguist-generated=true
 .cursor/skills/clarifying-interview/SKILL.md -diff linguist-generated=true
 .cursor/skills/command-forge/SKILL.md -diff linguist-generated=true
+.cursor/skills/content-reviewer/SKILL.md -diff linguist-generated=true
 .cursor/skills/conventions-scanner/SKILL.md -diff linguist-generated=true
 .cursor/skills/domain-behavior-scanner/SKILL.md -diff linguist-generated=true
 .cursor/skills/hook-forge/SKILL.md -diff linguist-generated=true
@@ -146,6 +177,7 @@
 .cursor/skills/infra-ops-scanner/SKILL.md -diff linguist-generated=true
 .cursor/skills/infra-scan/SKILL.md -diff linguist-generated=true
 .cursor/skills/infra-update/SKILL.md -diff linguist-generated=true
+.cursor/skills/infra-validate/SKILL.md -diff linguist-generated=true
 .cursor/skills/integration-scanner/SKILL.md -diff linguist-generated=true
 .cursor/skills/memory-seed/SKILL.md -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/project-brain/.gitignore -diff linguist-generated=true
@@ -184,6 +216,7 @@
 .cursor/skills/memory-seed/assets/project-brain/templates/promotion.json -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/project-brain/templates/retrieval-manifest.json -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/project-brain/templates/task.md -diff linguist-generated=true
+.cursor/skills/memory-seed/assets/runtime-contract.json -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/scripts/brain_runtime.py -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/scripts/context.py -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/scripts/context_retrieval.py -diff linguist-generated=true
@@ -195,6 +228,7 @@
 .cursor/skills/security-compliance-scanner/SKILL.md -diff linguist-generated=true
 .cursor/skills/skill-flow-composer/SKILL.md -diff linguist-generated=true
 .cursor/skills/skill-forge/SKILL.md -diff linguist-generated=true
+.cursor/skills/skill-forge/references/candidate-registry.json -diff linguist-generated=true
 .cursor/skills/skill-forge/references/php-architecture-patterns.md -diff linguist-generated=true
 .cursor/skills/skill-forge/references/php-domain-behavior.md -diff linguist-generated=true
 .cursor/skills/skill-forge/references/php-frameworks.md -diff linguist-generated=true
@@ -204,3 +238,4 @@
 .cursor/skills/stack-adapter/SKILL.md -diff linguist-generated=true
 .cursor/skills/stack-researcher/SKILL.md -diff linguist-generated=true
 .cursor/skills/stack-scanner/SKILL.md -diff linguist-generated=true
+.cursor/skills/stack-scanner/references/scan-evidence-contract.md -diff linguist-generated=true

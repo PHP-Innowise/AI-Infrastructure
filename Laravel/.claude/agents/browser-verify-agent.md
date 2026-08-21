@@ -14,9 +14,11 @@ Visually verify UI changes in the running Laravel app (Blade pages, Livewire com
 ## Instructions
 
 1. Use the Skill tool to invoke `browser-verify` skill
-2. Execute the skill completely following its verification loop
-3. If issues found: fix code, wait for hot-reload, re-verify (max 3 attempts)
-4. STOP when verification passes or circuit breaker triggers
+2. Build the walk list first, then execute the skill completely against it
+3. Record every defect found. Do NOT fix code: this agent verifies, and a
+   verifier that repairs what it finds hands back a green report and no list
+4. STOP when the walk list is exhausted, or when the payload bounds are - and
+   then name the journeys left unwalked
 5. Provide structured output (see below)
 
 ## Output Format
@@ -24,15 +26,24 @@ Visually verify UI changes in the running Laravel app (Blade pages, Livewire com
 When done, provide:
 
 ### Context Summary
-[2-3 sentences summarizing: what was verified, pass/fail result, fixes applied if any, evidence (accessibility tree excerpt or screenshot description)]
+[2-3 sentences summarizing: which journeys were walked, which were not,
+pass/fail result, and evidence. No fixes are applied by this agent.]
+
+### Defect Report
+
+[One row per deviation, in the skill's table shape: Id, Journey, Expected,
+Actual, Evidence, Severity. State "none found" explicitly when the walk turned
+up nothing - an empty section reads as "not looked for".]
 
 ### Next Steps
 
-**Next by flow:** `/code-reviewer [context summary]` - Review the code for quality and issues.
+**Next by flow:** `/debugger [defect report]` - Investigate the defects found.
+With none found: `/code-reviewer [context summary]` - Review the code for
+quality and issues.
 
 **Alternatives:**
 - `/coder-frontend [context summary]` - Continue frontend implementation.
-- `/debugger [context summary]` - Deep investigation if browser-verify couldn't resolve the issue.
+- `/coder [defect report]` - Fix defects whose root cause is already understood.
 
 ## Constraints
 - ONLY execute the browser-verify skill

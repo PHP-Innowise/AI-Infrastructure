@@ -11,29 +11,72 @@ related: [infra-generate, policy-forge, skill-forge, command-forge, hook-forge, 
 
 ## Overview
 
-`agent-forge` wraps each skill that `skill-forge` generated into a single-purpose agent that runs that one skill in an isolated context and then stops. It reads the `skill-forge-log.md` (the authoritative list of skills this run produced) and profile section 1 (which editions were selected), and writes one agent file per skill into every selected edition that carries an agent layer. It authors from the log only - it never invents an agent for a skill that was not generated.
+`agent-forge` wraps each semantically validated skill that `skill-forge`
+generated into a single-purpose agent that runs that one skill in an isolated
+context and then stops. It reads the validated skill log and that skill's
+contract from `skill-generation-plan.json`; a wrapper is a routing surface, not
+a second copy of the workflow. Its description and examples must make adjacent
+skills distinguishable using the target's actual concerns.
 
 Only two editions carry an agent layer: **Claude** (`.claude/agents/`, full frontmatter) and **Cursor** (`.cursor/agents/`, reduced frontmatter). **Codex has no agent layer** and is always skipped. The agent body is identical across the two editions; only the frontmatter differs.
 
-Consumes: `tasks/TASK-{N}/skill-forge-log.md` (skill list) and profile section **1** (selected editions).
+Consumes: `tasks/TASK-{N}/skill-forge-log.md` (validated skill list),
+`tasks/TASK-{N}/skill-generation-plan.json` schema **1.6** (`routing_cases`,
+every `nearest_siblings[]` adjacency, `flow_contracts`, and write contracts),
+and profile section **1** (selected editions). If the skill log does not record
+a passing semantic validation result, stop; wrappers must never legitimize an
+unvalidated skill set.
 
 ## Generated File Naming Convention (MANDATORY)
 
-Into the target, for each generated skill `<name>` and each selected agent-carrying edition, write `<edition-agents-dir>/<name>-agent.md` where the agents dir is `.claude/agents` and/or `.cursor/agents`. Never write agents into `.codex`. Append a generation log to `tasks/TASK-{N}/agent-forge-log.md` listing every agent produced and the skill it wraps.
+Into the required **generation root** (task staging during orchestration), for
+each validated skill `<name>` and selected agent-carrying edition, write
+`<edition-agents-dir>/<name>-agent.md`. Never write agents into `.codex`.
 
 ## Process
 
-1. **Read the skill-forge log** to get the exact set of generated skills; read profile section 1 to confirm which of {Claude, Cursor} were selected. If neither is selected, write nothing and report that no edition carries agents.
-2. **For each generated skill, one agent per selected edition.** Never create an agent for a skill absent from the log.
+1. **Read the validated inventory.** Require the skill log's semantic-validation
+   PASS and load the exact matching contract for every generated skill. Confirm
+   selected editions from profile section 1. If neither Claude nor Cursor is
+   selected, write nothing and report that no edition carries agents.
+2. **Decide whether a wrapper adds routing value.** Create one agent per
+   validated skill for the currently supported Claude/Cursor host model, but
+   fail if its contract has no positive trigger, negative trigger, expected
+   output, or distinct boundary for every adjacent skill. Never invent a
+   wrapper for a skill absent from the validated log.
 3. **Author the Claude agent** at `.claude/agents/<name>-agent.md` with frontmatter keys `name`, `description`, `model`, `invokes`, `phase`, and `writes` when write-capable:
-   - `description` is a QUOTED string holding the usage sentence ONLY: what the agent is for, and which sibling agent to prefer when they are close. Keep it under ~250 characters. Every agent description is loaded into the orchestrator's context on every session of the generated accelerator, spawned or not, so this string is the accelerator's largest recurring startup cost after AGENTS.md.
-   - `<example>...</example>` blocks (user request -> why this agent fires) go in the BODY, under a `## Selection examples` heading - never in `description`. They teach a reader; the prose above is what actually routes work. Embedding them measured about two thirds of the description bytes in the hand-built editions.
+   - `description` is a QUOTED selection sentence derived from the contract:
+     when to use this agent, its target-specific owned concern, and the
+     adjacent owners for excluded concerns. Keep it under ~250 characters.
+     Circular descriptions such as "runs the X skill" or "use for work governed
+     by X" are invalid.
+   - Put at least one contract-derived positive example and one negative sibling
+     deferral in the BODY under `## Selection examples`. Each example names a
+     concrete project concern from the evidence ledger and explains the routing
+     decision; repeating the skill name is not an explanation.
    - `model`: `opus` for heavy planning/architecture skills (architecture skill, security-review, performance, and evidence-gated domain-review skills); `sonnet` for the rest.
    - `invokes`: the exact skill name; `phase`: the skill's phase.
-   - `writes: true` when the wrapped skill modifies repository files - implementation, scaffolding, refactoring, test generation, migrations, dependency changes, documentation writing, release/branch operations. Omit the key for read-only skills (research, mapping, review, audit, design-only). The subagent gate reads this key to run write-capable agents one at a time; an agent that edits files without it will run concurrently with another writer, and one marked wrongly will serialize a read-only stage for no reason. Decide from what the skill's own Process section actually writes, not from its phase.
+   - Set wrapper `writes: true` exactly when the validated contract's `writes`
+     path list is non-empty; omit it when that list is empty. Do not infer it
+     again from phase or prose.
 4. **Author the Cursor agent** at `.cursor/agents/<name>-agent.md` with the SAME body but frontmatter reduced to `name`, `description`, and `writes` when the Claude agent carries it - Cursor runs the same gate and needs the same flag.
-5. **Write the shared body** for both: `## Role`, `## Instructions` (use the Skill tool to invoke `<skill>`, execute it fully, then STOP - do not chain), `## Output Format` (Context Summary + Next Steps), `## Constraints`.
-6. **Log** every agent path and its wrapped skill to `agent-forge-log.md` (consumed by `command-forge` and `skill-flow-composer`).
+5. **Write the shared body** for both: `## Role` (bounded ownership and
+   exclusions), `## Selection examples`, `## Instructions` (invoke exactly the
+   skill and pass its evidence-bounded delegation capsule), `## Output Format`
+   (the contract's expected result plus Context Summary/Next Steps), and
+   `## Constraints`. Keep the operational procedure in the skill; do not copy
+   it into the wrapper.
+6. **Validate all adjacency and routing oracles.** Carry every
+   `nearest_siblings[]` entry into the wrapper's negative deferrals; never
+   collapse the list to one convenient sibling. Execute every schema 1.6
+   `routing_cases[]` oracle. Each case must preserve its prompt, one primary
+   owner, and the complete ordered deferred set. Fail on an omitted adjacency,
+   an undeclared owner, or two agents claiming the same example without an
+   explicit primary/deferred relationship.
+7. **Log** every agent path, contract name, positive/negative routing example,
+   complete adjacency list, routing-case result, expected output, and write
+   flag to `agent-forge-log.md` (consumed by `command-forge` and
+   `skill-flow-composer`).
 
 ## Output Template
 
@@ -61,6 +104,11 @@ command-forge (wrap these agents as commands); hook-forge/memory-seed if not alr
 - MUST set `model: opus` for heavy planning/architecture/domain-review skills and `sonnet` for the rest.
 - MUST make each agent invoke exactly one skill and STOP - no auto-chaining.
 - MUST keep the agent body identical across Claude and Cursor for the same skill.
+- MUST derive routing and `writes` from the validated per-skill contract; MUST
+  reject circular selection text, any omitted adjacent deferral, a routing-case
+  mismatch, and ambiguous sibling ownership.
+- MUST keep agents DRY: project-specific routing and expected output belong in
+  the wrapper, while the complete procedure remains in the skill.
 
 ## Final Output
 

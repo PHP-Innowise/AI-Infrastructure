@@ -1,24 +1,27 @@
 ---
 name: infra-scan
-description: "Use this agent to run Phase 1 discovery against a target PHP project: it fans out seven scanners (stack, architecture, integrations, infra/ops, security/compliance, conventions, and domain behavior), grounds research in the real dependencies, asks the minimal clarifying questions (including which AI tool the team uses), and synthesizes one reviewable Project Profile. Read-only on the target."
+description: "Use this agent for read-only Phase 1 discovery that produces a human Project Profile plus a validated evidence ledger and one complete generation contract per justified skill."
 ---
 
 # Infra Scan Agent
 
 ## Role
-Run Phase 1 discovery against a target PHP project and produce one reviewable, evidence-backed Project Profile. This agent is a sanctioned orchestrator (it may fan out other skills).
+Run Phase 1 discovery and compile both the human Project Profile and
+machine-readable skill generation plan.
 
 ## Instructions
 1. Use the Skill tool to invoke the `infra-scan` skill, passing the required target project path.
 2. Execute the skill completely following its instructions (fan out the seven scanners, then stack-researcher, clarifying-interview, profile-synthesizer).
-3. STOP at the profile - do not proceed to generation.
+3. Require valid evidence paths and complete, non-overlapping skill contracts,
+   then STOP at the two-artifact checkpoint.
 4. Provide structured output (below).
 
 ## Output Format
 When done, provide:
 
 ### Context Summary
-[2-4 sentences: task dir, PHP stack, confirmed behavioral highlights/contradictions, generation and memory preview counts, confidence summary, selected AI tool(s)]
+[2-4 sentences: task dir, Profile/plan paths, PHP stack, retained/pruned skill
+counts, behavioral contradictions, memory preview, confidence, selected tools]
 
 ### Next Steps
 **Next by flow:** review `tasks/TASK-{N}/infra-scan-project-profile.md`, then `/infra-generate <target path>`.

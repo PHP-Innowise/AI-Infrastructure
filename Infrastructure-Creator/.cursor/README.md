@@ -1,9 +1,9 @@
 # Infrastructure-Creator - Cursor Edition
 
-This is the Cursor edition of the generator. It mirrors the Claude edition's 23 skills exactly and adds Cursor-native wiring.
+This is the Cursor edition of the generator. It mirrors the Claude edition's 25 skills exactly and adds Cursor-native wiring.
 
 - **Skills:** `.cursor/skills/<name>/SKILL.md` (byte-identical to the Claude edition, including nested references, assets, and scripts).
-- **Agents:** `.cursor/agents/<name>-agent.md` - 23 wrappers with reduced frontmatter (`name` + `description` only).
+- **Agents:** `.cursor/agents/<name>-agent.md` - 25 wrappers with reduced frontmatter (`name` + `description` only).
 - **Commands:** `.cursor/commands/{infra-scan,infra-generate,infra-build,infra-update,infra-adapt}.md` - `name` + `description` frontmatter.
 - **Rules:** `.cursor/rules/*.mdc` - `accelerator-workflow` and `safety-and-verification` are always applied; `php-standards` is on-demand reference.
 - **Hooks:** `.cursor/hooks/*.sh` wired via `.cursor/hooks.json` (camelCase events, second timeouts).

@@ -1,6 +1,6 @@
 ---
 name: infra-scan
-description: Run the full Phase 1 discovery pipeline against a target PHP project - seven parallel scanners (including domain behavior), dependency/integration research, a minimal clarifying interview, and synthesis into one reviewable Project Profile. Use when the user wants to start generating a bespoke accelerator for a specific PHP project or points Infrastructure-Creator at a target path. Triggers on "infra-scan", "scan this project", "scan my project", "analyze this codebase for infrastructure generation", "analyze my PHP project for the accelerator generator", "start the infrastructure creator".
+description: Run Phase 1 discovery against a target PHP project and compile a human Project Profile plus a machine-readable evidence ledger with one complete generation contract per justified skill. Use when starting bespoke infrastructure generation from a target path.
 phase: orchestration
 flow-next: infra-generate
 flow-alternatives: [infra-build, stack-adapter]
@@ -11,7 +11,11 @@ related: [stack-scanner, architecture-scanner, integration-scanner, infra-ops-sc
 
 ## Overview
 
-`infra-scan` is one of the four orchestrator skills permitted to fan out other skills automatically (see `AGENTS.md`'s "Orchestration Exception"). Its purpose is to turn a target PHP project's path into one reviewable, evidence-backed Project Profile: it fans out the seven Phase 1 scanners, runs bounded web research on the real dependencies, asks the user only what evidence could not settle (including which AI tool the target team uses), and synthesizes everything into a single file. The seventh scanner, `domain-behavior-scanner`, adds the behavioral contract that the technical scanners cannot provide: source-backed invariants, transitions, permissions, audit obligations, high-risk workflows, and critical regression scenarios. This skill never writes into the target project - only into this folder's own `tasks/TASK-{N}/`.
+`infra-scan` turns a target PHP project into two reviewable handoff artifacts:
+a human Project Profile and a machine-readable evidence/skill generation plan.
+The plan gives every justified skill its own evidence, ownership, procedure,
+verification, output, failure, and routing contract. This skill never writes
+into the target project - only into this folder's own `tasks/TASK-{NNN}/`.
 
 This skill does not generate anything for a PHP target. It stops at the profile. `infra-generate` is a separate, later step the user runs only after reviewing the profile.
 
@@ -19,37 +23,115 @@ If the target turns out not to be PHP at all, this skill does not silently fail 
 
 ## Generated File Naming Convention (MANDATORY)
 
-All output from this run lives under `tasks/TASK-{N}/` in Infrastructure-Creator's own folder (not the target project), where `{N}` is the next value from `tasks/.task-counter`:
+All output from this run lives under `tasks/TASK-{NNN}/` in Infrastructure-Creator's own folder (not the target project), where `{NNN}` is the next value from `tasks/.task-counter` zero-padded to three digits (`TASK-001`); see `stack-scanner/references/scan-evidence-contract.md`:
 
-- `stack-scanner-findings.md`, `architecture-scanner-findings.md`, `integration-scanner-findings.md`, `infra-ops-scanner-findings.md`, `security-compliance-scanner-findings.md`, `conventions-scanner-findings.md`, `domain-behavior-scanner-findings.md`
+- per scanner, a report, an evidence ledger, and a coverage record: `stack-scanner-findings.md` + `stack-scanner-evidence.json` + `stack-scanner-coverage.json`, and the same three for `architecture-scanner`, `integration-scanner`, `infra-ops-scanner`, `security-compliance-scanner`, `conventions-scanner`, `domain-behavior-scanner`
 - `stack-researcher-findings.md`
 - `clarifying-interview-questions.md`, `clarifying-interview-answers.md`
 - `infra-scan-project-profile.md` (the deliverable)
+- `skill-generation-plan.json` (validated evidence ledger and per-skill contracts)
+- `infra-scan-rejection-report.md` (every rejected candidate, bucketed, with what would change the decision)
 
 ## Process
 
 1. **Validate the target.** Require an explicit target project path (e.g. "run infra-scan against ../my-php-app"). Refuse to proceed if no path was given, if the path does not exist, or if it resolves to Infrastructure-Creator's own directory tree.
-2. **Confirm it is a PHP project - and branch if it is not.** There must be a `composer.json` and/or `*.php` files for the PHP pipeline (steps 3-9) to proceed. If there is no PHP evidence:
+2. **Confirm it is a PHP project - and branch if it is not.** There must be a `composer.json` and/or `*.php` files for the PHP pipeline (steps 3-11) to proceed. If there is no PHP evidence:
    - **Probe for a recognizable non-PHP stack** using manifest/signal evidence (this is a lightweight presence check, not deep analysis - deep analysis of the detected stack happens only inside `stack-adapter`, and only if the user opts in): `pubspec.yaml` (+ `*.dart`) -> Flutter/Dart; `package.json` -> Node.js/JavaScript/TypeScript; `requirements.txt`/`pyproject.toml`/`Pipfile` -> Python; `go.mod` -> Go; `Gemfile` -> Ruby; `pom.xml`/`build.gradle`/`build.gradle.kts` -> Java/Kotlin; `*.csproj`/`*.sln` -> .NET/C#; `Cargo.toml` -> Rust; `Package.swift` -> Swift. This list is illustrative, not exhaustive - any other clear ecosystem manifest counts too.
    - **If a recognizable non-PHP stack is found:** STOP the PHP pipeline (do not run the seven PHP scanners) and ask the user one question: *"This target uses [detected stack], not PHP. Infrastructure-Creator only generates PHP accelerators directly, but it can build you an independent sibling generator - `Infrastructure-Creator-[Stack]` - with the identical architecture, freshly researched and authored for [detected stack]. Create it?"* If yes, invoke `stack-adapter` with the target path and the detected stack name; report its result and stop (do not continue this skill's own PHP steps). If no, STOP and report the target is out of scope, same as below.
    - **If nothing recognizable is found at all:** STOP and report the target is out of scope (this tool only generates PHP accelerators, and no other stack could even be identified) rather than scanning further.
    - Otherwise (PHP evidence found): continue to step 3.
 3. **Collision note.** Check whether the target already has `AGENTS.md` or any AI-tool edition folder (`.claude/`, `.cursor/`, `.codex/`, `.agents/`). If so, note it in the profile's "Generation Notes" so `infra-generate` asks about overwrite/merge/abort before writing. (This read-only phase does not need to ask yet.)
-4. **Allocate the task directory.** Read `tasks/.task-counter`, create `tasks/TASK-{N}/`, and increment the counter.
+4. **Allocate the task directory.** Read `tasks/.task-counter`, create the zero-padded `tasks/TASK-{NNN}/`, and increment the counter.
 5. **Fan out the seven scanners.**
    - **If your AI tool supports parallel subagents/tool calls:** spawn all seven in one batch so they run concurrently: `stack-scanner`, `architecture-scanner`, `integration-scanner`, `infra-ops-scanner`, `security-compliance-scanner`, `conventions-scanner`, `domain-behavior-scanner`, each given the target path and the task directory. Wait for all seven before continuing.
    - **If your AI tool is single-threaded:** invoke each scanner's logic sequentially in the same session. Output is identical; only mechanics differ. Say so in the Context Summary.
-6. **Run `stack-researcher`** once the scanners have written findings - it needs `integration-scanner-findings.md` (what to research) and `stack-scanner-findings.md` (the PHP framework/version to ground research in).
-7. **Run `clarifying-interview`** once research is done - it turns remaining `inferred`/`unknown` items into a short question set and always asks the mandatory AI-tool-selection question.
-8. **Run `profile-synthesizer`** last - it consumes all of the above and produces `infra-scan-project-profile.md`, validating against `profile-synthesizer/references/project-profile-schema.md` before this skill reports done.
-9. **Stop.** Do not proceed to generation automatically - the profile is a human checkpoint by design.
+   - Treat test topology, exact/resolved command definitions, stable high-priority invariant IDs, bounded evidence anchors, path authority/creatability, material adjacency, and routing cases as mandatory cross-scanner outputs. A scanner that omits its applicable portion is incomplete, not silently optional.
+   - **Scan to a budget.** Completeness is every surface having a disposition,
+     not every file being opened: name a tree, read the exemplars a claim rests
+     on, and mark what you stopped short of `truncated` with the reason. An
+     over-enumerated coverage record and an over-long report are warned about.
+6. **Reconcile discovery before anything reads it.** Once all seven have
+   returned, promote their prose claims into one
+   `tasks/TASK-{NNN}/project-claims.json` - typed, deduplicated, each claim
+   naming the evidence ids it came from and the scanners that made it, with
+   every contradiction between them recorded rather than silently picked. Then
+   run
+   `python3 bootstrap-verifier/scripts/validate_scan_coverage.py --target <target> --task-dir tasks/TASK-{NNN}`.
+   A surface nobody dispositioned, coverage claimed with no evidence inside it,
+   evidence cited from outside what a scanner says it read, two scanners
+   disagreeing about a forbidden surface, or any claim to have read a secret is
+   blocking: fix the scan, do not proceed on the assumption that the missing
+   part did not matter. Truncations are reported as warnings and belong in the
+   confidence summary verbatim - a cap nobody sees reads as full coverage.
+   This is also where a scanner's "sibling report absent" note is revisited:
+   the parallel siblings have all landed by now, so a claim made against a
+   missing neighbour is either confirmed or withdrawn here.
+7. **Run `stack-researcher`** once the scanners have written findings - it needs `integration-scanner-findings.md` (what to research) and `stack-scanner-findings.md` (the PHP framework/version to ground research in).
+8. **Run `clarifying-interview`** once research is done - it turns remaining `inferred`/`unknown` items into a short question set and always asks the mandatory AI-tool-selection question.
+9. **Run `profile-synthesizer`** last, then re-run the discovery gate with
+   `--plan tasks/TASK-{NNN}/skill-generation-plan.json`. It asks two questions
+   of the finished plan, and both are about what the plan left behind:
+   - A high-priority invariant discovery confirmed and the plan does not carry
+     is `CLAIM_INVARIANT_LOST`. Dropping one may be right, but it is a decision,
+     and an undocumented decision cannot be told apart from an oversight.
+   - A surface a scanner read that no selected skill declares is
+     `OWNERSHIP_SURFACE_UNOWNED`, unless `tasks/TASK-{NNN}/plan-ownership.json`
+     says so and why: rejections are argued one at a time, and nothing else asks
+     what the selection as a whole left uncovered.
+   `profile-synthesizer` produces both handoff artifacts,
+   validates evidence paths and fingerprints, runs complete plan-level
+   operational-safety, ownership/write/routing/flow diagnostics, prunes
+   unjustified or conflicting skill proposals, and requires one complete schema
+   1.5 contract per retained skill. It maps every high-priority confirmed
+   invariant to a procedure and concrete verification assertion and compiles
+   runtime-fixed contracts from `memory-seed/assets/runtime-contract.json`.
+   Stop before approval on any blocking diagnostic; schema migration and
+   calibrated similarity warnings remain visible but non-blocking.
+10. **Escalate risk-flagged rejections before the dispositions freeze.** If
+    the drafted plan rejects any candidate whose registry entry declares
+    `escalates_on_rejection` (`skill-forge/references/candidate-registry.json`
+    flags the families whose absence leaves a confirmed operational surface
+    unguarded - migrations, command catalogs, deployment, containers, admin
+    panels, caching, dependencies, debugging, auth, file storage), run one
+    bounded second `clarifying-interview` round: one concrete question per
+    such rejection, phrased as a decision - *"Migrations are present
+    (database/migrations/, N files) but no creation authority was found: (a)
+    name the owner and allowed paths so a narrow skill can be generated, (b)
+    confirm the rejection."* Feed the answers back into `profile-synthesizer`
+    for re-synthesis; an answer that supplies the missing authority converts
+    the rejection into a bounded (often read-only) selected contract, and a
+    confirmed rejection is recorded with its interview reference. Skip this
+    step entirely when no risk-flagged candidate was rejected - the
+    low-friction principle stands. A silently dropped `migration-safety` on a
+    target full of migrations is the miss this step exists to close.
+11. **Review the plan adversarially, with a reader that did not write it.**
+    For every selected skill, answer eight questions and record them in
+    `tasks/TASK-{NNN}/skill-plan-quality-report.json`: does it win a positive
+    request nobody wrote down before; does its nearest sibling win the sibling's
+    request; does an ambiguous request get a question rather than a guess; does a
+    cross-domain request get split; does the procedure carry the candidate's
+    catalog obligations; does the skill refuse what it must refuse; do the
+    prescribed checks do what the plan claims; and is the contract still
+    distinguishable once its nouns and paths are removed. Write every fixture
+    prompt in the words a person would use - a prompt that names the skill it
+    expects tests nothing. **Run the prescribed commands rather than judging
+    them from the page**: in the third preserved run the broken verification was
+    found only by the judge who ran it. The same reader also reviews every
+    risk-flagged rejection into the record's `rejected` section: a
+    consolidated entry names the selected skill that really absorbs it, an
+    insufficient-evidence entry cites the step-10 interview exchange and states
+    why not even a narrow read-only variant is generatable, and an
+    unresolved-safety entry carries the recorded human decision (an undecided
+    one goes in `blockers` instead, which blocks). Then
+    `python3 bootstrap-verifier/scripts/validate_plan_review.py --plan tasks/TASK-{NNN}/skill-generation-plan.json --review tasks/TASK-{NNN}/skill-plan-quality-report.json --registry skill-forge/references/candidate-registry.json`.
+12. **Stop.** Do not proceed to generation automatically - the profile is a human checkpoint by design.
 
 ## Output Template
 
 ```markdown
 # Infra Scan Complete: [target_name]
 
-**Task:** tasks/TASK-{N}/
+**Task:** tasks/TASK-{NNN}/
 **Target:** [target path]
 **PHP:** [detected PHP version + framework]
 **Confidence summary:** [X confirmed, Y inferred, Z unknown]
@@ -59,15 +141,25 @@ All output from this run lives under `tasks/TASK-{N}/` in Infrastructure-Creator
 [2-4 sentences: PHP framework, architecture pattern, key integrations, and the most important confirmed domain invariants/risks]
 
 ## What Will Be Generated (see profile sections 11-12 for full detail)
-- **Skills:** [total count] across architecture (1) / design & interaction (3) / frontend (0 or 5) / process & workflow (18, including the memory quartet: memory-bank, project-brain, checkpoint, memory) / universal PHP (7) / framework-specialty ([N], evidence-driven) / integrations ([M], one per confirmed integration) / domain ([D], evidence-gated bounded-context skills) - each with a target-specific description in section 11.1 (not just a bare name)
+- **Skills:** [dynamic evidence-gated count] - each has a distinct
+  necessity/scope/procedure/output/routing contract; the memory quartet remains
+  because its runtime is always installed
 - **Agents & commands:** [counts from section 11.2, for the selected edition(s)]
 - **Memory bank:** [count] cohesive confirmed concepts planned in section 12, each linked to canonical sources
 
 ## Open Items
 [Anything still `unknown` after the interview, or flagged for the user to double check]
 
+## Rejected Candidates
+[count] rejected - see `infra-scan-rejection-report.md` for the bucketed
+dispositions and what would change each decision; [count] risk-flagged
+rejections were escalated through the interview.
+
 ## Review This Before Generating
-Read `tasks/TASK-{N}/infra-scan-project-profile.md` in full - not just the confidence summary. Section 8 shows the behavioral contract; section 11 tells you exactly what each generated skill/agent/command will be; section 12 previews every memory-bank concept. Correct anything wrong, then run `infra-generate` against `[target path]`.
+Read the Project Profile and review the proposed inventory. Inspect
+`skill-generation-plan.json` when checking evidence, ownership boundaries, or
+routing, and `infra-scan-rejection-report.md` for what was deliberately not
+generated. Correct anything wrong, then run `infra-generate`.
 ```
 
 ## Guardrails
@@ -78,6 +170,8 @@ Read `tasks/TASK-{N}/infra-scan-project-profile.md` in full - not just the confi
 - MUST NOT run the seven PHP scanners against a target that already failed the PHP-evidence check.
 - MUST NOT skip the interview's mandatory AI-tool-selection question, even if an edition folder already exists elsewhere - confirm explicitly.
 - MUST NOT let a slow/failed scanner silently drop from the profile - report it as a gap in the confidence summary.
+- MUST NOT approve synthesis with missing applicable test topology, command definitions, evidence anchors, path authority, invariant mapping, or material routing adjacency.
+- MUST NOT finalize the plan while a risk-flagged candidate's rejection was never escalated to the user - the disposition round is skippable only when no such rejection exists.
 - MUST NOT re-run scanners against an unchanged target just to double-check - one scan per invocation is the contract.
 
 ## Final Output

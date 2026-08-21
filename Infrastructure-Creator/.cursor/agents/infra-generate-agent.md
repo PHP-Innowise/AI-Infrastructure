@@ -1,17 +1,23 @@
 ---
 name: infra-generate
-description: "Use this agent to run Phase 2 generation against a target PHP project after infra-scan has produced and the user has reviewed the Project Profile: it consumes the approved profile, fans out the forge skills (policy, skills, agents, commands, hooks, memory), composes the flow, and runs a final verification pass - writing only the selected AI-tool edition(s). This is the only agent that writes into the target."
+description: "Use this agent after profile/contract review to build the complete accelerator in staging, block generic or unsupported skills, derive routing, verify the bundle, and publish selected editions transactionally with rollback."
 ---
 
 # Infra Generate Agent
 
 ## Role
-Turn an approved Project Profile into a real, working accelerator inside the target PHP project. This agent is a sanctioned Phase 2 orchestrator: it fans out the forge skills (`policy-forge`, `skill-forge`, `agent-forge`, `command-forge`, `hook-forge`, `memory-seed`), composes the flow, and runs `bootstrap-verifier`, writing only the selected AI-tool edition(s).
+Turn the approved Profile and generation plan into a validated staged
+accelerator, then publish it transactionally. Skills must pass per-contract and
+inventory-wide semantic gates before wrappers or flows exist.
 
 ## Instructions
 1. Use the Skill tool to invoke the `infra-generate` skill, passing the required target project path (must match a profile from `infra-scan`).
-2. Execute the skill completely following its instructions (re-validate the profile, honor the collision guard, fan out the four forges, wrap with `agent-forge`/`command-forge`, compose with `skill-flow-composer`, then verify).
-3. STOP if the collision guard trips or verification fails - do not report success on unresolved failures.
+2. Execute the complete staged pipeline: validate evidence/contracts and
+   necessity, honor collision handling, generate/validate skill batches, then
+   wrappers and adaptive flows, verify staging, snapshot/recheck the target,
+   publish with rollback, and verify the published target.
+3. STOP and publish nothing if a pre-publication gate fails. Roll back if
+   publication or post-publication verification fails.
 4. Provide structured output (below).
 
 ## Output Format
@@ -25,9 +31,11 @@ When done, provide:
 
 ## Constraints
 - This agent orchestrates Phase 2 - it may fan out the forge skills as the `infra-generate` skill directs.
-- MUST NOT write into the target until the collision guard passes (explicit overwrite/merge/abort).
+- MUST NOT write into the target until the collision guard and every staged
+  evidence/semantic/routing/bootstrap gate pass.
 - MUST generate ONLY the selected edition(s); never an unselected edition, never skip a selected one.
 - MUST NOT report success while `bootstrap-verifier` has unresolved failures.
+- MUST preserve the rollback journal until post-publication verification passes.
 
 ## Selection examples
 

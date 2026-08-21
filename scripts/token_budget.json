@@ -29,12 +29,12 @@
       "skills": 37
     },
     "Infrastructure-Creator": {
-      "agents_md_bytes": 12720,
-      "descriptor_bytes": 12478,
-      "command_bytes": 840,
-      "agent_bytes": 10342,
-      "frontmatter_bytes": 18078,
-      "body_bytes": 176549,
+      "agents_md_bytes": 17971,
+      "descriptor_bytes": 11880,
+      "command_bytes": 1137,
+      "agent_bytes": 8734,
+      "frontmatter_bytes": 18136,
+      "body_bytes": 277625,
       "skills": 25
     }
   }

@@ -29,6 +29,20 @@ Write two files into the current run's task directory:
 4. **Ask.** Use the AI tool's structured question mechanism when available; otherwise write the questions to `clarifying-interview-questions.md` and ask the user to answer inline.
 5. **Record answers** verbatim in `clarifying-interview-answers.md`, including the AI-tool selection as a discrete, machine-readable line (e.g. `editions: [cursor]`). Label behavioral resolutions as `source type: interview answer`; do not make them indistinguishable from repository-backed evidence.
 6. **Do not over-ask.** If nothing is genuinely ambiguous beyond the tool question, ask only that one.
+7. **Disposition round (second invocation, only when the orchestrator requests
+   it).** After `profile-synthesizer` drafts its dispositions, `infra-scan`
+   may re-invoke this skill with the draft rejections of risk-flagged
+   candidates (registry `escalates_on_rejection`). Ask exactly one decision
+   question per such rejection, grounded in the run's own evidence and
+   offering the concrete choices: *"Migrations are present
+   (database/migrations/, N files) but no creation authority was found: (a)
+   name the owner and allowed paths so a narrow skill can be generated, (b)
+   confirm the rejection."* Append the questions and verbatim answers to the
+   same two interview files under a `## Disposition Round` heading, each
+   answer labeled `source type: interview answer` with a stable line
+   reference the plan's rejection reasons and review record can cite. This
+   round never fires on the first invocation and never re-asks a question the
+   first round answered.
 
 ## Output Template
 

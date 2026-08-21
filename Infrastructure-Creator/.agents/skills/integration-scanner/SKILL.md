@@ -11,17 +11,19 @@ related: [stack-scanner, architecture-scanner, infra-ops-scanner, security-compl
 
 ## Overview
 
-Read-only reconnaissance of a PHP target's third-party integrations. Evidence comes from `composer.json` `require` (NOT `require-dev`, unless a dev entry is clearly a runtime dependency) cross-referenced with runtime config wiring (config files, service registration, provider/bundle registration, env-var references). A package with matching runtime wiring is `confirmed`; a package present with no discoverable wiring is `inferred`. Non-PHP neighbors (e.g. a Node service, a managed database) are captured only as integration contracts, not as separate stacks.
+Read-only reconnaissance of a PHP target's third-party integrations. Candidates come from every source in the contract's integration-source checklist - `composer.json` `require` (NOT `require-dev`, unless a dev entry is clearly a runtime dependency), runtime config wiring, the implementing package resolved in `composer.lock`, and environment/deploy declarations - because a real project routinely runs providers that `require` never names. A candidate with cited runtime wiring is `confirmed`; a package or configured subsystem with no discoverable wiring is `inferred`. Non-PHP neighbors (e.g. a Node service, a managed database) are captured only as integration contracts, not as separate stacks.
 
-The target project path is a **required** argument (e.g. "scan integrations of ../my-php-app"). Never assume the current working directory is the target. Operate strictly read-only within that path; never write to it, never read its `.env`/secrets (env-var *names* may be cited from config, but never their values).
+The target project path is a **required** argument; never assume the current working directory is the target. Operate strictly read-only within it.
 
-## Generated File Naming Convention (MANDATORY)
+**Secrets rule** (identical in `security-compliance-scanner`, full text in the contract): never open, read, print, or fingerprint `.env`/`.env.*` or any credential store, and never record a value. Environment-variable *names* may be cited when they come from a non-secret committed source - `config/**`, container/CI config, deploy scripts, committed `.env.example`/`*.template` files, and `env()`/`getenv()`/`$_ENV` call sites.
 
-Write exactly one findings file into the current run's task directory: `tasks/TASK-{N}/integration-scanner-findings.md`. Never write into the target.
+## Outputs (MANDATORY)
+
+Per run: exactly one report `tasks/TASK-{NNN}/integration-scanner-findings.md` and exactly one evidence ledger `tasks/TASK-{NNN}/integration-scanner-evidence.json` and exactly one coverage record `tasks/TASK-{NNN}/integration-scanner-coverage.json`, all shaped by `stack-scanner/references/scan-evidence-contract.md` - read it first. Never write into the target.
 
 ## Process
 
-1. **Read `composer.json` `require`.** Enumerate every non-`php`, non-`ext-*` runtime package as an integration candidate; exclude `require-dev` unless the package is clearly used at runtime.
+1. **Enumerate candidates from every source in the contract's integration-source checklist, not from `require` alone.** Take every non-`php`, non-`ext-*` package from `composer.json` `require` (a `require-dev` entry only when clearly runtime, with the reason), then add the sources `require` cannot show: a subsystem configured in `config/bundles.php`, `config/packages/**`, or service/provider wiring (mailer DSN, messenger transport, storage/Flysystem adapter, JWT or other auth bundle, CORS, search or cache client) is a candidate even when the package implementing it arrives transitively through a meta-package or CMS bundle - resolve that implementing package in `composer.lock`; a DSN or base URL declared in environment/container/CI config or a deploy script is a candidate contract; a `package.json` service that calls an external provider is a candidate. "No integrations" is reportable only after all of these were searched, and the report must say which were searched.
 2. **Categorize each candidate** using concrete PHP package signals:
    - Payment: `stripe/stripe-php`, `srmklive/paypal`.
    - Messaging/queue: `predis/predis`, `aws/aws-sdk-php` (SQS), `enqueue/*`, `php-amqplib/php-amqplib`.
@@ -32,44 +34,31 @@ Write exactly one findings file into the current run's task directory: `tasks/TA
    - Auth/identity: `laravel/sanctum`, `laravel/passport`, `lexik/jwt-authentication-bundle`, `firebase/php-jwt`.
    - Observability: `sentry/sentry`, `open-telemetry/*`.
    - Feature flags, CDN, ML/AI, secondary database: category by package purpose.
-3. **Find runtime wiring** for each candidate: config file (`config/services.yaml`, `config/*.php`), provider/bundle registration, DI service definition, or client instantiation. Cite the wiring path:line.
-4. **Assign confidence:** `confirmed` = package + wiring both cited; `inferred` = package only; `unknown` = ambiguous signal (e.g. a generic HTTP client used for an unnamed API).
-5. **Capture non-PHP neighbors as contracts.** When config references an external service without a PHP client (e.g. a base URL, a broker DSN), record it as an integration contract with its config citation, not as a PHP dependency.
-6. **Mark confidence** per finding and never present a guess as fact.
+   These package names are examples of each class, not its definition; a transitively installed or config-only provider belongs to the same category as its named peers.
+3. **Find runtime wiring and bounded call sites** for each candidate: config file (`config/services.yaml`, `config/*.php`), provider/bundle registration, DI service definition, client instantiation, and at least one real request/response or producer/consumer call path. Cite bounded line ranges, symbols, or JSON pointers. Package/config presence may confirm installation, but only call-site evidence can support owned runtime behavior.
+4. **Assign confidence:** `confirmed` = implementing package + wiring both cited; `inferred` = package or configuration alone; `unknown` = ambiguous signal (e.g. a generic HTTP client used for an unnamed API).
+5. **Capture provider test topology and safety.** Find provider fakes, fixtures, mock transports, sandbox configuration names, contract/integration tests, and focused test commands without reading credentials. Record whether network execution is default-deny, what explicit environment/authorization would be required, and what rollback/sanitization boundary exists. Absence stays `unknown`; do not invent a safe sandbox.
+6. **Map claims and material adjacency.** Separate behavior directly supported by target evidence from catalog review questions/external provider requirements. Record the primary provider-mechanics owner and every material adjacent owner (domain outcome, async reliability, local authorization, storage/cache correctness, security, or testing), with positive, negative, ambiguous, and cross-domain routing cases.
+7. **Capture non-PHP neighbors as contracts.** When config references an external service without a PHP client (e.g. a base URL, a broker DSN), record it as an integration contract with its config citation, not as a PHP dependency.
+8. **Mark confidence** per finding and never present a guess as fact.
 
-## Output Template
+## Report Structure
 
-```markdown
-# Integration Scanner Findings: [target_name]
-
-**Target:** [path]  **Scanned:** [date]
-
-## Integrations by Category
-### [Category, e.g. Payment]
-- [package] - wiring: [config path:L#] (confirmed/inferred)
-
-### [Next category ...]
-- ...
-
-## Integration Contracts (non-PHP neighbors)
-- [service] - referenced at [config path:L#] (inferred/unknown)
-
-## Uncategorized / Ambiguous
-- [package or reference] (unknown - path:L#)
-
-## Confidence Summary
-[X confirmed, Y inferred, Z unknown]
-```
+Follow the `integration-scanner` report template in appendix A of `stack-scanner/references/scan-evidence-contract.md`. Every factual line carries its confidence tag and its evidence id.
 
 ## Guardrails
 
 - MUST cite the composer package AND the runtime wiring path:line to mark an integration `confirmed`.
-- MUST cite a real file path (and line where practical) for every finding.
-- MUST operate read-only on the target; MUST NOT read `.env`/secrets (env-var names only, never values).
+- MUST give every surface it saw one of the four dispositions in the coverage record; a surface nobody dispositioned is not the same as one nobody needed.
+- MUST cite a real file path (and line where practical) for every finding, and MUST emit all three artifacts with contract-shaped evidence records (target-relative path, `sha256:` fingerprint, supported claims).
+- MUST operate read-only on the target and follow the shared secrets rule: key names from non-secret committed sources only; never a value, and never `.env` itself.
+- MUST search every source in the integration-source checklist before reporting an empty or short integration list; `require` alone is not a complete search.
 - MUST prefer `require` over `require-dev`; only include a dev entry when it is clearly a runtime dependency, and say why.
 - MUST record non-PHP neighbors as integration contracts, never as PHP stacks.
+- MUST NOT elevate catalog capabilities (timeouts, retries, deduplication, retention, model choice, or similar) into confirmed target behavior without call-site evidence.
+- MUST capture provider-safe test topology and all material adjacent owners; a single generic sibling is insufficient.
 - MUST NOT deep-dive stack identity, architecture, infra, security, or conventions - those belong to their own scanners.
 
 ## Final Output
 
-Return the findings file path, the categorized integration list with per-item confidence, any integration contracts, and a one-line confidence summary. Suggest `stack-researcher` (to ground detected integrations in current provider docs) as the next step.
+Return all three artifact paths (report, evidence ledger, coverage record), the categorized integration list with per-item confidence, any integration contracts, and a one-line confidence summary. Suggest `stack-researcher` (to ground detected integrations in current provider docs) as the next step.

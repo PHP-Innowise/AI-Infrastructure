@@ -40,6 +40,7 @@ Buffering is what keeps per-turn continuity affordable: without it, every turn w
 **Purpose:** Allows only subagents defined in `.claude/agents/` (frontmatter `name:`); Claude Code's built-in agents (Explore, Plan, general-purpose, claude, statusline-setup, claude-code-guide) are denied, so every delegation goes through the accelerator's command -> agent -> skill pipeline. Works together with the `Agent(...)` deny rules and `CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS` in `.claude/settings.json`; the hook also covers built-in agents added after that deny list was written.
 **Return:** 0 = allow, 2 = block
 **Serialization:** agents marked `writes: true` in their frontmatter run one at a time - the gate takes `/tmp/claude-write-agent-lock-<repo-key>` (TTL 30 min, override with `SUBAGENT_WRITE_LOCK_TTL_MINUTES`), released by the completion observer or by expiry.
+**Limits:** the lock is advisory and machine-local (`/tmp`, keyed by the repository path), so two containers or two machines working the same branch are not serialized against each other. It covers subagent spawns only - the main conversation's own edits are not gated, and nothing running outside the tool is. It fails open with no JSON extractor (`jq`/`php`/`python3`), with an unreadable agent roster, and - for the check-and-take race only - without `flock`. Past the TTL the holder stops blocking, so a run longer than `SUBAGENT_WRITE_LOCK_TTL_MINUTES` can be joined by a second writer.
 
 ### SubagentStop: Subagent Dispatch Observer
 **Script:** `subagent-dispatch.sh`

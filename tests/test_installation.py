@@ -113,8 +113,25 @@ class InventoryTest(unittest.TestCase):
             for edition in EDITIONS
         )
         before = {path: path.read_bytes() for path in inventory_paths}
-        generated = run(sys.executable, str(INSTALLER), "--write-inventories")
-        self.assertEqual(0, generated.returncode, generated.stderr)
+        with tempfile.TemporaryDirectory(prefix="regenerated inventories ") as raw:
+            regenerated = Path(raw).resolve() / "inventories"
+            generated = run(
+                sys.executable,
+                str(INSTALLER),
+                "--write-inventories",
+                "--inventory-out",
+                str(regenerated),
+            )
+            self.assertEqual(0, generated.returncode, generated.stderr)
+            self.assertEqual(
+                before,
+                {
+                    path: (regenerated / path.name).read_bytes()
+                    for path in inventory_paths
+                },
+            )
+        # Regeneration reads the index, so an untracked working tree can neither
+        # change the committed inventories nor be written into them.
         self.assertEqual(before, {path: path.read_bytes() for path in inventory_paths})
 
         for edition in EDITIONS:
@@ -126,10 +143,51 @@ class InventoryTest(unittest.TestCase):
             self.assertEqual(len(installed), len(set(installed)))
             self.assertEqual(excluded, sorted(set(excluded)))
             self.assertTrue(set(installed).isdisjoint(excluded))
+            # Every file the accelerator's own runtime rewrites here installs
+            # from a pristine source instead of the developer's working copy.
             self.assertEqual(
-                {"memory-bank/INDEX.md": "memory-bank/.install/INDEX.md"},
+                {
+                    "memory-bank/INDEX.md": "memory-bank/.install/INDEX.md",
+                    "project-brain/indexes/active.json": "project-brain/.install/active.json",
+                    "project-brain/indexes/archive.json": "project-brain/.install/archive.json",
+                },
                 data["source_overrides"],
             )
+
+    def test_generation_ignores_untracked_working_tree_files(self) -> None:
+        # An inventory is a committed contract that the installer copies
+        # verbatim, so anything the generator picks up ships to consumers.
+        # Generating from the working tree once absorbed 8586 untracked
+        # `vendor/` paths from a locally built app into an edition's
+        # distribution list. Verification stays permissive on purpose - it is
+        # meant to warn about a file not committed yet - but generation reads
+        # tracked files only.
+        probe = ROOT / "Symfony" / ".claude" / "untracked-generation-probe.md"
+        self.assertFalse(probe.exists(), "probe path is already in use")
+        inventory_paths = tuple(
+            ROOT
+            / "install"
+            / "inventories"
+            / (edition.lower().replace(" ", "-") + ".json")
+            for edition in EDITIONS
+        )
+        before = {path: path.read_bytes() for path in inventory_paths}
+        probe.write_text("untracked\n", encoding="utf-8")
+        try:
+            generated = run(sys.executable, str(INSTALLER), "--write-inventories")
+            self.assertEqual(0, generated.returncode, generated.stderr)
+            self.assertEqual(
+                before, {path: path.read_bytes() for path in inventory_paths}
+            )
+            self.assertNotIn(
+                probe.name, json.dumps(inventory("Symfony"))
+            )
+            # The delta is what makes a wrong inventory visible before it is
+            # committed, so an unchanged run has to say so rather than stay
+            # silent.
+            self.assertIn("\t+0\t-0", generated.stdout)
+        finally:
+            probe.unlink()
 
     def test_malformed_exclusion_and_override_metadata_is_rejected(self) -> None:
         mutations = {
@@ -454,6 +512,116 @@ class InventoryTest(unittest.TestCase):
             self.assertFalse(any(target.iterdir()))
 
 
+class UntrackedSourceTest(unittest.TestCase):
+    """Untracked working-tree content must never reach a shipped inventory."""
+
+    LEAKS = (
+        ".env",
+        "client-notes.txt",
+        "Task/app/.env",
+        "Task/app/var/cache/dev/ContainerSynthetic.php",
+    )
+    MARKER = "CLIENT_SECRET=must-not-ship"
+
+    def _write_editions(self, base: Path) -> None:
+        for edition in EDITIONS:
+            edition_root = base / edition
+            (edition_root / "memory-bank" / ".install").mkdir(parents=True)
+            (edition_root / ".claude").mkdir(parents=True)
+            (edition_root / "VERSION").write_text("0.0.0\n", encoding="utf-8")
+            (edition_root / "AGENTS.md").write_text("# policy\n", encoding="utf-8")
+            (edition_root / "CHANGELOG.md").write_text("# history\n", encoding="utf-8")
+            (edition_root / "memory-bank" / "INDEX.md").write_text(
+                "# source index\n", encoding="utf-8"
+            )
+            (edition_root / "memory-bank" / ".install" / "INDEX.md").write_text(
+                "# production index\n", encoding="utf-8"
+            )
+            (edition_root / ".claude" / "settings.json").write_text(
+                "{}\n", encoding="utf-8"
+            )
+
+    def _plant_untracked_files(self, base: Path) -> None:
+        for relative in self.LEAKS:
+            leak = base / "Symfony" / relative
+            leak.parent.mkdir(parents=True, exist_ok=True)
+            leak.write_text(self.MARKER + "\n", encoding="utf-8")
+
+    def test_untracked_files_are_absent_from_generated_inventories(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="untracked source ") as raw:
+            base = Path(raw).resolve()
+            self._write_editions(base)
+            initialized = run(
+                "git", "-c", "init.defaultBranch=main", "init", "-q", str(base)
+            )
+            self.assertEqual(0, initialized.returncode, initialized.stderr)
+            # Staged and never committed: the index alone defines the payload.
+            staged = run("git", "add", "--", *EDITIONS, cwd=base)
+            self.assertEqual(0, staged.returncode, staged.stderr)
+            self._plant_untracked_files(base)
+
+            generated = run(
+                sys.executable,
+                str(INSTALLER),
+                "--source-root",
+                str(base),
+                "--write-inventories",
+                cwd=base,
+            )
+            self.assertEqual(0, generated.returncode, generated.stderr)
+
+            written = base / "install" / "inventories" / "symfony.json"
+            raw_text = written.read_text(encoding="utf-8")
+            self.assertNotIn(self.MARKER, raw_text)
+            data = json.loads(raw_text)
+            installed = [
+                path for paths in data["installed"].values() for path in paths
+            ]
+            recorded = set(installed) | set(data["excluded_tracked_paths"])
+            for relative in self.LEAKS:
+                with self.subTest(path=relative):
+                    self.assertNotIn(relative, recorded)
+            self.assertEqual(
+                ["AGENTS.md", "VERSION", "memory-bank/INDEX.md"],
+                data["installed"]["shared"],
+            )
+            self.assertEqual([".claude/settings.json"], data["installed"]["claude"])
+            self.assertEqual(
+                ["CHANGELOG.md", "memory-bank/.install/INDEX.md"],
+                data["excluded_tracked_paths"],
+            )
+
+            # Verification reads the same index, so the dirty working tree keeps
+            # the installation gate green instead of failing on client files.
+            verified = run(
+                sys.executable,
+                str(INSTALLER),
+                "--source-root",
+                str(base),
+                "--verify-inventories",
+                cwd=base,
+            )
+            self.assertEqual(0, verified.returncode, verified.stderr)
+            self.assertIn("VERIFIED\tSymfony", verified.stdout)
+
+    def test_generation_without_a_git_checkout_fails_instead_of_scanning(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ungit source ") as raw:
+            base = Path(raw).resolve()
+            self._write_editions(base)
+            self._plant_untracked_files(base)
+            result = run(
+                sys.executable,
+                str(INSTALLER),
+                "--source-root",
+                str(base),
+                "--write-inventories",
+                cwd=base,
+            )
+            self.assertEqual(1, result.returncode, result.stdout)
+            self.assertIn("install-accelerator:", result.stderr)
+            self.assertFalse((base / "install").exists())
+
+
 class CleanInstallTest(unittest.TestCase):
     def test_every_edition_and_tool_clean_install(self) -> None:
         baseline_status = source_status()
@@ -465,6 +633,47 @@ class CleanInstallTest(unittest.TestCase):
                     self._run_clean_install(edition, tool, data)
                     self.assertEqual(baseline_digest, source_digest(edition, data))
                     self.assertEqual(baseline_status, source_status())
+
+    def test_local_runtime_state_never_ships_into_an_install(self) -> None:
+        """A developer's own Brain index must not reach a target.
+
+        The accelerator's runtime rewrites `project-brain/indexes/active.json`
+        in this repository whenever a task is opened here, and the records it
+        then lists are this repository's - untracked, and never installed. A
+        target that received that index held one pointing at files it does not
+        have, which its own `context.py validate` reports as stale. Measured on
+        a working checkout: three clean-install subtests failed for that reason
+        alone, with nothing wrong in any committed file.
+        """
+        index = ROOT / "Symfony" / "project-brain" / "indexes" / "active.json"
+        pristine = index.read_bytes()
+        index.write_text(
+            json.dumps(
+                [{"type": "task", "external_id": "local-session",
+                  "path": "project-brain/dynamic/tasks/local-session.md"}],
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self.addCleanup(index.write_bytes, pristine)
+        with tempfile.TemporaryDirectory(prefix="runtime state install ") as raw:
+            target = Path(raw).resolve()
+            installed = run(
+                sys.executable,
+                str(INSTALLER),
+                "--edition",
+                "Symfony",
+                "--tool",
+                "claude",
+                "--target",
+                str(target),
+            )
+            self.assertEqual(0, installed.returncode, installed.stderr)
+            shipped = (target / "project-brain" / "indexes" / "active.json").read_text(
+                encoding="utf-8"
+            )
+        self.assertEqual("[]", shipped.strip())
 
     def _run_clean_install(self, edition: str, tool: str, data: dict) -> None:
         with tempfile.TemporaryDirectory(prefix="clean install ") as raw:

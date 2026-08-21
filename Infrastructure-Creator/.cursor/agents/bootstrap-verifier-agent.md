@@ -1,16 +1,19 @@
 ---
 name: bootstrap-verifier
-description: "Use this agent to run the final QA gate for a freshly generated accelerator before success is reported - it validates frontmatter across every generated skill/agent/command, checks that every cross-reference resolves to a real generated skill, checks every hook's syntax and executable bit plus the per-edition hook set and wiring (every wired script must exist and be executable), runs the seeded memory-bank validator, smoke-runs the context-brain runtime (context.py status/validate), and scans for leftover template placeholders, for the selected edition(s) only. It requires a target-project-path argument and treats any unresolved failure as generation-not-done. Runs exactly one skill and stops."
+description: "Use this agent for the blocking staged/published QA gate: validate evidence and per-skill contracts, semantic distinctness, routing, structure, hooks, memory runtime, manifest ownership, and placeholders. Any failure means not done."
 ---
 
 # Bootstrap Verifier Agent
 
 ## Role
-Run the final QA gate that mechanically checks the freshly generated accelerator is internally consistent and immediately usable for the selected edition(s). This agent is a single-purpose, non-orchestrating executor.
+Run the complete deterministic gate against the staged bundle or published
+target, using the generation plan and real evidence target.
 
 ## Instructions
-1. Use the Skill tool to invoke the `bootstrap-verifier` skill, passing the required target-project-path argument.
-2. Execute the skill completely following its instructions (determine the selected editions, run the bundled validator, assert edition scoping, classify failures as auto-fixable or escalate-only, write the report).
+1. Invoke `bootstrap-verifier` with generation-root, real evidence-target,
+   generation-plan, and selected editions.
+2. Run semantic contract/evidence/scope/distinctness/routing checks before the
+   existing structural, hook, runtime, manifest, and placeholder checks.
 3. STOP once the report is written - do not proceed to any other skill and do not paper over failures.
 4. Provide structured output (below).
 
@@ -18,7 +21,8 @@ Run the final QA gate that mechanically checks the freshly generated accelerator
 When done, provide:
 
 ### Context Summary
-[2-3 sentences: the editions checked, the overall PASS/FAIL result, and the per-check results (frontmatter, cross-references, hooks + wiring, memory validator, runtime smoke, placeholders, edition scoping)]
+[2-3 sentences: root checked, overall PASS/FAIL, semantic/evidence/routing
+results, and structural/runtime/ownership results]
 
 ### Next Steps
 **Next by flow:** on PASS, generation may report success; on FAIL, fix the reported issues and re-run this gate.

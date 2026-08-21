@@ -24,10 +24,11 @@ All Minimum items, plus:
 
 - [ ] Composer metadata is valid: `composer validate --strict`.
 - [ ] Syntax is clean: `php -l` on changed files (or `find app -name '*.php' -print0 | xargs -0 -n1 php -l`).
-- [ ] Tests pass: `php artisan test` (or `vendor/bin/pest` / `vendor/bin/phpunit`).
+- [ ] Tests pass: `php artisan test` (or `vendor/bin/pest` / `vendor/bin/phpunit`). Run the whole suite; a `--filter`/`--group` run is a debugging aid, not evidence, and must be reported as filtered.
 - [ ] Formatting passes: `vendor/bin/pint --test`.
 - [ ] Static analysis passes: `vendor/bin/phpstan analyse` (Larastan) or `vendor/bin/psalm` if configured.
 - [ ] New behavior has focused test coverage, at least the happy path and the highest-risk failure path.
+- [ ] Tests own the rows they assert on: shared fixture records are treated as read-only, and any test that mutates state (sign-in, password change, deletion, counters) creates its own subject. A test that reads a fixture another test can write passes or fails by suite order.
 - [ ] Project Brain mutations use legal transitions, expected revisions, and the shared mutation lock; no duplicate authoritative task state was introduced.
 - [ ] Database changes include a migration (and factory/seeder updates where relevant).
 - [ ] Input validation is via a Form Request (or explicit validator) and authorization via a Policy/Gate.

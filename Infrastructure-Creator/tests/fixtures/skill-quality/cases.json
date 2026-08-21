@@ -1,0 +1,270 @@
+{
+  "absence-evidence-calibration": {
+    "description": "An absence whose search resolves to exactly its accounted matches is accepted.",
+    "expected": null
+  },
+  "absence-evidence-contradicted": {
+    "description": "Evidence claims the target does not do something the resolved search finds it doing.",
+    "expected": "EVIDENCE_ABSENCE_CONTRADICTED"
+  },
+  "ambiguous-routing": {
+    "description": "Two skills claim the same positive request without explicit primary ownership.",
+    "expected": "ROUTING_AMBIGUITY"
+  },
+  "body-path-calibration": {
+    "description": "Strings shaped like paths are not paths: backslashed class names, dotted config keys, constants, placeholders and globs, foreign-layout and installed-tree paths, Twig logical names, files the body commands into existence, and directories the cited configuration itself declares.",
+    "expected": null
+  },
+  "body-path-existence": {
+    "description": "A skill body sends the agent to a target file that does not exist.",
+    "expected": "SKILL_BODY_PATH_MISSING"
+  },
+  "catalog-role-coverage": {
+    "description": "A selected candidate declares the universal load/execute/verify trio where its catalog obligations belong.",
+    "expected": "CATALOG_ROLE_UNCOVERED"
+  },
+  "claim-common-lexicon-only": {
+    "description": "A claim clears the language tier but nothing project-specific in it appears in the cited range; support rests entirely on software-English boilerplate ('service', 'method', 'result', 'value').",
+    "expected": "EVIDENCE_CLAIM_GENERIC_SUPPORT"
+  },
+  "claim-compound-identifier-calibration": {
+    "description": "Honest prose stays clean when the code spells its subject as one identifier: a claim about the 'reminder' the file only ever writes as publishReminder is accepted.",
+    "expected": null
+  },
+  "claim-invariant-lost": {
+    "description": "A high-priority invariant discovery confirmed does not survive into the plan.",
+    "expected": "CLAIM_INVARIANT_LOST"
+  },
+  "claim-language-lexicon-only": {
+    "description": "An invented claim overlaps the cited source only through PHP keywords ('class', 'function', 'public', 'string'), which occur in most PHP files and therefore ground nothing.",
+    "expected": "EVIDENCE_CLAIM_UNSUPPORTED"
+  },
+  "claim-php-separator-calibration": {
+    "description": "PHP member separators join compounds like '.' and '/': a true claim naming FrameworkBundle is accepted against the line registering FrameworkBundle::class.",
+    "expected": null
+  },
+  "claim-short-config-calibration": {
+    "description": "An eight-line config holds a single sentence of vocabulary, so an honest claim that reuses one of its words and paraphrases the rest is accepted.",
+    "expected": null
+  },
+  "claim-single-word-source-calibration": {
+    "description": "A cited file whose whole content is '8.2' can offer one word, so the overlap bar cannot demand two; .php-version stays gradeable and a claim reusing nothing it says is still rejected.",
+    "expected": null
+  },
+  "claim-traceability": {
+    "description": "Evidence claims trace through scope, procedure, verification, and output.",
+    "expected": "CLAIM_TRACEABILITY_MISSING"
+  },
+  "contract-rendering": {
+    "description": "An approved procedure step is planned but never reaches the authored skill.",
+    "expected": "SKILL_STEP_NOT_RENDERED"
+  },
+  "contract-rendering-obligation": {
+    "description": "A catalog obligation is planned but never reaches the authored procedure.",
+    "expected": "SKILL_ROLE_NOT_RENDERED"
+  },
+  "critical-invariant-coverage": {
+    "description": "Every critical invariant reaches a selected skill procedure and verification assertion.",
+    "expected": "CRITICAL_INVARIANT_COVERAGE"
+  },
+  "deterministic-output": {
+    "description": "Repeated runs emit byte-identical sorted JSON diagnostics.",
+    "expected": "SKILL_SIMILARITY"
+  },
+  "duplicate-shared-template": {
+    "description": "Unrelated skills reuse the same generic five-step procedure.",
+    "expected": "SKILL_SIMILARITY"
+  },
+  "evidence-anchor": {
+    "description": "Skill evidence carries a bounded canonical source anchor.",
+    "expected": "EVIDENCE_ANCHOR_LOCATION"
+  },
+  "evidence-anchor-resolution": {
+    "description": "A well-formed anchor must resolve inside the file it cites: a line range past EOF, an inverted range, or an absent symbol cites nothing.",
+    "expected": "EVIDENCE_ANCHOR_RANGE"
+  },
+  "evidence-row-agreement": {
+    "description": "A rendered evidence row keeps a real identifier but re-points it at a path the plan never declared.",
+    "expected": "SKILL_EVIDENCE_ROW_ANCHOR"
+  },
+  "evidence-undisposed": {
+    "description": "Evidence sits inside the skill's own declared paths and is neither cited nor ruled out.",
+    "expected": "SKILL_EVIDENCE_UNDISPOSED"
+  },
+  "exclusive-ownership-write": {
+    "description": "A skill writes a path another skill owns exclusively, including a read-only owner whose own writes are empty.",
+    "expected": "OWNERSHIP_EXCLUSIVE_WRITE_CONFLICT"
+  },
+  "flow-contract-shape": {
+    "description": "Declared flows use typed stages and resolve every selected skill.",
+    "expected": "FLOW_CONTRACT_INVALID"
+  },
+  "generic-verification": {
+    "description": "Verification must define a concrete command or manual assertion and explicit outcomes.",
+    "expected": "GENERIC_VERIFICATION"
+  },
+  "golden-plan-shapes": {
+    "description": "Modular, tenant-shared and provider-integration plans of thirty-six skills each validate clean, so shape-specific rules are calibrated on more than one shape.",
+    "expected": null
+  },
+  "good-distinct-shared-safety": {
+    "description": "Distinct procedures share one exact approved safety block.",
+    "expected": null
+  },
+  "invalid-evidence": {
+    "description": "Evidence attempts target traversal or names a missing file.",
+    "expected": "EVIDENCE_PATH_INVALID"
+  },
+  "irrelevant-evidence-reuse": {
+    "description": "An integration reuses valid evidence that does not identify it.",
+    "expected": "SKILL_EVIDENCE_IRRELEVANT"
+  },
+  "large-plan-calibration": {
+    "description": "A thirty-six skill plan, honest by construction, validates with zero blocking diagnostics.",
+    "expected": null
+  },
+  "legacy-publication-ineligible": {
+    "description": "Schema 1.0 and 1.1 remain auditable but cannot validate authored publication output.",
+    "expected": "LEGACY_PLAN_PUBLICATION_INELIGIBLE"
+  },
+  "lexically-unique-empty": {
+    "description": "Long varied prose has no traceable project procedure or contract decisions.",
+    "expected": "SKILL_PROCEDURE_TRACE"
+  },
+  "missing-evidence": {
+    "description": "A skill references an evidence ID absent from the plan.",
+    "expected": "SKILL_EVIDENCE_UNKNOWN"
+  },
+  "nonconforming-agent-file": {
+    "description": "An extra Markdown wrapper outside the planned <skill>-agent naming contract is rejected.",
+    "expected": "AGENT_ROUTING_NONCONFORMING_FILE"
+  },
+  "noun-substituted-template": {
+    "description": "One prose template serves two skills, differing only in the project nouns each plan contract forces it to carry; every line is lexically distinct.",
+    "expected": "SKILL_TEMPLATE_REUSE"
+  },
+  "operational-content-calibration": {
+    "description": "Honest instruction stays clean: project-specific verbs outside the whitelist, delegation and decision steps, and steps carrying no anchor of their own.",
+    "expected": null
+  },
+  "paraphrased-empty": {
+    "description": "Headings are present but the operational contract is filler.",
+    "expected": "SKILL_CONTENT_EMPTY"
+  },
+  "path-contract-classification": {
+    "description": "Every path is normalized and classified as resolving, generated, or safely creatable.",
+    "expected": "PATH_EXISTING_MISSING"
+  },
+  "plan-mutation-step": {
+    "description": "The pre-publication step damages the plan one way at a time; a damage the gate accepts means a rule stopped firing.",
+    "expected": "MUTATION_UNCAUGHT"
+  },
+  "procedure-role-collapse-calibration": {
+    "description": "Two obligations honestly sharing one step in a small skill stay clean; only the unambiguous collapse blocks.",
+    "expected": null
+  },
+  "procedure-role-collapsed": {
+    "description": "Three or more catalog obligations are all discharged by one general inspection step.",
+    "expected": "PROCEDURE_ROLE_COLLAPSED"
+  },
+  "procedure-role-wiring": {
+    "description": "A role is declared with requirements but names neither the evidence that grounds it nor the step that discharges it.",
+    "expected": "PROCEDURE_ROLE_CONTRACT_INVALID"
+  },
+  "provider-safety": {
+    "description": "Provider access requires a safe default and explicit authorization.",
+    "expected": "PROVIDER_AUTHORIZATION_REQUIRED"
+  },
+  "read-only-mutation": {
+    "description": "Read-only contracts cannot use write-oriented procedure language.",
+    "expected": "READ_ONLY_PROCEDURE_MUTATION"
+  },
+  "registry-coverage-bypass": {
+    "description": "A canonical candidate is neither selected nor rejected, or its catalog anchor is invalid.",
+    "expected": "INVENTORY_CANDIDATE_UNACCOUNTED"
+  },
+  "repunctuated-template": {
+    "description": "The same template again, the second skill differing from the first only in punctuation and interchangeable connectives.",
+    "expected": "SKILL_TEMPLATE_REUSE"
+  },
+  "review-verification-not-executed": {
+    "description": "The adversarial review judged a prescribed command from the page instead of running it.",
+    "expected": "REVIEW_VERIFICATION_NOT_EXECUTED"
+  },
+  "routing-case-coverage": {
+    "description": "Routing fixtures cover self-selection and every adjacent owner.",
+    "expected": "ROUTING_CASE_COVERAGE"
+  },
+  "routing-tautology": {
+    "description": "A routing fixture names the skill it expects to win, so no routing decision is tested.",
+    "expected": "ROUTING_CASE_TAUTOLOGICAL"
+  },
+  "routing-tautology-calibration": {
+    "description": "A runtime-fixed skill may be named by its own subject; a memory request cannot avoid the word memory.",
+    "expected": null
+  },
+  "runtime-baseline-contradicted": {
+    "description": "A baseline recorded for a runtime command says something the runtime contract does not declare.",
+    "expected": "RUNTIME_BASELINE_CONTRADICTED"
+  },
+  "runtime-expectation-contradicted": {
+    "description": "A runtime-fixed skill promises its runtime command exits zero while the runtime contract declares a nonzero exit for it.",
+    "expected": "RUNTIME_EXPECTATION_CONTRADICTED"
+  },
+  "scan-secret-covered": {
+    "description": "A scanner claims to have covered a secret-bearing file, which the contract forbids reading.",
+    "expected": "SCAN_SECRET_COVERED"
+  },
+  "scan-surface-unaccounted": {
+    "description": "A module of the target received no disposition from any scanner.",
+    "expected": "SCAN_SURFACE_UNACCOUNTED"
+  },
+  "schema-1.4-valid": {
+    "description": "A complete typed contract at the current schema passes both plan-only and authored validation.",
+    "expected": null
+  },
+  "scope-collision": {
+    "description": "Sibling skills claim the same owned scope.",
+    "expected": "SCOPE_COLLISION"
+  },
+  "skill-body-command-calibration": {
+    "description": "Class names, config paths, constants, and read-only tooling in backticks are not commands.",
+    "expected": null
+  },
+  "skill-body-command-risk": {
+    "description": "Skill prose hands the agent a destructive, mutating, or provider-calling command.",
+    "expected": "SKILL_BODY_COMMAND_RISK"
+  },
+  "template-reuse-calibration": {
+    "description": "Honest inventories stay clean: two genuinely different skills, an approved versioned fixed block repeated word for word, and the same framework idiom shown in a fenced code block.",
+    "expected": null
+  },
+  "unjustified-inventory-growth": {
+    "description": "A catalog candidate is added without a satisfied evidence-backed selection condition.",
+    "expected": "SKILL_SELECTION_CONDITION"
+  },
+  "unsupported-evidence-claim": {
+    "description": "A selection condition repeats a claim that the cited source/range does not support.",
+    "expected": "EVIDENCE_CLAIM_UNSUPPORTED"
+  },
+  "vacuous-operational-content": {
+    "description": "A skill names real project files, classes, and constants in every section, traces to every plan contract, and still commands nothing: procedure steps hedge instead of acting and verification accepts an impression.",
+    "expected": "SKILL_STEP_HEDGED"
+  },
+  "verbatim-boundary": {
+    "description": "A declared primary/defer precedence cannot resolve an owned scope, ownership description, or positive trigger that both skills claim word for word.",
+    "expected": "BOUNDARY_NOT_SEPARATING"
+  },
+  "verification-baseline-calibration": {
+    "description": "The same failing baseline with a differential expectation stays clean.",
+    "expected": null
+  },
+  "verification-baseline-contradicted": {
+    "description": "An expectation promises the command succeeds outright while its recorded baseline fails on the unmodified target.",
+    "expected": "VERIFICATION_BASELINE_CONTRADICTED"
+  },
+  "verification-baseline-missing": {
+    "description": "An executable check this gate cannot resolve declares an expectation for a command nobody observed.",
+    "expected": "VERIFICATION_BASELINE_MISSING"
+  }
+}

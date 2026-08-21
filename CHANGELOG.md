@@ -170,7 +170,27 @@ edition's own files remain in that edition's changelog.
   exporter, no network, no configuration; never invoked by a hook, a skill,
   or CI.
 
+- **CI now syntax-checks the PHP the accelerator actually ships.** The
+  repository tracks no `.php` file, so no job had ever parsed a line of PHP -
+  yet its skills, examples and DOD carry 363 fenced PHP blocks, and those
+  blocks are what an agent copies when it writes code. A broken one propagates
+  into generated applications while every existing job stays green. The new
+  `scripts/check_php_snippets.py`, wired into the `lint` job, extracts each
+  block from tracked Markdown and runs `php -l` over the 93 that begin with
+  `<?php` and therefore claim to be whole files; the remaining 270 fragments
+  are counted and reported rather than linted, so the step never overstates
+  its coverage. All 93 pass today. `--require-php` makes a runner that lost
+  its preinstalled `php` fail rather than report a silent pass.
+
 ### Changed
+
+- **Infrastructure-Creator's context-budget ceilings were raised for the
+  content review-and-repair phase** (`scripts/token_budget.json`, observed
+  values + ~5%): the generator gained the `infra-validate` and
+  `content-reviewer` skills with their agent wrappers and the
+  `/infra-validate` command, growing the edition's startup surface and skill
+  bodies. The change that justifies the growth is recorded in
+  `Infrastructure-Creator/CHANGELOG.md`.
 
 - **The ready-made accelerator installer can now adopt standard existing
   project root files without destructive overwrites.** The new
@@ -347,6 +367,203 @@ edition's own files remain in that edition's changelog.
   main-session turns, and compact deliberately near ~400k of context. Both
   thresholds are derived from local transcripts and are marked as such.
 
+- **Browser verification now walks journeys, and reports defects instead of
+  repairing them.** Three rounds of manual testing on a completed application
+  found 15 defects that a 419-of-419 acceptance-criteria suite and the
+  agent's own browser pass had both stayed green through, and the skill's
+  shape explains why: every checklist item asked "on this page, does X work",
+  while every one of the 15 needed a role walked from its first action. A
+  parent with a zero balance pressing "Register & Pay" got an HTTP 500; the
+  page it sat on loaded perfectly. `browser-verify/SKILL.md` gained a
+  mandatory `What To Walk` section - roles enumerated, each role's first
+  action named, ordered by blast radius rather than by proximity to the diff,
+  each journey walked empty as well as populated - and calls out the two
+  classes a page check cannot see: the feature that saves and never renders,
+  and the mechanism behind the button. It also gained a `Defect Report` output
+  contract, because the previous "verified flows, evidence, blockers" had
+  nowhere for "the feature works and is invisible" to land. The screenshot
+  bound became per-journey rather than per-verification, and exhausting the
+  budget now requires naming the journeys left unwalked. In
+  `browser-verify-agent.md`, the instruction "If issues found: fix code, wait
+  for hot-reload, re-verify (max 3 attempts)" is gone: a verifier that repairs
+  what it finds hands back a green report and no list, and the list is the
+  deliverable.
+
+- **The debugger sweeps the root cause across the codebase before calling a
+  bug fixed.** `EntityManager::wrapInTransaction()` closes the manager on any
+  exception, expected ones included, so six services handed their controller a
+  dead manager while reporting an ordinary rejection - one shape, six sites,
+  and fixing the reported one left five live. Phase 4 of
+  `systematic-debugger/SKILL.md` gained a `Sweep The Root Cause` step: search
+  for the mechanism rather than the symptom, report every other site with file
+  and line even when fixing it is out of scope, and treat that list as the
+  requester's scope decision rather than a "while I'm here" improvement the
+  same phase forbids. `project-brain/templates/bug.md` gained `Root Cause`,
+  `Same Shape Elsewhere` and `Guard` sections so the sweep and the regression
+  test survive in the record; an empty sweep section means the search ran.
+
+- **The Definition of Done and the test-data skills now name the
+  order-dependence a green suite hides.** A new test signed in as a seeded
+  fixture account and failed, because an earlier password-reset test had
+  permanently changed that fixture's password - a result that depended on
+  suite order and surfaced as an unrelated assertion. Each edition's
+  `.claude/DOD.md` now requires the whole suite in one run, states that a
+  `--filter`/`--group` run is a debugging aid to be reported as filtered, and
+  adds an item requiring tests to own the rows they assert on. The
+  `test-generator` skills and Symfony's `fixture-factory-generator` carry the
+  same rule where the test is written: a seeded fixture is a read-only prop,
+  and anything a test authenticates as or mutates is minted by that test.
+
+- **`docs/SECURITY.md` states what the write-agent gate does not guarantee.**
+  The policy-versus-enforcement table gained a row for it: an advisory,
+  machine-local `/tmp` lock that does not serialize two containers on the same
+  branch, expires after `SUBAGENT_WRITE_LOCK_TTL_MINUTES`, gates subagent
+  spawns rather than the main conversation's own edits, and fails open without
+  a JSON extractor, without a readable roster, or - for the check-and-take
+  race - without `flock`. Each `.claude`/`.cursor` hooks README carries the
+  same limits next to the serialization it already documented.
+
+- **`Infrastructure-Creator.body_bytes` in `scripts/token_budget.json` refit
+  to 232069 B** (observed 221018 B + 5 %, the ceiling file's own policy), and
+  only that ceiling. The growth is 901 B of `bootstrap-verifier/SKILL.md`
+  documenting two new gate checks - the offline resolution of a literal
+  `grep` in `verification[].command` and the optional `--baseline-plan`
+  coverage comparison - which carried the edition 577 B past its previous
+  220441 B. Trimming was measured first and rejected on the numbers: the two
+  documentation blocks are 901 B in total, so closing a 577 B overrun inside
+  them would have deleted about two thirds of what they document, including
+  diagnostic identifiers the report text is grepped for. `body_bytes` is paid
+  per skill invocation, not at startup, and the startup categories
+  (`agents_md_bytes`, `descriptor_bytes`, `command_bytes`, `agent_bytes`),
+  `frontmatter_bytes` and `skills` are unchanged and stay where they are.
+
+### Fixed
+
+- **A developer's own Project Brain index no longer ships into an install.**
+  The accelerator's runtime rewrites `project-brain/indexes/active.json` inside
+  this repository whenever a task is opened here, and the records it then lists
+  are this repository's own - untracked, and never part of the payload. The
+  installer copies working-tree bytes for every inventory path, so a target
+  received an index pointing at files it does not have, and its own
+  `context.py validate` reported it stale. Measured on a working checkout:
+  three clean-install subtests failed for that reason alone, with nothing wrong
+  in any committed file, while a fresh clone of the same commit passed.
+  `memory-bank/INDEX.md` had already met this problem and set the precedent, so
+  both Brain indexes now install from a pristine
+  `project-brain/.install/*.json` the same way. Inventory generation also stopped
+  emitting an override for a path the edition does not install, since the
+  override table is shared while editions differ. Covered by
+  `tests/test_installation.py`, which dirties the index and asserts the target
+  still receives `[]`.
+
+- **The memory-bank validator can now be told which tree its chunks cite,
+  so an honestly seeded bank stops failing for being staged.**
+  `memory-bank/scripts/validate.py` resolved every chunk source against the
+  bank's parent directory. That is right once the bank is published beside the
+  project it describes, but during `infra-generate` the bank sits in a staging
+  root while the files it cites live in the target - so every chunk reported
+  "source path does not exist" and the publication gate refused a bundle whose
+  only fault was not having been published yet. Seeding zero chunks passed;
+  seeding the chunks `memory-seed` prescribes did not. `validate.py` gained
+  `--source-root` (default unchanged: the bank's parent), and
+  `validate_generated.py` passes the `--evidence-target` it already resolves,
+  so the same bank is checked against the project it actually describes. The
+  regression is covered in
+  `Infrastructure-Creator/tests/test_memory_readiness.py`, which asserts both
+  directions: staged-and-unaided fails, staged-and-told passes, and a published
+  bank still needs no flag.
+
+- **The write-capable agent lock no longer exempts a second instance of the
+  same agent.** The gate blocked a different write-capable agent while one
+  held the lock but let a same-named one through, so N concurrent `coder`
+  runs all passed and each merely refreshed the lock - which is how three epic
+  builds once ran at the same time against one repository. Any live holder now
+  blocks. A genuine respawn is unaffected: `subagent-dispatch.sh` clears the
+  lock when the holder finishes, so a fresh lock means the holder is still
+  running, and a crashed run stays covered by `LOCK_TTL_MINUTES`. Applied to
+  all four editions' `.claude` and `.cursor` copies by hand, because
+  `subagent-gate.sh` is a documented `skip` in the hooks mirror class - the
+  Codex copies block multi-agent spawning outright and hold no lock.
+  `test_a_second_instance_of_the_same_agent_is_blocked` in each edition's
+  `memory-bank/tests/test_hooks.py` covers it.
+
+- **Inventory generation no longer reads the working tree.**
+  `--write-inventories` discovered tracked *and* non-ignored untracked files,
+  the same permissive walk `--verify-inventories` uses; one local run absorbed
+  8586 untracked `vendor/` paths from a built application into an edition's
+  distribution list, and the installer copies what the inventory names.
+  Generation is now tracked-only, verification stays permissive - warning
+  about a file not yet committed is the point there - and each written
+  inventory reports its path count with the added and removed paths, so a
+  wrong inventory is visible before it is committed rather than as an
+  unreadable diff. Regenerating produces byte-identical output.
+  `test_generation_ignores_untracked_working_tree_files` covers it.
+- `scripts/build_mirrors.py` now runs its reverse stray pass over
+  `only`-classes too (the governance documents: `DOD.md`,
+  `GOLDEN-PRINCIPLES.md`, `STABILIZATION.md`). Previously a deleted
+  canonical governance file with surviving mirrors was silently skipped:
+  deleting `.claude/DOD.md` left `--check` flagging only the stale
+  `.gitattributes`, and once `--write` refreshed that manifest the orphaned
+  `.cursor/DOD.md` and `.codex/DOD.md` would have persisted indefinitely as
+  canonical-looking files no rule accounts for. The pass examines only the
+  listed names, so canonical files other classes own inside the same mirror
+  directory are untouched; behavior for every other class is unchanged.
+  A listed `only` entry whose canonical file does not exist is now itself a
+  reported problem: previously `iter_canonical` skipped it silently, so a
+  typo in the list (or a canonical file renamed after mirrors were
+  generated) mirrored nothing while `--check` stayed green and the
+  orphaned mirrors persisted. Pinned by the new
+  `tests/test_build_mirrors.py`, which the `mirrors` CI job now runs
+  alongside `--check`.
+
+- `scripts/token_budget.json` re-baselines the Infrastructure-Creator
+  ceilings, which the 2.5.0 evidence-contract work outgrew without moving
+  them - the `lint` job had been red on every commit since. Per the file's
+  own policy (ceiling = observed + ~5%, raised only with the change that
+  justifies the growth), all six byte ceilings are re-derived from the
+  current tree: `body_bytes` 176549 -> 220441 and `agents_md_bytes` 12720 ->
+  15673 admit the new evidence, contract and semantic-gate procedures, while
+  `descriptor_bytes` 12478 -> 10811, `agent_bytes` 10342 -> 8134 and
+  `frontmatter_bytes` 18078 -> 16499 are *tightened* onto the slimming 2.5.0
+  performed, so the gate keeps its grip instead of inheriting dead slack.
+  Net effect on the surface that matters most: the startup total - paid on
+  every session whether or not anything is invoked - is 823 B *smaller* than
+  before 2.5.0 (34648 B -> 33825 B); the growth is confined to skill bodies,
+  which are paid only on invocation. `skills` stays at 25.
+
+- **`scripts/install_accelerator.py` no longer leaks untracked working-tree
+  files into the shipped inventories.** `discover_distribution_files` listed
+  `git ls-files --cached --others --exclude-standard`, so *anything* sitting
+  in an edition directory was classified and written into
+  `install/inventories/*.json` by `--write-inventories`. On a working tree
+  holding a real client application under `Task/app/` that pulled roughly
+  19700 lines - including `.env` and `var/cache/dev/**` - into `symfony.json`
+  and `laravel.json`, files that are distributed with the repository. The same
+  scan made `--verify-inventories` (the `installation` CI gate) fail with
+  `UNCLASSIFIED` records on any tree with untracked files. Discovery is now
+  `git ls-files --cached`: the inventory is a closed contract over the index,
+  which is what "tracked-file contract" already claimed. Staging is enough to
+  register a new distribution file (`git add`, no commit); an unstaged file is
+  not part of the payload. Outside a Git checkout - or when the source root
+  holds no tracked files for an edition - both modes now fail with an explicit
+  error instead of falling back to a filesystem walk, because off the index
+  there is no way to separate distribution files from client data. Writing is
+  also staged in memory and only then flushed, so a failure on the third
+  edition no longer leaves a half-written inventory set.
+
+- **`--write-inventories` accepts `--inventory-out DIR`**, writing the
+  generated inventories somewhere other than the checkout's
+  `install/inventories`. `tests/test_installation.py` used to assert
+  determinism by regenerating *in place* over the live repository and
+  comparing bytes: with the leak above, running the test suite silently
+  rewrote the committed inventories with client paths, and the assertion
+  reported the damage only after it was done. The test now regenerates into a
+  temporary directory, compares that against the committed files, and asserts
+  the checkout was left untouched. A new `UntrackedSourceTest` builds a
+  synthetic staged checkout, plants untracked `.env`, `Task/app/.env` and
+  `Task/app/var/cache/dev/**` files in it, and pins that they reach neither
+  the generated inventory nor its verification - plus that generation outside
+  a Git checkout fails loudly and writes nothing.
 ## 2.0.0 - 2026-08-07
 
 ### 2026-08-06 hook and installation hardening

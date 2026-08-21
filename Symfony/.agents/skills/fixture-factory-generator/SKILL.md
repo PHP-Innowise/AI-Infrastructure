@@ -18,6 +18,7 @@ Rules:
 - Do not put assertions in factories.
 - Model required relations explicitly.
 - Keep production fixtures separate from test builders.
+- Separate shared fixtures (read-only props, seeded once) from per-test subjects (anything a test authenticates as or mutates), and make minting a fresh subject cheap enough that no test has to borrow a shared one.
 
 ## Workflow
 

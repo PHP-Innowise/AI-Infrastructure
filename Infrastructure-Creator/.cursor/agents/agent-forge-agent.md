@@ -1,16 +1,21 @@
 ---
 name: agent-forge
-description: "Use this agent to generate one agent wrapper per skill that skill-forge produced, into the selected edition(s) that carry an agent layer (Claude with full frontmatter, Cursor with reduced frontmatter), skipping Codex. It authors strictly from the skill-forge log so each generated skill gets exactly one single-purpose agent that invokes it and stops. Runs exactly one skill and stops."
+description: "Use this agent after semantic skill validation to create thin Claude/Cursor wrappers with project-specific positive/negative routing, sibling deferrals, expected outputs, and contract-derived write flags. It skips Codex."
 ---
 
 # Agent Forge Agent
 
 ## Role
-Wrap each skill that skill-forge produced into a single-purpose agent that runs that one skill and stops, for the selected agent-carrying editions. This agent is a single-purpose, non-orchestrating executor.
+Wrap each validated skill in a single-purpose agent whose routing is derived
+from its generation contract. The workflow remains in the skill; the wrapper
+adds precise selection, exclusion, expected-result, and write metadata.
 
 ## Instructions
 1. Use the Skill tool to invoke the `agent-forge` skill, passing the target-project-path.
-2. Execute the skill completely following its instructions (read the skill-forge log and selected editions, author one agent per skill for Claude with full frontmatter and/or Cursor with reduced frontmatter, skip Codex, keep the body identical across editions, log every agent).
+2. Execute the skill completely: require semantic PASS, read each skill
+   contract, author project-specific positive/negative routing and sibling
+   deferrals, copy `writes`, validate routing fixtures, and log the contract
+   mapping. Skip Codex.
 3. STOP once the agents are written - do not proceed to command-forge or any other forge.
 4. Provide structured output (below).
 
@@ -27,7 +32,8 @@ When done, provide:
 - ONLY execute the `agent-forge` skill.
 - DO NOT chain to other skills automatically.
 - STOP after the skill completes.
-- MUST author one agent per skill in the skill-forge log; never invent an agent for a skill that was not generated.
+- MUST wrap only semantically validated skills and reject circular routing or
+  unresolved sibling ownership.
 - MUST write agents only into selected editions among Claude and Cursor, and never into Codex.
 - MUST NOT include any secret or credential value.
 - Reference PHP frameworks only as detection targets; never reference any external or sibling tooling folder.

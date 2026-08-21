@@ -2,7 +2,13 @@
 
 These are enforceable rules for Infrastructure-Creator itself. Wishes are ignored; constraints are enforced.
 
-Infrastructure-Creator is a standalone **generator** for **PHP projects**: a two-phase, multi-agent pipeline that scans an arbitrary target PHP project, researches its specific framework and integrations, asks the few questions it could not answer from evidence, and produces a bespoke accelerator (its own `AGENTS.md`, skills, agents, commands, hooks, and a seeded `memory-bank/`) tailored to that project - written directly into the target project's own root. Every generated artifact is derived from evidence found in the target, never from a bundled template.
+Infrastructure-Creator is a standalone **generator** for **PHP projects**: a
+two-phase, multi-agent pipeline that scans an arbitrary target PHP project,
+researches its specific framework and integrations, asks the few questions it
+could not answer from evidence, and produces a bespoke accelerator. Candidate
+output is generated and validated in task-scoped staging, then transactionally
+published into the target. Every generated artifact is derived from evidence
+found in the target, never from a bundled prose template.
 
 This policy is shared across the editions in which the **generator itself** ships. The generator is mirrored for **Claude Code** (`.claude/`), **Cursor** (`.cursor/`), and **Codex** (`.agents/skills` + `.codex/`) so any team member can run it from whichever tool they use. This is distinct from what the generator *produces*: the accelerator it writes into a target project contains only the edition(s) that target's team selects during `clarifying-interview`.
 
@@ -51,16 +57,85 @@ Infrastructure-Creator intentionally has no `memory-bank/` of its own: its job i
 - MUST mark any unverifiable or low-confidence finding as `inferred` or `unknown` rather than presenting a guess as fact, and MUST route genuinely ambiguous items through `clarifying-interview`.
 - Behavioral findings MUST also preserve source type (`spec/ADR`, `test`, `database constraint`, `workflow configuration`, `authorization rule`, code/configuration, or `interview answer`) and surface contradictions. Implementation behavior and user testimony MUST NOT be silently promoted to stronger authority.
 - Generated skills/agents/commands MUST conform to the standard `SKILL.md`/agent/command frontmatter and structure documented in each forge skill's own `SKILL.md`.
+- The Project Profile MUST compile into a machine-readable evidence ledger and
+  one complete generation contract per proposed skill. Group summaries are not
+  generation contracts.
+- Every proposed skill MUST prove distinct selection, owned scope, procedure,
+  output, evidence, and routing value. Catalog membership alone is not a reason
+  to generate it; unsupported or overlapping skills are pruned or merged.
+  Two exceptions are unconditional by design: the runtime-fixed memory
+  quartet, and the **golden development set** (`requirements-analyst`,
+  `coding`, `refactorer`, `testing`, `debugging`, `performance`,
+  `code-review`, `security-review`) - the
+  loop every codebase lives in is always generated, in any weather. Evidence
+  controls a golden skill's contract (its scope, procedures, commands, and
+  verification are built from the target's own details), never its
+  existence; `GOLDEN_CANDIDATE_REJECTED` blocks a plan that drops one.
+- Rejection is never silent. Every run writes a rejection report covering all
+  turned-down candidates, and rejecting a candidate the registry flags
+  `escalates_on_rejection` MUST be escalated to the user through the
+  disposition interview round and adversarially reviewed
+  (`validate_plan_review.py`'s `rejected` section) before the plan freezes -
+  a consolidation must name its real absorbing owner, an evidence gap must
+  show it was asked about (and why not even a narrow read-only variant), and
+  a safety gap must carry the recorded human decision.
+- Plan approval MUST validate the complete selected inventory before any skill
+  is authored, and only a schema 1.6 plan is approvable. Schema 1.6 carries
+  an explicit merge-only contract for baseline-hashed, watch-only,
+  team-owned skill collisions and
+  the stable ownership IDs/modes, normalized write surfaces, and reciprocal
+  sibling routing introduced in 1.1, the operational contracts of 1.2, the
+  role-to-step wiring, executable verification baselines, and absence evidence
+  added in 1.3, the claim references and evidence dispositions added in 1.4,
+  and the typed rejection dispositions added in 1.5: a rejection declares
+  whether the target holds no such surface or a selected skill already owns it,
+  and names that owner.
+- New generation and publication require schema 1.6 operational contracts.
+  Legacy 1.0/1.1/1.2/1.3/1.4/1.5 plans remain readable for audit but MUST be re-synthesized;
+  missing verification, provider-safety, invariant, path, or routing facts are
+  never invented by a migration adapter.
+- Generated skills MUST cite canonical target-relative sources and contain
+  project-specific procedures, decision points, verification, outputs, and
+  failure handling. Generator task paths are provenance only and MUST NOT be a
+  runtime evidence dependency of a generated target.
+- Every procedure step and verification assertion MUST be typed, evidence
+  anchored, capability-compatible, and explicit about expected/pass/fail/skip
+  outcomes. Verification commands MUST be non-mutating and non-networked unless
+  the contract classifies and explicitly authorizes the side effect.
+- Integration skills MUST default to static inspection, fakes, fixtures, or
+  local adapters. Credential-backed provider execution requires a named
+  approved environment, human authorization, rollback boundary, and sanitized
+  output.
+- Every high-priority confirmed invariant MUST map to a selected skill
+  procedure and regression assertion. Owned scope and outputs MUST NOT exceed
+  their claim-linked evidence.
+- Agents MUST remain thin wrappers but carry contract-derived positive/negative
+  routing and sibling deferrals. Flows MUST select specialist agents by matching
+  scope, never run every available specialist unconditionally.
+- `SKILL FLOW.md`, executable flow commands, and routing fixtures MUST compile
+  from one canonical plan graph; independent prose flow authoring is invalid.
 - Generated output is tool-selected: `policy-forge`, `skill-forge`, `agent-forge`, `command-forge`, and `hook-forge` produce ONLY the edition(s) the target team selected in `clarifying-interview` - never more editions than selected, never fewer.
 - The generator's version has exactly one source of truth: the root `VERSION` file. The Project Profile's metadata, the target's `AGENTS.md` stamp, and `.infra-manifest.json` all read it; nothing hardcodes or recalls a version from the changelog.
-- Generated output is upgradeable: every `infra-generate` run MUST end by stamping the target's `AGENTS.md` and writing `.infra-manifest.json` (generator version, source profile, sha256 per generator-owned file). `infra-update` MUST NOT overwrite any file whose hash differs from that manifest without an explicit per-file human decision, and MUST NOT touch files the manifest does not list.
+- Generated output is upgradeable: every successful `infra-generate` run MUST
+  stage and validate the complete bundle, publish with rollback, then leave a
+  stamped target `AGENTS.md` and `.infra-manifest.json`. `infra-update` MUST NOT
+  overwrite any file whose hash differs from that manifest without an explicit
+  per-file human decision, and MUST NOT touch files the manifest does not list.
+- Root `.gitignore` is a narrowly scoped shared-file exception: forges declare
+  exact requirements, only generation/update orchestration composes them, and
+  a pre-existing file is changed only by explicit append approval with
+  baseline/watch protection and structured decision metadata.
 
 ## Orchestration Exception (MANDATORY, SCOPED)
 
-The general accelerator rule is "an agent executes exactly one skill, then stops; it never auto-chains." Five skills in this folder are a deliberate, narrowly scoped exception, because pipeline orchestration is their entire purpose:
+The general accelerator rule is "an agent executes exactly one skill, then stops; it never auto-chains." Six skills in this folder are a deliberate, narrowly scoped exception, because pipeline orchestration is their entire purpose:
 
 - `infra-scan` MAY fan out to the seven scanner skills (including `domain-behavior-scanner`), `stack-researcher`, `clarifying-interview`, and `profile-synthesizer` in one run. It MAY also hand off to `stack-adapter` when a non-PHP stack is detected and the user opts in.
-- `infra-generate` MAY fan out to the six forge skills, then `skill-flow-composer`, then `bootstrap-verifier` in one run.
+- `infra-generate` MAY fan out evidence-independent forges into staging, but
+  MUST generate skills in bounded contract-driven batches and pass semantic
+  validation in partial mode after each batch and complete mode before
+  agent/command/flow generation, publication, or success.
+- `infra-validate` MAY fan out parallel read-only `content-reviewer` instances over the staged (or manifest-listed published) surface and re-invoke the owning forges to repair blocking findings, bounded at two repair rounds; reviewers themselves never write, and a finding evidence cannot settle escalates instead of being repaired by invention.
 - `infra-build` MAY chain `infra-scan` then `infra-generate` in one run, pausing at the profile checkpoint only when a blocking ambiguity or a collision is detected.
 - `infra-update` MAY re-validate the profile, fan out the forge skills into its staging directory, apply manifest-verified safe replacements, rewrite `.infra-manifest.json`, and run `bootstrap-verifier` in one run. It writes into the target only what the target's `.infra-manifest.json` proves untouched (sha256 match) or what the user explicitly approved per file; without that manifest it MUST abort.
 - `stack-adapter` MAY research, replicate, re-author, mirror, and self-verify an entire sibling generator in one run, after explicit user confirmation.
@@ -70,7 +145,7 @@ Fan-out runs in parallel when the AI tool supports concurrent subagents/tool cal
 ## Agent Behavior
 
 - MUST output a Context Summary and Next Steps at the end of every skill.
-- MUST NOT make workflow decisions for the user beyond the five sanctioned orchestrators above.
+- MUST NOT make workflow decisions for the user beyond the six sanctioned orchestrators above.
 - MUST read the target's actual `composer.json`/config/PHP source/CI/IaC before making any claim about it.
 - MUST NOT read, print, or write the target's `.env` files, credentials, or anything under a `secrets/`-style path.
 - MUST re-validate a `profile-synthesizer` profile against the target's current files before `infra-generate` consumes it, and MUST flag drift if the target changed since the scan.
@@ -94,7 +169,17 @@ Fan-out runs in parallel when the AI tool supports concurrent subagents/tool cal
 ## Verification
 
 - MUST run the applicable checks in `DOD.md` before claiming a scan or generation is complete.
-- MUST run `bootstrap-verifier` (frontmatter validity, cross-reference integrity, hook syntax/executable bit, the generated `memory-bank/scripts/validate.py`, the `.infra-manifest.json` upgrade contract, no leftover template placeholders) before reporting `infra-generate` or `infra-update` as done.
+- MUST run `infra-validate` (the content review-and-repair phase: every
+  staged file read for uniqueness, completeness, accuracy, and coherence,
+  blocking findings repaired through the owning forges or escalated, recorded
+  in a review record `validate_content_review.py` accepts) against the
+  complete staged bundle before manifest stamping or publication in
+  `infra-generate` and `infra-update`.
+- MUST run `bootstrap-verifier` (evidence and per-skill contract conformance,
+  semantic distinctness, routing, content-review record,
+  frontmatter/cross-references, hook syntax/wiring, memory runtime, manifest
+  ownership/hashes, and placeholders) against staging and again after
+  publication before reporting `infra-generate` or `infra-update` as done.
 - MUST report unavailable tooling as `N/A - tooling not configured`; do not install tooling without user approval.
 
 ## Git Safety
