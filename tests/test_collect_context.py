@@ -55,10 +55,12 @@ class TestContainment(unittest.TestCase):
     """The tool must not leak out of the repository root."""
 
     def test_containment(self):
+        edition_roots = [
+            f"{path.as_posix()}/" for path in cc.EDITION_PATHS.values()
+        ]
         proc = subprocess.run(
             ["git", "grep", "-lI", "-i", "code2prompt", "--",
-             "Laravel/", "Symfony/", "PHP Core/", "Infrastructure-Creator/",
-             "install/"],
+             *edition_roots, "Infrastructure-Creator/", "install/"],
             cwd=ROOT, capture_output=True, text=True)
         # git grep exits 1 when nothing matched, which is the passing case.
         hits = [line for line in proc.stdout.splitlines() if line.strip()]
@@ -126,8 +128,8 @@ class TestInvocation(unittest.TestCase):
         # At the root, not inside an edition: an installed accelerator must not
         # carry a command for a tool it does not ship.
         self.assertTrue(self.COMMAND.is_file(), f"missing {self.COMMAND}")
-        for edition in cc.EDITIONS:
-            stray = ROOT / edition / ".claude" / "commands" / "collect.md"
+        for edition_path in cc.EDITION_PATHS.values():
+            stray = ROOT / edition_path / ".claude" / "commands" / "collect.md"
             self.assertFalse(stray.exists(), f"{stray} would ship the tool")
 
     def test_slash_command_invokes_the_script(self):

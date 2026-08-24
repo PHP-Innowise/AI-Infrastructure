@@ -531,8 +531,8 @@ class UntrackedSourceTest(unittest.TestCase):
     MARKER = "CLIENT_SECRET=must-not-ship"
 
     def _write_editions(self, base: Path) -> None:
-        for edition in EDITIONS:
-            edition_root = base / edition
+        for edition_path in EDITION_PATHS.values():
+            edition_root = base / edition_path
             (edition_root / "memory-bank" / ".install").mkdir(parents=True)
             (edition_root / ".claude").mkdir(parents=True)
             (edition_root / "VERSION").write_text("0.0.0\n", encoding="utf-8")
@@ -563,7 +563,13 @@ class UntrackedSourceTest(unittest.TestCase):
             )
             self.assertEqual(0, initialized.returncode, initialized.stderr)
             # Staged and never committed: the index alone defines the payload.
-            staged = run("git", "add", "--", *EDITIONS, cwd=base)
+            staged = run(
+                "git",
+                "add",
+                "--",
+                *(path.as_posix() for path in EDITION_PATHS.values()),
+                cwd=base,
+            )
             self.assertEqual(0, staged.returncode, staged.stderr)
             self._plant_untracked_files(base)
 
