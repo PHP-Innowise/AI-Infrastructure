@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": ".cursor/hooks/local-context.sh",
+        "timeout": 15
+      }
+    ],
+    "subagentStart": [
+      {
+        "command": ".cursor/hooks/subagent-gate.sh",
+        "timeout": 5,
+        "failClosed": true
+      }
+    ],
+    "subagentStop": [
+      {
+        "command": ".cursor/hooks/subagent-dispatch.sh",
+        "timeout": 8
+      }
+    ],
+    "beforeShellExecution": [
+      {
+        "command": ".cursor/hooks/bash-validator.sh",
+        "timeout": 5
+      }
+    ],
+    "afterFileEdit": [
+      {
+        "command": ".cursor/hooks/file-naming-validator.sh",
+        "timeout": 5
+      },
+      {
+        "command": ".cursor/hooks/loop-detection.sh",
+        "timeout": 5
+      }
+    ],
+    "stop": [
+      {
+        "command": ".cursor/hooks/working-memory-write.sh",
+        "timeout": 15
+      }
+    ]
+  }
+}

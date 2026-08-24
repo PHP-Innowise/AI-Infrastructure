@@ -1,0 +1,34 @@
+---
+description: Mandatory safety, security, and verification rules for all work
+alwaysApply: true
+---
+
+# Safety, Security & Verification
+
+## Security
+- Never read, print, edit, or commit `.env` files or secrets.
+- Use `$wpdb->prepare()` for SQL values and allowlist identifiers.
+- Sanitize and validate input; escape late for HTML, attribute, URL, JavaScript,
+  textarea, or a narrow `wp_kses()` policy.
+- Verify both nonce and capability for state-changing browser requests; a nonce
+  is not authorization. Every REST route needs a deliberate permission callback.
+- Validate file uploads by type, size, storage location, and visibility.
+- Avoid `eval`, unsafe `unserialize` of untrusted data, and dynamic includes of untrusted paths.
+- Do not introduce OWASP Top 10 vulnerabilities.
+
+## Git Safety
+- Never skip hooks with `--no-verify`.
+- Never force-push, hard-reset, or drop database tables without explicit user consent.
+- Never overwrite unrelated user changes.
+
+## Verification (Definition of Done)
+- Run applicable checks from `.cursor/DOD.md` before claiming completion.
+- Run applicable PHP/JavaScript tests, WordPress Coding Standards, static
+  analysis, asset/block builds, and WordPress integration/browser checks.
+- Never claim completion with failing tests, failing static analysis, or known broken entry points.
+- Report unavailable tooling as `N/A - tooling not configured`; do not install tooling without user approval.
+- Include verification evidence in the final Context Summary for implementation work.
+
+## File Naming
+- Prefix generated task/spec markdown with the skill name: `{skill-name}-{purpose}.md`.
+- Use zero-padded task directories (`TASK-001/`); place temporary task docs in `tasks/TASK-{N}/` and living specs in `specs/`.

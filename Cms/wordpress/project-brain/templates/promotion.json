@@ -1,0 +1,26 @@
+{
+  "conflicts": [],
+  "content": "Reusable consequence pending independent review",
+  "created_at": "RFC3339",
+  "destination_memory_id": null,
+  "destination_revision": null,
+  "id": "UUIDV4",
+  "outcome": null,
+  "proposer": "owner",
+  "review_mode": "human",
+  "reviewed_at": null,
+  "reviewer": null,
+  "revision": 1,
+  "schema_version": 1,
+  "source_records": [
+    {
+      "id": "UUIDV4",
+      "path": "project-brain/dynamic/findings/UUIDV4.md",
+      "revision": 1,
+      "type": "finding"
+    }
+  ],
+  "status": "proposed",
+  "title": "Promotion title",
+  "updated_at": "RFC3339"
+}

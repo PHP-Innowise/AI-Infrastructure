@@ -26,10 +26,10 @@ python3 scripts/build_mirrors.py --write --edition Laravel \
 ```
 
 - **Principal options:** exactly one of `--check` or `--write`;
-  repeatable `--edition` for `Laravel`, `Symfony`, `PHP Core`, or
+  repeatable `--edition` for `Laravel`, `Symfony`, `PHP Core`, `WordPress`, or
   `Infrastructure-Creator`. The default is all editions.
 - **Inputs:** canonical edition files and the edition-local mirror rules.
-  Laravel, Symfony, and PHP Core load rules from
+  Laravel, Symfony, PHP Core, and WordPress load rules from
   `memory-bank/scripts/context_retrieval.py`; Infrastructure-Creator loads
   `mirror_rules.py`.
 - **Outputs:** `--check` prints drift, missing files, and unaccounted mirror
@@ -86,7 +86,7 @@ python3 scripts/install_accelerator.py \
 ```
 
 - **Principal modes:** `--verify-inventories`, `--write-inventories`, or
-  `--edition {Laravel,Symfony,PHP Core}` with `--target`.
+  `--edition {Laravel,Symfony,PHP Core,WordPress}` with `--target`.
 - **Selection options:** repeatable `--tool {claude,cursor,codex}`; omission
   selects all tools. `--source-root` points at an alternate source checkout.
 - **Collision options:** `--dry-run`; conservative `--merge-existing`; and

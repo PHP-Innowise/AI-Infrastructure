@@ -13,7 +13,13 @@ import sys
 from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parent.parent
-EDITIONS = ("Laravel", "Symfony", "PHP Core")
+EDITION_PATHS = {
+    "Laravel": Path("Laravel"),
+    "Symfony": Path("Symfony"),
+    "PHP Core": Path("PHP Core"),
+    "WordPress": Path("Cms/wordpress"),
+}
+EDITIONS = tuple(EDITION_PATHS)
 TOOLS = ("claude", "cursor", "codex")
 COMPONENTS = ("shared", *TOOLS)
 INVENTORY_DIR = ROOT / "install" / "inventories"
@@ -71,6 +77,14 @@ def resolve_write_target(value: Path) -> Path:
 
 def inventory_path(edition: str) -> Path:
     return INVENTORY_DIR / f"{edition.lower().replace(' ', '-')}.json"
+
+
+def edition_path(edition: str) -> Path:
+    """Return the repository-relative source directory for a public edition."""
+    try:
+        return EDITION_PATHS[edition]
+    except KeyError as error:
+        raise InventoryError(f"unsupported edition: {edition}") from error
 
 
 def load_inventory(edition: str, root: Path = ROOT) -> dict:
@@ -220,7 +234,8 @@ def discover_distribution_files(root: Path, edition: str) -> list[str]:
     Without a Git checkout there is no way to tell distribution files from
     client data, so this raises instead of guessing from the filesystem.
     """
-    command = ["git", "ls-files", "-z", "--cached", "--", edition]
+    source_dir = edition_path(edition).as_posix()
+    command = ["git", "ls-files", "-z", "--cached", "--", source_dir]
     try:
         result = subprocess.run(command, cwd=str(root), capture_output=True)
     except OSError as error:
@@ -234,7 +249,7 @@ def discover_distribution_files(root: Path, edition: str) -> list[str]:
             + (f": {reason[-1]}" if reason else "")
             + "; inventories are generated from a Git checkout only"
         )
-    prefix = edition + "/"
+    prefix = source_dir + "/"
     # Unmerged index entries repeat a path once per stage; distinct paths are
     # what the inventory records.
     paths = set()
@@ -246,7 +261,7 @@ def discover_distribution_files(root: Path, edition: str) -> list[str]:
             paths.add(value[len(prefix) :])
     if not paths:
         raise InventoryError(
-            f"{edition}: no tracked files under {root / edition}; "
+            f"{edition}: no tracked files under {root / edition_path(edition)}; "
             "--source-root must point at the Git checkout holding the editions"
         )
     return sorted(paths)
@@ -287,7 +302,7 @@ def build_inventory(root: Path, edition: str) -> dict:
         else:
             components[component_for(path)].append(path)
     installed = {path for paths in components.values() for path in paths}
-    version_file = root / edition / "VERSION"
+    version_file = root / edition_path(edition) / "VERSION"
     release = version_file.read_text(encoding="utf-8").strip()
     return {
         "schema_version": 2,
@@ -380,11 +395,12 @@ def verify_inventory(root: Path, edition: str) -> None:
     excluded = data["excluded_tracked_paths"]
     classified = sorted((*expected, *excluded))
     missing_sources = [
-        path for path in expected if not (root / edition / path).is_file()
+        path for path in expected if not (root / edition_path(edition) / path).is_file()
     ]
     override_sources = sorted(set(data["source_overrides"].values()))
     missing_override_sources = [
-        path for path in override_sources if not (root / edition / path).is_file()
+        path for path in override_sources
+        if not (root / edition_path(edition) / path).is_file()
     ]
     if actual != classified or missing_sources or missing_override_sources:
         unclassified = sorted(set(actual) - set(classified))
@@ -422,7 +438,7 @@ def install(
     resolutions: dict[str, tuple[str, Path, bytes | None]] = {}
     for component, path in files:
         source_path = data["source_overrides"].get(path, path)
-        source = root / edition / PurePosixPath(source_path)
+        source = root / edition_path(edition) / PurePosixPath(source_path)
         destination = target / PurePosixPath(path)
         if destination.is_symlink():
             collisions.append((component, path, "symlink"))
@@ -495,7 +511,7 @@ def install(
     action = "WOULD_COPY" if dry_run else "COPY"
     for component, path in files:
         source_path = data["source_overrides"].get(path, path)
-        source = root / edition / PurePosixPath(source_path)
+        source = root / edition_path(edition) / PurePosixPath(source_path)
         destination = target / PurePosixPath(path)
         if not source.is_file():
             raise InventoryError(f"source file missing: {source}")

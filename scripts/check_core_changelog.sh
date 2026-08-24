@@ -31,7 +31,7 @@ CHANGELOG="CHANGELOG.md"
 
 # POSIX ERE describing shared-core paths, matched against repo-relative
 # names from `git diff --name-only`.
-CORE_PATTERN='^((Laravel|Symfony|PHP Core)/(memory-bank/(scripts|tests|templates)/|project-brain/(PROTOCOL\.md|config/|schemas/|scripts/|tests/|templates/)|\.(claude|cursor|codex)/hooks/)|scripts/)'
+CORE_PATTERN='^(((Laravel|Symfony|PHP Core)/|Cms/wordpress/)(memory-bank/(scripts|tests|templates)/|project-brain/(PROTOCOL\.md|config/|schemas/|scripts/|tests/|templates/)|\.(claude|cursor|codex)/hooks/)|scripts/)'
 
 if ! git rev-parse --git-dir > /dev/null 2>&1; then
   echo "core-changelog: not a git repository; skipping." >&2

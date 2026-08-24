@@ -20,6 +20,8 @@ jobs:
           - "Symfony/project-brain/tests"
           - "PHP Core/memory-bank/tests"
           - "PHP Core/project-brain/tests"
+          - "Cms/wordpress/memory-bank/tests"
+          - "Cms/wordpress/project-brain/tests"
           - "Infrastructure-Creator/tests"
     steps:
       - uses: actions/checkout@v4
@@ -44,6 +46,7 @@ jobs:
           - "Laravel"
           - "Symfony"
           - "PHP Core"
+          - "Cms/wordpress"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

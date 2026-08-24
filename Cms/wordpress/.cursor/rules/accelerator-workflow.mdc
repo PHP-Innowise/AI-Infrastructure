@@ -1,0 +1,32 @@
+---
+description: WordPress Accelerator - how commands, agents, and skills work together
+alwaysApply: true
+---
+
+# WordPress Accelerator
+
+This is the `Cms/wordpress/` accelerator for plugins, classic/block themes,
+Gutenberg, REST, WP-CLI, multisite and WooCommerce. Follow the consuming
+project's supported WordPress/PHP/Node versions and existing shape.
+
+## Command -> Agent -> Skill
+
+- **Commands** (`.cursor/commands/*.md`) are `/slash` entry points; invoke with `/name` and pass context as `$ARGUMENTS`.
+- **Agents** (`.cursor/agents/*.md`) run one skill in an isolated context, then stop.
+- **Skills** (`.cursor/skills/<name>/SKILL.md`) contain the actual workflow.
+
+Execute only the selected skill, then stop. Do not auto-chain. Always end with a Context Summary and Next Steps.
+
+## Typical Flow
+
+`brainstorm` -> `requirements-analyst` -> `architect` -> optional
+`content-modeling` / `api-designer` -> `writing-plans` -> the narrowest
+WordPress implementation skill -> tests/review/security -> `verify`.
+
+WordPress specialties: `plugin-development`, `theme-development`,
+`block-development`, `hooks-events`, `rest-api`, `content-modeling`, `wp-cli`,
+`multisite`, `woocommerce`, and `cron-background-processing`.
+
+## Sources Of Truth
+
+Enforcement/policy > canonical architecture/code/config/migrations/tests > shared Project Brain work/control > verified durable memory > skills > examples > docs. Canonical project sources always outrank retrieved context. Use `/project-brain` for governed active work and `/memory-bank` for durable memory or approved promotion application. See root `AGENTS.md`, `.cursor/DOD.md`, and `.cursor/GOLDEN-PRINCIPLES.md`.

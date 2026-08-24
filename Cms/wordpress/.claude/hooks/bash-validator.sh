@@ -1,0 +1,101 @@
+#!/bin/bash
+# Bash Validator Hook
+# Blocks destructive commands for WordPress projects.
+# Hook type: PreToolUse:Bash
+# Exit codes: 0 = pass, 1 = warn (continue), 2 = block
+
+# Consume the complete hook payload without relying on external utilities.
+# `read -d ''` returns nonzero at EOF, which is the expected delimiter here.
+INPUT=
+IFS= read -r -d '' INPUT || :
+
+# Cheap self-filter before any process is forked: Codex and Cursor register
+# this hook without a tool matcher, so it runs for every tool call. A real
+# "command"/"cmd" JSON key always appears unescaped on the wire, while the
+# same text inside a string value arrives as \"command\" and does not match,
+# so payloads that cannot carry a shell command exit here for free.
+case "$INPUT" in
+  *'"command"'*|*'"cmd"'*) ;;
+  *) exit 0 ;;
+esac
+
+# Decode JSON instead of scraping quoted strings; nested shell commands contain escaped quotes.
+extract_command() {
+  if command -v jq >/dev/null 2>&1; then
+    jq -r '[.. | objects | .command?, .cmd? | select(type == "string" and length > 0)] | join("\n")'
+  elif command -v php >/dev/null 2>&1; then
+    php -r '$v=json_decode(stream_get_contents(STDIN), true); $found=[]; $find=function($v) use (&$find, &$found) { if (!is_array($v)) return; foreach (["command", "cmd"] as $k) if (isset($v[$k]) && is_string($v[$k]) && $v[$k] !== "") $found[]=$v[$k]; foreach ($v as $child) $find($child); }; $find($v); echo implode("\n", $found);'
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import json,sys
+found=[]
+def find(v):
+    if isinstance(v, dict):
+        for key in ("command", "cmd"):
+            if isinstance(v.get(key), str) and v[key]: found.append(v[key])
+        for child in v.values():
+            find(child)
+    elif isinstance(v, list):
+        for child in v:
+            find(child)
+find(json.load(sys.stdin))
+print("\n".join(found), end="")'
+  else
+    return 1
+  fi
+}
+
+if ! command -v jq >/dev/null 2>&1 && ! command -v php >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
+  echo "bash-validator: no JSON extractor available (jq/php/python3), validation skipped" >&2
+  exit 0
+fi
+
+COMMAND=$(printf '%s' "$INPUT" | extract_command 2>/dev/null) || exit 0
+
+if [ -z "$COMMAND" ]; then
+  exit 0
+fi
+
+# BLOCKED patterns - hard block (exit 2), truly destructive/irreversible
+# WordPress database resets, destructive search/replace, and site deletion are
+# blocked alongside generic irreversible operations.
+BLOCKED_PATTERNS=(
+  "git[^;&|]*[[:space:]]push[^;&|]*(--force([^[:alnum:]]|$)|-f([[:space:]]|$))"
+  "git[[:space:]]+reset[[:space:]]+--hard"
+  "git[[:space:]]+clean[[:space:]].*-f"
+  "git[[:space:]]+branch[[:space:]]+-D"
+  "--no-verify"
+  "DROP[[:space:]]+(TABLE|DATABASE)"
+  "TRUNCATE[[:space:]]+TABLE"
+  "DELETE[[:space:]]+FROM.*WHERE[[:space:]]+1[[:space:]]*=[[:space:]]*1"
+  "(^|[^[:alnum:]_])(php|artisan|console|phinx|doctrine-migrations)[^;&|]*[[:space:]](migrate:(fresh|reset|refresh|rollback)|db:wipe|schema:drop)([^[:alnum:]:-]|$)"
+  "(^|[;&|[:space:]])wp[[:space:]]+db[[:space:]]+(reset|drop)([[:space:]]|$)"
+  "(^|[;&|[:space:]])wp[[:space:]]+site[[:space:]]+delete([[:space:]]|$)"
+  "(^|[;&|[:space:]])wp[[:space:]]+search-replace[^;&|]*(--all-tables|--all-tables-with-prefix)"
+  "(^|[;&|[:space:]])(cat|less|more|head|tail|sed|awk|grep)[^;&|]*wp-config[^;&|]*\.php"
+  "(^|[;&|[:space:]])wp[[:space:]]+config[[:space:]]+(set|delete|shuffle-salts)([[:space:]]|$)"
+  "composer config.*github-oauth"
+  "composer config.*http-basic"
+  "rm[[:space:]]+-rf[[:space:]]+(/|~|\.)[[:space:]]*$"
+  "gh repo delete"
+  "gh repo archive"
+  "gh issue delete"
+  "gh release delete"
+  "gh api.*DELETE"
+)
+
+# One combined grep decides pass/block instead of one grep fork per pattern;
+# every alternative keeps its own group so "^" anchors keep their standalone
+# meaning. The per-pattern loop runs only after a match, to name the pattern
+# in the block message.
+BLOCKED_REGEX=""
+for PATTERN in "${BLOCKED_PATTERNS[@]}"; do
+  BLOCKED_REGEX="${BLOCKED_REGEX:+$BLOCKED_REGEX|}($PATTERN)"
+done
+
+if printf '%s\n' "$COMMAND" | grep -Eqi -- "$BLOCKED_REGEX"; then
+  echo "BLOCKED: Destructive command detected (rule category: destructive command)." >&2
+  echo "   This operation is blocked. See AGENTS.md." >&2
+  exit 2
+fi
+
+exit 0

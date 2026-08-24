@@ -28,6 +28,12 @@ edition's own files remain in that edition's changelog.
 
 ### Added
 
+- Added a first-class WordPress accelerator at `Cms/wordpress` with canonical
+  WordPress policy and skills for plugins, classic/block themes, Gutenberg,
+  actions/filters, content modeling, REST, WP-CLI, multisite, WooCommerce and
+  background processing; integrated it into mirrors, installation inventories,
+  context budgets, cross-edition runtime parity, CI and documentation.
+
 - **A context-collection command for external models
   (`scripts/collect_context.py`), wrapping the optional `code2prompt`
   CLI.** Invoked as `/collect <scope> [options]` in Claude Code, from a

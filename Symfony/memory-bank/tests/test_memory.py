@@ -11,6 +11,12 @@ from pathlib import Path
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+WORKSPACE_ROOT = next(
+    candidate
+    for candidate in REPOSITORY_ROOT.parents
+    if (candidate / "README_EN.md").is_file()
+    and (candidate / "README_RU.md").is_file()
+)
 SKILL_PATHS = tuple(
     f"{tool}/skills/memory/SKILL.md"
     for tool in (".agents", ".claude", ".cursor")
@@ -114,7 +120,7 @@ class MemoryIntegrationTest(unittest.TestCase):
         accelerator_readme = REPOSITORY_ROOT.joinpath("README.md").read_text(
             encoding="utf-8"
         )
-        workspace_root = REPOSITORY_ROOT.parent
+        workspace_root = WORKSPACE_ROOT
         workspace_readme = workspace_root.joinpath("README.md").read_text(
             encoding="utf-8"
         )
@@ -174,8 +180,8 @@ class MemoryIntegrationTest(unittest.TestCase):
         documents = (
             REPOSITORY_ROOT / "README.md",
             REPOSITORY_ROOT / "memory-bank/README.md",
-            REPOSITORY_ROOT.parent / "README_EN.md",
-            REPOSITORY_ROOT.parent / "README_RU.md",
+            WORKSPACE_ROOT / "README_EN.md",
+            WORKSPACE_ROOT / "README_RU.md",
         )
         for path in documents:
             text = path.read_text(encoding="utf-8")
