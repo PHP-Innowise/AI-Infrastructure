@@ -291,12 +291,22 @@ edition's own files remain in that edition's changelog.
   - `memory-probes.json` copied to the edition: it is byte-identical across
     the other three, so it is engine data rather than framework data.
   - `SkillRoutingTest` now skips explicitly, naming the gap, when an edition
-    ships no `skill-routing-golden.json`. That fixture names skills from one
-    roster and its floor is a measured number, so it can be neither shared nor
-    invented; WordPress owes its own.
-  - `policy_lock.py` and `check_stabilization.py` learned the edition (it
-    ships 41 agents and its own stabilization rules); `routing_eval.py`
-    deliberately did not, with the reason recorded in the file.
+    ships no `skill-routing-golden.json`. The guard stays after WordPress got
+    its own set, because the generator ships this test into projects that have
+    no roster fixture at all.
+  - WordPress gained both routing fixtures. `skill-routing-golden.json` holds
+    18 boundary cases over its roster and a floor **measured at 17 of 18** —
+    the one miss is "write tests for the checkout extension", which reaches
+    `woocommerce` because "checkout" is that skill's strongest term. The
+    comment warns against reading 17/18 against Symfony's 10/16: WordPress's
+    domain skills carry far more distinctive vocabulary than Symfony's
+    overlapping pairs, so the two numbers are not comparable.
+    `.agents/evals/routing.json` holds 15 cases including two restraint ones,
+    and `Cms/wordpress` joins `EDITIONS` in `routing_eval.py` in the same
+    change, as that file's own note required.
+  - `policy_lock.py`, `check_stabilization.py` and `routing_eval.py` all
+    learned the edition; it ships 41 agents, its own stabilization rules and
+    now its own routing cases.
   - Mirrors, the generator asset and all four installation inventories
     regenerated; the WordPress inventory gains its policy lock.
 

@@ -487,6 +487,7 @@
       ".cursor/skills/writing-plans/SKILL.md"
     ],
     "codex": [
+      ".agents/evals/routing.json",
       ".agents/skills/SKILL FLOW.md",
       ".agents/skills/api-designer/SKILL.md",
       ".agents/skills/architect/SKILL.md",
@@ -632,6 +633,7 @@
     "project-brain/tests/__init__.py",
     "project-brain/tests/fixtures/memory-probes.json",
     "project-brain/tests/fixtures/retrieval-golden.json",
+    "project-brain/tests/fixtures/skill-routing-golden.json",
     "project-brain/tests/test_runtime.py"
   ],
   "source_overrides": {

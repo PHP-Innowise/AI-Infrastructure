@@ -1,0 +1,124 @@
+{
+  "_comment": "Skill-routing golden set for the WordPress edition. `acceptable` is a SET, not one slug: several of these requests have two defensibly correct answers and asserting one would measure the fixture author's taste rather than routing quality. The gate asserts an acceptable skill reaches the TOP TWO of the procedural layer, because the capsule carries only two procedural slots — a skill ranked third never reaches the model however right it is. `min_top2` is the MEASURED floor, not a target: it exists so routing cannot quietly get worse while someone edits a `description:`. Raise it only together with a change that improves it. Measured at 17/18: the one miss is «write tests for the checkout extension», which reaches `woocommerce` because \"checkout\" is that skill's strongest term and outweighs \"write tests\". Note when comparing editions that this case set is new and its difficulty is not calibrated against the other three: WordPress's domain skills (block-development, woocommerce, wp-cli, multisite, hooks-events) carry far more distinctive vocabulary than Symfony's overlapping pairs (api-designer/api-platform-designer, messenger-designer/event-subscriber-designer), so 17/18 here and 10/16 there are not directly comparable numbers.",
+  "min_top2": 17,
+  "cases": [
+    {
+      "request": "write tests for the checkout extension",
+      "acceptable": [
+        "test-generator"
+      ]
+    },
+    {
+      "request": "the scheduled cleanup runs twice sometimes, find out why",
+      "acceptable": [
+        "systematic-debugger",
+        "cron-background-processing"
+      ]
+    },
+    {
+      "request": "review this change for security problems",
+      "acceptable": [
+        "security-reviewer",
+        "code-reviewer",
+        "review-pr"
+      ]
+    },
+    {
+      "request": "this plugin file is doing too much, clean it up",
+      "acceptable": [
+        "refactorer",
+        "code-reviewer"
+      ]
+    },
+    {
+      "request": "the archive page is slow",
+      "acceptable": [
+        "performance-optimization"
+      ]
+    },
+    {
+      "request": "design the REST route for orders",
+      "acceptable": [
+        "rest-api",
+        "api-designer"
+      ]
+    },
+    {
+      "request": "map this codebase, I have never seen it before",
+      "acceptable": [
+        "codebase-mapper"
+      ]
+    },
+    {
+      "request": "check this page against WCAG",
+      "acceptable": [
+        "wcag-accessibility",
+        "web-design-guidelines"
+      ]
+    },
+    {
+      "request": "cut a release and update the changelog",
+      "acceptable": [
+        "release"
+      ]
+    },
+    {
+      "request": "plan this feature before anyone writes code",
+      "acceptable": [
+        "writing-plans",
+        "brainstorming",
+        "requirements-analyst",
+        "architect"
+      ]
+    },
+    {
+      "request": "schedule a nightly cleanup that still runs on a quiet site",
+      "acceptable": [
+        "cron-background-processing"
+      ]
+    },
+    {
+      "request": "register a custom post type with its taxonomy and meta",
+      "acceptable": [
+        "content-modeling"
+      ]
+    },
+    {
+      "request": "add a WP-CLI command to reindex products",
+      "acceptable": [
+        "wp-cli"
+      ]
+    },
+    {
+      "request": "build a dynamic Gutenberg block with attributes",
+      "acceptable": [
+        "block-development"
+      ]
+    },
+    {
+      "request": "this filter fires twice and the priority looks wrong",
+      "acceptable": [
+        "hooks-events"
+      ]
+    },
+    {
+      "request": "add a payment gateway to the store",
+      "acceptable": [
+        "woocommerce"
+      ]
+    },
+    {
+      "request": "this should activate on one site of the network only",
+      "acceptable": [
+        "multisite"
+      ]
+    },
+    {
+      "request": "add a template part to the block theme",
+      "acceptable": [
+        "theme-development"
+      ]
+    }
+  ],
+  "_measured": "17/18 on 2026-08-25"
+}
