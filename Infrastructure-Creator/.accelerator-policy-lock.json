@@ -103,8 +103,8 @@
     ".agents/skills/memory-seed/assets/scripts/validate.py": "01ce77bf0e47ce0af686513fdd2b8b5264cf7477d87442ed10a5aa4755b9da3d",
     ".agents/skills/memory-seed/assets/templates/chunk.md": "172c3300e6c5f3ed7fd22a673f7681ec7649338bb50e64f178fe5792b49295ea",
     ".agents/skills/policy-forge/SKILL.md": "31bd376c980687eea112abb47edfd18f13fa2b1e85ff61ad97cf9af78f7deda5",
-    ".agents/skills/profile-synthesizer/SKILL.md": "fb666d2d24b88c09e9673dc215a0bc6a7fd24539aa5ab027325d0a900291cb53",
-    ".agents/skills/profile-synthesizer/references/project-profile-schema.md": "1592d4505a2e388714094bed6ca40d71c8d55cc441c6a3c67796b2ecd35c803d",
+    ".agents/skills/profile-synthesizer/SKILL.md": "76f4705fc5a2f0184aaa65c150b9706edc674f0e292657d8dc5f8d041ae3029b",
+    ".agents/skills/profile-synthesizer/references/project-profile-schema.md": "95f05519ffa4293615423d8f0067db411bf1bc90d0c7d2947577cca266078500",
     ".agents/skills/security-compliance-scanner/SKILL.md": "8a2426f9fdac1516f9a6f0167b1af62ba9d185acac913c57f3a28040ce839519",
     ".agents/skills/skill-flow-composer/SKILL.md": "0125a0d83d3b76957768011997d889a428e5a5afb3ed798618272293f7172242",
     ".agents/skills/skill-forge/SKILL.md": "43f31d26e345d95b7a7d0ccb43b0e0a4a91f5f5efeffaae032789a7dbde4a1c2",
@@ -164,7 +164,7 @@
     ".cursor/rules/subagent-policy.mdc": "b2200867b3141faedb982cb12cc58158015ef5d9294c0f8b193bb8b70f61f201",
     "AGENTS.md": "4a87c3ba8c45a3d89f8018e043b7a0736b624b3bb1b481612b9ac064ae010634"
   },
-  "policy_digest": "f71b100f57fe1dbe55703dd53b71960cf3acdcfab602f0fa7975fbaeb00b943f",
+  "policy_digest": "d705f6d281825094ad86c1a2b0e955229e0f6362518533807927bc31fb58984a",
   "release": "2.5.0",
   "schema_version": 1
 }
