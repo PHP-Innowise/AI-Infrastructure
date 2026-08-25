@@ -6,6 +6,7 @@
   "scope": "closed tracked-file contract for production installation",
   "installed": {
     "shared": [
+      ".accelerator-policy-lock.json",
       ".agents/README.md",
       ".codex/README.md",
       ".cursor/README.md",
@@ -629,6 +630,7 @@
     "project-brain/.install/active.json",
     "project-brain/.install/archive.json",
     "project-brain/tests/__init__.py",
+    "project-brain/tests/fixtures/memory-probes.json",
     "project-brain/tests/fixtures/retrieval-golden.json",
     "project-brain/tests/test_runtime.py"
   ],
