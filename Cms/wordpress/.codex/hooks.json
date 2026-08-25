@@ -1,0 +1,63 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".codex/hooks/local-context.sh"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".codex/hooks/working-memory-read.sh",
+            "additionalContextLimit": 4000
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".codex/hooks/working-memory-write.sh"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".codex/hooks/bash-validator.sh"
+          },
+          {
+            "type": "command",
+            "command": ".codex/hooks/file-naming-validator.sh"
+          },
+          {
+            "type": "command",
+            "command": ".codex/hooks/subagent-gate.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".codex/hooks/loop-detection.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

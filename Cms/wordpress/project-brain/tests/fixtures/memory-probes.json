@@ -1,0 +1,265 @@
+{
+  "_comment": "Memory probes with a declared category and declared negatives. The frozen retrieval fixture next to this one expresses only {query, expected[]}, so a negative had to be hardcoded in the test body and a restraint case could not be written at all. Every case here seeds its own corpus, because UPDATE needs a chunk that was retired and RESTRAINT needs a corpus that provably lacks the subject. `filler` pads the corpus so term rarity is meaningful: a term counts as distinctive at df <= 10% of documents, so a seed of three cannot produce one. Deterministic gate only; no model is invoked. Seeds live under specs/probe/ and probe chunks under MEM-2026010*, both cleared between cases: without that, a later case retrieves an earlier case's corpus and the gate stops measuring what it names.",
+  "filler": 12,
+  "cases": [
+    {
+      "id": "recall-authority-rule",
+      "category": "recall",
+      "seed": [
+        {
+          "path": "specs/probe/zirconium-authority.md",
+          "text": "The zirconium authority rule requires a server-side check before dispatch."
+        },
+        {
+          "path": "specs/probe/plover-migrations.md",
+          "text": "Plover migrations run in batches with a resumable cursor."
+        }
+      ],
+      "query": "zirconium authority rule",
+      "expected_paths": [
+        "specs/probe/zirconium-authority.md"
+      ],
+      "forbidden_paths": [],
+      "expect_no_match": false
+    },
+    {
+      "id": "recall-batch-window",
+      "category": "recall",
+      "seed": [
+        {
+          "path": "specs/probe/plover-migrations.md",
+          "text": "Plover migrations run in batches of one thousand with a resumable cursor."
+        },
+        {
+          "path": "specs/probe/zirconium-authority.md",
+          "text": "The zirconium authority rule requires a server-side check."
+        }
+      ],
+      "query": "plover migrations resumable cursor",
+      "expected_paths": [
+        "specs/probe/plover-migrations.md"
+      ],
+      "forbidden_paths": [],
+      "expect_no_match": false
+    },
+    {
+      "id": "recall-two-documents",
+      "category": "recall",
+      "seed": [
+        {
+          "path": "specs/probe/zirconium-authority.md",
+          "text": "The zirconium authority rule requires a server-side check before dispatch."
+        },
+        {
+          "path": "specs/probe/zirconium-voters.md",
+          "text": "Zirconium authority checks are expressed as voters, never inline."
+        }
+      ],
+      "query": "zirconium authority check",
+      "expected_paths": [
+        "specs/probe/zirconium-authority.md",
+        "specs/probe/zirconium-voters.md"
+      ],
+      "forbidden_paths": [],
+      "expect_no_match": false
+    },
+    {
+      "id": "update-retired-chunk-is-not-served",
+      "category": "update",
+      "seed": [
+        {
+          "path": "specs/probe/zirconium-authority.md",
+          "text": "The zirconium authority rule requires a server-side check before dispatch."
+        }
+      ],
+      "retire_chunk": {
+        "title": "Zirconium retry window is thirty seconds",
+        "body": "The zirconium gateway retry window is thirty seconds.",
+        "valid_to": "yesterday"
+      },
+      "replacement_chunk": {
+        "title": "Zirconium retry window is five minutes",
+        "body": "The zirconium gateway retry window is five minutes."
+      },
+      "query": "zirconium gateway retry window",
+      "expected_paths": [
+        "__replacement__"
+      ],
+      "forbidden_paths": [
+        "__retired__"
+      ],
+      "expect_no_match": false
+    },
+    {
+      "id": "update-archived-chunk-is-not-served",
+      "category": "update",
+      "seed": [
+        {
+          "path": "specs/probe/plover-migrations.md",
+          "text": "Plover migrations run in batches with a resumable cursor."
+        }
+      ],
+      "retire_chunk": {
+        "title": "Plover batches are one hundred rows",
+        "body": "Plover migration batches are one hundred rows.",
+        "valid_to": "today"
+      },
+      "replacement_chunk": {
+        "title": "Plover batches are one thousand rows",
+        "body": "Plover migration batches are one thousand rows."
+      },
+      "query": "plover migration batch size",
+      "expected_paths": [
+        "__replacement__"
+      ],
+      "forbidden_paths": [
+        "__retired__"
+      ],
+      "expect_no_match": false
+    },
+    {
+      "id": "update-superseded-link-is-not-served",
+      "category": "update",
+      "seed": [
+        {
+          "path": "specs/probe/zirconium-voters.md",
+          "text": "Zirconium authority checks are expressed as voters."
+        }
+      ],
+      "retire_chunk": {
+        "title": "Zirconium checks live in controllers",
+        "body": "Zirconium authority checks are written inline in controllers.",
+        "valid_to": "today"
+      },
+      "replacement_chunk": {
+        "title": "Zirconium checks live in voters",
+        "body": "Zirconium authority checks are written as voters, never inline."
+      },
+      "query": "where do zirconium authority checks live",
+      "expected_paths": [
+        "__replacement__"
+      ],
+      "forbidden_paths": [
+        "__retired__"
+      ],
+      "expect_no_match": false
+    },
+    {
+      "id": "restraint-absent-subject",
+      "category": "restraint",
+      "seed": [
+        {
+          "path": "specs/probe/zirconium-authority.md",
+          "text": "The zirconium authority rule requires a server-side check."
+        }
+      ],
+      "query": "quokka telemetry ingestion pipeline",
+      "expected_paths": [],
+      "forbidden_paths": [
+        "specs/probe/zirconium-authority.md"
+      ],
+      "expect_no_match": true
+    },
+    {
+      "id": "restraint-chitchat",
+      "category": "restraint",
+      "seed": [
+        {
+          "path": "specs/probe/plover-migrations.md",
+          "text": "Plover migrations run in batches with a resumable cursor."
+        }
+      ],
+      "query": "thanks that looks good continue",
+      "expected_paths": [],
+      "forbidden_paths": [
+        "specs/probe/plover-migrations.md"
+      ],
+      "expect_no_match": true
+    },
+    {
+      "id": "restraint-single-rare-term-is-marked-weak",
+      "category": "restraint",
+      "seed": [
+        {
+          "path": "specs/probe/zirconium-authority.md",
+          "text": "The zirconium authority rule requires a server-side check."
+        },
+        {
+          "path": "specs/probe/quokka-ingestion.md",
+          "text": "Quokka ingestion batches telemetry before upload."
+        }
+      ],
+      "query": "zirconium quokka",
+      "expected_paths": [],
+      "forbidden_paths": [],
+      "expect_no_match": false,
+      "expect_weak_match": [
+        "specs/probe/zirconium-authority.md"
+      ],
+      "_comment": "Both terms exist in the corpus and each document carries only one, so neither reaches the required coverage of two and both are admitted on rarity alone - which is what `distinctive` names. A term absent from the index is dropped as uninformative and would collapse the query to a single term, making every hit `covered`."
+    },
+    {
+      "id": "reasoning-two-facts-one-capsule",
+      "category": "reasoning",
+      "seed": [
+        {
+          "path": "specs/probe/zirconium-authority.md",
+          "text": "The zirconium authority rule requires a server-side check before dispatch."
+        },
+        {
+          "path": "specs/probe/zirconium-voters.md",
+          "text": "A zirconium server-side check is expressed as a voter."
+        }
+      ],
+      "query": "zirconium server-side check",
+      "expected_paths": [
+        "specs/probe/zirconium-authority.md",
+        "specs/probe/zirconium-voters.md"
+      ],
+      "forbidden_paths": [],
+      "expect_no_match": false
+    },
+    {
+      "id": "reasoning-rule-and-its-exception",
+      "category": "reasoning",
+      "seed": [
+        {
+          "path": "specs/probe/plover-migrations.md",
+          "text": "Plover migrations run in batches with a resumable cursor."
+        },
+        {
+          "path": "specs/probe/plover-exceptions.md",
+          "text": "Plover migrations skip batching when the table is empty."
+        }
+      ],
+      "query": "plover migrations batching",
+      "expected_paths": [
+        "specs/probe/plover-migrations.md",
+        "specs/probe/plover-exceptions.md"
+      ],
+      "forbidden_paths": [],
+      "expect_no_match": false
+    },
+    {
+      "id": "reasoning-fact-and-its-constraint",
+      "category": "reasoning",
+      "seed": [
+        {
+          "path": "specs/probe/zirconium-retry.md",
+          "text": "The zirconium gateway retry window is five minutes."
+        },
+        {
+          "path": "specs/probe/zirconium-budget.md",
+          "text": "A zirconium retry must not exceed the five minute request budget."
+        }
+      ],
+      "query": "zirconium retry five minutes",
+      "expected_paths": [
+        "specs/probe/zirconium-retry.md",
+        "specs/probe/zirconium-budget.md"
+      ],
+      "forbidden_paths": [],
+      "expect_no_match": false
+    }
+  ]
+}

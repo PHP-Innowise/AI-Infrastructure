@@ -43,6 +43,11 @@ import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+# Three, not four: the WordPress edition ships no `.agents/evals/routing.json`
+# yet. The cases in that file are authored judgement about one roster - which
+# request should reach which skill - and a set invented by someone who does not
+# own the edition would be measured into a baseline and then look validated.
+# Add "Cms/wordpress" here in the same change that adds its cases.
 EDITIONS = ("Laravel", "Symfony", "PHP Core")
 DEFAULT_RUNS = 3
 DEFAULT_TIMEOUT = 120

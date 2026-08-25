@@ -1,7 +1,7 @@
 # Accelerator Installer
 
-`scripts/install_accelerator.py` installs a ready-made Laravel, Symfony, or PHP
-Core accelerator into an existing project from a versioned production
+`scripts/install_accelerator.py` installs a ready-made Laravel, Symfony, PHP
+Core, or WordPress accelerator into an existing project from a versioned production
 inventory. It copies the selected production payload into the target root and
 refuses unsupported collisions before writing anything.
 
@@ -27,6 +27,9 @@ or other dependencies.
 - `Symfony` for Symfony projects.
 - `PHP Core` for native Composer/PSR projects, microframeworks, or frameworks
   without a dedicated edition.
+- `WordPress` for plugins, themes, blocks, WordPress sites, multisite
+  components, or WooCommerce extensions. Its source directory is
+  `Cms/wordpress`.
 
 Use the edition supported by evidence in the target project's `composer.json`
 and lock file.
@@ -37,7 +40,7 @@ and lock file.
 python3 scripts/install_accelerator.py --verify-inventories
 ```
 
-The command must report `VERIFIED` for Laravel, Symfony, and PHP Core. An
+The command must report `VERIFIED` for Laravel, Symfony, PHP Core, and WordPress. An
 inventory mismatch means the source checkout is incomplete or its distribution
 files changed without an inventory update.
 
@@ -211,7 +214,7 @@ Do **not**:
 
 - copy `Infrastructure-Creator/` into the target project;
 - point the generator at its own directory;
-- copy the ready-made `Laravel/`, `Symfony/`, or `PHP Core/` edition when using
+- copy the ready-made `Laravel/`, `Symfony/`, `PHP Core/`, or `Cms/wordpress/` edition when using
   this custom-generation path.
 
 ### Run the Scan

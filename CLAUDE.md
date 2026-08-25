@@ -5,14 +5,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What This Repository Is
 
 This is **not a PHP application**. It is a monorepo of AI-agent accelerators for PHP
-projects: ready-made policy/skill/agent/hook bundles for Laravel, Symfony, and
-framework-neutral PHP Core, plus `Infrastructure-Creator/`, a generator that scans
+projects: ready-made policy/skill/agent/hook bundles for Laravel, Symfony,
+framework-neutral PHP Core, and WordPress, plus `Infrastructure-Creator/`, a generator that scans
 a *target* PHP project and builds a bespoke accelerator for it. There is no
 application code, no Composer install, and no PHP runtime to execute here — the
 repository's own tests and tooling are Python (standard library only) and shell.
 
 ```
-Laravel/, Symfony/, PHP Core/    # three independent, ready-to-use editions
+Laravel/, Symfony/, PHP Core/    # framework ready-to-use editions
+Cms/wordpress/                   # WordPress ready-to-use edition
 Infrastructure-Creator/          # generator that builds a bespoke edition for a target project
 install/                         # installer docs + versioned inventories
 scripts/                         # repo-level build/install/measurement/CI tools (Python, stdlib only)
@@ -21,8 +22,8 @@ tests/                           # repository-level tests (installation, mirrors
 docs/                            # shared documentation (CI, adoption, tool integration, operations)
 ```
 
-Each of the four top-level accelerator directories (`Laravel/`, `Symfony/`,
-`PHP Core/`, `Infrastructure-Creator/`) is a self-contained unit with its own
+Each ready-made accelerator (`Laravel/`, `Symfony/`, `PHP Core/`,
+`Cms/wordpress/`) and `Infrastructure-Creator/` is a self-contained unit with its own
 `AGENTS.md` (enforceable policy), `README.md`, `CHANGELOG.md`, `VERSION`,
 `memory-bank/`, `project-brain/` (Infrastructure-Creator excepted), `specs/`,
 `tasks/`, and mirrored tool integrations `.claude/`, `.cursor/`, `.agents/` +
@@ -41,6 +42,7 @@ for suite in \
   "Laravel/memory-bank/tests" "Laravel/project-brain/tests" \
   "Symfony/memory-bank/tests" "Symfony/project-brain/tests" \
   "PHP Core/memory-bank/tests" "PHP Core/project-brain/tests" \
+  "Cms/wordpress/memory-bank/tests" "Cms/wordpress/project-brain/tests" \
   "Infrastructure-Creator/tests"; do
   (cd "$suite" && for test_file in test_*.py; do python3 "$test_file"; done)
 done
@@ -74,6 +76,7 @@ python3 scripts/build_mirrors.py --write --edition Laravel --edition "PHP Core" 
 (cd "Laravel"  && python3 memory-bank/scripts/context.py parity && python3 memory-bank/scripts/context.py parity --cross-edition)
 (cd "Symfony"  && python3 memory-bank/scripts/context.py parity && python3 memory-bank/scripts/context.py parity --cross-edition)
 (cd "PHP Core" && python3 memory-bank/scripts/context.py parity && python3 memory-bank/scripts/context.py parity --cross-edition)
+(cd "Cms/wordpress" && python3 memory-bank/scripts/context.py parity && python3 memory-bank/scripts/context.py parity --cross-edition)
 ```
 
 `--cross-edition` covers the three PHP editions, including their
@@ -142,7 +145,7 @@ In Claude Code this is the `/collect` command. Bundles land in the ignored `.c2p
 
 ### Shared workflow model: Command → Agent → Skill
 
-Every edition (Laravel/Symfony/PHP Core) follows the same pipeline, adapted per stack:
+Every ready-made edition follows the same pipeline, adapted per stack:
 
 ```
 User request → Command routes intent → Agent executes exactly one Skill in an isolated context → stop
@@ -157,7 +160,7 @@ Codex has no command layer: skills are invoked by name or auto-selected from `.a
 
 `tasks/` holds temporary, skill-prefixed `TASK-NNN/` work docs. `specs/` holds
 durable living specifications registered in `specs/MANIFEST.md`. Uppercase
-`Task/` (Laravel/Symfony/PHP Core only) is optional client-owned input material —
+`Task/` in the ready-made editions is optional client-owned input material —
 distinct from lowercase `tasks/` — and is excluded from the installed payload.
 
 ### Three mirrored tool integrations per edition
@@ -224,7 +227,7 @@ silently failing — see `Infrastructure-Creator/README.md#non-php-targets`.
 
 ### Installer (`scripts/install_accelerator.py`)
 
-Installs one of the three ready-made editions into a target project from
+Installs one of the four ready-made editions into a target project from
 versioned inventories (`install/inventories/*.json`), refusing unsupported
 collisions before writing anything. Always dry-run first
 (`--dry-run --merge-existing`), resolve every `COLLISION`, then repeat without
@@ -233,8 +236,8 @@ custom architecture — see `install/README.md`.
 
 ## Contributing Conventions
 
-- Only change a skill in the edition(s) where it actually applies — a Laravel
-  fix doesn't automatically belong in Symfony or PHP Core.
+- Only change a skill in the edition(s) where it actually applies — Laravel,
+  Symfony, WordPress and PHP Core semantics must remain distinct.
 - Evaluate a universal policy change in `PHP Core/` first, then adapt it to
   other frameworks' boundaries rather than copying it blindly.
 - Within one edition, mirror supported skill/agent/command changes across

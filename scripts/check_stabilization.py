@@ -44,7 +44,13 @@ from datetime import date
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-EDITIONS = ("Laravel", "Symfony", "PHP Core", "Infrastructure-Creator")
+EDITIONS = (
+    "Laravel",
+    "Symfony",
+    "PHP Core",
+    "Cms/wordpress",
+    "Infrastructure-Creator",
+)
 
 RULE_HEADING = re.compile(r"^### Rule:\s*(?P<name>.+?)\s*$", re.M)
 SECTION_HEADING = re.compile(r"^## (?P<name>.+?)\s*$", re.M)

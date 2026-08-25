@@ -41,7 +41,14 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-EDITIONS = ("Laravel", "Symfony", "PHP Core", "Infrastructure-Creator")
+EDITION_PATHS = {
+    "Laravel": Path("Laravel"),
+    "Symfony": Path("Symfony"),
+    "PHP Core": Path("PHP Core"),
+    "WordPress": Path("Cms/wordpress"),
+    "Infrastructure-Creator": Path("Infrastructure-Creator"),
+}
+EDITIONS = tuple(EDITION_PATHS)
 RULE_LOCATIONS = (
     Path("memory-bank/scripts/context_retrieval.py"),
     Path("mirror_rules.py"),
@@ -367,7 +374,7 @@ def main() -> int:
     all_problems: list[str] = []
     all_written: list[str] = []
     for name in selected:
-        edition_dir = ROOT / name
+        edition_dir = ROOT / EDITION_PATHS[name]
         if not edition_dir.is_dir():
             all_problems.append(f"{name}: edition directory not found")
             continue

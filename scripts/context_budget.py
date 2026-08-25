@@ -98,7 +98,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BUDGET_FILE = ROOT / "scripts" / "token_budget.json"
-EDITIONS = ("Laravel", "Symfony", "PHP Core", "Infrastructure-Creator")
+EDITION_PATHS = {
+    "Laravel": Path("Laravel"),
+    "Symfony": Path("Symfony"),
+    "PHP Core": Path("PHP Core"),
+    "WordPress": Path("Cms/wordpress"),
+    "Infrastructure-Creator": Path("Infrastructure-Creator"),
+}
+EDITIONS = tuple(EDITION_PATHS)
 CATEGORIES = (
     "agents_md_bytes",
     "descriptor_bytes",
@@ -266,7 +273,7 @@ def listing_bytes(paths: list[Path]) -> tuple[int, int]:
 
 
 def measure_edition(edition: str) -> dict:
-    edition_dir = ROOT / edition
+    edition_dir = ROOT / EDITION_PATHS[edition]
     agents_md = edition_dir / "AGENTS.md"
     if not agents_md.is_file():
         raise BudgetError(f"{edition}: missing AGENTS.md")

@@ -1,6 +1,6 @@
 # Safe Adoption Guide
 
-This guide installs a ready-made Laravel, Symfony, or PHP Core edition into an
+This guide installs a ready-made Laravel, Symfony, PHP Core, or WordPress edition into an
 existing project without replacing existing project files. An accelerator is
 a workflow layer; the consuming project's code, configuration, tests,
 specifications, and CI remain authoritative.
@@ -24,6 +24,9 @@ points, and declared PHP/framework versions.
 - Choose [PHP Core](../PHP%20Core/README.md) for native Composer/PSR projects,
   microframeworks, or frameworks without a dedicated edition. Its baseline is
   PHP 8.2+.
+- Choose [WordPress](../Cms/wordpress/README.md) for plugins, classic/block
+  themes, Gutenberg blocks, custom WordPress sites, multisite components, or
+  WooCommerce extensions. Follow the target project's supported versions.
 
 Do not select an edition by preference when the project evidence identifies a
 different stack. Use

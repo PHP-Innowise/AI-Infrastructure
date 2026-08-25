@@ -86,7 +86,14 @@ MAX_VERSION = (5, 0, 0)
 RUN_TIMEOUT = 120
 PROBE_TIMEOUT = 15
 
-EDITIONS = ("Laravel", "Symfony", "PHP Core", "Infrastructure-Creator")
+EDITION_PATHS = {
+    "Laravel": Path("Laravel"),
+    "Symfony": Path("Symfony"),
+    "PHP Core": Path("PHP Core"),
+    "WordPress": Path("Cms/wordpress"),
+    "Infrastructure-Creator": Path("Infrastructure-Creator"),
+}
+EDITIONS = tuple(EDITION_PATHS)
 
 # Applied to every scope, unconditionally. Each entry is either something that
 # must not reach a model prompt, or something whose bytes the prompt already
@@ -351,7 +358,7 @@ def resolve_scope(args: argparse.Namespace) -> tuple[Path, list[str], list[str],
                 f"scope {args.scope!r} needs --edition "
                 f"({', '.join(repr(e) for e in EDITIONS)})"
             )
-        target = ROOT / args.edition
+        target = ROOT / EDITION_PATHS[args.edition]
         if not target.is_dir():
             raise CollectError(f"no such edition directory: {target}")
         label = f"{args.scope}-{args.edition.replace(' ', '-').lower()}"

@@ -14,7 +14,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "scripts" / "install_accelerator.py"
-EDITIONS = ("Laravel", "Symfony", "PHP Core")
+EDITION_PATHS = {
+    "Laravel": Path("Laravel"),
+    "Symfony": Path("Symfony"),
+    "PHP Core": Path("PHP Core"),
+    "WordPress": Path("Cms/wordpress"),
+}
+EDITIONS = tuple(EDITION_PATHS)
 TOOLS = ("claude", "cursor", "codex")
 TIMEOUT = 90
 REQUIRED_SHARED = (
@@ -66,7 +72,7 @@ def source_digest(edition: str, data: dict) -> str:
         source = data["source_overrides"].get(path, path)
         digest.update(path.encode())
         digest.update(b"\0")
-        digest.update((ROOT / edition / source).read_bytes())
+        digest.update((ROOT / EDITION_PATHS[edition] / source).read_bytes())
         digest.update(b"\0")
     return digest.hexdigest()
 
@@ -89,9 +95,10 @@ class InventoryTest(unittest.TestCase):
         for edition in EDITIONS:
             data = inventory(edition)
             excluded = set(data["excluded_tracked_paths"])
-            tracked_result = run("git", "ls-files", "-z", "--", edition)
+            source_dir = EDITION_PATHS[edition].as_posix()
+            tracked_result = run("git", "ls-files", "-z", "--", source_dir)
             self.assertEqual(0, tracked_result.returncode, tracked_result.stderr)
-            prefix = edition + "/"
+            prefix = source_dir + "/"
             tracked = {
                 path[len(prefix) :]
                 for path in tracked_result.stdout.split("\0")
@@ -100,7 +107,7 @@ class InventoryTest(unittest.TestCase):
             for path in REQUIRED_SOURCE_EXCLUSIONS:
                 with self.subTest(edition=edition, path=path):
                     self.assertIn(path, excluded)
-                    self.assertTrue((ROOT / edition / path).is_file())
+                    self.assertTrue((ROOT / EDITION_PATHS[edition] / path).is_file())
                     self.assertIn(path, tracked)
             self.assertTrue(any(path.startswith("Task/") for path in excluded))
 
@@ -524,8 +531,8 @@ class UntrackedSourceTest(unittest.TestCase):
     MARKER = "CLIENT_SECRET=must-not-ship"
 
     def _write_editions(self, base: Path) -> None:
-        for edition in EDITIONS:
-            edition_root = base / edition
+        for edition_path in EDITION_PATHS.values():
+            edition_root = base / edition_path
             (edition_root / "memory-bank" / ".install").mkdir(parents=True)
             (edition_root / ".claude").mkdir(parents=True)
             (edition_root / "VERSION").write_text("0.0.0\n", encoding="utf-8")
@@ -556,7 +563,13 @@ class UntrackedSourceTest(unittest.TestCase):
             )
             self.assertEqual(0, initialized.returncode, initialized.stderr)
             # Staged and never committed: the index alone defines the payload.
-            staged = run("git", "add", "--", *EDITIONS, cwd=base)
+            staged = run(
+                "git",
+                "add",
+                "--",
+                *(path.as_posix() for path in EDITION_PATHS.values()),
+                cwd=base,
+            )
             self.assertEqual(0, staged.returncode, staged.stderr)
             self._plant_untracked_files(base)
 

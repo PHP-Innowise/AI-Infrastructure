@@ -46,7 +46,16 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-EDITIONS = ("Laravel", "Symfony", "PHP Core", "Infrastructure-Creator")
+# "Cms/wordpress" is a path, not a bare name: the WordPress edition lives
+# one level down. Every use here joins it onto the repository root or a
+# pathspec, so the nesting costs nothing.
+EDITIONS = (
+    "Laravel",
+    "Symfony",
+    "PHP Core",
+    "Cms/wordpress",
+    "Infrastructure-Creator",
+)
 LOCK_NAME = ".accelerator-policy-lock.json"
 SCHEMA_VERSION = 1
 
@@ -87,6 +96,7 @@ MODEL_ALLOWLIST = {
     "Laravel": ("opus", "sonnet", "haiku"),
     "Symfony": ("opus", "sonnet", "haiku"),
     "PHP Core": ("opus", "sonnet", "haiku"),
+    "Cms/wordpress": ("opus", "sonnet", "haiku"),
     "Infrastructure-Creator": ("opus", "sonnet"),
 }
 
@@ -95,6 +105,7 @@ EDITION_SLUG = {
     "Laravel": "laravel",
     "Symfony": "symfony",
     "PHP Core": "php-core",
+    "Cms/wordpress": "wordpress",
     "Infrastructure-Creator": "infrastructure-creator",
 }
 

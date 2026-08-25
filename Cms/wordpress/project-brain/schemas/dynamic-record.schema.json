@@ -1,0 +1,365 @@
+{
+  "$defs": {
+    "stringList": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    }
+  },
+  "$id": "https://local.invalid/project-brain/dynamic-record.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "task"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "status": {
+            "enum": [
+              "active",
+              "blocked",
+              "verifying",
+              "completed",
+              "cancelled"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "finding"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "status": {
+            "enum": [
+              "open",
+              "investigating",
+              "resolved",
+              "superseded"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "bug"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "status": {
+            "enum": [
+              "reported",
+              "triaged",
+              "fixing",
+              "verifying",
+              "resolved",
+              "cancelled"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "incident"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "status": {
+            "enum": [
+              "open",
+              "contained",
+              "recovering",
+              "resolved",
+              "closed",
+              "cancelled"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "decision"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "status": {
+            "enum": [
+              "proposed",
+              "accepted",
+              "rejected",
+              "superseded"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "event"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "status": {
+            "enum": [
+              "recorded",
+              "superseded"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "properties": {
+    "authority": {
+      "enum": [
+        "inferred",
+        "observed",
+        "verified"
+      ]
+    },
+    "authorized_owners": {
+      "$ref": "#/$defs/stringList"
+    },
+    "auto_checkpoint": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "confidence": {
+      "maximum": 1,
+      "minimum": 0,
+      "type": "number"
+    },
+    "conflicts": {
+      "$ref": "#/$defs/stringList"
+    },
+    "created_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "external_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "files": {
+      "$ref": "#/$defs/stringList"
+    },
+    "goal": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "id": {
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "next_steps": {
+      "$ref": "#/$defs/stringList"
+    },
+    "owner": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "phase": {
+      "enum": [
+        "understanding",
+        "planning",
+        "implementation",
+        "verification",
+        "finalization"
+      ]
+    },
+    "privacy": {
+      "enum": [
+        "public",
+        "team",
+        "restricted",
+        "private"
+      ]
+    },
+    "progress": {
+      "type": "string"
+    },
+    "revision": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "source_fingerprints": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "sha256"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "sources": {
+      "$ref": "#/$defs/stringList"
+    },
+    "status": {
+      "enum": [
+        "active",
+        "blocked",
+        "verifying",
+        "completed",
+        "cancelled",
+        "open",
+        "investigating",
+        "resolved",
+        "superseded",
+        "reported",
+        "triaged",
+        "fixing",
+        "contained",
+        "recovering",
+        "closed",
+        "proposed",
+        "accepted",
+        "rejected",
+        "recorded"
+      ]
+    },
+    "superseded_by": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "supersedes": {
+      "$ref": "#/$defs/stringList"
+    },
+    "title": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "transitions": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "from": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "to": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "at",
+          "actor",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "type": {
+      "enum": [
+        "task",
+        "finding",
+        "bug",
+        "incident",
+        "decision",
+        "event"
+      ]
+    },
+    "updated_at": {
+      "format": "date-time",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "id",
+    "type",
+    "external_id",
+    "title",
+    "status",
+    "revision",
+    "owner",
+    "authorized_owners",
+    "privacy",
+    "authority",
+    "confidence",
+    "created_at",
+    "updated_at",
+    "transitions",
+    "source_fingerprints",
+    "conflicts",
+    "supersedes",
+    "superseded_by",
+    "goal",
+    "progress",
+    "next_steps",
+    "files",
+    "sources"
+  ],
+  "title": "Project Brain dynamic record frontmatter",
+  "type": "object"
+}

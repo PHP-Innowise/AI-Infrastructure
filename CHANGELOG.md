@@ -112,6 +112,12 @@ edition's own files remain in that edition's changelog.
   - CI: the `parity` job runs both the asset check and
     `tests/test_asset_parity.py` once, on the `Laravel` leg.
 
+- Added a first-class WordPress accelerator at `Cms/wordpress` with canonical
+  WordPress policy and skills for plugins, classic/block themes, Gutenberg,
+  actions/filters, content modeling, REST, WP-CLI, multisite, WooCommerce and
+  background processing; integrated it into mirrors, installation inventories,
+  context budgets, cross-edition runtime parity, CI and documentation.
+
 - **A context-collection command for external models
   (`scripts/collect_context.py`), wrapping the optional `code2prompt`
   CLI.** Invoked as `/collect <scope> [options]` in Claude Code, from a
@@ -267,6 +273,33 @@ edition's own files remain in that edition's changelog.
   its preinstalled `php` fail rather than report a silent pass.
 
 ### Changed
+
+- **Integration of the WordPress edition with the H1–H4 memory work.** The two
+  branches merged cleanly as text and would have shipped a broken engine: the
+  new edition carried its own copy of the five core modules taken from `main`,
+  so four of them were behind, and `parity --cross-edition` — which the
+  WordPress branch itself extended to cover the edition — reported ten
+  divergences. Reconciled by bringing the edition to canon rather than by
+  relaxing the gate.
+  - Four core modules, three shared test files, `PROTOCOL.md`, the retrieval
+    manifest schema and `project-brain/tests/test_runtime.py` synchronised.
+  - `.claude/hooks/working-memory-read.sh` was the pre-H1-01 variant that
+    truncates the prompt with a regex; replaced with the canonical one, which
+    passes the raw prompt to the CLI where distillation and the secret gate
+    live. Left as it was, the edition would have asked the core a different
+    question than its siblings — the exact drift H1-01 exists to prevent.
+  - `memory-probes.json` copied to the edition: it is byte-identical across
+    the other three, so it is engine data rather than framework data.
+  - `SkillRoutingTest` now skips explicitly, naming the gap, when an edition
+    ships no `skill-routing-golden.json`. That fixture names skills from one
+    roster and its floor is a measured number, so it can be neither shared nor
+    invented; WordPress owes its own.
+  - `policy_lock.py` and `check_stabilization.py` learned the edition (it
+    ships 41 agents and its own stabilization rules); `routing_eval.py`
+    deliberately did not, with the reason recorded in the file.
+  - Mirrors, the generator asset and all four installation inventories
+    regenerated; the WordPress inventory gains its policy lock.
+
 
 - **Infrastructure-Creator's context-budget ceilings were raised for the
   content review-and-repair phase** (`scripts/token_budget.json`, observed

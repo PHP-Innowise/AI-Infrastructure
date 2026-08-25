@@ -1,0 +1,51 @@
+{
+  "documents": [
+    {"path": "specs/golden/cobalt-1.md", "text": "Cobalt pagination cursor stability contract."},
+    {"path": "specs/golden/cobalt-2.md", "text": "Cobalt pagination cursor ordering rule."},
+    {"path": "specs/golden/cobalt-3.md", "text": "Cobalt pagination cursor compatibility."},
+    {"path": "specs/golden/cobalt-4.md", "text": "Cobalt pagination cursor verification."},
+    {"path": "specs/golden/cobalt-5.md", "text": "Cobalt pagination cursor implementation."},
+    {"path": "specs/golden/amber-1.md", "text": "Amber webhook signature rotation contract."},
+    {"path": "specs/golden/amber-2.md", "text": "Amber webhook signature replay defense."},
+    {"path": "specs/golden/amber-3.md", "text": "Amber webhook signature verification."},
+    {"path": "specs/golden/amber-4.md", "text": "Amber webhook signature compatibility."},
+    {"path": "specs/golden/amber-5.md", "text": "Amber webhook signature implementation."},
+    {"path": "specs/golden/indigo-1.md", "text": "Indigo queue lease recovery contract."},
+    {"path": "specs/golden/indigo-2.md", "text": "Indigo queue lease renewal rule."},
+    {"path": "specs/golden/indigo-3.md", "text": "Indigo queue lease verification."},
+    {"path": "specs/golden/indigo-4.md", "text": "Indigo queue lease compatibility."},
+    {"path": "specs/golden/indigo-5.md", "text": "Indigo queue lease implementation."}
+  ],
+  "cases": [
+    {
+      "query": "cobalt pagination cursor",
+      "expected": [
+        "specs/golden/cobalt-1.md",
+        "specs/golden/cobalt-2.md",
+        "specs/golden/cobalt-3.md",
+        "specs/golden/cobalt-4.md",
+        "specs/golden/cobalt-5.md"
+      ]
+    },
+    {
+      "query": "amber webhook signature",
+      "expected": [
+        "specs/golden/amber-1.md",
+        "specs/golden/amber-2.md",
+        "specs/golden/amber-3.md",
+        "specs/golden/amber-4.md",
+        "specs/golden/amber-5.md"
+      ]
+    },
+    {
+      "query": "indigo queue lease",
+      "expected": [
+        "specs/golden/indigo-1.md",
+        "specs/golden/indigo-2.md",
+        "specs/golden/indigo-3.md",
+        "specs/golden/indigo-4.md",
+        "specs/golden/indigo-5.md"
+      ]
+    }
+  ]
+}

@@ -2928,8 +2928,19 @@ class SkillRoutingTest(RuntimeHarness):
     """
 
     def test_skill_routing_meets_its_measured_floor(self) -> None:
+        # The golden set names skills from this edition's own roster and its
+        # floor is a measured number, so unlike the memory probes it cannot be
+        # shared between editions or invented for one. An edition that ships
+        # no set is reported as uncovered rather than silently passing: the
+        # gap is real work its author owes, not an engine defect.
+        golden = Path(__file__).parent / "fixtures/skill-routing-golden.json"
+        if not golden.is_file():
+            self.skipTest(
+                "this edition ships no fixtures/skill-routing-golden.json; "
+                "author its cases and record the measured min_top2 floor"
+            )
         fixture = json.loads(
-            (Path(__file__).parent / "fixtures/skill-routing-golden.json").read_text(
+            golden.read_text(
                 encoding="utf-8"
             )
         )

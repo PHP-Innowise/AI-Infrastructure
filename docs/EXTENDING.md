@@ -7,6 +7,8 @@ covers the three maintained accelerators and the generator:
 - [`Symfony/`](../Symfony/README.md) for Symfony-specific workflows;
 - [`PHP Core/`](../PHP%20Core/README.md) for framework-neutral Composer, PSR,
   and native-PHP workflows;
+- [`Cms/wordpress/`](../Cms/wordpress/README.md) for WordPress plugins, themes,
+  blocks, multisite, REST, WP-CLI, and WooCommerce workflows;
 - [`Infrastructure-Creator/`](../Infrastructure-Creator/README.md) for
   evidence-driven generation into an external PHP project.
 
@@ -38,6 +40,14 @@ Use `PHP Core/` for framework-neutral PHP behavior: Composer and PSR
 conventions, explicit HTTP boundaries, PDO or documented data layers,
 framework-neutral validation and authorization, and portable PHP tooling.
 Framework-specific examples belong in their framework sibling.
+
+### WordPress
+
+Use `Cms/wordpress/` when the consuming project is governed by WordPress
+lifecycle and APIs: plugins, classic/block themes, Gutenberg, WordPress REST,
+WP-CLI, multisite, WordPress data APIs, or WooCommerce. Preserve public hooks,
+stored content/data, block serialization, capability boundaries, and declared
+minimum versions rather than importing generic PHP architecture mechanically.
 
 ### Infrastructure-Creator
 
@@ -191,8 +201,8 @@ Review together:
 - Project Brain and Memory Bank tests;
 - [`CONTEXT-MODES.md`](CONTEXT-MODES.md).
 
-Keep common runtime assets byte-identical across Laravel, Symfony, and PHP
-Core unless a file is explicitly framework-specific. Runtime configuration
+Keep common runtime assets byte-identical across Laravel, Symfony, PHP Core,
+and WordPress unless a file is explicitly framework-specific. Runtime configuration
 contains the framework label and allowed policy differences. Validate:
 
 ```bash

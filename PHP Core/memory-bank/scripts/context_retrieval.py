@@ -477,14 +477,19 @@ MIRROR_RULES: dict[str, Any] = {
 # ---------------------------------------------------------------------------
 # Cross-edition core - the Python runtime, its tests, the Brain schemas and
 # the protocol are byte-identical across the PHP editions of the monorepo
-# (Laravel, Symfony, "PHP Core") and MUST stay that way: a fix that lands in
+# (Laravel, Symfony, PHP Core, WordPress) and MUST stay that way: a fix that lands in
 # one edition and not the others silently forks the engine. `context.py
 # parity --cross-edition` walks this manifest against every sibling edition
 # it can find next to this one; a standalone (copied-out) edition has no
 # siblings and skips the check.
 # ---------------------------------------------------------------------------
 
-CROSS_EDITION_SIBLINGS = ("Laravel", "Symfony", "PHP Core")
+CROSS_EDITION_PATHS = {
+    "Laravel": Path("Laravel"),
+    "Symfony": Path("Symfony"),
+    "PHP Core": Path("PHP Core"),
+    "WordPress": Path("Cms/wordpress"),
+}
 
 # Glob patterns, relative to an edition root, of files that must be
 # byte-identical in every sibling edition. Composition verified by direct
@@ -1163,10 +1168,16 @@ def format_full_mirror_drift(drift: list[dict[str, str]]) -> str:
 
 
 def monorepo_root(repository: Path) -> Optional[Path]:
-    """The parent directory, when it carries at least two PHP editions."""
-    parent = repository.resolve().parent
-    present = [name for name in CROSS_EDITION_SIBLINGS if (parent / name).is_dir()]
-    return parent if len(present) >= 2 else None
+    """Nearest ancestor carrying at least two maintained PHP editions."""
+    resolved = repository.resolve()
+    for candidate in resolved.parents:
+        present = [
+            name for name, path in CROSS_EDITION_PATHS.items()
+            if (candidate / path).is_dir()
+        ]
+        if len(present) >= 2:
+            return candidate
+    return None
 
 
 def _cross_edition_allowed(rel: str) -> Optional[str]:
@@ -1185,10 +1196,13 @@ def cross_edition_drift(repository: Path) -> Optional[list[dict[str, object]]]:
     root = monorepo_root(repository)
     if root is None:
         return None
-    editions = [name for name in CROSS_EDITION_SIBLINGS if (root / name).is_dir()]
+    editions = [
+        name for name, path in CROSS_EDITION_PATHS.items()
+        if (root / path).is_dir()
+    ]
     digests: dict[str, dict[str, str]] = {}
     for name in editions:
-        base = root / name
+        base = root / CROSS_EDITION_PATHS[name]
         for pattern in CROSS_EDITION_CORE_MANIFEST:
             for path in sorted(base.glob(pattern)):
                 if not path.is_file() or path.is_symlink():

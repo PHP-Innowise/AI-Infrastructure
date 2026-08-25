@@ -1,0 +1,181 @@
+{
+  "env": {
+    "APP_ENV": "local",
+    "FORCE_COLOR": "1",
+    "CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS": "1",
+    "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1"
+  },
+  "permissions": {
+    "allow": [
+      "Read(**)",
+      "Edit(**)",
+      "Write(**)",
+      "Glob(**)",
+      "Grep(**)",
+      "Bash(php:*)",
+      "Bash(composer:*)",
+      "Bash(vendor/bin/phpunit:*)",
+      "Bash(vendor/bin/pest:*)",
+      "Bash(vendor/bin/php-cs-fixer:*)",
+      "Bash(vendor/bin/phpcs:*)",
+      "Bash(vendor/bin/phpcbf:*)",
+      "Bash(vendor/bin/phpstan:*)",
+      "Bash(vendor/bin/psalm:*)",
+      "Bash(vendor/bin/rector:*)",
+      "Bash(vendor/bin/phpbench:*)",
+      "Bash(wp:*)",
+      "Bash(npm:*)",
+      "Bash(npx wp-env:*)",
+      "Bash(git:*)",
+      "Bash(gh:*)",
+      "Bash(ls:*)",
+      "Bash(mkdir:*)",
+      "Bash(cp:*)",
+      "Bash(mv:*)",
+      "Bash(echo:*)",
+      "Bash(make:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:api.github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:php.net)",
+      "WebFetch(domain:www.php.net)",
+      "WebFetch(domain:php-fig.org)",
+      "WebFetch(domain:www.php-fig.org)",
+      "WebFetch(domain:getcomposer.org)",
+      "WebFetch(domain:packagist.org)",
+      "WebFetch(domain:pestphp.com)",
+      "WebFetch(domain:phpunit.de)",
+      "WebFetch(domain:phpstan.org)",
+      "WebFetch(domain:psalm.dev)",
+      "WebFetch(domain:developer.wordpress.org)",
+      "WebFetch(domain:make.wordpress.org)",
+      "WebFetch(domain:wordpress.org)",
+      "WebFetch(domain:developer.woocommerce.com)"
+    ],
+    "deny": [
+      "Agent(Explore)",
+      "Agent(Plan)",
+      "Agent(general-purpose)",
+      "Agent(claude)",
+      "Agent(statusline-setup)",
+      "Agent(claude-code-guide)",
+      "Read(.env)",
+      "Read(.env.*)",
+      "Edit(.env)",
+      "Edit(.env.*)",
+      "Write(.env)",
+      "Write(.env.*)",
+      "Read(wp-config.php)",
+      "Read(wp-config-*.php)",
+      "Edit(wp-config.php)",
+      "Edit(wp-config-*.php)",
+      "Write(wp-config.php)",
+      "Write(wp-config-*.php)",
+      "Read(./secrets/**)",
+      "Bash(rm -rf:*)",
+      "Bash(sudo:*)",
+      "Bash(chmod 777:*)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/local-context.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/working-memory-read.sh",
+            "timeout": 8
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/working-memory-write.sh",
+            "timeout": 8
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/subagent-gate.sh",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/file-naming-validator.sh",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/bash-validator.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/loop-detection.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/subagent-dispatch.sh",
+            "timeout": 8
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "case \"$(uname -s)\" in Darwin) osascript -e 'display notification \"Claude needs your attention\" with title \"Claude Code\"' 2>/dev/null || echo 'Claude Code notification';; Linux) notify-send 'Claude Code' 'Claude needs your attention' 2>/dev/null || echo 'Claude Code notification';; *) echo 'Claude Code notification';; esac",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

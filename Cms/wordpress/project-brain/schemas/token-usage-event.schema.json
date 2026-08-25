@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "timestamp", "provider", "model", "operation",
+    "input_tokens", "output_tokens", "context_tokens", "cached_input_tokens",
+    "cost_usd", "ttfr_ms", "availability", "task_id"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "id": {"type": "string", "format": "uuid"},
+    "timestamp": {"type": "string", "format": "date-time"},
+    "provider": {"type": "string", "minLength": 1},
+    "model": {"type": ["string", "null"], "minLength": 1},
+    "operation": {"type": "string", "minLength": 1},
+    "input_tokens": {"type": ["integer", "null"], "minimum": 0},
+    "output_tokens": {"type": ["integer", "null"], "minimum": 0},
+    "context_tokens": {"type": ["integer", "null"], "minimum": 0},
+    "cached_input_tokens": {"type": ["integer", "null"], "minimum": 0},
+    "cost_usd": {"type": ["number", "null"], "minimum": 0},
+    "ttfr_ms": {"type": ["number", "null"], "minimum": 0},
+    "availability": {"enum": ["measured", "N/A"]},
+    "task_id": {"type": ["string", "null"], "format": "uuid"}
+  }
+}

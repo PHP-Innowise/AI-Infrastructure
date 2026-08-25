@@ -26,6 +26,8 @@ your situation.
   Messenger, API Platform, Forms, voters, and Symfony UX.
 - [PHP Core](../PHP%20Core/README.md) — framework-neutral PHP 8.2+,
   Composer/PSR projects, PDO, or frameworks without a dedicated edition.
+- [WordPress](../Cms/wordpress/README.md) — plugins, classic/block themes,
+  Gutenberg, REST, WP-CLI, multisite, WooCommerce, and custom WordPress sites.
 - [Infrastructure-Creator](../Infrastructure-Creator/README.md) — generate a
   project-specific accelerator from observed PHP project evidence instead of
   adopting a generic edition.
