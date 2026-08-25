@@ -39,13 +39,34 @@ You - the MAIN conversation - are the orchestrator and the synthesizer.
 3. When all three return, synthesize in the main conversation: deduplicate
    overlapping findings, rank by severity, drop claims without evidence,
    and present one report grouped by file.
-4. Record the outcome:
+4. Materialize each confirmed finding as a Project Brain record, from the
+   main conversation - not from the subagents, which stay read-only in this
+   flow:
+   `python3 memory-bank/scripts/context.py brain-create finding --external-id <TASK>-F<N> --title "<one line>" --source <path>`.
+   Cite a bare path or `path#L42`; `--source` rejects `path:42`. One record
+   per confirmed finding, none for anything you dropped in step 3. This is
+   the step the consolidation pipeline has been waiting for: a review's
+   findings written into the task's `--progress` are bookkeeping on a `task`
+   record, and the `task` type can never be promoted, so nothing a review
+   produced could ever become durable memory.
+5. Record the outcome:
    `python3 memory-bank/scripts/context.py update --task-id <ID> --progress "flow-review: <N> findings, <top severity>"`.
-5. Suggest next steps: `/coder` to fix confirmed findings, `/debugger` for
+6. When a finding is later fixed and verified, close it on the record so it
+   becomes promotable - two calls, because authority and status are separate
+   edges:
+   `... brain-update --record-id <id> --revision auto --authority verified --reason "Verified: <check>"`
+   `... brain-update --record-id <id> --revision auto --progress "<one-line consequence>" --transition resolved --reason "Resolved"`.
+   The `--progress` text is not optional bookkeeping: it is the record's only
+   content, and a record without it is blocked as carrying nothing beyond its
+   own title.
+7. Suggest next steps: `/coder` to fix confirmed findings, `/debugger` for
    unclear failures, `/verify` for the full Definition of Done.
 
 **Rules.** All three agents are bounded to report-only by their capsules in
-this flow; spawn only agents from this accelerator's roster. Note that
+this flow; spawn only agents from this accelerator's roster. Record
+creation happens in the main conversation for the same reason: making a
+reviewer write-capable would put a second write-capable agent in this stage,
+which the subagent gate serializes behind a lock. Note that
 `performance-optimization` is declared `writes: true`, so the gate holds the
 write lock for it during the stage - harmless here (the other two are
 read-only), but do not add a second write-capable agent to this stage. If

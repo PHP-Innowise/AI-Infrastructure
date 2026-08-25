@@ -9,6 +9,7 @@ import re
 import sys
 from datetime import date
 from pathlib import Path
+from typing import Optional
 
 
 # Chunk identifiers come in two accepted formats:
@@ -57,6 +58,11 @@ REQUIRED_KEYS = {
 OPTIONAL_KEYS = {
     "valid_from",
     "valid_to",
+    # Digests of the files this chunk cites, so a chunk can notice that the
+    # thing it summarizes has moved on. Optional, because requiring it would
+    # invalidate every chunk written before it existed - the same reason
+    # `valid_from`/`valid_to` are optional.
+    "source_digests",
 }
 SECRET_PATTERNS = {
     "private key": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
@@ -111,7 +117,32 @@ def require_date(metadata: dict, key: str) -> date:
         raise ValidationError(f"{key} must use YYYY-MM-DD") from error
 
 
-def validate_metadata(path: Path, metadata: dict, repository_root: Path) -> None:
+def terminal_chunk(metadata: dict, valid_to: object) -> bool:
+    """Whether a chunk has reached the end of its life, by status or by date.
+
+    A terminal chunk no longer answers questions, so the sources it cites are
+    history rather than obligations. Deleting a cited file is routine work -
+    dropping a controller, regenerating a schema - and it must not make an
+    unrelated task fail validation for a chunk that was correctly archived.
+    """
+    if metadata.get("status") in {"superseded", "archived"}:
+        return True
+    return valid_to is not None and valid_to < date.today()
+
+
+def validate_metadata(
+    path: Path,
+    metadata: dict,
+    repository_root: Path,
+    warnings: Optional[list[str]] = None,
+) -> None:
+    """Raise on anything that makes a chunk unusable.
+
+    ``warnings`` opts a caller into the non-fatal class: a terminal chunk
+    whose cited source has since been deleted is reported there instead of
+    raised. Without a sink the behaviour is unchanged, which is what keeps
+    the retrieval gate in `active_memory` strict.
+    """
     missing = REQUIRED_KEYS - metadata.keys()
     extra = metadata.keys() - REQUIRED_KEYS - OPTIONAL_KEYS
     if missing:
@@ -169,6 +200,31 @@ def validate_metadata(path: Path, metadata: dict, repository_root: Path) -> None
         if metadata["status"] == "active" and valid_to < date.today():
             raise ValidationError("active chunk is past its valid_to date")
 
+    digests = metadata.get("source_digests")
+    if digests is not None:
+        if not isinstance(digests, list):
+            raise ValidationError("source_digests must be a list")
+        for entry in digests:
+            if not isinstance(entry, dict) or set(entry) != {"path", "sha256"}:
+                raise ValidationError(
+                    "each source_digests entry must be {path, sha256}"
+                )
+            if not isinstance(entry["path"], str) or not entry["path"]:
+                raise ValidationError("source_digests path must be a non-empty string")
+            if not isinstance(entry["sha256"], str) or not re.fullmatch(
+                r"[0-9a-f]{64}", entry["sha256"]
+            ):
+                raise ValidationError("source_digests sha256 must be a hex digest")
+        cited = {
+            source.split("#", 1)[0]
+            for source in metadata["sources"]
+            if not source.startswith(("https://", "http://"))
+        }
+        if {entry["path"] for entry in digests} - cited:
+            raise ValidationError(
+                "source_digests may only cover paths listed in sources"
+            )
+
     replacement = metadata["superseded_by"]
     if replacement is not None and (
         not isinstance(replacement, str) or ID_PATTERN.fullmatch(replacement) is None
@@ -189,6 +245,14 @@ def validate_metadata(path: Path, metadata: dict, repository_root: Path) -> None
         except ValueError as error:
             raise ValidationError(f"source path escapes the repository: {source_path}") from error
         if not resolved_source.exists():
+            # The containment check above stays fatal in every status: it is a
+            # boundary guarantee, not a freshness one.
+            if warnings is not None and terminal_chunk(metadata, valid_to):
+                warnings.append(
+                    f"{path}: cited source no longer exists: {source_path} "
+                    f"(chunk is {metadata['status']} and no longer retrievable)"
+                )
+                continue
             raise ValidationError(f"source path does not exist: {source_path}")
 
 
@@ -251,7 +315,23 @@ def summarize_bank(bank_root: Path) -> str:
 
 
 def validate_bank(bank_root: Path, source_root: Path | None = None) -> list[str]:
+    """Every problem that makes the bank invalid. Kept for existing callers."""
+    return validate_bank_report(bank_root, source_root)[0]
+
+
+def validate_bank_report(
+    bank_root: Path, source_root: Path | None = None
+) -> tuple[list[str], list[str]]:
+    """Errors and warnings, separately.
+
+    The split exists because two different situations produced the same red
+    output: a chunk that is wrong, and a chunk that correctly reached the end
+    of its life while a file it cites was deleted. Only the first is something
+    the engineer must fix, and only the first should fail a task that has
+    nothing to do with the bank.
+    """
     errors: list[str] = []
+    warnings: list[str] = []
     # Chunks cite the project's own files, which sit beside the bank once it is
     # published. During generation the bank is staged apart from the project it
     # describes, so the caller passes the tree those citations resolve against;
@@ -266,7 +346,7 @@ def validate_bank(bank_root: Path, source_root: Path | None = None) -> list[str]
         if not required.is_file():
             errors.append(f"{required}: required file is missing")
     if errors:
-        return errors
+        return errors, warnings
 
     try:
         index = parse_index(index_path)
@@ -285,12 +365,21 @@ def validate_bank(bank_root: Path, source_root: Path | None = None) -> list[str]
             chunk_paths.append(entry)
 
     chunks: dict[str, tuple[Path, dict]] = {}
+    # Every id that exists on disk, including chunks that failed validation.
+    # The index cross-check below distinguishes "the file is gone" from "the
+    # file is here and broken", and a chunk can fail before its id is
+    # readable, so the filename is the fallback.
+    on_disk: set[str] = set()
     for path in chunk_paths:
+        filename_match = FILENAME_PATTERN.fullmatch(path.name)
+        if filename_match is not None:
+            on_disk.add(filename_match.group(1))
         try:
             metadata = parse_frontmatter(path)
-            validate_metadata(path, metadata, repository_root)
+            validate_metadata(path, metadata, repository_root, warnings)
             validate_secret_patterns(path)
             memory_id = metadata["id"]
+            on_disk.add(memory_id)
             if memory_id in chunks:
                 raise ValidationError(f"duplicate chunk ID: {memory_id}")
             chunks[memory_id] = (path, metadata)
@@ -319,8 +408,20 @@ def validate_bank(bank_root: Path, source_root: Path | None = None) -> list[str]
                 errors.append(f"{index_path}: {memory_id} {index_key} differs from chunk metadata")
 
     for memory_id, row in index.items():
-        if memory_id not in chunks:
-            errors.append(f"{index_path}: {memory_id} points to a missing chunk ({row['file']})")
+        if memory_id in chunks:
+            continue
+        if memory_id in on_disk:
+            # The chunk is on disk and already reported its own error above.
+            # Saying it is missing sends the reader looking for a deleted file
+            # that is sitting right there.
+            warnings.append(
+                f"{index_path}: {memory_id} index row retained for invalid chunk "
+                f"({row['file']})"
+            )
+        else:
+            errors.append(
+                f"{index_path}: {memory_id} points to a missing chunk ({row['file']})"
+            )
 
     for memory_id, (_, metadata) in chunks.items():
         if memory_id in metadata["supersedes"] or metadata["superseded_by"] == memory_id:
@@ -355,7 +456,7 @@ def validate_bank(bank_root: Path, source_root: Path | None = None) -> list[str]
             visited.add(current_id)
             current_id = chunks[current_id][1]["superseded_by"]
 
-    return errors
+    return errors, warnings
 
 
 def main() -> int:
@@ -387,9 +488,16 @@ def main() -> int:
         print(summarize_bank(bank_root))
         return 0
 
-    errors = validate_bank(
+    errors, warnings = validate_bank_report(
         bank_root, args.source_root.resolve() if args.source_root else None
     )
+    if warnings:
+        # Printed on both paths and never fatal: a warning describes a chunk
+        # that is doing what it promised, so it must not fail a task that has
+        # nothing to do with the bank.
+        print(f"Memory bank validation warnings ({len(warnings)}):", file=sys.stderr)
+        for warning in warnings:
+            print(f"- {warning}", file=sys.stderr)
     if errors:
         print(f"Memory bank validation failed ({len(errors)} error(s)):", file=sys.stderr)
         for error in errors:

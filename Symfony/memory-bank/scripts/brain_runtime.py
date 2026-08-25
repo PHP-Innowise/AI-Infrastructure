@@ -12,7 +12,7 @@ import re
 import tempfile
 import threading
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
@@ -199,6 +199,26 @@ def configured_mode(repository: Path, requested: Optional[str] = None) -> str:
     if mode not in {"governed", "lightweight"}:
         raise BrainError("Mode must be governed or lightweight")
     return mode
+
+
+def configured_retrieval_gate(
+    repository: Path, requested: Optional[str] = None
+) -> str:
+    """Which gate mode this run uses: flag, then env, then config, then shadow.
+
+    Same ladder as `configured_mode`, and validated here rather than only by
+    argparse: `hook-context` never sees the flag, so a bad value in config or
+    in the environment has to be rejected where every caller passes through.
+    """
+    gate = (
+        requested
+        or os.environ.get("CONTEXT_RETRIEVAL_GATE")
+        or load_config(repository).get("retrieval_gate")
+        or "shadow"
+    )
+    if gate not in {"off", "shadow", "enforce"}:
+        raise BrainError("Retrieval gate must be off, shadow or enforce")
+    return gate
 
 
 @contextlib.contextmanager
@@ -456,6 +476,37 @@ def source_fingerprints(repository: Path, sources: list[str]) -> list[dict[str, 
     return fingerprints
 
 
+def digestible_sources(sources: Any) -> list[str]:
+    """The cited paths a digest can be taken of.
+
+    A URL is a legitimate source and is deliberately not fingerprinted: the
+    runtime has no network, so the only honest thing it can say about a remote
+    citation is nothing.
+    """
+    if not isinstance(sources, list):
+        return []
+    return [
+        source
+        for source in sources
+        if isinstance(source, str)
+        and source
+        and not source.startswith(("https://", "http://"))
+    ]
+
+
+def chunk_source_digests(repository: Path, sources: Any) -> list[dict[str, str]]:
+    """Digest every local file a chunk cites, skipping what cannot be read."""
+    digests: list[dict[str, str]] = []
+    for source in sorted(set(digestible_sources(sources))):
+        try:
+            digests.append(fingerprint(repository, source))
+        except BrainError:
+            # A citation that does not resolve is validate.py's problem to
+            # report, not a reason to refuse to digest the rest.
+            continue
+    return digests
+
+
 def sources_are_fresh(repository: Path, record: dict[str, Any]) -> bool:
     fingerprints = record.get("source_fingerprints", [])
     if not isinstance(fingerprints, list):
@@ -697,14 +748,27 @@ def find_task(repository: Path, identifier: str) -> tuple[Path, dict[str, Any], 
 
 
 def _record_body(record: dict[str, Any]) -> str:
+    """Render the human-readable half of a record.
+
+    ``## Sources`` is rendered for the same reason ``## Files`` is: the index
+    reads bodies, not frontmatter, so a finding created with
+    ``--source app/Billing/InvoiceTotal.php`` was previously unreachable by
+    that path — the one string a reader is most likely to search for. Nothing
+    verifies an on-disk body against this function (``validate_repository``
+    checks frontmatter only) and ``document_metadata.source_hash`` is
+    recomputed from the file at index time, so existing records keep their
+    current body until their next mutation rewrites them.
+    """
     next_steps = "\n".join(f"- {item}" for item in record["next_steps"]) or "- None"
     files = "\n".join(f"- `{item}`" for item in record["files"]) or "- None"
+    sources = "\n".join(f"- `{item}`" for item in record.get("sources") or []) or "- None"
     return (
         f"# {record['title']}\n\n"
         f"## Goal\n{record['goal']}\n\n"
         f"## Progress\n{record['progress'] or 'Not started.'}\n\n"
         f"## Next Steps\n{next_steps}\n\n"
-        f"## Files\n{files}\n"
+        f"## Files\n{files}\n\n"
+        f"## Sources\n{sources}\n"
     )
 
 
@@ -1389,10 +1453,25 @@ def validate_repository(repository: Path) -> list[str]:
                     previous_seq = entry["seq"]
             except (OSError, json.JSONDecodeError, BrainError, KeyError) as error:
                 errors.append(f"{path}: {error}")
-    manifest_keys = {
+    # Keyed off the manifest's own declared version rather than one frozen
+    # set: version 2 adds retrieval provenance and the gate verdict, and a
+    # consuming project's version 1 manifests must keep validating instead of
+    # turning its Definition of Done red the day the engine is upgraded.
+    #
+    # The gate joined version 2 rather than opening a version 3 because
+    # version 2 has not been released: it and the gate land in the same
+    # unreleased change, and no manifest anywhere was ever written to the
+    # intermediate shape. Requiredness lives here and not in the JSON schema
+    # because `validate_schema_value` has no conditional construct, so a
+    # schema `required` entry would reject a version 1 manifest too.
+    version_1_keys = {
         "schema_version", "id", "created_at", "query", "task_id", "task_revision",
         "filters", "selected", "excluded", "token_estimates", "provider",
         "escalation_reason",
+    }
+    manifest_keys_by_version = {
+        1: version_1_keys,
+        2: version_1_keys | {"query_source", "phase_seconds", "gate"},
     }
     manifests = brain_root(repository) / "control" / "retrieval-manifests"
     if manifests.is_dir():
@@ -1402,7 +1481,14 @@ def validate_repository(repository: Path) -> list[str]:
                 validate_schema_file(
                     repository, "retrieval-manifest.schema.json", manifest
                 )
-                if not isinstance(manifest, dict) or set(manifest) != manifest_keys:
+                expected_keys = manifest_keys_by_version.get(
+                    manifest.get("schema_version") if isinstance(manifest, dict) else None
+                )
+                if (
+                    not isinstance(manifest, dict)
+                    or expected_keys is None
+                    or set(manifest) != expected_keys
+                ):
                     raise BrainError("retrieval manifest does not match strict schema")
                 if not is_uuid4(manifest["id"]) or not is_uuid4(manifest["task_id"]):
                     raise BrainError("retrieval manifest IDs must be UUIDv4")
@@ -1477,6 +1563,18 @@ def promoted_source_rewrites(
                 updated.append(source)
         if touched:
             metadata["sources"] = updated
+            digests = metadata.get("source_digests")
+            if isinstance(digests, list):
+                # The file moved; its contents did not. Repointing the digest
+                # keeps the path sets equal - leave them diverged and every
+                # promoted chunk reads as source-changed forever after the
+                # first compaction.
+                metadata["source_digests"] = [
+                    {**entry, "path": renames[entry["path"]]}
+                    if isinstance(entry, dict) and entry.get("path") in renames
+                    else entry
+                    for entry in digests
+                ]
             rewrites.append((path, render_markdown_record(metadata, body)))
     return rewrites
 
@@ -1562,6 +1660,19 @@ PROMOTABLE_STATES = {
     "bug": {"resolved"},
     "incident": {"closed"},
     "decision": {"accepted"},
+}
+
+# What a promoted record becomes in the bank. Kept beside PROMOTABLE_STATES
+# because the two must cover the same four record types: every promotion wrote
+# `type: decision` regardless of origin, so a resolved bug and a closed
+# incident both entered the bank claiming to be decisions, and `bank-audit`,
+# INDEX.md and every reader keyed on type were reading a value nothing had
+# chosen. Each value is in validate.ALLOWED_TYPES.
+PROMOTION_TYPE_BY_RECORD = {
+    "finding": "domain",
+    "bug": "constraint",
+    "incident": "operations",
+    "decision": "decision",
 }
 
 
@@ -1824,6 +1935,108 @@ def promotable_records(
     return candidates, blocked
 
 
+# A small, fixed stop list rather than corpus-adaptive terms. The adaptive
+# vocabulary in the retrieval layer is derived from `memory-bank/local/`, which
+# is git-ignored and disposable, and making the CONTENT of the tracked Memory
+# Bank depend on it would let two machines on the same commit promote different
+# sets. This list never moves, so the decision is reproducible.
+_DUPLICATE_STOPWORDS = frozenset(
+    """a an and are as at be but by for from has have if in into is it its of on
+    or that the their then there these this to was were will with when where
+    which while""".split()
+)
+BANK_DUPLICATE_RATIO = 0.6
+
+
+def _duplicate_tokens(text: str) -> list[str]:
+    # Digits are kept at any length. They are frequently the only thing that
+    # distinguishes two findings - an error code, a table version, an ordinal -
+    # and dropping them as "too short" made texts identical that a reader would
+    # never confuse.
+    return [
+        token
+        for token in re.findall(r"[a-z0-9]+", str(text).lower())
+        if (len(token) >= 2 or token.isdigit())
+        and token not in _DUPLICATE_STOPWORDS
+    ]
+
+
+def _duplicate_shingles(text: str) -> set[tuple[str, ...]]:
+    """Three-gram shingles, so word order counts and short texts still compare.
+
+    Whole-set Jaccard over bare tokens was tried elsewhere in this repository
+    and recorded as diluting below any usable threshold; shingles keep two
+    texts that say the same thing in the same order close, and two that merely
+    share vocabulary apart.
+    """
+    tokens = _duplicate_tokens(text)
+    if not tokens:
+        return set()
+    if len(tokens) < 3:
+        return {tuple(tokens)}
+    return {tuple(tokens[index : index + 3]) for index in range(len(tokens) - 2)}
+
+
+def text_similarity(left: str, right: str) -> float:
+    """Jaccard overlap of two texts' shingles, 0.0 when either says nothing."""
+    first = _duplicate_shingles(left)
+    second = _duplicate_shingles(right)
+    if not first or not second:
+        return 0.0
+    return len(first & second) / len(first | second)
+
+
+def active_chunk_texts(repository: Path) -> list[tuple[str, str]]:
+    """Every active chunk as (memory id, comparable text).
+
+    The comparable text is the title plus the body, because that is where a
+    promoted conclusion actually lands. The chunk's frontmatter `sources` is
+    not usable for this: promotion writes the SOURCE RECORD's own file path
+    there, so two chunks promoted from two records can never share one, and
+    compaction rewrites them again when it archives the record.
+    """
+    texts: list[tuple[str, str]] = []
+    chunks = repository / "memory-bank" / "chunks"
+    if not chunks.is_dir():
+        return texts
+    for path in sorted(chunks.glob("*.md")):
+        if BANK_FILENAME_PATTERN.fullmatch(path.name) is None:
+            continue
+        try:
+            metadata, body = _parse_chunk(path)
+        except BrainError:
+            continue
+        if metadata.get("status") != "active":
+            continue
+        memory_id = metadata.get("id")
+        if not isinstance(memory_id, str):
+            continue
+        texts.append((memory_id, f"{metadata.get('title', '')}\n{body}"))
+    return texts
+
+
+def near_duplicate_chunk(
+    content: str, chunks: list[tuple[str, str]], threshold: float
+) -> Optional[str]:
+    """The closest active chunk this content would duplicate, if any."""
+    best_id: Optional[str] = None
+    best_score = threshold
+    for memory_id, text in chunks:
+        score = text_similarity(content, text)
+        if score >= best_score:
+            best_id, best_score = memory_id, score
+    return best_id
+
+
+def bank_duplicate_ratio(config: dict[str, Any]) -> float:
+    value = config.get("bank_duplicate_ratio", BANK_DUPLICATE_RATIO)
+    try:
+        ratio = float(value)
+    except (TypeError, ValueError):
+        return BANK_DUPLICATE_RATIO
+    return ratio if 0.0 < ratio <= 1.0 else BANK_DUPLICATE_RATIO
+
+
 def auto_promote(repository: Path, *, owner: str, limit: int = 5) -> dict[str, Any]:
     """Promote resolved, verified knowledge into durable memory without review.
 
@@ -1859,8 +2072,31 @@ def auto_promote(repository: Path, *, owner: str, limit: int = 5) -> dict[str, A
         )
 
     candidates, blocked = promotable_records(repository, config)
+    # Re-read on every iteration rather than once before the loop: a single
+    # flush promotes up to `limit` records, so the batch case - one review
+    # producing several findings that say the same thing - is exactly the one
+    # a pre-loop snapshot would miss.
+    threshold = bank_duplicate_ratio(config)
+    existing = active_chunk_texts(repository)
     for candidate in candidates[:limit]:
         record = candidate["record"]
+        duplicate = near_duplicate_chunk(
+            f"{record['title']}\n{candidate['content']}", existing, threshold
+        )
+        if duplicate is not None:
+            # The policy "update an existing chunk instead of creating a near
+            # duplicate" had no executor on the automatic path: promotion
+            # never read the bank it writes into. Naming the chunk turns the
+            # block into an instruction.
+            blocked.append(
+                {
+                    "record_id": record["id"],
+                    "reason": (
+                        f"near-duplicate of {duplicate}; merge or supersede first"
+                    ),
+                }
+            )
+            continue
         try:
             proposal = create_promotion(
                 repository,
@@ -1884,6 +2120,14 @@ def auto_promote(repository: Path, *, owner: str, limit: int = 5) -> dict[str, A
                 "type": record["type"],
                 "memory_id": applied["destination_memory_id"],
             }
+        )
+        # The chunk just written is a duplicate candidate for the rest of this
+        # same batch.
+        existing.append(
+            (
+                applied["destination_memory_id"],
+                f"{record['title']}\n{candidate['content']}",
+            )
         )
     return {
         "enabled": True,
@@ -2012,6 +2256,292 @@ def render_bank_index(bank: Path) -> tuple[str, int]:
     return preamble + BANK_INDEX_HEADER + body, len(rows)
 
 
+def _parse_chunk(path: Path) -> tuple[dict[str, Any], str]:
+    """A chunk's frontmatter and its body, kept apart so the body is untouched.
+
+    Deliberately not `parse_markdown_record` / `render_markdown_record`: those
+    render with `sort_keys=True` and re-expand every list, so a round trip
+    reorders frontmatter a human wrote and rewrites lines the retire never
+    meant to change. `json.loads` preserves key order, so re-dumping the same
+    mapping keeps the file recognisable as the one that was edited.
+    """
+    text = path.read_text(encoding="utf-8")
+    if not text.startswith("---\n"):
+        raise BrainError(f"Memory Bank chunk has no frontmatter: {path.name}")
+    try:
+        raw, body = text[4:].split("\n---\n", 1)
+    except ValueError as error:
+        raise BrainError(
+            f"Memory Bank chunk frontmatter is unterminated: {path.name}"
+        ) from error
+    try:
+        metadata = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise BrainError(
+            f"Memory Bank chunk frontmatter is not valid JSON: {path.name}"
+        ) from error
+    if not isinstance(metadata, dict):
+        raise BrainError(f"Memory Bank chunk frontmatter is not an object: {path.name}")
+    return metadata, body
+
+
+def _render_chunk(metadata: dict[str, Any], body: str) -> str:
+    return f"---\n{json.dumps(metadata, indent=2)}\n---\n{body}"
+
+
+def _find_chunk(bank: Path, memory_id: str) -> tuple[Path, dict[str, Any], str]:
+    chunks = bank / "chunks"
+    if chunks.is_dir():
+        for path in sorted(chunks.glob("*.md")):
+            match = BANK_FILENAME_PATTERN.fullmatch(path.name)
+            if match is None or match.group(1) != memory_id:
+                continue
+            metadata, body = _parse_chunk(path)
+            return path, metadata, body
+    raise BrainError(f"Memory Bank chunk not found: {memory_id}")
+
+
+def retire_chunk(
+    repository: Path,
+    memory_id: str,
+    *,
+    valid_to: str,
+    superseded_by: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> dict[str, Any]:
+    """Close a chunk's period, and its replacement link, in one transaction.
+
+    Retire was designed but only ever documented: the sole code that writes
+    `valid_to` is promotion, and it always writes null, so the operation was
+    an editing convention - hand-edit both sides of a supersession, then
+    regenerate the index, then validate. Between the first edit and the last
+    the bank is invalid, and the word `valid_to` appears in no skill, so an
+    agent following policy honestly sets a status and never writes a date.
+
+    `valid_to` says when the knowledge stopped being true; `superseded_by`
+    says what replaced it. With a successor the chunk becomes `superseded` and
+    the successor's `supersedes` list gains it in the same write; without one
+    it becomes `archived`, which is the honest status for knowledge that
+    simply ceased. The body is never touched.
+
+    Every write is taken under the mutation lock against a snapshot, so an
+    interruption between the two sides of a link leaves the bank exactly as it
+    was rather than half-retired.
+    """
+    try:
+        closing = date.fromisoformat(valid_to)
+    except (TypeError, ValueError) as error:
+        raise BrainError("valid_to must be an ISO date (YYYY-MM-DD)") from error
+    if superseded_by is not None and superseded_by == memory_id:
+        raise BrainError("A chunk cannot supersede itself")
+    bank = repository / "memory-bank"
+    index_path = bank / "INDEX.md"
+    with mutation_lock(repository):
+        path, metadata, body = _find_chunk(bank, memory_id)
+        successor_path: Optional[Path] = None
+        successor: Optional[dict[str, Any]] = None
+        successor_body = ""
+        if superseded_by is not None:
+            # Resolved before any write: letting the whole-bank validation
+            # discover a missing successor would roll back with a message
+            # about a broken link rather than about the argument that caused
+            # it.
+            successor_path, successor, successor_body = _find_chunk(
+                bank, superseded_by
+            )
+        snapshot = snapshot_files(
+            [p for p in (path, successor_path, index_path) if p is not None]
+        )
+        try:
+            metadata["status"] = "superseded" if superseded_by else "archived"
+            # Only a superseded chunk may carry a replacement link, and every
+            # superseded chunk must.
+            metadata["superseded_by"] = superseded_by
+            metadata["valid_to"] = closing.isoformat()
+            atomic_write(path, _render_chunk(metadata, body))
+            if successor_path is not None and successor is not None:
+                supersedes = list(successor.get("supersedes") or [])
+                if memory_id not in supersedes:
+                    supersedes.append(memory_id)
+                successor["supersedes"] = supersedes
+                atomic_write(
+                    successor_path, _render_chunk(successor, successor_body)
+                )
+            index_text, chunk_count = render_bank_index(bank)
+            atomic_write(index_path, index_text)
+            errors = validate_bank(bank)
+            if errors:
+                raise BrainError(
+                    "Memory Bank retire failed validation: " + "; ".join(errors)
+                )
+        except Exception:
+            restore_files(snapshot)
+            raise
+    return {
+        "id": memory_id,
+        "status": metadata["status"],
+        "valid_to": metadata["valid_to"],
+        "superseded_by": superseded_by,
+        # Recorded for the operator's transcript only: the chunk schema is a
+        # closed key set, so a reason written into the frontmatter would fail
+        # validation and roll the whole retire back.
+        "reason": reason,
+        "chunk": path.relative_to(repository).as_posix(),
+        "index": index_path.relative_to(repository).as_posix(),
+        "chunks": chunk_count,
+    }
+
+
+def audit_bank(repository: Path) -> dict[str, Any]:
+    """Report chunks whose citations moved on, and chunks overdue for review.
+
+    Read-only and dependency-free. Answers the question the digests exist to
+    make answerable: which durable knowledge is still standing on the file it
+    was drawn from.
+    """
+    bank = repository / "memory-bank"
+    chunks = bank / "chunks"
+    today = datetime.now(timezone.utc).date()
+    changed: list[dict[str, Any]] = []
+    overdue: list[dict[str, Any]] = []
+    undigested: list[str] = []
+    total = 0
+    if chunks.is_dir():
+        for path in sorted(chunks.glob("*.md")):
+            if BANK_FILENAME_PATTERN.fullmatch(path.name) is None:
+                continue
+            try:
+                metadata, _ = _parse_chunk(path)
+            except BrainError:
+                continue
+            total += 1
+            relative = path.relative_to(repository).as_posix()
+            if metadata.get("status") != "active":
+                continue
+            digests = metadata.get("source_digests")
+            if not isinstance(digests, list) or not digests:
+                if digestible_sources(metadata.get("sources")):
+                    undigested.append(relative)
+            else:
+                for entry in digests:
+                    if not isinstance(entry, dict):
+                        continue
+                    try:
+                        current = fingerprint(repository, entry.get("path", ""))
+                    except BrainError:
+                        changed.append(
+                            {
+                                "chunk": relative,
+                                "id": metadata.get("id"),
+                                "source": entry.get("path"),
+                                "state": "missing",
+                            }
+                        )
+                        continue
+                    if current["sha256"] != entry.get("sha256"):
+                        changed.append(
+                            {
+                                "chunk": relative,
+                                "id": metadata.get("id"),
+                                "source": entry.get("path"),
+                                "state": "changed",
+                            }
+                        )
+            review_after = metadata.get("review_after")
+            if isinstance(review_after, str):
+                try:
+                    if date.fromisoformat(review_after) < today:
+                        overdue.append(
+                            {
+                                "chunk": relative,
+                                "id": metadata.get("id"),
+                                "review_after": review_after,
+                            }
+                        )
+                except ValueError:
+                    continue
+    duplicates: list[dict[str, Any]] = []
+    texts = active_chunk_texts(repository)
+    threshold = bank_duplicate_ratio(load_config(repository))
+    for index, (left_id, left_text) in enumerate(texts):
+        for right_id, right_text in texts[index + 1 :]:
+            score = text_similarity(left_text, right_text)
+            if score >= threshold:
+                duplicates.append(
+                    {
+                        "left": left_id,
+                        "right": right_id,
+                        "similarity": round(score, 3),
+                    }
+                )
+    return {
+        "chunks": total,
+        "source_changed": changed,
+        "overdue_review": overdue,
+        "undigested": undigested,
+        # Pairs a human decides on: update the survivor, or close the older
+        # one with `bank-retire`. The engine never merges chunks by itself.
+        "duplicates": duplicates,
+    }
+
+
+def reverify_chunk(
+    repository: Path, memory_id: str, *, review_after: Optional[str] = None
+) -> dict[str, Any]:
+    """Re-attest a chunk against its sources as they are now.
+
+    Without this the digests would be a one-way ratchet: the first time a
+    cited file changed, the chunk would leave retrieval and stay out, because
+    nothing but promotion has ever written chunk frontmatter and hand-editing
+    is what the rest of this system exists to avoid. Calling it is an
+    assertion by whoever ran it that they re-read the sources and the chunk
+    still holds - the command records that, it does not decide it.
+    """
+    bank = repository / "memory-bank"
+    index_path = bank / "INDEX.md"
+    today = datetime.now(timezone.utc).date()
+    if review_after is not None:
+        try:
+            next_review = date.fromisoformat(review_after)
+        except (TypeError, ValueError) as error:
+            raise BrainError("review_after must be an ISO date (YYYY-MM-DD)") from error
+    else:
+        next_review = today + timedelta(days=365)
+    with mutation_lock(repository):
+        path, metadata, body = _find_chunk(bank, memory_id)
+        if metadata.get("status") != "active":
+            raise BrainError(
+                f"Only an active chunk can be re-verified: {memory_id} is "
+                f"{metadata.get('status')}"
+            )
+        snapshot = snapshot_files([path, index_path])
+        try:
+            metadata["last_verified"] = today.isoformat()
+            metadata["review_after"] = next_review.isoformat()
+            metadata["source_digests"] = chunk_source_digests(
+                repository, metadata.get("sources")
+            )
+            atomic_write(path, _render_chunk(metadata, body))
+            index_text, chunk_count = render_bank_index(bank)
+            atomic_write(index_path, index_text)
+            errors = validate_bank(bank)
+            if errors:
+                raise BrainError(
+                    "Memory Bank re-verify failed validation: " + "; ".join(errors)
+                )
+        except Exception:
+            restore_files(snapshot)
+            raise
+    return {
+        "id": memory_id,
+        "last_verified": metadata["last_verified"],
+        "review_after": metadata["review_after"],
+        "source_digests": metadata["source_digests"],
+        "chunk": path.relative_to(repository).as_posix(),
+        "chunks": chunk_count,
+    }
+
+
 def reindex_bank(repository: Path) -> dict[str, Any]:
     """Regenerate memory-bank/INDEX.md from chunk frontmatter.
 
@@ -2054,6 +2584,19 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
             not proposal.get("reviewer") and not automatic
         ):
             raise BrainError("Promotion requires an approved human review before apply")
+        # What the promoted records themselves cited, carried through to the
+        # chunk. Without this the citation chain breaks at promotion: the
+        # chunk names the record, the record names the document, and nothing
+        # traverses two hops — so `links` and `retrieve --path` on the
+        # document reach the record and never the knowledge derived from it.
+        # Measured on a real project: two chunks promoted from findings about
+        # one design document shared no source at all.
+        #
+        # Only `sources`, never `files`. A record's `files` is Git churn in
+        # the Git-toplevel frame — phpunit cache, vendored JavaScript — and
+        # merging it here would put code paths under `chunk_source_digests`,
+        # where the next edit evicts the chunk as `source-changed`.
+        inherited: list[str] = []
         for source in proposal["source_records"]:
             current_path, current, _ = find_record(
                 repository, source["id"], include_archive=True
@@ -2066,6 +2609,14 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
                 or current["revision"] != source["revision"]
             ):
                 raise BrainError(f"Promotion source revision changed: {source['id']}")
+            for cited in current.get("sources") or []:
+                if not isinstance(cited, str):
+                    continue
+                # A citation whose file is already gone is not carried: the
+                # chunk would fail `validate_metadata` at birth and block a
+                # promotion that has nothing to do with that file.
+                if (repository / cited.split("#", 1)[0]).is_file():
+                    inherited.append(cited)
         today = datetime.now(timezone.utc).date()
         # Conflict-free identifier: the promotion date plus eight hex
         # characters of the source record's UUID. Two machines or branches
@@ -2085,16 +2636,37 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
         # approved; a reader must not have to open the promotion to find out.
         tags = ["project-brain", "promoted"] + (["auto-promoted"] if automatic else [])
         metadata = {
-            "id": memory_id, "title": proposal["title"], "type": "decision", "status": "active",
+            "id": memory_id, "title": proposal["title"],
+            # Derived from what was promoted, not asserted. `decision` remains
+            # the fallback for a source type this map has not learned yet.
+            "type": PROMOTION_TYPE_BY_RECORD.get(
+                proposal["source_records"][0]["type"], "decision"
+            ),
+            "status": "active",
             "scope": ["application"], "tags": tags,
             "created": today.isoformat(), "last_verified": today.isoformat(),
             "review_after": (today + timedelta(days=365)).isoformat(),
-            "sources": [item["path"] for item in proposal["source_records"]],
+            # The records that were promoted, plus what those records cited.
+            # Both are durable citations under the same freshness discipline:
+            # an edit to either re-opens the chunk for `bank-reverify`.
+            "sources": sorted(
+                dict.fromkeys(
+                    [item["path"] for item in proposal["source_records"]] + inherited
+                )
+            ),
             "supersedes": [], "superseded_by": None,
             # Open-ended validity: the knowledge holds from today until a
             # successor closes it with a valid_to, rather than being deleted.
             "valid_from": today.isoformat(), "valid_to": None,
         }
+        # Digest what the chunk itself cites. A Brain record is checked against
+        # its sources on every retrieval and lives for days; a chunk lives a
+        # year or more and carried no such check at all, so a promoted
+        # conclusion outlived any means of noticing that the record it was
+        # drawn from had moved on.
+        metadata["source_digests"] = chunk_source_digests(
+            repository, metadata["sources"]
+        )
         heading = f"# {proposal['title']}"
         content = proposal["content"].strip()
         chunk = render_markdown_record(

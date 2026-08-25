@@ -47,6 +47,11 @@ Contains records that coordinate Project Brain operations.
 Handoffs and manifests do not contain raw prompts, responses, hidden
 reasoning, or complete source bodies.
 
+Delivered Task Capsules are deterministic discovery aids: after ranking and
+policy filters they contain at most 2 procedural, 3 semantic, and 1 episodic
+item and no more than 8,000 serialized characters. Direct CLI queries are
+privacy-checked before any index or manifest is opened.
+
 ## `archive/`
 
 Contains terminal or superseded records moved by compaction. Records are moved,
@@ -85,6 +90,16 @@ compaction. They are navigation indexes, not independent authorities.
 | `config/runtime.json` | Selects governed/lightweight mode, framework label, canonical skill edition, privacy/authority filters, owners, and retrieval provider. |
 | `config/providers.json` | Documents the native SQLite provider and optional disabled provider contracts. |
 | `config/telemetry.json` | Configures disabled-by-default, metadata-only observability and prohibited fields. |
+
+Task phases persist only as `understanding`, `planning`, `implementation`,
+`verification`, and `finalization`; legacy input aliases normalize before
+write. Task completion is explicit and numeric-revision checked. Merge
+detection can report a sanitized candidate but cannot close a task.
+
+Promotion has two independent modes. The shipped automatic mode labels output
+`automatic` and `approved-without-review` with no reviewer. Disabling
+`automatic_promotion` enables propose → independent review → apply; neither
+mode is represented as the other.
 
 Framework-specific differences belong in `runtime.json`; common runtime and
 Brain assets remain byte-identical across accelerators.

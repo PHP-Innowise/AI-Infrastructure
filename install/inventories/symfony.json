@@ -6,6 +6,7 @@
   "scope": "closed tracked-file contract for production installation",
   "installed": {
     "shared": [
+      ".accelerator-policy-lock.json",
       ".agents/README.md",
       ".codex/README.md",
       ".cursor/README.md",
@@ -31,6 +32,7 @@
       "project-brain/config/runtime.json",
       "project-brain/config/telemetry.json",
       "project-brain/control/handoffs/.gitkeep",
+      "project-brain/control/messages/.gitkeep",
       "project-brain/control/promotions/.gitkeep",
       "project-brain/control/retrieval-manifests/.gitkeep",
       "project-brain/dynamic/bugs/.gitkeep",
@@ -500,6 +502,7 @@
       ".cursor/skills/writing-plans/SKILL.md"
     ],
     "codex": [
+      ".agents/evals/routing.json",
       ".agents/skills/SKILL FLOW.md",
       ".agents/skills/api-designer/SKILL.md",
       ".agents/skills/api-platform-designer/SKILL.md",
@@ -667,7 +670,9 @@
     "project-brain/.install/active.json",
     "project-brain/.install/archive.json",
     "project-brain/tests/__init__.py",
+    "project-brain/tests/fixtures/memory-probes.json",
     "project-brain/tests/fixtures/retrieval-golden.json",
+    "project-brain/tests/fixtures/skill-routing-golden.json",
     "project-brain/tests/test_runtime.py"
   ],
   "source_overrides": {

@@ -76,6 +76,22 @@ python3 scripts/build_mirrors.py --write --edition Laravel --edition "PHP Core" 
 (cd "PHP Core" && python3 memory-bank/scripts/context.py parity && python3 memory-bank/scripts/context.py parity --cross-edition)
 ```
 
+`--cross-edition` covers the three PHP editions, including their
+`.claude/hooks/*.sh` (except the two framework-shaped hooks,
+`bash-validator.sh` and `local-context.sh`). It does not see the fourth copy
+of the core — the generator asset that `memory-seed` copies verbatim into
+every generated project. That one has its own gate:
+
+```bash
+python3 scripts/asset_parity.py --check
+python3 scripts/asset_parity.py --write   # after an intentional core change
+```
+
+A change to `memory-bank/scripts/`, `memory-bank/templates/` or
+`project-brain/` is not finished until both checks are green: the first keeps
+the editions identical to each other, the second carries the same change into
+the projects the generator builds.
+
 ### Installer inventory verification
 
 ```bash

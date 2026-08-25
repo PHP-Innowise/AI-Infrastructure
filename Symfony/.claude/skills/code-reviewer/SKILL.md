@@ -46,3 +46,11 @@ Summary
 ```
 
 If no issues are found, say that clearly and mention residual test or tooling gaps.
+
+## Recording Findings
+
+Do not create Project Brain records from this skill. It is read-only by
+design, and in `/flow-review` it runs alongside a write-capable agent that
+already holds the write lock for the stage. Report the findings; the caller
+materializes each confirmed one as a `finding` record after synthesis, so that
+nothing you dropped as unevidenced becomes durable memory.

@@ -140,6 +140,7 @@ and not installed. It measures edition startup surfaces and skill bodies.
 ```bash
 python3 scripts/context_budget.py
 python3 scripts/context_budget.py --check
+python3 scripts/context_budget.py --headroom
 ```
 
 - **Principal option:** `--check` compares all measured categories with
@@ -150,6 +151,12 @@ python3 scripts/context_budget.py --check
 - **Outputs:** a human-readable byte/token-estimate report, or per-category
   pass/fail lines. `--check` exits nonzero for budget excess, malformed/missing
   ceilings, or edition drift.
+- **`--headroom`:** prints the bytes remaining under each ceiling,
+  tightest first, and always exits 0. It is what a rule author needs
+  before adding a paragraph to a gated file. No percentage warning is
+  printed: `token_budget.json` sets every ceiling at the observed value
+  plus about five per cent, so headroom is ~4.8 % of the ceiling by
+  construction and a 5 % warning would fire on every category at once.
 - **Dependencies:** Python 3 standard library.
 - **Writes:** none.
 - **CI relationship:** the `lint` job runs `--check`.
@@ -257,6 +264,136 @@ The checker URL-decodes paths, resolves file/directory targets, rejects links
 that escape the selected root, and ignores external schemes, anchor-only
 links, fenced code, and inline code. It checks target existence, not
 heading-anchor validity. Tracked files deleted in the working tree are skipped.
+
+### `asset_parity.py`
+
+**Purpose and status.** Maintainer parity gate; source-only and not installed.
+It holds the `memory-seed` generator asset
+(`Infrastructure-Creator/.agents/skills/memory-seed/assets/`) to the canonical
+edition, so an engine fix reaches the projects the generator builds and not
+only the three ready-made editions.
+
+```bash
+python3 scripts/asset_parity.py --check
+python3 scripts/asset_parity.py --check --json
+python3 scripts/asset_parity.py --write
+```
+
+- **Options:** `--check` (default) reports and exits non-zero on drift;
+  `--write` copies the canonical bytes over drifted or missing asset files and
+  re-checks; `--json` prints a machine-readable report. `--check` and `--write`
+  are mutually exclusive.
+- **Inputs:** the asset tree and the first present edition of `Laravel`,
+  `Symfony`, `PHP Core`. Any of them will do, because
+  `context.py parity --cross-edition` already holds the three to each other -
+  that check is this one's prerequisite, not its duplicate.
+- **Outputs:** one line per finding and exit 1; a success message and exit 0
+  otherwise. Exit 2 on a missing asset tree.
+- **Dependencies:** Python 3 standard library.
+- **Writes:** none under `--check`; only asset files under `--write`.
+- **CI relationship:** the `parity` job runs `--check` and
+  `tests/test_asset_parity.py` once, on the `Laravel` matrix leg.
+
+Five things are enforced: mapped asset files are byte-identical to their
+counterpart (`scripts/` against `memory-bank/scripts/`, `templates/` against
+`memory-bank/templates/`, `project-brain/` against itself); every canonical
+file the asset is supposed to seed exists in it, so a new core module cannot be
+forgotten; every asset file is either mapped or listed in `ASSET_ONLY` with a
+reason, so a new asset file cannot become silently unchecked;
+`runtime.json.template` cannot match byte-for-byte and is compared by JSON key
+set against the edition's `runtime.json`, so a new runtime setting reaches
+generated projects or fails here; and every `memory-bank/scripts/` path in
+`runtime-contract.json`'s `required_skeleton` is actually shipped.
+
+Deliberate one-sided files live in `ASSET_ONLY` (the runtime contract, the
+runtime template) and `EDITION_ONLY` (per-target prose, both Python test
+suites, installer bookkeeping, the materialized `runtime.json`). Record a new
+divergence there with its reason rather than widening a glob.
+
+### `policy_lock.py`
+
+**Purpose and status.** Release gate for content identity; the lock files it
+writes ARE installed, the script itself is not.
+
+```bash
+python3 scripts/policy_lock.py --check
+python3 scripts/policy_lock.py --write --edition Symfony
+python3 scripts/policy_lock.py --check --json
+```
+
+- **Options:** exactly one of `--check` (default) or `--write`; repeatable
+  `--edition`; `--json`.
+- **Inputs:** every tracked file of the model-facing surface — `AGENTS.md`,
+  `CLAUDE.md`, `.claude/{DOD,GOLDEN-PRINCIPLES,STABILIZATION}.md`, the whole
+  canonical `.agents/skills/` tree, the two `skill-creator` copies and
+  `SKILL FLOW.md` that are canon in their own right, `.claude/agents/*-agent.md`,
+  `.claude/commands/`, `.claude/settings.json`, `.cursor/rules/`,
+  `.cursor/hooks.json`, `.codex/{hooks.json,config.toml}`.
+- **Outputs:** `<edition>/.accelerator-policy-lock.json` — `schema_version`,
+  `edition`, `release`, `policy_digest`, `agent_models`, `files`. Exit 1 on
+  drift or a disallowed model.
+- **Dependencies:** Python 3 standard library and Git.
+- **CI relationship:** the `lint` job runs `--check` and its regression tests;
+  `check_core_changelog.sh` requires an edition changelog entry when the same
+  surface changes.
+
+Three decisions worth knowing:
+
+**Whole files, never projections.** Hashing only an agent's frontmatter would
+store a digest under a path key that is not `sha256(path)`, making every
+independent check a false positive. And an agent's *body* is its prompt: once
+mirrors are regenerated, a body edit passes `mirrors`, `context_budget` and
+`check_stabilization` alike. This gate is the only one that sees it.
+
+**Enumerated from Git, never from disk.** `.cursor/rules/` holds a
+runtime-rendered, gitignored `working-memory.mdc` that changes every turn; a
+filesystem glob would bake it in and `--check` would fail for ever.
+
+**The allowlist is enforced on `--write` too, and is per edition.** Validating
+only on `--check` would let a regeneration record `model: sonet` and then
+agree with itself. The three ready editions use haiku for four narrow agents;
+Infrastructure-Creator's own `agent-forge` skill requires opus or sonnet and
+it ships no haiku agent.
+
+`policy_digest` identifies the surface, not a release: a surface change does
+not require a `VERSION` bump, it requires the lock to be regenerated.
+
+### `check_stabilization.py`
+
+**Purpose and status.** Policy structure gate; source-only and not installed.
+It validates the `### Rule:` blocks in each edition's
+`.claude/STABILIZATION.md` against the template that same file declares.
+
+```bash
+python3 scripts/check_stabilization.py
+python3 scripts/check_stabilization.py --json
+```
+
+- **Checks:** the required fields (`Trigger`, `Root cause`, `Rule`,
+  `Example`, `Enforcement`); that `Rule` states an obligation (MUST / MUST
+  NOT), because a rule the harness cannot check compliance against is advice;
+  that `Enforcement` names something; that `Added`/`Retired` are ISO dates;
+  that a rule carrying `Retired` sits under `## Retired rules` and one sitting
+  there carries a date; that `Superseded-by` names a rule in the same file;
+  and that `Evidence`, when present, is a UUID resolving to a Project Brain
+  record on disk.
+- **Optional by design:** `Added` and `Evidence`. Requiring them would
+  invalidate every rule written before they existed.
+- **Inputs:** `<edition>/.claude/STABILIZATION.md` and, for `Evidence`, that
+  edition's `project-brain/{dynamic,archive}/`.
+- **Outputs:** one line per finding and exit 1; a per-edition rule count and
+  exit 0 otherwise. An edition whose file carries no rule blocks is reported
+  as *skipped*, not as passed — Infrastructure-Creator writes the cycle as
+  prose, and silently approving a file nothing examined is the defect this
+  gate exists to prevent.
+- **Dependencies:** Python 3 standard library.
+- **Writes:** none.
+- **CI relationship:** the `lint` job runs it and its regression tests.
+
+What it deliberately does not check: any `Edge`/`Blame` failure-localization
+vocabulary. No such fields exist in any stabilization document in this
+repository, and inventing a component taxonomy is a design decision, not a
+validation one.
 
 ### `check_core_changelog.sh`
 

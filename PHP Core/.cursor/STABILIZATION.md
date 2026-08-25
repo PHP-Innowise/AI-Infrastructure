@@ -33,7 +33,15 @@ Session hooks may surface only mode, index health/staleness, active binding coun
 - Correct: [good example]
 **Enforcement:** Policy / skill instruction / hook / review checklist
 **Added:** YYYY-MM-DD
+**Retired:** YYYY-MM-DD or omit while the rule is live
+**Superseded-by:** [Short Name of the replacement, or omit]
 ```
+
+A rule with a `Retired:` date moves to `## Retired rules` at the end of this
+file and its line is removed from wherever it was enforced. That matters
+because `AGENTS.md` is paid on every session of this edition and is gated in
+CI, while this file is not: a procedural pillar that can only ever add rules
+runs out of budget and has nothing to give back.
 
 ## Native PHP Examples
 
@@ -66,6 +74,15 @@ Session hooks may surface only mode, index health/staleness, active binding coun
 - Incorrect: `$pdo->query("SELECT * FROM users WHERE email = '$email'")`
 - Correct: `$stmt = $pdo->prepare('SELECT * FROM users WHERE email = :email'); $stmt->execute(['email' => $email]);`
 **Enforcement:** `AGENTS.md`, `coder`, `code-reviewer`, `security-reviewer`.
+
+## Retired rules
+
+Rules that no longer apply, kept for the same reason a superseded memory chunk
+is kept: the reasoning that produced them is evidence, and deleting it invites
+the same mistake again. A rule here is not policy. It carries the `Retired:`
+date that removed it and, when something took its place, `Superseded-by:`.
+
+_None yet._
 
 ## Verification
 

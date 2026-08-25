@@ -1,1 +1,23 @@
-[]
+[
+  {
+    "id": "0a212ade-c03d-4afc-bb91-46d0d6841089",
+    "path": "project-brain/dynamic/tasks/0a212ade-c03d-4afc-bb91-46d0d6841089.md",
+    "revision": 7,
+    "status": "active",
+    "type": "task"
+  },
+  {
+    "id": "601f0596-9a52-4ab9-8d5d-4461950fc718",
+    "path": "project-brain/dynamic/tasks/601f0596-9a52-4ab9-8d5d-4461950fc718.md",
+    "revision": 10,
+    "status": "active",
+    "type": "task"
+  },
+  {
+    "id": "e5def0e1-6eca-4bdf-88cd-d000c23bfeaa",
+    "path": "project-brain/dynamic/tasks/e5def0e1-6eca-4bdf-88cd-d000c23bfeaa.md",
+    "revision": 4,
+    "status": "active",
+    "type": "task"
+  }
+]

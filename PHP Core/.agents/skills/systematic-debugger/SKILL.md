@@ -180,6 +180,33 @@ If you catch yourself thinking:
 
 ---
 
+## Record The Finding
+
+A root cause you confirmed is durable knowledge; a root cause you only
+described in prose is not. This skill is declared write-capable, so record it
+directly:
+
+```bash
+python3 memory-bank/scripts/context.py brain-create finding \
+  --external-id <TASK>-F<N> --title "<one line>" --source <path>
+```
+
+Cite a bare path or `path#L42` — `--source` rejects `path:42`. Once the fix is
+verified, close the record so the consolidation pipeline can promote it; the
+two edges are separate calls:
+
+```bash
+python3 memory-bank/scripts/context.py brain-update --record-id <id> \
+  --revision auto --authority verified --reason "Verified: <check>"
+python3 memory-bank/scripts/context.py brain-update --record-id <id> \
+  --revision auto --progress "<one-line consequence>" \
+  --transition resolved --reason "Resolved"
+```
+
+`--progress` carries the record's only content. Omit it and the record is
+blocked from promotion as carrying nothing beyond its own title, which is the
+same dead end as never creating it.
+
 ## Next Steps
 
 After debugging is complete and fix is verified, STOP and present these options:

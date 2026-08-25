@@ -33,6 +33,13 @@ CHANGELOG="CHANGELOG.md"
 # names from `git diff --name-only`.
 CORE_PATTERN='^((Laravel|Symfony|PHP Core)/(memory-bank/(scripts|tests|templates)/|project-brain/(PROTOCOL\.md|config/|schemas/|scripts/|tests/|templates/)|\.(claude|cursor|codex)/hooks/)|scripts/)'
 
+# The model-facing surface: what an agent actually reads. Generated mirrors
+# (.cursor, .codex) are deliberately excluded - they cannot change without
+# their canon changing, and listing them would report one edit three times.
+# The policy lock is excluded too: it is derived from this surface, so
+# requiring a changelog entry for it would fire on its own regeneration.
+SURFACE_PATTERN='^(Laravel|Symfony|PHP Core)/(AGENTS\.md|CLAUDE\.md|\.agents/skills/|\.claude/(DOD|GOLDEN-PRINCIPLES|STABILIZATION)\.md|\.claude/(agents|commands)/|\.claude/settings\.json)'
+
 if ! git rev-parse --git-dir > /dev/null 2>&1; then
   echo "core-changelog: not a git repository; skipping." >&2
   exit 0
@@ -67,22 +74,45 @@ if [ -z "$CHANGED" ]; then
   exit 0
 fi
 
+STATUS=0
+
 CORE_TOUCHED=$(printf '%s\n' "$CHANGED" | grep -E -- "$CORE_PATTERN" || true)
 if [ -z "$CORE_TOUCHED" ]; then
   echo "core-changelog: no shared-core files touched; no root $CHANGELOG entry required."
-  exit 0
-fi
-
-if printf '%s\n' "$CHANGED" | grep -qxF -- "$CHANGELOG"; then
+elif printf '%s\n' "$CHANGED" | grep -qxF -- "$CHANGELOG"; then
   echo "core-changelog: shared-core files changed and the root $CHANGELOG was updated."
-  exit 0
+else
+  {
+    echo "core-changelog: this diff touches shared-core files but not the root $CHANGELOG:"
+    printf '%s\n' "$CORE_TOUCHED" | sed 's/^/  - /'
+    echo ""
+    echo "Add an entry to the root $CHANGELOG (its header states the scope),"
+    echo "or move the change out of the shared core."
+  } >&2
+  STATUS=1
 fi
 
-{
-  echo "core-changelog: this diff touches shared-core files but not the root $CHANGELOG:"
-  printf '%s\n' "$CORE_TOUCHED" | sed 's/^/  - /'
-  echo ""
-  echo "Add an entry to the root $CHANGELOG (its header states the scope),"
-  echo "or move the change out of the shared core."
-} >&2
-exit 1
+# Second rule, same shape, different target. The surface the model reads is
+# edition content, not shared core, so it belongs in that edition's own
+# changelog - and until this check existed nothing required a record of it at
+# all: a skill, an agent prompt or a policy document could change with no
+# entry anywhere. Infrastructure-Creator is out of scope here for the same
+# reason it is out of the shared-core rule.
+for EDITION in "Laravel" "Symfony" "PHP Core"; do
+  SURFACE_TOUCHED=$(printf '%s\n' "$CHANGED" | grep -E -- "$SURFACE_PATTERN" | grep -F -- "$EDITION/" || true)
+  [ -n "$SURFACE_TOUCHED" ] || continue
+  if printf '%s\n' "$CHANGED" | grep -qxF -- "$EDITION/$CHANGELOG"; then
+    echo "core-changelog: $EDITION surface changed and $EDITION/$CHANGELOG was updated."
+    continue
+  fi
+  {
+    echo "core-changelog: this diff changes the $EDITION model-facing surface but not $EDITION/$CHANGELOG:"
+    printf '%s\n' "$SURFACE_TOUCHED" | sed 's/^/  - /'
+    echo ""
+    echo "Add an entry to $EDITION/$CHANGELOG, and regenerate the policy lock"
+    echo "with: python3 scripts/policy_lock.py --write --edition \"$EDITION\""
+  } >&2
+  STATUS=1
+done
+
+exit "$STATUS"

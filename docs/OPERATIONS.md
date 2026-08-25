@@ -199,7 +199,15 @@ Interpretation:
 - `parity` compares mirrored skill implementations with the
   `canonical_edition` configured in `runtime.json`. It fails on drift.
 - `memory-bank/scripts/validate.py` validates durable Memory Bank structure and
-  metadata independently of Project Brain validation.
+  metadata independently of Project Brain validation. It reports two severity
+  levels. **Errors** exit `1`: a chunk that is wrong, or an index row pointing
+  at a chunk that is not on disk. **Warnings** print to stderr and exit `0`: a
+  terminal chunk — `superseded`, `archived`, or past its `valid_to` — whose
+  cited source has since been deleted, and an index row kept for a chunk that
+  is present but failed its own validation. Deleting a cited file is routine
+  work, and a chunk that correctly reached the end of its life must not fail
+  an unrelated task. A source path that escapes the repository stays an error
+  in every status: that is a containment guarantee, not a freshness one.
 - `index --json` reports exclusions and skill parity drift, but parity drift is
   reported rather than made fatal. Use the dedicated `parity` command when
   drift must fail the check.
@@ -299,11 +307,27 @@ mirrored skills, and replaces the previous document/metadata index in one
 SQLite transaction.
 
 `--incremental` reuses every row whose source modification time and size are
-unchanged, so only new or modified documents are re-read and re-scanned and a
-no-change refresh performs reads only. Project Brain records are always
+unchanged **and whose calendar boundary has not passed**, so only new,
+modified, or newly out-of-date documents are re-read and re-scanned and a
+no-change refresh performs reads only. A durable memory chunk retires on a
+date rather than on an edit, so the cache records `min(review_after,
+valid_to)` next to the stat pair: the day after that boundary the row is
+re-validated and the chunk leaves the index without anyone touching the file.
+A cache row written before this column existed carries no boundary and is
+re-validated once rather than trusted. Project Brain records are always
 rebuilt, because their eligibility depends on configuration, lifecycle, and
 cross-record state rather than on the record file alone. Without the flag this
 is a full rebuild.
+
+Every document dropped during discovery is reported in `excluded` with the
+reason it was dropped: `retired` (past `valid_to`), `overdue-review` (past
+`review_after`), `superseded` / `archived` / `needs-review` (a non-active
+status), `invalid` (frontmatter that fails validation), and `secret` (the
+secret scan rejected the file). `--json` lists the paths; the plain output
+prints a per-reason tally. Structural skips — a Git-ignored candidate, a
+second pattern matching a file the first already owns, a mirrored copy of an
+indexed skill — are how discovery is defined and are deliberately not
+reported.
 
 Side effects: writes only the selected SQLite database. It does not create a
 task, retrieve context, or inject context into a prompt. Invalid UTF-8 aborts
@@ -328,18 +352,44 @@ Refresh the index first when freshness matters.
 
 Side effects: SQLite initialization only.
 
+### `links`
+
+```bash
+python3 memory-bank/scripts/context.py links --path SOURCE \
+  [--prefix] \
+  [--json]
+```
+
+Reports every eligible document that declares `SOURCE` among its sources — the
+reverse of reading a chunk's frontmatter. Use it to answer "what did we already
+write down about this file" before editing it, and to see what
+`retrieve --path` would pull in.
+
+`--prefix` treats the path as a directory and matches sources beneath it. A
+line-range fragment (`file.md#L4-L9`) is anchored to the document, as
+`fingerprint()` anchors it.
+
+Unlike `search`, this joins `document_metadata` and applies the full runtime
+filter, so a record withheld by privacy, owner, authority, lifecycle or
+freshness is reported under `excluded` rather than shown. Reads the existing
+index without refreshing it.
+
+Side effects: SQLite initialization only.
+
 ### `retrieve` and compatibility `context`
 
 ```bash
 python3 memory-bank/scripts/context.py retrieve QUERY \
   --task-id ID \
   [--limit N] \
+  [--path SOURCE ...] \
   [--ephemeral] \
   [--json]
 
 python3 memory-bank/scripts/context.py context QUERY \
   --task-id ID \
   [--limit N] \
+  [--path SOURCE ...] \
   [--ephemeral] \
   [--json]
 ```
@@ -350,6 +400,14 @@ alias. The default per-query limit is `3`.
 Both refresh the index incrementally before reading it, because retrieval reads
 the index rather than the sources and a stale index silently narrows the
 result. A refresh failure degrades to a warning instead of failing the request.
+
+`--path` is repeatable and also delivers documents that cite that source, for
+the case lexical ranking cannot reach: two chunks whose only connection is a
+shared `sources[]` entry are unreachable from each other and from the source's
+own words — measured at 0 of 2, and 2 of 2 through the link index. Path-linked
+items lead their layer, carry `selection: "path-link"` in the manifest and no
+`match`, and do not change `no_match`, which remains a statement about the
+query. See `docs/CONTEXT-AND-MEMORY.md`.
 
 `--ephemeral` writes the retrieval manifest to the ignored
 `memory-bank/local/retrieval-manifests/` instead of shared Git history, capped
@@ -379,6 +437,13 @@ on text length, not provider billing measurements.
 
 The delivered capsule has a separate final contract in both modes: at most 2
 procedural, 3 semantic, and 1 episodic item and 8,000 serialized characters.
+
+It also reports the quality of what it found. `no-match: <layers>` names the
+layers where no candidate passed the relevance test — measured before any
+filter or budget runs, so it never claims memory was empty when something was
+withheld. `weak-match: <path>` marks an item admitted on a single rare term
+rather than on covering the query. Both lines are printed after the opening
+`working:` line, which the Cursor hooks use as the render marker.
 
 Side effects in governed mode: creates
 `project-brain/control/retrieval-manifests/<uuid>.json`, a Git-trackable
@@ -819,6 +884,160 @@ All promotion writes are snapshotted and restored on failure. The generated
 chunk currently uses the runtime's fixed promoted-memory defaults; use the
 normal Memory Bank capture workflow when a proposal requires more nuanced
 categorization or an update/supersession decision.
+
+### `retrieval-report`
+
+```bash
+python3 memory-bank/scripts/context.py retrieval-report \
+  [--since N] [--scope local|governed|all] [--json]
+```
+
+Aggregates what the retrieval manifests recorded. Until it existed the
+manifests were written and never read: every number a gate decision needs
+lived for one turn and then only on disk.
+
+`--since N` counts **records, not days** — the N most recent manifests by
+creation time. Lightweight mode writes no manifests at all, which the command
+reports as its own fact rather than as an empty aggregate.
+
+Two reporting choices worth knowing. Turns are broken down by `query_source`,
+because a prompt, a task, a bare branch name and an operator's query are not
+comparable and an undifferentiated average of them says nothing. And the top
+score is reported **twice**: `top_candidate_score` from the gate signals,
+taken before any policy filter, and `top_delivered_score` from the selection.
+Those diverge exactly when the best match was withheld — the case a report
+like this exists to surface — so the command does not pick one for you.
+
+Manifests written before schema version 2 carry no gate, no phase timings, no
+query source and no per-item score. They are counted, and each metric reports
+how many manifests could answer it, rather than silently averaging over the
+subset that can. Path counts come from the manifest's selection, which is
+recorded before the capsule's character ladder may drop an item, so they are
+an upper bound on what the model was shown.
+
+The report never contains the query text, in either output mode.
+
+### `health`
+
+```bash
+python3 memory-bank/scripts/context.py health [--window N] [--json]
+```
+
+Aggregates `memory-bank/local/refresh-health.ndjson`, one record per turn,
+bounded by `refresh_health_retention` in `runtime.json` (default 500, floored
+at 1). Reports p50/p95/max per phase, the timeout rate, the share of turns
+whose capsule dropped content, and the share where not every layer refreshed.
+
+It reads only the health series, never the manifests: the manifest's
+`retrieval` phase times the body of `retrieve()`, while a health record times
+the whole refresh including the episodic slot and the capsule contract. Those
+are different intervals and averaging them under one name would compare two
+things.
+
+A record is appended by `refresh`, by `hook-context` (Cursor's read path never
+enters the refresh branch, so without it that client would be invisible), and
+by the prompt hook itself — the hook writes its own line carrying only an exit
+status, because on a timeout the Python process is killed before it can write
+anything, and that is the one case most worth measuring. Records carry no
+query text and no selected paths.
+
+### `status` consolidation counters
+
+`status` reports a `Consolidation:` line and a `consolidation` object:
+promotable candidates, blocked candidates, applied promotions, and durable
+chunks. It exists because "nothing was ever consolidated" and "consolidation
+ran and had nothing to do" produced identical output — which is how a fully
+built promotion pipeline received no input for nine days without anyone
+noticing.
+
+Each count is `null`, and prints as `unavailable`, when it cannot be
+established: in lightweight mode, without a `project-brain/` directory, or if
+the walk fails. `null` and `0` are deliberately different answers — an absent
+Brain is not an empty one.
+
+The counters walk `project-brain/` and hash each cited source, so `status`
+costs more than the SQLite counts it used to be. It is also what the
+session-start hook calls; the walk degrades to `null` rather than failing, but
+on a very large Brain expect `status` to take proportionally longer.
+
+### `bank-audit`
+
+```bash
+python3 memory-bank/scripts/context.py bank-audit [--json]
+```
+
+Read-only. Reports, for active chunks only: `source_changed` (a cited local
+file whose digest no longer matches, or that is gone), `overdue_review` (past
+`review_after`), `undigested` (cites local files but records no digests, which
+is every chunk written before digests existed), and `duplicates` (pairs of
+active chunks whose text overlaps at or above `bank_duplicate_ratio`). A
+duplicate pair is a decision for a human: update the survivor, or close the
+older one with `bank-retire`. The engine never merges chunks by itself. A
+retired chunk is not audited — it has nothing left to attest to, and its dead citations would bury
+the live ones.
+
+### `bank-reverify`
+
+```bash
+python3 memory-bank/scripts/context.py bank-reverify --id MEM-... \
+  [--review-after YYYY-MM-DD] [--json]
+```
+
+Re-attests an active chunk against its sources as they are now: recomputes
+`source_digests` for every local path in `sources`, stamps `last_verified`
+with today, and sets the next `review_after` (default one year). Runs under
+the same transaction as `bank-retire` — lock, snapshot, regenerated index,
+whole-bank validation, restore on failure.
+
+Running it is an assertion by whoever ran it that they re-read the sources and
+the chunk still holds; the command records that judgement, it does not make
+it. If the chunk no longer holds, retire it instead. Only active chunks can be
+re-verified, so this cannot quietly resurrect retired knowledge.
+
+Without this command the digests would be a one-way ratchet: the first time a
+cited file changed, the chunk would leave retrieval and stay out, because
+nothing else writes chunk frontmatter and hand-editing is what these commands
+exist to replace.
+
+A URL in `sources` is cited but never digested — the runtime has no network,
+so the only honest thing it can say about a remote citation is nothing.
+
+### `bank-retire`
+
+```bash
+python3 memory-bank/scripts/context.py bank-retire \
+  --id MEM-20260101-a1b2c3d4 \
+  --valid-to 2026-08-22 \
+  [--superseded-by MEM-20260815-e5f6a7b8] [--reason "..."] [--json]
+```
+
+Closes a durable chunk's validity period as one transaction. `--valid-to` is
+the date the knowledge stopped being true and is what removes the chunk from
+retrieval; `--superseded-by` names what replaced it. With a successor the
+chunk becomes `superseded` and the successor's `supersedes` list gains it in
+the same write; without one it becomes `archived`, the honest status for
+knowledge that ceased with nothing taking its place.
+
+Use this rather than editing frontmatter. Retiring by hand means editing both
+sides of a replacement link and then regenerating the index, and between any
+two of those edits the bank is invalid. Every write here happens under the
+mutation lock against a snapshot, `memory-bank/INDEX.md` is regenerated, and
+the whole bank is validated; any failure restores every touched file, so an
+interruption leaves the bank exactly as it was.
+
+What does not change: the chunk body, its other frontmatter fields, the file
+on disk, and its `INDEX.md` row, which survives with the new status — a chunk
+on disk without an index row is itself a validation error. What leaves is
+retrieval, and only at the next `index`/`refresh`, which reports the chunk in
+`excluded` with its new status as the reason. `--reason` is recorded in the
+command's output only: the chunk schema is a closed key set, so writing a
+reason into the frontmatter would fail validation.
+
+Because the whole bank is validated before the write is accepted, a
+pre-existing error in an unrelated chunk will roll a valid retire back. Fix
+that error first, or retire the offending chunk — a terminal chunk whose cited
+source was deleted downgrades from error to warning, so retiring it clears the
+failure.
 
 ### `reindex-bank`
 

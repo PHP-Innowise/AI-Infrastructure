@@ -10,14 +10,18 @@
   "automatic_compaction": true,
   "automatic_completion": false,
   "automatic_promotion": true,
+  "bank_duplicate_ratio": 0.6,
   "canonical_edition": ".agents",
   "codebase_map_max_drift": 25,
   "compaction_threshold": 5,
+  "local_manifest_retention": 200,
   "framework": "symfony",
   "mode": "governed",
   "owners": [
     "*"
   ],
+  "refresh_health_retention": 500,
   "provider": "sqlite-fts5",
+  "retrieval_gate": "shadow",
   "telemetry_enabled": false
 }

@@ -58,6 +58,7 @@
       "memory-bank/scripts/brain_runtime.py",
       "memory-bank/scripts/context_retrieval.py",
       "memory-bank/scripts/validate.py",
+      "memory-bank/scripts/telemetry.py",
       "memory-bank/local/",
       "memory-bank/chunks/",
       "project-brain/PROTOCOL.md",
@@ -200,7 +201,7 @@
       "python3 memory-bank/scripts/validate.py": [
         {
           "exit": 0,
-          "meaning": "the durable memory bank passes chunk frontmatter and status validation"
+          "meaning": "the durable memory bank passes chunk frontmatter and status validation; non-fatal warnings may still be printed to stderr"
         },
         {
           "exit": 1,

@@ -13,7 +13,7 @@ import stat as stat_module
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -33,6 +33,7 @@ from brain_runtime import (
     close_task,
     compact,
     configured_mode,
+    configured_retrieval_gate,
     create_promotion,
     create_record,
     create_task,
@@ -41,7 +42,16 @@ from brain_runtime import (
     load_config,
     mutation_lock,
     read_messages,
+    audit_bank,
+    brain_root,
+    utc_now,
+    validate_schema_file,
+    iter_promotions,
+    render_bank_index,
+    promotable_records,
     reindex_bank,
+    retire_chunk,
+    reverify_chunk,
     render_current_state,
     rollback_created_record,
     review_promotion,
@@ -74,6 +84,11 @@ from context_retrieval import (
     store_index_state,
     codebase_map_drift,
     is_relevant,
+    linked_documents,
+    match_strength,
+    refresh_health_retention,
+    RETRIEVAL_GATE_DEFAULT,
+    RETRIEVAL_GATE_MODES,
     query_tokens,
     required_coverage,
     retrieve,
@@ -103,7 +118,10 @@ SOURCE_PATTERNS = (
     ("semantic", "overview", "README.md"),
     ("semantic", "spec", "specs/**/*.md"),
     ("semantic", "spec", "docs/**/*.md"),
-    ("semantic", "codebase", "codebase/*.md"),
+    # Recursive, like every other document tree here. A codebase map big
+    # enough to be worth writing is filed into subdirectories, and a
+    # single-level glob silently indexed the top of it and nothing else.
+    ("semantic", "codebase", "codebase/**/*.md"),
     ("semantic", "memory", "memory-bank/chunks/*.md"),
     ("semantic", "task", "tasks/**/*.md"),
     # Task/ (client product specifications and design references) is
@@ -211,6 +229,16 @@ def connect(database: Path) -> sqlite3.Connection:
             document_columns = set()
         if not document_columns:
             create_document_table(connection)
+        # `discover_documents` returns only *changed* documents, so a link
+        # table created beside an existing index would be populated for the
+        # handful of files that happen to change next and silently claim to be
+        # complete. Dropping the stat cache forces one full re-read, the same
+        # remedy the tokenizer change above uses. A new database has no cache
+        # to drop, so this costs nothing there.
+        if connection.execute(
+            "SELECT name FROM sqlite_master WHERE name = 'document_links'"
+        ).fetchone() is None:
+            connection.execute("DROP TABLE IF EXISTS document_source_state")
         episode_schema = connection.execute(
             "SELECT sql FROM sqlite_master WHERE name = 'episodes'"
         ).fetchone()
@@ -347,14 +375,89 @@ def document_title(path: Path, content: str) -> str:
     return path.stem.replace("-", " ").replace("_", " ")
 
 
-def active_memory(path: Path, repository: Path) -> bool:
+def memory_eligible_until(metadata: dict) -> Optional[str]:
+    """The date a chunk stops being servable: ``min(review_after, valid_to)``.
+
+    Eligibility is a calendar fact, not a filesystem one, and the incremental
+    cache keys on ``(mtime_ns, size)``. Recording the boundary alongside the
+    stat pair is what lets a cached row expire on its own date without the
+    file being touched. ``review_after`` is required of every chunk, so an
+    eligible chunk always has a boundary; ``None`` means the frontmatter
+    carries no parseable date, which validation rejects anyway.
+    """
+    bounds = []
+    for key in ("review_after", "valid_to"):
+        value = metadata.get(key)
+        if not isinstance(value, str):
+            continue
+        try:
+            bounds.append(date.fromisoformat(value))
+        except ValueError:
+            return None
+    return min(bounds).isoformat() if bounds else None
+
+
+def _lapsed_reason(metadata: dict, eligible_until: Optional[str]) -> str:
+    """Name the boundary a chunk crossed, or 'invalid' if it crossed none.
+
+    A chunk that reached its own end date is not malformed - it is retired,
+    which is the outcome the lifecycle is for. Reporting that as `invalid`
+    tells a reader to go fix a file that is doing exactly what it promised.
+    """
+    if metadata.get("status") != "active" or eligible_until is None:
+        return "invalid"
+    if date.today() <= date.fromisoformat(eligible_until):
+        return "invalid"
+    valid_to = metadata.get("valid_to")
+    if isinstance(valid_to, str):
+        try:
+            if date.today() > date.fromisoformat(valid_to):
+                return "retired"
+        except ValueError:
+            return "invalid"
+    return "overdue-review"
+
+
+def memory_eligibility(
+    path: Path, repository: Path
+) -> tuple[Optional[dict], Optional[str], Optional[str]]:
+    """Frontmatter if the chunk may be served, else why not, plus its boundary.
+
+    Returns ``(metadata, None, eligible_until)`` for a servable chunk and
+    ``(None, reason, eligible_until)`` otherwise. The reason vocabulary is the
+    one the retrieval manifest already speaks - `retired`, `overdue-review`,
+    `invalid`, `secret`, plus the non-active statuses - so a dropped chunk
+    reaches the `excluded` channel instead of vanishing on a bare `continue`.
+    """
     try:
         metadata = parse_frontmatter(path)
+    except (OSError, ValidationError):
+        return None, "invalid", None
+    eligible_until = memory_eligible_until(metadata)
+    try:
         validate_metadata(path, metadata, repository)
+    except OSError:
+        return None, "invalid", eligible_until
+    except ValidationError:
+        return None, _lapsed_reason(metadata, eligible_until), eligible_until
+    try:
         validate_secret_patterns(path)
     except (OSError, ValidationError):
-        return False
-    return metadata["status"] == "active"
+        return None, "secret", eligible_until
+    status = metadata["status"]
+    if status != "active":
+        return None, status, eligible_until
+    return metadata, None, eligible_until
+
+
+def active_memory(path: Path, repository: Path) -> Optional[dict]:
+    """The chunk's frontmatter when it may be served, else ``None``.
+
+    Returning the metadata rather than a bare bool keeps every caller's
+    truthiness test working while giving the ones that need provenance
+    something to read.
+    """
+    return memory_eligibility(path, repository)[0]
 
 
 def git_ignored_paths(repository: Path, paths: list[str]) -> set[bytes]:
@@ -380,7 +483,9 @@ def git_ignored_paths(repository: Path, paths: list[str]) -> set[bytes]:
 
 # One discovered source file: layer, kind, absolute path, repository-relative
 # path, and the (mtime_ns, size) stat pair every downstream consumer needs.
-SourceCandidate = tuple[str, str, Path, str, tuple[int, int]]
+# The originating glob travels with each candidate so discovery can report a
+# pattern that matched files on disk and lost every one of them to .gitignore.
+SourceCandidate = tuple[str, str, Path, str, tuple[int, int], str]
 
 
 def collect_source_candidates(repository: Path) -> list[SourceCandidate]:
@@ -409,24 +514,58 @@ def collect_source_candidates(repository: Path) -> list[SourceCandidate]:
                     path,
                     path.relative_to(repository).as_posix(),
                     (status.st_mtime_ns, status.st_size),
+                    pattern,
                 )
             )
     return candidates
+
+
+def _cache_entry_is_current(
+    kind: str, cached: tuple, current: tuple[int, int]
+) -> bool:
+    """Whether a cached row may be reused without re-reading the file.
+
+    The stat pair answers "has the file changed"; for durable memory that is
+    only half the question, because a chunk also stops being servable on a
+    date nobody has to touch it for. The recorded boundary answers the other
+    half. An entry from a build that predates the boundary column cannot
+    express expiry, so it is re-validated once rather than trusted.
+    """
+    if tuple(cached[:2]) != current:
+        return False
+    if kind != "memory":
+        return True
+    boundary = cached[2] if len(cached) > 2 else None
+    if boundary is None:
+        return False
+    try:
+        return date.today() <= date.fromisoformat(boundary)
+    except (TypeError, ValueError):
+        return False
 
 
 def discover_documents(
     repository: Path,
     reusable: Optional[SourceState] = None,
     candidates: Optional[list[SourceCandidate]] = None,
-) -> tuple[list[DocumentRow], SourceState, SourceState]:
-    """Return changed documents, the retained cache subset, and the new cache.
+) -> tuple[list[DocumentRow], SourceState, SourceState, list[dict[str, str]]]:
+    """Return changed documents, the retained cache subset, the new cache, and
+    every candidate dropped along the way with the reason it was dropped.
 
-    ``reusable`` maps already-indexed paths to the (mtime_ns, size) recorded by
-    the last successful index. A candidate whose stat still matches is neither
-    read nor re-validated, which is what makes per-request indexing affordable:
-    secret scanning dominates a full pass. A modification that somehow reuses
-    its predecessor's stat is still not served as truth — governed retrieval
+    ``reusable`` maps already-indexed paths to the (mtime_ns, size, boundary)
+    recorded by the last successful index. A candidate whose stat still matches
+    and whose calendar boundary has not passed is neither read nor
+    re-validated, which is what makes per-request indexing affordable: secret
+    scanning dominates a full pass. A modification that somehow reuses its
+    predecessor's stat is still not served as truth — governed retrieval
     re-hashes every candidate and excludes the mismatch as stale.
+
+    Only files a reader could reasonably expect to find in the index are
+    reported as excluded. The three structural skips below - git-ignored
+    files, a second pattern claiming a file the first already owns, and a
+    mirrored copy of an indexed skill - are how discovery is defined rather
+    than something that went wrong, and Symfony alone would contribute 279 of
+    the third.
 
     ``candidates`` accepts an already-collected source walk so a caller that
     also needs the stats elsewhere (the skill-tree fingerprint) pays for the
@@ -435,6 +574,7 @@ def discover_documents(
     documents: list[DocumentRow] = []
     retained: SourceState = {}
     state: SourceState = {}
+    excluded: list[dict[str, str]] = []
     skill_keys: set[str] = set()
     claimed: set[str] = set()
     if candidates is None:
@@ -442,10 +582,14 @@ def discover_documents(
 
     cache = reusable or {}
     ignored_paths = git_ignored_paths(
-        repository, [relative_path for _, _, _, relative_path, _ in candidates]
+        repository, [relative_path for _, _, _, relative_path, _, _ in candidates]
     )
-    for layer, kind, path, relative_path, current in candidates:
+    seen_by_pattern: dict[str, int] = {}
+    ignored_by_pattern: dict[str, int] = {}
+    for layer, kind, path, relative_path, current, pattern in candidates:
+        seen_by_pattern[pattern] = seen_by_pattern.get(pattern, 0) + 1
         if os.fsencode(relative_path) in ignored_paths:
+            ignored_by_pattern[pattern] = ignored_by_pattern.get(pattern, 0) + 1
             continue
         if relative_path in claimed:
             # Two patterns can match one file, and the earlier one owns its
@@ -461,22 +605,30 @@ def discover_documents(
             # passes validation claims the key, so a later copy can never win
             # it and never needs to be read or scanned.
             continue
-        if cache.get(relative_path) == current:
-            # Unchanged since the last successful index, so it already passed
-            # secret and active-memory validation; keep the existing row.
+        cached = cache.get(relative_path)
+        if cached is not None and _cache_entry_is_current(kind, cached, current):
+            # Unchanged since the last successful index and still inside its
+            # calendar boundary, so it already passed secret and
+            # active-memory validation; keep the existing row.
             if skill_key is not None:
                 skill_keys.add(skill_key)
-            retained[relative_path] = current
-            state[relative_path] = current
+            retained[relative_path] = cached
+            state[relative_path] = cached
             continue
+        boundary: Optional[str] = None
         try:
             if kind == "memory":
-                if not active_memory(path, repository):
+                metadata, reason, boundary = memory_eligibility(path, repository)
+                if metadata is None:
+                    excluded.append(
+                        {"path": relative_path, "reason": reason or "invalid"}
+                    )
                     continue
             else:
                 try:
                     validate_secret_patterns(path)
                 except (OSError, ValidationError):
+                    excluded.append({"path": relative_path, "reason": "secret"})
                     continue
             content = path.read_text(encoding="utf-8")
         except UnicodeDecodeError as error:
@@ -496,9 +648,43 @@ def discover_documents(
             )
         )
         # Stat was taken before the read, so a write that races this pass is
-        # detected next time instead of being cached away.
-        state[relative_path] = current
-    return documents, retained, state
+        # detected next time instead of being cached away. The boundary rides
+        # along so the next incremental pass can retire the row on its date
+        # without opening the file.
+        state[relative_path] = (current[0], current[1], boundary)
+    # A whole pattern going dark is the one git-ignore case worth reporting.
+    # Individual ignored files are deliberately silent — Symfony alone would
+    # contribute hundreds — but a glob that matched files on disk and lost
+    # every one of them means a documented source of truth is invisible and
+    # nothing else would say so. Measured on a real installation: a project
+    # whose own .gitignore carried a bare `docs` entry indexed 96 accelerator
+    # skills, one README, and none of its own design documents.
+    for pattern, total in sorted(seen_by_pattern.items()):
+        if total and ignored_by_pattern.get(pattern, 0) == total:
+            excluded.append(
+                {"path": pattern, "reason": "pattern-all-git-ignored"}
+            )
+    return documents, retained, state, excluded
+
+
+def _merge_excluded(result: dict[str, object], dropped: list[dict[str, str]]) -> None:
+    """Fold discovery's exclusions into the one channel the index reports.
+
+    Project Brain records are excluded inside ``index_documents``; repository
+    documents are excluded during discovery, one call earlier. Merging here
+    rather than threading the list through ``index_documents`` keeps that
+    function's signature and every existing caller untouched, and it has to
+    happen on both of ``index_documents``' return paths - including the
+    "nothing observable changed" early return, which is the one the per-prompt
+    hook takes.
+    """
+    if not dropped:
+        return
+    existing = result.get("excluded")
+    result["excluded"] = [
+        *(existing if isinstance(existing, list) else []),
+        *dropped,
+    ]
 
 
 def index_repository(
@@ -518,7 +704,7 @@ def index_repository(
     # skill-tree fingerprint is derived from it instead of a second tree walk.
     skill_stats = [
         (relative.split("/", 1)[0], relative.split("/skills/", 1)[1], mtime_ns, size)
-        for _, kind, _, relative, (mtime_ns, size) in candidates
+        for _, kind, _, relative, (mtime_ns, size), _ in candidates
         if kind == "skill"
     ]
     fingerprints = index_fingerprints(repository, skill_stats)
@@ -526,7 +712,7 @@ def index_repository(
         reusable, fingerprints = reusable_source_state(
             connection, repository, fingerprints
         )
-        documents, retained, state = discover_documents(
+        documents, retained, state, dropped = discover_documents(
             repository, reusable, candidates=candidates
         )
         scan_seconds += time.monotonic() - phase_started
@@ -544,18 +730,22 @@ def index_repository(
             # The cache disagreed with the index; fall through and rebuild.
             phase_started = time.monotonic()
         else:
+            _merge_excluded(result, dropped)
             result["phase_seconds"] = {
                 "stat": round(scan_seconds, 6),
                 "index": round(time.monotonic() - index_started, 6),
             }
             return result
-    documents, _, state = discover_documents(repository, candidates=candidates)
+    documents, _, state, dropped = discover_documents(
+        repository, candidates=candidates
+    )
     scan_seconds += time.monotonic() - phase_started
     index_started = time.monotonic()
     result = index_documents(
         connection, repository, documents, source_state=state,
         fingerprints=fingerprints,
     )
+    _merge_excluded(result, dropped)
     result["phase_seconds"] = {
         "stat": round(scan_seconds, 6),
         "index": round(time.monotonic() - index_started, 6),
@@ -585,6 +775,11 @@ def search_documents(
     contain more than one query term. Capsule assembly uses it, because a
     document that shares a single common word with the request is noise
     presented as context. Explicit `search` stays broad by design.
+
+    On the ``relevant_only`` path each returned item also carries how it
+    qualified, via `match_strength`: a document admitted only by a single rare
+    term is a far weaker answer than one that covered the query, and until the
+    capsule says so the two are indistinguishable inside a turn.
     """
     coverage: dict[str, int] = {}
     distinctive: set[str] = set()
@@ -593,11 +788,11 @@ def search_documents(
         tokens = informative_tokens(connection, query_tokens(query))
         coverage, distinctive = token_coverage(connection, tokens)
         minimum = required_coverage(tokens)
-        match = " OR ".join(f'"{token}"' for token in tokens)
+        match_expression = " OR ".join(f'"{token}"' for token in tokens)
     else:
-        match = fts_query(query)
+        match_expression = fts_query(query)
     conditions = ["documents MATCH ?"]
-    parameters: list[object] = [match]
+    parameters: list[object] = [match_expression]
     if layer is not None:
         conditions.append("layer = ?")
         parameters.append(layer)
@@ -622,7 +817,13 @@ def search_documents(
         for row in rows
         if is_relevant(row["path"], coverage, distinctive, minimum)
     ] if relevant_only else rows
-    return [dict(row) for row in selected[:limit]]
+    items = [dict(row) for row in selected[:limit]]
+    if relevant_only:
+        for item in items:
+            strength = match_strength(str(item["path"]), coverage, minimum)
+            if strength != "covered":
+                item["match"] = strength
+    return items
 
 
 def search_episodes(
@@ -853,6 +1054,47 @@ def deduplicate_context_items(
     return unique
 
 
+def deduplicate_capsule_layers(capsule: dict[str, object]) -> None:
+    """Drop any item that a second layer of the same capsule already holds.
+
+    The governed capsule is assembled from two different taxonomies - the
+    semantic layer from retrieval categories, the episodic layer from the
+    layer column - which is how one document can occupy a slot in each. The
+    layer split has to survive, so this is a layer-preserving pass rather than
+    `deduplicate_context_items` over the concatenation: the governed contract
+    enforces per-layer limits afterwards and needs three lists, not one.
+
+    A document is claimed by the capsule layer its own ``layer`` field names,
+    whichever list happened to see it first; only an item with no such home -
+    a recorded episode, which has an id rather than a path and no layer -
+    falls back to first-come priority. Resolving by ownership rather than by
+    order is what keeps the episodic slot from being emptied by a semantic
+    copy of the one document that belongs in it.
+
+    Today the retrieval side already excludes episodic documents from the
+    semantic ranking, which is where the freed slot gets reallocated to the
+    next candidate, so this pass removes nothing. It exists so that a future
+    layer source cannot reintroduce the collision unnoticed.
+    """
+    layers = ("procedural", "semantic", "episodic")
+
+    def key(item: dict[str, object]) -> tuple[str, object]:
+        return ("path", item["path"]) if "path" in item else ("episode", item["id"])
+
+    holder: dict[tuple[str, object], str] = {}
+    for layer in layers:
+        for item in capsule.get(layer) or []:
+            if item.get("layer") == layer:
+                holder[key(item)] = layer
+    for layer in layers:
+        for item in capsule.get(layer) or []:
+            holder.setdefault(key(item), layer)
+    for layer in layers:
+        items = capsule.get(layer)
+        if isinstance(items, list):
+            capsule[layer] = [item for item in items if holder[key(item)] == layer]
+
+
 def build_context_packet(
     connection: sqlite3.Connection,
     query: str,
@@ -921,6 +1163,18 @@ def build_context_packet(
                 connection, retrieval_query, episodic_limit, "episodic",
                 relevant_only=True,
             ) + search_episodes(connection, retrieval_query, episodic_limit)
+    # Recorded from what survived the relevance test, before the per-layer
+    # truncation below: a layer that is short because the limit cut it is not
+    # a layer memory had nothing for.
+    packet["no_match"] = [
+        layer
+        for layer, found in (
+            ("procedural", procedural),
+            ("semantic", semantic),
+            ("episodic", episodic),
+        )
+        if not found
+    ]
     packet["procedural"] = deduplicate_context_items(procedural)[:procedural_limit]
     packet["semantic"] = deduplicate_context_items(semantic)[:semantic_limit]
     packet["episodic"] = deduplicate_context_items(episodic)[:episodic_limit]
@@ -1034,7 +1288,7 @@ def enforce_governed_capsule_contract(
     def synchronize_views() -> None:
         selected_paths = {
             item["path"]
-            for layer in ("procedural", "semantic")
+            for layer in DOCUMENT_LAYERS
             for item in compacted[layer]
             if isinstance(item, dict) and isinstance(item.get("path"), str)
         }
@@ -1618,6 +1872,40 @@ def last_turn_report_path(repository: Path) -> Path:
     return repository / "memory-bank" / "local" / LAST_TURN_REPORT_FILENAME
 
 
+REFRESH_HEALTH_FILE = "refresh-health.ndjson"
+
+
+def refresh_health_path(repository: Path) -> Path:
+    return repository / "memory-bank" / "local" / REFRESH_HEALTH_FILE
+
+
+def append_refresh_health(repository: Path, record: dict[str, object]) -> None:
+    """Append one turn's health line, or quietly do nothing.
+
+    The honesty the hook already has lives exactly one turn: a timeout, a
+    stalled index phase or a capsule that dropped content is visible in that
+    turn's report and nowhere afterwards, so no one can say whether it happens
+    once a week or every third prompt.
+
+    Append-only NDJSON rather than the whole-file replace `write_last_turn_report`
+    uses, because this is a series and that is a snapshot. Wrapped like it,
+    though: a health write must never be the reason a turn fails.
+    """
+    path = refresh_health_path(repository)
+    retention = refresh_health_retention(load_config(repository))
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if len(lines) > retention:
+            path.write_text(
+                "\n".join(lines[-retention:]) + "\n", encoding="utf-8"
+            )
+    except (OSError, BrainError, ValueError):
+        return
+
+
 def write_last_turn_report(repository: Path, report: dict[str, object]) -> None:
     """Persist the turn outcome where the next request's capsule can read it.
 
@@ -1774,16 +2062,28 @@ def assemble_capsule(
     limit: int,
     ephemeral: bool,
     refresh_index: bool = True,
+    query_source: str = "explicit",
+    phase_seconds: Optional[dict[str, object]] = None,
+    gate_mode: str = RETRIEVAL_GATE_DEFAULT,
+    paths: Optional[list[str]] = None,
 ) -> dict[str, object]:
     """Build the layered capsule for one request.
 
     ``refresh_index`` exists so a caller that already refreshed does not index
     twice; retrieval reads the index rather than the sources, so the refresh
     has to happen somewhere before this runs.
+
+    ``query_source`` and ``phase_seconds`` are provenance only the caller
+    knows - where the query came from, and what the index phases cost - and
+    are recorded in the governed manifest. A caller that refreshed elsewhere
+    passes its own timings; one that refreshes here has them measured for it.
     """
     warnings: list[str] = []
     if refresh_index:
-        _, _, warnings = refresh_layers(connection, repository)
+        _, index_result, warnings = refresh_layers(connection, repository)
+        # The refresh that just ran is this turn's index cost, so it wins over
+        # anything the caller guessed.
+        phase_seconds = index_result.get("phase_seconds") or None
     # What the silenced Stop hook did last turn, folded into this request's
     # capsule. Rendered once here so both modes report it identically; the
     # summary itself is bounded, and the lightweight budget below may still
@@ -1799,6 +2099,7 @@ def assemble_capsule(
             warnings=warnings,
         )
         result["last_turn"] = last_turn
+        result["query_source"] = query_source
         return enforce_capsule_budget(result)
     if task_id is None:
         raise ContextError("Governed retrieval requires --task-id")
@@ -1815,23 +2116,78 @@ def assemble_capsule(
         binding["task_uuid"],
         limit=limit,
         manifest_scope="local" if ephemeral else "governed",
+        query_source=query_source,
+        phase_seconds=phase_seconds,
+        gate_mode=gate_mode,
+        paths=paths,
     )
-    result["episodic"] = (
-        search_documents(
-            connection,
-            request_query,
-            CAPSULE_LAYER_LIMITS["episodic"],
-            "episodic",
-            relevant_only=True,
-        )
-        + search_episodes(
+    # `retrieve()` already ranked, filtered, budgeted and recorded every
+    # indexed episodic document. What it cannot see are the local replay
+    # episodes, which live in the disposable database rather than in the
+    # document index, so only those are appended here.
+    governed_episodic = result.get("episodic") or []
+    episodic_candidates = [
+        *governed_episodic,
+        *search_episodes(
             connection, request_query, CAPSULE_LAYER_LIMITS["episodic"]
-        )
-    )[:CAPSULE_LAYER_LIMITS["episodic"]]
+        ),
+    ]
+    result["episodic"] = episodic_candidates[:CAPSULE_LAYER_LIMITS["episodic"]]
+    deduplicate_capsule_layers(result)
+    result["query_source"] = query_source
     # The print tail dereferences result["warnings"]; retrieve() has no such key.
     result["warnings"] = warnings
     result["last_turn"] = last_turn
     return enforce_governed_capsule_contract(result)
+
+
+def hook_capsule_query(
+    repository: Path, task_id: str, task_uuid: str
+) -> tuple[str, str]:
+    """The query the hook should ask with, and where it came from.
+
+    Cursor has no prompt-submit event, so its only automatic memory entry
+    supplies a task identifier - usually a branch name - and the governed path
+    then tokenized that slug and retrieved on it. A branch called `main` asks
+    memory for documents about the word "main"; `chore/accelerator-hardening`
+    asks for a release skill. The enrichment `build_capsule_query` already
+    performs for the lightweight path is applied here instead, so the question
+    is the task's own goal and state.
+
+    Deliberately excluded is the automatic checkpoint: it is a sentence of
+    turn counts and an ISO timestamp with no topical content, it changes on
+    every flush, and it would spend a third of a 32-token budget displacing
+    real terms. An auto-provisioned goal is excluded too - it is the branch
+    slug re-cased, so it adds the noise back under another name. When nothing
+    substantive remains the bare identifier is used and the manifest says so.
+    """
+    try:
+        task = get_task(repository, task_uuid)
+        goal = str(task.get("goal") or "")
+        # `derive_goal` builds the auto-provisioned form, so comparing against
+        # it keeps the two definitions in lockstep instead of duplicating the
+        # suffix as a literal here.
+        if goal == derive_goal(task_id):
+            goal = ""
+        working = {
+            "goal": goal,
+            # The manual progress note only: `render_current_state` would fold
+            # the checkpoint sentence back in.
+            "progress": str(task.get("progress") or ""),
+            "next_steps": task.get("next_steps") or [],
+            "files": task.get("files") or [],
+        }
+        if not any(
+            value for value in working.values() if value not in ("", [], None)
+        ):
+            return task_id, "task-id"
+        query = build_capsule_query(task_id, working)
+    except (ContextError, BrainError, RetrievalError, KeyError, ValueError, OSError):
+        # A capsule built on a bare identifier is worse than one built on the
+        # task, and far better than none: Cursor would otherwise keep serving
+        # the previous rule with no signal that anything failed.
+        return task_id, "task-id"
+    return query, "task"
 
 
 def assemble_hook_context(
@@ -1840,6 +2196,7 @@ def assemble_hook_context(
     *,
     mode: str,
     task_id: str,
+    gate_mode: str = RETRIEVAL_GATE_DEFAULT,
 ) -> Optional[dict[str, object]]:
     """Return a governed capsule or a sanitized pre-provision warming capsule."""
     task_id = validate_task_id(task_id)
@@ -1854,21 +2211,28 @@ def assemble_hook_context(
                 task_id=task_id,
                 limit=3,
                 ephemeral=True,
+                query_source="task-id",
+                gate_mode=gate_mode,
             )
     else:
         try:
-            governed_binding(connection, task_id)
+            binding = governed_binding(connection, task_id)
         except ContextError:
             pass
         else:
+            query, query_source = hook_capsule_query(
+                repository, task_id, binding["task_uuid"]
+            )
             return assemble_capsule(
                 connection,
                 repository,
                 mode=mode,
-                query=task_id,
+                query=query,
                 task_id=task_id,
                 limit=3,
                 ephemeral=True,
+                query_source=query_source,
+                gate_mode=gate_mode,
             )
 
     files, excluded = changed_paths(repository)
@@ -1909,6 +2273,39 @@ def print_capsule(capsule: dict[str, object]) -> None:
         print(f"warning: {warning}")
     if capsule.get("last_turn"):
         print(f"Last turn: {capsule['last_turn']}")
+    # Both lines come after the "working:" marker on purpose - the Cursor
+    # hooks reject a capsule that does not open with it.
+    source = capsule.get("query_source")
+    if source in ("task", "task-id"):
+        # Printed after the "working:" render marker. A capsule retrieved on a
+        # branch slug and one retrieved on the task's own goal are worth very
+        # different amounts, and looked identical until this line existed.
+        print(
+            "query: from task goal"
+            if source == "task"
+            else "query: from branch name only"
+        )
+    gate = capsule.get("gate")
+    if isinstance(gate, dict) and gate.get("mode") == "enforce" and gate.get(
+        "decision"
+    ) == "skip":
+        # Only in enforce, and only on a skip: in shadow the verdict lives in
+        # the manifest, because the capsule is zero-sum against its character
+        # ceiling and a line saying "this turn retrieved normally" buys the
+        # reader nothing. An empty capsule and a withheld one are different
+        # facts and must not render the same.
+        print(f"gate: skipped — {gate.get('reason', 'unknown')}")
+    no_match = capsule.get("no_match")
+    if no_match:
+        # "Memory has nothing for this" is an answer, and until it was said
+        # out loud it looked exactly like "memory was not consulted".
+        print(f"no-match: {', '.join(sorted(str(layer) for layer in no_match))}")
+    for layer in DOCUMENT_LAYERS:
+        for item in capsule[layer] or []:
+            if item.get("match") == "distinctive" and "path" in item:
+                # Admitted on one rare term rather than on covering the
+                # query: still worth a slot, not worth being read as an answer.
+                print(f"weak-match: {item['path']}")
     for layer in DOCUMENT_LAYERS:
         items = capsule[layer]
         if not items:
@@ -2038,6 +2435,319 @@ def _readiness_git_probe(
     if result.returncode != 0:
         return None, "not-a-worktree"
     return result.stdout.strip(), None
+
+
+def _percentiles(values: list[float]) -> dict[str, object]:
+    """p50/p95/max over the values that exist, nulls dropped rather than zeroed.
+
+    A phase that did not run this turn is recorded as null, and coercing that
+    to 0.0 would report an instantaneous index rather than an absent one.
+    """
+    present = sorted(value for value in values if isinstance(value, (int, float)))
+    if not present:
+        return {"samples": 0, "p50": None, "p95": None, "max": None}
+
+    def at(fraction: float) -> float:
+        index = min(len(present) - 1, int(round(fraction * (len(present) - 1))))
+        return round(float(present[index]), 6)
+
+    return {
+        "samples": len(present),
+        "p50": at(0.5),
+        "p95": at(0.95),
+        "max": round(float(present[-1]), 6),
+    }
+
+
+def read_manifests(repository: Path, scope: str, since: Optional[int]) -> list[dict]:
+    """Manifests newest first, from the requested store or both.
+
+    Lightweight mode writes none at all, which the caller reports as its own
+    fact rather than as an empty aggregate.
+    """
+    directories = []
+    if scope in ("governed", "all"):
+        directories.append(brain_root(repository) / "control" / "retrieval-manifests")
+    if scope in ("local", "all"):
+        directories.append(repository / "memory-bank" / "local" / "retrieval-manifests")
+    manifests: list[dict] = []
+    for directory in directories:
+        if not directory.is_dir():
+            continue
+        for path in directory.glob("*.json"):
+            try:
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(loaded, dict):
+                manifests.append(loaded)
+    manifests.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    return manifests[:since] if since else manifests
+
+
+def retrieval_report(
+    repository: Path, *, scope: str, since: Optional[int]
+) -> dict[str, object]:
+    """Aggregate what the retrieval manifests recorded, across turns.
+
+    Manifests were written and never read: every number a gate decision needs
+    existed for one turn and then only on disk. This is the reader.
+
+    Two deliberate reporting choices. Turns are broken down by `query_source`,
+    because a prompt, a task, a bare branch name and an operator's explicit
+    query are not comparable and an undifferentiated average of them says
+    nothing. And the top score is reported twice - `top_candidate` from the
+    gate signals, before any policy filter, and `top_delivered` from the
+    selection - because those diverge exactly when the best candidate was
+    withheld, which is the case a report like this exists to surface.
+
+    Version 1 manifests carry no gate, no phase timings, no query source and
+    no per-item score. They are counted, and every metric says how many of the
+    manifests could answer it, rather than silently averaging over a subset.
+    """
+    manifests = read_manifests(repository, scope, since)
+    reasons: dict[str, int] = {}
+    paths: dict[str, int] = {}
+    sources: dict[str, int] = {}
+    gate_decisions: dict[str, int] = {}
+    gate_skip_reasons: dict[str, int] = {}
+    matches: dict[str, int] = {}
+    top_candidate: list[float] = []
+    top_delivered: list[float] = []
+    phases: dict[str, list[float]] = {"stat": [], "index": [], "retrieval": []}
+    empty_selection = 0
+    versions: dict[str, int] = {}
+
+    for manifest in manifests:
+        version = str(manifest.get("schema_version"))
+        versions[version] = versions.get(version, 0) + 1
+        selected = manifest.get("selected") or []
+        if not selected:
+            empty_selection += 1
+        best = None
+        for item in selected:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path", ""))
+            if path:
+                paths[path] = paths.get(path, 0) + 1
+            strength = item.get("match")
+            if isinstance(strength, str):
+                matches[strength] = matches.get(strength, 0) + 1
+            score = item.get("score")
+            if isinstance(score, (int, float)):
+                best = score if best is None else max(best, score)
+        if best is not None:
+            top_delivered.append(float(best))
+        for item in manifest.get("excluded") or []:
+            if isinstance(item, dict):
+                reason = str(item.get("reason", "unknown"))
+                reasons[reason] = reasons.get(reason, 0) + 1
+        source = manifest.get("query_source")
+        if isinstance(source, str):
+            sources[source] = sources.get(source, 0) + 1
+        gate = manifest.get("gate")
+        if isinstance(gate, dict):
+            decision = str(gate.get("decision", "unknown"))
+            gate_decisions[decision] = gate_decisions.get(decision, 0) + 1
+            if decision == "skip":
+                reason = str(gate.get("reason", "unknown"))
+                gate_skip_reasons[reason] = gate_skip_reasons.get(reason, 0) + 1
+            signal = (gate.get("signals") or {}).get("top_score")
+            if isinstance(signal, (int, float)):
+                top_candidate.append(float(signal))
+        timings = manifest.get("phase_seconds")
+        if isinstance(timings, dict):
+            for name in phases:
+                phases[name].append(timings.get(name))
+
+    total = len(manifests)
+    gated = sum(gate_decisions.values())
+    return {
+        "scope": scope,
+        "turns": total,
+        "schema_versions": dict(sorted(versions.items())),
+        "query_source": dict(sorted(sources.items())),
+        "empty_selection": empty_selection,
+        # Membership counted from the manifest, which records the selection
+        # before the capsule's character ladder may drop an item, so this is
+        # an upper bound on what the model was actually shown.
+        "top_paths": dict(
+            sorted(paths.items(), key=lambda pair: (-pair[1], pair[0]))[:20]
+        ),
+        "excluded_reasons": dict(sorted(reasons.items())),
+        "match_strength": dict(sorted(matches.items())),
+        "gate": {
+            "decided": gated,
+            "decisions": dict(sorted(gate_decisions.items())),
+            "skip_reasons": dict(sorted(gate_skip_reasons.items())),
+            "skip_rate": (
+                round(gate_decisions.get("skip", 0) / gated, 4) if gated else None
+            ),
+        },
+        "top_candidate_score": _percentiles(top_candidate),
+        "top_delivered_score": _percentiles(top_delivered),
+        "phase_seconds": {name: _percentiles(values) for name, values in phases.items()},
+    }
+
+
+def refresh_health(repository: Path, window: Optional[int]) -> dict[str, object]:
+    """Aggregate the per-turn health series the hook and the CLI append.
+
+    Reads only `refresh-health.ndjson`, never the manifests: the manifest's
+    `retrieval` phase times the body of `retrieve()`, while the series records
+    the whole refresh including the episodic slot and the capsule contract.
+    H1-05 split those on purpose, and averaging them under one name would
+    compare two different intervals.
+    """
+    path = refresh_health_path(repository)
+    records: list[dict] = []
+    if path.is_file():
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    loaded = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(loaded, dict):
+                    records.append(loaded)
+        except OSError:
+            records = []
+    if window:
+        records = records[-window:]
+    phases: dict[str, list[float]] = {"stat": [], "index": [], "retrieval": []}
+    timeouts = 0
+    omitted_turns = 0
+    incomplete_layers = 0
+    statuses: dict[str, int] = {}
+    for record in records:
+        timings = record.get("phase_seconds")
+        if isinstance(timings, dict):
+            for name in phases:
+                phases[name].append(timings.get(name))
+        status = record.get("hook_status")
+        if status is not None:
+            statuses[str(status)] = statuses.get(str(status), 0) + 1
+            if status == 124:
+                timeouts += 1
+        # "Non-empty omitted" means a positive counter: a lightweight capsule
+        # always carries the keys with zeros, so testing the dict for
+        # emptiness would fire on every turn.
+        omitted = record.get("omitted")
+        if isinstance(omitted, dict) and any(
+            isinstance(value, int) and value > 0 for value in omitted.values()
+        ):
+            omitted_turns += 1
+        if record.get("layers_updated") is False:
+            incomplete_layers += 1
+    total = len(records)
+    ratio = lambda count: round(count / total, 4) if total else None
+    return {
+        "turns": total,
+        "phase_seconds": {name: _percentiles(values) for name, values in phases.items()},
+        "hook_status": dict(sorted(statuses.items())),
+        "timeout_rate": ratio(timeouts),
+        "lossy_capsule_rate": ratio(omitted_turns),
+        "incomplete_layers_rate": ratio(incomplete_layers),
+    }
+
+
+def emit_refresh_telemetry(
+    repository: Path, capsule: Optional[dict], retrieval_seconds: float
+) -> None:
+    """Give the telemetry adapter its first production caller, safely.
+
+    `telemetry.py` was written, disabled by default, covered by five tests and
+    never called from anywhere, so the one thing it could not report was
+    whether it worked. Three constraints its contract imposes, each of which
+    would otherwise break a turn:
+
+    * it reads `project-brain/config/telemetry.json` BEFORE it checks whether
+      telemetry is enabled, and raises when that file is absent - the normal
+      state of a lightweight-mode or partially installed project;
+    * `task_id` must be a UUID, and the refresh branch's `--task-id` is an
+      external id or a branch name; the UUID exists only on a governed
+      capsule;
+    * `context_tokens` exists only as the capsule's token estimate, which a
+      refresh without `--query` never produces.
+
+    Imported lazily and swallowed entirely: telemetry is off by default and
+    must never be the reason a prompt fails.
+    """
+    try:
+        import telemetry
+    except ImportError:
+        return
+    payload: dict[str, object] = {
+        "operation": "refresh",
+        "provider": str(load_config(repository).get("provider") or "sqlite-fts5"),
+        "ttfr_ms": max(0, int(round(retrieval_seconds * 1000))),
+    }
+    if isinstance(capsule, dict):
+        task_uuid = capsule.get("task_uuid")
+        if isinstance(task_uuid, str) and task_uuid:
+            payload["task_id"] = task_uuid
+        estimates = capsule.get("token_estimates")
+        if isinstance(estimates, dict) and isinstance(estimates.get("total"), int):
+            payload["context_tokens"] = estimates["total"]
+    try:
+        event = telemetry.write_metadata_event(repository, payload)
+    except (telemetry.TelemetryError, OSError, ValueError):
+        return
+    if event is None:
+        return
+    try:
+        validate_schema_file(
+            repository,
+            "token-usage-event.schema.json",
+            json.loads(event.read_text(encoding="utf-8")),
+        )
+    except (BrainError, OSError, ValueError):
+        # Validation belongs to the caller: telemetry.py has no Brain coupling
+        # by design and keeping it that way is worth more than a hard failure
+        # on a channel that is off by default.
+        return
+
+
+def consolidation_counters(repository: Path, mode: str) -> dict[str, object]:
+    """How much the promotion pipeline has actually carried.
+
+    "Nothing was ever consolidated" and "consolidation ran and had nothing to
+    do" produced identical output, which is how a pipeline can be built,
+    tested and left with no input for nine days without anyone noticing.
+
+    Every count is `None` rather than 0 when it cannot be established, so an
+    absent Project Brain stays distinguishable from an empty one. Walking the
+    Brain costs a hash per cited source, and `status` is on the session-start
+    hook's budget, so any failure degrades instead of propagating.
+    """
+    counters: dict[str, object] = {
+        "promotable": None,
+        "blocked": None,
+        "applied": None,
+        "chunks": None,
+    }
+    if mode == "lightweight" or not (repository / "project-brain").is_dir():
+        return counters
+    try:
+        config = load_config(repository)
+        promotable, blocked = promotable_records(repository, config)
+        counters["promotable"] = len(promotable)
+        counters["blocked"] = len(blocked)
+        counters["applied"] = sum(
+            1
+            for promotion in iter_promotions(repository)
+            if promotion.get("status") == "applied"
+        )
+    except (BrainError, OSError, ValueError):
+        return counters
+    try:
+        counters["chunks"] = render_bank_index(repository / "memory-bank")[1]
+    except (BrainError, OSError, ValueError):
+        counters["chunks"] = None
+    return counters
 
 
 def automatic_memory_readiness(repository: Path) -> dict[str, object]:
@@ -2422,6 +3132,9 @@ def complete_governed_task(
                 ),
                 actor=owner,
             )
+            event = record_completion_event(
+                repository, task, outcome, verification, owner
+            )
             connection.commit()
         except Exception:
             connection.rollback()
@@ -2429,10 +3142,66 @@ def complete_governed_task(
             raise
     return {
         "episode_id": episode_id,
+        "event_id": event,
         "task_uuid": completed["id"],
         "revision": completed["revision"],
         "status": completed["status"],
     }
+
+
+def record_completion_event(
+    repository: Path,
+    task: dict[str, object],
+    outcome: str,
+    verification: list[str],
+    owner: str,
+) -> Optional[str]:
+    """Write the completed task as a git-tracked episodic record.
+
+    The episodic layer had exactly one Git-tracked source - the changelog -
+    while completed work lived only in the disposable local database, so the
+    one layer meant to hold "what happened here" could not survive a fresh
+    clone. An `event` is the right carrier: it is the record type that reports
+    that something happened rather than what to do about it, and it is
+    excluded from promotion for that reason, so this is not the engine
+    inventing knowledge - it fixes a lifecycle transition that occurred.
+
+    Best-effort: a task that completed must not be reopened because its
+    episode could not be written. The failure is reported, not raised.
+    """
+    external_id = f"EVENT-{str(task['id']).replace('-', '')[:12]}"
+    goal_parts = [outcome.strip()]
+    if verification:
+        goal_parts.append("Verification: " + "; ".join(verification))
+    try:
+        # `create_record` fingerprints every cited source and raises on one
+        # that no longer resolves. A completed task routinely cites files a
+        # refactor removed, so only what still exists is carried over.
+        sources = [
+            source
+            for source in list(task.get("sources") or [])
+            if isinstance(source, str)
+            and (repository / source.split("#", 1)[0]).is_file()
+        ]
+        event = create_record(
+            repository,
+            "event",
+            # Derived from the task UUID, not its external id: a branch name
+            # is reused, and events are never archived, so a slug-derived id
+            # would collide the second time round and fail the completion.
+            external_id,
+            f"Completed {task['external_id']}: {str(task['title'])[:80]}",
+            [],
+            sources,
+            owner=owner,
+            goal=" ".join(part for part in goal_parts if part),
+        )
+    except (BrainError, ContextError, OSError) as error:
+        # Silent by design: the caller's own report is the channel, and a
+        # completed task must never be reopened because its episode failed.
+        del error
+        return None
+    return str(event["id"])
 
 
 def default_branch(repository: Path) -> Optional[str]:
@@ -3189,7 +3958,20 @@ def build_parser() -> argparse.ArgumentParser:
     hook_context.add_argument("--task-id", required=True)
     hook_context.add_argument("--json", action="store_true")
 
+
     for retrieval_parser in (context, retrieve_command):
+        retrieval_parser.add_argument(
+            "--path",
+            action="append",
+            default=[],
+            dest="paths",
+            help=(
+                "repeatable; also deliver documents that cite this source "
+                "path. Two chunks whose only connection is a shared source "
+                "are unreachable from each other lexically — measured at 0 of "
+                "2 — and this is the route that reaches them."
+            ),
+        )
         retrieval_parser.add_argument(
             "--ephemeral",
             action="store_true",
@@ -3219,6 +4001,21 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="write the capsule's retrieval manifest to ignored local state",
     )
+    # Every entry point that can retrieve takes the gate mode, because the
+    # decision is about the turn and each of these is a turn. The resolution
+    # ladder (flag, environment, runtime.json, then shadow) lives in
+    # `configured_retrieval_gate`, so the flag is only the first rung.
+    for gated_parser in (context, retrieve_command, refresh, hook_context):
+        gated_parser.add_argument(
+            "--gate",
+            choices=RETRIEVAL_GATE_MODES,
+            default=None,
+            help=(
+                "whether this turn decides to retrieve: off never decides, "
+                "shadow decides and records without acting, enforce acts. "
+                "Overrides CONTEXT_RETRIEVAL_GATE and runtime.json."
+            ),
+        )
     refresh.add_argument(
         "--validate",
         action="store_true",
@@ -3448,6 +4245,44 @@ def build_parser() -> argparse.ArgumentParser:
     get_brain.add_argument("--record-id", required=True)
     get_brain.add_argument("--json", action="store_true")
 
+    retrieval_report_command = commands.add_parser(
+        "retrieval-report",
+        help="aggregate what the retrieval manifests recorded, across turns",
+    )
+    retrieval_report_command.add_argument(
+        "--since",
+        type=int,
+        default=None,
+        help="use only the N most recent manifests (records, not days)",
+    )
+    retrieval_report_command.add_argument(
+        "--scope", choices=("local", "governed", "all"), default="all"
+    )
+    retrieval_report_command.add_argument("--json", action="store_true")
+
+    health = commands.add_parser(
+        "health",
+        help="aggregate per-turn refresh health: phase percentiles, timeouts, loss",
+    )
+    health.add_argument(
+        "--window", type=int, default=None, help="use only the last N records"
+    )
+    health.add_argument("--json", action="store_true")
+
+    links = commands.add_parser(
+        "links",
+        help="show every eligible document that cites a given source path",
+    )
+    links.add_argument(
+        "--path", required=True, help="the source path to look up citations of"
+    )
+    links.add_argument(
+        "--prefix",
+        action="store_true",
+        help="also match sources under --path, treating it as a directory",
+    )
+    links.add_argument("--json", action="store_true")
+
     status = commands.add_parser("status", help="show local context index counts")
     status.add_argument("--json", action="store_true")
 
@@ -3476,6 +4311,46 @@ def build_parser() -> argparse.ArgumentParser:
         "compact", help="archive terminal and superseded Brain records"
     )
     compact_command.add_argument("--json", action="store_true")
+
+    bank_audit = commands.add_parser(
+        "bank-audit",
+        help="report chunks whose cited sources changed and chunks overdue for review",
+    )
+    bank_audit.add_argument("--json", action="store_true")
+
+    bank_reverify = commands.add_parser(
+        "bank-reverify",
+        help="re-attest an active chunk against its sources as they are now",
+    )
+    bank_reverify.add_argument("--id", required=True, dest="memory_id")
+    bank_reverify.add_argument(
+        "--review-after",
+        default=None,
+        help="next review date (YYYY-MM-DD); defaults to one year from today",
+    )
+    bank_reverify.add_argument("--json", action="store_true")
+
+    bank_retire = commands.add_parser(
+        "bank-retire",
+        help="close a durable chunk's validity period, archiving or superseding it",
+    )
+    bank_retire.add_argument("--id", required=True, dest="memory_id")
+    bank_retire.add_argument(
+        "--valid-to",
+        required=True,
+        help="the last date the chunk's knowledge held (YYYY-MM-DD)",
+    )
+    bank_retire.add_argument(
+        "--superseded-by",
+        default=None,
+        help=(
+            "the chunk that replaced this one; without it the chunk is "
+            "archived, which is the honest status for knowledge that ceased "
+            "without a successor"
+        ),
+    )
+    bank_retire.add_argument("--reason", default=None)
+    bank_retire.add_argument("--json", action="store_true")
 
     reindex_bank_command = commands.add_parser(
         "reindex-bank",
@@ -3540,6 +4415,9 @@ def main() -> int:
         validate_direct_query_request(arguments)
         database = (arguments.db or default_database(repository)).resolve()
         mode = configured_mode(repository, arguments.mode)
+        gate_mode = configured_retrieval_gate(
+            repository, getattr(arguments, "gate", None)
+        )
         owner = arguments.owner or os.environ.get("PROJECT_BRAIN_OWNER", "local")
         connection = connect(database)
         try:
@@ -3554,6 +4432,23 @@ def main() -> int:
                         f"Context index: {result['documents']} documents "
                         f"({result['removed']} removed, {result['reused']} reused)."
                     )
+                    # A document that was dropped is the one thing a count of
+                    # what stayed cannot report. Summarize by reason here and
+                    # point at --json for the paths.
+                    dropped = result.get("excluded") or []
+                    if isinstance(dropped, list) and dropped:
+                        tally: dict[str, int] = {}
+                        for item in dropped:
+                            reason = str(item.get("reason", "unknown"))
+                            tally[reason] = tally.get(reason, 0) + 1
+                        summary = ", ".join(
+                            f"{reason}: {count}"
+                            for reason, count in sorted(tally.items())
+                        )
+                        print(
+                            f"Excluded: {len(dropped)} document(s) ({summary}); "
+                            "--json lists the paths."
+                        )
                 return 0
 
             if arguments.command == "record":
@@ -3971,8 +4866,114 @@ def main() -> int:
                     )
                 return 0
 
+            if arguments.command == "retrieval-report":
+                result = retrieval_report(
+                    repository, scope=arguments.scope, since=arguments.since
+                )
+                if arguments.json:
+                    print(json.dumps(result, ensure_ascii=False))
+                elif not result["turns"]:
+                    print(
+                        f"No retrieval manifests in scope {arguments.scope}. "
+                        "Lightweight mode writes none."
+                    )
+                else:
+                    gate = result["gate"]
+                    print(
+                        f"Retrieval report ({result['turns']} turn(s), scope "
+                        f"{result['scope']}): {result['empty_selection']} with an "
+                        "empty selection."
+                    )
+                    print(
+                        "  query source: "
+                        + (
+                            ", ".join(
+                                f"{name} {count}"
+                                for name, count in result["query_source"].items()
+                            )
+                            or "not recorded"
+                        )
+                    )
+                    print(
+                        f"  gate: {gate['decided']} decided, skip rate "
+                        f"{gate['skip_rate'] if gate['skip_rate'] is not None else 'n/a'}"
+                        + (
+                            " ("
+                            + ", ".join(
+                                f"{name} {count}"
+                                for name, count in gate["skip_reasons"].items()
+                            )
+                            + ")"
+                            if gate["skip_reasons"]
+                            else ""
+                        )
+                    )
+                    for label in ("top_candidate_score", "top_delivered_score"):
+                        band = result[label]
+                        print(
+                            f"  {label.replace('_', ' ')}: "
+                            f"p50 {band['p50']} p95 {band['p95']} max {band['max']} "
+                            f"({band['samples']} sample(s))"
+                        )
+                    for name, band in result["phase_seconds"].items():
+                        print(
+                            f"  phase {name}: p50 {band['p50']} p95 {band['p95']} "
+                            f"({band['samples']} sample(s))"
+                        )
+                    if result["excluded_reasons"]:
+                        print(
+                            "  excluded: "
+                            + ", ".join(
+                                f"{name} {count}"
+                                for name, count in result["excluded_reasons"].items()
+                            )
+                        )
+                    if result["match_strength"]:
+                        print(
+                            "  match: "
+                            + ", ".join(
+                                f"{name} {count}"
+                                for name, count in result["match_strength"].items()
+                            )
+                        )
+                    for path_name, count in result["top_paths"].items():
+                        print(f"    {count:>4}  {path_name}")
+                return 0
+
+            if arguments.command == "health":
+                result = refresh_health(repository, arguments.window)
+                if arguments.json:
+                    print(json.dumps(result, ensure_ascii=False))
+                elif not result["turns"]:
+                    print(
+                        "No refresh health records yet "
+                        "(memory-bank/local/refresh-health.ndjson)."
+                    )
+                else:
+                    print(f"Refresh health ({result['turns']} turn(s)):")
+                    for name, band in result["phase_seconds"].items():
+                        print(
+                            f"  phase {name}: p50 {band['p50']} p95 {band['p95']} "
+                            f"max {band['max']} ({band['samples']} sample(s))"
+                        )
+                    print(
+                        f"  timeouts: {result['timeout_rate']}; lossy capsules: "
+                        f"{result['lossy_capsule_rate']}; incomplete layers: "
+                        f"{result['incomplete_layers_rate']}"
+                    )
+                    if result["hook_status"]:
+                        print(
+                            "  hook status: "
+                            + ", ".join(
+                                f"{name} {count}"
+                                for name, count in result["hook_status"].items()
+                            )
+                        )
+                return 0
+
             if arguments.command == "status":
                 layers = {layer: 0 for layer in DOCUMENT_LAYERS}
+                consolidation = consolidation_counters(repository, mode)
                 for row in connection.execute(
                     "SELECT layer, COUNT(*) AS count FROM documents GROUP BY layer"
                 ):
@@ -3995,10 +4996,24 @@ def main() -> int:
                     "layers": layers,
                     "database": str(database),
                     "automatic_memory": automatic_memory_readiness(repository),
+                    "consolidation": consolidation,
                 }
                 if arguments.json:
                     print(json.dumps(result, ensure_ascii=False))
                 else:
+                    counts = result["consolidation"]
+                    unknown = "unavailable"
+                    print(
+                        "Consolidation: "
+                        f"{counts['promotable'] if counts['promotable'] is not None else unknown}"
+                        " promotable candidate(s), "
+                        f"{counts['blocked'] if counts['blocked'] is not None else unknown}"
+                        " blocked, "
+                        f"{counts['applied'] if counts['applied'] is not None else unknown}"
+                        " promotion(s) applied, "
+                        f"{counts['chunks'] if counts['chunks'] is not None else unknown}"
+                        " durable chunk(s)."
+                    )
                     print(
                         f"Context index: {result['documents']} documents, "
                         f"{result['episodes']} episodes, {result['working']} working tasks "
@@ -4012,6 +5027,51 @@ def main() -> int:
                     )
                     if readiness["remediation"]:
                         print(f"Remediation: {readiness['remediation']}")
+                return 0
+
+            if arguments.command == "links":
+                selected, withheld = linked_documents(
+                    connection,
+                    repository,
+                    load_config(repository),
+                    arguments.path,
+                    prefix=arguments.prefix,
+                )
+                result = {
+                    "path": arguments.path,
+                    "prefix": arguments.prefix,
+                    "documents": [
+                        {
+                            key: item[key]
+                            for key in (
+                                "path", "layer", "kind", "title",
+                                "ref_path", "ref_kind", "authority", "lifecycle",
+                            )
+                        }
+                        for item in selected
+                    ],
+                    "excluded": withheld,
+                }
+                if arguments.json:
+                    print(json.dumps(result, ensure_ascii=False))
+                elif not selected:
+                    print(
+                        f"No eligible document cites {arguments.path}."
+                        + (
+                            f" {len(withheld)} withheld by policy or freshness."
+                            if withheld
+                            else ""
+                        )
+                    )
+                else:
+                    for item in result["documents"]:
+                        print(
+                            f"{item['layer']} {item['kind']}: "
+                            f"{item['path']} — {item['title']}"
+                        )
+                        print(f"  cites {item['ref_path']} ({item['ref_kind']})")
+                    for item in withheld:
+                        print(f"withheld {item['path']}: {item['reason']}")
                 return 0
 
             if arguments.command == "search":
@@ -4053,6 +5113,8 @@ def main() -> int:
                     task_id=arguments.task_id,
                     limit=arguments.limit,
                     ephemeral=arguments.ephemeral,
+                    gate_mode=gate_mode,
+                    paths=arguments.paths,
                 )
                 if arguments.json:
                     print(serialize_capsule(result))
@@ -4066,12 +5128,37 @@ def main() -> int:
                     repository,
                     mode=mode,
                     task_id=arguments.task_id,
+                    gate_mode=gate_mode,
                 )
                 if result is None:
                     # A valid current branch with no meaningful change has no
                     # context. Cursor uses this distinct code to remove a
                     # foreign branch's stale rule; real failures remain code 1.
                     return 3
+                gate = result.get("gate")
+                if (
+                    isinstance(gate, dict)
+                    and gate.get("mode") == "enforce"
+                    and gate.get("decision") == "skip"
+                ):
+                    # Print nothing and exit with a status the Cursor delivery
+                    # treats as "keep what you have". Rendering the withheld
+                    # capsule would satisfy that hook's `working:*` check and
+                    # overwrite the rule with an empty one on every skipped
+                    # turn, which is the opposite of what a skip means.
+                    return 4
+                # Cursor's read path never enters the refresh branch, so
+                # without this the health series would systematically
+                # under-report the one client whose capsule is a turn stale.
+                append_refresh_health(
+                    repository,
+                    {
+                        "at": utc_now(),
+                        "mode": mode,
+                        "omitted": result.get("omitted"),
+                        "source": "hook-context",
+                    },
+                )
                 if arguments.json:
                     print(serialize_capsule(result))
                 else:
@@ -4107,6 +5194,9 @@ def main() -> int:
                             limit=arguments.limit,
                             ephemeral=arguments.ephemeral,
                             refresh_index=False,
+                            query_source="prompt",
+                            phase_seconds=index_result.get("phase_seconds"),
+                            gate_mode=gate_mode,
                         )
                     except (ContextError, BrainError, RetrievalError) as error:
                         # A capsule needs an active task; the layer refresh
@@ -4143,6 +5233,25 @@ def main() -> int:
                     errors = validate_repository(repository)
                     result["brain_validation"] = "valid" if not errors else "invalid"
                     warnings.extend(errors)
+                # The series the `health` command reads. Deliberately carries
+                # no query text and no selected paths: a health record must
+                # not become a second channel for what the manifest already
+                # keeps under privacy rules.
+                emit_refresh_telemetry(repository, capsule, retrieval_seconds)
+                append_refresh_health(
+                    repository,
+                    {
+                        "at": utc_now(),
+                        "mode": mode,
+                        "phase_seconds": phases,
+                        "omitted": (capsule or {}).get("omitted"),
+                        "layers_updated": all(
+                            layers[layer] == "updated" for layer in DOCUMENT_LAYERS
+                        ),
+                        "warnings": len(warnings),
+                        "source": "refresh",
+                    },
+                )
                 if arguments.json:
                     print(json.dumps(result, ensure_ascii=False))
                 else:
@@ -4163,6 +5272,18 @@ def main() -> int:
                                 else f"{behind} commit(s) behind",
                             )
                         )
+                    # The hook runs under a hard budget and the JSON branch it
+                    # does not take was the only place these numbers appeared,
+                    # so a run creeping toward the ceiling was invisible to
+                    # everyone who could act on it.
+                    print(
+                        "phases: "
+                        + " ".join(
+                            f"{name} {round(float(phases[name]) * 1000)}ms"
+                            for name in ("stat", "index", "retrieval")
+                            if isinstance(phases.get(name), (int, float))
+                        )
+                    )
                     if "brain_validation" in result:
                         print(f"brain-validation: {result['brain_validation']}")
                     for warning in warnings:
@@ -4295,6 +5416,77 @@ def main() -> int:
                     print(json.dumps(result))
                 else:
                     print(f"Project Brain compacted: {result['moved']} record(s) archived.")
+                return 0
+
+            if arguments.command == "bank-audit":
+                result = audit_bank(repository)
+                if arguments.json:
+                    print(json.dumps(result))
+                else:
+                    print(
+                        f"Memory bank audit: {result['chunks']} chunk(s), "
+                        f"{len(result['source_changed'])} with a changed source, "
+                        f"{len(result['overdue_review'])} overdue for review, "
+                        f"{len(result['undigested'])} without source digests, "
+                        f"{len(result['duplicates'])} near-duplicate pair(s)."
+                    )
+                    for pair in result["duplicates"]:
+                        print(
+                            f"  near-duplicate: {pair['left']} ~ {pair['right']} "
+                            f"({pair['similarity']})"
+                        )
+                    for item in result["source_changed"]:
+                        print(
+                            f"  source-{item['state']}: {item['chunk']} "
+                            f"cites {item['source']}"
+                        )
+                    for item in result["overdue_review"]:
+                        print(
+                            f"  overdue-review: {item['chunk']} "
+                            f"(due {item['review_after']})"
+                        )
+                    for path in result["undigested"]:
+                        print(f"  undigested: {path}")
+                return 0
+
+            if arguments.command == "bank-reverify":
+                result = reverify_chunk(
+                    repository,
+                    arguments.memory_id,
+                    review_after=arguments.review_after,
+                )
+                if arguments.json:
+                    print(json.dumps(result))
+                else:
+                    print(
+                        f"Re-verified {result['id']} against "
+                        f"{len(result['source_digests'])} source(s) on "
+                        f"{result['last_verified']}; next review "
+                        f"{result['review_after']}."
+                    )
+                return 0
+
+            if arguments.command == "bank-retire":
+                result = retire_chunk(
+                    repository,
+                    arguments.memory_id,
+                    valid_to=arguments.valid_to,
+                    superseded_by=arguments.superseded_by,
+                    reason=arguments.reason,
+                )
+                if arguments.json:
+                    print(json.dumps(result))
+                else:
+                    replacement = (
+                        f", superseded by {result['superseded_by']}"
+                        if result["superseded_by"]
+                        else ""
+                    )
+                    print(
+                        f"Retired {result['id']}: {result['status']} "
+                        f"as of {result['valid_to']}{replacement}. "
+                        f"Index rewritten with {result['chunks']} chunk row(s)."
+                    )
                 return 0
 
             if arguments.command == "reindex-bank":

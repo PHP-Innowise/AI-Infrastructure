@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from datetime import date, timedelta
@@ -123,6 +124,123 @@ class MemoryBankValidatorTest(unittest.TestCase):
         self.add_chunk()
 
         self.assertEqual([], VALIDATOR.validate_bank(self.bank))
+
+    def update_index_status(self, status: str) -> None:
+        index_path = self.bank / "INDEX.md"
+        index_path.write_text(
+            index_path.read_text(encoding="utf-8").replace(
+                "| active |", f"| {status} |"
+            ),
+            encoding="utf-8",
+        )
+
+    def test_archived_chunk_with_a_deleted_source_only_warns(self) -> None:
+        # Deleting a cited file is routine work — dropping a controller,
+        # regenerating a schema. A chunk that was correctly archived must not
+        # turn that into a failure on an unrelated task, leaving the engineer
+        # a choice between faking `sources` and deleting the record.
+        self.add_chunk()
+        self.update_chunk_metadata(
+            status="archived", valid_to=(date.today() - timedelta(days=1)).isoformat()
+        )
+        self.update_index_status("archived")
+        self.repository.joinpath("AGENTS.md").unlink()
+
+        errors, warnings = VALIDATOR.validate_bank_report(self.bank)
+        self.assertEqual([], errors)
+        self.assertTrue(
+            any("cited source no longer exists" in warning for warning in warnings),
+            warnings,
+        )
+        self.assertEqual(errors, VALIDATOR.validate_bank(self.bank))
+
+    def test_closed_period_chunk_with_a_deleted_source_only_warns(self) -> None:
+        # The same rule reached by date rather than by status.
+        self.add_chunk()
+        self.update_chunk_metadata(
+            status="archived", valid_to=(date.today() - timedelta(days=1)).isoformat()
+        )
+        self.update_index_status("archived")
+        self.repository.joinpath("AGENTS.md").unlink()
+
+        errors, _ = VALIDATOR.validate_bank_report(self.bank)
+        self.assertEqual([], errors)
+
+    def test_active_chunk_with_a_deleted_source_is_still_an_error(self) -> None:
+        # The other half of the contract: a chunk that still answers questions
+        # must still be able to prove where its answer came from.
+        self.add_chunk()
+        self.repository.joinpath("AGENTS.md").unlink()
+
+        errors, warnings = VALIDATOR.validate_bank_report(self.bank)
+        self.assertTrue(
+            any("source path does not exist" in error for error in errors), errors
+        )
+        # The chunk was not downgraded to a warning; the only warning is the
+        # index-row diagnostic that follows from the error above.
+        self.assertFalse(
+            any("cited source no longer exists" in warning for warning in warnings),
+            warnings,
+        )
+
+    def test_source_escaping_the_repository_is_fatal_in_every_status(self) -> None:
+        # Containment is a boundary guarantee, not a freshness one, so it is
+        # not softened by the chunk being terminal.
+        self.add_chunk()
+        self.update_chunk_metadata(
+            status="archived",
+            valid_to=(date.today() - timedelta(days=1)).isoformat(),
+            sources=["../outside.md"],
+        )
+        self.update_index_status("archived")
+
+        errors, _ = VALIDATOR.validate_bank_report(self.bank)
+        self.assertTrue(
+            any("escapes the repository" in error for error in errors), errors
+        )
+
+    def test_an_index_row_for_a_broken_chunk_is_not_called_missing(self) -> None:
+        # The chunk is on disk and already reported its own error; telling the
+        # reader it is missing sends them looking for a file that is right
+        # there.
+        self.add_chunk()
+        self.update_chunk_metadata(type=[])
+
+        errors, warnings = VALIDATOR.validate_bank_report(self.bank)
+        self.assertTrue(any("type must be one of" in error for error in errors), errors)
+        self.assertFalse(
+            any("points to a missing chunk" in error for error in errors), errors
+        )
+        self.assertTrue(
+            any("index row retained for invalid chunk" in warning for warning in warnings),
+            warnings,
+        )
+
+    def test_an_index_row_for_a_deleted_chunk_is_still_an_error(self) -> None:
+        self.add_chunk()
+        (self.bank / "chunks" / "MEM-0001-layering-convention.md").unlink()
+
+        errors, _ = VALIDATOR.validate_bank_report(self.bank)
+        self.assertTrue(
+            any("points to a missing chunk" in error for error in errors), errors
+        )
+
+    def test_warnings_alone_leave_the_cli_green(self) -> None:
+        self.add_chunk()
+        self.update_chunk_metadata(
+            status="archived", valid_to=(date.today() - timedelta(days=1)).isoformat()
+        )
+        self.update_index_status("archived")
+        self.repository.joinpath("AGENTS.md").unlink()
+
+        result = subprocess.run(
+            [sys.executable, str(MODULE_PATH), str(self.bank)],
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("Memory bank validation passed.", result.stdout)
+        self.assertIn("Memory bank validation warnings (1)", result.stderr)
 
     def test_all_session_hooks_report_json_frontmatter_status(self) -> None:
         self.add_chunk('```json\n"status": "needs-review",\n```\n')

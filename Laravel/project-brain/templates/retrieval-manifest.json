@@ -18,9 +18,15 @@
     ]
   },
   "id": "UUIDV4",
+  "phase_seconds": {
+    "index": 0.0,
+    "retrieval": 0.0,
+    "stat": 0.0
+  },
   "provider": "sqlite-fts5",
   "query": "Query",
-  "schema_version": 1,
+  "query_source": "prompt",
+  "schema_version": 2,
   "selected": [],
   "task_id": "UUIDV4",
   "task_revision": 1,

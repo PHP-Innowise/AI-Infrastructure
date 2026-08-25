@@ -277,6 +277,43 @@ relevant validator fails. Record user-facing or release-relevant changes in
 the affected `CHANGELOG.md` (the root one when the change is to the shared
 core).
 
+## Changing a Description
+
+An agent's or skill's `description:` is the selector: it is what decides which
+of roughly forty-five skills answers a request. Changing one, or adding or
+removing an entry from the roster, changes routing for every user of that
+edition — and until there was eval data, no change of that kind carried a
+single number about whether the choice got better or worse.
+
+A pull request that edits any `description:`, or that adds or removes an agent
+or a skill, must attach the delta to that edition's routing baseline:
+
+```bash
+python3 scripts/routing_eval.py --edition Symfony --runs 5 --write-baseline
+```
+
+This invokes a model, costs money and takes minutes, so it is deliberately
+outside CI — the same treatment `docs/CI.md` gives the external harness. Run
+it before and after, and put both pass rates in the pull request.
+
+A baseline records the `policy_digest` of the surface that produced it, so a
+stale one is mechanically visible: if the digest in
+`install/policy-lock/<edition>-routing-baseline.json` does not match the one in
+`<edition>/.accelerator-policy-lock.json`, the numbers describe a different
+roster.
+
+Read `miss` and `wrong` differently. A `miss` — nothing triggered — means the
+description is too narrow. A `wrong` — a neighbour triggered — means it
+overlaps that neighbour. They are repaired in opposite directions, which is
+why the runner never collapses them into one failure count.
+
+The cheap check that needs no model is
+`python3 -m unittest tests.test_check_stabilization tests.test_policy_lock`
+plus the per-edition skill-routing floor in
+`project-brain/tests/fixtures/skill-routing-golden.json`, which asserts an
+acceptable skill still reaches the capsule's two procedural slots at least as
+often as it does today.
+
 ## Downstream Customization and Upgrades
 
 Treat a copied accelerator or Infrastructure-Creator output as downstream

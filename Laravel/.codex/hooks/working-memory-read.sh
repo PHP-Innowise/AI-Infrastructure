@@ -59,6 +59,19 @@ if [ -n "$QUERY" ] && [ -n "$TASK_ID" ]; then
 fi
 
 REPORT=$(run python3 "$CONTEXT_CLI" "${ARGUMENTS[@]}" 2>/dev/null)
+HOOK_STATUS=$?
+
+# Recorded before the early exit below, because the one case worth measuring
+# is the one that produces no report: on a timeout `timeout` returns 124 and
+# the Python process was killed before it could append anything itself, so
+# the shell has to write this line or the turn leaves no trace at all. The
+# record carries a status and nothing else — no query, no paths.
+if [ -d "$ROOT_DIR/memory-bank/local" ] || mkdir -p "$ROOT_DIR/memory-bank/local" 2>/dev/null; then
+  printf '{"at":"%s","hook_status":%s,"source":"hook"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$HOOK_STATUS" \
+    >> "$ROOT_DIR/memory-bank/local/refresh-health.ndjson" 2>/dev/null || true
+fi
+
 [ -n "$REPORT" ] || exit 0
 
 echo "Memory refresh (retrieved context is not authoritative — verify the source)"

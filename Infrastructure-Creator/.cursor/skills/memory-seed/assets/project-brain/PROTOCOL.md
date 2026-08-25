@@ -86,10 +86,19 @@ restores both stores. Compaction uses the same snapshot-and-move-journal rule.
 The public command is:
 
 ```text
-python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID
+python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID [--path SOURCE ...]
+python3 memory-bank/scripts/context.py links --path SOURCE [--prefix]
 ```
 
 `context` is an alias. Retrieval uses SQLite FTS5/BM25 and bounded snippets.
+
+`--path` is repeatable and also delivers documents that cite that source.
+Two durable chunks whose only connection is a shared `sources[]` entry are
+unreachable from each other lexically — measured at 0 of 2, and 2 of 2 through
+the link index. Path-linked items lead their layer, are recorded in the
+manifest with `selection: "path-link"` and no `match`, and do not change
+`no_match`, which stays a statement about the query. `links` reports the same
+citations without retrieving; both apply the full runtime filter.
 Category budgets are policy 1,200; handoff 1,500; durable 3,500; dynamic 1,500;
 evidence 2,000 estimated tokens. Internal candidate selection may escalate to
 its 12,000-token conflict ceiling, but the delivered capsule is always capped

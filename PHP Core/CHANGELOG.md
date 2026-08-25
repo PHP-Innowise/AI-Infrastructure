@@ -13,6 +13,39 @@ it at the top of every session.
 
 ### Added
 
+- **Workflow skills now produce and retire durable knowledge, and the
+  procedural rules gained a lifecycle** (roadmap H2-02, H2-03, H2-04, H2-05,
+  H2-07; the engine changes behind them are in the root changelog).
+  - `memory-bank` skill: retiring a chunk is `context.py bank-retire`, not a
+    hand edit of frontmatter on both sides of a replacement link, and a chunk
+    written by hand is followed by `bank-reverify` so it can later notice that
+    what it cites has moved on. The two questions `valid_to` and
+    `superseded_by` answer are spelled out, because the field was named in no
+    skill and an agent following policy honestly set a status and never wrote
+    a date.
+  - `/flow-review` materializes each confirmed finding as a `finding` record —
+    from the orchestrator after synthesis, not from the review agents, which
+    stay read-only so the stage keeps exactly one write-capable agent. Until
+    now a review wrote its findings into the task's `--progress`, and the
+    `task` record type can never be promoted, so nothing a review produced
+    could ever become durable memory.
+  - `systematic-debugger` records its confirmed root cause directly (it is
+    already declared write-capable); `code-reviewer` and `security-reviewer`
+    gained the opposite instruction, so the division is stated where each
+    skill is read rather than inferred.
+  - `DOD.md`, Standard tier: every confirmed review or debugging finding
+    exists as a `finding` record — resolved, or explicitly deferred.
+  - `reflect` skill and `STABILIZATION.md`: the rule template gained
+    `Retired:` and `Superseded-by:` and the file gained a `## Retired rules`
+    section, and the skill now takes an explicit add / overwrite / retire
+    decision before writing. A pillar that can only add runs out of budget,
+    because `AGENTS.md` is paid on every session and gated in CI.
+  - `.accelerator-policy-lock.json` ships with the edition: a manifest of
+    sha256 digests over the surface the model reads, plus each agent's
+    declared model. The session banner prints its short digest beside the
+    version, because a version that moves once a release says nothing about
+    whether the prompt layer changed.
+
 - Agent `<example>` blocks moved out of `description:` frontmatter into a
   `## Selection examples` body section. An agent's description is loaded into
   the orchestrator's context on every session, spawned or not, and the

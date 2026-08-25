@@ -147,7 +147,15 @@ class ContextEngineTest(unittest.TestCase):
             self.assertFalse(thread.is_alive(), "concurrent operation did not finish")
         return results
 
-    def write_memory(self, name: str, status: object, body: str) -> None:
+    def write_memory(
+        self,
+        name: str,
+        status: object,
+        body: str,
+        *,
+        review_after: object = None,
+        valid_to: object = None,
+    ) -> None:
         memory_id = "-".join(name.split("-", 2)[:2])
         today = date.today()
         self.repository.joinpath("AGENTS.md").write_text(
@@ -163,15 +171,29 @@ class ContextEngineTest(unittest.TestCase):
             "tags": ["context"],
             "created": today.isoformat(),
             "last_verified": today.isoformat(),
-            "review_after": (today + timedelta(days=365)).isoformat(),
+            "review_after": review_after
+            or (today + timedelta(days=365)).isoformat(),
             "sources": ["AGENTS.md"],
             "supersedes": [],
             "superseded_by": "MEM-9999" if status == "superseded" else None,
         }
+        if valid_to is not None:
+            metadata["valid_to"] = valid_to
         self.repository.joinpath("memory-bank/chunks", name).write_text(
             f"---\n{json.dumps(metadata, indent=2)}\n---\n\n{body}\n",
             encoding="utf-8",
         )
+
+    def source_state_row(self, path: str) -> tuple:
+        connection = sqlite3.connect(self.repository / "memory-bank/local/context.db")
+        try:
+            return connection.execute(
+                "SELECT mtime_ns, size, eligible_until FROM document_source_state "
+                "WHERE path = ?",
+                (path,),
+            ).fetchone()
+        finally:
+            connection.close()
 
     def create_old_episode_database(self) -> Path:
         database = self.repository / "memory-bank/local/context.db"
@@ -554,6 +576,292 @@ class ContextEngineTest(unittest.TestCase):
         searched = self.run_context("search", "vermilion", "--json")
         self.assertEqual(0, searched.returncode, searched.stderr)
         self.assertEqual([], json.loads(searched.stdout)["documents"])
+
+    def excluded_reasons(self, *arguments: str) -> dict[str, str]:
+        indexed = self.run_context("index", "--json", *arguments)
+        self.assertEqual(0, indexed.returncode, indexed.stderr)
+        payload = json.loads(indexed.stdout)
+        return {item["path"]: item["reason"] for item in payload["excluded"]}
+
+    def test_index_excludes_a_chunk_past_valid_to_and_says_why(self) -> None:
+        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        self.write_memory(
+            "MEM-0001-closed-period.md",
+            "active",
+            "# Closed Period\n\nThe cerulean rollout is finished.",
+            valid_to=yesterday,
+        )
+
+        reasons = self.excluded_reasons()
+        chunk = "memory-bank/chunks/MEM-0001-closed-period.md"
+        self.assertEqual("retired", reasons.get(chunk), reasons)
+
+        searched = self.run_context("search", "cerulean", "--json")
+        self.assertEqual([], json.loads(searched.stdout)["documents"])
+
+    def test_index_excludes_an_overdue_chunk_and_says_why(self) -> None:
+        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        self.write_memory(
+            "MEM-0001-overdue.md",
+            "active",
+            "# Overdue\n\nThe cerulean rollout needs a look.",
+            review_after=yesterday,
+        )
+
+        reasons = self.excluded_reasons()
+        chunk = "memory-bank/chunks/MEM-0001-overdue.md"
+        # An expired review date is not a malformed file: naming it
+        # `overdue-review` rather than `invalid` is the difference between
+        # "go do the review" and "go fix the frontmatter".
+        self.assertEqual("overdue-review", reasons.get(chunk), reasons)
+
+    def test_human_readable_index_reports_that_documents_were_dropped(self) -> None:
+        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        self.write_memory(
+            "MEM-0001-closed.md",
+            "active",
+            "# Closed\n\nThe cerulean rollout is finished.",
+            valid_to=yesterday,
+        )
+
+        indexed = self.run_context("index")
+        self.assertEqual(0, indexed.returncode, indexed.stderr)
+        # A count of what stayed cannot report what left. Without this line a
+        # reader of the plain output cannot tell an empty bank from a retired
+        # one.
+        self.assertIn("Excluded: 1 document(s) (retired: 1)", indexed.stdout)
+
+    def test_index_reports_a_reason_for_every_kind_of_dropped_document(self) -> None:
+        self.write_memory(
+            "MEM-0002-archived.md",
+            "archived",
+            "# Archived\n\nThe cerulean rollout ended without a successor.",
+        )
+        self.repository.joinpath("memory-bank/chunks/MEM-0003-broken.md").write_text(
+            '---\n{"status": "active"}\n---\n\n# Broken\n\nNo frontmatter keys.\n',
+            encoding="utf-8",
+        )
+
+        reasons = self.excluded_reasons()
+        self.assertEqual(
+            "archived", reasons.get("memory-bank/chunks/MEM-0002-archived.md"), reasons
+        )
+        self.assertEqual(
+            "invalid", reasons.get("memory-bank/chunks/MEM-0003-broken.md"), reasons
+        )
+        # The structural skips - git-ignored files, a second pattern claiming
+        # an owned file, a mirrored copy of an indexed skill - are how
+        # discovery is defined and would drown the channel if reported.
+        self.assertTrue(
+            all(path.startswith("memory-bank/chunks/") for path in reasons), reasons
+        )
+
+    def incremental_index_on(self, today: date) -> dict:
+        """Run one incremental pass with the calendar moved to ``today``.
+
+        The defect is that a chunk retires because a date arrives, not because
+        anyone touches the file — so the only thing a faithful test may change
+        between the two passes is what day it is. Both modules that ask are
+        patched: `context` decides cache eligibility and `validate` decides
+        whether the chunk may still call itself active.
+        """
+
+        class FrozenDate(date):
+            @classmethod
+            def today(cls) -> date:
+                return today
+
+        connection = CONTEXT.connect(self.repository / "memory-bank/local/context.db")
+        try:
+            with mock.patch.object(CONTEXT, "date", FrozenDate), mock.patch.object(
+                sys.modules["validate"], "date", FrozenDate
+            ):
+                return CONTEXT.index_repository(
+                    connection, self.repository, incremental=True
+                )
+        finally:
+            connection.close()
+
+    def test_incremental_index_retires_a_chunk_when_its_valid_to_arrives(self) -> None:
+        # Indexed while current, then the calendar moves one day past its
+        # valid_to. Nothing on disk changes — which is exactly why the
+        # (mtime_ns, size) cache reused the row forever and served a fact
+        # that had stopped being true on every prompt.
+        boundary = date.today() + timedelta(days=1)
+        self.write_memory(
+            "MEM-0001-closing-period.md",
+            "active",
+            "# Closing Period\n\nThe cerulean rollout is current.",
+            valid_to=boundary.isoformat(),
+        )
+        relative = "memory-bank/chunks/MEM-0001-closing-period.md"
+
+        self.assertEqual(0, self.run_context("index", "--json").returncode)
+        found = self.run_context("search", "cerulean", "--json")
+        self.assertEqual(
+            [relative], [item["path"] for item in json.loads(found.stdout)["documents"]]
+        )
+        self.assertEqual(boundary.isoformat(), self.source_state_row(relative)[2])
+
+        result = self.incremental_index_on(boundary + timedelta(days=1))
+
+        self.assertEqual(
+            "retired",
+            {item["path"]: item["reason"] for item in result["excluded"]}.get(relative),
+            result["excluded"],
+        )
+        self.assertEqual([], json.loads(
+            self.run_context("search", "cerulean", "--json").stdout
+        )["documents"])
+        # The cache row goes with it, so the next pass has nothing to reuse.
+        self.assertIsNone(self.source_state_row(relative))
+
+    def test_incremental_index_retires_a_chunk_when_its_review_falls_due(self) -> None:
+        boundary = date.today() + timedelta(days=1)
+        self.write_memory(
+            "MEM-0001-review-due.md",
+            "active",
+            "# Review Due\n\nThe cerulean rollout is current.",
+            review_after=boundary.isoformat(),
+        )
+        relative = "memory-bank/chunks/MEM-0001-review-due.md"
+        self.assertEqual(0, self.run_context("index", "--json").returncode)
+
+        result = self.incremental_index_on(boundary + timedelta(days=1))
+
+        self.assertEqual(
+            "overdue-review",
+            {item["path"]: item["reason"] for item in result["excluded"]}.get(relative),
+            result["excluded"],
+        )
+        self.assertEqual([], json.loads(
+            self.run_context("search", "cerulean", "--json").stdout
+        )["documents"])
+
+    def test_incremental_index_keeps_a_chunk_on_its_boundary_day(self) -> None:
+        # `valid_to` names the last day the chunk holds, not the first day it
+        # does not: an off-by-one here retires knowledge a day early.
+        boundary = date.today() + timedelta(days=1)
+        self.write_memory(
+            "MEM-0001-last-day.md",
+            "active",
+            "# Last Day\n\nThe cerulean rollout is current.",
+            valid_to=boundary.isoformat(),
+        )
+        relative = "memory-bank/chunks/MEM-0001-last-day.md"
+        self.assertEqual(0, self.run_context("index", "--json").returncode)
+
+        result = self.incremental_index_on(boundary)
+
+        self.assertEqual(
+            [], [item for item in result["excluded"] if item["path"] == relative]
+        )
+        self.assertEqual([relative], [
+            item["path"]
+            for item in json.loads(
+                self.run_context("search", "cerulean", "--json").stdout
+            )["documents"]
+        ])
+
+    def test_incremental_index_still_reuses_a_chunk_inside_its_boundary(self) -> None:
+        # The other half of the contract: the calendar gate must not turn the
+        # incremental pass into a full one. Reuse is what makes per-prompt
+        # indexing affordable.
+        self.write_memory(
+            "MEM-0001-current.md",
+            "active",
+            "# Current\n\nThe cerulean rollout is current.",
+            valid_to=(date.today() + timedelta(days=30)).isoformat(),
+        )
+        relative = "memory-bank/chunks/MEM-0001-current.md"
+        self.assertEqual(0, self.run_context("index", "--json").returncode)
+
+        payload = json.loads(
+            self.run_context("index", "--json", "--incremental").stdout
+        )
+        self.assertTrue(payload["incremental"])
+        self.assertGreater(payload["reused"], 0)
+        self.assertEqual(
+            [], [item for item in payload["excluded"] if item["path"] == relative]
+        )
+        self.assertEqual(
+            [relative],
+            [
+                item["path"]
+                for item in json.loads(
+                    self.run_context("search", "cerulean", "--json").stdout
+                )["documents"]
+            ],
+        )
+
+    def test_source_state_written_before_the_boundary_column_is_migrated(self) -> None:
+        self.write_memory(
+            "MEM-0001-current.md",
+            "active",
+            "# Current\n\nThe cerulean rollout is current.",
+        )
+        self.assertEqual(0, self.run_context("index", "--json").returncode)
+
+        database = self.repository / "memory-bank/local/context.db"
+        connection = sqlite3.connect(database)
+        try:
+            # Recreate the three-column table exactly as an older build left
+            # it. CREATE TABLE IF NOT EXISTS would leave this alone, so
+            # without the ALTER every insert fails and the developer is told
+            # to delete the database by hand.
+            rows = connection.execute(
+                "SELECT path, mtime_ns, size FROM document_source_state"
+            ).fetchall()
+            connection.execute("DROP TABLE document_source_state")
+            connection.execute(
+                "CREATE TABLE document_source_state("
+                "path TEXT PRIMARY KEY, mtime_ns INTEGER NOT NULL, "
+                "size INTEGER NOT NULL)"
+            )
+            connection.executemany(
+                "INSERT INTO document_source_state(path, mtime_ns, size) "
+                "VALUES (?, ?, ?)",
+                rows,
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        incremental = self.run_context("index", "--json", "--incremental")
+        self.assertEqual(0, incremental.returncode, incremental.stderr)
+        self.assertNotIn("Traceback", incremental.stderr)
+        # A row with no recorded boundary cannot express expiry, so the chunk
+        # is re-validated once and comes back with one.
+        self.assertIsNotNone(
+            self.source_state_row("memory-bank/chunks/MEM-0001-current.md")[2]
+        )
+        self.assertEqual(
+            ["memory-bank/chunks/MEM-0001-current.md"],
+            [
+                item["path"]
+                for item in json.loads(
+                    self.run_context("search", "cerulean", "--json").stdout
+                )["documents"]
+            ],
+        )
+
+    def test_refresh_reports_phase_durations_without_json(self) -> None:
+        # The hook echoes this report verbatim and never passes --json, so
+        # until now the one number that says whether the turn is approaching
+        # its five-second budget was printed only where nobody was looking.
+        self.repository.joinpath("specs/timing.md").write_text(
+            "# Timing\n\nThe cerulean rollout is timed.\n", encoding="utf-8"
+        )
+        refreshed = self.run_context("refresh")
+        self.assertEqual(0, refreshed.returncode, refreshed.stderr)
+        phases = [
+            line for line in refreshed.stdout.splitlines()
+            if line.startswith("phases: ")
+        ]
+        self.assertEqual(1, len(phases), refreshed.stdout)
+        for name in ("stat", "index", "retrieval"):
+            self.assertIn(name, phases[0])
+        self.assertRegex(phases[0], r"stat \d+ms index \d+ms retrieval \d+ms")
 
     def test_index_skips_unhashable_type_and_status_metadata(self) -> None:
         self.write_memory(

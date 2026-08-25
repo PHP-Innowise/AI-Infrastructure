@@ -1,0 +1,106 @@
+{
+  "_comment": "Skill-routing golden set. The procedural layer is the largest slice of the index and had no eval case at all. `acceptable` is a SET, not one slug: several of these requests have two defensibly correct answers and asserting one would measure the fixture author's taste rather than routing quality. The gate asserts an acceptable skill reaches the TOP TWO of the procedural layer, because the capsule carries two procedural slots - a skill ranked third never reaches the model. `min_top2` is the CURRENTLY MEASURED value, recorded as a regression floor and explicitly not a quality bar: routing is poor today and the number is here so that it cannot quietly get worse while someone edits a description. Raise it only together with a change that improves it.",
+  "min_top2": 12,
+  "cases": [
+    {
+      "request": "write tests for the invoice service",
+      "acceptable": [
+        "test-generator"
+      ]
+    },
+    {
+      "request": "the payment test fails intermittently, find out why",
+      "acceptable": [
+        "systematic-debugger"
+      ]
+    },
+    {
+      "request": "review this change for security problems",
+      "acceptable": [
+        "security-reviewer",
+        "code-reviewer",
+        "review-pr"
+      ]
+    },
+    {
+      "request": "this controller is doing too much, clean it up",
+      "acceptable": [
+        "refactorer",
+        "code-reviewer"
+      ]
+    },
+    {
+      "request": "the checkout page is slow",
+      "acceptable": [
+        "performance-optimization"
+      ]
+    },
+    {
+      "request": "design the REST API for invoices",
+      "acceptable": [
+        "api-designer"
+      ]
+    },
+    {
+      "request": "map this codebase, I have never seen it before",
+      "acceptable": [
+        "codebase-mapper"
+      ]
+    },
+    {
+      "request": "audit the composer dependencies for advisories",
+      "acceptable": [
+        "dependency-manager"
+      ]
+    },
+    {
+      "request": "check this page against WCAG",
+      "acceptable": [
+        "wcag-accessibility",
+        "web-design-guidelines"
+      ]
+    },
+    {
+      "request": "write an ADR for the caching decision",
+      "acceptable": [
+        "documentation-generator"
+      ]
+    },
+    {
+      "request": "cut a release and update the changelog",
+      "acceptable": [
+        "release"
+      ]
+    },
+    {
+      "request": "plan this feature before anyone writes code",
+      "acceptable": [
+        "writing-plans",
+        "brainstorming",
+        "requirements-analyst",
+        "architect"
+      ]
+    },
+    {
+      "request": "add a queued job to send invoice emails after checkout",
+      "acceptable": [
+        "queues-jobs",
+        "events-notifications"
+      ]
+    },
+    {
+      "request": "the order listing has an N+1",
+      "acceptable": [
+        "eloquent",
+        "performance-optimization"
+      ]
+    },
+    {
+      "request": "add a scheduled command to reindex products",
+      "acceptable": [
+        "console-scheduler"
+      ]
+    }
+  ],
+  "_measured": "12/15 on 2026-08-22"
+}

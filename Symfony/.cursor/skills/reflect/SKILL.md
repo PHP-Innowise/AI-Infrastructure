@@ -57,6 +57,8 @@ Write a rule following this template:
 - Correct: {concrete good example}
 **Enforcement:** Hook / Skill instruction / Review checklist / Policy
 **Added:** {today's date}
+**Retired:** {omit while the rule is live}
+**Superseded-by:** {omit unless another rule replaced this one}
 ```
 
 ### Step 4: Determine Placement
@@ -71,6 +73,42 @@ Choose where the rule belongs:
 | Process | the active edition's `STABILIZATION.md` | Add as example cycle for future reference |
 
 If enforcement is automatable, also identify which hook to create/update.
+
+Write into the canonical tree — `.agents/skills/{name}/SKILL.md` — never into
+the generated `.claude`/`.cursor` mirrors. Here, regenerate with
+`python3 scripts/build_mirrors.py --write --edition <edition>`; in a consuming
+project, where that tool is not installed, make the identical edit in every
+tool tree present, or `context.py parity` will report a governance-document
+drift you just created.
+
+### Step 4b: Decide add, overwrite, or retire
+
+A pillar that can only add runs out of budget: `AGENTS.md` is paid on every
+session and gated in CI. Before writing, look for what this rule replaces.
+
+```bash
+python3 memory-bank/scripts/context.py index
+python3 memory-bank/scripts/context.py search "<the rule's own words>" --layer procedural
+```
+
+Index first: a stale index returns nothing and the decision degrades to `add`
+without saying so. The procedural layer covers `AGENTS.md`, `CLAUDE.md` and
+skill bodies only, so candidates in `GOLDEN-PRINCIPLES.md` and
+`STABILIZATION.md` must be found by reading them.
+
+Present the candidates and decide explicitly — never default to `add`:
+
+- **add** — nothing it replaces.
+- **overwrite** — an existing rule says this less well; edit in place and
+  leave its `Added:` date alone.
+- **retire** — an existing rule no longer applies. Give it `Retired:` today
+  and, if this replaces it, `Superseded-by:`; move the block to
+  `## Retired rules` in `STABILIZATION.md` and delete the line it placed
+  wherever it was enforced. That is what returns budget.
+
+Report the remaining budget with `python3 scripts/context_budget.py --headroom`
+where that maintainer tool exists; a consuming project quotes its own ceiling
+instead.
 
 ### Step 5: Present and Apply
 
