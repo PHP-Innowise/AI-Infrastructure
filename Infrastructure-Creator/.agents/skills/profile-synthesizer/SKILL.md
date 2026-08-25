@@ -74,7 +74,7 @@ Follow `references/project-profile-schema.md` exactly. The JSON is generator run
    `interview answer` provenance; a confirmed rejection keeps the interview
    reference in its reason. Never resolve such a rejection by inventing the
    missing authority, and never silently drop it.
-8. **Build `skill-generation-plan.json`.** Stamp schema `1.4` and the current
+8. **Build `skill-generation-plan.json`.** Stamp schema `1.6` and the current
    reference-corpus `catalog_version`. Normalize target evidence into
    `evidence[]` with supported claims and sha256 fingerprints for repository
    files. Local evidence needs a bounded anchor (`line_range`, `symbol`, or

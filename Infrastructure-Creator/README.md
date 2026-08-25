@@ -79,7 +79,7 @@ infra-scan <path-to-php-project>          (read-only; never writes into the targ
    <-- REVIEW THE PROFILE (what you read here is what infra-generate will build) -->
 
 infra-generate <path-to-php-project>
-   -> validates complete schema 1.5 evidence, operational safety, ownership,
+   -> validates complete schema 1.6 evidence, operational safety, ownership,
       routing, invariants, path authority, and necessity
    -> builds policy/hooks/memory and evidence-scoped skill batches in staging
       (partial batches are allowed; the final complete gate is mandatory)
@@ -148,14 +148,15 @@ evidence, ownership, procedure, verification, output, and routing contract.
 Each selected skill carries satisfied claim-backed selection conditions;
 rejected catalog candidates record their reason and missing evidence.
 Unsupported or overlapping candidates are pruned before generation.
-Schema 1.0 through 1.3 plans remain readable for audit and migration diagnostics
+Schema 1.0 through 1.5 plans remain readable for audit and migration diagnostics
 but cannot be generated or published: operational safety data cannot be
-inferred. New profiles use schema 1.5 with typed procedures and verification,
+inferred. New profiles use schema 1.6 with typed procedures and verification,
 provider safety, path authority, critical invariant coverage, evidence anchors,
 routing fixtures, one canonical flow graph, each catalog obligation wired to the
 evidence and step that carry it, a recorded baseline for every executable check,
 evidence that may state an absence, the reconciled claims each skill rests on,
-and a recorded decision on every piece of evidence inside a skill's own paths.
+a recorded decision on every piece of evidence inside a skill's own paths, and
+the typed `preexisting_team_skills` collision contract.
 
 ## Upgrading A Generated Accelerator
 

@@ -897,7 +897,7 @@ One shared memory layer will be created at the target root, spanning two roots: 
 - Every line in sections 2-8 (including 3.1 and 3.2) MUST carry a confidence tag; every section 8 finding MUST also carry source type.
 - Section 8.5 MUST distinguish discovered statuses from evidenced transitions; section 8.6 MUST state permission-matrix completeness; section 8.8 MUST distinguish risk indicators from documented severity/approval.
 - Section 11.1 MUST equal JSON `skills[]` exactly. Every selected candidate satisfies its reference contract; every rejected candidate records the missing trigger/evidence. Only the memory quartet is unconditional.
-- JSON MUST use schema 1.2 and satisfy the typed capability, procedure,
+- JSON MUST use schema 1.6 and satisfy the typed capability, procedure,
   verification, provider-safety, path, invariant, evidence-anchor, routing-case,
   flow, ownership, reciprocal-routing, uniqueness, reference, normalized-glob,
   canonical-path, and completeness rules above. Grouped summaries are invalid.

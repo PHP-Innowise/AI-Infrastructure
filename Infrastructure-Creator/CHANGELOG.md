@@ -4,7 +4,32 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Fixed
+
+- **`profile-synthesizer` still told itself to stamp plan schema `1.4`.** Schema
+  1.6 bumped the skill's own guardrail (`validate_skill_quality.py`'s
+  `CURRENT_PLAN_SCHEMA`) to require emitting 1.6 and retiring 1.0-1.5 to audit
+  only, but the build instruction (`SKILL.md` step 8) and one self-check rule
+  in `references/project-profile-schema.md` ("JSON MUST use schema 1.2") were
+  never updated past wording carried over from two and four schema bumps ago
+  respectively. A plan authored to the letter of either stale instruction would
+  stamp an ineligible schema version while the enforcement layer already
+  demanded 1.6, producing an invalid plan that passes review but fails
+  publication. Fixed in the canonical copy (`.agents/skills`), regenerated the
+  `.claude/skills` and `.cursor/skills` mirrors; `build_mirrors.py --check`
+  passes. `README.md`'s schema-version prose (still describing 1.5 as current
+  and 1.0-1.3 as legacy) was also stale and is corrected to 1.6 / 1.0-1.5.
+
 ### Breaking
+
+- **Plan schema 1.6: a plan records team-owned skills merge mode must preserve.**
+  1.5 joins 1.0-1.4 as readable-for-audit and publication-ineligible; new
+  synthesis emits 1.6. The typed `preexisting_team_skills[]` collision contract
+  exists only when a selected-edition skill path already resolves to a
+  team-owned symlink - it pins the original name/candidate, edition,
+  target-relative symlink path, literal link target and SHA-256, every
+  protected regular file and its SHA-256, and a distinct `generated_alias`, so
+  merge mode has an auditable record of exactly what it must not overwrite.
 
 - **Plan schema 1.5: a rejection says which kind of rejection it is.** 1.4 joins
   1.0-1.3 as readable-for-audit and publication-ineligible; new synthesis emits
