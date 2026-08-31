@@ -7,7 +7,9 @@ refuses unsupported collisions before writing anything.
 
 Use this installer for ready-made editions. For projects with substantial
 custom architecture, integrations, or internal conventions, use
-[Infrastructure-Creator](../Infrastructure-Creator/README.md).
+[Infrastructure-Creator](../Infrastructure-Creator/README.md). For a non-PHP
+stack, a short pilot, or a client that wants a minimal footprint instead of
+either of those, see the [Open-Source Kit](open-source-kit/README.md).
 
 ## Prerequisites
 

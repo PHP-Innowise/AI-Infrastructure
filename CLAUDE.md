@@ -105,6 +105,35 @@ python3 scripts/install_accelerator.py --write-inventories     # only after inte
 Inventories are generated from `git ls-files --cached`; stage new distribution
 files before regenerating or they won't be included.
 
+### Open-source kit selector (Kit 3 - see `install/open-source-kit/README.md`)
+
+```bash
+python3 scripts/install_open_source_kit.py --list                              # browse the reviewed catalog
+python3 scripts/install_open_source_kit.py --target /path/to/client-project     # interactive checkbox-style selection
+python3 scripts/install_open_source_kit.py --select ID1,ID2 --target /path/to/client-project --dry-run
+```
+
+Selects from `install/open-source-kit/resources.json` and writes a
+`.kit3-manifest.json` into the target; it never downloads or executes
+third-party code itself.
+
+The catalog is browsable; the **admission registry**
+(`install/open-source-kit/registry/`, one JSON file per candidate) carries the
+judgement of whether an entry should be installed. Twelve gates — eight binary
+(one failure rejects), four scored — with the verdict recomputed from the gates
+rather than trusted. The selector warns on a non-approved pick but does not yet
+refuse it, and most catalog entries have no registry file:
+
+```bash
+python3 scripts/validate_registry.py            # report every entry and its verdict
+python3 scripts/validate_registry.py --check    # CI gate
+python3 scripts/validate_registry.py --id graphify
+python3 -m unittest tests.test_registry
+```
+
+An `unknown` gate blocks rather than passes, and a stored `approved` cannot
+outrank a failing gate — see `install/open-source-kit/README.md`.
+
 ### Lint (mirrors CI exactly)
 
 ```bash

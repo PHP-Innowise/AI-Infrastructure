@@ -28,6 +28,52 @@ edition's own files remain in that edition's changelog.
 
 ### Added
 
+- **The Kit 3 admission registry (`install/open-source-kit/registry/`) and
+  `scripts/validate_registry.py`.** A curated list of other people's
+  repositories is not something we can own or be accountable for on an
+  outstaff engagement; four things are, and they are what the registry
+  records: admission (what passed, pinned to which ref, on whose decision),
+  isolation, measurement, and removal without residue. The tool list is now a
+  consequence of the gates rather than a decision taken ahead of them.
+  - Twelve gates per candidate. Eight are **binary** - `license`,
+    `data_egress`, `pinning`, `uninstall`, `collisions`, `auto_update`,
+    `maintenance_ownership`, `measurability` - and one failure rejects the
+    tool however good it is. Four are **scored** 0-5 and inform without
+    blocking. `unknown` blocks rather than passes: a tool whose source nobody
+    has read is `blocked`, not admissible, because absence of evidence is not
+    evidence of safety.
+  - The verdict is stored for review but never trusted. The validator
+    recomputes it from the gates and fails when the two disagree, so a stored
+    `approved` cannot outrank a failing binary gate.
+  - `intersection_map` is mandatory and may not be empty. The hidden cost of
+    Kit 3 is not context, it is two systems doing one job, and an entry with
+    no intersection analysis is unreviewed whatever its gates say. Each row is
+    typed `duplicates`/`replaces`/`conflicts`/`complements`.
+  - A gate that is `fail` or `unknown` must carry `resolves_by`, so a
+    rejection is a work item rather than a dead end. Unmeasured cost scores 0
+    and may not coexist with a passing `measurability` gate.
+  - Star count is excluded from scoring by construction. Inflated counts are
+    recorded in `trust_signals.disqualified_signals` as findings, never scored:
+    an implausible count is evidence the signal is fake, not that the code is.
+  - Two worked entries, both `rejected` on recorded evidence rather than
+    taste. `graphify` fails `collisions` because its PreToolUse hook occupies
+    the same interception point as `local-context.sh` with no precedence
+    resolution recorded, and duplicates the Local Context Engine's retrieval
+    job. `ohmyclaude` fails `collisions` head-on: a 19-agent self-orchestrating
+    architecture is exactly what `subagent-gate.sh`,
+    `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` and the denied
+    `Agent(Explore|Plan|general-purpose)` entries refuse by construction. Both
+    also fail `measurability` and `maintenance_ownership`.
+  - 38 tests cover all three verdict paths and every enforcement property,
+    including four defects found by adversarial probing before release: a
+    malformed gate crashed the validator with `AttributeError` instead of
+    reporting it (a traceback in CI reads as broken tooling rather than as bad
+    input); `score: true` passed the 0-5 check because `bool` subclasses `int`;
+    and whitespace-only `evidence`, `resolves_by` and `intersection_map`
+    fields satisfied a truthiness test while committing a reviewer to nothing.
+    The verdict cross-check runs both ways - a stored verdict may be neither
+    kinder nor harsher than its gates.
+
 - **`document_links`, a reverse index from source path to the documents that
   cite it, with `context.py links` and `retrieve --path` (roadmap H4-02,
   H4-03).** Two durable chunks whose only connection was a `sources[]` entry
