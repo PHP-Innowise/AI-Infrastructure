@@ -1,0 +1,196 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1460" height="1580" viewBox="0 0 1460 1580" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+<rect width="100%" height="100%" fill="#FFFFFF"/>
+<defs>
+<marker id="aR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2E7D5B"/></marker>
+<marker id="aM" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#B0791F"/></marker>
+<marker id="aD" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4F5FA8"/></marker>
+</defs>
+<text x="50" y="52" font-size="27" font-weight="700" fill="#1A1F26">Роудмап: память как инфраструктура</text>
+<text x="50" y="80" font-size="14" fill="#6B7684">Карта открытой работы. Порядок задан типом блокировки, а не сроком · снимок 2026-08-25</text>
+<rect x="50" y="104" width="1360" height="118" rx="4" fill="#FAFAF8" stroke="#E3E7EB"/>
+<text x="74" y="134" font-size="13" font-weight="700" fill="#B0791F" letter-spacing="1.2">ГЛАВНЫЙ ВЫВОД</text>
+<text x="74" y="162" font-size="16" fill="#1A1F26">Четыре горизонта построили весь жизненный цикл знания. <tspan font-weight="700">Ни один механизм ни разу не обработал реальный вход.</tspan></text>
+<text x="74" y="186" font-size="14" fill="#6B7684">продвижений 0 · записей продвигаемых типов 0 · строк эпизодов 0 · чанков 1 на издание, без дайджестов</text>
+<text x="74" y="208" font-size="14" fill="#6B7684">исключение — ворота: 200 решений, 95,5 % skip, из них 185 repeat-retrieval. Трафик есть только там, где хук.</text>
+<rect x="50" y="212" width="400" height="34" rx="3" fill="#2E7D5B"/>
+<text x="64" y="234" font-size="14" font-weight="700" fill="#FFFFFF">R · можно строить</text>
+<text x="436" y="234" font-size="12" fill="#FFFFFF" opacity="0.8" text-anchor="end">предпосылка проверена · 12</text>
+<rect x="50" y="258" width="400" height="62" rx="4" fill="#FFFDF5" stroke="#2E7D5B" stroke-width="2"/>
+<rect x="50" y="258" width="4" height="62" rx="2" fill="#C2603A"/>
+<text x="68" y="280" font-size="12.5" font-weight="700" fill="#2E7D5B" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">R-01</text>
+<text x="436" y="280" font-size="10.5" font-weight="700" fill="#2E7D5B" letter-spacing="0.8" text-anchor="end">КЛЮЧЕВОЙ КАМЕНЬ</text>
+<text x="68" y="298" font-size="13.5" fill="#1A1F26">Первый настоящий вход</text>
+<text x="68" y="314" font-size="13.5" fill="#1A1F26">в конвейер консолидации</text>
+<rect x="50" y="340" width="400" height="62" rx="4" fill="#FFFFFF" stroke="#E3E7EB" stroke-width="1"/>
+<rect x="50" y="340" width="4" height="62" rx="2" fill="#7A4FA8"/>
+<text x="68" y="362" font-size="12.5" font-weight="700" fill="#2E7D5B" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">R-02</text>
+<text x="68" y="380" font-size="13.5" fill="#1A1F26">Reasoning-проба</text>
+<text x="68" y="396" font-size="13.5" fill="#1A1F26">через маршрут --path</text>
+<rect x="50" y="422" width="400" height="62" rx="4" fill="#FFFFFF" stroke="#E3E7EB" stroke-width="1"/>
+<rect x="50" y="422" width="4" height="62" rx="2" fill="#2563A8"/>
+<text x="68" y="444" font-size="12.5" font-weight="700" fill="#2E7D5B" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">R-03</text>
+<text x="68" y="462" font-size="13.5" fill="#1A1F26">Агрегировать token_estimates</text>
+<text x="68" y="478" font-size="13.5" fill="#1A1F26">и no_match в отчёте</text>
+<rect x="50" y="504" width="400" height="62" rx="4" fill="#FFFFFF" stroke="#E3E7EB" stroke-width="1"/>
+<rect x="50" y="504" width="4" height="62" rx="2" fill="#7A4FA8"/>
+<text x="68" y="526" font-size="12.5" font-weight="700" fill="#2E7D5B" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">R-04</text>
+<text x="68" y="544" font-size="13.5" fill="#1A1F26">memory-probes.json</text>
+<text x="68" y="560" font-size="13.5" fill="#1A1F26">в кросс-издательский гейт</text>
+<rect x="50" y="586" width="400" height="62" rx="4" fill="#FFFFFF" stroke="#E3E7EB" stroke-width="1"/>
+<rect x="50" y="586" width="4" height="62" rx="2" fill="#2E7D5B"/>
+<text x="68" y="608" font-size="12.5" font-weight="700" fill="#2E7D5B" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">R-05</text>
+<text x="68" y="626" font-size="13.5" fill="#1A1F26">Гейт соответствия</text>
+<text x="68" y="642" font-size="13.5" fill="#1A1F26">docs/CI.md и scripts/</text>
+<rect x="50" y="668" width="400" height="62" rx="4" fill="#FFFFFF" stroke="#E3E7EB" stroke-width="1"/>
+<rect x="50" y="668" width="4" height="62" rx="2" fill="#2E7D5B"/>
+<text x="68" y="690" font-size="12.5" font-weight="700" fill="#2E7D5B" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">R-06</text>
+<text x="68" y="708" font-size="13.5" fill="#1A1F26">Нога CI на Python 3.9</text>
+<rect x="50" y="750" width="400" height="62" rx="4" fill="#FFFFFF" stroke="#E3E7EB" stroke-width="1"/>
+<rect x="50" y="750" width="4" height="62" rx="2" fill="#2E7D5B"/>
+<text x="68" y="772" font-size="12.5" font-weight="700" fill="#2E7D5B" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">R-07</text>
+<text x="68" y="790" font-size="13.5" fill="#1A1F26">Тест установки</text>
+<text x="68" y="806" font-size="13.5" fill="#1A1F26">в целевой проект</text>
+<rect x="50" y="832" width="400" height="62" rx="4" fill="#FFFFFF" stroke="#E3E7EB" stroke-width="1"/>
+<rect x="50" y="832" width="4" height="62" rx="2" fill="#2E7D5B"/>
+<text x="68" y="854" font-size="12.5" font-weight="700" fill="#2E7D5B" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">R-08</text>
+<text x="68" y="872" font-size="13.5" fill="#1A1F26">Переопределяемый каталог</text>
+<text x="68" y="888" font-size="13.5" fill="#1A1F26">write-lock</text>
+<rect x="50" y="914" width="400" height="62" rx="4" fill="#FFFFFF" stroke="#E3E7EB" stroke-width="1"/>
+<rect x="50" y="914" width="4" height="62" rx="2" fill="#C2603A"/>
+<text x="68" y="936" font-size="12.5" font-weight="700" fill="#2E7D5B" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">R-09</text>
+<text x="68" y="954" font-size="13.5" fill="#1A1F26">Переаттестовать MEM-0001</text>
+<text x="68" y="970" font-size="13.5" fill="#1A1F26">в трёх изданиях</text>
+<rect x="50" y="996" width="400" height="62" rx="4" fill="#FFFFFF" stroke="#E3E7EB" stroke-width="1"/>
+<rect x="50" y="996" width="4" height="62" rx="2" fill="#2563A8"/>
+<text x="68" y="1018" font-size="12.5" font-weight="700" fill="#2E7D5B" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">R-10</text>
+<text x="68" y="1036" font-size="13.5" fill="#1A1F26">Хост и точка входа</text>
+<text x="68" y="1052" font-size="13.5" fill="#1A1F26">в манифесте</text>
+<rect x="50" y="1078" width="400" height="62" rx="4" fill="#FFFFFF" stroke="#E3E7EB" stroke-width="1"/>
+<rect x="50" y="1078" width="4" height="62" rx="2" fill="#7A4FA8"/>
+<text x="68" y="1100" font-size="12.5" font-weight="700" fill="#2E7D5B" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">R-11</text>
+<text x="68" y="1118" font-size="13.5" fill="#1A1F26">Пол top-2 Symfony 10 → 11</text>
+<rect x="50" y="1160" width="400" height="62" rx="4" fill="#FFFFFF" stroke="#E3E7EB" stroke-width="1"/>
+<rect x="50" y="1160" width="4" height="62" rx="2" fill="#2563A8"/>
+<text x="68" y="1182" font-size="12.5" font-weight="700" fill="#2E7D5B" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">R-12</text>
+<text x="68" y="1200" font-size="13.5" fill="#1A1F26">Долговечный срез</text>
+<text x="68" y="1216" font-size="13.5" fill="#1A1F26">метрик извлечения</text>
+<rect x="530" y="212" width="400" height="34" rx="3" fill="#B0791F"/>
+<text x="544" y="234" font-size="14" font-weight="700" fill="#FFFFFF">M · ждёт измерения</text>
+<text x="916" y="234" font-size="12" fill="#FFFFFF" opacity="0.8" text-anchor="end">числа пока нет · 8</text>
+<rect x="530" y="258" width="400" height="62" rx="4" fill="#FFFFFF" stroke="#E3E7EB" stroke-width="1"/>
+<rect x="530" y="258" width="4" height="62" rx="2" fill="#2563A8"/>
+<text x="548" y="280" font-size="12.5" font-weight="700" fill="#B0791F" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">M-01</text>
+<text x="548" y="298" font-size="13.5" fill="#1A1F26">Включение ворот в enforce</text>
+<rect x="530" y="340" width="400" height="62" rx="4" fill="#FFFFFF" stroke="#E3E7EB" stroke-width="1"/>
+<rect x="530" y="340" width="4" height="62" rx="2" fill="#7A4FA8"/>
+<text x="548" y="362" font-size="12.5" font-weight="700" fill="#B0791F" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">M-02</text>
+<text x="548" y="380" font-size="13.5" fill="#1A1F26">Baseline routing_eval</text>
+<rect x="530" y="422" width="400" height="62" rx="4" fill="#FFFFFF" stroke="#E3E7EB" stroke-width="1"/>
+<rect x="530" y="422" width="4" height="62" rx="2" fill="#2563A8"/>
+<text x="548" y="444" font-size="12.5" font-weight="700" fill="#B0791F" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">M-03</text>
+<text x="548" y="462" font-size="13.5" fill="#1A1F26">95 % skip — результат</text>
+<text x="548" y="478" font-size="13.5" fill="#1A1F26">или артефакт хука?</text>
+<rect x="530" y="504" width="400" height="62" rx="4" fill="#FFFFFF" stroke="#E3E7EB" stroke-width="1"/>
+<rect x="530" y="504" width="4" height="62" rx="2" fill="#2563A8"/>
+<text x="548" y="526" font-size="12.5" font-weight="700" fill="#B0791F" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">M-04</text>
+<text x="548" y="544" font-size="13.5" fill="#1A1F26">Вредит ли доминирование</text>
+<text x="548" y="560" font-size="13.5" fill="#1A1F26">корпуса акселератором</text>
+<rect x="530" y="586" width="400" height="62" rx="4" fill="#FFFFFF" stroke="#E3E7EB" stroke-width="1"/>
+<rect x="530" y="586" width="4" height="62" rx="2" fill="#C2603A"/>
+<text x="548" y="608" font-size="12.5" font-weight="700" fill="#B0791F" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">M-05</text>
+<text x="548" y="626" font-size="13.5" fill="#1A1F26">Калибровка порога</text>
+<text x="548" y="642" font-size="13.5" fill="#1A1F26">near-duplicate 0.6</text>
+<rect x="530" y="668" width="400" height="62" rx="4" fill="#FFFFFF" stroke="#E3E7EB" stroke-width="1"/>
+<rect x="530" y="668" width="4" height="62" rx="2" fill="#C2603A"/>
+<text x="548" y="690" font-size="12.5" font-weight="700" fill="#B0791F" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">M-06</text>
+<text x="548" y="708" font-size="13.5" fill="#1A1F26">Стоит ли document_links</text>
+<text x="548" y="724" font-size="13.5" fill="#1A1F26">на реальном корпусе</text>
+<rect x="530" y="750" width="400" height="62" rx="4" fill="#FFFFFF" stroke="#E3E7EB" stroke-width="1"/>
+<rect x="530" y="750" width="4" height="62" rx="2" fill="#C2603A"/>
+<text x="548" y="772" font-size="12.5" font-weight="700" fill="#B0791F" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">M-07</text>
+<text x="548" y="790" font-size="13.5" fill="#1A1F26">conflicts у долговременных</text>
+<text x="548" y="806" font-size="13.5" fill="#1A1F26">чанков</text>
+<rect x="530" y="832" width="400" height="62" rx="4" fill="#FFFFFF" stroke="#E3E7EB" stroke-width="1"/>
+<rect x="530" y="832" width="4" height="62" rx="2" fill="#C2603A"/>
+<text x="548" y="854" font-size="12.5" font-weight="700" fill="#B0791F" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">M-08</text>
+<text x="548" y="872" font-size="13.5" fill="#1A1F26">Фильтры</text>
+<text x="548" y="888" font-size="13.5" fill="#1A1F26">--type / --scope / --tag</text>
+<rect x="1010" y="212" width="400" height="34" rx="3" fill="#4F5FA8"/>
+<text x="1024" y="234" font-size="14" font-weight="700" fill="#FFFFFF">D · ждёт решения</text>
+<text x="1396" y="234" font-size="12" fill="#FFFFFF" opacity="0.8" text-anchor="end">выбор за человеком · 9</text>
+<rect x="1010" y="258" width="400" height="62" rx="4" fill="#FFFFFF" stroke="#E3E7EB" stroke-width="1"/>
+<rect x="1010" y="258" width="4" height="62" rx="2" fill="#A83E52"/>
+<text x="1028" y="280" font-size="12.5" font-weight="700" fill="#4F5FA8" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">D-01</text>
+<text x="1028" y="298" font-size="13.5" fill="#1A1F26">Таксономия Edge/Blame:</text>
+<text x="1028" y="314" font-size="13.5" fill="#1A1F26">изобретение, не валидация</text>
+<rect x="1010" y="340" width="400" height="62" rx="4" fill="#FFFFFF" stroke="#E3E7EB" stroke-width="1"/>
+<rect x="1010" y="340" width="4" height="62" rx="2" fill="#A83E52"/>
+<text x="1028" y="362" font-size="12.5" font-weight="700" fill="#4F5FA8" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">D-02</text>
+<text x="1028" y="380" font-size="13.5" fill="#1A1F26">Чей файл</text>
+<text x="1028" y="396" font-size="13.5" fill="#1A1F26">DOMAIN-CONTRACT.md</text>
+<rect x="1010" y="422" width="400" height="62" rx="4" fill="#FFFFFF" stroke="#E3E7EB" stroke-width="1"/>
+<rect x="1010" y="422" width="4" height="62" rx="2" fill="#C2603A"/>
+<text x="1028" y="444" font-size="12.5" font-weight="700" fill="#4F5FA8" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">D-03</text>
+<text x="1028" y="462" font-size="13.5" fill="#1A1F26">Для чего нужен архив</text>
+<text x="1028" y="478" font-size="13.5" fill="#1A1F26">Project Brain</text>
+<rect x="1010" y="504" width="400" height="62" rx="4" fill="#FFFFFF" stroke="#E3E7EB" stroke-width="1"/>
+<rect x="1010" y="504" width="4" height="62" rx="2" fill="#C2603A"/>
+<text x="1028" y="526" font-size="12.5" font-weight="700" fill="#4F5FA8" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">D-04</text>
+<text x="1028" y="544" font-size="13.5" fill="#1A1F26">Период полураспада</text>
+<text x="1028" y="560" font-size="13.5" fill="#1A1F26">долговременного слоя</text>
+<rect x="1010" y="586" width="400" height="62" rx="4" fill="#FFFFFF" stroke="#E3E7EB" stroke-width="1"/>
+<rect x="1010" y="586" width="4" height="62" rx="2" fill="#A83E52"/>
+<text x="1028" y="608" font-size="12.5" font-weight="700" fill="#4F5FA8" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">D-05</text>
+<text x="1028" y="626" font-size="13.5" fill="#1A1F26">Что едет в устанавливаемый</text>
+<text x="1028" y="642" font-size="13.5" fill="#1A1F26">payload</text>
+<rect x="1010" y="668" width="400" height="62" rx="4" fill="#FFFFFF" stroke="#E3E7EB" stroke-width="1"/>
+<rect x="1010" y="668" width="4" height="62" rx="2" fill="#2E7D5B"/>
+<text x="1028" y="690" font-size="12.5" font-weight="700" fill="#4F5FA8" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">D-06</text>
+<text x="1028" y="708" font-size="13.5" fill="#1A1F26">cost_attribution:</text>
+<text x="1028" y="724" font-size="13.5" fill="#1A1F26">тест или явный отказ</text>
+<rect x="1010" y="750" width="400" height="62" rx="4" fill="#FFFFFF" stroke="#E3E7EB" stroke-width="1"/>
+<rect x="1010" y="750" width="4" height="62" rx="2" fill="#2E7D5B"/>
+<text x="1028" y="772" font-size="12.5" font-weight="700" fill="#4F5FA8" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">D-07</text>
+<text x="1028" y="790" font-size="13.5" fill="#1A1F26">Поддержка Windows (fcntl)</text>
+<rect x="1010" y="832" width="400" height="62" rx="4" fill="#FFFFFF" stroke="#E3E7EB" stroke-width="1"/>
+<rect x="1010" y="832" width="4" height="62" rx="2" fill="#A83E52"/>
+<text x="1028" y="854" font-size="12.5" font-weight="700" fill="#4F5FA8" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">D-08</text>
+<text x="1028" y="872" font-size="13.5" fill="#1A1F26">Закоммитить</text>
+<text x="1028" y="888" font-size="13.5" fill="#1A1F26">governed-запись</text>
+<rect x="1010" y="914" width="400" height="62" rx="4" fill="#FFFFFF" stroke="#E3E7EB" stroke-width="1"/>
+<rect x="1010" y="914" width="4" height="62" rx="2" fill="#2563A8"/>
+<text x="1028" y="936" font-size="12.5" font-weight="700" fill="#4F5FA8" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">D-09</text>
+<text x="1028" y="954" font-size="13.5" fill="#1A1F26">Схема манифеста v3</text>
+<text x="1028" y="970" font-size="13.5" fill="#1A1F26">или отказ от послойных метрик</text>
+<path d="M450,289.0 C466,289.0 514,617.0 521,617.0" fill="none" stroke="#B0791F" stroke-width="1.6" opacity="0.7" marker-end="url(#aM)"/>
+<path d="M450,289.0 C477,289.0 503,699.0 521,699.0" fill="none" stroke="#B0791F" stroke-width="1.6" opacity="0.7" marker-end="url(#aM)"/>
+<path d="M450,289.0 C488,289.0 492,781.0 521,781.0" fill="none" stroke="#B0791F" stroke-width="1.6" opacity="0.7" marker-end="url(#aM)"/>
+<path d="M450,1027.0 C499,1027.0 481,289.0 521,289.0" fill="none" stroke="#B0791F" stroke-width="1.6" opacity="0.7" marker-end="url(#aM)"/>
+<path d="M450,1027.0 C510,1027.0 470,453.0 521,453.0" fill="none" stroke="#B0791F" stroke-width="1.6" opacity="0.7" marker-end="url(#aM)"/>
+<rect x="50" y="1268" width="1360" height="112" rx="4" fill="#F6F7F8" stroke="#E3E7EB"/>
+<text x="72" y="1296" font-size="13" font-weight="700" fill="#8A939E" letter-spacing="1.2">X · ЗАКРЫТО ИЗМЕРЕНИЕМ — НЕ СТРОИТЬ ЗАНОВО</text>
+<text x="72.0" y="1326" font-size="12.5" font-weight="700" fill="#8A939E" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">X-01</text>
+<text x="72.0" y="1346" font-size="12.5" fill="#6B7684">Дескрипторный фильтр</text>
+<text x="72.0" y="1361" font-size="12.5" fill="#6B7684">опровергнут симуляцией</text>
+<text x="405.5" y="1326" font-size="12.5" font-weight="700" fill="#8A939E" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">X-02</text>
+<text x="405.5" y="1346" font-size="12.5" fill="#6B7684">Поле related</text>
+<text x="405.5" y="1361" font-size="12.5" fill="#6B7684">закрыто измерением 0 из 2</text>
+<text x="739.0" y="1326" font-size="12.5" font-weight="700" fill="#8A939E" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">X-03</text>
+<text x="739.0" y="1346" font-size="12.5" fill="#6B7684">Эмбеддинги</text>
+<text x="739.0" y="1361" font-size="12.5" fill="#6B7684">0,76 против 0,48</text>
+<text x="1072.5" y="1326" font-size="12.5" font-weight="700" fill="#8A939E" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">X-04</text>
+<text x="1072.5" y="1346" font-size="12.5" fill="#6B7684">Индексация архива</text>
+<text x="1072.5" y="1361" font-size="12.5" fill="#6B7684">бездействует по построению</text>
+<line x1="50" y1="1392" x2="1410" y2="1392" stroke="#E3E7EB"/>
+<rect x="50" y="1408" width="4" height="13" rx="2" fill="#2563A8"/>
+<text x="62" y="1419" font-size="12" fill="#6B7684">Извлечение и ворота</text>
+<rect x="318" y="1408" width="4" height="13" rx="2" fill="#C2603A"/>
+<text x="330" y="1419" font-size="12" fill="#6B7684">Жизненный цикл и консолидация</text>
+<rect x="586" y="1408" width="4" height="13" rx="2" fill="#7A4FA8"/>
+<text x="598" y="1419" font-size="12" fill="#6B7684">Измерение и фикстуры</text>
+<rect x="854" y="1408" width="4" height="13" rx="2" fill="#2E7D5B"/>
+<text x="866" y="1419" font-size="12" fill="#6B7684">Инженерная база и CI</text>
+<rect x="1122" y="1408" width="4" height="13" rx="2" fill="#A83E52"/>
+<text x="1134" y="1419" font-size="12" fill="#6B7684">Дистрибуция и политика</text>
+<text x="50" y="1442" font-size="12" fill="#6B7684">Стрелка — реальная разблокировка: R-01 открывает три измерения, R-10 — ещё два. Полные формулировки и команды проверки — в docs/ROADMAP.md, раздел 4.</text>
+</svg>

@@ -16,7 +16,7 @@
       "command_bytes": 6726,
       "agent_bytes": 9389,
       "frontmatter_bytes": 15564,
-      "body_bytes": 181612,
+      "body_bytes": 192210,
       "skills": 50
     },
     "PHP Core": {
@@ -27,6 +27,15 @@
       "frontmatter_bytes": 14844,
       "body_bytes": 208474,
       "skills": 37
+    },
+    "WordPress": {
+      "agents_md_bytes": 18450,
+      "descriptor_bytes": 11075,
+      "command_bytes": 6300,
+      "agent_bytes": 6910,
+      "frontmatter_bytes": 19205,
+      "body_bytes": 180950,
+      "skills": 48
     },
     "Infrastructure-Creator": {
       "agents_md_bytes": 17971,

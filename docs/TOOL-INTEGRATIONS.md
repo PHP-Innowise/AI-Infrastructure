@@ -118,8 +118,23 @@ the record is written exactly as on the other two clients. Retrieval on
 Cursor can also be explicit - run `context.py retrieve` or the `memory`
 command when a task needs prior context sharper than the rendered rule.
 
-Treat the editions as equivalent in policy, skills, and enforcement, and as
-differing only in capsule freshness: Claude Code and Codex retrieve
+The two clients also differ in what the capsule was retrieved *for*. Claude
+Code and Codex pass the user's prompt, so the query is the request. Cursor's
+hook has no prompt to pass and supplies the task identifier, which is usually
+a branch name - and a branch name tokenized into a query asks memory about the
+word `main`. The governed path therefore builds Cursor's query from the task
+behind the identifier: its goal, manual progress, next steps and file stems,
+the same enrichment the lightweight path already performed. The automatic
+checkpoint is deliberately excluded (turn counts and a timestamp carry no
+topic and would change the query on every flush), and so is an
+auto-provisioned goal, which is the branch slug re-cased. When nothing
+substantive remains, the bare identifier is used and the capsule says
+`query: from branch name only` rather than `query: from task goal`; the
+manifest records the same distinction as `query_source`.
+
+So the difference is one turn of freshness, not one order of query quality:
+treat the editions as equivalent in policy, skills, and enforcement, and as
+differing in when the capsule was rendered - Claude Code and Codex retrieve
 per-prompt, Cursor reads the rule rendered at the previous turn boundary.
 
 The installed scripts:

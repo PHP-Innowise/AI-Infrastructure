@@ -1,0 +1,92 @@
+# Skill Flow
+
+This flow keeps WordPress work structured while preserving user control. Agents suggest the next command but do not automatically chain.
+
+## Main Flow
+
+```text
+/requirements-analyst
+  -> /researcher        (when options/libraries/approaches are unclear)
+  -> /brainstorm
+  -> /council           (for high-stakes trade-offs)
+  -> /architect
+  -> /content-modeling  (when content/storage shape is unclear)
+  -> /database-designer (when the data model is non-trivial)
+  -> /api-designer
+  -> /frontend-design
+  -> /writing-plans
+  -> /git-worktrees
+  -> /architecture-implementer   (scaffold the decided structure)
+  -> /coder, /coder-frontend, or the narrowest WordPress specialty
+  -> /code-reviewer
+  -> /security-reviewer (for security-sensitive changes)
+  -> /test-generator
+  -> /performance-optimization   (when speed/resource use matters)
+  -> /verify
+  -> /finishing-branch
+```
+
+## Shortcuts
+
+- Use `/coder` directly for small, well-understood WordPress fixes.
+- Use `plugin-development` for lifecycle, upgrades, uninstall and packaging.
+- Use `theme-development` for classic/block theme behavior and templates.
+- Use `block-development` for Gutenberg metadata, serialization and rendering.
+- Use `hooks-events` when callback contracts, priorities or recursion are unclear.
+- Use `rest-api` to implement the contract planned by `api-designer`.
+- Use `content-modeling` for post types, taxonomies and metadata.
+- Use `wp-cli` for safe commands, migrations and batch operations.
+- Use `multisite` for network/site scope and large-network behavior.
+- Use `woocommerce` for CRUD, HPOS, checkout, order and payment extension work.
+- Use `cron-background-processing` for scheduling, idempotency and retries.
+- Use `/researcher` before `/council` or `/architect` when you need sourced evidence.
+- Use `/council` when a decision has real, competing trade-offs.
+- Use `/architecture-implementer` to turn an `/architect` decision into a compiling skeleton before `/coder`.
+- Use `/database-designer` before `/coder` when schema, keys, or indexing are unclear.
+- Use `/api-designer` before `/coder` when route, request, response, or error contracts are unclear.
+- Use `/test-generator` after `/coder` when coverage is missing.
+- Use `/refactorer` for behavior-preserving cleanup under a test safety net.
+- Use `/security-reviewer` for auth, input-handling, SQL, upload, or secret-touching changes.
+- Use `/performance-optimization` when something is measurably slow.
+- Use `/dependency-manager` for Composer audits, updates, and vetting new packages.
+- Use `/debugger` when tests fail for unclear reasons or behavior is unexpected.
+- Use `/docs-generator` when setup, deployment, worker/cron, API, or architecture documentation changed.
+- Use `project-brain` for governed task lifecycle, handoffs, unified retrieval, findings/bugs/incidents/decisions/events, compaction, and promotion proposals. Governed mode is the default; `--mode lightweight` is an explicit local-only fallback.
+- Use `memory-bank` only for durable retrieval/capture/audit/supersession and governed automatic or independently reviewed promotion application; active work stays in Project Brain.
+- Use `checkpoint`, `memory` for authority-aware progress capture and unified context refresh; governed mode never creates SQLite task authority.
+
+## Phase Map
+
+| Phase | Commands |
+| --- | --- |
+| Understanding | `/requirements-analyst`, `/codebase-mapper`, `/researcher`, `/brainstorm` |
+| Planning | `council`, `architect`, `content-modeling`, `database-designer`, `api-designer`, `hooks-events`, `multisite`, `cron-background-processing`, `frontend-design`, `writing-plans` |
+| Implementation | `using-git-worktrees`, `architecture-implementer`, `coder`, `coder-frontend`, `plugin-development`, `theme-development`, `block-development`, `rest-api`, `wp-cli`, `woocommerce`, `refactorer` |
+| Quality | `/code-reviewer`, `/security-reviewer`, `/test-generator`, `/performance-optimization`, `/debugger`, `/verify` |
+| Finalization | `/docs-generator`, `/release`, `/finishing-branch` |
+| Utility | `project-brain`, `checkpoint`, `memory`, `memory-bank`, `/reflect`, `/skill-creator`, `/review-pr`, `/browser-verify`, `/dependency-manager` |
+
+## Task Capsule Handoff
+
+At a complex phase boundary, the orchestrating agent builds one bounded Task
+Capsule from a concise sanitized retrieval query, optional Working state, and
+layered context. A fresh phase agent receives the capsule and explicit
+current-step files, not the parent conversation.
+
+The returning handoff contains only:
+
+- work completed;
+- decisions made;
+- files changed or examined;
+- verification evidence;
+- risks and assumptions;
+- the next step or recommended next command;
+- unresolved blockers or questions;
+- memory chunk IDs used or changed, when applicable;
+- Project Brain task/record revisions, handoff, and retrieval manifest, when
+  applicable;
+- cited authoritative sources.
+
+The next agent must not preload every cited source. It opens one only when the
+current step requires more information. Simple tasks remain in the current
+context.

@@ -20,6 +20,8 @@ jobs:
           - "Symfony/project-brain/tests"
           - "PHP Core/memory-bank/tests"
           - "PHP Core/project-brain/tests"
+          - "Cms/wordpress/memory-bank/tests"
+          - "Cms/wordpress/project-brain/tests"
           - "Infrastructure-Creator/tests"
     steps:
       - uses: actions/checkout@v4
@@ -44,6 +46,7 @@ jobs:
           - "Laravel"
           - "Symfony"
           - "PHP Core"
+          - "Cms/wordpress"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -55,6 +58,17 @@ jobs:
       - name: Cross-edition core parity
         working-directory: ${{ matrix.edition }}
         run: python3 memory-bank/scripts/context.py parity --cross-edition
+      # The generator asset is the fourth copy of the memory core and the one
+      # the cross-edition walk above cannot see, so an engine fix can land in
+      # all three editions, leave CI green, and still miss every project the
+      # generator builds. Repository-scoped, hence run once rather than per
+      # matrix leg; the guard keeps it inside the job it belongs to.
+      - name: Generator-asset parity
+        if: matrix.edition == 'Laravel'
+        run: python3 scripts/asset_parity.py --check
+      - name: Generator-asset parity regression tests
+        if: matrix.edition == 'Laravel'
+        run: python3 -m unittest tests.test_asset_parity
 
   mirrors:
     name: mirrors
@@ -159,6 +173,25 @@ jobs:
         run: python3 scripts/check_php_snippets.py --require-php
       - name: Context budget
         run: python3 scripts/context_budget.py --check
+      # Stdlib policy check, following the context-budget precedent above: the
+      # stabilization rules declare their own template and nothing verified
+      # that they obeyed it.
+      - name: Stabilization rules are well-formed
+        run: python3 scripts/check_stabilization.py
+      - name: Stabilization validator regression tests
+        run: python3 -m unittest tests.test_check_stabilization
+      # Content identity for the surface the model reads. The other gates
+      # measure its volume and its mirror agreement; none of them looks at
+      # what it says, so an unreviewed instruction in an agent's prompt and a
+      # mistyped `model:` value both passed silently.
+      - name: Policy lock matches the surface
+        run: python3 scripts/policy_lock.py --check
+      - name: Policy lock regression tests
+        run: python3 -m unittest tests.test_policy_lock
+      # The routing eval itself invokes a model and stays out of CI, but its
+      # scoring and its fixtures are ordinary code and are gated here.
+      - name: Routing eval scoring and fixtures
+        run: python3 -m unittest tests.test_routing_eval
 
   changelog:
     name: core-changelog

@@ -60,7 +60,13 @@ Check:
 - active chunks pointing at superseded chunks;
 - secret-like values, personal data, raw logs, or prompt-injection text promoted as instructions.
 
-Update a chunk in place when its concept remains valid. When another chunk replaces it, mark the old chunk `superseded`, set `superseded_by`, add the old ID to the replacement's `supersedes`, and update both index rows. Archive historically valid context that no longer helps active work.
+Update a chunk in place when its concept remains valid.
+
+When it stops being valid, retire it with `python3 memory-bank/scripts/context.py bank-retire --id MEM-... --valid-to YYYY-MM-DD [--superseded-by MEM-...]`. MUST use that command rather than hand-editing frontmatter, for the same reason the `memory` skill MUST call the command the hook calls: retiring by hand means editing both sides of a replacement link and then the index, and between any two of those edits the bank is invalid. `bank-retire` writes all of it under one lock and rolls the whole thing back if validation fails.
+
+After writing or updating a chunk by hand, run `python3 memory-bank/scripts/context.py bank-reverify --id MEM-...`. It digests every local path the chunk cites and stamps `last_verified`, which is what lets the chunk later notice that the file it summarizes has moved on. `bank-audit` lists chunks whose citations changed and chunks past `review_after`; a chunk reported there is re-read against its sources and then either re-verified or retired. A chunk with no digests keeps working exactly as before — the field is optional so that chunks written before it existed stay valid.
+
+The two fields answer different questions and both matter. `valid_to` is the date the knowledge stopped being true, which is what removes the chunk from retrieval; `superseded_by` is what replaced it. Pass `--superseded-by` when a successor exists — the chunk becomes `superseded` and the successor's `supersedes` gains it in the same write. Without a successor the chunk becomes `archived`, the honest status for knowledge that simply ceased. The chunk body and every other field are left untouched, the file stays on disk, and its `INDEX.md` row survives with the new status: what leaves is retrieval, not history.
 
 ## Native PHP Memory Categories
 
@@ -98,4 +104,4 @@ Memory can point to a living spec but must not replace one when architecture, AP
 
 ## Output
 
-Report selected mode, chunks read/created/updated/superseded, approved promotion ID when applicable, canonical sources verified, index/counter changes, conflicts or sensitive candidates rejected, validation evidence, Context Summary, and Next Steps.
+Report selected mode, chunks read/created/updated/superseded, approved promotion ID when applicable, canonical sources verified, index regeneration (`reindex-bank`), conflicts or sensitive candidates rejected, validation evidence, Context Summary, and Next Steps.

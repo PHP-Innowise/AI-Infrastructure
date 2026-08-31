@@ -170,6 +170,28 @@ Episodes support recall of what happened; they do not prove that the same
 behavior or decision is still valid. Local episodes are non-authoritative,
 machine-local, and never automatically promoted.
 
+Completing a governed task also writes a Git-tracked `event` record beside the
+local episode, so the one layer meant to hold "what happened here" survives a
+fresh clone instead of living only in the disposable database. `event` is the
+record type that reports that something happened rather than what to do about
+it, and it is excluded from promotion for exactly that reason — the record
+fixes a lifecycle transition that occurred and asserts nothing about how to
+act. It is best-effort: a task that completed is never reopened because its
+episode could not be written.
+
+`event` is the only record type mapped to the episodic layer. An `incident`
+stays semantic even though it is also a record of something that happened: an
+open incident is active, urgent, promotable content, and moving it to the
+single episodic slot would take it out of the runtime filters, the budget and
+the manifest.
+
+The episodic slot of a governed capsule is ranked by `retrieve()` along with
+everything else. It used to be fetched separately by a query that never joined
+the metadata table, which applied no privacy, owner, authority, lifecycle or
+freshness filter and left the delivered document out of the manifest entirely.
+That was harmless while the only episodic document was the changelog; it stops
+being harmless once governed records live there.
+
 ## Governed and Lightweight Ownership
 
 The default governed model is:
@@ -314,6 +336,8 @@ The indexer discovers eligible files from fixed repository patterns, including:
 - mirrored edition skills;
 - root `README.md`;
 - `specs/**/*.md` and `docs/**/*.md`;
+- `codebase/**/*.md` — recursive, so a map filed per module is indexed whole
+  rather than only at its top level;
 - active `memory-bank/chunks/*.md`;
 - `tasks/**/*.md`;
 - `CHANGELOG.md`;
@@ -333,6 +357,21 @@ only when their task is eligible and the handoff validates against it.
 Indexing replaces the FTS document and metadata tables transactionally. It does
 not modify canonical source files or transform indexed content into truth.
 
+A pattern that matched files on disk and lost every one of them to
+`.gitignore` is reported as an exclusion named for the pattern, with the
+reason `pattern-all-git-ignored`. Individual ignored files stay silent on
+purpose — Symfony alone contributes hundreds — but a whole source of truth
+going dark is not a routine skip. Measured on a real installation: a project
+whose own `.gitignore` carried a bare `docs` entry indexed 96 accelerator
+skills, one `README.md`, and none of its own design documents, without a word.
+
+The same pass builds `document_links`, the reverse index of which document
+declares which source, read by `links` and by `retrieve --path`. It is derived
+and disposable: rows follow their document, and when the table is absent the
+runtime drops the stat cache so the first index after an upgrade re-reads
+every candidate. Populating it incrementally would leave it complete only for
+whatever happened to change next, while claiming to be complete.
+
 Important boundaries:
 
 - the index stems with `porter unicode61`, so "review" reaches a document that
@@ -346,12 +385,197 @@ Important boundaries:
   explicit full rebuild.
 
 `index --incremental` reuses every row whose source modification time and size
-are unchanged, so only new or modified documents are re-read and re-scanned.
-Project Brain records are always rebuilt, because their eligibility depends on
-configuration, lifecycle, and cross-record conflict state rather than on the
-record file alone. A change that somehow reproduced its predecessor's stat is
-not served as truth: retrieval re-hashes every candidate and excludes the
+are unchanged and whose calendar boundary has not passed, so only new,
+modified, or newly out-of-date documents are re-read and re-scanned. The two
+conditions answer different questions and only the first is a filesystem
+fact: a durable memory chunk stops being servable when a date arrives, which
+no `stat` can see. The cache therefore stores `min(review_after, valid_to)`
+alongside `(mtime_ns, size)`, and the day after that boundary the row is
+re-validated instead of reused. Project Brain records are always rebuilt,
+because their eligibility depends on configuration, lifecycle, and
+cross-record conflict state rather than on the record file alone. A change
+that somehow reproduced its predecessor's stat is not served as truth in
+governed mode: retrieval re-hashes every candidate and excludes the content
 mismatch as stale.
+
+### Two facts linked only by a shared source: a measured limit
+
+The second measurement of what lexical retrieval can and cannot reach, beside
+the embeddings result above.
+
+Two durable chunks were written whose only connection was a `sources[]` entry
+naming the same file — no shared vocabulary of their own. A query phrased in
+the *source's* words, which appear in neither chunk, retrieved the source
+document and **neither chunk: 0 of 2**. A control query using words the two
+chunks do share retrieved **2 of 2**.
+
+So co-retrieval of two related facts is available exactly when they happen to
+share the query's vocabulary, and unavailable when the relationship is the
+only thing joining them. `supersedes` and `superseded_by` are not read during
+retrieval, and no other edge between chunks exists, so nothing walks that link.
+That is not a ranking weakness to be tuned; it is a missing traversal.
+
+This is the number that justifies giving durable chunks a one-step link
+hydration, and it is why the semantic limit is not raised instead: widening
+2/3/1 would buy a larger lexical net, and the failure above is not a
+net-size problem.
+
+#### What was built, and what was not
+
+The repair is a reverse index, not an authored edge. `document_links` records
+which documents declare which source — one row per `sources[]` entry, derived
+at index time and thrown away with the index — and `linked_documents` walks it
+backwards: given a path, every document that cites it. On the same fixture
+that measures 0 of 2 lexically, the link route returns **2 of 2**, with nobody
+authoring anything.
+
+That number is also why a `related:` field on chunks was *not* built. It would
+repair the same case only if a human wrote an edge for every pair, and nothing
+in the repository authors chunk edges; the link the two chunks already assert
+was sitting unread in their own frontmatter. A `related:` field remains
+justifiable only for a relationship that no shared source expresses, and no
+such case has been measured. It is recorded here beside the embeddings
+negative so the question is not reopened without new evidence.
+
+Two things the index deliberately does not carry:
+
+* **`source_fingerprints`.** `sources_are_fresh` requires the fingerprint path
+  set to equal the sources path set, so a fingerprint can never name anything
+  `sources` does not already name.
+* **A task's `files[]`.** Every live task record in this repository lists
+  twenty entries led by phpunit cache, vendored JavaScript and dev container
+  dumps, and `changed_paths` writes them relative to the Git toplevel while
+  every other path in the index is relative to the repository root. Linking
+  them would fill the table with build artifacts that resolve to nothing.
+
+The link is deliberately derived rather than durable. Carrying the same edge
+on the chunk would put it under `chunk_source_digests` and `validate_metadata`,
+where editing the referenced file evicts the chunk as `source-changed` and
+deleting it becomes a permanent bank-validation error reachable from
+`apply_promotion`, `compact` and `validate`.
+
+#### Promotion carries the citation through
+
+A promoted chunk records the records it was promoted from **and what those
+records themselves cited**. Without the second the chain breaks exactly where
+it matters: the chunk names the record, the record names the document, and
+`links` is one hop by design, so a query on the document reaches the record
+and never the knowledge derived from it.
+
+This was found on a real installation rather than in a fixture. Two findings
+about one design document promoted into two chunks that shared no source at
+all — the shape the fixture hand-wrote is one the automatic pipeline never
+produced. With inheritance the same two chunks share the document, and
+`links --path` on it returns both.
+
+Two limits on what is carried:
+
+* **Only `sources`, never `files`.** A record's `files` is Git churn in the
+  Git-toplevel frame; merging it would put code paths under
+  `chunk_source_digests`, where the next edit to any of them evicts the chunk
+  as `source-changed`.
+* **Only citations whose file still exists.** A file deleted between review
+  and apply would otherwise produce a chunk that fails `validate_metadata` at
+  birth, failing a promotion that has nothing to do with that file.
+
+An inherited citation is a full citation: it is digested, and an edit to the
+document re-opens the chunk for `bank-reverify` the same way an edit to the
+record does. That is the intended coupling — durable knowledge derived from a
+document should not outlive a change to it silently.
+
+#### Reaching it: `links` and `retrieve --path`
+
+    python3 memory-bank/scripts/context.py links --path specs/rounding.md
+    python3 memory-bank/scripts/context.py links --path specs --prefix
+    python3 memory-bank/scripts/context.py retrieve "..." --task-id T --path specs/rounding.md
+
+`links` reports the citations; `retrieve --path` delivers them in the same
+capsule, budget and manifest as everything else. Both apply the full runtime
+filter — privacy, owner, authority, lifecycle and freshness. That is not
+incidental: `search_documents` deliberately does not join `document_metadata`,
+and a `links` modelled on `search` would have republished restricted records
+the way `search` once did.
+
+Three properties worth knowing when reading a manifest:
+
+* A path-linked item carries `selection: "path-link"` and **no** `match`.
+  `match` says how the query matched, and nothing lexical selected these.
+  They also carry no `rank`, and score zero, like a conflict partner.
+* Path-linked items **lead** their layer, capped at `PATH_LINK_LIMIT`. Naming
+  a path is a claim that these documents matter to this turn; appending them
+  would let three query matches evict them and reproduce the 0-of-2 failure.
+* A layer can report `no-match` and still deliver a path-linked document on
+  the same turn. `no_match` is computed before injection and is a claim about
+  the *query* — the capsule line and `gate.signals.no_match` both read it that
+  way. The two answer different questions: whether the caller's words found
+  anything there, and whether the caller's path did.
+
+### Skill pointers in the procedural layer: a measured negative
+
+A separate idea was tested here and rejected on measurement, and the result is
+recorded for the same reason the embeddings result is: so nobody spends the
+effort again without new evidence.
+
+The observation is real. Nineteen of twenty measured procedural slots hold
+pointers to a `SKILL.md` whose name and `description` are already paid for at
+the start of every session, and some of those pointers are plainly wrong. The
+proposed remedy was to admit a skill document into the procedural layer only
+by the `distinctive` route — on a rare term — rather than by covering the
+query.
+
+Both readings of that rule were simulated against real indexes and both fail.
+Gating on the item's own match strength drops the *right* skill and keeps the
+wrong one: "map the codebase" loses `codebase-mapper` and retains `researcher`.
+Gating on membership of the distinctive-path set keeps the showcase failures
+the proposal cited. The cause is that a skill's `description` is indexed as the
+`summary` column at weight 8, so a correct and an incorrect skill match arrive
+through exactly the same channel — no filter over that channel can separate
+them.
+
+What the measurement does support is that the procedural layer routes badly:
+on real requests an acceptable skill reaches the top two only 10 times out of
+16 on Symfony. That number is now a regression floor in
+`project-brain/tests/fixtures/skill-routing-golden.json`, and
+`retrieval-report` reports the match-strength distribution and the most-selected
+paths over real turns. A remedy should be built when those two say what it
+should be — not before.
+
+### The retrieval gate
+
+Restraint above was all about the document: which files are relevant enough to
+occupy a slot. It cannot express the other question — whether this turn needed
+retrieval at all. A pointer that says "relevant right now" about the wrong file
+costs more than no pointer, because the agent opens it; the saving is bias, not
+tokens, and the work the gate skips is trivially cheap either way.
+
+`gate_decision` records a verdict on every governed retrieval. Two rules fire,
+both deterministic and both computable before any document body is opened:
+`no-match` when nothing survived the relevance test, so retrieving and skipping
+deliver the same thing, and `repeat-retrieval` when the distilled query and the
+selected path set both match the previous turn of the same task. That pair is
+the invariant — not "the capsule repeats byte-for-byte", which can never happen:
+every call mints a fresh manifest id, and the rendered capsule folds in an
+automatic checkpoint sentence and a last-turn summary that move on their own.
+The previous turn is remembered as two hashes in the disposable index, in a
+single bounded row rather than one per task, and a skip never overwrites it —
+otherwise the turn after a skip would compare against nothing.
+
+The mode comes from `--gate`, then `CONTEXT_RETRIEVAL_GATE`, then
+`retrieval_gate` in `runtime.json`, and defaults to `shadow`. In `shadow` the
+decision is computed, recorded and ignored: the turn is served either way. That
+is deliberate and is the same standard that kept embeddings out — the mechanism
+is built and observed before it is trusted, and switching it on is H3-05's
+decision, taken on the report `shadow` produces. `off` never decides. In
+`enforce` a skip withholds the selection, prints `gate: skipped — <reason>`
+after the `working:` marker, and still writes a manifest, because a withheld
+turn has to be countable. On the Cursor path a skip exits with a status the
+delivery hooks leave alone: rendering a withheld capsule would satisfy their
+`working:` check and replace Cursor's only memory channel with an empty rule.
+
+Whatever the reason a document leaves, `index` names it rather than dropping
+it silently — `retired`, `overdue-review`, a non-active status, `invalid`, or
+`secret` — so a red validator and a quietly shrinking index can no longer
+disagree about the same chunk.
 
 ## Search and Governed Retrieval
 
@@ -368,6 +592,26 @@ matters scores one, while filler sharing two unremarkable words scores two and
 takes the slot. Admitting a distinctive single match lets some noise back in on
 queries no document covers, which is the cheaper error — a spurious result
 wastes a slot, a hidden one denies an answer the project already holds.
+
+Both admissions used to arrive looking identical, so the capsule names which
+one applied. A document that carried the required number of distinct query
+terms is `covered`; one admitted on rarity alone is `distinctive` and renders
+as `weak-match: <path>`. `covered` is the common verdict and is carried by its
+absence in the capsule — the capsule is zero-sum against its character ceiling
+and each selected item is serialized more than once — while the manifest
+records the verdict for every selected item in full. A conflict partner is
+pulled in by record id rather than by the query and is recorded as `conflict`.
+
+A capsule also says when nothing matched. `no-match: <layers>` lists the
+layers in which no candidate passed the relevance test, and is computed before
+any privacy, authority, lifecycle, budget or layer filter runs — a layer
+emptied by one of those is not a layer memory had nothing for, and the
+manifest's `excluded` entries say which it was. In the manifest the same
+distinction reads as an empty `selected` with an empty `excluded`. Without
+this a capsule that found nothing and a capsule that was never consulted
+render identically, which is what makes "refuse when there is no data" a rule
+the model can actually follow rather than a request to observe something it
+was never shown.
 
 Ranking weights what a document declares itself to be about. Each document is
 indexed with a `summary` — a frontmatter `description` where one exists, the
@@ -506,10 +750,21 @@ successor took over, which the bank requires a link for, and `archived` when
 the knowledge simply ceased and nothing replaced it. The boolean model could
 not express that second case at all.
 
+Closing a period is an operation, not an editing convention: `context.py
+bank-retire --id MEM-... --valid-to YYYY-MM-DD [--superseded-by MEM-...]`
+writes the chunk, the other side of any replacement link, and the regenerated
+index under one lock, validates the bank, and restores every touched file if
+anything fails. Doing it by hand leaves the bank invalid between the first
+edit and the last.
+
 An active chunk may not sit past its `valid_to`, the same rule `review_after`
 already applies. Closing a period therefore removes the chunk from retrieval
 without deleting it: automatically written memory earns a boundary rather than
-an erasure, and what was believed during that period stays readable.
+an erasure, and what was believed during that period stays readable. The
+boundary is enforced on both indexing paths, not only the full rebuild — the
+incremental cache keys on it as well as on the stat pair, so the removal
+happens on the date itself rather than on the next time someone edits the
+file.
 
 ## Budgets and Snippets
 
@@ -536,16 +791,22 @@ the Git-tracked `project-brain/control/retrieval-manifests/<uuid>.json`.
 `--ephemeral` writes the same validated record to
 `memory-bank/local/retrieval-manifests/<uuid>.json` instead. Automated
 retrieval must use it: one manifest per request would otherwise add thousands
-of files to shared history. Local manifests are ignored, are capped at the most
-recent 200, and are provenance for the local machine only.
+of files to shared history. Local manifests are ignored, are provenance for the
+local machine only, and are capped by `local_manifest_retention` in
+`project-brain/config/runtime.json` (default 200, floored at 1). That window is
+the observation window for anything measured from manifests, and a withheld
+turn writes one too — so a high skip rate shortens the history in proportion.
 
 A manifest binds:
 
 - creation time and the privacy-checked, distilled retrieval query;
 - Brain task UUID and revision;
 - privacy, owner, authority, freshness, and active-only filters;
-- selected paths, categories, estimated tokens, and source hashes;
+- selected paths, categories, estimated tokens, source hashes, and how
+  each one matched (`covered`, `distinctive`, or `conflict`);
 - excluded paths and safe reasons;
+- the retrieval gate's verdict for the turn: `decision`, `mode`, `reason`, and
+  the signals it decided on;
 - provider;
 - target/hard estimates and any conflict escalation reason.
 

@@ -28,6 +28,96 @@ edition's own files remain in that edition's changelog.
 
 ### Added
 
+- **`document_links`, a reverse index from source path to the documents that
+  cite it, with `context.py links` and `retrieve --path` (roadmap H4-02,
+  H4-03).** Two durable chunks whose only connection was a `sources[]` entry
+  naming the same file were unreachable from each other and from the source's
+  own words: a query phrased in the source's vocabulary returned the source
+  document and **neither chunk — 0 of 2**, while a control query using words
+  the chunks share returned 2 of 2. The link the two chunks already asserted
+  was sitting unread in their own frontmatter.
+  - `document_links(path, ref_path, ref_kind)` is built during indexing from
+    the `sources` of durable chunks, Brain records and handoffs, with an index
+    on `ref_path`. On the same fixture the link route returns **2 of 2**.
+  - `context.py links --path P [--prefix]` reports the citations. It joins
+    `document_metadata` and applies the full runtime filter; `search_documents`
+    deliberately does not, and a `links` modelled on `search` would have
+    republished restricted records.
+  - `retrieve --path P` (repeatable, also on `context`) delivers them in the
+    same capsule, budget and manifest. Path-linked items lead their layer,
+    capped at `PATH_LINK_LIMIT`, and carry `selection: "path-link"` in the
+    manifest with no `match` and no `rank` — `match` says how the *query*
+    matched, and nothing lexical selected these. `selection` is added to
+    `retrieval-manifest.schema.json`, which is `additionalProperties: false`;
+    the strict top-level key set is untouched, so no manifest version bump.
+  - Injection happens strictly after `matched_layers`/`no_match` are computed,
+    so the capsule's `no-match:` line and `gate.signals.no_match` keep meaning
+    "the query found nothing in this layer". A layer can report `no-match` and
+    still deliver a path-linked document on the same turn.
+  - A `related:` field on chunks was considered and **not** built: it repairs
+    the same case only if a human authors an edge for every pair, and nothing
+    in the repository authors chunk edges. Recorded in
+    `docs/CONTEXT-AND-MEMORY.md` beside the embeddings negative.
+  - `ref_kind` carries only `source`. `fingerprint` is dead by construction
+    (`sources_are_fresh` requires the fingerprint path set to equal the
+    sources path set) and a task's `files[]` is Git churn in the wrong path
+    frame — every live task here lists twenty entries led by phpunit cache and
+    vendored JavaScript, written relative to the Git toplevel rather than the
+    repository root.
+  - When the table is absent the runtime drops `document_source_state` so the
+    first index after an upgrade re-reads every candidate. `discover_documents`
+    returns only *changed* documents, so populating it incrementally would
+    leave it complete for whatever happened to change next while claiming to
+    be complete.
+
+- **Project Brain records render a `## Sources` block (roadmap H4-03).** The
+  index reads bodies, not frontmatter, so a finding created with
+  `--source app/Billing/InvoiceTotal.php` was not reachable by the one string
+  a reader is most likely to search for. Existing records keep their current
+  body until their next mutation rewrites them; nothing verifies an on-disk
+  body against `_record_body`, and `source_hash` is recomputed at index time.
+
+- **`codebase/**/*.md` is indexed recursively (roadmap H4-05).** The pattern
+  was single-level, so a codebase map filed into per-module directories — the
+  shape a map big enough to be worth writing takes — was indexed at its top
+  level and nowhere else. A strict superset of what was indexed before.
+
+
+- **Cross-edition parity now covers the hook surface, and a new
+  `scripts/asset_parity.py` covers the generator asset (roadmap H1-01).**
+  The memory core has four copies, not three: the three PHP editions plus
+  `Infrastructure-Creator/.agents/skills/memory-seed/assets/`, which is
+  copied verbatim into every project the generator builds. Nothing
+  compared that fourth copy, and the hooks — the only automatic entry
+  into the engine — were outside `CROSS_EDITION_CORE_MANIFEST` entirely,
+  so both drifted while CI stayed green.
+  - `CROSS_EDITION_CORE_MANIFEST` gains `.claude/hooks/*.sh`.
+    `bash-validator.sh` (this framework's destructive commands) and
+    `local-context.sh` (this framework's session-start detection) are
+    framework surface and are exempted by name in
+    `CROSS_EDITION_ALLOWED_DRIFT`; every other hook is engine and must
+    match. `subagent-gate.sh` needs no exemption — it is already
+    byte-identical across the editions, and its `MIRROR_RULES.skip`
+    entry governs the `.claude`→`.cursor`/`.codex` axis inside one
+    edition, which is a different question.
+  - `scripts/asset_parity.py --check|--write` compares the asset against
+    the canonical edition in both directions: drifted bytes, canonical
+    files the asset never received, and asset files that map to no
+    canonical path (so a new asset file cannot become silently
+    unchecked). `runtime.json.template` cannot match byte-for-byte, so it
+    is compared by JSON key set against the edition's `runtime.json` — a
+    new runtime setting now either reaches generated projects or fails
+    the gate. Deliberate one-sided files are listed with their reason in
+    `ASSET_ONLY` / `EDITION_ONLY`.
+  - CI: the `parity` job runs both the asset check and
+    `tests/test_asset_parity.py` once, on the `Laravel` leg.
+
+- Added a first-class WordPress accelerator at `Cms/wordpress` with canonical
+  WordPress policy and skills for plugins, classic/block themes, Gutenberg,
+  actions/filters, content modeling, REST, WP-CLI, multisite, WooCommerce and
+  background processing; integrated it into mirrors, installation inventories,
+  context budgets, cross-edition runtime parity, CI and documentation.
+
 - **A context-collection command for external models
   (`scripts/collect_context.py`), wrapping the optional `code2prompt`
   CLI.** Invoked as `/collect <scope> [options]` in Claude Code, from a
@@ -183,6 +273,43 @@ edition's own files remain in that edition's changelog.
   its preinstalled `php` fail rather than report a silent pass.
 
 ### Changed
+
+- **Integration of the WordPress edition with the H1–H4 memory work.** The two
+  branches merged cleanly as text and would have shipped a broken engine: the
+  new edition carried its own copy of the five core modules taken from `main`,
+  so four of them were behind, and `parity --cross-edition` — which the
+  WordPress branch itself extended to cover the edition — reported ten
+  divergences. Reconciled by bringing the edition to canon rather than by
+  relaxing the gate.
+  - Four core modules, three shared test files, `PROTOCOL.md`, the retrieval
+    manifest schema and `project-brain/tests/test_runtime.py` synchronised.
+  - `.claude/hooks/working-memory-read.sh` was the pre-H1-01 variant that
+    truncates the prompt with a regex; replaced with the canonical one, which
+    passes the raw prompt to the CLI where distillation and the secret gate
+    live. Left as it was, the edition would have asked the core a different
+    question than its siblings — the exact drift H1-01 exists to prevent.
+  - `memory-probes.json` copied to the edition: it is byte-identical across
+    the other three, so it is engine data rather than framework data.
+  - `SkillRoutingTest` now skips explicitly, naming the gap, when an edition
+    ships no `skill-routing-golden.json`. The guard stays after WordPress got
+    its own set, because the generator ships this test into projects that have
+    no roster fixture at all.
+  - WordPress gained both routing fixtures. `skill-routing-golden.json` holds
+    18 boundary cases over its roster and a floor **measured at 17 of 18** —
+    the one miss is "write tests for the checkout extension", which reaches
+    `woocommerce` because "checkout" is that skill's strongest term. The
+    comment warns against reading 17/18 against Symfony's 10/16: WordPress's
+    domain skills carry far more distinctive vocabulary than Symfony's
+    overlapping pairs, so the two numbers are not comparable.
+    `.agents/evals/routing.json` holds 15 cases including two restraint ones,
+    and `Cms/wordpress` joins `EDITIONS` in `routing_eval.py` in the same
+    change, as that file's own note required.
+  - `policy_lock.py`, `check_stabilization.py` and `routing_eval.py` all
+    learned the edition; it ships 41 agents, its own stabilization rules and
+    now its own routing cases.
+  - Mirrors, the generator asset and all four installation inventories
+    regenerated; the WordPress inventory gains its policy lock.
+
 
 - **Infrastructure-Creator's context-budget ceilings were raised for the
   content review-and-repair phase** (`scripts/token_budget.json`, observed
@@ -438,6 +565,746 @@ edition's own files remain in that edition's changelog.
   `frontmatter_bytes` and `skills` are unchanged and stay where they are.
 
 ### Fixed
+
+- **Promotion carries a record's citations through to the chunk.** Found by
+  installing the edition into a real Symfony project rather than by a fixture:
+  `apply_promotion` recorded only the source records, so two findings about one
+  design document promoted into two chunks that shared no source at all. The
+  chunk named the record, the record named the document, and `links` and
+  `retrieve --path` are one hop by design — so the document reached the records
+  and never the knowledge derived from them. The hand-written fixture had two
+  chunks citing one document, a shape the automatic pipeline never produces.
+  - Only `sources` is inherited, never `files`: a record's `files` is Git churn
+    in the Git-toplevel frame, and merging it would put code paths under
+    `chunk_source_digests` where the next edit evicts the chunk.
+  - A citation whose file no longer exists is dropped rather than carried. It
+    is reachable — delete the file between review and apply — and without the
+    guard `validate_metadata` rejects the new chunk and fails a promotion that
+    has nothing to do with that file.
+
+- **A source tree lost entirely to `.gitignore` is now reported.** Same real
+  installation: the project's own `.gitignore` carried a bare `docs` entry, so
+  `docs/**/*.md` matched two design documents on disk and silently indexed
+  neither. The index held 99 documents — 96 of them the accelerator's own
+  skills, one the project's `README.md`. Discovery now emits one exclusion per
+  pattern that lost every candidate, named for the pattern with the reason
+  `pattern-all-git-ignored`; it surfaces wherever excluded paths already do,
+  including the per-turn hook line. Individual ignored files stay silent as
+  before — Symfony alone contributes hundreds.
+
+
+- **A promoted chunk declares what it was promoted from (roadmap H4-04).**
+  `apply_promotion` wrote `type: "decision"` whatever it promoted, so a
+  resolved bug and a closed incident both entered the Memory Bank claiming to
+  be decisions, and `INDEX.md`, `bank-audit` and every reader keyed on type
+  were reading a value nothing had chosen. `PROMOTION_TYPE_BY_RECORD` maps the
+  four promotable record types to `constraint`, `operations`, `domain` and
+  `decision`; every value is in `validate.ALLOWED_TYPES`, and `decision`
+  remains the fallback. It sits beside `PROMOTABLE_STATES` so the two stay
+  visibly coupled.
+
+- **A snippet for a candidate the query did not match is prose, not
+  frontmatter.** `_conflict_candidates` took `substr(content, 1, N)`, and a
+  durable chunk opens with a JSON metadata block long enough to fill the whole
+  snippet allowance — so a conflict partner was delivered as a wall of quoted
+  keys and digests. Candidates selected by the query escaped this because FTS
+  `snippet()` centres on the match. `_body_snippet` skips a leading
+  frontmatter block and is used by conflict partners and path links alike.
+
+
+- **The bank validator distinguishes a broken chunk from a retired one
+  (roadmap H1-07).** `validate_bank` returned a flat list and `main()` exited
+  `1` on any element, so deleting a cited file — dropping a controller,
+  regenerating a schema — failed Definition of Done on an unrelated task for a
+  chunk that had been correctly archived. The engineer's only outs were to
+  fake `sources` or delete the record, both of which destroy the provenance
+  the bank exists for.
+  - `validate_bank_report` returns `(errors, warnings)`; `validate_bank` keeps
+    its list-of-errors signature and delegates, so every existing caller in
+    `brain_runtime.py` and the tests is untouched. A terminal chunk
+    (`superseded`, `archived`, or past its `valid_to`) whose cited source has
+    been deleted is a warning; an active chunk with the same defect is still
+    an error, because a chunk that still answers questions must still be able
+    to show where the answer came from. A source path escaping the repository
+    stays fatal in every status.
+  - `validate_metadata` takes an optional warnings sink. Without one its
+    behaviour is byte-for-byte unchanged, which is what keeps `active_memory`
+    — the retrieval gate — strict rather than quietly admitting active chunks
+    with deleted sources into the index.
+  - The cascade message is fixed: an index row whose chunk is on disk but
+    failed validation now reads `index row retained for invalid chunk`
+    instead of `points to a missing chunk`, which sent the reader looking for
+    a file that was sitting right there. It reproduced for *any* metadata
+    error, not just deleted sources. The row is matched against the ids seen
+    on disk, falling back to the filename, because a chunk can fail before
+    its own id is readable.
+
+- **Cursor now retrieves on the task, not on the branch name (roadmap
+  H1-06).** Cursor has no prompt-submit event, so its one automatic memory
+  entry point hands over a task identifier — in practice a branch name — and
+  the governed path tokenized that slug and retrieved on it. Measured: branch
+  `main` filled both procedural slots with `wcag-accessibility` rules matched
+  on the word "main"; `chore/accelerator-hardening` returned a release skill.
+  The enrichment that fixes this already existed and was used only on the
+  lightweight path.
+  - `hook_capsule_query` builds the query from the task behind the binding —
+    goal, manual progress, next steps, file stems — via the existing
+    `build_capsule_query`. The identifier still leads, so branch tokens are
+    kept, but a second informative term raises `required_coverage` from 1 to
+    2 and documents whose only hit is the slug stop qualifying.
+  - Two exclusions are deliberate. The automatic checkpoint is a sentence of
+    turn counts and an ISO timestamp with no topical content that would spend
+    a third of the 32-token budget and change the query on every flush. An
+    auto-provisioned goal is the branch slug re-cased, so using it would
+    reintroduce the same noise under another name; it is detected by
+    comparing against `derive_goal`, which builds that form, rather than by
+    matching a literal suffix.
+  - When nothing substantive remains, or the task cannot be read, the bare
+    identifier is used rather than failing — Cursor would otherwise keep
+    serving the previous rule with no signal. The capsule prints `query: from
+    task goal` or `query: from branch name only` after the `working:` render
+    marker, and the manifest records the same distinction as `query_source`.
+  - `docs/TOOL-INTEGRATIONS.md` described the Cursor difference as one turn of
+    staleness only; the query source was the larger half and is now stated.
+
+- **The signals a retrieval gate will need are now persisted, and the
+  observation window is configurable (roadmap H1-05).** Everything needed to
+  decide whether a turn should retrieve at all is already computed during a
+  retrieval and was discarded at the end of it: `adjusted_score` never left
+  `retrieve()`, rank existed only as list position, phase timings printed only
+  under `--json` on a branch the hook never takes, and nothing recorded where
+  the query came from. Horizon H3 has nothing to measure without them.
+  - Manifest `selected[]` entries gain `score` (the adjusted relevance) and
+    `rank` (position in the lexically ranked list, stamped in `_candidates`
+    before any filter — a position in the post-filter list would say where a
+    survivor landed, not how well it answered). A conflict partner is pulled
+    in by record id and never ranked, so it reports `rank: null` and an
+    explicit `score: 0.0` rather than inheriting a relevance it never earned.
+  - The manifest gains `query_source` (`prompt` | `task` | `task-id` |
+    `explicit`, threaded from each dispatch site because neither `retrieve()`
+    nor `assemble_capsule()` can infer it from a bare query string) and
+    `phase_seconds` for stat, index and retrieval. `retrieve()` times its own
+    body rather than reusing the CLI's `retrieval_seconds`, which measures a
+    strictly larger interval; a phase that did not run this turn reports
+    `null` rather than `0.0`, which would claim an instantaneous index.
+  - `local_manifest_retention` moves from a module constant to
+    `project-brain/config/runtime.json` (default 200). It is floored at 1:
+    zero or a negative value would delete the manifest the current retrieval
+    just wrote while the returned capsule still advertised its path.
+  - Plain `refresh` now prints `phases: stat Xms index Yms retrieval Zms`.
+    The hook echoes that report verbatim and never passes `--json`, so this
+    is the first time the number that says whether a turn is approaching its
+    five-second budget is visible where it can be acted on. It is printed in
+    the `refresh` branch, not in `print_capsule`, whose first line must stay
+    the `working:` render marker the Cursor hooks key on.
+  - **Manifest schema version 2.** `brain_runtime.validate_repository`
+    duplicates the manifest key set as a literal and compares it with strict
+    equality, so any new top-level field would have invalidated every
+    manifest a consuming project had already written — a red Definition of
+    Done on upgrade, for a file nothing re-reads. The key set is now selected
+    by the manifest's own declared version: a version 1 manifest keeps
+    validating, and a manifest claiming version 2 must carry what version 2
+    promises. `schema_version` accepts `[1, 2]`; the new fields are declared
+    explicitly, since every Brain schema is `additionalProperties: false`.
+
+- **The capsule now says how well it matched, and when it matched nothing
+  (roadmap H1-04).** A capsule that retrieved noise and a capsule that
+  retrieved an answer looked identical from inside a turn, and a capsule that
+  found nothing looked identical to one that was never consulted. Any policy
+  rule of the form "refuse when there is no data" was therefore asking the
+  model to observe something the harness never reported — exactly what
+  `STABILIZATION.md` forbids.
+  - `match_strength` names which of the two admission routes `is_relevant`
+    took: `covered` (the document carried the required number of distinct
+    query terms) or `distinctive` (it did not, and was admitted on rarity
+    alone). The threshold is `required_coverage(tokens)`, which is 1 for a
+    single-term query — so a one-term query is always `covered`, correctly:
+    there is no weaker way to match it. A conflict partner is pulled in by
+    record id rather than by the query and is recorded as `conflict`, which
+    also keeps it from tripping the projections below.
+  - The label is set on both retrieval paths — `_candidates` for governed
+    retrieval and `search_documents` for the lightweight one — and named in
+    all three key whitelists (`manifest["selected"]`, the capsule `groups`
+    projection, the returned `selected`), any one of which would otherwise
+    have swallowed it silently.
+  - The capsule is zero-sum against an 8,000-character ceiling and serializes
+    each selected item up to three times, so `covered` is carried by its
+    absence: the manifest records the verdict for every item, the capsule
+    spends characters only on the one that needs a caveat. `print_capsule`
+    renders it as `weak-match: <path>`.
+  - `no-match: <layers>` names the layers where no candidate passed the
+    relevance test. It is computed before any privacy, authority, lifecycle,
+    budget or layer-limit filter runs, because a layer emptied by a filter is
+    not a layer memory had nothing for — deriving it from an empty rendered
+    list would have re-created the very conflation the line exists to remove.
+    In the manifest the same distinction reads as an empty `selected` next to
+    an empty `excluded`.
+  - Both lines are printed after the opening `working:` line, which the Cursor
+    hooks require as the render marker.
+  - `match` is declared in `retrieval-manifest.schema.json` with an enum but
+    deliberately left out of `required`, so manifests written by an earlier
+    build stay valid in a consuming project.
+
+- **One document can no longer hold two slots of the same capsule
+  (roadmap H1-03).** The governed capsule builds its semantic layer from
+  retrieval categories and its episodic layer from the layer column, and the
+  two taxonomies disagree: `category_for` has no `changelog` branch, so
+  CHANGELOG.md — the only episodic document a repository ships — was category
+  `evidence` and layer `episodic` at once. It took one of the three semantic
+  slots and the single episodic slot together, so a sixth of a capsule bounded
+  at 2+3+1 went to a duplicate while the degradation ladder dropped real
+  content to stay under 8,000 characters.
+  - `retrieve()` now excludes episodic-layer documents from the semantic
+    ranking *before* the 2+3 truncation rather than after it. Filtering
+    afterwards would subtract without replacing — the freed slot would be
+    lost instead of going to the next ranked candidate — and would leave the
+    written manifest asserting a selection the delivered capsule no longer
+    matched.
+  - A document held back because its own layer will carry it is now excluded
+    with reason `episodic-layer` rather than `layer-limit`; the manifest
+    schema takes a free-form reason string, so nothing else changed.
+  - `deduplicate_capsule_layers` is a layer-preserving guard in
+    `assemble_capsule`, added so a future layer source cannot reintroduce the
+    collision unnoticed. It resolves a collision by ownership — a document
+    goes to the capsule layer its own `layer` field names — rather than by
+    first-come priority, which would have let a semantic copy empty the one
+    episodic slot. It removes nothing today.
+  - The lightweight path never had the collision (it queries each layer
+    separately) and is now held to the same asserted contract as the governed
+    one.
+
+- **Retrieval quality is measured rather than asserted (roadmap H3-03,
+  H3-04, H3-06), and one proposed mechanism is recorded as refuted
+  (H3-05).**
+  - **Memory probes with declared categories** (`memory-probes.json`, twelve
+    cases across recall / update / restraint / reasoning, and a deterministic
+    gate). The old fixture expressed only `{query, expected[]}`, so negatives
+    had to be hardcoded in a test body and a restraint case could not be
+    written at all. UPDATE cases exercise the retire path end to end: a chunk
+    is written, retired with `bank-retire`, replaced, and the retired one must
+    not be delivered. Cases seed and clear their own corpus — without that a
+    later case retrieved an earlier one's documents and the gate stopped
+    measuring what it named.
+  - The RESTRAINT predicate is deliberately narrower than proposed. The
+    roadmap's version would have declared a documented, deliberate behaviour a
+    defect: retrieval surfaces the least-bad lexical match rather than nothing,
+    on the recorded ground that a hidden answer costs more than a spurious one.
+    So restraint is asserted where the claim is unambiguous — a subject absent
+    from the corpus must produce `no-match` — and the single-rare-term case
+    asserts the checkable thing instead: the selection is *marked*
+    `distinctive`.
+  - **A skill-routing floor** (`skill-routing-golden.json` plus a gate that
+    copies the edition's real skill tree). `acceptable` is a set, not one
+    slug, because several requests have two defensibly correct answers and
+    asserting one would measure the fixture author's taste. `min_top2` is the
+    measured value — Laravel 12/15, Symfony 10/16, PHP Core 13/14 — recorded
+    as a regression floor and explicitly not a quality bar. Routing is poor
+    today; the number exists so it cannot quietly get worse.
+  - **A roster routing eval** (`routing.json` per edition, `routing_eval.py`).
+    The unit is the *skill*, not the agent: agent name equals skill name for
+    every roster entry, so a name-based detector cannot tell them apart, and
+    the skill layer is the only one Codex shares. The capsule stays on,
+    because a baseline without it would describe a configuration nobody runs.
+    `hit` / `miss` / `wrong` stay separate because a miss means the
+    description is too narrow and a wrong means it overlaps a neighbour.
+    Baselines are keyed to `policy_digest`, and `--dry-run` refuses to write
+    one — it scores perfectly by construction and would publish a meaningless
+    1.0. No baseline is recorded here: producing one invokes a model.
+  - `docs/EXTENDING.md`: a pull request changing any `description:`, or the
+    composition of the roster, attaches the routing delta.
+  - **H3-05's descriptor filter is refuted, not implemented.** Both readings
+    of "admit a skill only by the distinctive route" were simulated against
+    real indexes: gating on match strength drops the right skill and keeps the
+    wrong one ("map the codebase" loses `codebase-mapper`, retains
+    `researcher`), and gating on distinctive-path membership keeps the
+    proposal's own showcase failures. A skill's `description` is indexed as
+    the `summary` column at weight 8, so correct and incorrect skill matches
+    arrive through the same channel and no filter over it separates them. The
+    negative is recorded in `docs/CONTEXT-AND-MEMORY.md` beside the embeddings
+    negative, with the two measurements that should decide any future remedy.
+
+- **The retrieval manifests are read, and turn health accumulates (roadmap
+  H3-02).** The prompt hook is the most frequent event in the system and its
+  honesty lived exactly one turn: a timeout, a slow index phase or a capsule
+  that dropped content was visible in that turn's report and nowhere
+  afterwards. None of the CLI's subcommands read a manifest — they were
+  written and died — and `telemetry.py` had been written, disabled, covered by
+  five tests and never called from anywhere.
+  - `context.py retrieval-report [--since N] [--scope] [--json]` aggregates
+    turns, empty selections, exclusion reasons, gate decisions and skip
+    reasons, match strengths, phase percentiles and the twenty most-selected
+    paths. `--since` counts records, not days, and says so.
+  - It reports the top score **twice** — best candidate before any filter, and
+    best delivered — because those diverge exactly when the best match was
+    withheld, which is the case the report exists to surface. Picking one for
+    the reader would hide it.
+  - Version 1 manifests, which carry no gate, timings, query source or
+    per-item score, are counted rather than skipped, and every metric states
+    how many manifests could answer it. On a real corpus that is most of them.
+  - `context.py health [--window N] [--json]` aggregates a new append-only
+    `memory-bank/local/refresh-health.ndjson`, bounded by
+    `refresh_health_retention` in `runtime.json` — a window, so a runtime key
+    beside `local_manifest_retention` for the reason H1-05 recorded, not a
+    module constant. It reads only the health series: the manifest's
+    `retrieval` phase and a refresh's `retrieval` phase are different
+    intervals that H1-05 split deliberately.
+  - Records are appended by `refresh`, by `hook-context` (Cursor's read path
+    never enters the refresh branch and would otherwise be invisible), and by
+    `working-memory-read.sh` itself, which writes its own status line **before**
+    the early exit — on a timeout the Python process is killed before it can
+    write anything, and that is the one case worth measuring. The hook had no
+    status capture at all; the roadmap's `$STATUS` did not exist.
+  - `emit_refresh_telemetry` gives `telemetry.py` its first production caller,
+    guarded against the three ways its contract breaks a turn: it reads its
+    config file before checking whether it is enabled and raises when that
+    file is absent; `task_id` must be a UUID while the refresh branch has a
+    branch name; and `context_tokens` exists only on a capsule that a refresh
+    without `--query` never builds. Imported lazily, wrapped, and validated by
+    the caller so `telemetry.py` keeps its zero coupling to Project Brain.
+  - Privacy: neither report nor the health series carries the query text, in
+    either output mode — the roadmap asked for this on `--json` only, but the
+    text report and the NDJSON are the same leak.
+
+- **The surface the model reads now has a content identity (roadmap
+  H3-01).** It was gated on volume (`context_budget.py --check`) and on mirror
+  agreement (`parity`, `mirrors`) and on nothing that said what it *is*.
+  Measured consequences: `model: sonet` in an agent's frontmatter passed every
+  job — the mirror builder drops that line whatever it says, and the budget
+  counts only the stem and the description, so no byte moves; and once mirrors
+  are regenerated, an unreviewed instruction appended to an agent's *body* —
+  which is its prompt — passes `mirrors`, `context_budget` and
+  `check_stabilization` alike.
+  - `scripts/policy_lock.py --check|--write` writes
+    `<edition>/.accelerator-policy-lock.json`: sha256 per surface file, each
+    agent's declared model, and a `policy_digest` over the sorted manifest.
+  - **Whole files, never projections.** Hashing only frontmatter would store a
+    digest under a path key that is not `sha256(path)`, turning every
+    independent check into a false positive — the exact failure the lock
+    exists to remove.
+  - **Enumerated from Git, never from disk**, because `.cursor/rules/` holds a
+    gitignored render that changes every turn and a filesystem glob would bake
+    it into the lock permanently.
+  - The model allowlist is enforced on `--write` as well as `--check` —
+    otherwise a regeneration launders the typo and then agrees with itself —
+    and is per edition, since Infrastructure-Creator ships no haiku agent and
+    its own `agent-forge` skill requires opus or sonnet.
+  - The lock lives inside the edition rather than under `install/`, so the
+    installer classifies it as a shared component with no code change and it
+    lands beside `VERSION` — the only place a session hook can find it without
+    knowing its edition name. Inventories regenerated.
+  - `local-context.sh` prints `Accelerator version: 2.0.0 (policy b3dbfccb)`.
+    It prints the *recorded* digest, which is honest here — CI refuses a
+    surface change without regenerating the lock — and as stale as the version
+    line in a project that edited a skill locally; that limit is stated in the
+    code. `skill_tree_fingerprint` was deliberately not reused: it is computed
+    from mtime and size, which makes it a cache-invalidation key rather than a
+    statement about content.
+  - `check_core_changelog.sh` gained a second rule: a change to an edition's
+    model-facing surface requires an entry in that edition's own changelog. A
+    single ERE could not express it — the two rules have different targets —
+    so the script now runs both and reports both. The three edition changelogs
+    were back-filled for the H1/H2 skill, DOD, command and STABILIZATION
+    changes, which had been recorded only in this file.
+
+- **The stabilization rules are validated against the template they declare
+  (roadmap H2-08).** `STABILIZATION.md` states the shape a rule takes and
+  nothing checked that the rules took it — the contract rested entirely on the
+  discipline of whoever wrote the last one, in a repository that gates
+  markdown links, JSON syntax, PHP snippets and byte budgets.
+  - `scripts/check_stabilization.py` validates the required fields, that
+    `Rule` states an obligation rather than a preference, that `Enforcement`
+    names something, that dates are ISO, that a `Retired` rule sits under
+    `## Retired rules` and vice versa, that `Superseded-by` resolves within
+    the file, and that `Evidence` — optional — is a UUID naming a Project
+    Brain record on disk. Wired into the `lint` job with its regression tests,
+    following the `context_budget.py` precedent for stdlib policy checks.
+  - Infrastructure-Creator is reported as **skipped**, not passed: it writes
+    the cycle as prose and carries no rule blocks, and a validator that
+    silently approves a file it never examined is the defect it exists to
+    prevent.
+  - A parser bug the tests caught, worth recording because it is the exact
+    case being validated: the field regex used `\s*`, which matches a
+    newline, so an empty `**Enforcement:**` swallowed the line break and
+    adopted the next line as its value — the check would have passed the one
+    thing it was written to catch.
+  - **Most of this item's premise does not exist.** It describes
+    `STABILIZATION.md` as already localizing failures with `Edge`/`Blame`
+    fields over a nine-component vocabulary, already declaring an "earliest
+    unrecovered failure" rule and a `Blame`-to-`Enforcement` routing rule, and
+    Symfony as already rewritten to carry them. `Blame`, `Edge`, "unrecovered"
+    and the nine-component vocabulary appear nowhere in the repository except
+    in the roadmap paragraph proposing to validate them. Steps 2, 3 and 6 were
+    therefore not implemented: authoring a failure-localization taxonomy is a
+    design decision for a human, not something to infer from a description of
+    a document that was never written.
+
+- **A procedural rule can now be retired, and the budget it frees is
+  visible (roadmap H2-07).** `/reflect` could only ever add: the rule template
+  carried `Added:` and nothing else, there was no notion of a rule that had
+  stopped applying and no way to take one back out. `AGENTS.md` is paid on
+  every session of an edition and gated in CI, so the only growing channel of
+  procedural memory ran toward a wall with nothing to give back.
+  - The rule template gains `Retired:` and `Superseded-by:`, in both places it
+    lives — `.claude/STABILIZATION.md` and the `reflect` skill, which
+    duplicate it and would otherwise fork on the first edit. `STABILIZATION.md`
+    gains a `## Retired rules` section: a retired rule is kept for the reason a
+    superseded memory chunk is kept, and that file is not part of the
+    per-session budget.
+  - `/reflect` gains an explicit add / overwrite / retire decision before it
+    writes, with the search that finds what a new rule might replace. Two
+    limits are stated rather than papered over: the index must be refreshed
+    first or `search` silently returns nothing and the decision degrades to
+    `add`; and the procedural layer covers `AGENTS.md`, `CLAUDE.md` and skill
+    bodies only, so candidates in `GOLDEN-PRINCIPLES.md` and
+    `STABILIZATION.md` have to be found by reading them.
+  - It also now names the canonical tree to write into and what to do in a
+    consuming project, where the mirror builder is not installed: make the
+    identical edit in every tool tree present, or the retire manufactures a
+    governance-document parity failure in the project it was meant to help.
+  - `context_budget.py --headroom` prints the bytes remaining under each
+    ceiling, tightest first. The roadmap said this mode was unnecessary
+    because `--check` already prints the numbers; it does not — it prints
+    `ok`/`FAIL` and nothing else, which is why its own readiness criterion
+    could not be met without it.
+  - **No 5 % warning was added, deliberately.** `token_budget.json` sets every
+    ceiling at the observed value plus about five per cent, so headroom is
+    ~4.8 % of the ceiling by construction: a 5 % warning fires on all 28
+    edition×category pairs at once, which is the same as no warning. Saying so
+    is more useful than shipping an alarm that is always on.
+  - The premise figure was already dead: Symfony's `agents_md_bytes` headroom
+    is 847 B (4.72 %), not 137 B — the H1-01 status block had recorded the
+    same correction. `Symfony.body_bytes` did have to rise, to cover the skill
+    text this horizon added across H2-02, H2-03, H2-04 and this item; the
+    ceiling was re-baselined to the documented observed + 5 %.
+
+- **The episodic layer gets a Git-tracked source, and stops bypassing the
+  filters (roadmap H2-06).** The layer existed as a taxonomy, a table, a CLI
+  verb and a record type, and in governed mode had exactly one Git-tracked
+  document: the changelog. Completed work lived only in the disposable local
+  database, so the one layer meant to hold "what happened here" could not
+  survive a fresh clone.
+  - `complete` now writes an `event` record beside the local episode, under
+    the same lock and rollback. Best-effort by construction: a task that
+    completed is never reopened because its episode could not be written.
+    The outcome and verification go in the record's `goal` — `create_record`
+    hard-codes empty progress and `update_record` refuses to mutate an event,
+    so a create-then-update pair is not available. The external id derives
+    from the task UUID rather than its slug, because branch names are reused
+    and events are never archived, so a slug-derived id would collide the
+    second time round and fail the completion. Cited sources are filtered to
+    files that still exist, since `create_record` fingerprints every one.
+  - `event` — and only `event` — maps to the episodic layer. The roadmap also
+    proposed `incident`, which would be harmful: an open incident is active,
+    urgent, promotable content, and the single episodic slot would take it out
+    of the runtime filters, the budget, the manifest, and the conflict-partner
+    fetch.
+  - **`retrieve()` now owns the episodic slot.** It was assembled by the
+    caller from a `search_documents` query that never joins
+    `document_metadata`, so it applied no privacy, owner, authority, lifecycle
+    or freshness filter and never reached the manifest. Harmless while the
+    only episodic document was the changelog; a hole on the per-prompt hook
+    path the moment governed records live there. Ranking it with everything
+    else also closes the audit gap and makes H1-03's `episodic-layer`
+    exclusion reason literally true, and `synchronize_views` now spans all
+    three layers so the manifest describes every delivered document.
+  - The roadmap's step 1 — indexing `project-brain/archive/` — was dropped as
+    inert: every archived record is terminal by contract and
+    `record_is_eligible` rejects terminal statuses, so the one-line change
+    adds zero documents and only grows an exclusion tally. Carving archived
+    records out of that check would make the manifest's advertised
+    `filters.active_only: true` a lie, which is a decision this item is not
+    the place to take.
+  - Two existing tests were tightened rather than worked around: the manifest
+    is now asserted to describe every layer the capsule delivers, episodic
+    included, and the changelog is asserted to arrive through the governed
+    path instead of being excluded from it.
+
+- **Two records saying one thing no longer become two chunks (roadmap
+  H2-05).** `noop` existed by record identity — the same record cannot be
+  promoted twice — and in reviewed mode as an explicit rejection. The case
+  with no executor was two *different* records carrying the same consequence:
+  promotion never read the bank it writes into, so the policy "update an
+  existing chunk instead of creating a near duplicate" had nothing enforcing
+  it on the automatic path. With H2-04 giving the pipeline producers, that
+  stopped being latent.
+  - `auto_promote` now compares each candidate's promotion content against
+    the active chunks and blocks a near duplicate with
+    `near-duplicate of MEM-...; merge or supersede first` — through the
+    existing `blocked` channel, so it reaches the last-turn report and the
+    capsule, and names the chunk so the block reads as an instruction.
+  - **The check runs inside the promotion loop, not before it.** One flush
+    promotes up to five records, so a single review producing several findings
+    that say the same thing — the realistic case, and the one the roadmap
+    describes — is exactly what a pre-loop snapshot cannot see: it would
+    compare only against chunks that existed before the run.
+  - Neither key the roadmap proposed to match on works. A chunk's `sources`
+    holds the *source record's* file path, so two chunks promoted from two
+    records can never share one; and promotion hardcodes chunk `type` to
+    `decision` regardless of the record type. Similarity is measured on what
+    actually carries the conclusion: the title plus the body.
+  - Similarity is 3-gram Jaccard over a fixed stop list, not the retrieval
+    layer's corpus-adaptive vocabulary. That vocabulary is derived from
+    `memory-bank/local/`, which is git-ignored and disposable, and letting it
+    decide would make the content of the tracked Memory Bank depend on local
+    state — two machines on the same commit would promote different sets.
+    Whole-set Jaccard was avoided because this repository has already recorded
+    it diluting below any usable threshold.
+  - Digits are kept at any length. They are often the only thing separating
+    two findings — an error code, a version, an ordinal — and dropping them as
+    too short made texts identical that no reader would confuse.
+  - `bank_duplicate_ratio` (default 0.6) in `runtime.json`, beside
+    `automatic_promotion` and `compaction_threshold`. `bank-audit` reports
+    duplicate pairs among existing chunks.
+
+- **The consolidation pipeline has producers, and its emptiness is now
+  reportable (roadmap H2-04).** Promotion is built end to end and well
+  tested — flush-boundary distillation, narrow criteria, a blocked-with-reason
+  report — and had received nothing in nine days of use, because no workflow
+  produced records it could promote. `/flow-review` writes its findings into
+  the task's `--progress`, and the `task` record type is absent from
+  `PROMOTABLE_STATES`, so a review's output could never become a candidate.
+  - `/flow-review` now materializes each confirmed finding as a `finding`
+    record — **from the orchestrator, after synthesis**, not from the review
+    agents. Making a reviewer write-capable would put a second write-capable
+    agent in a stage the subagent gate serializes behind a TTL lock, which
+    that command explicitly forbids. Creating records after synthesis also
+    means nothing dropped as unevidenced becomes durable memory.
+  - `systematic-debugger` is already declared `writes: true` and records its
+    confirmed root cause directly. `code-reviewer` and `security-reviewer`
+    gained the opposite instruction — report, do not record — so the division
+    is stated where each skill is read rather than inferred.
+  - The commands in the roadmap did not exist: there is no `--status` flag and
+    no positional record id. The two real edges are
+    `brain-update --record-id <id> --revision auto --authority verified` and a
+    second call with `--transition resolved`. Both are written down with
+    `--progress`, which is not optional bookkeeping but the record's only
+    content — resolving without it produces a record blocked as carrying
+    nothing beyond its own title, which is the same dead end as never
+    creating it.
+  - `DOD.md` Standard tier: every confirmed review or debugging finding exists
+    as a `finding` record, resolved or explicitly deferred.
+  - `context.py status` reports promotable, blocked, applied and chunk counts.
+    Each is `null` (printed `unavailable`) rather than 0 when it cannot be
+    established — in lightweight mode, without a `project-brain/`, or on a
+    failed walk — because an absent Brain and an empty one are different
+    facts. The walk degrades rather than failing: `status` is on the
+    session-start hook's budget.
+  - The roadmap's Stop-hook line was dropped as unimplementable where it was
+    specified: `working-memory-write.sh` discards stdout and always exits 0,
+    which the code says twice and the generator mandates for produced
+    projects. Nothing printed there reaches anyone.
+
+- **A durable chunk can now notice that what it cites has moved on (roadmap
+  H2-03).** The provenance asymmetry was inverted: a Project Brain record
+  lives for days and carries `source_fingerprints` re-checked on every
+  retrieval, while a chunk lives a year or more, is auto-promoted with
+  `review_after` a year out, and carried no such check at all — the schema did
+  not even permit one. So the longest-lived claims were the least verified.
+  - Optional `source_digests: [{path, sha256}]` on the chunk schema, written
+    by promotion and by the new `bank-reverify`, validated for shape and
+    required to be a subset of the chunk's own `sources`. Optional on purpose:
+    requiring it would invalidate every chunk written before it existed, the
+    same reason `valid_from`/`valid_to` are optional.
+  - The digests cover what the chunk itself cites, not what the source record
+    cited. `sources_are_fresh` compares path sets for equality, so digests of
+    the record's code paths would have been permanently unequal to the chunk's
+    own `sources` and every chunk would read as changed on day one.
+  - `promoted_source_rewrites` now repoints digests along with citations when
+    compaction archives a promoted record. Without that, the file moves,
+    the digest keeps the old path, and every promoted chunk reads as
+    `source-changed` forever after the first compaction.
+  - `_runtime_filter` no longer restricts the freshness check to Brain
+    records. A chunk whose cited file changed is excluded with reason
+    `source-changed` rather than `stale`: the two words name different
+    remedies — a record is refreshed by a revisioned mutation, a chunk by
+    re-reading the source — and the existing `stale` runbook and its test keep
+    their meaning. The check sits before the budget and the 2+3 truncation, so
+    an excluded chunk frees its slot to the next candidate and the manifest
+    still describes the delivered capsule.
+  - `_legacy_metadata` writes the digests into `document_metadata` from the
+    content the indexer already holds, rather than re-opening every chunk on
+    the prompt hot path.
+  - **`bank-reverify` is not optional scope.** Nothing but promotion has ever
+    written chunk frontmatter, so without a re-attestation path the digests
+    would be a one-way ratchet: the first change to a cited file would remove
+    the chunk from retrieval permanently, leaving hand-editing as the only
+    remedy — the very thing these commands replace. It recomputes digests and
+    `last_verified` under the `bank-retire` transaction, and refuses
+    non-active chunks so it cannot resurrect retired knowledge.
+  - `bank-audit` reports active chunks with changed or missing citations,
+    chunks past `review_after`, and chunks that cite local files but record no
+    digests. A URL source is cited and never digested — the runtime has no
+    network, so nothing is the only honest thing it can say about one.
+  - Fixed in passing, and closed for good: `memory-bank/templates/chunk.md`
+    had drifted — Symfony and PHP Core still handed engineers the retired
+    `MEM-0000` identifier scheme that the bank's own validator had moved past.
+    Templates were in neither the cross-edition manifest nor the allowed-drift
+    list, so no gate could see it. `memory-bank/templates/*` is now in
+    `CROSS_EDITION_CORE_MANIFEST`.
+
+- **Retiring a chunk is now one command instead of an editing convention
+  (roadmap H2-02).** Retire was designed carefully — `superseded_by` for "what
+  replaced it", `valid_to` for "when it stopped being true", `archived` for
+  "it ceased and nothing replaced it" — and then left to hand-editing: change
+  the frontmatter on both sides of a link, regenerate the index, validate.
+  Between any two of those steps the bank is invalid. The only code that ever
+  wrote `valid_to` was promotion, and it always wrote `null`; the field is
+  named in no skill, so an agent following policy honestly set a status and
+  never wrote a date.
+  - `retire_chunk` in `brain_runtime.py` follows the `apply_promotion`
+    pattern: mutation lock, snapshot, atomic writes, regenerated `INDEX.md`,
+    whole-bank validation, and `restore_files` on any failure. A missing
+    successor is refused before the first write, so the error names the
+    argument that caused it rather than surfacing later as a broken link.
+  - It does not reuse `render_markdown_record`: that renders with
+    `sort_keys=True` and re-expands every list, so a round trip would reorder
+    frontmatter a human wrote and rewrite lines the retire never touched. A
+    chunk-local parse/render keeps key order and leaves the body byte-for-byte
+    intact.
+  - `--reason` is recorded in the command's output only. The chunk schema is
+    a closed key set, so a reason written into the frontmatter would fail
+    validation and roll the whole retire back.
+  - New `context.py bank-retire --id --valid-to [--superseded-by] [--reason]`,
+    documented in `docs/OPERATIONS.md`, with the requirement to use it rather
+    than hand-edit added to each edition's `memory-bank` skill — the same rule
+    that makes the `memory` skill call the command the hook calls.
+  - The readiness criterion's "the chunk is absent from the index" was
+    corrected on the way in: `memory-bank/INDEX.md` must KEEP the row, because
+    a chunk on disk without one is itself a validation error. What leaves is
+    the retrieval index, at the next `index`/`refresh`, where the chunk is
+    reported in `excluded` with its new status as the reason.
+  - Fixed in passing: the Symfony and PHP Core copies of the `memory-bank`
+    skill still told the agent to report "index/counter changes", naming the
+    retired `.memory-counter` that the same file forbids touching. All three
+    editions now say `reindex-bank`.
+
+- **A retrieval gate decides whether a turn is worth retrieving for, and
+  records the verdict (roadmap H2-01).** Restraint existed only at the
+  document level — `informative_tokens`, `token_coverage`, `is_relevant` — and
+  no aggregate turn-level decision existed, nor anywhere to write one. What a
+  gate saves is bias rather than tokens: a pointer asserting "relevant right
+  now" about the wrong file costs more than no pointer, because the agent
+  opens it.
+  - `gate_decision` in `context_retrieval.py` returns `{decision, mode,
+    reason, signals}` and is called once the delivered selection is known —
+    after the episodic-layer filter and the 2+3 truncation — because
+    `selection_identical_to_previous_turn` is a claim about what the capsule
+    carries. Deciding earlier would describe a set the capsule never had.
+  - Two deterministic rules, both computable before a document body is
+    opened: `no-match` (nothing survived relevance, so retrieving and
+    skipping deliver the same thing) and `repeat-retrieval` (same distilled
+    query and same selected path set as the previous turn of this task).
+    The roadmap's proposed signal — a capsule repeating byte-for-byte —
+    cannot occur: every call mints a fresh manifest id, and the rendered form
+    carries an automatic-checkpoint sentence and a last-turn summary that
+    both move on their own.
+  - The previous turn is remembered as two hashes under one bounded
+    `index_state` row, not one row per task: nothing prunes that table, so a
+    key per task would grow for the life of the database. The write is
+    best-effort against a read-only database, and a skip never overwrites the
+    record — otherwise the turn after a skip would compare against nothing.
+  - Signals: `informative_terms` and `top_score` were computed inside
+    `_candidates` and discarded, so it now returns them alongside its
+    candidates. `distinctive_matches` replaces the roadmap's
+    `distinctive_terms`, which does not exist as a quantity — `token_coverage`
+    decides rarity per token but returns paths — and is free from the match
+    strength H1-04 already records. `top_score` is pre-filter, so a candidate
+    withheld by policy stays visible, and is corpus-scaled telemetry, never a
+    threshold.
+  - Mode resolution follows the `configured_mode` ladder: `--gate`, then
+    `CONTEXT_RETRIEVAL_GATE`, then `retrieval_gate` in `runtime.json`, then
+    `shadow`. It is validated in `configured_retrieval_gate` rather than only
+    by argparse, because `hook-context` never sees the flag.
+  - **`shadow` is the default and is the whole point.** The decision is
+    computed, written to the manifest and ignored; the turn is served either
+    way. Enabling `enforce` is H3-05's decision on the data `shadow`
+    produces — the same standard that kept embeddings out on measured
+    evidence. `enforce` is implemented and unlit.
+  - In `enforce` a skip withholds the selection, prints `gate: skipped —
+    <reason>` after the `working:` render marker, and still writes a manifest
+    with the verdict, because a withheld turn has to be countable or the skip
+    rate H3-02 needs cannot be computed.
+  - **The Cursor hazard is closed in the same change.** Both Cursor delivery
+    hooks accept any stdout opening with `working:` at exit 0 and move it over
+    `.cursor/rules/working-memory.mdc`, so a withheld capsule rendered
+    normally would replace Cursor's only memory channel with an empty rule on
+    every skipped turn. `hook-context` now exits 4 and prints nothing on a
+    skip; both delivery constants document that any status other than 0 and 3
+    preserves the existing rule, which is the behaviour a skip needs.
+  - `gate` is declared under `properties` in
+    `retrieval-manifest.schema.json` and made mandatory through the version-2
+    key set in `brain_runtime`, not through the schema's `required` array:
+    `validate_schema_value` has no conditional construct, so a `required`
+    entry would reject version 1 manifests too. It joined version 2 rather
+    than opening a version 3 because version 2 is itself unreleased — both
+    land in the same change and no manifest was ever written to the
+    intermediate shape.
+
+- **A retired chunk now leaves the index on its own date, and every dropped
+  document says why it was dropped (roadmap H1-02).**
+  `docs/CONTEXT-AND-MEMORY.md` promised that closing a period removes a chunk
+  from retrieval without deleting it. The incremental cache keyed on
+  `(mtime_ns, size)` alone, so it did not: a chunk whose `valid_to` or
+  `review_after` arrived while the file sat untouched was reused on every
+  prompt indefinitely, and `validate.py` began failing at the same moment —
+  the human saw a red Definition of Done while the agent went on reading the
+  retired fact. The only automatic indexing path is the incremental one, so
+  this was the state every session ran in.
+  - `document_source_state` gains an `eligible_until` column holding
+    `min(review_after, valid_to)`, and reuse now requires both an unchanged
+    stat pair and an unexpired boundary. The table is created with
+    `CREATE TABLE IF NOT EXISTS`, so `ensure_metadata_tables` adds the column
+    to an existing database with the same `PRAGMA table_info` + `ALTER TABLE`
+    pattern already used for `document_metadata`; a pre-migration row carries
+    no boundary, cannot express expiry, and is re-validated once rather than
+    trusted. No extra `stat` and no extra filesystem pass: the date comes
+    from frontmatter that discovery already parses.
+  - Discovery no longer drops documents on a bare `continue`. It returns an
+    `excluded` list that `index_repository` merges into the channel
+    `index_documents` already reports for Project Brain records, on both of
+    its return paths — including the "nothing observable changed" early
+    return, which is the one the per-prompt hook takes. Reasons: `retired`,
+    `overdue-review`, `superseded` / `archived` / `needs-review`, `invalid`,
+    `secret`. A chunk that reached its own end date is reported as retired
+    rather than invalid, because "go do the review" and "go fix the
+    frontmatter" are different instructions. The three structural skips
+    (Git-ignored, second pattern on an owned file, mirrored skill copy) stay
+    unreported — Symfony alone would contribute 279 of the last one.
+  - `active_memory` returns the chunk's frontmatter instead of a bool
+    (`None` when it may not be served, so every existing truthiness test
+    still holds), and `memory_eligibility` exposes the reason and the
+    boundary alongside it. `discover_documents` returns a fourth value.
+  - Plain `index` output now prints a per-reason tally of what was excluded;
+    `--json` carries the paths.
+
+- **The four copies of the memory core were reconciled (roadmap H1-01).**
+  Every divergence below was live at `cef813ee`:
+  - `memory-bank/scripts/context.py`: the generator asset carried
+    `_readiness_git_probe` / `automatic_memory_readiness` and their
+    `status` wiring — 208 lines the three editions never received. The
+    editions gain them, so all four copies are byte-identical again.
+  - `memory-bank/scripts/telemetry.py` existed in the editions and not in
+    the asset: generated projects were seeded with four of the five core
+    modules. The asset gains it, `runtime-contract.json`'s
+    `required_skeleton` now names it, and `memory-seed/SKILL.md` says
+    five scripts rather than four.
+  - `.claude/hooks/working-memory-read.sh`: Symfony and PHP Core cut the
+    prompt to `re.findall(r"\w+", prompt)[:24]` before handing it to the
+    CLI while Laravel passed it through. Truncating by position discards
+    the input that `distill_capsule_query` ranks by rarity, so the same
+    request produced a different capsule per edition. Both now pass the
+    prompt through, and the `.codex` mirrors follow.
+  - The asset's seeded content was stale against canon:
+    `templates/chunk.md` still showed the pre-race-free `MEM-0000` chunk
+    id, `project-brain/templates/{task,handoff}.md` lacked `phase`,
+    `templates/bug.md` lacked its Root Cause / Same Shape Elsewhere /
+    Guard sections, `templates/promotion.json` lacked `review_mode`, and
+    `project-brain/README.md` was missing the capsule-contract, task-phase
+    and promotion-mode paragraphs.
+  - `project-brain/control/messages/` is required by
+    `runtime-contract.json` and shipped by the asset, but no edition
+    tracked a `.gitkeep` for it. All three now do, and the installation
+    inventories were regenerated.
 
 - **A developer's own Project Brain index no longer ships into an install.**
   The accelerator's runtime rewrites `project-brain/indexes/active.json` inside

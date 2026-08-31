@@ -17,6 +17,7 @@ AI-Infrastructure/
 ├── Laravel/                  # готовая Laravel-редакция
 ├── Symfony/                  # готовая Symfony-редакция
 ├── PHP Core/                 # готовая редакция для нативного PHP
+├── Cms/wordpress/            # готовая WordPress-редакция
 └── Infrastructure-Creator/   # генератор под конкретный проект
 ~~~
 
@@ -27,11 +28,13 @@ AI-Infrastructure/
   Platform, voters, Forms и Symfony UX.
 - [PHP Core/](PHP%20Core/README.md) — нейтральная к фреймворку основа для
   Composer + PSR-проектов, PDO и явных границ приложения.
+- [Cms/wordpress/](Cms/wordpress/README.md) — редакция для WordPress-плагинов,
+  классических и блочных тем, Gutenberg, REST, WP-CLI, multisite и WooCommerce.
 - [Infrastructure-Creator/](Infrastructure-Creator/README.md) — не готовая
   редакция для копирования, а генератор, который исследует целевой проект и
   создаёт подходящий набор правил для работы агентов.
 
-Первые три каталога — самостоятельные готовые редакции.
+Первые четыре каталога — самостоятельные готовые редакции.
 Infrastructure-Creator/ решает другую задачу: создаёт новую редакцию по
 составу, интеграциям, архитектуре и CI/CD указанного PHP-проекта.
 
@@ -42,8 +45,9 @@ Infrastructure-Creator/ решает другую задачу: создаёт �
 | [Laravel/](Laravel/README.md) | Laravel 12 / 13, PHP 8.2+ (PHP 8.3+ для Laravel 13) | Проект уже использует Laravel, Eloquent, Artisan, Sanctum, очереди или экосистему Laravel. |
 | [Symfony/](Symfony/README.md) | Symfony 7.4 LTS с PHP 8.2+ или Symfony 8.1 с PHP 8.4+ | Проект использует Symfony, Doctrine, Messenger, API Platform, voters и типичные Symfony-границы. |
 | [PHP Core/](PHP%20Core/README.md) | Нативный PHP 8.2+ | Обычный PSR-проект, микрофреймворк или фреймворк без отдельной редакции. |
+| [WordPress](Cms/wordpress/README.md) | Версии WordPress/PHP целевого проекта | Плагины, темы, блоки, WordPress-сайты, multisite-компоненты и расширения WooCommerce. |
 
-Если проект уже на Laravel или Symfony, берите соответствующий каталог. Для
+Если проект уже на Laravel, Symfony или WordPress, берите соответствующий каталог. Для
 остальных случаев подходит PHP Core/: он не навязывает ORM, роутер или
 DI-контейнер.
 
@@ -63,13 +67,14 @@ AI-интеграции, вручную разрешите все конфлик
 
 Открытие корня этого монорепозитория само по себе не активирует вложенную
 редакцию: Claude Code, Cursor и Codex не ищут конфигурацию автоматически в
-Laravel/, Symfony/ или PHP Core/.
+Laravel/, Symfony/, PHP Core/ или Cms/wordpress/.
 
 ## Основная структура папок
 
 - `Laravel/` — готовая Laravel-редакция.
 - `Symfony/` — готовая Symfony-редакция.
 - `PHP Core/` — готовая редакция для нативного PHP.
+- `Cms/wordpress/` — готовая WordPress-редакция.
 - `Infrastructure-Creator/` — генератор акселератора под конкретный проект.
 - `install/` — документация по установке и списки файлов.
 - `scripts/` — скрипты установки и обслуживания.
@@ -79,7 +84,7 @@ Laravel/, Symfony/ или PHP Core/.
 
 ## Общая архитектура: Command → Agent → Skill
 
-Все три редакции используют одну модель работы, адаптированную под стек:
+Все четыре редакции используют одну модель работы, адаптированную под стек:
 
 ~~~text
 Запрос пользователя
@@ -136,6 +141,10 @@ AGENTS.md выбранной редакции — исполняемая пол�
 - PHP Core сохраняет минимальную общую основу: архитектуру, API и БД, код,
   тестирование, проверку кода и безопасности, производительность, зависимости,
   отладку и выпуск версий без предположений о конкретном фреймворке.
+- WordPress добавляет жизненный цикл плагинов и тем, actions/filters,
+  Gutenberg-блоки, модель контента, REST permissions, WP-CLI, multisite,
+  WooCommerce, миграции данных, cron, обратную совместимость, accessibility и
+  проверку релизных архивов.
 
 Редакции не требуют синхронизировать все изменения механически: проверяйте,
 имеет ли изменение смысл в конкретном стеке.

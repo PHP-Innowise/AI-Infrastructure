@@ -12,7 +12,28 @@ echo "==============="
 # CHANGELOG.md.
 EDITION_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 if [ -f "$EDITION_DIR/VERSION" ]; then
-  echo "Accelerator version: $(tr -d '[:space:]' < "$EDITION_DIR/VERSION" 2>/dev/null)"
+  # The policy digest identifies the model-facing surface: policy, skills,
+  # agents, commands, settings. VERSION names a release and moves rarely, so
+  # on its own it says nothing about whether the prompt layer changed. The
+  # digest is the RECORDED one, not a recomputed one: it is honest here,
+  # where CI refuses a surface change without regenerating the lock, and it
+  # is as stale as VERSION in a project that edited a skill locally without
+  # running `policy_lock.py --write`.
+  #
+  # Deliberately not `skill_tree_fingerprint`: that is computed from mtime
+  # and size, which makes it a cache-invalidation key rather than a statement
+  # about content — a touched file moves it and an edit that preserves size
+  # may not.
+  POLICY_LOCK="$EDITION_DIR/.accelerator-policy-lock.json"
+  POLICY_DIGEST=""
+  if [ -f "$POLICY_LOCK" ]; then
+    POLICY_DIGEST=$(sed -n 's/.*"policy_digest"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{8\}\).*/\1/p' "$POLICY_LOCK" 2>/dev/null | head -1)
+  fi
+  if [ -n "$POLICY_DIGEST" ]; then
+    echo "Accelerator version: $(tr -d '[:space:]' < "$EDITION_DIR/VERSION" 2>/dev/null) (policy $POLICY_DIGEST)"
+  else
+    echo "Accelerator version: $(tr -d '[:space:]' < "$EDITION_DIR/VERSION" 2>/dev/null)"
+  fi
 fi
 
 # Loop detection is session-scoped; discard counters from earlier sessions.

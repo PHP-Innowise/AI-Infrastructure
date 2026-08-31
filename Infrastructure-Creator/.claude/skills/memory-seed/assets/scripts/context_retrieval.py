@@ -8,6 +8,7 @@ import json
 import re
 import sqlite3
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -45,6 +46,7 @@ HARD_BUDGET = 12000
 MAX_SNIPPET_CHARS = 1200
 CAPSULE_PROCEDURAL_LIMIT = 2
 CAPSULE_SEMANTIC_LIMIT = 3
+CAPSULE_EPISODIC_LIMIT = 1
 SKILL_EDITIONS = (".agents", ".claude", ".cursor", ".codex")
 # Skills whose body documents the host tool itself rather than a workflow this
 # repository owns. `skill-creator` instructs the agent to drive its own product
@@ -181,6 +183,12 @@ fi
 # The rendered capsule always opens with the working line. Anything else is a
 # broken render and must not replace a good rule. This guard replaces the JSON
 # parse that protected the --json form.
+#
+# Statuses: 0 renders, 3 removes a foreign branch's rule, and everything else
+# - including 4, "the retrieval gate withheld this turn" - falls through and
+# leaves the previous rule in place. That fallthrough is the correct
+# behaviour for a skip and is relied on: an enforce-mode skip must never
+# replace Cursor's only memory channel with an empty capsule.
 if [ "$CAPSULE_STATUS" -eq 0 ]; then
   case "$CAPSULE" in
     working:*) ;;
@@ -236,6 +244,12 @@ if command -v python3 > /dev/null 2>&1 && [ -f "$CONTEXT_CLI" ] && [ -n "$CAPSUL
 fi
 # See the stop hook: the working line is the render marker that replaces the
 # JSON parse.
+#
+# Statuses: 0 renders, 3 removes a foreign branch's rule, and everything else
+# - including 4, "the retrieval gate withheld this turn" - falls through and
+# leaves the previous rule in place. That fallthrough is the correct
+# behaviour for a skip and is relied on: an enforce-mode skip must never
+# replace Cursor's only memory channel with an empty capsule.
 if [ "$CAPSULE_STATUS" -eq 0 ]; then
   case "$CAPSULE" in
     working:*) ;;
@@ -463,14 +477,19 @@ MIRROR_RULES: dict[str, Any] = {
 # ---------------------------------------------------------------------------
 # Cross-edition core - the Python runtime, its tests, the Brain schemas and
 # the protocol are byte-identical across the PHP editions of the monorepo
-# (Laravel, Symfony, "PHP Core") and MUST stay that way: a fix that lands in
+# (Laravel, Symfony, PHP Core, WordPress) and MUST stay that way: a fix that lands in
 # one edition and not the others silently forks the engine. `context.py
 # parity --cross-edition` walks this manifest against every sibling edition
 # it can find next to this one; a standalone (copied-out) edition has no
 # siblings and skips the check.
 # ---------------------------------------------------------------------------
 
-CROSS_EDITION_SIBLINGS = ("Laravel", "Symfony", "PHP Core")
+CROSS_EDITION_PATHS = {
+    "Laravel": Path("Laravel"),
+    "Symfony": Path("Symfony"),
+    "PHP Core": Path("PHP Core"),
+    "WordPress": Path("Cms/wordpress"),
+}
 
 # Glob patterns, relative to an edition root, of files that must be
 # byte-identical in every sibling edition. Composition verified by direct
@@ -478,16 +497,31 @@ CROSS_EDITION_SIBLINGS = ("Laravel", "Symfony", "PHP Core")
 CROSS_EDITION_CORE_MANIFEST = (
     "memory-bank/scripts/*.py",
     "memory-bank/tests/*.py",
+    # The chunk template is the shape every durable memory is written to, and
+    # nothing framework-specific appears in it. It sat outside every gate
+    # until two editions were found still handing engineers the retired
+    # MEM-0000 identifier scheme that the same bank's validator had moved on
+    # from.
+    "memory-bank/templates/*",
     "project-brain/scripts/*.py",
     "project-brain/schemas/**/*",
     "project-brain/PROTOCOL.md",
     "project-brain/tests/*.py",
+    # The hooks are the only automatic entry into the memory core, so a hook
+    # that forks silently forks the engine as surely as a module would: an
+    # edition whose UserPromptSubmit hook truncates the prompt asks the core a
+    # different question than its siblings and gets a different capsule back.
+    # Two of them speak the framework and are exempted below; the rest are
+    # engine and are held byte-identical here.
+    ".claude/hooks/*.sh",
 )
 
 # Legitimate cross-edition differences, each with its justification. Entries
-# ending in "/" match a whole subtree. None of these currently intersect the
-# manifest above; they are recorded so a future manifest extension cannot
-# accidentally turn known-deliberate divergence into reported drift.
+# ending in "/" match a whole subtree. The hook entries below are the only
+# ones that intersect the manifest above, and deliberately so: they carve the
+# two framework-shaped files out of an otherwise byte-identical hook surface.
+# The rest are recorded so a future manifest extension cannot accidentally
+# turn known-deliberate divergence into reported drift.
 CROSS_EDITION_ALLOWED_DRIFT = {
     # Each edition's README introduces its own framework and stack.
     "README.md": "edition-specific introduction",
@@ -501,9 +535,41 @@ CROSS_EDITION_ALLOWED_DRIFT = {
     ".agents/skills/": "skills are edition-specific (verify, framework skills)",
     ".claude/skills/": "mirror of .agents/skills - same edition-specific content",
     ".cursor/skills/": "mirror of .agents/skills - same edition-specific content",
+    # Two hooks are framework surface rather than engine: bash-validator.sh
+    # blocks the destructive commands of this framework's CLI (artisan
+    # migrate:fresh against doctrine:schema:drop), and local-context.sh
+    # detects this framework's stack at session start. Every other hook -
+    # working-memory-read/write, subagent-gate, subagent-dispatch,
+    # loop-detection, file-naming-validator - is engine and MUST match.
+    ".claude/hooks/bash-validator.sh": "framework-specific destructive-command rules",
+    ".claude/hooks/local-context.sh": "framework-specific session-start detection",
 }
 
 MANIFEST_SCOPES = ("governed", "local")
+# Version 2 adds `query_source` and `phase_seconds` at the top level and
+# `score`/`rank`/`match` inside `selected[]`. Version 1 manifests written by
+# an earlier build stay valid: the validator keys its strict key set off the
+# declared version rather than off one hard-coded set.
+MANIFEST_SCHEMA_VERSION = 2
+# Where the query that produced a retrieval came from. `prompt` is the user's
+# own request, `task` the goal and state of the active task, `task-id` a bare
+# identifier or branch name with no task text behind it, and `explicit` an
+# operator-supplied query on the CLI.
+QUERY_SOURCES = ("prompt", "task", "task-id", "explicit")
+# Whether a turn retrieves at all. `off` never decides; `shadow` decides and
+# records the decision but always retrieves; `enforce` acts on it. The default
+# is `shadow` on purpose: the project rejected an embedding similarity floor on
+# measured evidence, and the same standard applies here - the mechanism is
+# built, observed, and only then switched on, which is H3-05's job and not
+# this one's.
+RETRIEVAL_GATE_MODES = ("off", "shadow", "enforce")
+RETRIEVAL_GATE_DEFAULT = "shadow"
+# One index_state row holding a JSON map of task UUID -> last retrieval, not
+# one row per task: nothing prunes index_state (it is upsert-only), so a key
+# per task would grow for the life of the database.
+LAST_RETRIEVAL_KEY = "last-retrieval"
+LAST_RETRIEVAL_RETENTION = 200
+REFRESH_HEALTH_RETENTION = 500
 STOPWORD_DOCUMENT_RATIO = 0.5
 MIN_TOKEN_COVERAGE = 2
 DISTINCTIVE_DOCUMENT_RATIO = 0.1
@@ -539,7 +605,13 @@ AUTHORITY_WEIGHTS = {"verified": 1.0, "observed": 0.85}
 AUTHORITY_WEIGHT_DEFAULT = 0.85
 
 DocumentRow = tuple[str, str, str, str, str, str]
-SourceState = dict[str, tuple[int, int]]
+# path -> (mtime_ns, size, eligible_until). The stat pair answers "has the
+# file changed"; the third element answers "is it still in date", which for
+# durable memory is a separate question with a separate answer - a chunk
+# retires on a calendar boundary without anyone touching the file. ``None``
+# means the document has no calendar boundary (everything but memory) or the
+# row predates the column.
+SourceState = dict[str, tuple[int, int, Optional[str]]]
 
 
 class RetrievalError(Exception):
@@ -604,9 +676,48 @@ def ensure_metadata_tables(connection: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS document_source_state(
             path TEXT PRIMARY KEY,
             mtime_ns INTEGER NOT NULL,
-            size INTEGER NOT NULL
+            size INTEGER NOT NULL,
+            eligible_until TEXT
         )
         """
+    )
+    # CREATE TABLE IF NOT EXISTS leaves an existing three-column table alone,
+    # so a database written before the calendar boundary existed needs the
+    # column added or every insert below fails. An old row reads NULL, which
+    # `_cache_entry_is_current` treats as "cannot express expiry, re-validate
+    # once" rather than as "no boundary".
+    source_state_columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(document_source_state)")
+    }
+    if "eligible_until" not in source_state_columns:
+        connection.execute(
+            "ALTER TABLE document_source_state ADD COLUMN eligible_until TEXT"
+        )
+    # The reverse index: which documents declare which source. Retrieval is
+    # lexical, so two chunks that share nothing but a `sources[]` entry are
+    # unreachable from each other and from the words of the source itself —
+    # measured at 0 of 2 (docs/CONTEXT-AND-MEMORY.md). This table is the edge
+    # those two chunks already assert but that nothing could read.
+    #
+    # Derived and disposable: every row is rebuilt from the documents, so it is
+    # dropped and repopulated rather than migrated, and no validation depends
+    # on it. That is deliberate — carrying the same link durably on the chunk
+    # would put it under `chunk_source_digests` and `validate_metadata`, where
+    # editing or deleting the referenced file becomes a bank-validation error.
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS document_links(
+            path TEXT NOT NULL,
+            ref_path TEXT NOT NULL,
+            ref_kind TEXT NOT NULL,
+            PRIMARY KEY(path, ref_path, ref_kind)
+        )
+        """
+    )
+    # The whole point is the reverse direction: given a source, who cites it.
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS document_links_ref ON document_links(ref_path)"
     )
     connection.execute(
         """
@@ -768,9 +879,9 @@ def reusable_source_state(
         return {}, fingerprints
     indexed = {row[0] for row in connection.execute("SELECT path FROM documents")}
     return {
-        row[0]: (int(row[1]), int(row[2]))
+        row[0]: (int(row[1]), int(row[2]), row[3])
         for row in connection.execute(
-            "SELECT path, mtime_ns, size FROM document_source_state"
+            "SELECT path, mtime_ns, size, eligible_until FROM document_source_state"
         )
         if row[0] in indexed
     }, fingerprints
@@ -1057,10 +1168,16 @@ def format_full_mirror_drift(drift: list[dict[str, str]]) -> str:
 
 
 def monorepo_root(repository: Path) -> Optional[Path]:
-    """The parent directory, when it carries at least two PHP editions."""
-    parent = repository.resolve().parent
-    present = [name for name in CROSS_EDITION_SIBLINGS if (parent / name).is_dir()]
-    return parent if len(present) >= 2 else None
+    """Nearest ancestor carrying at least two maintained PHP editions."""
+    resolved = repository.resolve()
+    for candidate in resolved.parents:
+        present = [
+            name for name, path in CROSS_EDITION_PATHS.items()
+            if (candidate / path).is_dir()
+        ]
+        if len(present) >= 2:
+            return candidate
+    return None
 
 
 def _cross_edition_allowed(rel: str) -> Optional[str]:
@@ -1079,10 +1196,13 @@ def cross_edition_drift(repository: Path) -> Optional[list[dict[str, object]]]:
     root = monorepo_root(repository)
     if root is None:
         return None
-    editions = [name for name in CROSS_EDITION_SIBLINGS if (root / name).is_dir()]
+    editions = [
+        name for name, path in CROSS_EDITION_PATHS.items()
+        if (root / path).is_dir()
+    ]
     digests: dict[str, dict[str, str]] = {}
     for name in editions:
-        base = root / name
+        base = root / CROSS_EDITION_PATHS[name]
         for pattern in CROSS_EDITION_CORE_MANIFEST:
             for path in sorted(base.glob(pattern)):
                 if not path.is_file() or path.is_symlink():
@@ -1122,21 +1242,83 @@ def format_cross_edition_drift(drift: list[dict[str, object]]) -> str:
     return "\n".join(lines)
 
 
+def _chunk_frontmatter(content: str) -> dict[str, Any]:
+    """A durable chunk's metadata block, parsed from the content in hand.
+
+    Read from the content the indexer already holds rather than from the file:
+    this runs on the prompt hot path, once per document, and re-opening every
+    chunk to parse frontmatter a second time is exactly the cost the single
+    filesystem pass was built to avoid.
+    """
+    if not content.startswith("---\n"):
+        return {}
+    try:
+        raw, _ = content[4:].split("\n---\n", 1)
+        metadata = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _chunk_digests(content: str) -> str:
+    """The declared source digests, as the metadata column wants them."""
+    digests = _chunk_frontmatter(content).get("source_digests")
+    return json.dumps(digests if isinstance(digests, list) else [], sort_keys=True)
+
+
+def _link_rows(path: str, sources: object) -> list[tuple[str, str, str]]:
+    """One `document_links` row per source a document declares.
+
+    `ref_kind` carries a single value, `source`, and the two candidates for a
+    second were both rejected on evidence rather than left for later:
+
+    * `fingerprint` is dead by construction — `sources_are_fresh` requires the
+      fingerprint path set to equal the sources path set, so it can never name
+      anything `source` does not already name.
+    * `file` (a task's `files[]`) is Git churn in the wrong frame. Every live
+      task in this repository records twenty entries led by phpunit cache,
+      vendored JavaScript and dev container dumps, and `changed_paths` writes
+      them relative to the Git toplevel while every other path in the index is
+      relative to the repository root. Linking them would fill the table with
+      build artifacts that resolve to nothing.
+    """
+    if not isinstance(sources, list):
+        return []
+    rows = []
+    for source in sources:
+        if not isinstance(source, str):
+            continue
+        # Anchored the way `fingerprint()` anchors: a link is to the document,
+        # not to a line range inside it.
+        reference = source.split("#", 1)[0].strip()
+        if reference:
+            rows.append((path, reference, "source"))
+    return sorted(set(rows))
+
+
 def _legacy_metadata(path: str, kind: str, content: str) -> tuple[object, ...]:
     # Repository documents carry no provenance timestamp or confidence of
     # their own: '' means "never decayed" and 1.0 keeps them rank-neutral.
     return (
         path, category_for(kind), "public", "*", "verified", "active",
-        _content_hash(content), None, "[]", "[]", "", 1.0,
+        _content_hash(content), None, "[]",
+        _chunk_digests(content) if kind == "memory" else "[]",
+        "", 1.0,
     )
 
 
 def _brain_documents(
     repository: Path, config: dict[str, Any]
-) -> tuple[list[tuple[str, str, str, str, str]], list[tuple[object, ...]], list[dict[str, str]]]:
+) -> tuple[
+    list[tuple[str, str, str, str, str]],
+    list[tuple[object, ...]],
+    list[dict[str, str]],
+    list[tuple[str, str, str]],
+]:
     documents: list[tuple[str, str, str, str, str]] = []
     metadata_rows: list[tuple[object, ...]] = []
     excluded: list[dict[str, str]] = []
+    links: list[tuple[str, str, str]] = []
     eligible_tasks: dict[str, dict[str, Any]] = {}
     for path, record, body in iter_records(repository):
         relative = path.relative_to(repository).as_posix()
@@ -1154,7 +1336,15 @@ def _brain_documents(
         # progress and evidence that describe the work rather than the topic.
         documents.append(
             (
-                relative, "semantic", f"brain-{record['type']}", title,
+                relative,
+                # `event` is the one record type that reports that something
+                # happened rather than what to do about it, which is what the
+                # episodic layer is for. `incident` deliberately stays
+                # semantic: an open incident is active, urgent, verified
+                # content that belongs in the three semantic slots, and it is
+                # promotable, which nothing episodic is.
+                "episodic" if record["type"] == "event" else "semantic",
+                f"brain-{record['type']}", title,
                 " ".join(filter(None, (title, str(record.get("goal") or "")))),
                 body,
             )
@@ -1171,6 +1361,7 @@ def _brain_documents(
                 float(record.get("confidence", 1.0)),
             )
         )
+        links.extend(_link_rows(relative, record.get("sources")))
     handoffs = brain_root(repository) / "control" / "handoffs"
     if handoffs.is_dir():
         for path in sorted(handoffs.glob("*.md")):
@@ -1201,7 +1392,10 @@ def _brain_documents(
                     float(task.get("confidence", 1.0)),
                 )
             )
-    return documents, metadata_rows, excluded
+            # From the handoff's own frontmatter, not the task's: the link
+            # describes what this document declares.
+            links.extend(_link_rows(relative, handoff.get("sources")))
+    return documents, metadata_rows, excluded, links
 
 
 def _layer_counts(connection: sqlite3.Connection) -> tuple[int, dict[str, int]]:
@@ -1224,6 +1418,9 @@ def _drop_indexed_paths(connection: sqlite3.Connection, paths: list[str]) -> Non
         )
         connection.execute(
             f"DELETE FROM document_metadata WHERE path IN ({placeholders})", chunk
+        )
+        connection.execute(
+            f"DELETE FROM document_links WHERE path IN ({placeholders})", chunk
         )
 
 
@@ -1260,12 +1457,26 @@ def index_documents(
         # and it is fingerprint-cached above. The full MIRROR_RULES check
         # (full_mirror_drift) runs from `context.py parity` for CLI/CI.
         parity_drift = skill_mirror_drift(repository, str(config["canonical_edition"]))
-    brain_documents, brain_metadata, excluded = _brain_documents(repository, config)
+    brain_documents, brain_metadata, excluded, brain_links = _brain_documents(
+        repository, config
+    )
     documents = [*legacy_documents, *brain_documents]
     metadata = [
         _legacy_metadata(path, kind, content)
         for path, _, kind, _, _, content in legacy_documents
     ] + brain_metadata
+    # Only durable chunks carry `sources` among repository documents; the rest
+    # are prose with no declared provenance to link. Brain records are always
+    # rebuilt, so their links are always complete; repository links follow the
+    # documents, surviving for retained paths and being dropped with dropped
+    # ones, which is why an existing database has to be forced through one full
+    # re-read when the table first appears (see `connect`).
+    links = [
+        row
+        for path, _, kind, _, _, content in legacy_documents
+        if kind == "memory"
+        for row in _link_rows(path, _chunk_frontmatter(content).get("sources"))
+    ] + brain_links
     state = source_state or {}
     ensure_metadata_tables(connection)
     existing = {
@@ -1309,6 +1520,7 @@ def index_documents(
             # for a per-path delete of every row.
             connection.execute("DELETE FROM documents")
             connection.execute("DELETE FROM document_metadata")
+            connection.execute("DELETE FROM document_links")
         else:
             _drop_indexed_paths(connection, sorted(existing - keep))
         connection.execute("DELETE FROM document_source_state")
@@ -1327,8 +1539,17 @@ def index_documents(
             metadata,
         )
         connection.executemany(
-            "INSERT INTO document_source_state(path, mtime_ns, size) VALUES (?, ?, ?)",
-            [(path, value[0], value[1]) for path, value in sorted(state.items())],
+            "INSERT OR REPLACE INTO document_links(path, ref_path, ref_kind) "
+            "VALUES (?, ?, ?)",
+            links,
+        )
+        connection.executemany(
+            "INSERT INTO document_source_state(path, mtime_ns, size, eligible_until) "
+            "VALUES (?, ?, ?, ?)",
+            [
+                (path, value[0], value[1], value[2] if len(value) > 2 else None)
+                for path, value in sorted(state.items())
+            ],
         )
         store_index_state(
             connection,
@@ -1514,6 +1735,24 @@ def is_relevant(
     return path in distinctive or coverage.get(path, 0) >= minimum
 
 
+def match_strength(path: str, coverage: dict[str, int], minimum: int) -> str:
+    """How a document qualified: on breadth of match, or on one rare term.
+
+    `is_relevant` admits a candidate two different ways and then forgets which
+    one applied, so a document that answered the whole query and one admitted
+    by a single unusual word arrive looking identical. Naming the difference is
+    what lets a turn tell "memory found this" from "memory found something
+    that shares a rare word with this".
+
+    ``covered`` means the document carried at least the required number of
+    distinct query terms; ``distinctive`` means it did not and was admitted on
+    rarity alone. When the query offers only one informative term the
+    requirement is one, so every match is `covered` - correctly: there is no
+    weaker way to match a one-term query.
+    """
+    return "covered" if coverage.get(path, 0) >= minimum else "distinctive"
+
+
 def required_coverage(tokens: list[str]) -> int:
     """How many distinct terms a document must contain to count as relevant.
 
@@ -1567,7 +1806,13 @@ def ranking_weight(
 
 def _candidates(
     connection: sqlite3.Connection, query: str, limit: int = 100
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Ranked candidates, plus what the ranking knew about the query.
+
+    The diagnostics are computed here anyway and were discarded at the end of
+    the call. A gate that has to decide whether this turn is worth retrieving
+    for cannot recompute them without repeating the work.
+    """
     ensure_metadata_tables(connection)
     tokens = informative_tokens(connection, query_tokens(query))
     coverage, distinctive = token_coverage(connection, tokens)
@@ -1597,6 +1842,7 @@ def _candidates(
         item["snippet"] = str(item["snippet"])[:MAX_SNIPPET_CHARS]
         item["conflicts"] = json.loads(item["conflicts"])
         item["source_fingerprints"] = json.loads(item["source_fingerprints"])
+        item["match"] = match_strength(row["path"], coverage, minimum)
         item["estimated_tokens"] = _estimate_tokens(item["title"] + item["snippet"])
         # bm25() reports better matches as more negative, so relevance is its
         # negation; provenance quality and freshness then scale it.
@@ -1608,7 +1854,148 @@ def _candidates(
     # Re-rank the BM25 window: the raw score breaks adjusted ties so the
     # ordering stays deterministic even when every weight is neutral.
     result.sort(key=lambda item: (-item["adjusted_score"], item["score"], item["path"]))
-    return result
+    # Rank is stamped here, on the lexically ranked list, rather than after
+    # filtering: a position in the post-filter list says where a survivor
+    # landed, not how well it answered the query, which is the only reading a
+    # retrieval gate can use.
+    for position, item in enumerate(result, start=1):
+        item["rank"] = position
+    diagnostics = {
+        "informative_terms": len(tokens),
+        # The count of candidates admitted on rarity alone rather than the
+        # count of rare TERMS the roadmap asked for: `token_coverage` decides
+        # rarity per token but returns paths, so a per-term figure does not
+        # exist without changing a signature shared by both retrieval paths.
+        # This reading is free after the match strength H1-04 already records,
+        # and it answers the same question - how much of this result rests on
+        # a single unusual word.
+        "distinctive_matches": sum(
+            1 for item in result if item.get("match") == "distinctive"
+        ),
+        # Pre-filter, so a top candidate withheld by policy is still visible
+        # to the gate. Corpus-scaled telemetry for H3, never a threshold.
+        "top_score": (
+            round(float(result[0]["adjusted_score"]), 6) if result else None
+        ),
+    }
+    return result, diagnostics
+
+
+def _retrieval_signature(query: str, paths: Iterable[str]) -> dict[str, str]:
+    """What identifies a retrieval for the purpose of noticing a repeat.
+
+    Not the capsule: the returned packet carries a fresh manifest UUID every
+    call, and the rendered form folds in an automatic checkpoint sentence and
+    a last-turn summary that both move on their own. The invariant that
+    actually holds across a repeated turn is the distilled query plus the set
+    of paths it selected.
+    """
+    ordered = sorted(set(paths))
+    return {
+        "query": hashlib.sha256(query.encode("utf-8")).hexdigest(),
+        "paths": hashlib.sha256("\n".join(ordered).encode("utf-8")).hexdigest(),
+    }
+
+
+def _load_last_retrievals(connection: sqlite3.Connection) -> dict[str, Any]:
+    try:
+        raw = load_index_state(connection).get(LAST_RETRIEVAL_KEY)
+    except sqlite3.Error:
+        return {}
+    if not raw:
+        return {}
+    try:
+        stored = json.loads(raw)
+    except ValueError:
+        return {}
+    return stored if isinstance(stored, dict) else {}
+
+
+def _remember_retrieval(
+    connection: sqlite3.Connection, task_uuid: str, signature: dict[str, str]
+) -> None:
+    """Record this retrieval so the next turn can recognize a repeat.
+
+    Best-effort by design: the store is the disposable index, and a database
+    opened read-only must never turn a retrieval into an error. Losing the
+    record costs one un-skipped turn, which is the safe direction.
+    """
+    stored = _load_last_retrievals(connection)
+    stored.pop(task_uuid, None)
+    stored[task_uuid] = signature
+    if len(stored) > LAST_RETRIEVAL_RETENTION:
+        for stale in list(stored)[: len(stored) - LAST_RETRIEVAL_RETENTION]:
+            stored.pop(stale, None)
+    payload = json.dumps(stored, sort_keys=False, separators=(",", ":"))
+    try:
+        if connection.in_transaction:
+            store_index_state(connection, {LAST_RETRIEVAL_KEY: payload})
+        else:
+            with connection:
+                store_index_state(connection, {LAST_RETRIEVAL_KEY: payload})
+    except sqlite3.Error:
+        return
+
+
+def gate_decision(
+    mode: str,
+    *,
+    signature: dict[str, str],
+    previous: Optional[dict[str, Any]],
+    diagnostics: dict[str, Any],
+    no_match: list[str],
+    selected_count: int,
+) -> dict[str, Any]:
+    """Decide whether this turn was worth retrieving for, and say why.
+
+    The unit is the turn, not the document. Document-level restraint already
+    exists and cannot express "this turn needed nothing"; a pointer that says
+    "relevant right now" about the wrong file costs more than no pointer at
+    all, which is why the decision is recorded even when it is not acted on.
+
+    Two rules fire today, both deterministic and both computable before any
+    document body is opened. Everything else is recorded as a signal for the
+    report that will decide whether a third rule is worth having.
+    """
+    query_unchanged = bool(previous) and previous.get("query") == signature["query"]
+    selection_identical = (
+        bool(previous) and previous.get("paths") == signature["paths"]
+    )
+    signals = {
+        "informative_terms": diagnostics.get("informative_terms", 0),
+        "distinctive_matches": diagnostics.get("distinctive_matches", 0),
+        "top_score": diagnostics.get("top_score"),
+        "no_match": list(no_match),
+        "query_unchanged_from_previous_turn": query_unchanged,
+        "selection_identical_to_previous_turn": selection_identical,
+    }
+    if mode == "off":
+        return {"decision": "retrieve", "mode": mode, "reason": "gate-off", "signals": signals}
+    if selected_count == 0:
+        # Nothing survived relevance, so retrieving and skipping deliver the
+        # same thing. Naming it makes the empty turn countable instead of
+        # indistinguishable from a turn that was never gated.
+        return {"decision": "skip", "mode": mode, "reason": "no-match", "signals": signals}
+    if query_unchanged and selection_identical:
+        return {"decision": "skip", "mode": mode, "reason": "repeat-retrieval", "signals": signals}
+    return {"decision": "retrieve", "mode": mode, "reason": "new-selection", "signals": signals}
+
+
+def _body_snippet(content: str) -> str:
+    """A leading excerpt of a document's prose, never of its frontmatter.
+
+    A durable chunk opens with a JSON metadata block that can run past the
+    whole snippet allowance, so an unconditional `substr(content, 1, N)`
+    delivers a wall of quoted keys and digests where the reader expects the
+    first sentence. Candidates selected by the query escape this because FTS
+    `snippet()` centres on the match; candidates pulled in by record id or by
+    source path have no match to centre on and need this instead.
+    """
+    if content.startswith("---\n"):
+        _, separator, remainder = content[4:].partition("\n---\n")
+        if separator:
+            content = remainder
+    return content.lstrip()[:MAX_SNIPPET_CHARS]
 
 
 def _conflict_candidates(
@@ -1620,8 +2007,7 @@ def _conflict_candidates(
     rows = connection.execute(
         f"""
         SELECT
-            d.path, d.layer, d.kind, d.title,
-            substr(d.content, 1, ?) AS snippet,
+            d.path, d.layer, d.kind, d.title, d.content,
             m.category, m.privacy, m.owner, m.authority, m.lifecycle,
             m.source_hash, m.record_id, m.conflicts,
             m.source_fingerprints, m.updated_at, m.confidence,
@@ -1631,14 +2017,23 @@ def _conflict_candidates(
         WHERE m.record_id IN ({placeholders})
         ORDER BY d.path
         """,
-        (MAX_SNIPPET_CHARS, *sorted(record_ids)),
+        tuple(sorted(record_ids)),
     ).fetchall()
     result = []
     for row in rows:
         item = dict(row)
-        item["snippet"] = str(item["snippet"])[:MAX_SNIPPET_CHARS]
+        item["snippet"] = _body_snippet(str(item.pop("content")))
         item["conflicts"] = json.loads(item["conflicts"])
         item["source_fingerprints"] = json.loads(item["source_fingerprints"])
+        # A conflict partner is pulled in by record id, not by the query, so
+        # it has no match strength of its own: it is here because something
+        # else matched and it disagrees with it.
+        item["match"] = "conflict"
+        # Set explicitly rather than left absent: these rows reach the same
+        # manifest projection as ranked candidates, and a lexical score they
+        # never earned must read as zero, with no rank at all.
+        item["adjusted_score"] = 0.0
+        item["rank"] = None
         item["estimated_tokens"] = _estimate_tokens(
             item["title"] + item["snippet"]
         )
@@ -1693,11 +2088,7 @@ def _runtime_filter(
                 reason = "map-unverifiable"
             elif drift > limit:
                 reason = "map-drift"
-        if (
-            reason is None
-            and candidate["kind"].startswith("brain-")
-            and candidate["source_fingerprints"]
-        ):
+        if reason is None and candidate["source_fingerprints"]:
             fingerprints = candidate["source_fingerprints"]
             fresh = sources_are_fresh(
                 repository,
@@ -1707,12 +2098,137 @@ def _runtime_filter(
                 },
             )
             if not fresh:
-                reason = "stale"
+                # Two names for one event, deliberately. `stale` has always
+                # meant a Brain record whose cited file moved on, and the
+                # runbook and its tests speak that word. A durable chunk is a
+                # different remedy: a record is refreshed by a revisioned
+                # mutation, a chunk by re-reading the source and calling
+                # `bank-reverify`, so a reader who sees `source-changed` is
+                # told which of the two they are holding.
+                reason = (
+                    "source-changed"
+                    if candidate["kind"] == "memory"
+                    else "stale"
+                )
         if reason:
             excluded.append({"path": candidate["path"], "reason": reason})
         else:
             selected.append(candidate)
     return selected, excluded
+
+
+# How many path-linked documents may lead the selection. Set to the semantic
+# slot count rather than to a number of its own: naming a path is a claim that
+# these documents matter to this turn, so they take the layer the caller asked
+# about and the query keeps whatever they leave. A smaller cap would reproduce
+# the failure the link index exists to repair — in the measured case the query
+# does not reach the linked chunks at all, so any slot reserved for it is a
+# slot spent on documents the caller did not ask for.
+PATH_LINK_LIMIT = CAPSULE_SEMANTIC_LIMIT
+
+
+def _path_candidates(
+    connection: sqlite3.Connection,
+    repository: Path,
+    config: dict[str, Any],
+    paths: list[str],
+    seen: set[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Documents that cite one of `paths`, shaped like ranked candidates.
+
+    They carry no lexical score, because nothing lexical selected them: like a
+    conflict partner they read as score zero with no rank, and they are marked
+    `selection: path-link` so a manifest reader can tell a document the query
+    found from one the caller's path dragged in.
+    """
+    candidates: list[dict[str, Any]] = []
+    excluded: list[dict[str, str]] = []
+    for reference in dict.fromkeys(paths):
+        linked, withheld = linked_documents(
+            connection, repository, config, reference
+        )
+        excluded.extend(withheld)
+        for item in linked:
+            if item["path"] in seen:
+                # Already selected by the query; it arrived on its own merit
+                # and is not relabelled as a path link.
+                continue
+            seen.add(item["path"])
+            candidates.append(item)
+    for item in candidates[PATH_LINK_LIMIT:]:
+        excluded.append({"path": item["path"], "reason": "path-link-limit"})
+    candidates = candidates[:PATH_LINK_LIMIT]
+    content = {
+        row["path"]: row["content"]
+        for row in connection.execute(
+            "SELECT path, content FROM documents WHERE path IN ("
+            + ", ".join("?" for _ in candidates)
+            + ")",
+            [item["path"] for item in candidates],
+        )
+    } if candidates else {}
+    for item in candidates:
+        item["snippet"] = _body_snippet(str(content.get(item["path"], "")))
+        item["match"] = None
+        item["selection"] = "path-link"
+        item["adjusted_score"] = 0.0
+        item["rank"] = None
+        item["estimated_tokens"] = _estimate_tokens(item["title"] + item["snippet"])
+    return candidates, excluded
+
+
+def linked_documents(
+    connection: sqlite3.Connection,
+    repository: Path,
+    config: dict[str, Any],
+    reference: str,
+    *,
+    prefix: bool = False,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Every eligible document that declares `reference` among its sources.
+
+    Routed through `_runtime_filter` rather than reimplementing its checks,
+    because a link query is a retrieval and the same policy has to apply.
+    `search_documents` deliberately does not join `document_metadata`, and the
+    comment there records why: once governed records entered a layer, a search
+    that skipped the join leaked `restricted` bodies. A `links` command
+    modelled on `search` would reopen exactly that hole.
+    """
+    ensure_metadata_tables(connection)
+    reference = reference.split("#", 1)[0].strip()
+    if not reference:
+        return [], []
+    if prefix:
+        predicate = "l.ref_path = ? OR l.ref_path LIKE ? ESCAPE '\\'"
+        pattern = reference.rstrip("/").replace("\\", "\\\\")
+        pattern = pattern.replace("%", "\\%").replace("_", "\\_")
+        parameters: tuple[str, ...] = (reference, f"{pattern}/%")
+    else:
+        predicate = "l.ref_path = ?"
+        parameters = (reference,)
+    rows = connection.execute(
+        f"""
+        SELECT
+            d.path, d.layer, d.kind, d.title,
+            l.ref_path, l.ref_kind,
+            m.category, m.privacy, m.owner, m.authority, m.lifecycle,
+            m.source_hash, m.record_id, m.conflicts, m.source_fingerprints,
+            m.updated_at, m.confidence
+        FROM document_links AS l
+        JOIN documents AS d ON d.path = l.path
+        JOIN document_metadata AS m ON m.path = l.path
+        WHERE {predicate}
+        ORDER BY d.path, l.ref_path
+        """,
+        parameters,
+    ).fetchall()
+    candidates = []
+    for row in rows:
+        item = dict(row)
+        item["conflicts"] = json.loads(item["conflicts"])
+        item["source_fingerprints"] = json.loads(item["source_fingerprints"])
+        candidates.append(item)
+    return _runtime_filter(repository, candidates, config)
 
 
 def _apply_budgets(
@@ -1763,17 +2279,84 @@ def _apply_budgets(
     return selected, excluded, usage, escalation
 
 
-def _prune_local_manifests(directory: Path) -> None:
+def _phase_value(phases: Optional[dict[str, Any]], key: str) -> Optional[float]:
+    """One index phase duration, or None when this turn did not index.
+
+    Reporting 0.0 for a phase that never ran would claim an instantaneous
+    index; null says the turn read an index somebody else built.
+    """
+    if not phases:
+        return None
+    value = phases.get(key)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    return round(float(value), 6)
+
+
+def local_manifest_retention(config: dict[str, Any]) -> int:
+    """How many ignored local manifests to keep, from config, never below one.
+
+    The depth of this window is the observation window for every measurement
+    built on manifests, so it belongs in runtime configuration rather than in
+    a module constant. It is floored at one because zero or a negative value
+    would delete the manifest the current retrieval just wrote while the
+    returned capsule still advertises its path.
+    """
+    value = config.get("local_manifest_retention", LOCAL_MANIFEST_RETENTION)
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return LOCAL_MANIFEST_RETENTION
+
+
+def refresh_health_retention(config: dict[str, Any]) -> int:
+    """How many turn-health records to keep, from config, never below one.
+
+    Beside `local_manifest_retention` and floored the same way, for the reason
+    H1-05 recorded: the depth of an observation window is a runtime decision,
+    not a module constant, and a zero would delete the record just written.
+    """
+    value = config.get("refresh_health_retention", REFRESH_HEALTH_RETENTION)
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return REFRESH_HEALTH_RETENTION
+
+
+def _prune_local_manifests(directory: Path, retention: int) -> None:
     """Bound ignored local manifests; the governed store has its own policy."""
     manifests = [path for path in directory.glob("*.json") if path.is_file()]
-    if len(manifests) <= LOCAL_MANIFEST_RETENTION:
+    if len(manifests) <= retention:
         return
     manifests.sort(key=lambda path: (path.stat().st_mtime_ns, path.name))
-    for path in manifests[: len(manifests) - LOCAL_MANIFEST_RETENTION]:
+    for path in manifests[: len(manifests) - retention]:
         try:
             path.unlink()
         except OSError:
             continue
+
+
+# Keys of a candidate that may reach the model. `match` is carried only when
+# it is not `covered`: the capsule is zero-sum against CAPSULE_CHARACTER_LIMIT
+# and every selected item is serialized up to three times, so a key that says
+# "nothing unusual" would be paid for out of content on every turn. Absent
+# therefore means covered, which is what the schema and the docs record.
+_PUBLIC_ITEM_KEYS = (
+    "path", "layer", "kind", "title", "snippet", "category",
+    "estimated_tokens", "record_id", "conflicts",
+)
+
+
+def _public_item(item: dict[str, Any]) -> dict[str, Any]:
+    public = {key: item[key] for key in _PUBLIC_ITEM_KEYS}
+    if item.get("match") not in (None, "covered"):
+        public["match"] = item["match"]
+    if item.get("selection"):
+        # Only ever present when the caller passed `--path`, so it costs
+        # nothing on an ordinary turn, and on those turns it is the difference
+        # between "your words found this" and "the file you named did".
+        public["selection"] = item["selection"]
+    return public
 
 
 def retrieve(
@@ -1785,17 +2368,67 @@ def retrieve(
     limit: int,
     provider: Optional[str] = None,
     manifest_scope: str = "governed",
+    query_source: str = "explicit",
+    phase_seconds: Optional[dict[str, Any]] = None,
+    gate_mode: str = RETRIEVAL_GATE_DEFAULT,
+    paths: Optional[list[str]] = None,
 ) -> dict[str, Any]:
+    """Assemble governed context and record the manifest that justifies it.
+
+    ``query_source`` and ``phase_seconds`` are provenance the caller owns and
+    this function cannot infer: whether the query came from a prompt, a task,
+    a branch name or an operator, and how long the index phases that fed it
+    took. They are written into the manifest because a retrieval decision
+    cannot be reviewed later from the selection alone.
+    """
+    retrieval_started = time.monotonic()
     if limit < 1:
         raise RetrievalError("--limit must be a positive integer")
+    if query_source not in QUERY_SOURCES:
+        raise RetrievalError(
+            f"Query source must be one of {', '.join(sorted(QUERY_SOURCES))}"
+        )
     if manifest_scope not in MANIFEST_SCOPES:
         raise RetrievalError(
             f"Manifest scope must be one of {', '.join(MANIFEST_SCOPES)}"
         )
+    if gate_mode not in RETRIEVAL_GATE_MODES:
+        raise RetrievalError(
+            f"Retrieval gate must be one of {', '.join(RETRIEVAL_GATE_MODES)}"
+        )
     task = get_task(repository, task_identifier)
     config = load_config(repository)
-    candidates = _candidates(connection, query, max(20, limit * 10))
+    candidates, diagnostics = _candidates(connection, query, max(20, limit * 10))
+    # Taken before any filter runs, so "nothing matched" cannot be confused
+    # with "everything that matched was withheld". Only the layers a governed
+    # capsule fills from this call are answered for; the episodic layer is
+    # assembled by the caller and reports itself.
+    matched_layers = {item["layer"] for item in candidates}
+    no_match = [
+        layer
+        for layer in ("procedural", "semantic", "episodic")
+        if layer not in matched_layers
+    ]
     filtered, filter_excluded = _runtime_filter(repository, candidates, config)
+    # Injected here and nowhere earlier. `matched_layers` and `no_match` above
+    # are claims about the QUERY — the capsule's `no-match:` line and the
+    # gate's `signals.no_match` both read them that way — and a path link is
+    # not the query matching. A layer can therefore report `no-match` and
+    # still deliver a path-linked document on the same turn: the first says
+    # the caller's words found nothing there, the second says the caller's
+    # path did.
+    if paths:
+        linked, link_excluded = _path_candidates(
+            connection,
+            repository,
+            config,
+            paths,
+            {item["path"] for item in filtered},
+        )
+        filter_excluded.extend(link_excluded)
+        # Ahead of the query's own matches, because `_apply_budgets` and the
+        # per-layer ladder both honour input order and the caller named these.
+        filtered = [*linked, *filtered]
     known_ids = {
         item["record_id"] for item in filtered if item.get("record_id") is not None
     }
@@ -1838,20 +2471,73 @@ def retrieve(
     procedural_ranked = [
         item for item in selected if item["category"] == "policy"
     ]
+    # The semantic layer is built from categories and the episodic layer from
+    # the layer column, and the two taxonomies overlap: `category_for` has no
+    # `changelog` branch, so CHANGELOG.md is category 'evidence' AND layer
+    # 'episodic'. Without this filter it takes one of the three semantic slots
+    # and the single episodic slot at once, and the degradation ladder then
+    # drops real content to stay inside the budget. Filtering here rather than
+    # after the split matters twice over: the freed slot goes to the next
+    # ranked candidate instead of being lost, and the manifest written below
+    # keeps describing exactly what the capsule delivers.
     semantic_ranked = [
-        item for item in selected if item["category"] != "policy"
+        item
+        for item in selected
+        if item["category"] != "policy" and item["layer"] != "episodic"
     ]
+    # The episodic layer used to be assembled by the caller from a raw
+    # `search_documents` call, which never joins `document_metadata` - so it
+    # applied no privacy, owner, authority, lifecycle or freshness filter and
+    # never appeared in the manifest. That was harmless while the only
+    # episodic document was the changelog; it stops being harmless the moment
+    # governed records live there. Ranking it here puts it through the same
+    # filters, the same budget and the same audit record as everything else,
+    # and makes H1-03's `episodic-layer` exclusion reason literally true.
+    episodic_ranked = [item for item in selected if item["layer"] == "episodic"]
     capsule_selected = [
         *procedural_ranked[:CAPSULE_PROCEDURAL_LIMIT],
         *semantic_ranked[:CAPSULE_SEMANTIC_LIMIT],
+        *episodic_ranked[:CAPSULE_EPISODIC_LIMIT],
     ]
     capsule_paths = {item["path"] for item in capsule_selected}
     layer_excluded = [
-        {"path": item["path"], "reason": "layer-limit"}
+        {
+            "path": item["path"],
+            # A document held back because its own layer will carry it is not
+            # a document that ran out of room.
+            "reason": (
+                "episodic-layer" if item["layer"] == "episodic" else "layer-limit"
+            ),
+        }
         for item in selected
         if item["path"] not in capsule_paths
     ]
     selected = capsule_selected
+    # Decided here rather than earlier because `selection_identical_to_
+    # previous_turn` is a claim about what the capsule delivers, and after the
+    # episodic-layer filter and the 2+3 truncation above that is only now
+    # known. Deciding earlier would describe a set the capsule never carried.
+    signature = _retrieval_signature(query, (item["path"] for item in selected))
+    previous = _load_last_retrievals(connection).get(task["id"])
+    gate = gate_decision(
+        gate_mode,
+        signature=signature,
+        previous=previous if isinstance(previous, dict) else None,
+        diagnostics=diagnostics,
+        no_match=no_match,
+        selected_count=len(selected),
+    )
+    withheld = gate["mode"] == "enforce" and gate["decision"] == "skip"
+    if withheld:
+        # The gate saves the turn from a pointer, not the database from a
+        # query: the work is already done and cost nothing extra. What is
+        # withheld is the claim "this is relevant right now".
+        selected = []
+        layer_excluded = []
+    else:
+        # Remembered only for a turn that actually delivered, so the next turn
+        # compares against the last real retrieval rather than against a skip.
+        _remember_retrieval(connection, task["id"], signature)
     usage = {category: 0 for category in BUDGETS}
     for item in selected:
         usage[item["category"]] += item["estimated_tokens"]
@@ -1860,7 +2546,7 @@ def retrieve(
     usage["hard"] = HARD_BUDGET
     manifest_id = new_uuid()
     manifest = {
-        "schema_version": 1,
+        "schema_version": MANIFEST_SCHEMA_VERSION,
         "id": manifest_id,
         "created_at": utc_now(),
         "query": query,
@@ -1877,6 +2563,21 @@ def retrieve(
             {
                 "path": item["path"], "category": item["category"],
                 "estimated_tokens": item["estimated_tokens"], "source_hash": item["source_hash"],
+                # `match` describes how the query matched, so an item the
+                # query never matched carries none rather than a fourth
+                # reading of a lexical word. Why it is here is a separate
+                # question with a separate key.
+                **({"match": item["match"]} if item.get("match") else {}),
+                **(
+                    {"selection": item["selection"]}
+                    if item.get("selection")
+                    else {}
+                ),
+                # Everything a later gate needs to reason about this turn:
+                # how strongly it matched, and where it stood before any
+                # budget or layer limit applied.
+                "score": round(float(item.get("adjusted_score") or 0.0), 6),
+                "rank": item.get("rank"),
             }
             for item in selected
         ],
@@ -1884,6 +2585,16 @@ def retrieve(
         "token_estimates": usage,
         "provider": provider or config["provider"],
         "escalation_reason": escalation_reason,
+        # Where the query came from, and what the turn spent getting here.
+        # A manifest that records only the selection cannot answer whether a
+        # bad retrieval was a bad query or a bad ranking.
+        "query_source": query_source,
+        "gate": gate,
+        "phase_seconds": {
+            "stat": _phase_value(phase_seconds, "stat"),
+            "index": _phase_value(phase_seconds, "index"),
+            "retrieval": round(time.monotonic() - retrieval_started, 6),
+        },
     }
     if manifest_scope == "governed":
         manifest_directory = brain_root(repository) / "control" / "retrieval-manifests"
@@ -1900,18 +2611,20 @@ def retrieve(
         # Ignored local provenance for automated retrieval: the same validated
         # record, kept out of shared history and out of the runtime lock.
         atomic_json(manifest_path, manifest)
-        _prune_local_manifests(manifest_directory)
+        _prune_local_manifests(
+            manifest_directory, local_manifest_retention(config)
+        )
     groups = {category: [] for category in BUDGETS}
     for item in selected:
-        public = {
-            key: item[key]
-            for key in (
-                "path", "layer", "kind", "title", "snippet", "category",
-                "estimated_tokens", "record_id", "conflicts",
-            )
-        }
+        public = _public_item(item)
         groups[item["category"]].append(public)
     procedural = groups["policy"][:CAPSULE_PROCEDURAL_LIMIT]
+    episodic = [
+        item
+        for group in groups.values()
+        for item in group
+        if item["layer"] == "episodic"
+    ][:CAPSULE_EPISODIC_LIMIT]
     semantic = [
         *groups["handoff"], *groups["durable"], *groups["dynamic"], *groups["evidence"]
     ][:CAPSULE_SEMANTIC_LIMIT]
@@ -1934,17 +2647,14 @@ def retrieve(
         "categories": groups,
         "procedural": procedural,
         "semantic": semantic,
-        "episodic": [],
-        "selected": [
-            {
-                key: item[key]
-                for key in (
-                    "path", "layer", "kind", "title", "snippet", "category",
-                    "estimated_tokens", "record_id", "conflicts",
-                )
-            }
-            for item in selected
-        ],
+        "episodic": episodic,
+        "selected": [_public_item(item) for item in selected],
+        # A layer with no candidate at all is a different fact from a layer
+        # whose candidates were filtered out downstream, and only the first
+        # one means "memory has nothing here". Recorded before any budget or
+        # policy filter runs; `excluded` in the manifest explains the rest.
+        "no_match": no_match,
+        "gate": gate,
         "token_estimates": usage,
         "manifest": manifest_path.relative_to(repository).as_posix(),
         "manifest_scope": manifest_scope,

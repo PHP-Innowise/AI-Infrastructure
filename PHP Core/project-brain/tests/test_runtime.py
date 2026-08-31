@@ -9,12 +9,13 @@ import io
 import json
 import os
 import sqlite3
+import shutil
 import subprocess
 import sys
 import tempfile
 import threading
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -219,6 +220,670 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
             any(item["reason"] == "layer-limit" for item in manifest["excluded"])
         )
 
+    def test_capsule_says_when_memory_matched_nothing(self) -> None:
+        # Until this line existed, a capsule that found nothing and a capsule
+        # that was never consulted rendered identically, so any policy telling
+        # the model to "refuse when there is no data" was asking it to observe
+        # something the harness never reported.
+        self.start("TASK-NO-MATCH")
+        self.repository.joinpath("README.md").write_text(
+            "# Overview\n\nzorkmid ledger overview.\n", encoding="utf-8"
+        )
+
+        rendered = self.run_cli(
+            "retrieve", "unladen swallow airspeed velocity",
+            "--task-id", "TASK-NO-MATCH", "--ephemeral",
+        )
+        self.assertEqual(0, rendered.returncode, rendered.stderr)
+        # The Cursor hooks accept a capsule only if it opens with "working:".
+        self.assertTrue(rendered.stdout.startswith("working:"), rendered.stdout)
+        self.assertIn("no-match: episodic, procedural, semantic", rendered.stdout)
+
+        payload = self.run_cli(
+            "retrieve", "unladen swallow airspeed velocity",
+            "--task-id", "TASK-NO-MATCH", "--ephemeral", "--json",
+        )
+        capsule = json.loads(payload.stdout)
+        self.assertEqual(
+            ["procedural", "semantic", "episodic"], capsule["no_match"], capsule
+        )
+        manifest = json.loads(
+            (self.repository / capsule["manifest"]).read_text(encoding="utf-8")
+        )
+        # Nothing selected AND nothing excluded is what distinguishes "memory
+        # found nothing" from "memory found something a filter withheld".
+        self.assertEqual([], manifest["selected"], manifest)
+        self.assertEqual([], manifest["excluded"], manifest)
+
+    def test_a_layer_emptied_by_a_filter_is_not_reported_as_no_match(self) -> None:
+        # The distinction the previous test rests on, from the other side: a
+        # layer whose candidate was withheld downstream must not claim memory
+        # had nothing, or the two states collapse again.
+        self.start("TASK-FILTERED")
+        self.repository.joinpath("CHANGELOG.md").write_text(
+            "# Changelog\n\n## Unreleased\n\ncobalt authority rollout.\n",
+            encoding="utf-8",
+        )
+        self.repository.joinpath("specs/authority.md").write_text(
+            "# Authority\n\ncobalt authority specification detail.\n",
+            encoding="utf-8",
+        )
+
+        # The query reaches the task's own handoff, which the lifecycle filter
+        # withholds: without a document a filter actually removes, "a layer a
+        # filter emptied" has no instance and the test proves nothing.
+        payload = self.run_cli(
+            "retrieve", "cobalt authority rule", "--task-id", "TASK-FILTERED",
+            "--ephemeral", "--json",
+        )
+        self.assertEqual(0, payload.returncode, payload.stderr)
+        capsule = json.loads(payload.stdout)
+        manifest = json.loads(
+            (self.repository / capsule["manifest"]).read_text(encoding="utf-8")
+        )
+        # Both layers found candidates, so neither may claim memory had
+        # nothing — only `procedural`, which genuinely matched nothing, is
+        # entitled to say so.
+        self.assertEqual(["procedural"], capsule["no_match"], capsule)
+        self.assertTrue(capsule["semantic"], capsule)
+        self.assertTrue(capsule["episodic"], capsule)
+        # CHANGELOG.md is the episodic layer's own document and is now ranked,
+        # filtered and recorded through the governed path rather than fetched
+        # around it, so it appears in the manifest it is delivered under.
+        self.assertIn(
+            "CHANGELOG.md", [item["path"] for item in capsule["episodic"]], capsule
+        )
+        self.assertIn(
+            "CHANGELOG.md", [item["path"] for item in manifest["selected"]], manifest
+        )
+        # The other half — a document a filter removed arriving in `excluded`
+        # with its reason rather than silently shrinking a layer — is covered
+        # by test_no_document_occupies_two_layers_of_one_capsule, whose
+        # fixture produces a lifecycle exclusion.
+
+    def test_capsule_marks_an_item_admitted_on_a_single_rare_term(self) -> None:
+        # A distinctive match needs both query terms to exist in the corpus
+        # (an absent term is dropped as uninformative before coverage is
+        # counted) and the corpus to be large enough for one document to count
+        # as rare: `rare` is `hits <= 0.1 * documents`, so ten fillers are the
+        # minimum that lets a single-document term qualify.
+        self.start("TASK-WEAK")
+        self.repository.joinpath("README.md").write_text(
+            "# Overview\n\nzorkmid ledger overview.\n", encoding="utf-8"
+        )
+        self.repository.joinpath("specs/plover.md").write_text(
+            "# Plover\n\nplover migration notes.\n", encoding="utf-8"
+        )
+        for index in range(10):
+            self.repository.joinpath(f"specs/filler-{index}.md").write_text(
+                f"# Filler {index}\n\nunrelated boilerplate paragraph {index}.\n",
+                encoding="utf-8",
+            )
+
+        rendered = self.run_cli(
+            "retrieve", "zorkmid plover", "--task-id", "TASK-WEAK", "--ephemeral",
+        )
+        self.assertEqual(0, rendered.returncode, rendered.stderr)
+        self.assertIn("weak-match: README.md", rendered.stdout)
+
+        payload = self.run_cli(
+            "retrieve", "zorkmid plover", "--task-id", "TASK-WEAK",
+            "--ephemeral", "--json",
+        )
+        capsule = json.loads(payload.stdout)
+        strengths = {
+            item["path"]: item.get("match")
+            for layer in ("procedural", "semantic", "episodic")
+            for item in capsule[layer]
+            if "path" in item
+        }
+        self.assertEqual("distinctive", strengths.get("README.md"), capsule)
+        manifest = json.loads(
+            (self.repository / capsule["manifest"]).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            "distinctive",
+            {item["path"]: item["match"] for item in manifest["selected"]}["README.md"],
+            manifest,
+        )
+
+    def test_a_covering_match_costs_the_capsule_nothing_to_declare(self) -> None:
+        # The capsule is zero-sum against an 8,000-character ceiling and each
+        # selected item is serialized up to three times, so the common verdict
+        # is carried by its absence: the manifest records it in full, the
+        # capsule spends characters only on the answer that needs a caveat.
+        self.start("TASK-COVERED")
+        self.repository.joinpath("specs/authority.md").write_text(
+            "# Authority\n\ncobalt authority specification detail.\n",
+            encoding="utf-8",
+        )
+
+        payload = self.run_cli(
+            "retrieve", "cobalt authority", "--task-id", "TASK-COVERED",
+            "--ephemeral", "--json",
+        )
+        capsule = json.loads(payload.stdout)
+        semantic = {item["path"]: item for item in capsule["semantic"]}
+        self.assertIn("specs/authority.md", semantic, capsule)
+        self.assertNotIn("match", semantic["specs/authority.md"], capsule)
+        manifest = json.loads(
+            (self.repository / capsule["manifest"]).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            "covered",
+            {item["path"]: item["match"] for item in manifest["selected"]}[
+                "specs/authority.md"
+            ],
+            manifest,
+        )
+        rendered = self.run_cli(
+            "retrieve", "cobalt authority", "--task-id", "TASK-COVERED", "--ephemeral",
+        )
+        self.assertNotIn("weak-match", rendered.stdout)
+
+    def latest_manifest(self, capsule: dict) -> dict:
+        return json.loads(
+            (self.repository / capsule["manifest"]).read_text(encoding="utf-8")
+        )
+
+    def test_manifest_records_the_signals_a_retrieval_gate_needs(self) -> None:
+        # Everything a gate decision needs is already computed during a
+        # retrieval and was thrown away at the end of it. A manifest that
+        # records only the selection cannot answer, later, whether a bad
+        # capsule came from a bad query or a bad ranking.
+        self.start("TASK-SIGNALS")
+        self.repository.joinpath("specs/authority.md").write_text(
+            "# Authority\n\ncobalt authority specification detail.\n",
+            encoding="utf-8",
+        )
+        payload = self.run_cli(
+            "retrieve", "cobalt authority", "--task-id", "TASK-SIGNALS",
+            "--ephemeral", "--json",
+        )
+        self.assertEqual(0, payload.returncode, payload.stderr)
+        manifest = self.latest_manifest(json.loads(payload.stdout))
+
+        self.assertEqual(2, manifest["schema_version"], manifest)
+        self.assertEqual("explicit", manifest["query_source"], manifest)
+        phases = manifest["phase_seconds"]
+        self.assertEqual({"stat", "index", "retrieval"}, set(phases), phases)
+        self.assertIsInstance(phases["retrieval"], (int, float))
+        self.assertGreaterEqual(phases["retrieval"], 0)
+        entry = next(
+            item for item in manifest["selected"]
+            if item["path"] == "specs/authority.md"
+        )
+        self.assertIsInstance(entry["score"], (int, float))
+        self.assertGreaterEqual(entry["score"], 0)
+        self.assertIsInstance(entry["rank"], int)
+        self.assertGreaterEqual(entry["rank"], 1)
+
+    def test_manifest_records_where_the_query_came_from(self) -> None:
+        # A gate that cannot tell a real request from a branch name would be
+        # deciding on the strength of a slug.
+        self.start("TASK-PROVENANCE")
+        self.repository.joinpath("specs/authority.md").write_text(
+            "# Authority\n\ncobalt authority specification detail.\n",
+            encoding="utf-8",
+        )
+        prompt = self.run_cli(
+            "refresh", "--query", "how is cobalt authority specified",
+            "--task-id", "TASK-PROVENANCE", "--ephemeral", "--json",
+        )
+        self.assertEqual(0, prompt.returncode, prompt.stderr)
+        capsule = json.loads(prompt.stdout)["capsule"]
+        self.assertIsNotNone(capsule, prompt.stdout)
+        self.assertEqual("prompt", self.latest_manifest(capsule)["query_source"])
+
+        # The Cursor-facing path supplies a task identifier, and the query is
+        # built from the task behind it - `task`, not `task-id`.
+        hook = self.run_cli(
+            "hook-context", "--task-id", "TASK-PROVENANCE", "--json",
+        )
+        self.assertEqual(0, hook.returncode, hook.stderr)
+        self.assertEqual(
+            "task", self.latest_manifest(json.loads(hook.stdout))["query_source"]
+        )
+
+    def test_a_conflict_partner_reports_no_lexical_rank(self) -> None:
+        # A conflict partner is pulled in by record id, never ranked against
+        # the query. Reporting a rank for it would invent a relevance it never
+        # had; the manifest says so instead.
+        self.start("TASK-CONFLICT-RANK")
+        self.repository.joinpath("specs/authority.md").write_text(
+            "# Authority\n\ncobalt authority specification detail.\n",
+            encoding="utf-8",
+        )
+        payload = self.run_cli(
+            "retrieve", "cobalt authority", "--task-id", "TASK-CONFLICT-RANK",
+            "--ephemeral", "--json",
+        )
+        manifest = self.latest_manifest(json.loads(payload.stdout))
+        for item in manifest["selected"]:
+            self.assertIn("score", item, item)
+            self.assertTrue(
+                item["rank"] is None or item["rank"] >= 1, item
+            )
+
+    def test_local_manifest_retention_is_configurable_and_floored(self) -> None:
+        self.start("TASK-RETENTION")
+        self.repository.joinpath("specs/authority.md").write_text(
+            "# Authority\n\ncobalt authority specification detail.\n",
+            encoding="utf-8",
+        )
+        config_path = self.repository / "project-brain/config/runtime.json"
+
+        def retrieve_five(retention: object) -> str:
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config = (
+                json.loads(config_path.read_text(encoding="utf-8"))
+                if config_path.is_file()
+                else {"mode": "governed"}
+            )
+            config["local_manifest_retention"] = retention
+            config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+            last = ""
+            for index in range(5):
+                result = self.run_cli(
+                    "retrieve", f"cobalt authority {index}",
+                    "--task-id", "TASK-RETENTION", "--ephemeral", "--json",
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                last = json.loads(result.stdout)["manifest"]
+            return last
+
+        directory = self.repository / "memory-bank/local/retrieval-manifests"
+        last = retrieve_five(3)
+        self.assertLessEqual(len(list(directory.glob("*.json"))), 3)
+        # The window must never eat the manifest the caller was just handed.
+        self.assertTrue((self.repository / last).is_file(), last)
+
+        for bogus in (0, -1, "many"):
+            with self.subTest(retention=bogus):
+                last = retrieve_five(bogus)
+                self.assertTrue((self.repository / last).is_file(), last)
+
+    def test_a_version_one_manifest_still_validates(self) -> None:
+        # The migration guarantee for installed projects: upgrading the engine
+        # must not turn every manifest a consuming project already wrote into
+        # a validation error, which is what a single frozen key set would do.
+        self.start("TASK-MIGRATION")
+        manifests = self.repository / "project-brain/control/retrieval-manifests"
+        manifests.mkdir(parents=True, exist_ok=True)
+        legacy_id = "00000000-0000-4000-8000-000000000001"
+        legacy = {
+            "schema_version": 1,
+            "id": legacy_id,
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "query": "cobalt authority",
+            "task_id": "00000000-0000-4000-8000-000000000002",
+            "task_revision": 1,
+            "filters": {
+                "privacy": ["public"], "owners": ["*"],
+                "authority": ["verified"], "freshness": True, "active_only": True,
+            },
+            "selected": [],
+            "excluded": [],
+            "token_estimates": {
+                "policy": 0, "handoff": 0, "durable": 0, "dynamic": 0,
+                "evidence": 0, "total": 0, "target": 8000, "hard": 12000,
+            },
+            "provider": "sqlite-fts5",
+            "escalation_reason": None,
+        }
+        (manifests / f"{legacy_id}.json").write_text(
+            json.dumps(legacy, indent=2), encoding="utf-8"
+        )
+        self.assertEqual([], brain.validate_repository(self.repository))
+
+        # A manifest that claims version 2 must carry what version 2 promises.
+        incomplete_id = "00000000-0000-4000-8000-000000000003"
+        (manifests / f"{incomplete_id}.json").write_text(
+            json.dumps({**legacy, "schema_version": 2, "id": incomplete_id}, indent=2),
+            encoding="utf-8",
+        )
+        errors = brain.validate_repository(self.repository)
+        self.assertTrue(
+            any("strict schema" in error for error in errors), errors
+        )
+
+    def test_hook_query_comes_from_the_task_not_the_branch_name(self) -> None:
+        # Cursor has no prompt-submit event, so its one automatic memory entry
+        # hands over a branch name. Retrieving on the slug asks memory about
+        # the word "main"; the task behind it is what the turn is actually
+        # about.
+        self.run_cli(
+            "start", "--task-id", "main",
+            "--goal", "Write a Doctrine migration for the invoice table.",
+            "--source", "specs/authority.md", "--json",
+        )
+        self.repository.joinpath("specs/doctrine-migration.md").write_text(
+            "# Doctrine migration\n\n"
+            "Writing a Doctrine migration for an invoice table.\n",
+            encoding="utf-8",
+        )
+        # The goal is echoed into the task record and its handoff, so in a
+        # five-document corpus its own words already look corpus-common and
+        # `informative_tokens` discards them. Fillers restore the ratio a real
+        # repository has; without them the fixture measures its own size.
+        for index in range(10):
+            self.repository.joinpath(f"specs/filler-{index}.md").write_text(
+                f"# Filler {index}\n\nUnrelated boilerplate paragraph {index}.\n",
+                encoding="utf-8",
+            )
+        self.repository.joinpath(".agents/skills/main-landmark").mkdir(
+            parents=True, exist_ok=True
+        )
+        self.repository.joinpath(
+            ".agents/skills/main-landmark/SKILL.md"
+        ).write_text(
+            "# Main landmark\n\nEvery page needs one main landmark region.\n",
+            encoding="utf-8",
+        )
+
+        hook = self.run_cli("hook-context", "--task-id", "main", "--json")
+        self.assertEqual(0, hook.returncode, hook.stderr)
+        capsule = json.loads(hook.stdout)
+        self.assertEqual("task", capsule["query_source"], capsule)
+        paths = [
+            item["path"]
+            for layer in ("procedural", "semantic", "episodic")
+            for item in capsule[layer]
+            if "path" in item
+        ]
+        self.assertNotIn(".agents/skills/main-landmark/SKILL.md", paths, capsule)
+        self.assertIn("specs/doctrine-migration.md", paths, capsule)
+
+        rendered = self.run_cli("hook-context", "--task-id", "main")
+        self.assertTrue(rendered.stdout.startswith("working:"), rendered.stdout)
+        self.assertIn("query: from task goal", rendered.stdout)
+
+    def test_hook_query_falls_back_to_the_identifier_and_says_so(self) -> None:
+        # An auto-provisioned goal is the branch slug re-cased and nothing
+        # more, so treating it as task content would put the branch noise back
+        # under another name. The capsule reports that it retrieved on a
+        # branch name and nothing else, which is a different claim from having
+        # retrieved on the task.
+        branch = "chore/accelerator-hardening"
+        self.run_cli(
+            "start", "--task-id", branch,
+            "--goal", context_cli.derive_goal(branch), "--json",
+        )
+        payload = json.loads(
+            self.run_cli("hook-context", "--task-id", branch, "--json").stdout
+        )
+        self.assertEqual("task-id", payload["query_source"], payload)
+        # The identifier tokenized and nothing else: no goal words rode along,
+        # because the only goal available was the slug spelled differently.
+        self.assertEqual("chore accelerator hardening", payload["query"], payload)
+        rendered = self.run_cli("hook-context", "--task-id", branch)
+        self.assertTrue(rendered.stdout.startswith("working:"), rendered.stdout)
+        self.assertIn("query: from branch name only", rendered.stdout)
+
+    def gate_fixture(self, task: str) -> None:
+        self.start(task)
+        self.repository.joinpath("specs/authority.md").write_text(
+            "# Authority\n\ncobalt authority specification detail.\n",
+            encoding="utf-8",
+        )
+
+    def retrieve_gated(self, task: str, query: str, *extra: str) -> tuple[dict, dict]:
+        result = self.run_cli(
+            "retrieve", query, "--task-id", task, "--ephemeral", "--json", *extra
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        capsule = json.loads(result.stdout)
+        return capsule, self.latest_manifest(capsule)
+
+    def test_shadow_gate_records_a_verdict_on_every_manifest(self) -> None:
+        # Document-level restraint cannot express "this turn needed nothing",
+        # and there was nowhere to write such a decision even if it existed.
+        self.gate_fixture("TASK-GATE-SHADOW")
+        _, manifest = self.retrieve_gated("TASK-GATE-SHADOW", "cobalt authority")
+
+        gate = manifest["gate"]
+        self.assertEqual("shadow", gate["mode"], gate)
+        self.assertIn(gate["decision"], ("retrieve", "skip"))
+        self.assertTrue(gate["reason"], gate)
+        self.assertEqual(
+            {
+                "informative_terms", "distinctive_matches", "top_score",
+                "no_match", "query_unchanged_from_previous_turn",
+                "selection_identical_to_previous_turn",
+            },
+            set(gate["signals"]),
+            gate,
+        )
+        self.assertGreater(gate["signals"]["informative_terms"], 0, gate)
+
+    def test_shadow_is_the_default_and_never_withholds(self) -> None:
+        # The whole point of shadow: the decision is computed and recorded,
+        # and the turn is served anyway. Enforcement is H3-05's call, taken on
+        # the report this mode produces — the same standard that kept
+        # embeddings out.
+        self.gate_fixture("TASK-GATE-DEFAULT")
+        first, _ = self.retrieve_gated("TASK-GATE-DEFAULT", "cobalt authority")
+        second, manifest = self.retrieve_gated(
+            "TASK-GATE-DEFAULT", "cobalt authority"
+        )
+
+        self.assertEqual("shadow", manifest["gate"]["mode"], manifest)
+        self.assertEqual("skip", manifest["gate"]["decision"], manifest)
+        self.assertEqual("repeat-retrieval", manifest["gate"]["reason"], manifest)
+        # Verdict recorded, capsule delivered unchanged.
+        self.assertEqual(
+            [item["path"] for item in first["semantic"]],
+            [item["path"] for item in second["semantic"]],
+            second,
+        )
+        self.assertTrue(second["semantic"], second)
+        self.assertTrue(manifest["selected"], manifest)
+
+    def test_a_repeat_is_recognized_by_query_and_selection_not_by_bytes(self) -> None:
+        # The returned packet can never repeat byte-for-byte: every call mints
+        # a fresh manifest UUID, and the rendered form carries a checkpoint
+        # sentence and a last-turn summary that both move on their own. The
+        # invariant that does hold is the distilled query and the selected set.
+        self.gate_fixture("TASK-GATE-REPEAT")
+        first, first_manifest = self.retrieve_gated(
+            "TASK-GATE-REPEAT", "cobalt authority"
+        )
+        second, second_manifest = self.retrieve_gated(
+            "TASK-GATE-REPEAT", "cobalt authority"
+        )
+        self.assertNotEqual(first["manifest"], second["manifest"])
+
+        signals = second_manifest["gate"]["signals"]
+        self.assertTrue(signals["query_unchanged_from_previous_turn"], signals)
+        self.assertTrue(signals["selection_identical_to_previous_turn"], signals)
+        self.assertEqual("skip", second_manifest["gate"]["decision"], second_manifest)
+        self.assertEqual(
+            "repeat-retrieval", second_manifest["gate"]["reason"], second_manifest
+        )
+
+        _, changed = self.retrieve_gated(
+            "TASK-GATE-REPEAT", "doctrine migration invoice"
+        )
+        self.assertFalse(
+            changed["gate"]["signals"]["query_unchanged_from_previous_turn"],
+            changed["gate"],
+        )
+
+    def test_enforce_withholds_the_selection_and_says_it_did(self) -> None:
+        self.gate_fixture("TASK-GATE-ENFORCE")
+        self.retrieve_gated("TASK-GATE-ENFORCE", "cobalt authority")
+        capsule, manifest = self.retrieve_gated(
+            "TASK-GATE-ENFORCE", "cobalt authority", "--gate", "enforce"
+        )
+
+        self.assertEqual("skip", manifest["gate"]["decision"], manifest)
+        self.assertEqual([], capsule["semantic"], capsule)
+        self.assertEqual([], capsule["procedural"], capsule)
+        # The decision is still on the record: a withheld turn has to be
+        # countable, or the skip rate H3 needs cannot be computed.
+        self.assertEqual([], manifest["selected"], manifest)
+        self.assertEqual("enforce", manifest["gate"]["mode"], manifest)
+
+        rendered = self.run_cli(
+            "retrieve", "cobalt authority", "--task-id", "TASK-GATE-ENFORCE",
+            "--ephemeral", "--gate", "enforce",
+        )
+        self.assertTrue(rendered.stdout.startswith("working:"), rendered.stdout)
+        self.assertIn("gate: skipped — repeat-retrieval", rendered.stdout)
+
+    def test_enforce_serves_a_turn_whose_question_changed(self) -> None:
+        self.gate_fixture("TASK-GATE-CHANGED")
+        self.retrieve_gated("TASK-GATE-CHANGED", "cobalt authority")
+        capsule, manifest = self.retrieve_gated(
+            "TASK-GATE-CHANGED", "authority specification detail",
+            "--gate", "enforce",
+        )
+        self.assertEqual("retrieve", manifest["gate"]["decision"], manifest)
+        self.assertTrue(capsule["semantic"], capsule)
+
+    def test_a_skip_does_not_become_the_baseline_for_the_next_turn(self) -> None:
+        # If a skip overwrote the remembered retrieval, the turn after it
+        # would be comparing against nothing and would always look new.
+        self.gate_fixture("TASK-GATE-BASELINE")
+        self.retrieve_gated("TASK-GATE-BASELINE", "cobalt authority")
+        self.retrieve_gated(
+            "TASK-GATE-BASELINE", "cobalt authority", "--gate", "enforce"
+        )
+        _, manifest = self.retrieve_gated(
+            "TASK-GATE-BASELINE", "cobalt authority", "--gate", "enforce"
+        )
+        self.assertEqual("repeat-retrieval", manifest["gate"]["reason"], manifest)
+
+    def test_gate_off_never_decides(self) -> None:
+        self.gate_fixture("TASK-GATE-OFF")
+        self.retrieve_gated("TASK-GATE-OFF", "cobalt authority", "--gate", "off")
+        capsule, manifest = self.retrieve_gated(
+            "TASK-GATE-OFF", "cobalt authority", "--gate", "off"
+        )
+        self.assertEqual("retrieve", manifest["gate"]["decision"], manifest)
+        self.assertEqual("gate-off", manifest["gate"]["reason"], manifest)
+        self.assertTrue(capsule["semantic"], capsule)
+
+    def test_a_gated_hook_capsule_leaves_the_cursor_rule_alone(self) -> None:
+        # The enforce hazard. Both Cursor deliveries accept any stdout that
+        # opens with "working:" at exit 0 and move it over the rule file, so a
+        # withheld capsule rendered normally would replace Cursor's only
+        # memory channel with an empty rule on every skipped turn. The skip
+        # exits with a status those hooks leave alone, and prints nothing.
+        self.gate_fixture("TASK-GATE-HOOK")
+        self.assertEqual(
+            0, self.run_cli("hook-context", "--task-id", "TASK-GATE-HOOK").returncode
+        )
+        skipped = self.run_cli(
+            "hook-context", "--task-id", "TASK-GATE-HOOK", "--gate", "enforce"
+        )
+        self.assertEqual(4, skipped.returncode, skipped.stdout + skipped.stderr)
+        self.assertEqual("", skipped.stdout)
+        # Not 0 (would be rendered over the rule) and not 3 (would delete it).
+        self.assertNotIn(skipped.returncode, (0, 3))
+
+    def test_an_unknown_gate_mode_is_rejected(self) -> None:
+        self.gate_fixture("TASK-GATE-BAD")
+        config_path = self.repository / "project-brain/config/runtime.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config = (
+            json.loads(config_path.read_text(encoding="utf-8"))
+            if config_path.is_file()
+            else {"mode": "governed"}
+        )
+        config["retrieval_gate"] = "sometimes"
+        config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+        # hook-context never sees the flag, so a bad configured value has to be
+        # rejected where every caller passes, not only by argparse choices.
+        result = self.run_cli("hook-context", "--task-id", "TASK-GATE-BAD")
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("off, shadow or enforce", result.stderr)
+
+    def test_no_document_occupies_two_layers_of_one_capsule(self) -> None:
+        # The semantic layer is grouped by retrieval category and the episodic
+        # layer by the layer column, and the two taxonomies disagree:
+        # `category_for` has no `changelog` branch, so CHANGELOG.md is
+        # category 'evidence' and layer 'episodic' at the same time. It used to
+        # take one of the three semantic slots and the only episodic slot
+        # together, while the degradation ladder dropped real content to fit
+        # the budget.
+        self.start("TASK-LAYER-DEDUPE")
+        self.repository.joinpath("CHANGELOG.md").write_text(
+            "# Changelog\n\n## Unreleased\n\ncobalt authority rollout shipped.\n",
+            encoding="utf-8",
+        )
+        for index in range(4):
+            self.repository.joinpath(f"specs/cobalt-{index}.md").write_text(
+                f"# Cobalt {index}\n\ncobalt authority rollout detail {index}.\n",
+                encoding="utf-8",
+            )
+
+        governed = self.run_cli(
+            "retrieve", "cobalt authority rollout",
+            "--task-id", "TASK-LAYER-DEDUPE", "--limit", "20",
+            "--ephemeral", "--json",
+        )
+        self.assertEqual(0, governed.returncode, governed.stderr)
+        capsule = json.loads(governed.stdout)
+
+        placements: dict[str, list[str]] = {}
+        for layer in ("procedural", "semantic", "episodic"):
+            for item in capsule[layer]:
+                if "path" in item:
+                    placements.setdefault(item["path"], []).append(layer)
+        collisions = {
+            path: layers for path, layers in placements.items() if len(layers) > 1
+        }
+        self.assertEqual({}, collisions, capsule)
+        self.assertIn(
+            "CHANGELOG.md", [item["path"] for item in capsule["episodic"]], capsule
+        )
+
+        # The freed slot goes to the next ranked candidate rather than being
+        # lost, and the manifest keeps describing what was actually delivered.
+        manifest = json.loads(
+            (self.repository / capsule["manifest"]).read_text(encoding="utf-8")
+        )
+        selected = {item["path"] for item in manifest["selected"]}
+        delivered = {
+            item["path"]
+            for layer in ("procedural", "semantic", "episodic")
+            for item in capsule[layer]
+            if "path" in item
+        }
+        # The manifest describes every layer the capsule delivers, episodic
+        # included. Before the episodic layer was ranked here it was fetched
+        # around the manifest entirely, so the audit record was silent about a
+        # document the model was shown.
+        self.assertEqual(selected, delivered, manifest)
+        self.assertIn("CHANGELOG.md", selected, manifest)
+
+    def test_lightweight_capsule_also_keeps_layers_disjoint(self) -> None:
+        # The lightweight path queries each layer separately and has never had
+        # the collision; asserting it here keeps the two paths answerable to
+        # one contract rather than to whichever one was last looked at.
+        self.repository.joinpath("CHANGELOG.md").write_text(
+            "# Changelog\n\n## Unreleased\n\ncobalt authority rollout shipped.\n",
+            encoding="utf-8",
+        )
+        result = self.run_cli(
+            "--mode", "lightweight",
+            "retrieve", "cobalt authority rollout",
+            "--task-id", "TASK-LIGHTWEIGHT-LAYERS", "--limit", "20", "--json",
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        capsule = json.loads(result.stdout)
+        placements: dict[str, list[str]] = {}
+        for layer in ("procedural", "semantic", "episodic"):
+            for item in capsule.get(layer, []):
+                if "path" in item:
+                    placements.setdefault(item["path"], []).append(layer)
+        self.assertEqual(
+            {},
+            {path: layers for path, layers in placements.items() if len(layers) > 1},
+            capsule,
+        )
+
     def test_frozen_retrieval_corpus_meets_quality_and_privacy_gates(self) -> None:
         fixture = json.loads(
             (
@@ -274,12 +939,12 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
             for case in fixture["cases"]:
                 first, _ = retrieval._runtime_filter(
                     self.repository,
-                    retrieval._candidates(connection, case["query"]),
+                    retrieval._candidates(connection, case["query"])[0],
                     config,
                 )
                 second, _ = retrieval._runtime_filter(
                     self.repository,
-                    retrieval._candidates(connection, case["query"]),
+                    retrieval._candidates(connection, case["query"])[0],
                     config,
                 )
                 first_paths = [item["path"] for item in first[:5]]
@@ -944,7 +1609,13 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
             f"{self.expected_memory_id(finding['id'])}-reusable-finding.md"
         )
         metadata, _ = brain.parse_markdown_record(chunk)
-        self.assertEqual([source["path"]], metadata["sources"])
+        # The promoted record, and what that record itself cited. Carrying the
+        # second is what keeps the citation chain unbroken: without it the
+        # chunk names the record, the record names the document, and nothing
+        # traverses two hops.
+        self.assertEqual(
+            [source["path"], "specs/authority.md"], metadata["sources"]
+        )
         self.assertEqual("applied", applied["status"])
 
     def test_promotion_rechecks_exact_generic_source_revision(self) -> None:
@@ -1564,6 +2235,1404 @@ class AuthorityLifecycleTest(RuntimeHarness):
         )
 
 
+class ConsolidationPipelineTest(RuntimeHarness):
+    """The pipeline had no producers, so its emptiness was unreportable."""
+
+    def counters(self) -> dict:
+        result = self.run_cli("status", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        return json.loads(result.stdout)["consolidation"]
+
+    def test_status_reports_an_empty_pipeline_as_zero_not_as_silence(self) -> None:
+        # A Project Brain that exists and has produced nothing. Before this
+        # the same output meant that and "consolidation ran normally".
+        self.start("TASK-EMPTY-PIPELINE")
+        counters = self.counters()
+        self.assertEqual(0, counters["promotable"], counters)
+        self.assertEqual(0, counters["applied"], counters)
+        self.assertEqual(0, counters["chunks"], counters)
+        rendered = self.run_cli("status")
+        self.assertIn("Consolidation: 0 promotable candidate(s)", rendered.stdout)
+
+    def test_a_review_finding_reaches_the_pipeline_when_it_is_a_record(self) -> None:
+        # The wiring the whole item is about: a finding written into a task's
+        # progress is bookkeeping on a `task` record, and `task` can never be
+        # promoted. As its own `finding` record it becomes a candidate.
+        self.repository.joinpath("specs/authority.md").write_text(
+            "# Authority\n\ncobalt authority specification detail.\n",
+            encoding="utf-8",
+        )
+        created = self.run_cli(
+            "brain-create", "finding", "--external-id", "TASK-1-F1",
+            "--title", "Cobalt guard closes the request gap",
+            "--source", "specs/authority.md", "--json",
+        )
+        self.assertEqual(0, created.returncode, created.stderr)
+        record_id = json.loads(created.stdout)["id"]
+        self.assertEqual(0, self.counters()["promotable"])
+
+        verified = self.run_cli(
+            "brain-update", "--record-id", record_id, "--revision", "auto",
+            "--authority", "verified", "--reason", "Verified: guard covers it",
+            "--json",
+        )
+        self.assertEqual(0, verified.returncode, verified.stderr)
+        resolved = self.run_cli(
+            "brain-update", "--record-id", record_id, "--revision", "auto",
+            "--progress", "Guard the request gap before dispatch.",
+            "--transition", "resolved", "--reason", "Resolved", "--json",
+        )
+        self.assertEqual(0, resolved.returncode, resolved.stderr)
+
+        self.assertEqual(1, self.counters()["promotable"], self.counters())
+
+    def test_a_finding_without_content_is_reported_as_blocked_not_missing(self) -> None:
+        # Resolving without `--progress` produces a record that looks done and
+        # can never be promoted. Counting it as blocked is what makes that
+        # visible instead of leaving the pipeline mysteriously empty.
+        self.repository.joinpath("specs/authority.md").write_text(
+            "# Authority\n\ncobalt authority specification detail.\n",
+            encoding="utf-8",
+        )
+        created = self.run_cli(
+            "brain-create", "finding", "--external-id", "TASK-1-F2",
+            "--title", "Cobalt guard closes the request gap",
+            "--source", "specs/authority.md", "--json",
+        )
+        record_id = json.loads(created.stdout)["id"]
+        self.run_cli(
+            "brain-update", "--record-id", record_id, "--revision", "auto",
+            "--authority", "verified", "--reason", "Verified", "--json",
+        )
+        self.run_cli(
+            "brain-update", "--record-id", record_id, "--revision", "auto",
+            "--transition", "resolved", "--reason", "Resolved", "--json",
+        )
+        counters = self.counters()
+        self.assertEqual(0, counters["promotable"], counters)
+        self.assertEqual(1, counters["blocked"], counters)
+
+    def test_counters_report_null_rather_than_zero_without_a_brain(self) -> None:
+        # "No Project Brain" and "an empty Project Brain" are different facts;
+        # reporting 0 for both is the conflation this whole horizon is about.
+        result = self.run_cli("--mode", "lightweight", "status", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        counters = json.loads(result.stdout)["consolidation"]
+        self.assertIsNone(counters["promotable"], counters)
+        self.assertIsNone(counters["chunks"], counters)
+        rendered = self.run_cli("--mode", "lightweight", "status")
+        self.assertIn("unavailable promotable candidate(s)", rendered.stdout)
+
+
+class NearDuplicatePromotionTest(RuntimeHarness):
+    """Two different records saying one thing must not become two chunks."""
+
+    def resolved_finding(self, external_id: str, title: str, progress: str) -> dict:
+        record = brain.create_record(
+            self.repository, "finding", external_id, title, [],
+            ["specs/authority.md"], owner="alice",
+        )
+        brain.update_record(
+            self.repository, record["id"], expected_revision=record["revision"],
+            progress=None, next_steps=[], files=[], sources=[], actor="alice",
+            authority="verified", reason="Verified",
+        )
+        brain.update_record(
+            self.repository, record["id"], expected_revision=record["revision"] + 1,
+            progress=progress, next_steps=[], files=[], sources=[], actor="alice",
+            transition_to="resolved", reason="Resolved",
+        )
+        return record
+
+    def promote(self) -> dict:
+        return brain.auto_promote(self.repository, owner="alice", limit=5)
+
+    def setUp(self) -> None:
+        super().setUp()
+        config = self.repository / "project-brain/config/runtime.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(
+            json.dumps({"mode": "governed", "automatic_promotion": True}),
+            encoding="utf-8",
+        )
+
+    def test_a_second_record_saying_the_same_thing_is_blocked_by_name(self) -> None:
+        consequence = (
+            "Guard the request gap before dispatch so the cobalt authority "
+            "rule cannot be bypassed by a queued job."
+        )
+        self.resolved_finding("TASK-F1", "Cobalt guard closes the gap", consequence)
+        first = self.promote()
+        self.assertEqual(1, len(first["promoted"]), first)
+        memory_id = first["promoted"][0]["memory_id"]
+
+        self.resolved_finding("TASK-F2", "Cobalt guard closes the gap", consequence)
+        second = self.promote()
+        self.assertEqual([], second["promoted"], second)
+        self.assertEqual(1, len(second["blocked"]), second)
+        # The block names the chunk, so it reads as an instruction rather than
+        # as a refusal.
+        self.assertIn(memory_id, second["blocked"][0]["reason"], second)
+        self.assertIn("merge or supersede", second["blocked"][0]["reason"])
+
+    def test_duplicates_inside_one_flush_are_caught_too(self) -> None:
+        # The batch case is the realistic one: a single review produces several
+        # findings and one flush promotes up to five of them. A guard evaluated
+        # once before the loop would see none of the chunks it is creating.
+        consequence = (
+            "Guard the request gap before dispatch so the cobalt authority "
+            "rule cannot be bypassed by a queued job."
+        )
+        for index in range(3):
+            self.resolved_finding(
+                f"TASK-B{index}", "Cobalt guard closes the gap", consequence
+            )
+        result = self.promote()
+        self.assertEqual(1, len(result["promoted"]), result)
+        self.assertEqual(2, len(result["blocked"]), result)
+        for entry in result["blocked"]:
+            self.assertIn("near-duplicate", entry["reason"])
+
+    def test_a_genuinely_different_consequence_still_promotes(self) -> None:
+        # The other half of the contract: the guard must not become a cap on
+        # how much durable memory a project may hold.
+        self.resolved_finding(
+            "TASK-D1", "Cobalt guard closes the gap",
+            "Guard the request gap before dispatch so the authority rule holds.",
+        )
+        self.promote()
+        self.resolved_finding(
+            "TASK-D2", "Doctrine migration needs a backfill window",
+            "Run the invoice backfill in batches of a thousand with a resumable "
+            "cursor, because a single transaction locks the ledger table.",
+        )
+        result = self.promote()
+        self.assertEqual(1, len(result["promoted"]), result)
+        self.assertEqual([], result["blocked"], result)
+
+    def test_the_threshold_comes_from_configuration(self) -> None:
+        consequence = (
+            "Guard the request gap before dispatch so the cobalt authority "
+            "rule cannot be bypassed by a queued job."
+        )
+        self.resolved_finding("TASK-T1", "Cobalt guard closes the gap", consequence)
+        self.promote()
+        config = self.repository / "project-brain/config/runtime.json"
+        config.write_text(
+            json.dumps(
+                {
+                    "mode": "governed",
+                    "automatic_promotion": True,
+                    "bank_duplicate_ratio": 1.0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.resolved_finding("TASK-T2", "Cobalt guard closes the gap", consequence)
+        result = self.promote()
+        # A threshold of 1.0 demands identity, so a near duplicate gets through.
+        self.assertEqual(1, len(result["promoted"]), result)
+
+    def test_similarity_is_reproducible_without_a_local_index(self) -> None:
+        # The decision must not depend on `memory-bank/local/`, which is
+        # git-ignored and disposable: two machines on one commit have to
+        # promote the same set.
+        left = "Guard the request gap before dispatch so the rule holds."
+        self.assertEqual(
+            brain.text_similarity(left, left), 1.0
+        )
+        self.assertEqual(0.0, brain.text_similarity(left, ""))
+        self.assertLess(
+            brain.text_similarity(left, "Batch the invoice backfill by cursor."),
+            0.6,
+        )
+
+
+class EpisodicPillarTest(RuntimeHarness):
+    """The episodic layer gets a git-tracked source of its own."""
+
+    OUTCOME = "Zirconium gateway retry window widened to five minutes."
+    CHECK = "phpunit --filter Gateway"
+
+    def complete_task(self, task_id: str) -> dict:
+        task = self.start(task_id)
+        result = self.run_cli(
+            "complete", "--task-id", task_id,
+            "--revision", str(task["revision"]),
+            "--outcome", self.OUTCOME, "--verification", self.CHECK, "--json",
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        return json.loads(result.stdout)
+
+    def document_layers(self, prefix: str) -> dict:
+        connection = sqlite3.connect(
+            self.repository / "memory-bank/local/context.db"
+        )
+        try:
+            return dict(
+                connection.execute(
+                    "SELECT path, layer FROM documents WHERE path LIKE ?",
+                    (f"{prefix}%",),
+                ).fetchall()
+            )
+        finally:
+            connection.close()
+
+    def test_completing_a_task_writes_one_git_tracked_event(self) -> None:
+        # Completed work lived only in the disposable local database, so the
+        # one layer meant to hold "what happened here" could not survive a
+        # fresh clone.
+        payload = self.complete_task("TASK-EPISODE")
+        self.assertIsNotNone(payload["event_id"], payload)
+
+        events = sorted(
+            (self.repository / "project-brain/dynamic/events").glob("*.md")
+        )
+        self.assertEqual(1, len(events), events)
+        record, _ = brain.parse_markdown_record(events[0])
+        self.assertEqual("event", record["type"])
+        self.assertIn("Zirconium gateway retry window", record["goal"])
+        self.assertIn(self.CHECK, record["goal"])
+
+    def test_the_completion_event_lands_in_the_episodic_layer(self) -> None:
+        self.complete_task("TASK-EPISODE-LAYER")
+        self.assertEqual(0, self.run_cli("index", "--json").returncode)
+        layers = self.document_layers("project-brain/dynamic/events/")
+        self.assertEqual(1, len(layers), layers)
+        self.assertEqual(["episodic"], list(layers.values()), layers)
+
+    def test_the_event_fills_the_episodic_slot_ahead_of_the_changelog(self) -> None:
+        # The readiness criterion: on a query about what happened, the slot
+        # carries the record of what happened, not the repository changelog.
+        self.repository.joinpath("CHANGELOG.md").write_text(
+            "# Changelog\n\n## Unreleased\n\nUnrelated tooling change.\n",
+            encoding="utf-8",
+        )
+        self.complete_task("TASK-EPISODE-SLOT")
+        self.start("TASK-EPISODE-READER")
+        capsule = json.loads(
+            self.run_cli(
+                "retrieve", "zirconium gateway retry window",
+                "--task-id", "TASK-EPISODE-READER", "--ephemeral", "--json",
+            ).stdout
+        )
+        episodic = [item["path"] for item in capsule["episodic"] if "path" in item]
+        self.assertEqual(1, len(episodic), capsule)
+        self.assertTrue(
+            episodic[0].startswith("project-brain/dynamic/events/"), capsule
+        )
+        # It came through the governed path, so the manifest describes it.
+        manifest = json.loads(
+            (self.repository / capsule["manifest"]).read_text(encoding="utf-8")
+        )
+        self.assertIn(
+            episodic[0], [item["path"] for item in manifest["selected"]], manifest
+        )
+
+    def test_an_incident_stays_semantic(self) -> None:
+        # Only `event` is episodic. An open incident is active, urgent,
+        # promotable content: demoting it to the single episodic slot would
+        # take it out of the runtime filters, the budget and the manifest.
+        self.start("TASK-INCIDENT")
+        brain.create_record(
+            self.repository, "incident", "INC-1",
+            "Zirconium gateway outage", [], ["specs/authority.md"],
+            owner="alice",
+        )
+        self.assertEqual(0, self.run_cli("index", "--json").returncode)
+        layers = self.document_layers("project-brain/dynamic/incidents/")
+        self.assertEqual(["semantic"], list(layers.values()), layers)
+
+    def test_a_failed_event_write_never_reopens_a_completed_task(self) -> None:
+        # The episode is a record of something that already happened. If it
+        # cannot be written, the thing still happened: a completion must not
+        # be undone because its bookkeeping failed.
+        task = self.start("TASK-EPISODE-FAILS")
+        with mock.patch.object(
+            context_cli, "create_record", side_effect=brain.BrainError("no")
+        ):
+            code, stdout, _ = self.run_main(
+                "complete", "--task-id", "TASK-EPISODE-FAILS",
+                "--revision", str(task["revision"]),
+                "--outcome", self.OUTCOME, "--verification", self.CHECK, "--json",
+            )
+        self.assertEqual(0, code, stdout)
+        payload = json.loads(stdout)
+        self.assertEqual("completed", payload["status"])
+        self.assertIsNone(payload["event_id"], payload)
+        self.assertEqual(
+            [], list((self.repository / "project-brain/dynamic/events").glob("*.md"))
+        )
+
+
+class RetrievalReportTest(RuntimeHarness):
+    """Manifests were written and never read; this is the reader."""
+
+    def retrieve(self, task: str, query: str) -> dict:
+        result = self.run_cli(
+            "retrieve", query, "--task-id", task, "--ephemeral", "--json"
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        return json.loads(result.stdout)
+
+    def report(self, *extra: str) -> dict:
+        result = self.run_cli("retrieval-report", "--json", *extra)
+        self.assertEqual(0, result.returncode, result.stderr)
+        return json.loads(result.stdout)
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repository.joinpath("specs/authority.md").write_text(
+            "# Authority\n\ncobalt authority specification detail.\n",
+            encoding="utf-8",
+        )
+        self.start("TASK-REPORT")
+
+    def test_a_report_over_no_manifests_says_so(self) -> None:
+        rendered = self.run_cli("retrieval-report")
+        self.assertEqual(0, rendered.returncode, rendered.stderr)
+        self.assertIn("Lightweight mode writes none", rendered.stdout)
+
+    def test_the_report_aggregates_the_signals_the_gate_records(self) -> None:
+        self.retrieve("TASK-REPORT", "cobalt authority")
+        self.retrieve("TASK-REPORT", "cobalt authority")
+        report = self.report()
+
+        self.assertEqual(2, report["turns"], report)
+        self.assertEqual({"explicit": 2}, report["query_source"], report)
+        self.assertEqual(2, report["gate"]["decided"], report)
+        # The second turn repeats the first, so the gate records a skip even
+        # though shadow mode delivered it anyway.
+        self.assertEqual(0.5, report["gate"]["skip_rate"], report)
+        self.assertIn("repeat-retrieval", report["gate"]["skip_reasons"], report)
+        self.assertGreater(report["phase_seconds"]["retrieval"]["samples"], 0)
+
+    def test_both_top_scores_are_reported_because_they_diverge(self) -> None:
+        # `top_candidate` is the best candidate before any policy filter;
+        # `top_delivered` is the best the capsule carried. They differ exactly
+        # when the best match was withheld, which is the case a report exists
+        # to surface, so the report never picks one for the reader.
+        self.retrieve("TASK-REPORT", "cobalt authority")
+        report = self.report()
+        self.assertIn("top_candidate_score", report)
+        self.assertIn("top_delivered_score", report)
+        self.assertGreater(report["top_candidate_score"]["samples"], 0)
+
+    def test_a_version_one_manifest_is_counted_not_crashed_on(self) -> None:
+        # 95% of a real corpus predates the fields this report reads. Silently
+        # averaging over the subset that has them would misreport the rest.
+        self.retrieve("TASK-REPORT", "cobalt authority")
+        directory = self.repository / "memory-bank/local/retrieval-manifests"
+        legacy = {
+            "schema_version": 1,
+            "id": "00000000-0000-4000-8000-00000000000a",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "query": "legacy",
+            "task_id": "00000000-0000-4000-8000-00000000000b",
+            "task_revision": 1,
+            "filters": {
+                "privacy": ["public"], "owners": ["*"],
+                "authority": ["verified"], "freshness": True, "active_only": True,
+            },
+            "selected": [],
+            "excluded": [],
+            "token_estimates": {
+                "policy": 0, "handoff": 0, "durable": 0, "dynamic": 0,
+                "evidence": 0, "total": 0, "target": 8000, "hard": 12000,
+            },
+            "provider": "sqlite-fts5",
+            "escalation_reason": None,
+        }
+        (directory / f"{legacy['id']}.json").write_text(
+            json.dumps(legacy, indent=2), encoding="utf-8"
+        )
+
+        report = self.report()
+        self.assertEqual(2, report["turns"], report)
+        self.assertEqual({"1": 1, "2": 1}, report["schema_versions"], report)
+        # One of the two could answer the gate question; the report says so
+        # rather than dividing by two.
+        self.assertEqual(1, report["gate"]["decided"], report)
+        self.assertEqual(1, report["empty_selection"], report)
+
+    def test_the_report_never_carries_the_query_text(self) -> None:
+        # The manifest keeps the distilled query under privacy rules; an
+        # aggregate must not become a second copy of it.
+        self.retrieve("TASK-REPORT", "cobalt authority")
+        rendered = self.run_cli("retrieval-report")
+        payload = self.run_cli("retrieval-report", "--json")
+        for output in (rendered.stdout, payload.stdout):
+            self.assertNotIn("cobalt authority", output)
+
+
+class RefreshHealthTest(RuntimeHarness):
+    """The hook's honesty used to live exactly one turn."""
+
+    def health(self, *extra: str) -> dict:
+        result = self.run_cli("health", "--json", *extra)
+        self.assertEqual(0, result.returncode, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_health_over_no_records_says_so(self) -> None:
+        rendered = self.run_cli("health")
+        self.assertEqual(0, rendered.returncode, rendered.stderr)
+        self.assertIn("No refresh health records", rendered.stdout)
+
+    def test_each_refresh_appends_one_record(self) -> None:
+        self.assertEqual(0, self.run_cli("refresh").returncode)
+        self.assertEqual(0, self.run_cli("refresh").returncode)
+        health = self.health()
+        self.assertEqual(2, health["turns"], health)
+        self.assertGreater(health["phase_seconds"]["index"]["samples"], 0)
+        self.assertEqual(0.0, health["timeout_rate"], health)
+
+    def test_a_zeroed_omitted_counter_is_not_a_lossy_capsule(self) -> None:
+        # A lightweight capsule always carries the keys with zeros, so testing
+        # the dict for emptiness would report every turn as lossy.
+        path = self.repository / "memory-bank/local/refresh-health.ndjson"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"at": "x", "omitted": {"procedural": 0, "semantic": 0}})
+            + "\n"
+            + json.dumps({"at": "y", "omitted": {"procedural": 1, "semantic": 0}})
+            + "\n",
+            encoding="utf-8",
+        )
+        health = self.health()
+        self.assertEqual(0.5, health["lossy_capsule_rate"], health)
+
+    def test_the_window_bounds_what_is_aggregated(self) -> None:
+        path = self.repository / "memory-bank/local/refresh-health.ndjson"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "".join(
+                json.dumps({"at": str(index), "hook_status": 0}) + "\n"
+                for index in range(10)
+            ),
+            encoding="utf-8",
+        )
+        self.assertEqual(10, self.health()["turns"])
+        self.assertEqual(3, self.health("--window", "3")["turns"])
+
+    def test_a_health_record_carries_no_query_text(self) -> None:
+        self.start("TASK-HEALTH")
+        self.run_cli(
+            "refresh", "--query", "cobalt authority rollout",
+            "--task-id", "TASK-HEALTH", "--ephemeral",
+        )
+        path = self.repository / "memory-bank/local/refresh-health.ndjson"
+        self.assertNotIn("cobalt", path.read_text(encoding="utf-8"))
+
+
+class MemoryProbeTest(RuntimeHarness):
+    """Category contracts for retrieval, with negatives declared as data.
+
+    The frozen fixture beside this one expresses only `{query, expected[]}`, so
+    a negative had to be hardcoded in a test body and a restraint case could not
+    be written at all. Here every case names its own seed, its forbidden paths
+    and whether it expects a match, and the category decides which contract
+    applies.
+
+    On RESTRAINT the predicate is deliberately narrower than the roadmap
+    proposed. That item asked for "the capsule selected no seed document, or
+    marked its selection weak", which would declare a documented and
+    deliberate behaviour a defect: `docs/CONTEXT-AND-MEMORY.md` records that a
+    query sharing one term with the corpus surfaces the least-bad lexical
+    match rather than nothing, on the stated ground that a hidden answer costs
+    more than a spurious one. So restraint is measured where the claim is
+    unambiguous - a subject the corpus does not contain must produce
+    `no-match` - and the single-rare-term case asserts the weaker, checkable
+    thing instead: the selection is *marked* `distinctive`, which is what
+    H1-04 built the label for.
+    """
+
+    PROBE_DIR = "specs/probe"
+
+    def fixture(self) -> dict:
+        return json.loads(
+            (Path(__file__).parent / "fixtures/memory-probes.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+    def reset_corpus(self, filler: int) -> None:
+        # Both the seeded documents and the probe chunks are cleared: without
+        # this a later case retrieves an earlier case's corpus and the gate
+        # stops measuring the contract it names.
+        probe = self.repository / self.PROBE_DIR
+        if probe.is_dir():
+            for path in probe.glob("*.md"):
+                path.unlink()
+        probe.mkdir(parents=True, exist_ok=True)
+        chunks = self.repository / "memory-bank/chunks"
+        if chunks.is_dir():
+            for path in chunks.glob("MEM-2026010*-probe.md"):
+                path.unlink()
+            self.run_cli("reindex-bank")
+        # A term counts as distinctive at a document frequency of ten per cent
+        # or less, so a three-document corpus cannot produce one and the
+        # weak-match branch would be unreachable.
+        for index in range(filler):
+            (probe / f"filler-{index}.md").write_text(
+                f"# Filler {index}\n\nUnrelated boilerplate paragraph {index}.\n",
+                encoding="utf-8",
+            )
+
+    def seed_documents(self, seed: list) -> None:
+        for document in seed:
+            path = self.repository / document["path"]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                f"# Seed\n\n{document['text']}\n", encoding="utf-8"
+            )
+
+    def seed_update_pair(self, case: dict) -> tuple[str, str]:
+        """Write a chunk, retire it, and write its replacement.
+
+        UPDATE is the category the old fixture shape could not express at all:
+        it needs a fact that stopped being true and the fact that replaced it,
+        and the retired one has to leave retrieval without leaving the disk.
+        """
+        today = datetime.now(timezone.utc).date()
+        dates = {"yesterday": today - timedelta(days=1), "today": today}
+        chunks = self.repository / "memory-bank/chunks"
+        chunks.mkdir(parents=True, exist_ok=True)
+
+        def write(memory_id: str, spec: dict) -> Path:
+            metadata = {
+                "id": memory_id,
+                "title": spec["title"],
+                "type": "convention",
+                "status": "active",
+                "scope": ["application"],
+                "tags": ["probe"],
+                "created": today.isoformat(),
+                "last_verified": today.isoformat(),
+                "review_after": (today + timedelta(days=365)).isoformat(),
+                "sources": ["specs/authority.md"],
+                "supersedes": [],
+                "superseded_by": None,
+            }
+            path = chunks / f"{memory_id}-probe.md"
+            path.write_text(
+                f"---\n{json.dumps(metadata, indent=2)}\n---\n\n"
+                f"# {spec['title']}\n\n{spec['body']}\n",
+                encoding="utf-8",
+            )
+            return path
+
+        retired = write("MEM-20260101-aaaaaaaa", case["retire_chunk"])
+        replacement = write("MEM-20260102-bbbbbbbb", case["replacement_chunk"])
+        self.assertEqual(0, self.run_cli("reindex-bank").returncode)
+        result = self.run_cli(
+            "bank-retire", "--id", "MEM-20260101-aaaaaaaa",
+            "--valid-to", dates[case["retire_chunk"]["valid_to"]].isoformat(),
+            "--superseded-by", "MEM-20260102-bbbbbbbb",
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        return (
+            retired.relative_to(self.repository).as_posix(),
+            replacement.relative_to(self.repository).as_posix(),
+        )
+
+    def test_memory_probes_meet_category_contracts(self) -> None:
+        fixture = self.fixture()
+        self.start("TASK-PROBES")
+        for case in fixture["cases"]:
+            with self.subTest(case=case["id"], category=case["category"]):
+                self.reset_corpus(fixture["filler"])
+                self.seed_documents(case.get("seed") or [])
+                expected = list(case["expected_paths"])
+                forbidden = list(case["forbidden_paths"])
+                if "retire_chunk" in case:
+                    retired, replacement = self.seed_update_pair(case)
+                    expected = [
+                        replacement if path == "__replacement__" else path
+                        for path in expected
+                    ]
+                    forbidden = [
+                        retired if path == "__retired__" else path
+                        for path in forbidden
+                    ]
+                self.assertEqual(0, self.run_cli("index", "--json").returncode)
+
+                result = self.run_cli(
+                    "retrieve", case["query"], "--task-id", "TASK-PROBES",
+                    "--ephemeral", "--json",
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                capsule = json.loads(result.stdout)
+                delivered = {
+                    item["path"]
+                    for layer in ("procedural", "semantic", "episodic")
+                    for item in capsule[layer]
+                    if "path" in item
+                }
+
+                # Universal, every category: a forbidden path is never
+                # delivered. This is the assertion the old fixture had to
+                # hardcode in the test body.
+                for path in forbidden:
+                    self.assertNotIn(path, delivered, capsule)
+
+                if case["expect_no_match"]:
+                    # The subject is absent from the corpus, so every layer
+                    # this call answers for must say so.
+                    self.assertEqual(
+                        ["procedural", "semantic", "episodic"],
+                        capsule["no_match"],
+                        capsule,
+                    )
+                    self.assertEqual(set(), delivered, capsule)
+                    continue
+
+                weak = case.get("expect_weak_match")
+                if weak:
+                    strengths = {
+                        item["path"]: item.get("match")
+                        for layer in ("procedural", "semantic", "episodic")
+                        for item in capsule[layer]
+                        if "path" in item
+                    }
+                    for path in weak:
+                        self.assertEqual(
+                            "distinctive", strengths.get(path), capsule
+                        )
+                    continue
+
+                # recall / update / reasoning: every expected path is
+                # delivered. The capsule carries at most three semantic slots,
+                # so a case may not expect more than three.
+                self.assertLessEqual(len(expected), 3, case["id"])
+                for path in expected:
+                    self.assertIn(path, delivered, capsule)
+
+
+class SkillRoutingTest(RuntimeHarness):
+    """Does the request reach the skill that answers it?
+
+    The procedural layer is the largest slice of the index and had no eval
+    case at all, while the capsule gives it two slots - so a skill ranked
+    third never reaches the model no matter how right it is. This gate copies
+    the edition's real skill tree, asks it real questions, and asserts that an
+    acceptable skill lands in the top two at least as often as it does today.
+
+    `acceptable` is a set, not one slug. Several of these requests have two
+    defensibly correct answers, and asserting a single one would measure the
+    fixture author's taste rather than routing quality.
+
+    `min_top2` is the measured floor, not a target. Routing is poor today -
+    Symfony scores 10 of 16 - and the number exists so that it cannot quietly
+    get worse while someone edits a `description:`. Raise it only together
+    with a change that improves it.
+    """
+
+    def test_skill_routing_meets_its_measured_floor(self) -> None:
+        # The golden set names skills from this edition's own roster and its
+        # floor is a measured number, so unlike the memory probes it cannot be
+        # shared between editions or invented for one. An edition that ships
+        # no set is reported as uncovered rather than silently passing: the
+        # gap is real work its author owes, not an engine defect.
+        golden = Path(__file__).parent / "fixtures/skill-routing-golden.json"
+        if not golden.is_file():
+            self.skipTest(
+                "this edition ships no fixtures/skill-routing-golden.json; "
+                "author its cases and record the measured min_top2 floor"
+            )
+        fixture = json.loads(
+            golden.read_text(
+                encoding="utf-8"
+            )
+        )
+        source = EDITION / ".agents" / "skills"
+        if not source.is_dir():
+            self.skipTest("edition ships no canonical skill tree")
+        shutil.copytree(source, self.repository / ".agents" / "skills")
+        self.assertEqual(0, self.run_cli("index", "--json").returncode)
+
+        connection = context_cli.connect(
+            self.repository / "memory-bank/local/context.db"
+        )
+        hits = 0
+        misses = []
+        try:
+            for case in fixture["cases"]:
+                rows = context_cli.search_documents(
+                    connection, case["request"], 2, "procedural", relevant_only=True
+                )
+                slugs = {
+                    row["path"].split("/skills/", 1)[1].split("/")[0]
+                    for row in rows
+                    if "/skills/" in row["path"]
+                }
+                if slugs & set(case["acceptable"]):
+                    hits += 1
+                else:
+                    misses.append((case["request"], sorted(slugs)))
+        finally:
+            connection.close()
+
+        self.assertGreaterEqual(
+            hits,
+            fixture["min_top2"],
+            "skill routing regressed below its recorded floor "
+            f"({hits}/{len(fixture['cases'])} < {fixture['min_top2']}); "
+            f"misses: {misses}",
+        )
+
+
+class BankFixture(RuntimeHarness):
+    """A governed repository with one durable chunk citing one real source."""
+
+    def write_chunk(
+        self, memory_id: str, slug: str, body: str, **overrides: object
+    ) -> Path:
+        today = datetime.now(timezone.utc).date()
+        metadata = {
+            "id": memory_id,
+            "title": slug.replace("-", " ").title(),
+            "type": "convention",
+            "status": "active",
+            "scope": ["application"],
+            "tags": ["context"],
+            "created": today.isoformat(),
+            "last_verified": today.isoformat(),
+            "review_after": (today + timedelta(days=365)).isoformat(),
+            "sources": ["specs/authority.md"],
+            "supersedes": [],
+            "superseded_by": None,
+        }
+        metadata.update(overrides)
+        path = self.repository / "memory-bank/chunks" / f"{memory_id}-{slug}.md"
+        path.write_text(
+            f"---\n{json.dumps(metadata, indent=2)}\n---\n\n# {metadata['title']}\n\n{body}\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repository.joinpath("specs/authority.md").write_text(
+            "# Authority\n\ncobalt authority specification detail.\n",
+            encoding="utf-8",
+        )
+        self.chunk = self.write_chunk(
+            "MEM-20260101-aaaaaaaa", "old-rule", "The cerulean rollout is current."
+        )
+        self.assertEqual(0, self.run_cli("reindex-bank").returncode)
+
+    def bank_errors(self) -> list:
+        return brain.validate_bank(self.repository / "memory-bank")
+
+
+class BankRetireTest(BankFixture):
+    """Closing a chunk's period as one transaction rather than by hand."""
+
+    def test_retire_without_a_successor_archives_and_dates_the_chunk(self) -> None:
+        # `superseded` demands a successor, so knowledge that simply ceased is
+        # archived. The date says when it stopped being true; the status says
+        # that nothing took its place.
+        yesterday = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
+        result = self.run_cli(
+            "bank-retire", "--id", "MEM-20260101-aaaaaaaa",
+            "--valid-to", yesterday, "--json",
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual("archived", payload["status"])
+        self.assertEqual(yesterday, payload["valid_to"])
+
+        metadata = json.loads(
+            self.chunk.read_text(encoding="utf-8")[4:].split("\n---\n", 1)[0]
+        )
+        self.assertEqual("archived", metadata["status"])
+        self.assertEqual(yesterday, metadata["valid_to"])
+        self.assertIsNone(metadata["superseded_by"])
+        self.assertEqual([], self.bank_errors())
+
+    def test_retire_leaves_the_body_and_the_untouched_fields_alone(self) -> None:
+        before = self.chunk.read_text(encoding="utf-8")
+        before_metadata = json.loads(before[4:].split("\n---\n", 1)[0])
+        before_body = before.split("\n---\n", 1)[1]
+
+        self.run_cli(
+            "bank-retire", "--id", "MEM-20260101-aaaaaaaa",
+            "--valid-to", (datetime.now(timezone.utc).date()).isoformat(),
+        )
+        after = self.chunk.read_text(encoding="utf-8")
+        after_metadata = json.loads(after[4:].split("\n---\n", 1)[0])
+        self.assertEqual(before_body, after.split("\n---\n", 1)[1])
+        # Key order survives, so the file stays recognisable as the one a
+        # human edited rather than being re-serialized wholesale.
+        self.assertEqual(
+            [key for key in before_metadata if key not in ("valid_to",)],
+            [key for key in after_metadata if key not in ("valid_to",)],
+        )
+        for key in ("created", "last_verified", "review_after", "sources", "title"):
+            self.assertEqual(before_metadata[key], after_metadata[key], key)
+
+    def test_retire_with_a_successor_writes_both_sides_of_the_link(self) -> None:
+        successor = self.write_chunk(
+            "MEM-20260102-bbbbbbbb", "new-rule", "The cerulean rollout changed."
+        )
+        self.assertEqual(0, self.run_cli("reindex-bank").returncode)
+        today = datetime.now(timezone.utc).date().isoformat()
+
+        result = self.run_cli(
+            "bank-retire", "--id", "MEM-20260101-aaaaaaaa", "--valid-to", today,
+            "--superseded-by", "MEM-20260102-bbbbbbbb", "--json",
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+
+        retired = json.loads(
+            self.chunk.read_text(encoding="utf-8")[4:].split("\n---\n", 1)[0]
+        )
+        replacement = json.loads(
+            successor.read_text(encoding="utf-8")[4:].split("\n---\n", 1)[0]
+        )
+        self.assertEqual("superseded", retired["status"])
+        self.assertEqual("MEM-20260102-bbbbbbbb", retired["superseded_by"])
+        self.assertIn("MEM-20260101-aaaaaaaa", replacement["supersedes"])
+        # Both sides written, so the bank is never valid-on-one-side-only.
+        self.assertEqual([], self.bank_errors())
+
+    def test_an_interrupted_retire_leaves_the_bank_exactly_as_it_was(self) -> None:
+        # The defect this replaces: retiring by hand means editing two chunks
+        # and the index, and between any two of those edits the bank is
+        # invalid. Here the second write fails and nothing survives it.
+        successor = self.write_chunk(
+            "MEM-20260102-bbbbbbbb", "new-rule", "The cerulean rollout changed."
+        )
+        self.assertEqual(0, self.run_cli("reindex-bank").returncode)
+        before_chunk = self.chunk.read_text(encoding="utf-8")
+        before_successor = successor.read_text(encoding="utf-8")
+        before_index = (self.repository / "memory-bank/INDEX.md").read_text(
+            encoding="utf-8"
+        )
+
+        real_write = brain.atomic_write
+        calls = {"n": 0}
+
+        def failing_write(path: Path, content: str) -> None:
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise OSError("interrupted between the two sides of the link")
+            real_write(path, content)
+
+        with mock.patch.object(brain, "atomic_write", failing_write):
+            with self.assertRaises(OSError):
+                brain.retire_chunk(
+                    self.repository,
+                    "MEM-20260101-aaaaaaaa",
+                    valid_to=datetime.now(timezone.utc).date().isoformat(),
+                    superseded_by="MEM-20260102-bbbbbbbb",
+                )
+
+        self.assertEqual(before_chunk, self.chunk.read_text(encoding="utf-8"))
+        self.assertEqual(before_successor, successor.read_text(encoding="utf-8"))
+        self.assertEqual(
+            before_index,
+            (self.repository / "memory-bank/INDEX.md").read_text(encoding="utf-8"),
+        )
+        self.assertEqual([], self.bank_errors())
+
+    def test_a_missing_successor_is_refused_before_anything_is_written(self) -> None:
+        before = self.chunk.read_text(encoding="utf-8")
+        result = self.run_cli(
+            "bank-retire", "--id", "MEM-20260101-aaaaaaaa",
+            "--valid-to", datetime.now(timezone.utc).date().isoformat(),
+            "--superseded-by", "MEM-20260103-cccccccc",
+        )
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("MEM-20260103-cccccccc", result.stderr)
+        self.assertEqual(before, self.chunk.read_text(encoding="utf-8"))
+        self.assertEqual([], self.bank_errors())
+
+    def test_a_retired_chunk_keeps_its_index_row_and_leaves_retrieval(self) -> None:
+        # INDEX.md must keep the row — a chunk on disk without one is a
+        # validation error — so "gone from the index" means gone from
+        # retrieval, which is a different index and a separate step.
+        yesterday = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
+        self.run_cli(
+            "bank-retire", "--id", "MEM-20260101-aaaaaaaa", "--valid-to", yesterday
+        )
+        index_text = (self.repository / "memory-bank/INDEX.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("MEM-20260101-aaaaaaaa", index_text)
+        self.assertIn("archived", index_text)
+        self.assertEqual([], self.bank_errors())
+
+        indexed = self.run_cli("index", "--json")
+        self.assertEqual(0, indexed.returncode, indexed.stderr)
+        excluded = {
+            item["path"]: item["reason"]
+            for item in json.loads(indexed.stdout)["excluded"]
+        }
+        self.assertEqual(
+            "archived",
+            excluded.get("memory-bank/chunks/MEM-20260101-aaaaaaaa-old-rule.md"),
+            excluded,
+        )
+        self.assertTrue(self.chunk.is_file())
+
+    def test_a_bad_date_is_refused_without_touching_the_bank(self) -> None:
+        before = self.chunk.read_text(encoding="utf-8")
+        result = self.run_cli(
+            "bank-retire", "--id", "MEM-20260101-aaaaaaaa", "--valid-to", "yesterday"
+        )
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("ISO date", result.stderr)
+        self.assertEqual(before, self.chunk.read_text(encoding="utf-8"))
+
+
+class DocumentLinkTest(BankFixture):
+    """The reverse index, written as the measurement that justified it.
+
+    Two chunks are seeded whose only connection is that both cite the same
+    specification, and neither repeats that specification's vocabulary. Asked
+    for in the source's own words, retrieval returns the source and neither
+    chunk — 0 of 2. That is the measured failure H4-02 recorded, and these
+    tests assert both halves of it: that it is real (so the fixture cannot rot
+    into one that passes for the wrong reason) and that the link route closes
+    it without anyone authoring an edge.
+    """
+
+    SOURCE = "specs/rounding.md"
+    # Distinctive vocabulary, present in the source and in neither chunk.
+    SOURCE_WORDS = "half-to-even banker tie breaking"
+    # Vocabulary the two chunks share with each other and not with the source.
+    SHARED_WORDS = "stored invoice total"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repository.joinpath(self.SOURCE).write_text(
+            "# Rounding\n\nAmounts use half-to-even tie breaking, sometimes "
+            "called banker rounding, which suppresses the upward bias of "
+            "half-up tie breaking.\n",
+            encoding="utf-8",
+        )
+        self.first = self.write_chunk(
+            "MEM-20260101-bbbbbbbb",
+            "minor-units",
+            "Every invoice total is persisted as an integer count of minor "
+            "units, so floating point never touches a stored invoice total.",
+            sources=[self.SOURCE],
+        )
+        self.second = self.write_chunk(
+            "MEM-20260101-cccccccc",
+            "refund-reconciliation",
+            "A refund is validated against the stored invoice total, so a "
+            "refund can never exceed the stored invoice total.",
+            sources=[f"{self.SOURCE}#L1-L3"],
+        )
+        self.assertEqual(0, self.run_cli("index").returncode)
+
+    def chunk_paths(self) -> set:
+        return {
+            path.relative_to(self.repository).as_posix()
+            for path in (self.first, self.second)
+        }
+
+    def search_paths(self, query: str) -> set:
+        result = self.run_cli("search", query, "--limit", "40", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        return {item["path"] for item in json.loads(result.stdout)["documents"]}
+
+    def link_paths(self, path: str, *extra: str) -> set:
+        result = self.run_cli("links", "--path", path, *extra, "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        return {item["path"] for item in json.loads(result.stdout)["documents"]}
+
+    def test_the_sources_words_do_not_reach_the_chunks(self) -> None:
+        # The failure this index exists to repair. If this ever starts passing
+        # the fixture has lost its point and the rest of the class proves
+        # nothing.
+        found = self.search_paths(self.SOURCE_WORDS)
+        self.assertIn(self.SOURCE, found)
+        self.assertEqual(set(), self.chunk_paths() & found)
+
+    def test_the_chunks_are_retrievable_by_their_own_words(self) -> None:
+        # Control: 0 of 2 above is a missing edge, not a missing index entry.
+        self.assertEqual(
+            self.chunk_paths(), self.chunk_paths() & self.search_paths(self.SHARED_WORDS)
+        )
+
+    def test_the_source_path_reaches_both_chunks(self) -> None:
+        self.assertEqual(self.chunk_paths(), self.link_paths(self.SOURCE))
+
+    def test_a_line_range_links_to_the_document(self) -> None:
+        # The second chunk cites `#L1-L3`; `fingerprint()` anchors the same
+        # way, so a link is to the document rather than to a range inside it.
+        self.assertIn(
+            self.second.relative_to(self.repository).as_posix(),
+            self.link_paths(f"{self.SOURCE}#L9-L12"),
+        )
+
+    def test_a_prefix_query_matches_a_directory(self) -> None:
+        # A superset assertion: the inherited fixture chunk cites
+        # specs/authority.md, and it belongs under this prefix too.
+        self.assertTrue(self.chunk_paths() <= self.link_paths("specs", "--prefix"))
+
+    def test_a_prefix_query_does_not_match_a_sibling_by_string(self) -> None:
+        # "spec" must not reach "specs/..." — a bare LIKE would.
+        self.assertEqual(set(), self.link_paths("spec", "--prefix"))
+
+    def test_an_uncited_path_links_to_nothing(self) -> None:
+        self.assertEqual(set(), self.link_paths("specs/authority.md") & self.chunk_paths())
+
+    def test_links_withholds_a_document_that_no_longer_matches_the_index(self) -> None:
+        # The runtime filter has to run, not just the join. Removing the chunks
+        # without reindexing leaves their rows in place, which is exactly the
+        # `stale` case.
+        self.first.unlink()
+        self.second.unlink()
+        result = self.run_cli("links", "--path", self.SOURCE, "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual([], report["documents"])
+        self.assertEqual(
+            self.chunk_paths(), {item["path"] for item in report["excluded"]}
+        )
+
+    def test_links_withholds_a_record_the_config_no_longer_allows(self) -> None:
+        # The hazard `search_documents` carries a comment about: the index is a
+        # cache, so a `team` record indexed before the policy narrowed is still
+        # sitting in it. A links command modelled on `search` — which does not
+        # join document_metadata — would republish it.
+        self.assertEqual(
+            0,
+            self.run_cli(
+                "start", "--task-id", "TASK-LINK", "--goal",
+                "Apply the rounding policy.", "--source", self.SOURCE,
+            ).returncode,
+        )
+        self.assertEqual(0, self.run_cli("index").returncode)
+        record = {
+            item["path"]
+            for item in json.loads(
+                self.run_cli("links", "--path", self.SOURCE, "--json").stdout
+            )["documents"]
+        } - self.chunk_paths()
+        self.assertTrue(record, "the governed record should link before the policy narrows")
+
+        config = self.repository / "project-brain/config/runtime.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(
+            json.dumps({"allowed_privacy": ["public"]}), encoding="utf-8"
+        )
+        report = json.loads(
+            self.run_cli("links", "--path", self.SOURCE, "--json").stdout
+        )
+        self.assertEqual(set(), {item["path"] for item in report["documents"]} & record)
+        # A subset assertion: the task's handoff carries the same sources and
+        # is withheld for the same reason.
+        self.assertTrue(
+            record
+            <= {
+                item["path"]
+                for item in report["excluded"]
+                if item["reason"] == "privacy"
+            }
+        )
+
+    def test_a_record_source_is_reachable_by_path_in_its_own_body(self) -> None:
+        # The cheapest half of the same repair: the index reads bodies, so a
+        # record created with `--source` was previously unreachable by the one
+        # string a reader is most likely to search for.
+        self.assertEqual(
+            0,
+            self.run_cli(
+                "start", "--task-id", "TASK-BODY", "--goal",
+                "Apply the rounding policy.", "--source", self.SOURCE,
+            ).returncode,
+        )
+        self.assertEqual(0, self.run_cli("index").returncode)
+        self.assertTrue(
+            any(
+                path.startswith("project-brain/")
+                for path in self.search_paths(self.SOURCE)
+            ),
+            "a record citing the path should be findable by that path",
+        )
+
+    def test_a_dropped_chunk_drops_its_links(self) -> None:
+        self.second.unlink()
+        self.assertEqual(0, self.run_cli("index").returncode)
+        self.assertEqual(
+            {self.first.relative_to(self.repository).as_posix()},
+            self.link_paths(self.SOURCE),
+        )
+
+    def test_an_index_built_before_the_table_is_rebuilt_not_left_partial(self) -> None:
+        # `discover_documents` returns only *changed* documents, so a table
+        # created beside a warm index would be populated for whatever happens
+        # to change next and would silently claim to be complete.
+        database = self.repository / "memory-bank/local/context.db"
+        connection = sqlite3.connect(database)
+        with connection:
+            connection.execute("DROP TABLE document_links")
+        connection.close()
+        self.assertEqual(0, self.run_cli("index").returncode)
+        self.assertEqual(self.chunk_paths(), self.link_paths(self.SOURCE))
+
+
+class PathLinkedRetrievalTest(DocumentLinkTest):
+    """`retrieve --path`: the link index used during retrieval, not beside it.
+
+    Inherits the 0-of-2 fixture, so these tests speak about the same two
+    chunks the link tests do — and the same query that cannot reach them.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.assertEqual(0, self.run_cli("start", "--task-id", "TASK-PATH",
+                                         "--goal", "Apply the rounding policy.").returncode)
+        self.assertEqual(0, self.run_cli("index").returncode)
+
+    def capsule(self, *extra: str) -> dict:
+        result = self.run_cli(
+            "retrieve", self.SOURCE_WORDS, "--task-id", "TASK-PATH", "--json", *extra
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        return json.loads(result.stdout)
+
+    def manifest(self) -> dict:
+        manifests = sorted(
+            (self.repository / "project-brain/control/retrieval-manifests").glob("*.json"),
+            key=lambda path: path.stat().st_mtime_ns,
+        )
+        self.assertTrue(manifests, "a governed retrieval writes a manifest")
+        return json.loads(manifests[-1].read_text(encoding="utf-8"))
+
+    def delivered(self, capsule: dict) -> set:
+        return {
+            item["path"]
+            for layer in ("procedural", "semantic", "episodic")
+            for item in capsule.get(layer) or []
+        }
+
+    def test_without_the_flag_the_chunks_stay_unreachable(self) -> None:
+        # The baseline the flag is measured against.
+        self.assertEqual(set(), self.chunk_paths() & self.delivered(self.capsule()))
+
+    def test_the_flag_delivers_what_the_query_could_not_reach(self) -> None:
+        self.assertEqual(
+            self.chunk_paths(),
+            self.chunk_paths() & self.delivered(self.capsule("--path", self.SOURCE)),
+        )
+
+    def test_a_path_linked_item_is_marked_as_such_in_the_manifest(self) -> None:
+        self.capsule("--path", self.SOURCE)
+        selected = {
+            item["path"]: item for item in self.manifest()["selected"]
+        }
+        for path in self.chunk_paths():
+            self.assertEqual("path-link", selected[path].get("selection"), path)
+            # `match` is a lexical reading and nothing lexical selected these.
+            self.assertNotIn("match", selected[path])
+            self.assertIsNone(selected[path].get("rank"))
+
+    def test_the_manifest_still_validates(self) -> None:
+        self.capsule("--path", self.SOURCE)
+        # Raises on a schema violation; `selection` is `additionalProperties:
+        # false` territory, so an unregistered key would fail here.
+        brain.validate_schema_file(
+            self.repository, "retrieval-manifest", self.manifest()
+        )
+
+    def test_a_path_link_does_not_make_no_match_lie(self) -> None:
+        # `no_match` is a claim about the QUERY. Computing it after injection
+        # would silently flip it, and both the capsule line and the gate read
+        # it as "your words found nothing in this layer".
+        without = self.capsule()
+        with_path = self.capsule("--path", self.SOURCE)
+        self.assertEqual(
+            without["gate"]["signals"]["no_match"],
+            with_path["gate"]["signals"]["no_match"],
+        )
+        self.assertEqual(without["no_match"], with_path["no_match"])
+
+    def test_a_path_linked_snippet_is_prose_not_frontmatter(self) -> None:
+        # A chunk opens with a JSON metadata block long enough to fill the
+        # whole snippet allowance; `substr(content, 1, N)` would ship that.
+        capsule = self.capsule("--path", self.SOURCE)
+        for item in capsule["semantic"]:
+            if item["path"] in self.chunk_paths():
+                self.assertFalse(
+                    item["snippet"].lstrip().startswith(("---", "{")), item["snippet"][:80]
+                )
+                self.assertNotIn('"review_after"', item["snippet"])
+
+    def test_an_uncited_path_changes_nothing(self) -> None:
+        self.assertEqual(
+            self.delivered(self.capsule()),
+            self.delivered(self.capsule("--path", "app/Nothing.php")),
+        )
+
+
+class ChunkSourceDigestTest(BankFixture):
+    """A durable chunk that can notice its own citation moved on."""
+
+    def digests_of(self, path: Path) -> list:
+        metadata = json.loads(
+            path.read_text(encoding="utf-8")[4:].split("\n---\n", 1)[0]
+        )
+        return metadata.get("source_digests") or []
+
+    def test_reverify_records_a_digest_for_every_local_citation(self) -> None:
+        result = self.run_cli(
+            "bank-reverify", "--id", "MEM-20260101-aaaaaaaa", "--json"
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        digests = self.digests_of(self.chunk)
+        self.assertEqual(["specs/authority.md"], [d["path"] for d in digests])
+        self.assertRegex(digests[0]["sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual([], self.bank_errors())
+
+    def test_a_url_source_is_cited_but_never_digested(self) -> None:
+        # The runtime has no network, so the only honest thing it can say
+        # about a remote citation is nothing.
+        self.write_chunk(
+            "MEM-20260101-aaaaaaaa", "old-rule", "The cerulean rollout is current.",
+            sources=["specs/authority.md", "https://example.test/spec"],
+        )
+        self.assertEqual(
+            0, self.run_cli("bank-reverify", "--id", "MEM-20260101-aaaaaaaa").returncode
+        )
+        self.assertEqual(
+            ["specs/authority.md"], [d["path"] for d in self.digests_of(self.chunk)]
+        )
+        self.assertEqual([], self.bank_errors())
+
+    def test_a_chunk_whose_source_changed_leaves_retrieval_with_that_reason(
+        self,
+    ) -> None:
+        self.run_cli("bank-reverify", "--id", "MEM-20260101-aaaaaaaa")
+        indexed = self.run_cli("index", "--json")
+        self.assertEqual(0, indexed.returncode, indexed.stderr)
+        self.start("TASK-DIGEST")
+        found = self.run_cli(
+            "retrieve", "cerulean rollout", "--task-id", "TASK-DIGEST",
+            "--ephemeral", "--json",
+        )
+        chunk_path = "memory-bank/chunks/MEM-20260101-aaaaaaaa-old-rule.md"
+        self.assertIn(
+            chunk_path,
+            [item["path"] for item in json.loads(found.stdout)["selected"]],
+            found.stdout,
+        )
+
+        self.repository.joinpath("specs/authority.md").write_text(
+            "# Authority\n\nThe cobalt authority rule was replaced.\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(0, self.run_cli("index", "--json").returncode)
+        after = self.run_cli(
+            "retrieve", "cerulean rollout", "--task-id", "TASK-DIGEST",
+            "--ephemeral", "--json",
+        )
+        capsule = json.loads(after.stdout)
+        manifest = json.loads(
+            (self.repository / capsule["manifest"]).read_text(encoding="utf-8")
+        )
+        self.assertNotIn(
+            chunk_path, [item["path"] for item in manifest["selected"]], manifest
+        )
+        # Not `stale`: a Brain record is refreshed by a revisioned mutation, a
+        # chunk by re-reading the source. The reason names which remedy applies.
+        self.assertEqual(
+            "source-changed",
+            {item["path"]: item["reason"] for item in manifest["excluded"]}.get(
+                chunk_path
+            ),
+            manifest["excluded"],
+        )
+
+    def test_re_verifying_returns_the_chunk_to_retrieval(self) -> None:
+        # Without this the digests would be a one-way ratchet: the first time a
+        # cited file changed, the chunk would leave retrieval and stay out.
+        self.run_cli("bank-reverify", "--id", "MEM-20260101-aaaaaaaa")
+        self.repository.joinpath("specs/authority.md").write_text(
+            "# Authority\n\nThe cobalt authority rule was replaced.\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(0, self.run_cli("index", "--json").returncode)
+        self.start("TASK-REVERIFY")
+        chunk_path = "memory-bank/chunks/MEM-20260101-aaaaaaaa-old-rule.md"
+
+        audit = json.loads(self.run_cli("bank-audit", "--json").stdout)
+        self.assertEqual(
+            [chunk_path], [item["chunk"] for item in audit["source_changed"]], audit
+        )
+
+        self.assertEqual(
+            0, self.run_cli("bank-reverify", "--id", "MEM-20260101-aaaaaaaa").returncode
+        )
+        self.assertEqual(
+            [], json.loads(self.run_cli("bank-audit", "--json").stdout)["source_changed"]
+        )
+        self.assertEqual(0, self.run_cli("index", "--json").returncode)
+        capsule = json.loads(
+            self.run_cli(
+                "retrieve", "cerulean rollout", "--task-id", "TASK-REVERIFY",
+                "--ephemeral", "--json",
+            ).stdout
+        )
+        self.assertIn(
+            chunk_path, [item["path"] for item in capsule["selected"]], capsule
+        )
+
+    def test_a_retired_chunk_is_not_audited_for_freshness(self) -> None:
+        # A chunk that already left retrieval has nothing to attest to, and
+        # reporting its dead citations would bury the live ones.
+        self.run_cli("bank-reverify", "--id", "MEM-20260101-aaaaaaaa")
+        self.run_cli(
+            "bank-retire", "--id", "MEM-20260101-aaaaaaaa",
+            "--valid-to", datetime.now(timezone.utc).date().isoformat(),
+        )
+        self.repository.joinpath("specs/authority.md").write_text(
+            "# Authority\n\nThe cobalt authority rule was replaced.\n",
+            encoding="utf-8",
+        )
+        audit = json.loads(self.run_cli("bank-audit", "--json").stdout)
+        self.assertEqual([], audit["source_changed"], audit)
+        # And it cannot be re-attested either: there is nothing left to attest
+        # to, and re-verifying would quietly resurrect it.
+        refused = self.run_cli("bank-reverify", "--id", "MEM-20260101-aaaaaaaa")
+        self.assertNotEqual(0, refused.returncode)
+        self.assertIn("Only an active chunk", refused.stderr)
+
+    def test_audit_reports_a_chunk_overdue_for_review(self) -> None:
+        yesterday = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
+        self.write_chunk(
+            "MEM-20260101-aaaaaaaa", "old-rule", "The cerulean rollout is current.",
+            review_after=yesterday,
+        )
+        audit = json.loads(self.run_cli("bank-audit", "--json").stdout)
+        self.assertEqual(
+            [yesterday], [item["review_after"] for item in audit["overdue_review"]]
+        )
+
+    def test_a_chunk_without_digests_stays_retrievable(self) -> None:
+        # Optional means optional: every chunk written before this existed
+        # must keep working exactly as it did.
+        self.assertEqual([], self.digests_of(self.chunk))
+        self.assertEqual(0, self.run_cli("index", "--json").returncode)
+        self.start("TASK-UNDIGESTED")
+        capsule = json.loads(
+            self.run_cli(
+                "retrieve", "cerulean rollout", "--task-id", "TASK-UNDIGESTED",
+                "--ephemeral", "--json",
+            ).stdout
+        )
+        self.assertIn(
+            "memory-bank/chunks/MEM-20260101-aaaaaaaa-old-rule.md",
+            [item["path"] for item in capsule["selected"]],
+            capsule,
+        )
+
+
 class AutomaticWorkingMemoryTest(RuntimeHarness):
     """Cover the automated read and write paths the memory hooks depend on."""
 
@@ -1923,7 +3992,7 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
             ("semantic", "codebase", "docs/*.md"),
         )
         with mock.patch.object(context_cli, "SOURCE_PATTERNS", overlapping):
-            documents, _, state = context_cli.discover_documents(self.repository)
+            documents, _, state, _ = context_cli.discover_documents(self.repository)
 
         paths = [row[0] for row in documents]
         self.assertEqual(len(paths), len(set(paths)))
@@ -1973,6 +4042,30 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
 
         selected, _ = self.selected_paths("cobalt guard structure", "TASK-MAP")
         self.assertIn("codebase/STRUCTURE.md", selected)
+
+    def test_a_codebase_map_split_across_modules_is_indexed(self) -> None:
+        # `codebase/*.md` matched one level, so a map filed into per-module
+        # directories — the shape a map big enough to be worth writing takes —
+        # was indexed at the top and nowhere else.
+        self.start("TASK-MODULES")
+        self.commit_main()
+        commit = self.head()
+        self.write_codebase_map(commit)
+        module = self.repository / "codebase/modules"
+        module.mkdir(parents=True, exist_ok=True)
+        module.joinpath("billing.md").write_text(
+            "---\n"
+            "description: Where invoice rounding lives.\n"
+            f"mapped_commit: {commit}\n"
+            "mapped_scope: src\n"
+            "---\n\n"
+            "# Billing\n\n- `src/Cobalt.php` — the cobalt rounding guard.\n",
+            encoding="utf-8",
+        )
+        self.run_cli("refresh")
+
+        selected, _ = self.selected_paths("cobalt rounding guard", "TASK-MODULES")
+        self.assertIn("codebase/modules/billing.md", selected)
 
     def test_a_codebase_map_left_behind_by_the_code_is_excluded(self) -> None:
         self.start("TASK-DRIFT")
@@ -2666,6 +4759,202 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         )
         # The bank itself must show which knowledge no human approved.
         self.assertIn("auto-promoted", chunk.read_text(encoding="utf-8"))
+
+    def test_a_promoted_chunk_declares_what_it_was_promoted_from(self) -> None:
+        # Every promotion wrote `type: decision` whatever it promoted, so a
+        # resolved bug and a closed incident both entered the bank claiming to
+        # be decisions. INDEX.md, bank-audit and every reader keyed on type
+        # were reading a value nothing had chosen.
+        self.enable_automatic_promotion()
+        # Distinct subjects, not distinct identifiers: the near-duplicate guard
+        # refuses a promotion whose text merely repeats an existing chunk.
+        for external_id, record_type, ladder, expected, subject, consequence in (
+            ("BUG-1", "bug", ("triaged", "fixing", "verifying", "resolved"), "constraint",
+             "Pagination offsets skipped the final row",
+             "Every listing endpoint must use keyset pagination."),
+            ("INC-1", "incident", ("contained", "resolved", "closed"), "operations",
+             "Queue workers stalled behind a poisoned message",
+             "Dead-letter routing is mandatory for every consumer."),
+            ("FND-1", "finding", ("resolved",), "domain",
+             "Invoice currency was inferred from the browser locale",
+             "Currency belongs to the customer account, never the request."),
+            ("DEC-9", "decision", ("accepted",), "decision",
+             "Read models are rebuilt nightly rather than on write",
+             "Nightly rebuild trades staleness for predictable write latency."),
+        ):
+            with self.subTest(record_type=record_type):
+                record = json.loads(
+                    self.run_cli(
+                        "brain-create", record_type, "--external-id", external_id,
+                        "--title", subject,
+                        "--source", "specs/authority.md",
+                        "--authority", "verified", "--json",
+                    ).stdout
+                )
+                # Each type reaches its promotable state by its own ladder;
+                # a bug cannot jump from reported straight to resolved.
+                for step in ladder:
+                    result = self.run_cli(
+                        "brain-update", "--record-id", record["id"],
+                        "--revision", "auto", "--progress", consequence,
+                        "--transition", step, "--reason", "Done", "--json",
+                    )
+                    self.assertEqual(0, result.returncode, result.stderr)
+                self.repository.joinpath("app.txt").write_text(
+                    f"work {external_id}\n", encoding="utf-8"
+                )
+                self.run_cli("turn", "--task-id", "feature/auto", "--flush", "--json")
+                chunk = next(
+                    path
+                    for path in (self.repository / "memory-bank/chunks").glob("MEM-*.md")
+                    if subject in path.read_text(encoding="utf-8")
+                )
+                metadata = json.loads(chunk.read_text(encoding="utf-8").split("---")[1])
+                self.assertEqual(expected, metadata["type"])
+
+    def test_a_promoted_chunk_inherits_what_its_record_cited(self) -> None:
+        """The citation chain must survive promotion.
+
+        Found on a real installation, not in a fixture: two findings about one
+        design document promoted into two chunks that shared no source at all,
+        because `apply_promotion` recorded only the records. `links` and
+        `retrieve --path` are one hop by design, so the document reached the
+        records and never the knowledge derived from them.
+        """
+        self.enable_automatic_promotion()
+        self.repository.joinpath("specs/rounding.md").write_text(
+            "# Rounding\n\nHalf-to-even tie breaking.\n", encoding="utf-8"
+        )
+        for external_id, title, consequence in (
+            ("DEC-A", "Totals are stored in minor units",
+             "Every total is persisted as an integer count of minor units."),
+            ("DEC-B", "Refunds reconcile against the stored total",
+             "A refund is validated against the total already persisted."),
+        ):
+            record = json.loads(
+                self.run_cli(
+                    "brain-create", "decision", "--external-id", external_id,
+                    "--title", title, "--source", "specs/rounding.md",
+                    "--authority", "verified", "--json",
+                ).stdout
+            )
+            self.run_cli(
+                "brain-update", "--record-id", record["id"], "--revision", "auto",
+                "--progress", consequence, "--transition", "accepted",
+                "--reason", "Accepted", "--json",
+            )
+            self.repository.joinpath("app.txt").write_text(
+                consequence, encoding="utf-8"
+            )
+            self.run_cli("turn", "--task-id", "feature/auto", "--flush", "--json")
+
+        chunks = {
+            path.relative_to(self.repository).as_posix()
+            for path in (self.repository / "memory-bank/chunks").glob("MEM-*.md")
+        }
+        self.assertEqual(2, len(chunks), chunks)
+        self.assertEqual(0, self.run_cli("index").returncode)
+        linked = {
+            item["path"]
+            for item in json.loads(
+                self.run_cli("links", "--path", "specs/rounding.md", "--json").stdout
+            )["documents"]
+        }
+        self.assertEqual(chunks, chunks & linked)
+
+    def test_a_promoted_chunk_never_inherits_a_records_files(self) -> None:
+        # `files` is Git churn in the Git-toplevel frame. Merging it would put
+        # code paths under `chunk_source_digests`, where the next edit evicts
+        # the chunk as `source-changed`.
+        self.enable_automatic_promotion()
+        record = json.loads(
+            self.run_cli(
+                "brain-create", "decision", "--external-id", "DEC-FILES",
+                "--title", "Read models rebuild nightly",
+                "--source", "specs/authority.md", "--authority", "verified",
+                "--json",
+            ).stdout
+        )
+        self.run_cli(
+            "brain-update", "--record-id", record["id"], "--revision", "auto",
+            "--progress", "Nightly rebuild trades staleness for write latency.",
+            "--file", "src/ReadModel.php", "--transition", "accepted",
+            "--reason", "Accepted", "--json",
+        )
+        self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
+        self.run_cli("turn", "--task-id", "feature/auto", "--flush", "--json")
+        chunk = next((self.repository / "memory-bank/chunks").glob("MEM-*.md"))
+        metadata = json.loads(chunk.read_text(encoding="utf-8").split("---")[1])
+        self.assertNotIn("src/ReadModel.php", metadata["sources"])
+
+    def test_a_citation_whose_file_is_gone_is_not_carried(self) -> None:
+        """Reachable: the file is deleted between review and apply.
+
+        Without the guard `apply_promotion` writes a chunk citing a file that
+        is not there, `validate_metadata` raises, and a promotion with nothing
+        to do with that file fails outright.
+        """
+        self.repository.joinpath("specs/doomed.md").write_text(
+            "# Doomed\n\nAbout to be deleted.\n", encoding="utf-8"
+        )
+        record = brain.create_record(
+            self.repository, "decision", "DEC-GONE", "Queues drain before deploy",
+            [], ["specs/doomed.md"], owner="alice",
+        )
+        brain.update_record(
+            self.repository, record["id"], expected_revision=record["revision"],
+            progress="A deploy waits for the queue to drain first.",
+            next_steps=[], files=[], sources=[], actor="alice",
+            transition_to="accepted", reason="Accepted",
+        )
+        proposal = brain.create_promotion(
+            self.repository, [record["id"]], "Queues drain before deploy",
+            "Reviewed consequence.", proposer="alice",
+        )
+        brain.review_promotion(
+            self.repository, proposal["id"], "human", approve=True
+        )
+        self.repository.joinpath("specs/doomed.md").unlink()
+
+        applied = brain.apply_promotion(self.repository, proposal["id"])
+        self.assertEqual("applied", applied["status"])
+        chunk = next((self.repository / "memory-bank/chunks").glob("MEM-*.md"))
+        metadata = json.loads(chunk.read_text(encoding="utf-8").split("---")[1])
+        self.assertNotIn("specs/doomed.md", metadata["sources"])
+
+    def test_a_source_tree_lost_entirely_to_gitignore_is_reported(self) -> None:
+        """The silent case, found on a real installation.
+
+        A project whose own .gitignore carried a bare `docs` entry indexed 96
+        accelerator skills, one README and none of its own design documents,
+        and nothing said so. Individual ignored files stay silent on purpose —
+        Symfony alone contributes hundreds — but a glob that matched files on
+        disk and lost every one of them means a documented source of truth is
+        invisible.
+        """
+        docs = self.repository / "docs"
+        docs.mkdir(exist_ok=True)
+        docs.joinpath("architecture.md").write_text(
+            "# Architecture\n\nThe cobalt boundary.\n", encoding="utf-8"
+        )
+        result = self.run_cli("index", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertNotIn(
+            "docs/**/*.md",
+            {item["path"] for item in json.loads(result.stdout)["excluded"]},
+            "a visible tree must not be reported",
+        )
+
+        self.repository.joinpath(".gitignore").write_text("docs\n", encoding="utf-8")
+        result = self.run_cli("index", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        excluded = {
+            item["path"]: item["reason"]
+            for item in json.loads(result.stdout)["excluded"]
+        }
+        self.assertEqual("pattern-all-git-ignored", excluded.get("docs/**/*.md"))
+        # And only the tree that actually went dark.
+        self.assertNotIn("specs/**/*.md", excluded)
 
     def test_promotion_opens_a_validity_period(self) -> None:
         self.enable_automatic_promotion()

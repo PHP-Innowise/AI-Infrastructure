@@ -29,12 +29,13 @@ run() {
   fi
 }
 
-# The prompt arrives as JSON on stdin. Reduce it to a bounded, quoteless query;
-# the CLI still rejects anything that looks like a secret or personal data.
+# The prompt arrives as JSON on stdin and is passed to the CLI as-is: query
+# distillation (informative terms ranked by rarity in the index) lives in
+# context.py, which also rejects anything that looks like a secret or
+# personal data before the text can reach a query or a manifest.
 # Keep the program in -c: a heredoc would occupy stdin and hide the prompt.
 QUERY=$(python3 -c '
 import json
-import re
 import sys
 
 try:
@@ -43,7 +44,7 @@ except (AttributeError, UnicodeDecodeError, ValueError):
     prompt = ""
 if not isinstance(prompt, str):
     prompt = ""
-print(" ".join(re.findall(r"\w+", prompt, flags=re.UNICODE)[:24]))
+print(prompt)
 ' 2>/dev/null)
 
 TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$ROOT_DIR" branch --show-current 2>/dev/null)}"
@@ -58,6 +59,19 @@ if [ -n "$QUERY" ] && [ -n "$TASK_ID" ]; then
 fi
 
 REPORT=$(run python3 "$CONTEXT_CLI" "${ARGUMENTS[@]}" 2>/dev/null)
+HOOK_STATUS=$?
+
+# Recorded before the early exit below, because the one case worth measuring
+# is the one that produces no report: on a timeout `timeout` returns 124 and
+# the Python process was killed before it could append anything itself, so
+# the shell has to write this line or the turn leaves no trace at all. The
+# record carries a status and nothing else — no query, no paths.
+if [ -d "$ROOT_DIR/memory-bank/local" ] || mkdir -p "$ROOT_DIR/memory-bank/local" 2>/dev/null; then
+  printf '{"at":"%s","hook_status":%s,"source":"hook"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$HOOK_STATUS" \
+    >> "$ROOT_DIR/memory-bank/local/refresh-health.ndjson" 2>/dev/null || true
+fi
+
 [ -n "$REPORT" ] || exit 0
 
 echo "Memory refresh (retrieved context is not authoritative — verify the source)"

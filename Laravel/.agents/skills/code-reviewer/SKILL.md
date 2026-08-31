@@ -102,6 +102,14 @@ Lead with findings ordered by severity:
 
 If there are no findings, say so clearly and mention residual test or rollout risk.
 
+## Recording Findings
+
+Do not create Project Brain records from this skill. It is read-only by
+design, and in `/flow-review` it runs alongside a write-capable agent that
+already holds the write lock for the stage. Report the findings; the caller
+materializes each confirmed one as a `finding` record after synthesis, so that
+nothing you dropped as unevidenced becomes durable memory.
+
 ## Final Output
 
 Return findings, questions, short summary, Context Summary, and next step.

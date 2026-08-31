@@ -282,6 +282,15 @@ class CrossEditionParityTest(ParityFixture):
             self.write(
                 edition, "project-brain/schemas/record.schema.json", "{}\n"
             )
+            # The hooks are core too: they are the only automatic entry into
+            # the engine, so the manifest holds them byte-identical except
+            # for the two that speak the edition's framework.
+            self.write(
+                edition, ".claude/hooks/working-memory-read.sh", "#!/bin/bash\nread\n"
+            )
+            self.write(
+                edition, ".claude/hooks/subagent-gate.sh", "#!/bin/bash\ngate\n"
+            )
         return self.base / "Laravel"
 
     def cross(self, repository: Path) -> tuple[int, dict]:
@@ -332,6 +341,57 @@ class CrossEditionParityTest(ParityFixture):
             self.base / "Symfony",
             "memory-bank/chunks/MEM-0001-cross-edition-sync.md",
             "symfony flavor\n",
+        )
+        code, payload = self.cross(repository)
+        self.assertEqual(0, code, payload)
+        self.assertEqual([], payload["drift"])
+
+    def test_forked_engine_hook_is_caught(self) -> None:
+        repository = self.build_monorepo()
+        # The defect this covers shipped for real: Symfony and PHP Core
+        # truncated the prompt to 24 word characters before handing it to the
+        # CLI while Laravel passed it through, so the same request produced a
+        # different capsule per edition and nothing reported it.
+        self.write(
+            self.base / "Symfony",
+            ".claude/hooks/working-memory-read.sh",
+            "#!/bin/bash\nread truncated\n",
+        )
+        code, payload = self.cross(repository)
+        self.assertEqual(1, code)
+        drift = {item["path"]: item for item in payload["drift"]}
+        hook = ".claude/hooks/working-memory-read.sh"
+        self.assertIn(hook, drift)
+        self.assertEqual("content differs", drift[hook]["reason"])
+
+    def test_engine_hook_missing_from_a_sibling_is_caught(self) -> None:
+        repository = self.build_monorepo()
+        (self.base / "Symfony" / ".claude" / "hooks" / "subagent-gate.sh").unlink()
+        code, payload = self.cross(repository)
+        self.assertEqual(1, code)
+        drift = {item["path"]: item for item in payload["drift"]}
+        self.assertEqual("missing", drift[".claude/hooks/subagent-gate.sh"]["reason"])
+
+    def test_framework_shaped_hooks_may_differ(self) -> None:
+        repository = self.build_monorepo()
+        # bash-validator.sh blocks this framework's destructive commands and
+        # local-context.sh detects this framework's stack: both are exempt by
+        # name, and the exemption must survive the hook glob reaching them.
+        self.write(
+            self.base / "Laravel",
+            ".claude/hooks/bash-validator.sh",
+            "#!/bin/bash\nartisan migrate:fresh\n",
+        )
+        self.write(
+            self.base / "Symfony",
+            ".claude/hooks/bash-validator.sh",
+            "#!/bin/bash\ndoctrine:schema:drop\n",
+        )
+        self.write(
+            self.base / "Laravel", ".claude/hooks/local-context.sh", "artisan\n"
+        )
+        self.write(
+            self.base / "Symfony", ".claude/hooks/local-context.sh", "bin/console\n"
         )
         code, payload = self.cross(repository)
         self.assertEqual(0, code, payload)

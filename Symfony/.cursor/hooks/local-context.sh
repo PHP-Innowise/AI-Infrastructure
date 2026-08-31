@@ -12,7 +12,28 @@ echo "==============="
 # CHANGELOG.md.
 EDITION_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 if [ -f "$EDITION_DIR/VERSION" ]; then
-  echo "Accelerator version: $(tr -d '[:space:]' < "$EDITION_DIR/VERSION" 2>/dev/null)"
+  # The policy digest identifies the model-facing surface: policy, skills,
+  # agents, commands, settings. VERSION names a release and moves rarely, so
+  # on its own it says nothing about whether the prompt layer changed. The
+  # digest is the RECORDED one, not a recomputed one: it is honest here,
+  # where CI refuses a surface change without regenerating the lock, and it
+  # is as stale as VERSION in a project that edited a skill locally without
+  # running `policy_lock.py --write`.
+  #
+  # Deliberately not `skill_tree_fingerprint`: that is computed from mtime
+  # and size, which makes it a cache-invalidation key rather than a statement
+  # about content — a touched file moves it and an edit that preserves size
+  # may not.
+  POLICY_LOCK="$EDITION_DIR/.accelerator-policy-lock.json"
+  POLICY_DIGEST=""
+  if [ -f "$POLICY_LOCK" ]; then
+    POLICY_DIGEST=$(sed -n 's/.*"policy_digest"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{8\}\).*/\1/p' "$POLICY_LOCK" 2>/dev/null | head -1)
+  fi
+  if [ -n "$POLICY_DIGEST" ]; then
+    echo "Accelerator version: $(tr -d '[:space:]' < "$EDITION_DIR/VERSION" 2>/dev/null) (policy $POLICY_DIGEST)"
+  else
+    echo "Accelerator version: $(tr -d '[:space:]' < "$EDITION_DIR/VERSION" 2>/dev/null)"
+  fi
 fi
 
 # Loop detection is session-scoped; discard counters from earlier sessions.
@@ -187,6 +208,12 @@ if command -v python3 > /dev/null 2>&1 && [ -f "$CONTEXT_CLI" ] && [ -n "$CAPSUL
 fi
 # See the stop hook: the working line is the render marker that replaces the
 # JSON parse.
+#
+# Statuses: 0 renders, 3 removes a foreign branch's rule, and everything else
+# - including 4, "the retrieval gate withheld this turn" - falls through and
+# leaves the previous rule in place. That fallthrough is the correct
+# behaviour for a skip and is relied on: an enforce-mode skip must never
+# replace Cursor's only memory channel with an empty capsule.
 if [ "$CAPSULE_STATUS" -eq 0 ]; then
   case "$CAPSULE" in
     working:*) ;;

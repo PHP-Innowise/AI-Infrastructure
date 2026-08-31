@@ -1,0 +1,21 @@
+---
+description: WordPress PHP, lifecycle, data, security, compatibility, and integration standards
+globs: "**/*.php"
+alwaysApply: false
+---
+
+# WordPress PHP Standards
+
+- Follow the project's WordPress Coding Standards and supported PHP/WordPress versions.
+- Prefix or namespace global PHP symbols and all WordPress identifiers.
+- Register behavior on the correct hook; do not perform request work at include time.
+- Keep hook, REST, AJAX, shortcode, block-render and CLI callbacks thin.
+- Use WordPress APIs before direct filesystem, HTTP, mail, cache, cron or database code.
+- Sanitize and validate input; escape late for the exact output context.
+- Check capability/object authorization separately from nonce/authentication.
+- Every REST route has an intentional `permission_callback` and schema.
+- Use `$wpdb->prepare()` for values and allowlist dynamic identifiers.
+- Keep options small, avoid unbounded autoload/serialization, and make cache invalidation explicit.
+- Version migrations and make activation, cron, webhook, import and background work idempotent.
+- Preserve public hooks, routes, block attributes, option/meta formats, shortcodes and PHP APIs.
+- State site versus network ownership and restore every multisite blog switch.

@@ -1,0 +1,70 @@
+{
+  "_comment": "Roster routing eval. The accelerator's value is realised through choosing among ~45 skills, and that choice is made by the prose in `description:`. There was no eval data of any kind: 38 of 41 Laravel agents had their <example> blocks moved out of `description:` on a purely economic argument (7405 t -> 2104 t) with no number about whether the choice got worse. UNIT OF MEASUREMENT: the SKILL, not the agent. Agent name equals skill name for 100% of the roster, so a name-based detector cannot tell them apart, and the skill layer is the only one all three tool integrations share - Codex has no agent layer at all. CAPSULE: left ON, because that is the configuration users actually run; a baseline measured without it would describe a system nobody uses. `expect: null` is a restraint case: no skill should trigger.",
+  "cases": [
+    {
+      "request": "Implement the invoice service with validation and tests.",
+      "expect": "coder",
+      "rationale": "boundary against refactorer (behaviour-changing) and architecture-implementer (scaffolding)"
+    },
+    {
+      "request": "Rename these variables and extract a method; do not change behaviour.",
+      "expect": "refactorer",
+      "rationale": "boundary against coder: behaviour-preserving only"
+    },
+    {
+      "request": "Scaffold the approved layered structure, leave the logic as TODOs.",
+      "expect": "architecture-implementer",
+      "rationale": "boundary against coder: structure, not feature logic"
+    },
+    {
+      "request": "Something is wrong and I cannot tell why; the queue silently drops jobs.",
+      "expect": "systematic-debugger",
+      "rationale": "boundary against coder: root cause before any fix"
+    },
+    {
+      "request": "Design the tables and relations for invoices and line items.",
+      "expect": "database-designer",
+      "rationale": "boundary against the framework's own data skill"
+    },
+    {
+      "request": "Write the Eloquent relationships and scopes for the order model.",
+      "expect": "eloquent",
+      "rationale": "boundary against database-designer: framework mapping, not schema"
+    },
+    {
+      "request": "Design the HTTP contract for the invoice endpoints.",
+      "expect": "api-designer",
+      "rationale": "boundary against api-platform-designer"
+    },
+    {
+      "request": "The invoice listing takes nine seconds; find out where the time goes.",
+      "expect": "performance-optimization",
+      "rationale": "boundary against caching: measure before adding a layer"
+    },
+    {
+      "request": "Add a cache layer in front of the pricing lookup.",
+      "expect": "caching",
+      "rationale": "boundary against performance-optimization: the remedy, not the diagnosis"
+    },
+    {
+      "request": "Audit this change against the OWASP top ten.",
+      "expect": "security-reviewer",
+      "rationale": "boundary against code-reviewer: OWASP scope"
+    },
+    {
+      "request": "Generate PHPUnit tests for the invoice service.",
+      "expect": "test-generator",
+      "rationale": "boundary against coder: tests as the deliverable"
+    },
+    {
+      "request": "Thanks, that looks good, continue.",
+      "expect": null,
+      "rationale": "restraint: no skill should trigger"
+    },
+    {
+      "request": "What is the airspeed velocity of an unladen swallow?",
+      "expect": null,
+      "rationale": "restraint: no skill should trigger"
+    }
+  ]
+}

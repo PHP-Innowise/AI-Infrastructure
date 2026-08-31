@@ -55,6 +55,12 @@ fi
 # The rendered capsule always opens with the working line. Anything else is a
 # broken render and must not replace a good rule. This guard replaces the JSON
 # parse that protected the --json form.
+#
+# Statuses: 0 renders, 3 removes a foreign branch's rule, and everything else
+# - including 4, "the retrieval gate withheld this turn" - falls through and
+# leaves the previous rule in place. That fallthrough is the correct
+# behaviour for a skip and is relied on: an enforce-mode skip must never
+# replace Cursor's only memory channel with an empty capsule.
 if [ "$CAPSULE_STATUS" -eq 0 ]; then
   case "$CAPSULE" in
     working:*) ;;

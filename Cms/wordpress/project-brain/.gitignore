@@ -1,0 +1,4 @@
+local/*
+!local/.gitkeep
+telemetry/events/*
+!telemetry/events/.gitkeep

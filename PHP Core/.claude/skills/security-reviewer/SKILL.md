@@ -123,3 +123,11 @@ If nothing is found, state so and note the residual risk and what was not covere
 ## Final Output
 
 Return findings by severity with fixes, `composer audit` result, an overall verdict, Context Summary, and next step (`coder` to fix, then `verify`).
+
+## Recording Findings
+
+Do not create Project Brain records from this skill. It is read-only by
+design, and in `/flow-review` it runs alongside a write-capable agent that
+already holds the write lock for the stage. Report the findings; the caller
+materializes each confirmed one as a `finding` record after synthesis, so that
+nothing you dropped as unevidenced becomes durable memory.

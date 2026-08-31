@@ -1,0 +1,80 @@
+{
+  "_comment": "Roster routing eval for the WordPress edition, scored by scripts/routing_eval.py. Unlike skill-routing-golden.json this one invokes a model, so it is deliberately outside CI and its baseline is taken by hand. `expect` is a single slug because the script's three labels — hit / miss (nothing triggered) / wrong (something else triggered) — are repaired in opposite directions and a set would blur them. Every case is a BOUNDARY: it sits where two skills could plausibly answer, and the rationale names the neighbour it is meant to distinguish. The two null cases are restraint: an eval without a request that should trigger nothing measures only eagerness.",
+  "cases": [
+    {
+      "request": "Implement the settings screen for the plugin with sanitisation and tests.",
+      "expect": "plugin-development",
+      "rationale": "boundary against coder: plugin lifecycle and settings API, not generic PHP"
+    },
+    {
+      "request": "Rename these callbacks and extract a class; do not change behaviour.",
+      "expect": "refactorer",
+      "rationale": "boundary against coder: behaviour-preserving only"
+    },
+    {
+      "request": "Build a dynamic block that renders from a post query, with attributes and a deprecation.",
+      "expect": "block-development",
+      "rationale": "boundary against theme-development: editor blocks, not templates"
+    },
+    {
+      "request": "Add a template part and a pattern to the block theme.",
+      "expect": "theme-development",
+      "rationale": "boundary against block-development: theme surface, not the block itself"
+    },
+    {
+      "request": "Register the product post type, its taxonomy and the meta exposed to REST.",
+      "expect": "content-modeling",
+      "rationale": "boundary against rest-api: the model and its exposure, not the route"
+    },
+    {
+      "request": "Design the REST namespace, permission callbacks and response schema for orders.",
+      "expect": "rest-api",
+      "rationale": "boundary against content-modeling: the HTTP contract itself"
+    },
+    {
+      "request": "This filter runs on every request and recurses; fix the priority and argument count.",
+      "expect": "hooks-events",
+      "rationale": "boundary against systematic-debugger: a known hook contract defect, not an investigation"
+    },
+    {
+      "request": "Something is wrong and I cannot tell why; the nightly job stops halfway.",
+      "expect": "systematic-debugger",
+      "rationale": "boundary against cron-background-processing: root cause before any design"
+    },
+    {
+      "request": "Schedule a nightly reconciliation that is idempotent and survives a quiet site.",
+      "expect": "cron-background-processing",
+      "rationale": "boundary against wp-cli: scheduling and reliability, not a command"
+    },
+    {
+      "request": "Add a command that reindexes in batches with progress and a dry run.",
+      "expect": "wp-cli",
+      "rationale": "boundary against cron-background-processing: an operator-invoked command"
+    },
+    {
+      "request": "Add a payment gateway and keep it HPOS compatible.",
+      "expect": "woocommerce",
+      "rationale": "boundary against plugin-development: the store's own extension contracts"
+    },
+    {
+      "request": "Activation must provision per site, not per network.",
+      "expect": "multisite",
+      "rationale": "boundary against plugin-development: network scope decisions"
+    },
+    {
+      "request": "Audit this change against the OWASP top ten.",
+      "expect": "security-reviewer",
+      "rationale": "boundary against code-reviewer: OWASP scope"
+    },
+    {
+      "request": "Thanks, that looks good, continue.",
+      "expect": null,
+      "rationale": "restraint: no skill should trigger"
+    },
+    {
+      "request": "What is the airspeed velocity of an unladen swallow?",
+      "expect": null,
+      "rationale": "restraint: no skill should trigger"
+    }
+  ]
+}

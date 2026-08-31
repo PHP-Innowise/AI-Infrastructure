@@ -1,0 +1,23 @@
+{
+  "allowed_authority": [
+    "observed",
+    "verified"
+  ],
+  "allowed_privacy": [
+    "public",
+    "team"
+  ],
+  "automatic_compaction": true,
+  "automatic_completion": false,
+  "automatic_promotion": true,
+  "canonical_edition": ".agents",
+  "codebase_map_max_drift": 25,
+  "compaction_threshold": 5,
+  "framework": "wordpress",
+  "mode": "governed",
+  "owners": [
+    "*"
+  ],
+  "provider": "sqlite-fts5",
+  "telemetry_enabled": false
+}

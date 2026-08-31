@@ -4,8 +4,8 @@ English | [Русский](README_RU.md)
 
 # PHP AI Accelerators
 
-A collection of ready-to-use accelerators for AI agents working in PHP
-projects, plus a generator that builds an accelerator from the actual
+A collection of ready-to-use accelerators for AI agents working in PHP and
+WordPress projects, plus a generator that builds an accelerator from the actual
 structure of a specific project. Each edition combines policies, commands,
 agents, skills, quality checks, and documentation conventions. It does not
 replace the project's code, configuration, tests, or specifications.
@@ -17,6 +17,7 @@ AI-Infrastructure/
 ├── Laravel/                  # ready-to-use Laravel edition
 ├── Symfony/                  # ready-to-use Symfony edition
 ├── PHP Core/                 # ready-to-use native PHP edition
+├── Cms/wordpress/            # ready-to-use WordPress edition
 └── Infrastructure-Creator/   # generator for a specific project
 ~~~
 
@@ -27,11 +28,13 @@ AI-Infrastructure/
   Platform, voters, Forms, and Symfony UX.
 - [PHP Core/](PHP%20Core/README.md) — a framework-neutral foundation for
   Composer and PSR projects, PDO, and explicit application boundaries.
+- [Cms/wordpress/](Cms/wordpress/README.md) — a WordPress edition for plugins,
+  classic/block themes, Gutenberg, REST, WP-CLI, multisite, and WooCommerce.
 - [Infrastructure-Creator/](Infrastructure-Creator/README.md) — not an
   edition to copy, but a generator that inspects a target project and creates
   a suitable set of agent policies and workflows.
 
-The first three directories are independent, ready-to-use editions.
+The first four directories are independent, ready-to-use editions.
 `Infrastructure-Creator/` solves a different problem: it generates a new
 edition based on the components, integrations, architecture, and CI/CD of a
 given PHP project.
@@ -43,9 +46,10 @@ given PHP project.
 | [Laravel/](Laravel/README.md) | Laravel 12 / 13, PHP 8.2+ (PHP 8.3+ for Laravel 13) | The project already uses Laravel, Eloquent, Artisan, Sanctum, queues, or the Laravel ecosystem. |
 | [Symfony/](Symfony/README.md) | Symfony 7.4 LTS on PHP 8.2+, or Symfony 8.1 on PHP 8.4+ | The project uses Symfony, Doctrine, Messenger, API Platform, voters, and conventional Symfony boundaries. |
 | [PHP Core/](PHP%20Core/README.md) | Native PHP 8.2+ | A regular PSR project, a microframework, or a framework without a dedicated edition. |
+| [WordPress](Cms/wordpress/README.md) | Project-declared WordPress/PHP versions | Plugins, themes, blocks, WordPress sites, multisite components, or WooCommerce extensions. |
 
 Use the matching directory when the project already runs on Laravel or
-Symfony. Use `PHP Core/` for other cases; it does not impose a particular ORM,
+Symfony, or WordPress. Use `PHP Core/` for other cases; it does not impose a particular ORM,
 router, or dependency-injection container.
 
 ## How to Add an Accelerator to a Project
@@ -71,6 +75,7 @@ itself. Claude Code, Cursor, and Codex do not automatically search
 - `Laravel/` — ready-made Laravel edition.
 - `Symfony/` — ready-made Symfony edition.
 - `PHP Core/` — ready-made native PHP edition.
+- `Cms/wordpress/` — ready-made WordPress edition.
 - `Infrastructure-Creator/` — project-specific accelerator generator.
 - `install/` — installation documentation and inventories.
 - `scripts/` — installation and maintenance scripts.
@@ -80,7 +85,7 @@ itself. Claude Code, Cursor, and Codex do not automatically search
 
 ## Shared Architecture: Command → Agent → Skill
 
-All three editions use the same workflow model, adapted to their stack:
+All four editions use the same workflow model, adapted to their stack:
 
 ~~~text
 User request
@@ -156,6 +161,10 @@ that belong to its real stack:
   databases, implementation, testing, quality and security review,
   performance, dependencies, debugging, and releases without assuming a
   framework.
+- WordPress adds plugin/theme lifecycle, hooks and filters, Gutenberg blocks,
+  content modeling, REST routes and permissions, WP-CLI, multisite,
+  WooCommerce, WordPress data APIs, migrations, cron, compatibility,
+  accessibility, and release packaging.
 
 Do not synchronize every change mechanically across editions. First verify
 that the change is meaningful for the target stack.

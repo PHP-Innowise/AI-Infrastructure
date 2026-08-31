@@ -35,6 +35,7 @@ All Minimum items, plus:
 - [ ] New behavior has focused tests covering the happy path and highest-risk failure path.
 - [ ] Tests own the rows they assert on: shared fixture records are treated as read-only, and any test that mutates state (sign-in, password change, deletion, counters) creates its own subject. A test that reads a fixture another test can write passes or fails by suite order.
 - [ ] Project Brain mutations use legal transitions, expected revisions, and the shared mutation lock; no duplicate authoritative task state was introduced.
+- [ ] Every confirmed review or debugging finding exists as a `finding` record in Project Brain — `resolved` with `authority: verified`, or explicitly deferred with a reason. A finding recorded only in a task's `--progress` is bookkeeping on a record type that can never be promoted, so it cannot become durable memory.
 - [ ] Controller -> Service -> Repository boundaries are respected.
 - [ ] Pragmatic SOLID review passes: responsibilities are cohesive, dependencies point inward, contracts are narrow/substitutable, and interfaces have a concrete boundary justification.
 - [ ] Input validation and authorization are implemented at the boundary.

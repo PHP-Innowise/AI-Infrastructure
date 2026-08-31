@@ -3,12 +3,11 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schema_version", "id", "created_at", "query", "task_id",
-    "task_revision", "filters", "selected", "excluded", "token_estimates",
-    "provider", "escalation_reason"
+    "schema_version", "id", "created_at", "query", "task_id", "task_revision", "filters",
+    "selected", "excluded", "token_estimates", "provider", "escalation_reason"
   ],
   "properties": {
-    "schema_version": {"const": 1},
+    "schema_version": {"enum": [1, 2]},
     "id": {"type": "string", "format": "uuid"},
     "created_at": {"type": "string", "format": "date-time"},
     "query": {"type": "string", "minLength": 1},
@@ -36,7 +35,11 @@
           "path": {"type": "string", "minLength": 1},
           "category": {"enum": ["policy", "handoff", "durable", "dynamic", "evidence"]},
           "estimated_tokens": {"type": "integer", "minimum": 1},
-          "source_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          "source_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "match": {"enum": ["covered", "distinctive", "conflict"]},
+          "selection": {"enum": ["path-link"]},
+          "score": {"type": "number", "minimum": 0},
+          "rank": {"type": ["integer", "null"], "minimum": 1}
         }
       }
     },
@@ -55,7 +58,9 @@
     "token_estimates": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["policy", "handoff", "durable", "dynamic", "evidence", "total", "target", "hard"],
+      "required": [
+        "policy", "handoff", "durable", "dynamic", "evidence", "total", "target", "hard"
+      ],
       "properties": {
         "policy": {"type": "integer", "minimum": 0},
         "handoff": {"type": "integer", "minimum": 0},
@@ -68,6 +73,43 @@
       }
     },
     "provider": {"type": "string", "minLength": 1},
+    "query_source": {"enum": ["prompt", "task", "task-id", "explicit"]},
+    "gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision", "mode", "reason", "signals"],
+      "properties": {
+        "decision": {"enum": ["retrieve", "skip"]},
+        "mode": {"enum": ["off", "shadow", "enforce"]},
+        "reason": {"type": "string", "minLength": 1},
+        "signals": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "informative_terms", "distinctive_matches", "top_score", "no_match",
+            "query_unchanged_from_previous_turn", "selection_identical_to_previous_turn"
+          ],
+          "properties": {
+            "informative_terms": {"type": "integer", "minimum": 0},
+            "distinctive_matches": {"type": "integer", "minimum": 0},
+            "top_score": {"type": ["number", "null"]},
+            "no_match": {"type": "array", "items": {"type": "string"}},
+            "query_unchanged_from_previous_turn": {"type": "boolean"},
+            "selection_identical_to_previous_turn": {"type": "boolean"}
+          }
+        }
+      }
+    },
+    "phase_seconds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stat", "index", "retrieval"],
+      "properties": {
+        "stat": {"type": ["number", "null"], "minimum": 0},
+        "index": {"type": ["number", "null"], "minimum": 0},
+        "retrieval": {"type": "number", "minimum": 0}
+      }
+    },
     "escalation_reason": {"type": ["string", "null"]}
   }
 }

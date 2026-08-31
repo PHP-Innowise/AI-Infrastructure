@@ -98,7 +98,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BUDGET_FILE = ROOT / "scripts" / "token_budget.json"
-EDITIONS = ("Laravel", "Symfony", "PHP Core", "Infrastructure-Creator")
+EDITION_PATHS = {
+    "Laravel": Path("Laravel"),
+    "Symfony": Path("Symfony"),
+    "PHP Core": Path("PHP Core"),
+    "WordPress": Path("Cms/wordpress"),
+    "Infrastructure-Creator": Path("Infrastructure-Creator"),
+}
+EDITIONS = tuple(EDITION_PATHS)
 CATEGORIES = (
     "agents_md_bytes",
     "descriptor_bytes",
@@ -266,7 +273,7 @@ def listing_bytes(paths: list[Path]) -> tuple[int, int]:
 
 
 def measure_edition(edition: str) -> dict:
-    edition_dir = ROOT / edition
+    edition_dir = ROOT / EDITION_PATHS[edition]
     agents_md = edition_dir / "AGENTS.md"
     if not agents_md.is_file():
         raise BudgetError(f"{edition}: missing AGENTS.md")
@@ -417,11 +424,49 @@ def check(measurements: dict[str, dict]) -> int:
     return 0
 
 
+def headroom(measurements: dict[str, dict]) -> int:
+    """Print what is left under each ceiling, largest pressure first.
+
+    `--check` answers pass or fail and nothing else, so a rule author about to
+    add a paragraph to a policy file could not see how much room was left. A
+    procedural pillar that can only add rules needs that number in front of
+    whoever is adding one.
+
+    No warning threshold is printed on purpose. `token_budget.json` sets every
+    ceiling at the observed value plus about five per cent, so headroom is
+    ~4.8 % of the ceiling by construction and a percentage warning would fire
+    on every category at once, which is the same as no warning at all.
+    """
+    try:
+        ceilings = json.loads(BUDGET_FILE.read_text(encoding="utf-8"))["editions"]
+    except (OSError, ValueError, KeyError) as exc:
+        print(f"cannot read ceilings from {BUDGET_FILE}: {exc}", file=sys.stderr)
+        return 1
+
+    rows = []
+    for edition, measured in measurements.items():
+        for category, ceiling in ceilings.get(edition, {}).items():
+            value = measured.get(category)
+            if not isinstance(value, int) or not isinstance(ceiling, int):
+                continue
+            rows.append((ceiling - value, edition, category, value, ceiling))
+    rows.sort()
+    print(f"{'remaining':>10}  {'measured':>9}  {'ceiling':>9}  category")
+    for remaining, edition, category, value, ceiling in rows:
+        print(
+            f"{remaining:>10}  {value:>9}  {ceiling:>9}  {edition}.{category}"
+        )
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--check", action="store_true",
                         help="compare against scripts/token_budget.json ceilings; "
                              "exit 1 on any excess")
+    parser.add_argument("--headroom", action="store_true",
+                        help="print bytes remaining under each ceiling, "
+                             "tightest first; always exits 0")
     args = parser.parse_args()
 
     try:
@@ -432,6 +477,8 @@ def main() -> int:
 
     if args.check:
         return check(measurements)
+    if args.headroom:
+        return headroom(measurements)
     report(measurements)
     return 0
 

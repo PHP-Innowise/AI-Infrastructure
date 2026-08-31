@@ -11,9 +11,9 @@ does not install project packages or use `sudo`.
 | Job | What it verifies |
 |---|---|
 | `tests` | The unit-test suites of every edition (7 suites, run in a matrix). |
-| `parity` | Mirror parity and cross-edition core parity for Laravel, Symfony, and PHP Core. |
+| `parity` | Mirror parity and cross-edition core parity for Laravel, Symfony, PHP Core, and WordPress. |
 | `mirrors` | Every per-tool mirror matches its canon (`scripts/build_mirrors.py --check`). |
-| `installation` | Exact versioned inventories match the repository, and every Laravel/Symfony/PHP Core × Claude/Cursor/Codex selected-tool install passes isolated validate/status/index smoke tests without application, `.env`, or application-database access. Also that framework-specific skill semantics survive, and that the optional context-collection tool stays out of the editions and the installer. |
+| `installation` | Exact versioned inventories match the repository, and every Laravel/Symfony/PHP Core/WordPress × Claude/Cursor/Codex selected-tool install passes isolated validate/status/index smoke tests without application, `.env`, or application-database access. Also that framework-specific skill semantics survive, and that the optional context-collection tool stays out of the editions and the installer. |
 | `lint` | `bash -n` and `shellcheck -S error` on all tracked shell scripts (including root `collect`); `python3 -m json.tool` on tracked JSON; no clock/random invalidator in Cursor working-memory render hooks; every complete PHP snippet in tracked Markdown parses (`scripts/check_php_snippets.py --require-php`); startup context budget within ceilings (`scripts/context_budget.py --check`). |
 | `changelog` | Pull requests only: a diff that touches shared-core files (memory/context core, Project Brain, hooks, `scripts/`) must also change the root `CHANGELOG.md` (`scripts/check_core_changelog.sh`). |
 | `links` | All relative markdown links in tracked `.md` files resolve (`scripts/check_links.py`). |
@@ -32,6 +32,7 @@ for suite in \
   "Laravel/memory-bank/tests" "Laravel/project-brain/tests" \
   "Symfony/memory-bank/tests" "Symfony/project-brain/tests" \
   "PHP Core/memory-bank/tests" "PHP Core/project-brain/tests" \
+  "Cms/wordpress/memory-bank/tests" "Cms/wordpress/project-brain/tests" \
   "Infrastructure-Creator/tests"; do
   (cd "$suite" && for test_file in test_*.py; do python3 "$test_file"; done)
 done
@@ -67,6 +68,8 @@ automatic validation or a pass.
                && python3 memory-bank/scripts/context.py parity --cross-edition)
 (cd "PHP Core" && python3 memory-bank/scripts/context.py parity \
                && python3 memory-bank/scripts/context.py parity --cross-edition)
+(cd "Cms/wordpress" && python3 memory-bank/scripts/context.py parity \
+                     && python3 memory-bank/scripts/context.py parity --cross-edition)
 ```
 
 ### mirrors

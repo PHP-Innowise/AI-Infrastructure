@@ -7,6 +7,8 @@ covers the three maintained accelerators and the generator:
 - [`Symfony/`](../Symfony/README.md) for Symfony-specific workflows;
 - [`PHP Core/`](../PHP%20Core/README.md) for framework-neutral Composer, PSR,
   and native-PHP workflows;
+- [`Cms/wordpress/`](../Cms/wordpress/README.md) for WordPress plugins, themes,
+  blocks, multisite, REST, WP-CLI, and WooCommerce workflows;
 - [`Infrastructure-Creator/`](../Infrastructure-Creator/README.md) for
   evidence-driven generation into an external PHP project.
 
@@ -38,6 +40,14 @@ Use `PHP Core/` for framework-neutral PHP behavior: Composer and PSR
 conventions, explicit HTTP boundaries, PDO or documented data layers,
 framework-neutral validation and authorization, and portable PHP tooling.
 Framework-specific examples belong in their framework sibling.
+
+### WordPress
+
+Use `Cms/wordpress/` when the consuming project is governed by WordPress
+lifecycle and APIs: plugins, classic/block themes, Gutenberg, WordPress REST,
+WP-CLI, multisite, WordPress data APIs, or WooCommerce. Preserve public hooks,
+stored content/data, block serialization, capability boundaries, and declared
+minimum versions rather than importing generic PHP architecture mechanically.
 
 ### Infrastructure-Creator
 
@@ -191,8 +201,8 @@ Review together:
 - Project Brain and Memory Bank tests;
 - [`CONTEXT-MODES.md`](CONTEXT-MODES.md).
 
-Keep common runtime assets byte-identical across Laravel, Symfony, and PHP
-Core unless a file is explicitly framework-specific. Runtime configuration
+Keep common runtime assets byte-identical across Laravel, Symfony, PHP Core,
+and WordPress unless a file is explicitly framework-specific. Runtime configuration
 contains the framework label and allowed policy differences. Validate:
 
 ```bash
@@ -276,6 +286,43 @@ install missing tooling without approval, and do not claim success while a
 relevant validator fails. Record user-facing or release-relevant changes in
 the affected `CHANGELOG.md` (the root one when the change is to the shared
 core).
+
+## Changing a Description
+
+An agent's or skill's `description:` is the selector: it is what decides which
+of roughly forty-five skills answers a request. Changing one, or adding or
+removing an entry from the roster, changes routing for every user of that
+edition — and until there was eval data, no change of that kind carried a
+single number about whether the choice got better or worse.
+
+A pull request that edits any `description:`, or that adds or removes an agent
+or a skill, must attach the delta to that edition's routing baseline:
+
+```bash
+python3 scripts/routing_eval.py --edition Symfony --runs 5 --write-baseline
+```
+
+This invokes a model, costs money and takes minutes, so it is deliberately
+outside CI — the same treatment `docs/CI.md` gives the external harness. Run
+it before and after, and put both pass rates in the pull request.
+
+A baseline records the `policy_digest` of the surface that produced it, so a
+stale one is mechanically visible: if the digest in
+`install/policy-lock/<edition>-routing-baseline.json` does not match the one in
+`<edition>/.accelerator-policy-lock.json`, the numbers describe a different
+roster.
+
+Read `miss` and `wrong` differently. A `miss` — nothing triggered — means the
+description is too narrow. A `wrong` — a neighbour triggered — means it
+overlaps that neighbour. They are repaired in opposite directions, which is
+why the runner never collapses them into one failure count.
+
+The cheap check that needs no model is
+`python3 -m unittest tests.test_check_stabilization tests.test_policy_lock`
+plus the per-edition skill-routing floor in
+`project-brain/tests/fixtures/skill-routing-golden.json`, which asserts an
+acceptable skill still reaches the capsule's two procedural slots at least as
+often as it does today.
 
 ## Downstream Customization and Upgrades
 

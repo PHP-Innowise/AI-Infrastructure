@@ -25,11 +25,17 @@ SKILL_DOCUMENTS = (
     "memory-bank/SKILL.md",
     "project-brain/SKILL.md",
 )
+FRAMEWORK_PATHS = {
+    "Laravel": Path("Laravel"),
+    "Symfony": Path("Symfony"),
+    "PHP Core": Path("PHP Core"),
+    "WordPress": Path("Cms/wordpress"),
+}
 
 
 class FrameworkSemanticPreservationTest(unittest.TestCase):
     def read(self, framework: str, edition: str, relative: str) -> str:
-        return (ROOT / framework / edition / "skills" / relative).read_text(
+        return (ROOT / FRAMEWORK_PATHS[framework] / edition / "skills" / relative).read_text(
             encoding="utf-8"
         )
 
@@ -178,6 +184,90 @@ class FrameworkSemanticPreservationTest(unittest.TestCase):
                     self.assertIn("/debugger", flow)
                     self.assertIn("/requirements-analyst", flow)
         self.assert_mirror_invariants("Symfony")
+
+    def test_wordpress_skills_keep_wordpress_routing_and_shared_updates(self) -> None:
+        required_flow_markers = (
+            "plugin-development",
+            "theme-development",
+            "block-development",
+            "hooks-events",
+            "rest-api",
+            "content-modeling",
+            "wp-cli",
+            "multisite",
+            "woocommerce",
+            "cron-background-processing",
+        )
+        for edition in EDITIONS:
+            with self.subTest(edition=edition):
+                flow = self.read("WordPress", edition, "SKILL FLOW.md")
+                memory = self.read("WordPress", edition, "memory-bank/SKILL.md")
+                brain = self.read("WordPress", edition, "project-brain/SKILL.md")
+
+                self.assertIn("WordPress work", flow)
+                for marker in required_flow_markers:
+                    self.assertIn(marker, flow)
+                self.assertIn("# WordPress Memory Bank", memory)
+                self.assertIn("generic WordPress advice", memory)
+                self.assertIn("# WordPress Project Brain", brain)
+                self.assertIn("generic WordPress advice", brain)
+                self.assert_no_native_php_replacement(flow, memory, brain)
+                self.assert_shared_context_updates("WordPress", edition)
+                self.assert_not_php_core_copy("WordPress", edition)
+
+                if edition == ".agents":
+                    self.assertIn("Use `project-brain`", flow)
+                else:
+                    self.assertIn("Use `/project-brain`", flow)
+        self.assert_mirror_invariants("WordPress")
+
+    def test_wordpress_specialties_preserve_platform_safety_contracts(self) -> None:
+        root = ROOT / FRAMEWORK_PATHS["WordPress"]
+        required = {
+            "plugin-development": ("activation", "uninstall", "compatibility"),
+            "theme-development": ("theme.json", "child-theme", "accessibility"),
+            "block-development": ("block.json", "deprecations", "serialization"),
+            "hooks-events": ("priority", "recursion", "filter"),
+            "rest-api": ("permission_callback", "WP_REST_Response", "WP_Error"),
+            "content-modeling": ("post type", "taxonomy", "metadata"),
+            "wp-cli": ("idempotent", "dry-run", "multisite"),
+            "multisite": ("switch_to_blog()", "restore_current_blog()", "network"),
+            "woocommerce": ("HPOS", "CRUD", "Action Scheduler"),
+            "cron-background-processing": ("WP-Cron", "idempotent", "locking"),
+        }
+        for skill, markers in required.items():
+            canonical = (root / ".agents/skills" / skill / "SKILL.md").read_text(
+                encoding="utf-8"
+            )
+            for marker in markers:
+                with self.subTest(skill=skill, marker=marker):
+                    self.assertIn(marker, canonical)
+            for mirror in (".claude", ".cursor"):
+                self.assertEqual(
+                    canonical,
+                    (root / mirror / "skills" / skill / "SKILL.md").read_text(
+                        encoding="utf-8"
+                    ),
+                )
+
+        policy = (root / "AGENTS.md").read_text(encoding="utf-8")
+        for marker in (
+            "A nonce is CSRF protection, not permission",
+            "`$wpdb->prepare()`",
+            "permission_callback",
+            "flush_rewrite_rules()",
+            "Autoloaded",
+            "options MUST stay small",
+            "data is per-site, network-wide, per-user, locale-specific, or global",
+        ):
+            self.assertIn(marker, policy)
+
+        settings = (root / ".claude/settings.json").read_text(encoding="utf-8")
+        self.assertIn('"Bash(wp:*)"', settings)
+        self.assertIn('"Read(wp-config.php)"', settings)
+        hook = (root / ".claude/hooks/bash-validator.sh").read_text(encoding="utf-8")
+        self.assertIn("wp[[:space:]]+db", hook)
+        self.assertIn("wp-config", hook)
 
 
 if __name__ == "__main__":
