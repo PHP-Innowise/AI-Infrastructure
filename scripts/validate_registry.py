@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -55,6 +56,7 @@ STATUSES = {"clear", "open_questions", "known_risks"}
 RELATIONS = {"duplicates", "replaces", "conflicts", "complements"}
 DEFAULT_STATES = {"enabled", "disabled"}
 TIERS = {1, 2, 3}
+SAFE_RESOURCE_ID = re.compile(r"[a-z0-9][a-z0-9-]*\Z")
 
 TOP_LEVEL_FIELDS = (
     "schema_version",
@@ -106,7 +108,7 @@ def compute_status(binary_gates: dict) -> str:
     return "clear"
 
 
-def validate_entry(data: dict, catalog_ids: set[str]) -> list[str]:
+def validate_entry(data: dict, catalog: dict[str, dict]) -> list[str]:
     """Return every problem found in one registry entry."""
     errors: list[str] = []
     entry_id = data.get("id", "<no id>")
@@ -120,19 +122,36 @@ def validate_entry(data: dict, catalog_ids: set[str]) -> list[str]:
     if errors:
         return errors
 
-    if data["schema_version"] != 1:
-        err(f"unsupported schema_version {data['schema_version']}")
-    if data["tier"] not in TIERS:
+    for field in ("id", "catalog_id"):
+        value = data[field]
+        if not isinstance(value, str) or not SAFE_RESOURCE_ID.fullmatch(value):
+            err(f"{field} must be a filename-safe lowercase slug, got {value!r}")
+
+    if type(data["schema_version"]) is not int or data["schema_version"] != 1:
+        err(f"unsupported schema_version {data['schema_version']!r}")
+    if type(data["tier"]) is not int or data["tier"] not in TIERS:
         err(f"tier must be one of {sorted(TIERS)}, got {data['tier']!r}")
     if data["default_state"] not in DEFAULT_STATES:
         err(f"default_state must be one of {sorted(DEFAULT_STATES)}")
     if data["status"] not in STATUSES:
         err(f"status must be one of {sorted(STATUSES)}")
-    if data["catalog_id"] not in catalog_ids:
+    catalog_id = data["catalog_id"]
+    expected = None
+    if not isinstance(catalog_id, str) or catalog_id not in catalog:
         err(
-            f"catalog_id {data['catalog_id']!r} is not in "
+            f"catalog_id {catalog_id!r} is not in "
             "install/open-source-kit/resources.json"
         )
+    else:
+        expected = catalog[catalog_id]
+        if data["id"] != catalog_id:
+            err(f"id {data['id']!r} does not match catalog_id {catalog_id!r}")
+        for field in ("name", "url"):
+            if data[field] != expected.get(field):
+                err(
+                    f"{field} {data[field]!r} does not match catalog value "
+                    f"{expected.get(field)!r}"
+                )
 
     # Type-guard the blocks before indexing them. A hand-edited file that puts a
     # string where an object belongs must produce a diagnostic, not a traceback:
@@ -150,6 +169,20 @@ def validate_entry(data: dict, catalog_ids: set[str]) -> list[str]:
     for field in LIFECYCLE_FIELDS:
         if field not in data["lifecycle"]:
             err(f"lifecycle block missing `{field}`")
+
+    if expected is not None:
+        for field, catalog_field in (
+            ("method", "install_type"),
+            ("command", "verified_command"),
+        ):
+            value = expected.get(catalog_field)
+            if not stated(value):
+                err(f"catalog entry has no `{catalog_field}` to bind install.{field}")
+            elif data["install"].get(field) != value:
+                err(
+                    f"install.{field} {data['install'].get(field)!r} does not "
+                    f"match catalog value {value!r}"
+                )
 
     binary = data["binary_gates"]
     missing = set(BINARY_GATES) - set(binary)
@@ -172,7 +205,7 @@ def validate_entry(data: dict, catalog_ids: set[str]) -> list[str]:
         if not stated(gate.get("evidence")):
             err(f"gate `{name}` has no evidence")
         # A gate that is not passing must say what would change that. Without
-        # it a rejection is a dead end rather than a work item.
+        # it the finding is a label rather than an actionable work item.
         if status in {"fail", "unknown"} and not stated(gate.get("resolves_by")):
             err(f"gate `{name}` is {status} but has no `resolves_by`")
 
@@ -227,7 +260,7 @@ def validate_entry(data: dict, catalog_ids: set[str]) -> list[str]:
                 )
 
     # Cross-check: unmeasured cost scores 0 and must also fail measurability.
-    # Otherwise an entry could quietly claim an unmeasured tool is admissible.
+    # Otherwise the descriptive status would contradict its own measurements.
     token_score = scored.get("token_efficiency", {}).get("score")
     measurability = binary.get("measurability", {}).get("status")
     if token_score == 0 and measurability == "pass":
@@ -247,7 +280,7 @@ def validate_entry(data: dict, catalog_ids: set[str]) -> list[str]:
     return errors
 
 
-def load_catalog_ids() -> set[str]:
+def load_catalog() -> dict[str, dict]:
     try:
         data = json.loads(CATALOG.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
@@ -257,12 +290,13 @@ def load_catalog_ids() -> set[str]:
         raise RegistryError("catalog `resources` must be a list")
     # Same rule as everywhere else in this file: a malformed catalog is bad
     # input and must say so, not surface as a bare KeyError traceback.
-    ids = set()
+    catalog = {}
     for index, entry in enumerate(resources):
-        if not isinstance(entry, dict) or not entry.get("id"):
+        entry_id = entry.get("id") if isinstance(entry, dict) else None
+        if not isinstance(entry_id, str) or not SAFE_RESOURCE_ID.fullmatch(entry_id):
             raise RegistryError(f"catalog resource #{index} has no usable `id`")
-        ids.add(entry["id"])
-    return ids
+        catalog[entry_id] = entry
+    return catalog
 
 
 def registry_files(entry_id: str | None) -> list[Path]:
@@ -304,7 +338,7 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        catalog_ids = load_catalog_ids()
+        catalog = load_catalog()
         paths = registry_files(args.id)
     except RegistryError as error:
         print(f"validate-registry: {error}", file=sys.stderr)
@@ -332,7 +366,7 @@ def main() -> int:
         # CI gate, where a traceback reads as broken tooling rather than as bad
         # input.
         try:
-            errors = validate_entry(data, catalog_ids)
+            errors = validate_entry(data, catalog)
         except Exception as error:  # noqa: BLE001 - diagnostic of last resort
             errors = [f"{path.name}: could not be validated: {error!r}"]
         all_errors.extend(errors)

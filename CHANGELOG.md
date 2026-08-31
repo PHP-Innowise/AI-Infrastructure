@@ -48,10 +48,13 @@ edition's own files remain in that edition's changelog.
     Four are **scored** 0-5. They summarise as `clear`, `open_questions`, or
     `known_risks`; `unknown` is reported as its own state rather than folded
     into `clear`, because absence of evidence is not evidence of safety.
-  - The status is stored for review but never trusted. The validator
-    recomputes it from the gates and fails when the two disagree, so a stored
-    `clear` cannot outrank a failing gate. The cross-check runs both ways - a
-    status may be neither kinder nor graver than its gates.
+  - The status is stored for review but never trusted. Both the validator and
+    selector recompute it from the gates and bind registry identity plus install
+    method/guidance to the selected catalog entry before a snapshot is written,
+    so a copied or forged `clear` cannot outrank or describe different evidence.
+    Resource ids are filename-safe and cannot escape the registry directory.
+    The status cross-check runs both ways - it may be neither kinder nor graver
+    than its gates.
   - `.kit3-manifest.json` carries the status into the client project under
     `review`, so what review found is visible in a diff long after the
     terminal output is gone. It also records `install_method`,
@@ -59,7 +62,10 @@ edition's own files remain in that edition's changelog.
     of its risk - `curl | bash` is not `git clone` - and an audit trail that
     answers "what" but not "how" leaves that in terminal scrollback. The field
     is `guidance`, not `command`, because the tool knows what it proposed and
-    not what a human actually ran.
+    not what a human actually ran. Existing manifests are validated as schema-1
+    `open-source-kit` objects. A held target-directory descriptor plus an atomic
+    no-follow replacement prevents symlinks, ancestor swaps and hard links from
+    redirecting the audit write or changing another inode.
   - `intersection_map` is mandatory and may not be empty. The hidden cost of
     Kit 3 is not context, it is two systems doing one job, and an entry with
     no intersection analysis is unexamined whatever its gates say. Each row is
@@ -71,22 +77,20 @@ edition's own files remain in that edition's changelog.
     recorded in `trust_signals.disqualified_signals` as findings, never scored:
     an implausible count is evidence the signal is fake, not that the code is.
   - Two worked entries, both `known_risks` on recorded evidence rather than
-    taste. `graphify`'s PreToolUse hook occupies the same interception point
-    as `local-context.sh` with no precedence resolution recorded, and it
-    duplicates the Local Context Engine's retrieval job. `ohmyclaude`'s
+    taste. `graphify` duplicates the Local Context Engine's retrieval job, but
+    its prior hook-collision finding was wrong: `local-context.sh` runs at
+    `SessionStart`, and the only shared matcher is Graphify's advisory Bash hook
+    alongside `bash-validator.sh`. `ohmyclaude`'s
     19-agent self-orchestrating architecture is what `subagent-gate.sh`,
     `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` and the denied
     `Agent(Explore|Plan|general-purpose)` entries refuse by construction - it
     will not run under our accelerator without an explicit roster-whitelist
     decision. Both also carry unresolved `measurability` and
     `maintenance_ownership`.
-  - 38 tests cover all three status paths and every enforcement property,
-    including four defects found by adversarial probing before release: a
-    malformed gate crashed the validator with `AttributeError` instead of
-    reporting it (a traceback in CI reads as broken tooling rather than as bad
-    input); `score: true` passed the 0-5 check because `bool` subclasses `int`;
-    and whitespace-only `evidence`, `resolves_by` and `intersection_map`
-    fields satisfied a truthiness test while committing a reviewer to nothing.
+  - 81 focused tests (42 registry, 39 selector) cover all three status paths,
+    registry/catalog identity and install binding, manifest schema and filesystem
+    boundaries, and the earlier malformed-gate, boolean-score,
+    whitespace-evidence and pin-retention regressions.
 
 - **`document_links`, a reverse index from source path to the documents that
   cite it, with `context.py links` and `retrieve --path` (roadmap H4-02,

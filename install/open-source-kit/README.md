@@ -61,7 +61,7 @@ Expect, per entry:
 ```
 KNOWN_RISKS   	graphify      	Graphify-Labs/graphify
   tier 3, default disabled, pinned_ref NONE
-  risks found:    collisions, maintenance_ownership, measurability
+  risks found:    maintenance_ownership, measurability
   open questions: data_egress, pinning, uninstall, auto_update
   scores:         automation_depth=5, token_efficiency=0, integration_coverage=5, trust_signals=2
   intersections:  3 recorded
@@ -103,7 +103,7 @@ PY
 python3 scripts/validate_registry.py --check ; echo "exit=$?"
 ```
 
-Expect a refusal:
+Expect validation to fail:
 
 ```
 INVALID	1 problem(s) across 2 entr(ies)
@@ -149,6 +149,10 @@ The `!!` line names what review found. A pick with a registry entry shows its
 status instead — try `--select graphify --dry-run` for `KNOWN RISKS recorded`.
 It informs; it never refuses. The same fact is written into the manifest under
 `review`, so it survives the terminal.
+
+A malformed or mismatched registry file is different: it is invalid audit
+evidence, so the selector fails before writing anything. Every valid status
+remains advisory.
 
 Confirm nothing was written:
 
@@ -230,6 +234,11 @@ it answers *how* as well as *what*:
 registry entry is written later, an older manifest keeps saying `reviewed:
 false`. Re-running the selector for that id updates it.
 
+An existing manifest must remain a schema-1 `open-source-kit` JSON object with
+object-valued entries. The selector holds the opened target directory and uses
+an atomic no-follow replacement, so symlinks, directory swaps, and hard links
+cannot redirect the audit write or mutate another file.
+
 ### 8. Failure modes behave
 
 ```bash
@@ -259,7 +268,7 @@ A pin already in the manifest survives a later selection that carries none —
 python3 -m unittest tests.test_registry tests.test_open_source_kit
 ```
 
-Expect `Ran 52 tests ... OK` — 38 registry, 14 catalog/selector.
+Expect `Ran 81 tests ... OK` — 42 registry, 39 catalog/selector.
 
 ### 10. Clean up
 
@@ -271,8 +280,8 @@ rm -rf /tmp/kit3-demo /tmp/graphify.backup.json
 
 ## The gates
 
-Twelve per candidate. **Eight binary** — one failure rejects the tool however
-good it is:
+Twelve per candidate. **Eight binary** — one failure produces `known_risks`,
+however useful the tool is:
 
 `license` · `data_egress` · `pinning` · `uninstall` · `collisions` ·
 `auto_update` · `maintenance_ownership` · `measurability`
@@ -334,8 +343,8 @@ Beyond the gates:
 - `tier` — 1 (considered for every engagement), 2 (situational), 3 (specialist,
   needs a specific reason).
 
-A gate that is `fail` or `unknown` must carry `resolves_by`, so a rejection is a
-work item rather than a dead end.
+A gate that is `fail` or `unknown` must carry `resolves_by`, so every finding has
+a resolution path rather than ending at a label.
 
 ### Star count is not a trust signal
 
@@ -360,7 +369,7 @@ An inflated count is evidence the *signal* is fake, not that the *code* is —
 so it is recorded under `trust_signals.disqualified_signals` as a finding and
 never scored. These four are catalogued as `HIGH RISK` by explicit decision;
 `multica-ai/andrej-karpathy-skills` and `affaan-m/ecc` remain excluded
-entirely, `ecc` additionally for the same architectural conflict that rejects
+entirely, `ecc` additionally for the same architectural conflict recorded for
 `ohmyclaude`.
 
 Replaceable signals, used instead: commit freshness, bus factor, issue
@@ -391,7 +400,8 @@ Testing is above; this is the actual engagement flow.
 1. **Read what review found.** `validate_registry.py --id <tool>`. `clear` means
    nothing outstanding. `known_risks` and `open_questions` name what is
    unresolved and what would close it — decide whether to close it first or to
-   proceed knowingly. Nothing stops you; the choice is recorded either way.
+   proceed knowingly. No valid status stops you; the choice is recorded either
+   way.
 2. **Dry run** against the client project, read every risk note.
 3. **Record** the selection — writes `.kit3-manifest.json`.
 4. **Install by hand.** Run the printed command yourself, after reading the

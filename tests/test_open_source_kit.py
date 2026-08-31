@@ -3,12 +3,17 @@
 
 from __future__ import annotations
 
+import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+
+from scripts import install_open_source_kit as selector
 
 ROOT = Path(__file__).resolve().parents[1]
 SELECTOR = ROOT / "scripts" / "install_open_source_kit.py"
@@ -36,6 +41,7 @@ KNOWN_INSTALL_TYPES = {
     "mcp-server",
     "reference-clone",
     "npx-cli",
+    "python-cli",
     "discovery-index",
 }
 
@@ -235,7 +241,7 @@ class SelectorCliTests(unittest.TestCase):
         otherwise the answer lives in terminal scrollback and is gone.
         """
         with tempfile.TemporaryDirectory() as target:
-            run("--select", "caveman,grillme", "--target", target)
+            run("--select", "caveman,grillme,graphify", "--target", target)
             entries = json.loads(
                 (Path(target) / ".kit3-manifest.json").read_text()
             )["entries"]
@@ -243,6 +249,9 @@ class SelectorCliTests(unittest.TestCase):
             self.assertIn("npx", entries["caveman"]["install_guidance"])
             self.assertEqual(entries["grillme"]["install_method"], "reference-clone")
             self.assertIn("git clone", entries["grillme"]["install_guidance"])
+            self.assertEqual(entries["graphify"]["install_method"], "python-cli")
+            self.assertIn("graphifyy", entries["graphify"]["install_guidance"])
+            self.assertNotIn("npx", entries["graphify"]["install_guidance"])
 
     def test_manifest_carries_the_risk_notes(self) -> None:
         with tempfile.TemporaryDirectory() as target:
@@ -288,6 +297,305 @@ class SelectorCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as target:
             result = run("--select", "graphify", "--target", target, "--dry-run")
             self.assertIn("KNOWN RISKS", result.stdout)
+
+    def test_invalid_manifest_structure_fails_without_changes(self) -> None:
+        cases = (
+            ([], "JSON object"),
+            ({"schema_version": 1, "kit": "open-source-kit", "entries": []}, "entries"),
+            (
+                {
+                    "schema_version": 1,
+                    "kit": "open-source-kit",
+                    "entries": {"obra-superpowers": []},
+                },
+                "obra-superpowers",
+            ),
+        )
+        for data, expected in cases:
+            with self.subTest(data=data), tempfile.TemporaryDirectory() as target:
+                path = Path(target) / selector.MANIFEST_NAME
+                original = json.dumps(data)
+                path.write_text(original, encoding="utf-8")
+
+                result = run("--select", "obra-superpowers", "--target", target)
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(expected, result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertNotIn("SELECTED", result.stdout)
+                self.assertEqual(path.read_text(encoding="utf-8"), original)
+
+    def test_invalid_manifest_identity_fails_without_changes(self) -> None:
+        cases = (
+            ({"schema_version": 99, "kit": "open-source-kit", "entries": {}}, "schema_version"),
+            ({"schema_version": True, "kit": "open-source-kit", "entries": {}}, "schema_version"),
+            ({"schema_version": 1, "kit": "different-tool", "entries": {}}, "kit"),
+        )
+        for data, expected in cases:
+            with self.subTest(data=data), tempfile.TemporaryDirectory() as target:
+                path = Path(target) / selector.MANIFEST_NAME
+                original = json.dumps(data)
+                path.write_text(original, encoding="utf-8")
+
+                result = run("--select", "obra-superpowers", "--target", target)
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(expected, result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertNotIn("WROTE", result.stdout)
+                self.assertEqual(path.read_text(encoding="utf-8"), original)
+
+    def test_registry_status_is_recomputed_before_manifest_snapshot(self) -> None:
+        resource = next(
+            entry
+            for entry in json.loads(CATALOG.read_text(encoding="utf-8"))["resources"]
+            if entry["id"] == "graphify"
+        )
+        registry = json.loads(
+            (selector.REGISTRY_DIR / "graphify.json").read_text(encoding="utf-8")
+        )
+        registry["status"] = "clear"
+
+        with tempfile.TemporaryDirectory() as registry_dir:
+            Path(registry_dir, "graphify.json").write_text(
+                json.dumps(registry), encoding="utf-8"
+            )
+            manifest = {"entries": {}}
+            with mock.patch.object(selector, "REGISTRY_DIR", Path(registry_dir)):
+                with self.assertRaises(selector.KitError):
+                    selector.apply_selection(manifest, [resource], {}, "2026-08-31")
+            self.assertEqual(manifest, {"entries": {}})
+
+    def test_registry_identity_is_bound_to_the_selected_resource(self) -> None:
+        resource = next(
+            entry
+            for entry in json.loads(CATALOG.read_text(encoding="utf-8"))["resources"]
+            if entry["id"] == "graphify"
+        )
+        original = json.loads(
+            (selector.REGISTRY_DIR / "graphify.json").read_text(encoding="utf-8")
+        )
+        for field in ("id", "catalog_id", "name", "url"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as registry_dir:
+                registry = dict(original)
+                registry[field] = "different-resource"
+                Path(registry_dir, "graphify.json").write_text(
+                    json.dumps(registry), encoding="utf-8"
+                )
+                with mock.patch.object(selector, "REGISTRY_DIR", Path(registry_dir)):
+                    with self.assertRaises(selector.KitError):
+                        selector.apply_selection(
+                            {"entries": {}}, [resource], {}, "2026-08-31"
+                        )
+
+    def test_registry_install_path_is_bound_to_the_selected_resource(self) -> None:
+        resource = next(
+            entry
+            for entry in json.loads(CATALOG.read_text(encoding="utf-8"))["resources"]
+            if entry["id"] == "graphify"
+        )
+        for field, value in (
+            ("install_type", "npx-cli"),
+            ("verified_command", "run a different installer"),
+        ):
+            with self.subTest(field=field):
+                changed = dict(resource)
+                changed[field] = value
+                with self.assertRaises(selector.KitError):
+                    selector.apply_selection(
+                        {"entries": {}}, [changed], {}, "2026-08-31"
+                    )
+
+    def test_registry_path_cannot_escape_through_a_resource_id(self) -> None:
+        resource = next(
+            entry
+            for entry in json.loads(CATALOG.read_text(encoding="utf-8"))["resources"]
+            if entry["id"] == "graphify"
+        )
+        registry = json.loads(
+            (selector.REGISTRY_DIR / "graphify.json").read_text(encoding="utf-8")
+        )
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            registry_dir = root / "registry"
+            registry_dir.mkdir()
+            forged_id = "../forged"
+            forged_resource = dict(resource, id=forged_id)
+            registry["id"] = forged_id
+            registry["catalog_id"] = forged_id
+            (root / "forged.json").write_text(json.dumps(registry), encoding="utf-8")
+
+            with mock.patch.object(selector, "REGISTRY_DIR", registry_dir):
+                with self.assertRaises(selector.KitError):
+                    selector.registry_status(forged_resource)
+
+    def test_malformed_registry_entry_fails_as_a_kit_error(self) -> None:
+        resource = next(
+            entry
+            for entry in json.loads(CATALOG.read_text(encoding="utf-8"))["resources"]
+            if entry["id"] == "graphify"
+        )
+        for registry in ([], None, {"status": "clear"}):
+            with self.subTest(registry=registry), tempfile.TemporaryDirectory() as registry_dir:
+                Path(registry_dir, "graphify.json").write_text(
+                    json.dumps(registry), encoding="utf-8"
+                )
+                with mock.patch.object(selector, "REGISTRY_DIR", Path(registry_dir)):
+                    try:
+                        selector.apply_selection(
+                            {"entries": {}}, [resource], {}, "2026-08-31"
+                        )
+                    except Exception as error:  # assertion below checks the boundary type
+                        self.assertIsInstance(error, selector.KitError)
+                    else:
+                        self.fail("malformed registry entry was accepted")
+
+    def test_manifest_symlink_is_rejected_without_touching_its_target(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            target = root / "target"
+            target.mkdir()
+            victim = root / "victim.json"
+            original = '{"outside": true}\n'
+            victim.write_text(original, encoding="utf-8")
+            manifest_path = target / selector.MANIFEST_NAME
+            manifest_path.symlink_to(victim)
+
+            result = run("--select", "obra-superpowers", "--target", str(target))
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("symlink", result.stderr)
+            self.assertTrue(manifest_path.is_symlink())
+            self.assertEqual(victim.read_text(encoding="utf-8"), original)
+
+    def test_write_boundary_rejects_a_symlink_created_after_load(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            manifest_path = root / selector.MANIFEST_NAME
+            manifest = selector.load_manifest(manifest_path)
+            victim = root / "victim.json"
+            original = '{"outside": true}\n'
+            victim.write_text(original, encoding="utf-8")
+            manifest_path.symlink_to(victim)
+            writer = getattr(selector, "write_manifest", None)
+
+            self.assertIsNotNone(writer, "selector has no safe write boundary")
+            with self.assertRaises(selector.KitError):
+                writer(manifest_path, manifest)
+            self.assertEqual(victim.read_text(encoding="utf-8"), original)
+
+    def test_target_directory_swap_cannot_redirect_the_manifest_write(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            target = root / "target"
+            moved_target = root / "moved-target"
+            outside = root / "outside"
+            target.mkdir()
+            outside.mkdir()
+            apply_selection = selector.apply_selection
+
+            def swap_target(*args, **kwargs):
+                target.rename(moved_target)
+                target.symlink_to(outside, target_is_directory=True)
+                return apply_selection(*args, **kwargs)
+
+            argv = [
+                str(selector.__file__),
+                "--select",
+                "obra-superpowers",
+                "--target",
+                str(target),
+            ]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(selector, "apply_selection", side_effect=swap_target),
+                mock.patch("sys.stdout", new=io.StringIO()),
+                mock.patch("sys.stderr", new=io.StringIO()),
+            ):
+                result = selector.main()
+
+            self.assertEqual(result, 1)
+            self.assertFalse((outside / selector.MANIFEST_NAME).exists())
+
+    def test_ancestor_swap_before_open_cannot_redirect_the_manifest_write(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            ancestor = root / "ancestor"
+            target = ancestor / "target"
+            moved_ancestor = root / "moved-ancestor"
+            outside = root / "outside"
+            outside_target = outside / "target"
+            target.mkdir(parents=True)
+            outside_target.mkdir(parents=True)
+            open_target_directory = selector.open_target_directory
+
+            def swap_ancestor(path):
+                ancestor.rename(moved_ancestor)
+                ancestor.symlink_to(outside, target_is_directory=True)
+                return open_target_directory(path)
+
+            argv = [
+                str(selector.__file__),
+                "--select",
+                "obra-superpowers",
+                "--target",
+                str(target),
+            ]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(
+                    selector,
+                    "open_target_directory",
+                    side_effect=swap_ancestor,
+                ),
+                mock.patch("sys.stdout", new=io.StringIO()),
+                mock.patch("sys.stderr", new=io.StringIO()),
+            ):
+                result = selector.main()
+
+            self.assertEqual(result, 1)
+            self.assertFalse((outside_target / selector.MANIFEST_NAME).exists())
+
+    def test_existing_ancestor_symlink_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            real_target = root / "real" / "target"
+            alias = root / "alias"
+            real_target.mkdir(parents=True)
+            alias.symlink_to(root / "real", target_is_directory=True)
+
+            result = run(
+                "--select",
+                "obra-superpowers",
+                "--target",
+                str(alias / "target"),
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertFalse((real_target / selector.MANIFEST_NAME).exists())
+
+    def test_hard_linked_manifest_does_not_overwrite_the_other_link(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            target = root / "target"
+            target.mkdir()
+            victim = root / "victim.json"
+            original = json.dumps(
+                {"schema_version": 1, "kit": "open-source-kit", "entries": {}},
+                sort_keys=True,
+            ) + "\n"
+            victim.write_text(original, encoding="utf-8")
+            manifest_path = target / selector.MANIFEST_NAME
+            os.link(victim, manifest_path)
+
+            result = run("--select", "obra-superpowers", "--target", str(target))
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(victim.read_text(encoding="utf-8"), original)
+            self.assertIn(
+                "obra-superpowers",
+                json.loads(manifest_path.read_text(encoding="utf-8"))["entries"],
+            )
 
 
 if __name__ == "__main__":

@@ -196,7 +196,8 @@
       "category": "skills",
       "url": "https://github.com/Graphify-Labs/graphify",
       "description": "Parses a codebase (code, docs, SQL schemas, configs, PDFs) into a local, deterministic knowledge graph via tree-sitter AST parsing; a /graphify skill for Claude Code, Cursor, Codex, and Gemini CLI, no vector store.",
-      "install_type": "npx-cli",
+      "install_type": "python-cli",
+      "verified_command": "Install the CLI with `uv tool install graphifyy` (or `pipx install graphifyy`), then run `graphify install --project`; add `--strict` only after reviewing the hook behavior.",
       "automation_depth": "orchestrated",
       "token_footprint": "mixed - large per-query token reduction claimed after an expensive one-time graph build (hours) plus incremental rebuilds (~10 min)",
       "tool_compatibility": ["claude-code", "cursor", "codex"],
@@ -205,7 +206,7 @@
       "reviewed_date": "2026-08-31",
       "pinned_ref": null,
       "trust_flags": ["implausible star count: 112,842 stars / 10,980 forks at ~5 months old (created 2026-04-03, verified via GitHub API 2026-08-31) - matches the fake-star pattern in arXiv 2412.13459; previously excluded from this catalog for this exact reason"],
-      "risk_notes": "HIGH RISK - re-added after prior exclusion for a statistically implausible star count; flagged, not vetted for trust. Its strict-mode install adds a PreToolUse hook that intercepts file-search tool calls - test interaction with our own local-context.sh/subagent-gate.sh on a throwaway branch before rollout. Functionally overlaps the Local Context Engine's FTS5/BM25 retrieval - run the same query set through both before treating both as necessary. Pin to an exact commit SHA; do not track a floating branch."
+      "risk_notes": "HIGH RISK - re-added after prior exclusion for a statistically implausible star count; flagged, not vetted for trust. Its Claude integration adds Bash|Grep and Read|Glob PreToolUse hooks; test the Bash hook alongside our bash-validator.sh on a throwaway branch before rollout. Functionally overlaps the Local Context Engine's FTS5/BM25 retrieval - run the same query set through both before treating both as necessary. Pin to an exact commit SHA; do not track a floating branch."
     },
     {
       "id": "caveman",
@@ -248,6 +249,7 @@
       "url": "https://github.com/Yeachan-Heo/oh-my-claudecode",
       "description": "Multi-agent orchestration plugin advertising 19 specialized agents and 39 skills with an 'Ultrawork' mode for maximized parallel/automatic task execution.",
       "install_type": "claude-marketplace",
+      "verified_command": "Inside a Claude Code session: `/plugin marketplace add Yeachan-Heo/oh-my-claudecode`, then install the specific plugin(s) named in the repo README. Confirm the repo identity first - at least seven distinct 'oh-my-claude*' repositories exist.",
       "automation_depth": "orchestrated",
       "token_footprint": "always-loaded - 19 agent + 39 skill descriptors add fixed routing overhead every session regardless of use; measure before adopting (scripts/context_budget.py)",
       "tool_compatibility": ["claude-code"],
