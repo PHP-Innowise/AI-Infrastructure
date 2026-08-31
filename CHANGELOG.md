@@ -566,6 +566,13 @@ edition's own files remain in that edition's changelog.
 
 ### Fixed
 
+- **Prompt distillation now preserves terms that exist only in local
+  episodes.** The prompt hook previously ranked words against indexed files
+  alone, so a natural prompt containing one repository word plus a distinctive
+  episode-only phrase could discard the phrase before the episode search ran.
+  Distillation now measures the combined searchable corpus, and an end-to-end
+  `record` -> `refresh --query` regression covers the real prompt path.
+
 - **The memory lifecycle now passes end to end through the public CLI and a
   clean installed runtime.** A governed finding can move from observed to
   verified and resolved, be promoted automatically into a source-digested

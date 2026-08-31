@@ -956,6 +956,34 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
         )
         self.assertNotIn("scarlet protocol", json.dumps(manifest))
 
+    def test_prompt_refresh_keeps_terms_found_only_in_local_episodes(self) -> None:
+        self.start("TASK-PROMPT-EPISODE")
+        self.repository.joinpath("specs/developing.md").write_text(
+            "# Developing\n\nDeveloping guidance for this repository.\n",
+            encoding="utf-8",
+        )
+        recorded = self.run_cli(
+            "record",
+            "--summary", "Amber viaduct rollout",
+            "--outcome", "The local episode completed cleanly.",
+            "--json",
+        )
+        self.assertEqual(0, recorded.returncode, recorded.stderr)
+
+        refreshed = self.run_cli(
+            "refresh", "--query", "developing amber viaduct",
+            "--task-id", "TASK-PROMPT-EPISODE", "--ephemeral",
+            "--host", "codex", "--gate", "enforce", "--json",
+        )
+
+        self.assertEqual(0, refreshed.returncode, refreshed.stderr)
+        capsule = json.loads(refreshed.stdout)["capsule"]
+        self.assertIsNotNone(capsule, refreshed.stdout)
+        manifest = self.latest_manifest(capsule)
+        self.assertEqual("retrieve", manifest["gate"]["decision"], manifest)
+        self.assertEqual(1, manifest["local_episode_count"], manifest)
+        self.assertEqual("Amber viaduct rollout", capsule["episodic"][0]["summary"])
+
     def test_local_episode_cannot_bypass_the_target_budget(self) -> None:
         self.start("TASK-GATE-EPISODE-BUDGET")
         recorded = self.run_cli(

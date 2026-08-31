@@ -897,10 +897,11 @@ def distill_capsule_query(connection: sqlite3.Connection, prompt: str) -> str:
 
     The read hook used to keep the first 24 words of the prompt, so a long
     request whose actual subject arrives at the end retrieved on its preamble.
-    Instead the whole prompt is tokenized, terms the index has never seen or
-    that match most of the corpus are dropped — the same adaptive stop-word
-    rule retrieval itself applies — and the rarest terms win the slots. Rarity
-    in this repository's own index decides relevance, not position.
+    Instead the whole prompt is tokenized, terms the searchable corpus has
+    never seen or that match most of it are dropped — the same adaptive
+    stop-word rule retrieval itself applies — and the rarest terms win the
+    slots. Rarity in this repository's own index decides relevance, not
+    position.
 
     The fallback ladder mirrors ``informative_tokens``: rare terms first, any
     indexed term next, and the prompt head as a last resort, so a prompt made
@@ -921,12 +922,23 @@ def distill_capsule_query(connection: sqlite3.Connection, prompt: str) -> str:
         # ("Search query must contain a word") instead of inventing one here.
         return prompt
     try:
-        total = connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+        document_total, episode_total = connection.execute(
+            "SELECT (SELECT COUNT(*) FROM documents), "
+            "(SELECT COUNT(*) FROM episodes)"
+        ).fetchone()
+        total = document_total + episode_total
     except sqlite3.Error:
         total = 0
     if not total:
         return " ".join(tokens[:CAPSULE_PROMPT_TERM_LIMIT])
     frequencies = token_document_frequencies(connection, tokens)
+    if episode_total:
+        for token in tokens:
+            episode_count = connection.execute(
+                "SELECT COUNT(*) FROM episodes WHERE episodes MATCH ?",
+                (f'"{token}"',),
+            ).fetchone()[0]
+            frequencies[token] = (frequencies.get(token) or 0) + episode_count
     ranked = [
         (position, token, frequencies.get(token))
         for position, token in enumerate(tokens)

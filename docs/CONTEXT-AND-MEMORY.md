@@ -1159,10 +1159,11 @@ capsule with `--ephemeral`, avoiding the second index pass a separate
 `retrieve` would run. A capsule failure is a warning; the layer refresh stands.
 
 The hook passes the prompt as-is; `refresh` distills it into the retrieval
-query itself. The whole prompt is tokenized, terms the index has never seen or
-that match most of the corpus are dropped, and the rarest terms fill a bounded
-query — so a long request whose actual subject arrives at the end no longer
-retrieves on its preamble. The refresh report also carries per-phase wall-clock
+query itself. The whole prompt is tokenized, terms neither indexed documents
+nor local episodes have seen or that match most of that combined searchable
+corpus are dropped, and the rarest terms fill a bounded query — so a long
+request whose actual subject arrives at the end no longer retrieves on its
+preamble. The refresh report also carries per-phase wall-clock
 durations (`stat`, `index`, `retrieval`) so an operator can see which side of
 the work is approaching the hook budget.
 
