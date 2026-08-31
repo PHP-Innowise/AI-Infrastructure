@@ -60,13 +60,20 @@ AGENT=$(extract_string agent_type)
 [ -z "$AGENT" ] && exit 0
 
 # Release the write-agent lock this agent holds, whichever host took it.
-LOCK_ROOT=$(git -C "$ROOT_DIR" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$ROOT_DIR")
-LOCK_KEY=$(printf '%s' "$LOCK_ROOT" | cksum | cut -d' ' -f1)
-for lock in "/tmp/claude-write-agent-lock-$LOCK_KEY" "/tmp/cursor-write-agent-lock-$LOCK_KEY"; do
-  if [ -f "$lock" ] && [ "$(cat "$lock" 2>/dev/null)" = "$AGENT" ]; then
-    rm -f "$lock" 2>/dev/null
-  fi
-done
+LOCK_DIR="${SUBAGENT_WRITE_LOCK_DIR:-/tmp}"
+case "$LOCK_DIR" in
+  /*)
+    if [ -d "$LOCK_DIR" ] && [ -w "$LOCK_DIR" ] && [ -x "$LOCK_DIR" ]; then
+      LOCK_ROOT=$(git -C "$ROOT_DIR" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$ROOT_DIR")
+      LOCK_KEY=$(printf '%s' "$LOCK_ROOT" | cksum | cut -d' ' -f1)
+      for lock in "$LOCK_DIR/claude-write-agent-lock-$LOCK_KEY" "$LOCK_DIR/cursor-write-agent-lock-$LOCK_KEY"; do
+        if [ -f "$lock" ] && [ "$(cat "$lock" 2>/dev/null)" = "$AGENT" ]; then
+          rm -f "$lock" 2>/dev/null
+        fi
+      done
+    fi
+    ;;
+esac
 
 command -v python3 > /dev/null 2>&1 || exit 0
 [ -f "$CONTEXT_CLI" ] || exit 0

@@ -225,8 +225,13 @@ This policy is shared across editions. The same accelerator is mirrored for **Cl
 - MUST use `memory-bank/` only for durable, reusable project context: verified constraints, conventions, decisions, integration contracts, operational lessons, and stable domain knowledge.
 - MUST keep active tasks, handoffs, findings, bugs, incidents, decisions, events,
   retrieval manifests, and promotion proposals in `project-brain/`, not Memory Bank.
-- MUST apply promotion only after explicit human review; agents may propose but
-  MUST NOT self-approve. Approved application records source and destination revisions.
+- MUST honor the configured promotion mode. With `automatic_promotion: true`,
+  only eligible verified terminal records may be applied unattended and MUST
+  remain explicit about the missing review (`reviewer: null`, `review_mode:
+  automatic`, `outcome: approved-without-review`, and the `auto-promoted` tag).
+  With automatic promotion disabled, agents may propose but MUST NOT
+  self-approve; application requires an independent human review. Every
+  application records source and destination revisions.
 - MUST keep transient plans, unfinished reasoning, and command output out of both shared stores.
 - MUST mint each new chunk ID as `MEM-YYYYMMDD-xxxxxxxx` (today's UTC date plus eight lowercase hex characters) and regenerate `memory-bank/INDEX.md` with `python3 memory-bank/scripts/context.py reindex-bank` instead of hand-editing index rows or touching the retired `.memory-counter`.
 - MUST keep each chunk cohesive, source-backed, dated, tagged, scoped, and explicit about verification status.

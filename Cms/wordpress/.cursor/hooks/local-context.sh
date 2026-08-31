@@ -176,11 +176,11 @@ CAPSULE_STATUS=3
 if command -v python3 > /dev/null 2>&1 && [ -f "$CONTEXT_CLI" ] && [ -n "$CAPSULE_TASK_ID" ]; then
   if command -v timeout > /dev/null 2>&1; then
     CAPSULE=$(timeout "$CAPSULE_BUDGET_SECONDS" python3 "$CONTEXT_CLI" hook-context \
-      --task-id "$CAPSULE_TASK_ID" 2>/dev/null)
+      --host cursor --task-id "$CAPSULE_TASK_ID" 2>/dev/null)
     CAPSULE_STATUS=$?
   else
     CAPSULE=$(python3 "$CONTEXT_CLI" hook-context \
-      --task-id "$CAPSULE_TASK_ID" 2>/dev/null)
+      --host cursor --task-id "$CAPSULE_TASK_ID" 2>/dev/null)
     CAPSULE_STATUS=$?
   fi
 fi

@@ -89,6 +89,7 @@ from context_retrieval import (
     refresh_health_retention,
     RETRIEVAL_GATE_DEFAULT,
     RETRIEVAL_GATE_MODES,
+    RETRIEVAL_HOSTS,
     query_tokens,
     required_coverage,
     retrieve,
@@ -2066,6 +2067,8 @@ def assemble_capsule(
     phase_seconds: Optional[dict[str, object]] = None,
     gate_mode: str = RETRIEVAL_GATE_DEFAULT,
     paths: Optional[list[str]] = None,
+    host: str = "cli",
+    entry_point: str = "retrieve",
 ) -> dict[str, object]:
     """Build the layered capsule for one request.
 
@@ -2109,6 +2112,9 @@ def assemble_capsule(
     reject_capsule_privacy("Task Capsule request", [query])
     binding = governed_binding(connection, task_id)
     request_query = build_capsule_query(query, None)
+    local_episodes = search_episodes(
+        connection, request_query, CAPSULE_LAYER_LIMITS["episodic"]
+    )
     result = retrieve(
         connection,
         repository,
@@ -2120,19 +2126,10 @@ def assemble_capsule(
         phase_seconds=phase_seconds,
         gate_mode=gate_mode,
         paths=paths,
+        host=host,
+        entry_point=entry_point,
+        local_episodes=local_episodes,
     )
-    # `retrieve()` already ranked, filtered, budgeted and recorded every
-    # indexed episodic document. What it cannot see are the local replay
-    # episodes, which live in the disposable database rather than in the
-    # document index, so only those are appended here.
-    governed_episodic = result.get("episodic") or []
-    episodic_candidates = [
-        *governed_episodic,
-        *search_episodes(
-            connection, request_query, CAPSULE_LAYER_LIMITS["episodic"]
-        ),
-    ]
-    result["episodic"] = episodic_candidates[:CAPSULE_LAYER_LIMITS["episodic"]]
     deduplicate_capsule_layers(result)
     result["query_source"] = query_source
     # The print tail dereferences result["warnings"]; retrieve() has no such key.
@@ -2197,6 +2194,7 @@ def assemble_hook_context(
     mode: str,
     task_id: str,
     gate_mode: str = RETRIEVAL_GATE_DEFAULT,
+    host: str = "cli",
 ) -> Optional[dict[str, object]]:
     """Return a governed capsule or a sanitized pre-provision warming capsule."""
     task_id = validate_task_id(task_id)
@@ -2213,6 +2211,8 @@ def assemble_hook_context(
                 ephemeral=True,
                 query_source="task-id",
                 gate_mode=gate_mode,
+                host=host,
+                entry_point="hook-context",
             )
     else:
         try:
@@ -2233,6 +2233,8 @@ def assemble_hook_context(
                 ephemeral=True,
                 query_source=query_source,
                 gate_mode=gate_mode,
+                host=host,
+                entry_point="hook-context",
             )
 
     files, excluded = changed_paths(repository)
@@ -2509,20 +2511,39 @@ def retrieval_report(
     reasons: dict[str, int] = {}
     paths: dict[str, int] = {}
     sources: dict[str, int] = {}
+    hosts: dict[str, int] = {}
+    entry_points: dict[str, int] = {}
     gate_decisions: dict[str, int] = {}
     gate_skip_reasons: dict[str, int] = {}
+    gate_slices: dict[tuple[str, str, str, str, str], int] = {}
+    shadow_decided = 0
+    enforce_decided = 0
+    would_skip = 0
+    withheld = 0
+    no_match_counts: dict[str, int] = {}
+    token_series: dict[str, list[float]] = {}
     matches: dict[str, int] = {}
     top_candidate: list[float] = []
     top_delivered: list[float] = []
     phases: dict[str, list[float]] = {"stat": [], "index": [], "retrieval": []}
     empty_selection = 0
+    local_episode_count = 0
     versions: dict[str, int] = {}
 
     for manifest in manifests:
         version = str(manifest.get("schema_version"))
         versions[version] = versions.get(version, 0) + 1
         selected = manifest.get("selected") or []
-        if not selected:
+        manifest_episode_count = manifest.get("local_episode_count", 0)
+        if (
+            isinstance(manifest_episode_count, int)
+            and not isinstance(manifest_episode_count, bool)
+            and manifest_episode_count > 0
+        ):
+            local_episode_count += manifest_episode_count
+        else:
+            manifest_episode_count = 0
+        if not selected and not manifest_episode_count:
             empty_selection += 1
         best = None
         for item in selected:
@@ -2546,16 +2567,48 @@ def retrieval_report(
         source = manifest.get("query_source")
         if isinstance(source, str):
             sources[source] = sources.get(source, 0) + 1
+        host = manifest.get("host")
+        if isinstance(host, str):
+            hosts[host] = hosts.get(host, 0) + 1
+        entry_point = manifest.get("entry_point")
+        if isinstance(entry_point, str):
+            entry_points[entry_point] = entry_points.get(entry_point, 0) + 1
+        estimates = manifest.get("token_estimates")
+        if isinstance(estimates, dict):
+            for name, value in estimates.items():
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    token_series.setdefault(str(name), []).append(float(value))
         gate = manifest.get("gate")
         if isinstance(gate, dict):
             decision = str(gate.get("decision", "unknown"))
-            gate_decisions[decision] = gate_decisions.get(decision, 0) + 1
-            if decision == "skip":
-                reason = str(gate.get("reason", "unknown"))
-                gate_skip_reasons[reason] = gate_skip_reasons.get(reason, 0) + 1
+            gate_mode = str(gate.get("mode", "unknown"))
+            if gate_mode in ("shadow", "enforce"):
+                gate_decisions[decision] = gate_decisions.get(decision, 0) + 1
+                if gate_mode == "shadow":
+                    shadow_decided += 1
+                    if decision == "skip":
+                        would_skip += 1
+                else:
+                    enforce_decided += 1
+                    if decision == "skip":
+                        withheld += 1
+                slice_key = (
+                    gate_mode,
+                    decision,
+                    str(source or "unknown"),
+                    str(host or "unknown"),
+                    str(entry_point or "unknown"),
+                )
+                gate_slices[slice_key] = gate_slices.get(slice_key, 0) + 1
+                if decision == "skip":
+                    reason = str(gate.get("reason", "unknown"))
+                    gate_skip_reasons[reason] = gate_skip_reasons.get(reason, 0) + 1
             signal = (gate.get("signals") or {}).get("top_score")
             if isinstance(signal, (int, float)):
                 top_candidate.append(float(signal))
+            for layer in (gate.get("signals") or {}).get("no_match") or []:
+                if isinstance(layer, str):
+                    no_match_counts[layer] = no_match_counts.get(layer, 0) + 1
         timings = manifest.get("phase_seconds")
         if isinstance(timings, dict):
             for name in phases:
@@ -2568,7 +2621,10 @@ def retrieval_report(
         "turns": total,
         "schema_versions": dict(sorted(versions.items())),
         "query_source": dict(sorted(sources.items())),
+        "host": dict(sorted(hosts.items())),
+        "entry_point": dict(sorted(entry_points.items())),
         "empty_selection": empty_selection,
+        "local_episode_count": local_episode_count,
         # Membership counted from the manifest, which records the selection
         # before the capsule's character ladder may drop an item, so this is
         # an upper bound on what the model was actually shown.
@@ -2581,10 +2637,33 @@ def retrieval_report(
             "decided": gated,
             "decisions": dict(sorted(gate_decisions.items())),
             "skip_reasons": dict(sorted(gate_skip_reasons.items())),
-            "skip_rate": (
-                round(gate_decisions.get("skip", 0) / gated, 4) if gated else None
+            "shadow_decided": shadow_decided,
+            "would_skip": would_skip,
+            "would_skip_rate": (
+                round(would_skip / shadow_decided, 4) if shadow_decided else None
             ),
+            "enforce_decided": enforce_decided,
+            "withheld": withheld,
+            "withheld_rate": (
+                round(withheld / enforce_decided, 4) if enforce_decided else None
+            ),
+            "slices": [
+                {
+                    "mode": gate_mode,
+                    "decision": decision,
+                    "query_source": source,
+                    "host": host,
+                    "entry_point": entry_point,
+                    "turns": count,
+                }
+                for (gate_mode, decision, source, host, entry_point), count
+                in sorted(gate_slices.items())
+            ],
         },
+        "token_estimates": {
+            name: _percentiles(values) for name, values in sorted(token_series.items())
+        },
+        "no_match": dict(sorted(no_match_counts.items())),
         "top_candidate_score": _percentiles(top_candidate),
         "top_delivered_score": _percentiles(top_delivered),
         "phase_seconds": {name: _percentiles(values) for name, values in phases.items()},
@@ -2738,7 +2817,7 @@ def consolidation_counters(repository: Path, mode: str) -> dict[str, object]:
         counters["blocked"] = len(blocked)
         counters["applied"] = sum(
             1
-            for promotion in iter_promotions(repository)
+            for _, promotion in iter_promotions(repository)
             if promotion.get("status") == "applied"
         )
     except (BrainError, OSError, ValueError):
@@ -3435,13 +3514,12 @@ def changed_paths(repository: Path) -> tuple[list[str], list[str]]:
         git_output(repository, ["rev-parse", "--show-prefix"], "Git prefix probe")
     ).strip()
     runtime_owned = re.compile(
-        rf"^{re.escape(prefix)}project-brain/"
-        rf"({'|'.join(TURN_RUNTIME_DIRECTORIES)})/"
+        rf"^project-brain/({'|'.join(TURN_RUNTIME_DIRECTORIES)})/"
     )
     fields = git_output(
         repository,
         [
-            "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", ".",
+            "status", "--porcelain=v1", "-z", "--untracked-files=normal", "--", ".",
         ],
         "Git status probe",
     ).split(b"\0")
@@ -3456,7 +3534,9 @@ def changed_paths(repository: Path) -> tuple[list[str], list[str]]:
             # Rename and copy entries carry their origin in the next field.
             position += 1
         path = os.fsdecode(entry[3:])
-        if not runtime_owned.match(path):
+        if prefix and path.startswith(prefix):
+            path = path[len(prefix):]
+        if path != "project-brain/" and not runtime_owned.match(path):
             paths.append(path)
     excluded = sorted({item for item in paths if TURN_PATH_DENYLIST.search(item)})
     allowed = [item for item in dict.fromkeys(paths) if item not in set(excluded)]
@@ -4006,6 +4086,12 @@ def build_parser() -> argparse.ArgumentParser:
     # ladder (flag, environment, runtime.json, then shadow) lives in
     # `configured_retrieval_gate`, so the flag is only the first rung.
     for gated_parser in (context, retrieve_command, refresh, hook_context):
+        gated_parser.add_argument(
+            "--host",
+            choices=RETRIEVAL_HOSTS,
+            default="cli",
+            help="client invoking retrieval; recorded in the manifest",
+        )
         gated_parser.add_argument(
             "--gate",
             choices=RETRIEVAL_GATE_MODES,
@@ -4895,8 +4981,10 @@ def main() -> int:
                         )
                     )
                     print(
-                        f"  gate: {gate['decided']} decided, skip rate "
-                        f"{gate['skip_rate'] if gate['skip_rate'] is not None else 'n/a'}"
+                        f"  gate: {gate['decided']} decided; shadow would skip "
+                        f"{gate['would_skip_rate'] if gate['would_skip_rate'] is not None else 'n/a'}; "
+                        "enforce withheld "
+                        f"{gate['withheld_rate'] if gate['withheld_rate'] is not None else 'n/a'}"
                         + (
                             " ("
                             + ", ".join(
@@ -5115,6 +5203,8 @@ def main() -> int:
                     ephemeral=arguments.ephemeral,
                     gate_mode=gate_mode,
                     paths=arguments.paths,
+                    host=arguments.host,
+                    entry_point=arguments.command,
                 )
                 if arguments.json:
                     print(serialize_capsule(result))
@@ -5129,6 +5219,7 @@ def main() -> int:
                     mode=mode,
                     task_id=arguments.task_id,
                     gate_mode=gate_mode,
+                    host=arguments.host,
                 )
                 if result is None:
                     # A valid current branch with no meaningful change has no
@@ -5197,6 +5288,8 @@ def main() -> int:
                             query_source="prompt",
                             phase_seconds=index_result.get("phase_seconds"),
                             gate_mode=gate_mode,
+                            host=arguments.host,
+                            entry_point="refresh",
                         )
                     except (ContextError, BrainError, RetrievalError) as error:
                         # A capsule needs an active task; the layer refresh

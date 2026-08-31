@@ -132,6 +132,12 @@ substantive remains, the bare identifier is used and the capsule says
 `query: from branch name only` rather than `query: from task goal`; the
 manifest records the same distinction as `query_source`.
 
+Each automatic path also identifies its actual client to the runtime: Claude
+Code passes `claude`, Codex passes `codex`, and Cursor passes `cursor`; a direct
+CLI call defaults to `cli`. Retrieval manifest version 3 records that `host`
+beside the `entry_point`. The repeat gate scopes its baseline to task, host, and
+entry point, so one client's prompt hook cannot suppress another client's turn.
+
 So the difference is one turn of freshness, not one order of query quality:
 treat the editions as equivalent in policy, skills, and enforcement, and as
 differing in when the capsule was rendered - Claude Code and Codex retrieve

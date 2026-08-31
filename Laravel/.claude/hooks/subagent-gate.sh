@@ -99,7 +99,19 @@ if printf '%s' "$ROSTER" | grep -qxF -- "$SUB_TYPE"; then
   LOCK_ROOT=$(git -C "$ROOT_DIR" rev-parse --show-toplevel 2>/dev/null \
     || printf '%s' "$ROOT_DIR")
   LOCK_KEY=$(printf '%s' "$LOCK_ROOT" | cksum | cut -d' ' -f1)
-  LOCK_FILE="/tmp/claude-write-agent-lock-$LOCK_KEY"
+  LOCK_DIR="${SUBAGENT_WRITE_LOCK_DIR:-/tmp}"
+  case "$LOCK_DIR" in
+    /*) ;;
+    *)
+      echo "BLOCKED: write-agent lock directory configuration is invalid." >&2
+      exit 2
+      ;;
+  esac
+  if [ ! -d "$LOCK_DIR" ] || [ ! -w "$LOCK_DIR" ] || [ ! -x "$LOCK_DIR" ]; then
+    echo "BLOCKED: write-agent lock directory configuration is invalid." >&2
+    exit 2
+  fi
+  LOCK_FILE="$LOCK_DIR/claude-write-agent-lock-$LOCK_KEY"
   LOCK_TTL_MINUTES="${SUBAGENT_WRITE_LOCK_TTL_MINUTES:-30}"
   case "$LOCK_TTL_MINUTES" in
     *[!0-9]*|'') LOCK_TTL_MINUTES=30 ;;  # a bogus TTL must not become "never expires"
