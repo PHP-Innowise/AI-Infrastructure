@@ -192,6 +192,13 @@ freshness filter and left the delivered document out of the manifest entirely.
 That was harmless while the only episodic document was the changelog; it stops
 being harmless once governed records live there.
 
+Machine-local episodes also enter capsule assembly before the retrieval gate,
+not as an unaccounted append after it. They can fill only the unused part of the
+single episodic slot, contribute to the capsule and token ceilings, and their
+content hashes participate in repeat detection. A version 3 manifest records
+only `local_episode_count` and their aggregate
+`token_estimates.local_episodes`: it never stores a local episode ID or body.
+
 ## Governed and Lightweight Ownership
 
 The default governed model is:
@@ -548,17 +555,26 @@ retrieval at all. A pointer that says "relevant right now" about the wrong file
 costs more than no pointer, because the agent opens it; the saving is bias, not
 tokens, and the work the gate skips is trivially cheap either way.
 
-`gate_decision` records a verdict on every governed retrieval. Two rules fire,
-both deterministic and both computable before any document body is opened:
-`no-match` when nothing survived the relevance test, so retrieving and skipping
-deliver the same thing, and `repeat-retrieval` when the distilled query and the
-selected path set both match the previous turn of the same task. That pair is
-the invariant — not "the capsule repeats byte-for-byte", which can never happen:
-every call mints a fresh manifest id, and the rendered capsule folds in an
-automatic checkpoint sentence and a last-turn summary that move on their own.
-The previous turn is remembered as two hashes in the disposable index, in a
-single bounded row rather than one per task, and a skip never overwrites it —
-otherwise the turn after a skip would compare against nothing.
+`gate_decision` records a verdict and one deterministic reason on every governed
+retrieval:
+
+- `no-relevant-match` skips when neither indexed context nor a local episode
+  matched;
+- `empty-after-filter` skips when something matched but nothing remained
+  deliverable;
+- `repeat-retrieval` skips an unchanged query, selection and task revision;
+- `task-changed` retrieves when the query and selection match but the task
+  revision moved;
+- `new-selection` retrieves every other non-empty result;
+- `gate-off` retrieves without making a skip decision.
+
+A repeat baseline is scoped to the task UUID, host, and entry point. Its
+selection signature contains each selected path and source-content hash, any
+selected local-episode content hash, and the task revision. Changing a source
+without changing its path, changing a local episode, or advancing the task
+therefore cannot be mistaken for a repeat from another client or lifecycle
+state. The bounded baseline lives in the disposable index, and a skip never
+overwrites it — otherwise the turn after a skip would compare against nothing.
 
 The mode comes from `--gate`, then `CONTEXT_RETRIEVAL_GATE`, then
 `retrieval_gate` in `runtime.json`, and defaults to `shadow`. In `shadow` the
@@ -571,6 +587,12 @@ after the `working:` marker, and still writes a manifest, because a withheld
 turn has to be countable. On the Cursor path a skip exits with a status the
 delivery hooks leave alone: rendering a withheld capsule would satisfy their
 `working:` check and replace Cursor's only memory channel with an empty rule.
+
+`retrieval-report` keeps shadow `would_skip` distinct from context actually
+`withheld` in `enforce`. It slices gate results by `mode`, `query_source`,
+`host`, and `entry_point`, and separately aggregates `no_match` layers and
+`token_estimates`, so client-specific or query-specific failures are not hidden
+in one skip rate.
 
 Whatever the reason a document leaves, `index` names it rather than dropping
 it silently — `retired`, `overdue-review`, a non-active status, `invalid`, or
@@ -644,11 +666,13 @@ not require a task and does not create a manifest.
    error, because governed retrieval reads the index and not the sources;
 1. resolves the supplied external task ID through the local binding;
 2. loads the authoritative Brain task;
-3. uses FTS5/BM25 to identify candidates;
+3. uses FTS5/BM25 to identify candidates and loads matching local episodes
+   before the retrieval gate;
 4. applies runtime privacy, owner, authority, lifecycle, and freshness filters;
 5. fetches eligible linked conflict partners by UUID even if they did not
    lexically match;
-6. selects bounded snippets within category and total estimated-token budgets;
+6. selects bounded snippets and any remaining episodic slot within category
+   and total estimated-token budgets;
 7. writes a strict retrieval manifest;
 8. returns the working task, categorized selected context, exclusions, token
    estimates, and manifest path.
@@ -779,6 +803,10 @@ policy filtering, the delivered capsule is independently capped at 2
 procedural, 3 semantic, and 1 episodic item and 8,000 serialized characters.
 Snippets are deterministically shortened as needed.
 
+A selected local episode uses only the remaining episodic slot. Its estimate is
+included in `token_estimates.local_episodes` and in the total ceiling even
+though its identity and content are deliberately absent from the manifest.
+
 These controls bound selected retrieval context, not the size of source files,
 Brain records, user prompts, or model responses. Conflict escalation can exceed
 normal category/target budgets, never the hard ceiling.
@@ -787,6 +815,8 @@ normal category/target budgets, never the hard ceiling.
 
 Every successful governed retrieval writes a manifest. By default it lands in
 the Git-tracked `project-brain/control/retrieval-manifests/<uuid>.json`.
+The writer emits strict schema version 3; validators continue to accept valid
+version 1 and version 2 manifests already present in a consuming repository.
 
 `--ephemeral` writes the same validated record to
 `memory-bank/local/retrieval-manifests/<uuid>.json` instead. Automated
@@ -801,9 +831,12 @@ A manifest binds:
 
 - creation time and the privacy-checked, distilled retrieval query;
 - Brain task UUID and revision;
+- host and entry point;
 - privacy, owner, authority, freshness, and active-only filters;
 - selected paths, categories, estimated tokens, source hashes, and how
   each one matched (`covered`, `distinctive`, or `conflict`);
+- `local_episode_count` and `token_estimates.local_episodes` for selected local
+  episodes;
 - excluded paths and safe reasons;
 - the retrieval gate's verdict for the turn: `decision`, `mode`, `reason`, and
   the signals it decided on;
@@ -811,9 +844,9 @@ A manifest binds:
 - target/hard estimates and any conflict escalation reason.
 
 The manifest is provenance metadata, not a context snapshot. It does not retain
-the selected snippets or full source bodies, and it cannot replay the exact
-prompt seen by an agent. It deliberately excludes prompts, responses, hidden
-reasoning, and tool payloads.
+the selected snippets, full source bodies, or local episode IDs and bodies, and
+it cannot replay the exact prompt seen by an agent. It deliberately excludes
+prompts, responses, hidden reasoning, and tool payloads.
 
 Governed manifests are Git-trackable and validated, but the current compactor
 does not archive or prune them. Retention for those requires an explicit
@@ -877,13 +910,13 @@ recorded as `approved-without-review`, and the resulting chunk carries an
 approved. `promote-review` rejects an automatic promotion outright rather than
 letting a human signature be attached after the fact.
 
-Eligibility is deliberately narrow, because nothing downstream will catch a bad
-promotion:
+Eligibility is deliberately narrow and identical in reviewed and automatic
+modes, because an applied chunk becomes durable shared knowledge:
 
 - only `finding: resolved`, `bug: resolved`, `incident: closed`, and
   `decision: accepted`;
-- only `verified` authority, since there is no reviewer to question an
-  unverified claim;
+- only `verified` authority, because review cannot turn an unverified claim
+  into a durable fact;
 - only privacy the runtime already allows, and only with fresh source
   fingerprints;
 - never a task. Auto-checkpoint progress describes what happened in a session,
@@ -911,9 +944,12 @@ durable. Set `automatic_promotion` to `false` to return to reviewed promotion.
 
 Proposal records bind each source Brain record's exact UUID, type, path, and
 revision. In the reviewed mode an independent human reviewer must approve, and
-the proposer cannot review their own proposal. Apply rechecks every source
-binding in both modes, so a changed source revision invalidates the proposal
-rather than silently promoting changed content.
+the proposer cannot review their own proposal. Apply rechecks the same type,
+lifecycle, authority, privacy, freshness, content, and source-binding rules in
+both modes, so a task, reopened record, changed revision, or newly ineligible
+source cannot be promoted through an older proposal. Application sets the
+proposal status to applied while preserving the outcome: `approved` for
+reviewed promotion and `approved-without-review` for automatic promotion.
 
 Application mints a conflict-free Memory Bank ID (`MEM-YYYYMMDD-xxxxxxxx`,
 the promotion date plus eight hex characters of the source record's UUID),
@@ -1123,10 +1159,11 @@ capsule with `--ephemeral`, avoiding the second index pass a separate
 `retrieve` would run. A capsule failure is a warning; the layer refresh stands.
 
 The hook passes the prompt as-is; `refresh` distills it into the retrieval
-query itself. The whole prompt is tokenized, terms the index has never seen or
-that match most of the corpus are dropped, and the rarest terms fill a bounded
-query — so a long request whose actual subject arrives at the end no longer
-retrieves on its preamble. The refresh report also carries per-phase wall-clock
+query itself. The whole prompt is tokenized, terms neither indexed documents
+nor local episodes have seen or that match most of that combined searchable
+corpus are dropped, and the rarest terms fill a bounded query — so a long
+request whose actual subject arrives at the end no longer retrieves on its
+preamble. The refresh report also carries per-phase wall-clock
 durations (`stat`, `index`, `retrieval`) so an operator can see which side of
 the work is approaching the hook budget.
 
@@ -1136,10 +1173,13 @@ applies, and a capsule entry never outranks the source it summarizes.
 The write hook reads Git porcelain metadata only. Working-tree contents never
 reach the buffer, paths that look sensitive are excluded and reported, and the
 runtime's own record, handoff, and index churn is dropped rather than recorded
-as user work. Turns accumulate in ignored local state and flush together, so
-continuity costs one governed revision per `--flush-after` turns instead of one
-per turn. A flush contributes at most `--max-files` paths, and reports the
-remainder rather than dropping it silently.
+as user work. Paths are normalized relative to the installed edition even when
+it lives below the Git root, and Git collapses untracked directory trees before
+they enter the buffer. A dependency or cache tree therefore contributes one
+directory path rather than thousands of files. Turns accumulate in ignored
+local state and flush together, so continuity costs one governed revision per
+`--flush-after` turns instead of one per turn. A flush contributes at most
+`--max-files` paths, and reports the remainder rather than dropping it silently.
 
 The first flush provisions the task if it does not exist. Automated continuity
 is worthless if it buffers into a task nobody created, and requiring an

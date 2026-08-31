@@ -570,6 +570,20 @@ class WorkingMemoryRuleTest(unittest.TestCase):
                     text = hook_path(tool, hook).read_text(encoding="utf-8")
                     self.assertNotIn("working-memory.mdc", text)
 
+    def test_automatic_retrieval_attributes_the_real_host(self) -> None:
+        calls = {
+            "claude": ("working-memory-read.sh",),
+            "codex": ("working-memory-read.sh",),
+            "cursor": self.RENDER_HOOKS,
+        }
+        for tool, hooks in calls.items():
+            for hook in hooks:
+                with self.subTest(tool=tool, hook=hook):
+                    logical = hook_path(tool, hook).read_text(encoding="utf-8").replace(
+                        "\\\n", " "
+                    )
+                    self.assertIn(f"--host {tool}", logical)
+
     def test_render_carries_no_per_turn_invalidator(self) -> None:
         """The rule is re-sent on every prompt, so it may not embed a clock.
 
@@ -793,14 +807,25 @@ class SubagentGateTest(unittest.TestCase):
     BUILTIN_CURSOR = ("explore", "shell", "bash", "browser", "generalPurpose")
 
     def setUp(self) -> None:
-        self.clear_write_locks()
-        self.addCleanup(self.clear_write_locks)
+        self._lock_tmp = tempfile.TemporaryDirectory(prefix="subagent-gate-lock-")
+        self.lock_dir = Path(self._lock_tmp.name)
+        self.lock_env = {"SUBAGENT_WRITE_LOCK_DIR": str(self.lock_dir)}
+        self.addCleanup(self._lock_tmp.cleanup)
 
-    @staticmethod
-    def clear_write_locks() -> None:
+    def clear_write_locks(self) -> None:
         key = repo_key(EDITION_ROOT)
         for tool in ("claude", "cursor"):
-            Path(f"/tmp/{tool}-write-agent-lock-{key}").unlink(missing_ok=True)
+            (self.lock_dir / f"{tool}-write-agent-lock-{key}").unlink(
+                missing_ok=True
+            )
+
+    def run_gate(self, tool: str, payload):
+        return run_hook(
+            tool,
+            "subagent-gate.sh",
+            payload,
+            env=self.lock_env,
+        )
 
     @staticmethod
     def roster(tool: str) -> list[str]:
@@ -834,9 +859,7 @@ class SubagentGateTest(unittest.TestCase):
     def test_claude_blocks_builtin_agents(self) -> None:
         for builtin in self.BUILTIN_CLAUDE:
             with self.subTest(agent=builtin):
-                result = run_hook(
-                    "claude", "subagent-gate.sh", self.spawn_payload(builtin)
-                )
+                result = self.run_gate("claude", self.spawn_payload(builtin))
                 self.assertEqual(2, result.returncode)
                 self.assertIn("BLOCKED", result.stderr)
 
@@ -845,7 +868,7 @@ class SubagentGateTest(unittest.TestCase):
             "tool_name": "Task",
             "tool_input": {"subagent_type": "general-purpose"},
         }
-        result = run_hook("claude", "subagent-gate.sh", payload)
+        result = self.run_gate("claude", payload)
         self.assertEqual(2, result.returncode)
 
     def test_claude_allows_every_roster_agent(self) -> None:
@@ -853,9 +876,7 @@ class SubagentGateTest(unittest.TestCase):
         self.assertTrue(names)
         for name in names:
             with self.subTest(agent=name):
-                result = run_hook(
-                    "claude", "subagent-gate.sh", self.spawn_payload(name)
-                )
+                result = self.run_gate("claude", self.spawn_payload(name))
                 self.assertEqual(0, result.returncode, result.stderr)
             # Write-capable agents take the serialization lock on spawn;
             # release it so the roster sweep stays isolation-free.
@@ -869,15 +890,13 @@ class SubagentGateTest(unittest.TestCase):
             "",
         ):
             with self.subTest(payload=payload):
-                result = run_hook("claude", "subagent-gate.sh", payload)
+                result = self.run_gate("claude", payload)
                 self.assertEqual(0, result.returncode)
 
     def test_cursor_denies_builtins_with_permission_json(self) -> None:
         for builtin in self.BUILTIN_CURSOR:
             with self.subTest(agent=builtin):
-                result = run_hook(
-                    "cursor", "subagent-gate.sh", {"subagent_type": builtin}
-                )
+                result = self.run_gate("cursor", {"subagent_type": builtin})
                 self.assertEqual(0, result.returncode, result.stderr)
                 verdict = json.loads(result.stdout)
                 self.assertEqual("deny", verdict["permission"])
@@ -888,9 +907,7 @@ class SubagentGateTest(unittest.TestCase):
         self.assertTrue(names)
         for name in names:
             with self.subTest(agent=name):
-                result = run_hook(
-                    "cursor", "subagent-gate.sh", {"subagent_type": name}
-                )
+                result = self.run_gate("cursor", {"subagent_type": name})
                 self.assertEqual(0, result.returncode, result.stderr)
                 self.assertEqual(
                     "allow", json.loads(result.stdout)["permission"]
@@ -898,7 +915,7 @@ class SubagentGateTest(unittest.TestCase):
             self.clear_write_locks()
 
     def test_cursor_typeless_payload_allows(self) -> None:
-        result = run_hook("cursor", "subagent-gate.sh", {"task": "x"})
+        result = self.run_gate("cursor", {"task": "x"})
         self.assertEqual(0, result.returncode)
         self.assertEqual("allow", json.loads(result.stdout)["permission"])
 
@@ -912,10 +929,8 @@ class SubagentGateTest(unittest.TestCase):
             "close_agent",
         ):
             with self.subTest(tool=tool):
-                result = run_hook(
-                    "codex",
-                    "subagent-gate.sh",
-                    {"tool_name": tool, "tool_input": {}},
+                result = self.run_gate(
+                    "codex", {"tool_name": tool, "tool_input": {}}
                 )
                 self.assertEqual(2, result.returncode)
                 self.assertIn("BLOCKED", result.stderr)
@@ -927,8 +942,74 @@ class SubagentGateTest(unittest.TestCase):
             "",
         ):
             with self.subTest(payload=payload):
-                result = run_hook("codex", "subagent-gate.sh", payload)
+                result = self.run_gate("codex", payload)
                 self.assertEqual(0, result.returncode)
+
+
+class WriteLockDirectoryOverrideTest(unittest.TestCase):
+    @staticmethod
+    def snapshot(path: Path) -> tuple[bool, bytes | None]:
+        exists = path.exists()
+        return exists, path.read_bytes() if exists else None
+
+    def test_lock_directory_override_keeps_default_tmp_untouched(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="write-lock-override-") as temp:
+            base = Path(temp)
+            repo = base / "repo"
+            lock_dir = base / "locks"
+            lock_dir.mkdir()
+            subprocess.run(
+                ["git", "-c", "init.defaultBranch=main", "init", "-q", str(repo)],
+                check=True,
+                capture_output=True,
+                timeout=HOOK_TIMEOUT,
+            )
+            key = repo_key(repo)
+            for tool in ("claude", "cursor"):
+                hooks = repo / f".{tool}" / "hooks"
+                hooks.mkdir(parents=True)
+                shutil.copytree(
+                    EDITION_ROOT / f".{tool}" / "agents",
+                    repo / f".{tool}" / "agents",
+                )
+                gate = hooks / "subagent-gate.sh"
+                shutil.copy(hook_path(tool, "subagent-gate.sh"), gate)
+                default_lock = Path(f"/tmp/{tool}-write-agent-lock-{key}")
+                default_guard = Path(f"{default_lock}.guard")
+                default_before = {
+                    path: self.snapshot(path)
+                    for path in (default_lock, default_guard)
+                }
+                payload = (
+                    {"tool_name": "Agent", "tool_input": {"subagent_type": "coder"}}
+                    if tool == "claude"
+                    else {"subagent_type": "coder"}
+                )
+                env = dict(os.environ)
+                env["SUBAGENT_WRITE_LOCK_DIR"] = str(lock_dir)
+                result = subprocess.run(
+                    [BASH, str(gate)],
+                    input=json.dumps(payload),
+                    capture_output=True,
+                    text=True,
+                    cwd=str(repo),
+                    env=env,
+                    timeout=HOOK_TIMEOUT,
+                )
+                with self.subTest(tool=tool):
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    self.assertEqual(
+                        default_before,
+                        {
+                            path: self.snapshot(path)
+                            for path in (default_lock, default_guard)
+                        },
+                        "lock directory override must not touch the default /tmp lock",
+                    )
+                    self.assertEqual(
+                        "coder",
+                        (lock_dir / f"{tool}-write-agent-lock-{key}").read_text(),
+                    )
 
 
 class WriteLockMixin:
@@ -939,27 +1020,62 @@ class WriteLockMixin:
     """
 
     def lock_path(self, tool: str) -> Path:
-        return Path(f"/tmp/{tool}-write-agent-lock-{repo_key(EDITION_ROOT)}")
-
-    def clear_locks(self) -> None:
-        for tool in ("claude", "cursor"):
-            self.lock_path(tool).unlink(missing_ok=True)
+        return self.lock_dir / f"{tool}-write-agent-lock-{repo_key(EDITION_ROOT)}"
 
 
 class SubagentWriteLockTest(WriteLockMixin, unittest.TestCase):
     """`writes: true` agents are serialized by a TTL lock in both gates."""
 
     def setUp(self) -> None:
-        self.clear_locks()
-        self.addCleanup(self.clear_locks)
+        self._lock_tmp = tempfile.TemporaryDirectory(prefix="write-lock-test-")
+        self.lock_dir = Path(self._lock_tmp.name)
+        self.lock_env = {"SUBAGENT_WRITE_LOCK_DIR": str(self.lock_dir)}
+        self.addCleanup(self._lock_tmp.cleanup)
 
-    @staticmethod
-    def spawn(tool: str, agent: str):
+    def spawn(self, tool: str, agent: str, lock_dir: str | None = None):
         if tool == "claude":
             payload = {"tool_name": "Agent", "tool_input": {"subagent_type": agent}}
         else:
             payload = {"subagent_type": agent}
-        return run_hook(tool, "subagent-gate.sh", payload)
+        env = dict(self.lock_env)
+        if lock_dir is not None:
+            env["SUBAGENT_WRITE_LOCK_DIR"] = lock_dir
+        return run_hook(
+            tool,
+            "subagent-gate.sh",
+            payload,
+            env=env,
+        )
+
+    def assert_invalid_lock_dir_is_denied(self, lock_dir: Path | str) -> None:
+        key = repo_key(EDITION_ROOT)
+        lock_dir = str(lock_dir)
+        for tool in ("claude", "cursor"):
+            result = self.spawn(tool, "coder", lock_dir)
+            with self.subTest(tool=tool, lock_dir=lock_dir):
+                if tool == "claude":
+                    self.assertEqual(2, result.returncode, result.stderr)
+                    self.assertIn("BLOCKED", result.stderr)
+                else:
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    verdict = json.loads(result.stdout)
+                    self.assertEqual("deny", verdict["permission"])
+                    self.assertNotIn(lock_dir, verdict["user_message"])
+                candidate_root = Path(lock_dir)
+                if not candidate_root.is_absolute():
+                    candidate_root = EDITION_ROOT / candidate_root
+                candidate = candidate_root / f"{tool}-write-agent-lock-{key}"
+                self.assertFalse(candidate.exists())
+                self.assertFalse(Path(f"{candidate}.guard").exists())
+
+    def test_relative_existing_lock_directory_is_denied(self) -> None:
+        relative = os.path.relpath(self.lock_dir, EDITION_ROOT)
+        self.assert_invalid_lock_dir_is_denied(relative)
+
+    def test_nonexistent_absolute_lock_directory_is_denied(self) -> None:
+        self.assert_invalid_lock_dir_is_denied(
+            self.lock_dir / 'missing-"\nINJECTED'
+        )
 
     def test_write_agent_takes_the_lock_and_blocks_the_next(self) -> None:
         first = self.spawn("claude", "coder")
@@ -1002,6 +1118,16 @@ class SubagentWriteLockTest(WriteLockMixin, unittest.TestCase):
         verdict = json.loads(result.stdout)
         self.assertEqual("deny", verdict["permission"])
         self.assertIn("one at a time", verdict["user_message"])
+
+    def test_cursor_denial_omits_the_custom_lock_path(self) -> None:
+        with tempfile.TemporaryDirectory(prefix='cursor-lock-"\n') as temp:
+            self.assertEqual(
+                0, self.spawn("cursor", "coder", temp).returncode
+            )
+            result = self.spawn("cursor", "refactorer", temp)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertNotIn(temp, result.stdout)
+            self.assertEqual("deny", json.loads(result.stdout)["permission"])
 
     def test_cursor_read_only_allows_while_locked(self) -> None:
         self.assertEqual(0, self.spawn("cursor", "coder").returncode)
@@ -1062,10 +1188,16 @@ class SubagentDispatchTest(WriteLockMixin, unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory(prefix="dispatch-test-")
         self.repo = Path(self._tmp.name)
         (self.repo / ".claude" / "hooks").mkdir(parents=True)
+        shutil.copytree(
+            EDITION_ROOT / ".claude" / "agents",
+            self.repo / ".claude" / "agents",
+        )
         scripts = self.repo / "memory-bank" / "scripts"
         scripts.mkdir(parents=True)
         for source in (EDITION_ROOT / "memory-bank" / "scripts").glob("*.py"):
             shutil.copy(source, scripts / source.name)
+        self.gate = self.repo / ".claude" / "hooks" / "subagent-gate.sh"
+        shutil.copy(hook_path("claude", "subagent-gate.sh"), self.gate)
         self.hook = self.repo / ".claude" / "hooks" / "subagent-dispatch.sh"
         shutil.copy(hook_path("claude", "subagent-dispatch.sh"), self.hook)
         subprocess.run(
@@ -1078,13 +1210,10 @@ class SubagentDispatchTest(WriteLockMixin, unittest.TestCase):
         )
         started = self.cli("start", "--task-id", "feat/demo", "--goal", "Demo")
         self.assertEqual(0, started.returncode, started.stderr)
+        self.lock_dir = self.repo / ".test-write-locks"
+        self.lock_dir.mkdir()
+        self.lock_env = {"SUBAGENT_WRITE_LOCK_DIR": str(self.lock_dir)}
         self.addCleanup(self._tmp.cleanup)
-        self.addCleanup(self.repo_locks_cleanup)
-
-    def repo_locks_cleanup(self) -> None:
-        key = repo_key(self.repo)
-        for tool in ("claude", "cursor"):
-            Path(f"/tmp/{tool}-write-agent-lock-{key}").unlink(missing_ok=True)
 
     def cli(self, *arguments: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -1093,11 +1222,30 @@ class SubagentDispatchTest(WriteLockMixin, unittest.TestCase):
             text=True, capture_output=True, timeout=HOOK_TIMEOUT,
         )
 
-    def run_dispatch(self, payload) -> subprocess.CompletedProcess[str]:
+    def run_gate(self, agent: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [BASH, str(self.gate)],
+            input=json.dumps(
+                {"tool_name": "Agent", "tool_input": {"subagent_type": agent}}
+            ),
+            text=True,
+            capture_output=True,
+            cwd=str(self.repo),
+            env={**os.environ, **self.lock_env},
+            timeout=HOOK_TIMEOUT,
+        )
+
+    def run_dispatch(
+        self, payload, lock_dir: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
         stdin = payload if isinstance(payload, str) else json.dumps(payload)
+        env = dict(self.lock_env)
+        if lock_dir is not None:
+            env["SUBAGENT_WRITE_LOCK_DIR"] = lock_dir
         return subprocess.run(
             [BASH, str(self.hook)], input=stdin, text=True,
-            capture_output=True, cwd=str(self.repo), timeout=HOOK_TIMEOUT,
+            capture_output=True, cwd=str(self.repo),
+            env={**os.environ, **env}, timeout=HOOK_TIMEOUT,
         )
 
     def journal(self) -> list[dict[str, object]]:
@@ -1131,13 +1279,38 @@ class SubagentDispatchTest(WriteLockMixin, unittest.TestCase):
 
     def test_releases_only_the_holders_lock(self) -> None:
         key = repo_key(self.repo)
-        mine = Path(f"/tmp/claude-write-agent-lock-{key}")
+        mine = self.lock_dir / f"claude-write-agent-lock-{key}"
         mine.write_text("coder")
-        other = Path(f"/tmp/cursor-write-agent-lock-{key}")
+        other = self.lock_dir / f"cursor-write-agent-lock-{key}"
         other.write_text("refactorer")
         self.assertEqual(0, self.run_dispatch({"agent_type": "coder"}).returncode)
         self.assertFalse(mine.exists())
         self.assertTrue(other.exists())
+
+    def test_gate_lock_is_released_by_dispatch_with_the_same_override(self) -> None:
+        gate = self.run_gate("coder")
+        self.assertEqual(0, gate.returncode, gate.stderr)
+        lock = self.lock_dir / f"claude-write-agent-lock-{repo_key(self.repo)}"
+        self.assertEqual("coder", lock.read_text())
+        dispatched = self.run_dispatch({"agent_type": "coder"})
+        self.assertEqual(0, dispatched.returncode, dispatched.stderr)
+        self.assertFalse(lock.exists())
+
+    def test_dispatch_with_relative_lock_directory_skips_cleanup_only(self) -> None:
+        lock = self.lock_dir / f"claude-write-agent-lock-{repo_key(self.repo)}"
+        lock.write_text("coder")
+        relative = os.path.relpath(self.lock_dir, self.repo)
+        result = self.run_dispatch({"agent_type": "coder"}, relative)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertTrue(lock.exists())
+        self.assertEqual("coder", self.journal()[0]["from_actor"])
+
+    def test_dispatch_with_nonexistent_lock_directory_skips_cleanup_only(self) -> None:
+        missing = str(self.lock_dir / "missing")
+        result = self.run_dispatch({"agent_type": "coder"}, missing)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertFalse(Path(missing).exists())
+        self.assertEqual("coder", self.journal()[0]["from_actor"])
 
     def test_fails_open_without_agent_or_runtime(self) -> None:
         self.assertEqual(0, self.run_dispatch({"status": "done"}).returncode)

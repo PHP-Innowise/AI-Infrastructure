@@ -248,9 +248,9 @@
     ".cursor/rules/safety-and-verification.mdc": "05c0da0cf1cd5aa24a12c9d8346719fb1c8bf713a18f9ec35f878498fb8b4386",
     ".cursor/rules/subagent-policy.mdc": "b2200867b3141faedb982cb12cc58158015ef5d9294c0f8b193bb8b70f61f201",
     ".cursor/skills/skill-creator/SKILL.md": "f1bac11cf8ab0e6acb40196165aab0f8e87556a4e182ff00894b6ee11af3a2a5",
-    "AGENTS.md": "6e1053e0a6c066d83982784b60181c4c0132c8efb09b13e0e2d5e20d044f4aca"
+    "AGENTS.md": "13a25924007b1e8aa4c1e9f8f57bc86aa6f6f6a06c8ca818413021156a6cfb53"
   },
-  "policy_digest": "847c5f6711c33e5844029ef830162fa2a00f4368c6dd39ba0274603e9fdf990b",
+  "policy_digest": "429f0ba071358f333d3e79e2d568ca89504e4f8004d93811ad88aec30cfe66d5",
   "release": "2.0.0",
   "schema_version": 1
 }

@@ -566,6 +566,42 @@ edition's own files remain in that edition's changelog.
 
 ### Fixed
 
+- **Prompt distillation now preserves terms that exist only in local
+  episodes.** The prompt hook previously ranked words against indexed files
+  alone, so a natural prompt containing one repository word plus a distinctive
+  episode-only phrase could discard the phrase before the episode search ran.
+  Distillation now measures the combined searchable corpus, and an end-to-end
+  `record` -> `refresh --query` regression covers the real prompt path.
+
+- **The memory lifecycle now passes end to end through the public CLI and a
+  clean installed runtime.** A governed finding can move from observed to
+  verified and resolved, be promoted automatically into a source-digested
+  `MEM-*` chunk, complete its task into an episode, and be retrieved from a
+  different task. The same smoke now installs every edition for all three
+  supported tool surfaces and exercises `start`, source-backed `brain-create`,
+  indexing, and `links --path` under a hostile project `.gitignore`.
+  - Promotion discovery and apply share one eligibility check for record type,
+    terminal state, verified authority, privacy, useful content, and source
+    freshness. Apply no longer admits a stale, empty, or provenance-tampered
+    reviewed proposal; human and automatic outcomes are bound to their review
+    modes, while legacy applied v1 records remain readable. The `complete`
+    status counter also reads the `(path, promotion)` iterator correctly.
+  - Retrieval manifests are v3 and attribute the real host and entry point.
+    Repeat detection is isolated per task/host/entry point and includes source
+    hashes, task revision, and local episode content, preventing stale content
+    and Cursor task updates from false `repeat-retrieval` skips. Local episodes
+    enter the gate before its decision, consume the same token budget, and are
+    reported by count and token cost without persisting their id or body.
+    Reports separate shadow `would_skip` from enforce `withheld`, split slices
+    by mode, and aggregate token estimates and per-layer no-match signals.
+  - Automatic checkpoints now emit edition-relative paths and collapse large
+    untracked directories instead of expanding vendor/cache trees. Subagent
+    write-lock tests use isolated directories; explicit overrides must be safe
+    absolute writable directories, and an invalid cleanup override cannot
+    suppress the completion journal.
+  - `memory-probes.json` is part of cross-edition parity, and every edition's
+    existing `MEM-0001` was reverified with current source digests.
+
 - **Promotion carries a record's citations through to the chunk.** Found by
   installing the edition into a real Symfony project rather than by a fixture:
   `apply_promotion` recorded only the source records, so two findings about one
