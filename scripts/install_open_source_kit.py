@@ -122,35 +122,33 @@ def resolve_selection(resources: list[dict], ids: list[str]) -> list[dict]:
     return resolved
 
 
-def registry_verdict(resource_id: str) -> str | None:
-    """The admission verdict for a catalog id, or None when unreviewed.
+def registry_status(resource_id: str) -> str | None:
+    """What the registry found for a catalog id, or None when unreviewed.
 
-    Advisory only: this prints a warning, it does not refuse. Enforcement is
-    deliberately not wired yet - see the README's "Not built yet" section.
+    The registry describes; it never refuses. This script installs nothing
+    either way, so refusing would only block writing the choice down - and an
+    install that happened anyway would then be missing from the audit trail.
     """
     path = REGISTRY_DIR / f"{resource_id}.json"
     if not path.is_file():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8")).get("verdict")
+        return json.loads(path.read_text(encoding="utf-8")).get("status")
     except (OSError, json.JSONDecodeError):
         return None
 
 
-def admission_warning(resource_id: str) -> str | None:
-    """A one-line warning when a pick is not an approved candidate."""
-    verdict = registry_verdict(resource_id)
-    if verdict == "approved":
+def review_note(resource_id: str) -> str | None:
+    """One line naming what review found, so a pick is made with eyes open."""
+    status = registry_status(resource_id)
+    if status == "clear":
         return None
-    if verdict is None:
-        return (
-            "NOT REVIEWED - no registry entry; nothing has judged this against "
-            "the twelve gates"
-        )
-    return (
-        f"admission verdict is {verdict.upper()} - see "
-        f"install/open-source-kit/registry/{resource_id}.json"
-    )
+    reference = f"install/open-source-kit/registry/{resource_id}.json"
+    if status is None:
+        return "NOT REVIEWED - no registry entry; nothing checked this against the twelve gates"
+    if status == "known_risks":
+        return f"KNOWN RISKS recorded - read {reference} before installing"
+    return f"OPEN QUESTIONS remain - read {reference} before installing"
 
 
 def load_manifest(path: Path) -> dict:
@@ -187,6 +185,10 @@ def apply_selection(
         pinned_ref = pins.get(entry["id"])
         if pinned_ref is None:
             pinned_ref = existing.get("pinned_ref") or entry.get("pinned_ref")
+        # The manifest is committed to the client project as the audit trail, so
+        # it records what review found - not only what was picked. A warning
+        # printed to a terminal survives nothing; this is reviewable in a diff.
+        status = registry_status(entry["id"])
         manifest["entries"][entry["id"]] = {
             "name": entry["name"],
             "url": entry["url"],
@@ -195,6 +197,14 @@ def apply_selection(
             "reviewed_date": entry.get("reviewed_date"),
             "selected_date": today,
             "pinned_ref": pinned_ref,
+            # `guidance`, not `command`: this is what the tool proposed, not a
+            # record of what a human actually ran. How something was installed
+            # is part of its risk - `curl | bash` is not `git clone` - so the
+            # manifest has to answer "how", not only "what".
+            "install_method": entry["install_type"],
+            "install_guidance": guidance_for(entry),
+            "risk_notes": entry.get("risk_notes"),
+            "review": {"status": status, "reviewed": status is not None},
         }
     return manifest
 
@@ -263,9 +273,9 @@ def main() -> int:
             print(f"  url:  {entry['url']}")
             print(f"  how:  {guidance_for(entry)}")
             print(f"  risk: {entry.get('risk_notes', 'n/a')}")
-            warning = admission_warning(entry["id"])
-            if warning:
-                print(f"  !!    {warning}")
+            note = review_note(entry["id"])
+            if note:
+                print(f"  !!    {note}")
             if not pins.get(entry["id"]) and not entry.get("pinned_ref"):
                 print(
                     "  !     not pinned yet - once installed, record the exact ref with "

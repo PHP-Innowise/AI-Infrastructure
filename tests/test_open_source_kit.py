@@ -207,6 +207,60 @@ class SelectorCliTests(unittest.TestCase):
             self.assertIn("not in this selection", result.stderr)
             self.assertFalse((Path(target) / ".kit3-manifest.json").exists())
 
+    def test_manifest_records_what_review_found(self) -> None:
+        """The manifest is the audit trail, so it carries the status too.
+
+        A warning printed to a terminal survives nothing; this is reviewable in
+        the diff when the client project commits the manifest.
+        """
+        with tempfile.TemporaryDirectory() as target:
+            run("--select", "graphify,obra-superpowers", "--target", target)
+            entries = json.loads(
+                (Path(target) / ".kit3-manifest.json").read_text()
+            )["entries"]
+            self.assertEqual(
+                entries["graphify"]["review"],
+                {"status": "known_risks", "reviewed": True},
+            )
+            self.assertEqual(
+                entries["obra-superpowers"]["review"],
+                {"status": None, "reviewed": False},
+            )
+
+    def test_manifest_carries_the_install_guidance(self) -> None:
+        """How something was installed is part of its risk.
+
+        `curl | bash` is not `git clone`. The manifest is the audit trail a
+        client project keeps, so it has to answer "how", not only "what" -
+        otherwise the answer lives in terminal scrollback and is gone.
+        """
+        with tempfile.TemporaryDirectory() as target:
+            run("--select", "caveman,grillme", "--target", target)
+            entries = json.loads(
+                (Path(target) / ".kit3-manifest.json").read_text()
+            )["entries"]
+            self.assertEqual(entries["caveman"]["install_method"], "npx-cli")
+            self.assertIn("npx", entries["caveman"]["install_guidance"])
+            self.assertEqual(entries["grillme"]["install_method"], "reference-clone")
+            self.assertIn("git clone", entries["grillme"]["install_guidance"])
+
+    def test_manifest_carries_the_risk_notes(self) -> None:
+        with tempfile.TemporaryDirectory() as target:
+            run("--select", "caveman", "--target", target)
+            entry = json.loads(
+                (Path(target) / ".kit3-manifest.json").read_text()
+            )["entries"]["caveman"]
+            self.assertIn("HIGH RISK", entry["risk_notes"])
+
+    def test_verified_command_wins_over_the_generic_template(self) -> None:
+        """An entry that pins its own exact command must carry that one."""
+        with tempfile.TemporaryDirectory() as target:
+            run("--select", "obra-superpowers", "--target", target)
+            entry = json.loads(
+                (Path(target) / ".kit3-manifest.json").read_text()
+            )["entries"]["obra-superpowers"]
+            self.assertIn("/plugin install superpowers@", entry["install_guidance"])
+
     def test_missing_target_directory_fails_cleanly(self) -> None:
         """One line on stderr, not a traceback after lines that read as success."""
         result = run("--select", "obra-superpowers",
@@ -225,15 +279,15 @@ class SelectorCliTests(unittest.TestCase):
             self.assertIn("not an existing directory", result.stderr)
 
     def test_unreviewed_pick_is_flagged(self) -> None:
-        """No registry entry means nothing judged it against the gates."""
+        """No registry entry means nothing checked it against the gates."""
         with tempfile.TemporaryDirectory() as target:
             result = run("--select", "obra-superpowers", "--target", target, "--dry-run")
             self.assertIn("NOT REVIEWED", result.stdout)
 
-    def test_rejected_pick_is_flagged_with_its_verdict(self) -> None:
+    def test_pick_with_findings_is_flagged(self) -> None:
         with tempfile.TemporaryDirectory() as target:
             result = run("--select", "graphify", "--target", target, "--dry-run")
-            self.assertIn("REJECTED", result.stdout)
+            self.assertIn("KNOWN RISKS", result.stdout)
 
 
 if __name__ == "__main__":

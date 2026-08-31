@@ -117,22 +117,26 @@ Selects from `install/open-source-kit/resources.json` and writes a
 `.kit3-manifest.json` into the target; it never downloads or executes
 third-party code itself.
 
-The catalog is browsable; the **admission registry**
-(`install/open-source-kit/registry/`, one JSON file per candidate) carries the
-judgement of whether an entry should be installed. Twelve gates — eight binary
-(one failure rejects), four scored — with the verdict recomputed from the gates
-rather than trusted. The selector warns on a non-approved pick but does not yet
-refuse it, and most catalog entries have no registry file:
+The catalog is browsable; the **risk registry**
+(`install/open-source-kit/registry/`, one JSON file per candidate) records what
+review found. Twelve gates — eight binary (`pass`/`fail`/`unknown`), four scored
+0–5 — summarised as `clear`, `open_questions`, or `known_risks`:
 
 ```bash
-python3 scripts/validate_registry.py            # report every entry and its verdict
+python3 scripts/validate_registry.py            # report every entry and its status
 python3 scripts/validate_registry.py --check    # CI gate
 python3 scripts/validate_registry.py --id graphify
 python3 -m unittest tests.test_registry
 ```
 
-An `unknown` gate blocks rather than passes, and a stored `approved` cannot
-outrank a failing gate — see `install/open-source-kit/README.md`.
+**The registry describes; it does not forbid.** Nothing refuses a tool — the
+selector installs nothing either way, so refusing would only block writing the
+choice down, and an install that happened anyway would then be missing from the
+audit trail. The status is named before selection and written into
+`.kit3-manifest.json`, where it is visible in a diff. A stored `clear` cannot
+outrank a failing gate: the status is recomputed, never trusted. Most catalog
+entries have no registry file yet and report `NOT REVIEWED` — see
+`install/open-source-kit/README.md`.
 
 ### Lint (mirrors CI exactly)
 

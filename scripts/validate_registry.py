@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
-"""Validate the Kit 3 admission registry and recompute every verdict.
+"""Validate the Kit 3 risk registry and recompute every status.
 
-Each `install/open-source-kit/registry/<id>.json` records how one tool answered the
-twelve gates. Eight gates are binary - a single failure rejects the tool
-however good it is - and four are scored 0-5 and inform rather than block.
+Each `install/open-source-kit/registry/<id>.json` records how one tool answered
+the twelve gates. Eight gates are binary - answered pass/fail/unknown - and four
+are scored 0-5.
 
-The verdict is stored in the file so it is greppable and reviewable, but it is
+The registry describes; it does not forbid. Nothing here refuses a tool: the
+selector installs nothing either way, so a refusal would only block writing the
+choice down, and an install that happens anyway would then be absent from the
+audit trail. What the registry produces is a dossier - what was checked, what
+was found, and what would resolve each open item - and the team decides.
+
+The status is stored in the file so it is greppable and reviewable, but it is
 never trusted: this script recomputes it from the gates and fails when the two
-disagree. A stored `approved` cannot outrank a failing binary gate.
+disagree. A stored `clear` cannot outrank a failing gate.
 
     python3 scripts/validate_registry.py            # report every entry
     python3 scripts/validate_registry.py --check    # CI gate, non-zero on any error
@@ -43,7 +49,9 @@ SCORED_GATES = (
     "trust_signals",
 )
 GATE_STATUSES = {"pass", "fail", "unknown"}
-VERDICTS = {"approved", "blocked", "rejected"}
+# Descriptive, not prescriptive: each says what the gates found, never whether
+# the tool is allowed.
+STATUSES = {"clear", "open_questions", "known_risks"}
 RELATIONS = {"duplicates", "replaces", "conflicts", "complements"}
 DEFAULT_STATES = {"enabled", "disabled"}
 TIERS = {1, 2, 3}
@@ -56,8 +64,8 @@ TOP_LEVEL_FIELDS = (
     "url",
     "reviewed_date",
     "reviewed_by",
-    "verdict",
-    "verdict_summary",
+    "status",
+    "status_summary",
     "tier",
     "default_state",
     "install",
@@ -83,18 +91,19 @@ def stated(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
-def compute_verdict(binary_gates: dict) -> str:
-    """Derive the verdict from the binary gates alone.
+def compute_status(binary_gates: dict) -> str:
+    """Summarise what the binary gates found. A description, not a decision.
 
-    A failure rejects outright. An unknown blocks: absence of evidence is not a
-    pass, and a tool nobody has read the source of is not installable.
+    A failure is a risk we found and wrote down. An unknown is a question
+    nobody has answered yet - reported as its own state rather than folded into
+    the clear one, because absence of evidence is not evidence of safety.
     """
     statuses = {name: gate.get("status") for name, gate in binary_gates.items()}
     if any(status == "fail" for status in statuses.values()):
-        return "rejected"
+        return "known_risks"
     if any(status == "unknown" for status in statuses.values()):
-        return "blocked"
-    return "approved"
+        return "open_questions"
+    return "clear"
 
 
 def validate_entry(data: dict, catalog_ids: set[str]) -> list[str]:
@@ -117,8 +126,8 @@ def validate_entry(data: dict, catalog_ids: set[str]) -> list[str]:
         err(f"tier must be one of {sorted(TIERS)}, got {data['tier']!r}")
     if data["default_state"] not in DEFAULT_STATES:
         err(f"default_state must be one of {sorted(DEFAULT_STATES)}")
-    if data["verdict"] not in VERDICTS:
-        err(f"verdict must be one of {sorted(VERDICTS)}")
+    if data["status"] not in STATUSES:
+        err(f"status must be one of {sorted(STATUSES)}")
     if data["catalog_id"] not in catalog_ids:
         err(
             f"catalog_id {data['catalog_id']!r} is not in "
@@ -228,10 +237,10 @@ def validate_entry(data: dict, catalog_ids: set[str]) -> list[str]:
         )
 
     if not errors:
-        computed = compute_verdict(binary)
-        if data["verdict"] != computed:
+        computed = compute_status(binary)
+        if data["status"] != computed:
             err(
-                f"stored verdict {data['verdict']!r} disagrees with the gates, "
+                f"stored status {data['status']!r} disagrees with the gates, "
                 f"which compute {computed!r}"
             )
 
@@ -272,14 +281,14 @@ def describe(data: dict) -> str:
     failing = [name for name in BINARY_GATES if binary[name]["status"] == "fail"]
     unknown = [name for name in BINARY_GATES if binary[name]["status"] == "unknown"]
     lines = [
-        f"{data['verdict'].upper():<9}\t{data['id']:<14}\t{data['name']}",
+        f"{data['status'].upper():<14}\t{data['id']:<14}\t{data['name']}",
         f"  tier {data['tier']}, default {data['default_state']}, "
         f"pinned_ref {data['install']['pinned_ref'] or 'NONE'}",
     ]
     if failing:
-        lines.append(f"  failing gates:  {', '.join(failing)}")
+        lines.append(f"  risks found:    {', '.join(failing)}")
     if unknown:
-        lines.append(f"  unknown gates:  {', '.join(unknown)}")
+        lines.append(f"  open questions: {', '.join(unknown)}")
     scores = ", ".join(
         f"{name}={data['scored_gates'][name]['score']}" for name in SCORED_GATES
     )

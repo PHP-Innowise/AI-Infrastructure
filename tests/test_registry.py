@@ -36,8 +36,8 @@ def valid_entry() -> dict:
         "url": "https://example.invalid/fixture",
         "reviewed_date": "2026-08-31",
         "reviewed_by": "tests",
-        "verdict": "approved",
-        "verdict_summary": "fixture",
+        "status": "clear",
+        "status_summary": "fixture",
         "tier": 2,
         "default_state": "disabled",
         "install": {
@@ -64,26 +64,26 @@ def valid_entry() -> dict:
     }
 
 
-class VerdictComputationTests(unittest.TestCase):
-    def test_all_pass_is_approved(self) -> None:
+class StatusComputationTests(unittest.TestCase):
+    def test_all_pass_is_clear(self) -> None:
         gates = {name: {"status": "pass"} for name in registry.BINARY_GATES}
-        self.assertEqual(registry.compute_verdict(gates), "approved")
+        self.assertEqual(registry.compute_status(gates), "clear")
 
-    def test_any_unknown_is_blocked(self) -> None:
+    def test_any_unknown_is_open_questions(self) -> None:
         gates = {name: {"status": "pass"} for name in registry.BINARY_GATES}
         gates["uninstall"]["status"] = "unknown"
-        self.assertEqual(registry.compute_verdict(gates), "blocked")
+        self.assertEqual(registry.compute_status(gates), "open_questions")
 
-    def test_any_fail_is_rejected(self) -> None:
+    def test_any_fail_is_known_risks(self) -> None:
         gates = {name: {"status": "pass"} for name in registry.BINARY_GATES}
         gates["collisions"]["status"] = "fail"
-        self.assertEqual(registry.compute_verdict(gates), "rejected")
+        self.assertEqual(registry.compute_status(gates), "known_risks")
 
     def test_fail_outranks_unknown(self) -> None:
         gates = {name: {"status": "pass"} for name in registry.BINARY_GATES}
         gates["uninstall"]["status"] = "unknown"
         gates["license"]["status"] = "fail"
-        self.assertEqual(registry.compute_verdict(gates), "rejected")
+        self.assertEqual(registry.compute_status(gates), "known_risks")
 
 
 class EntryValidationTests(unittest.TestCase):
@@ -96,7 +96,7 @@ class EntryValidationTests(unittest.TestCase):
     def test_valid_fixture_passes(self) -> None:
         self.assertEqual(self.check(valid_entry()), [])
 
-    def test_stored_verdict_cannot_outrank_a_failing_gate(self) -> None:
+    def test_stored_status_cannot_outrank_a_failing_gate(self) -> None:
         entry = valid_entry()
         entry["binary_gates"]["license"] = {
             "status": "fail",
@@ -106,9 +106,9 @@ class EntryValidationTests(unittest.TestCase):
         errors = self.check(entry)
         self.assertTrue(any("disagrees with the gates" in e for e in errors), errors)
 
-    def test_blocked_verdict_is_accepted_when_gates_agree(self) -> None:
+    def test_open_questions_status_is_accepted_when_gates_agree(self) -> None:
         entry = valid_entry()
-        entry["verdict"] = "blocked"
+        entry["status"] = "open_questions"
         entry["binary_gates"]["data_egress"] = {
             "status": "unknown",
             "evidence": "source not read",
@@ -118,7 +118,7 @@ class EntryValidationTests(unittest.TestCase):
 
     def test_non_passing_gate_requires_resolves_by(self) -> None:
         entry = valid_entry()
-        entry["verdict"] = "blocked"
+        entry["status"] = "open_questions"
         entry["binary_gates"]["pinning"] = {
             "status": "unknown",
             "evidence": "not confirmed",
@@ -132,7 +132,7 @@ class EntryValidationTests(unittest.TestCase):
         errors = self.check(entry)
         self.assertTrue(any("no evidence" in e for e in errors), errors)
 
-    def test_unknown_gate_status_is_rejected(self) -> None:
+    def test_unrecognised_gate_status_is_reported(self) -> None:
         entry = valid_entry()
         entry["binary_gates"]["license"] = {"status": "probably", "evidence": "x"}
         errors = self.check(entry)
@@ -232,7 +232,7 @@ class EntryValidationTests(unittest.TestCase):
 
     def test_whitespace_resolves_by_is_not_a_plan(self) -> None:
         entry = valid_entry()
-        entry["verdict"] = "blocked"
+        entry["status"] = "open_questions"
         entry["binary_gates"]["pinning"] = {
             "status": "unknown",
             "evidence": "not confirmed",
@@ -247,22 +247,22 @@ class EntryValidationTests(unittest.TestCase):
         errors = self.check(entry)
         self.assertTrue(any("missing `detail`" in e for e in errors), errors)
 
-    def test_non_string_evidence_is_rejected(self) -> None:
+    def test_non_string_evidence_is_reported(self) -> None:
         entry = valid_entry()
         entry["binary_gates"]["license"]["evidence"] = 42
         errors = self.check(entry)
         self.assertTrue(any("no evidence" in e for e in errors), errors)
 
-    def test_verdict_is_case_sensitive(self) -> None:
+    def test_status_is_case_sensitive(self) -> None:
         entry = valid_entry()
-        entry["verdict"] = "APPROVED"
+        entry["status"] = "CLEAR"
         errors = self.check(entry)
-        self.assertTrue(any("verdict must be one of" in e for e in errors), errors)
+        self.assertTrue(any("status must be one of" in e for e in errors), errors)
 
-    def test_understated_verdict_is_caught_too(self) -> None:
-        """The check runs both ways - a verdict may not be harsher than the gates either."""
+    def test_overstated_status_is_caught_too(self) -> None:
+        """The check runs both ways - a status may not be graver than the gates either."""
         entry = valid_entry()
-        entry["verdict"] = "rejected"
+        entry["status"] = "known_risks"
         errors = self.check(entry)
         self.assertTrue(any("disagrees with the gates" in e for e in errors), errors)
 
@@ -304,13 +304,13 @@ class RealRegistryTests(unittest.TestCase):
         for entry in self.entries:
             self.assertIn(entry["catalog_id"], catalog_ids)
 
-    def test_unapproved_entries_default_to_disabled(self) -> None:
+    def test_entries_with_findings_default_to_disabled(self) -> None:
         for entry in self.entries:
-            if entry["verdict"] != "approved":
+            if entry["status"] != "clear":
                 self.assertEqual(
                     entry["default_state"],
                     "disabled",
-                    msg=f"{entry['id']} is {entry['verdict']} but defaults to enabled",
+                    msg=f"{entry['id']} is {entry['status']} but defaults to enabled",
                 )
 
     def test_no_entry_claims_a_pin_it_does_not_have(self) -> None:

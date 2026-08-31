@@ -7,7 +7,7 @@ gates we own.
 
 What Kit 3 actually is — four things, in order:
 
-1. **Admission** — what passed the gates, at which pinned ref, on whose decision.
+1. **Record** — what was checked, what was found, at which pinned ref, and how it was installed.
 2. **Isolation** — namespace, roster, hook precedence.
 3. **Measurement** — cost on the same ruler as our own editions.
 4. **Removal** — uninstall with no residue. We leave; the client keeps what they chose.
@@ -19,13 +19,19 @@ Two files matter:
 | Path | Role |
 | --- | --- |
 | `resources.json` | The browsable catalog. What exists. |
-| `registry/*.json` | The admission decision. What review concluded. |
+| `registry/*.json` | The risk dossier. What review found. |
 
-Being in the catalog is not permission to install — the registry carries that
-judgement. **Enforcement is not wired yet:** the selector prints the verdict as
-a warning but does not refuse, and 13 of 15 catalog entries have no registry
-file at all. Admission is therefore a step you perform (§"Installing for real"
-step 1), not something the tool guarantees. See "Not built yet" at the end.
+**The registry describes; it does not forbid.** Nothing here refuses a tool.
+This script installs nothing either way — it records a choice and prints a
+command a human runs — so a refusal would only block writing the choice down,
+and an install that happened anyway would then be missing from the audit trail
+entirely. What the registry produces is a dossier: what was checked, what was
+found, and what would resolve each open item. The team decides.
+
+What that buys you: the selector names what review found before you commit, and
+`.kit3-manifest.json` carries it into the client project, where it is visible in
+a diff long after the terminal output is gone. 13 of 15 catalog entries have no
+registry file yet and are reported as `NOT REVIEWED`.
 
 ---
 
@@ -44,7 +50,7 @@ python3 scripts/install_open_source_kit.py --list
 Expect entries grouped by category (`marketplace`, `mcp`, `skills`,
 `subagents`, `discovery-index`), each with id, target tools, and description.
 
-### 2. The registry reports a verdict per candidate
+### 2. The registry reports what it found per candidate
 
 ```bash
 python3 scripts/validate_registry.py
@@ -53,23 +59,22 @@ python3 scripts/validate_registry.py
 Expect, per entry:
 
 ```
-REJECTED 	graphify      	Graphify-Labs/graphify
+KNOWN_RISKS   	graphify      	Graphify-Labs/graphify
   tier 3, default disabled, pinned_ref NONE
-  failing gates:  collisions, maintenance_ownership, measurability
-  unknown gates:  data_egress, pinning, uninstall, auto_update
+  risks found:    collisions, maintenance_ownership, measurability
+  open questions: data_egress, pinning, uninstall, auto_update
   scores:         automation_depth=5, token_efficiency=0, integration_coverage=5, trust_signals=2
   intersections:  3 recorded
 
 VALID	2 registry entr(ies)
 ```
 
-`VALID` means the files are well-formed and every stored verdict matches what
-its gates compute. It does **not** mean the tools are approved — read the
-verdict on each line.
+`VALID` means the files are well-formed and every stored status matches what
+its gates compute. It says nothing about whether a tool is safe — read the
+status on each line.
 
-Both committed entries are `REJECTED` today. That is the expected state, not a
-failure: each failing gate carries a `resolves_by` naming exactly what would
-change it.
+Both committed entries are `KNOWN_RISKS` today. That is a finding, not a
+failure: each risk carries a `resolves_by` naming exactly what would close it.
 
 ### 3. The CI gate is silent on success
 
@@ -79,9 +84,9 @@ python3 scripts/validate_registry.py --check ; echo "exit=$?"
 
 Expect `VALID	2 registry entr(ies)` and `exit=0`.
 
-### 4. Prove the verdict cannot be faked
+### 4. Prove the status cannot be faked
 
-This is the property the whole registry rests on. Flip a verdict without
+This is the property the whole registry rests on. Flip a status without
 touching the gates that produced it:
 
 ```bash
@@ -91,7 +96,7 @@ python3 - <<'PY'
 import json
 p = "install/open-source-kit/registry/graphify.json"
 d = json.load(open(p))
-d["verdict"] = "approved"          # gates left untouched
+d["status"] = "clear"              # gates left untouched
 json.dump(d, open(p, "w"), indent=2)
 PY
 
@@ -102,7 +107,7 @@ Expect a refusal:
 
 ```
 INVALID	1 problem(s) across 2 entr(ies)
-  graphify: stored verdict 'approved' disagrees with the gates, which compute 'rejected'
+  graphify: stored status 'clear' disagrees with the gates, which compute 'known_risks'
 exit=1
 ```
 
@@ -134,15 +139,16 @@ WOULD_SELECT	obra-superpowers	obra/superpowers (+ superpowers-skills)
   url:  https://github.com/obra/superpowers
   how:  Inside a Claude Code session: `/plugin install superpowers@claude-plugins-official` ...
   risk: Passed Anthropic's own marketplace listing bar - the strongest trust signal in this catalog.
-  !!    NOT REVIEWED - no registry entry; nothing has judged this against the twelve gates
+  !!    NOT REVIEWED - no registry entry; nothing checked this against the twelve gates
   !     not pinned yet - once installed, record the exact ref with `--pin obra-superpowers=<ref>`
 
 WOULD_WRITE	/tmp/kit3-demo/.kit3-manifest.json
 ```
 
-The `!!` line is the admission warning. A pick with a registry entry shows its
-verdict instead — try `--select graphify --dry-run` for
-`admission verdict is REJECTED`. It warns; it does not refuse.
+The `!!` line names what review found. A pick with a registry entry shows its
+status instead — try `--select graphify --dry-run` for `KNOWN RISKS recorded`.
+It informs; it never refuses. The same fact is written into the manifest under
+`review`, so it survives the terminal.
 
 Confirm nothing was written:
 
@@ -184,10 +190,17 @@ Expect:
   "entries": {
     "obra-superpowers": {
       "category": "skills",
+      "install_guidance": "Inside a Claude Code session: `/plugin install superpowers@claude-plugins-official` - already listed in the official marketplace, no separate marketplace add needed.",
+      "install_method": "claude-marketplace",
       "license": null,
       "name": "obra/superpowers (+ superpowers-skills)",
       "pinned_ref": "abc1234",
+      "review": {
+        "reviewed": false,
+        "status": null
+      },
       "reviewed_date": "2026-08-26",
+      "risk_notes": "Passed Anthropic's own marketplace listing bar - the strongest trust signal in this catalog.",
       "selected_date": "2026-08-31",
       "url": "https://github.com/obra/superpowers"
     }
@@ -199,6 +212,23 @@ Expect:
 
 Selecting again merges rather than overwrites — run it with a second id and
 confirm both entries survive.
+
+This file is committed with the client project and is the whole audit trail, so
+it answers *how* as well as *what*:
+
+| Field | Answers |
+| --- | --- |
+| `install_method` / `install_guidance` | How it gets installed. `curl \| bash` is not `git clone`, and the method is part of the risk. Named `guidance`, not `command`: this is what the tool proposed, not proof of what a human ran. |
+| `pinned_ref` | Which exact ref is in the project. `null` means a floating version that can change under the client without review. |
+| `review.reviewed` | Whether anything checked it against the twelve gates at all. `false` is not "safe" — it is "unexamined". |
+| `review.status` | What that check found, when it happened. |
+| `risk_notes` | The catalog's standing warning, carried along so it is not left behind in a terminal. |
+| `license` | `null` means confirm at install time; do not assume permissive. |
+| `selected_date` vs `reviewed_date` | When it was picked, versus how current the review was at that moment. |
+
+`review` is a snapshot taken at selection time and is not refreshed — if a
+registry entry is written later, an older manifest keeps saying `reviewed:
+false`. Re-running the selector for that id updates it.
 
 ### 8. Failure modes behave
 
@@ -253,13 +283,17 @@ good it is:
 
 | Verdict | Meaning |
 | --- | --- |
-| `approved` | Every binary gate passes. Installable, subject to its conditions. |
-| `blocked` | Nothing fails, but something is `unknown`. Absence of evidence is not a pass. |
-| `rejected` | At least one binary gate fails. |
+| `clear` | Every binary gate passes. Nothing outstanding was found. |
+| `open_questions` | Nothing failed, but something is `unknown` — absence of evidence is not evidence of safety. |
+| `known_risks` | At least one binary gate failed. The risk is named, with what would close it. |
 
-The verdict is stored in the file so it is greppable, but never trusted:
+None of the three is a permission or a prohibition. `known_risks` means we
+looked and wrote down what we saw; installing anyway is a decision the team may
+take with its eyes open, and the manifest will record that it was taken.
+
+The status is stored in the file so it is greppable, but never trusted:
 `validate_registry.py` recomputes it from the gates and fails when the two
-disagree. A stored `approved` cannot outrank a failing gate — that is step 4
+disagree. A stored `clear` cannot outrank a failing gate — that is step 4
 above.
 
 ### What each binary gate means
@@ -354,9 +388,10 @@ the install script, and whether the thing auto-updates.
 
 Testing is above; this is the actual engagement flow.
 
-1. **Check admission.** `validate_registry.py --id <tool>`. Only `approved`
-   proceeds. `blocked` means someone does the work in that gate's `resolves_by`
-   first.
+1. **Read what review found.** `validate_registry.py --id <tool>`. `clear` means
+   nothing outstanding. `known_risks` and `open_questions` name what is
+   unresolved and what would close it — decide whether to close it first or to
+   proceed knowingly. Nothing stops you; the choice is recorded either way.
 2. **Dry run** against the client project, read every risk note.
 3. **Record** the selection — writes `.kit3-manifest.json`.
 4. **Install by hand.** Run the printed command yourself, after reading the
@@ -375,11 +410,12 @@ Testing is above; this is the actual engagement flow.
 
 Three gaps, stated plainly:
 
-- **The selector does not consult the registry.** `install_open_source_kit.py`
-  reads `resources.json` only; a `rejected` tool can still be selected today.
-  Admission is therefore enforced by convention (step 1 above), not by the
-  tool. Closing this is the highest-value next change.
+- **Most of the catalog is unreviewed.** 13 of 15 entries have no registry file,
+  so they report `NOT REVIEWED` — nothing has checked them against the twelve
+  gates. This is the largest gap: an unreviewed tool is not a safe one, it is an
+  unexamined one. Writing those entries is the highest-value next work.
 - **No cost preview.** Step 2 should print the startup-cost delta before you
-  commit. Needs an external-tree mode in `scripts/context_budget.py`.
+  commit. Needs an external-tree mode in `scripts/context_budget.py`, which is
+  also what closes the `measurability` gate on both current entries.
 - **No uninstall.** Pillar 4 — removing exactly what the manifest lists,
   leaving no residue — has no implementation.

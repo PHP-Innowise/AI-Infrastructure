@@ -6,8 +6,8 @@
   "url": "https://github.com/Yeachan-Heo/oh-my-claudecode",
   "reviewed_date": "2026-08-31",
   "reviewed_by": "Kit 3 registry pass - gates applied, source not yet read",
-  "verdict": "rejected",
-  "verdict_summary": "Fails `collisions` head-on: a 19-agent self-orchestrating architecture is precisely what our roster enforcement is built to refuse. Symfony sets CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1, sets CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS=1, denies Agent(Explore), Agent(Plan) and Agent(general-purpose), and gates PreToolUse: Agent|Task through subagent-gate.sh, which refuses any subagent outside our roster. This tool does not fail because it is bad; it fails because our accelerator will not physically run it. Also fails `measurability` and `maintenance_ownership`. Identity is additionally unconfirmed - see open_questions.",
+  "status": "known_risks",
+  "status_summary": "Known risks, recorded rather than ruled on. `collisions` is the substantial one: a 19-agent self-orchestrating architecture is what our roster enforcement refuses by construction - Symfony sets CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1, sets CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS=1, denies Agent(Explore), Agent(Plan) and Agent(general-purpose), and gates PreToolUse: Agent|Task through subagent-gate.sh. This is not a judgement on the tool's quality; it will not run under our accelerator without an explicit roster-whitelist decision. `measurability` and `maintenance_ownership` are also unresolved, and the repository identity is unconfirmed - see open_questions.",
   "tier": 3,
   "default_state": "disabled",
   "install": {
