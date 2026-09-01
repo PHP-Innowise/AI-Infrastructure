@@ -128,6 +128,12 @@ jobs:
         # The live code2prompt checks skip themselves here (no Rust toolchain);
         # what runs is the containment contract and the argv/exclude pins.
         run: python3 -m unittest tests.test_collect_context
+      - name: Kit 3 admission registry is well-formed
+        # Recomputes every verdict from its gates: a forged `approved` over a
+        # failing binary gate fails here rather than reaching a client project.
+        run: python3 scripts/validate_registry.py --check
+      - name: Kit 3 registry and catalog regression tests
+        run: python3 -m unittest tests.test_registry tests.test_open_source_kit
 
   lint:
     name: lint

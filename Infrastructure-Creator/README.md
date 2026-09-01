@@ -104,6 +104,11 @@ Infrastructure-Creator only generates PHP accelerators directly - but it does no
 - **Recognized:** it offers to build `stack-adapter` - a brand-new, fully independent sibling generator, `Infrastructure-Creator-[Stack]/`, next to this folder. The sibling carries the same evidence contracts, semantic gates, staged publication, and regression fixtures across all three editions.
 - **Not recognized at all:** it reports the target out of scope, same as before.
 
+For a target too small or short-lived to justify even `stack-adapter`, see
+the [Open-Source Kit](../install/open-source-kit/README.md) - a reviewed catalog of
+third-party Claude Code resources plus a selector that installs only what a
+project actually needs.
+
 ### Quick Guide: Building A Sibling Generator
 
 Your project isn't PHP (Flutter, Node.js, Python, Go, or similar) but you still want the same kind of bespoke, discovery-driven accelerator? Here's the whole path, start to finish:
