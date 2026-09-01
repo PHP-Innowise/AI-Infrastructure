@@ -60,6 +60,28 @@ edition's own files remain in that edition's changelog.
     answers "what" but not "how" leaves that in terminal scrollback. The field
     is `guidance`, not `command`, because the tool knows what it proposed and
     not what a human actually ran.
+  - **`scripts/kit_fetcher.py` and `install_open_source_kit.py --refresh`.** A
+    stored `verified_command` is a snapshot from whenever someone last read
+    that README by hand and goes stale. `--refresh` checks it against the
+    README as it stands right now, before recording anything: it fetches the
+    repo's current metadata and README from the GitHub API and looks for
+    fenced code blocks near an install-related keyword. It never guesses -
+    exactly one candidate is used and recorded as
+    `install_guidance_source: "live_fetch"` with `install_guidance_fetched_at`;
+    zero or several candidates, or any network failure, falls back to the
+    stored guidance unchanged, because picking among several would present a
+    guess as a fact. Opt-in, not the default: it makes a run network-dependent
+    and non-deterministic, and unauthenticated GitHub API calls are
+    rate-limited to 60/hour - browsing, testing, and recording a selection
+    offline stay exactly as fast and reliable as they always were.
+    Discovery-index entries are skipped, since "install" is not a concept for
+    a curated list. 16 tests exercise the fetcher fully mocked (no live
+    network in the suite), plus 5 more that patch `kit_fetcher.refresh`
+    in-process to prove the selector's fallback behavior end to end -
+    including one asserting `kit_fetcher.refresh` is never even called
+    without the flag. Live-verified against this catalog while writing the
+    fetcher: correctly caught a real GitHub rate-limit error and fell back
+    rather than crashing or writing nothing.
   - `intersection_map` is mandatory and may not be empty. The hidden cost of
     Kit 3 is not context, it is two systems doing one job, and an entry with
     no intersection analysis is unexamined whatever its gates say. Each row is
@@ -87,6 +109,20 @@ edition's own files remain in that edition's changelog.
     input); `score: true` passed the 0-5 check because `bool` subclasses `int`;
     and whitespace-only `evidence`, `resolves_by` and `intersection_map`
     fields satisfied a truthiness test while committing a reviewer to nothing.
+  - Six of fifteen catalog entries (`obra-superpowers`, `caveman`, `graphify`,
+    `ohmyclaude`, `claude-code-templates`, `claude-plugins-community`) carry a
+    `verified_command` checked against the tool's own current README, plus
+    `command_verified_date` recording when. The other nine keep the generic
+    `install_type` guidance instead of a fabricated single answer, because no
+    one unambiguous command exists yet for them (a 93-plugin marketplace, a
+    93-server MCP collection, a teaching repo with no install script) or none
+    has been verified. `graphify`'s command names the PyPI package as
+    `graphifyy` (double y) against the CLI it installs, `graphify` (single y) -
+    checked against PyPI on 2026-09-01: description and maintainer match
+    Graphify-Labs/graphify, a taken-name workaround, not a typosquat.
+    `.kit3-manifest.json` now carries whichever command actually printed, so
+    the audit trail states the real install step, not only that one was
+    proposed.
 
 - **`document_links`, a reverse index from source path to the documents that
   cite it, with `context.py links` and `retrieve --path` (roadmap H4-02,

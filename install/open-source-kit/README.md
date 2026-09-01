@@ -230,6 +230,56 @@ it answers *how* as well as *what*:
 registry entry is written later, an older manifest keeps saying `reviewed:
 false`. Re-running the selector for that id updates it.
 
+### 7a. `--refresh` — checking the install command is still current
+
+`verified_command` in the catalog is a snapshot from whenever someone last read
+that README by hand. `--refresh` checks it against the README as it stands
+right now, before writing the manifest:
+
+```bash
+python3 scripts/install_open_source_kit.py \
+  --select obra-superpowers --target /tmp/kit3-demo --refresh
+```
+
+For each pick it fetches the repo's current metadata and README from the
+GitHub API and looks for fenced code blocks near an install-related keyword.
+**It never guesses.** Exactly one candidate found → that command is used, and
+the manifest records `install_guidance_source: "live_fetch"` with
+`install_guidance_fetched_at`. Zero or several candidates, or any network
+failure → falls back to the stored `verified_command` or the generic
+`install_type` template, unchanged, with `~` lines explaining why:
+
+```
+how:  npx real-thing install [live_fetch]
+~     refresh found 1 unambiguous candidate in the current README
+```
+
+```
+how:  Inside a Claude Code session: `/plugin install superpowers@...` [verified_command]
+~     refresh error: https://api.github.com/repos/obra/superpowers: HTTP Error 403: rate limit exceeded
+```
+
+That second block is a real run against this repo's own catalog — GitHub's
+unauthenticated API allows 60 requests/hour per IP, easy to exhaust while
+testing. This is exactly the failure mode `--refresh` is built to survive: it
+reports the error and keeps the trustworthy fallback, rather than writing
+nothing or guessing.
+
+**Why opt-in, not the default:** it makes a run network-dependent and
+non-deterministic. Browsing the catalog, running the test suite, and recording
+a selection offline all stay exactly as fast and reliable as before -
+`kit_fetcher.refresh` is never called unless `--refresh` is passed (see
+`tests.test_open_source_kit.RefreshTests.test_without_refresh_flag_kit_fetcher_is_never_called`).
+Discovery-index entries are skipped - "install" is not a concept for a
+curated list.
+
+Direct lookup, without going through selection:
+
+```bash
+python3 scripts/kit_fetcher.py --id graphify
+python3 scripts/kit_fetcher.py --url https://github.com/owner/repo
+```
+
 ### 8. Failure modes behave
 
 ```bash

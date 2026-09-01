@@ -10,7 +10,8 @@
     "conflict_risk - chance of colliding with a generated Kit 1/Kit 2 agent, skill, or hook name, or double-firing a hook",
     "license - confirm at install time when null here; do not assume permissive",
     "pinned_ref - null until a project actually pins one; record it with install_open_source_kit.py --pin ID=REF",
-    "trust_flags - known-fake or inflated trust signals (e.g. a statistically implausible star count) that must not be read as endorsement; absent means no known issue"
+    "trust_flags - known-fake or inflated trust signals (e.g. a statistically implausible star count) that must not be read as endorsement; absent means no known issue",
+    "verified_command / command_verified_date - a literal, primary-source-confirmed install command and the date it was checked against the repo's own README; absent means the generic install_type guidance is still what prints, because no single unambiguous command exists or none has been checked yet"
   ],
   "resources": [
     {
@@ -22,7 +23,9 @@
       "install_type": "claude-marketplace",
       "automation_depth": "index-only",
       "token_footprint": "n/a - depends on what is installed from it",
-      "tool_compatibility": ["claude-code"],
+      "tool_compatibility": [
+        "claude-code"
+      ],
       "conflict_risk": "low",
       "license": null,
       "reviewed_date": "2026-08-26",
@@ -38,12 +41,16 @@
       "install_type": "claude-marketplace",
       "automation_depth": "index-only",
       "token_footprint": "n/a - depends on what is installed from it",
-      "tool_compatibility": ["claude-code"],
+      "tool_compatibility": [
+        "claude-code"
+      ],
       "conflict_risk": "low-medium",
       "license": null,
       "reviewed_date": "2026-08-26",
       "pinned_ref": null,
-      "risk_notes": "Lower bar for listing than claude-plugins-official - treat as a discovery source, review each plugin individually."
+      "risk_notes": "Lower bar for listing than claude-plugins-official - treat as a discovery source, review each plugin individually.",
+      "verified_command": "`claude plugin marketplace add anthropics/claude-plugins-community` then `claude plugin install <plugin-name>@claude-community` - note the marketplace slug is `claude-community`, not `claude-plugins-community`.",
+      "command_verified_date": "2026-09-01"
     },
     {
       "id": "mcp-servers-official",
@@ -54,7 +61,11 @@
       "install_type": "mcp-server",
       "automation_depth": "manual-invoke",
       "token_footprint": "mixed - each enabled server adds its tool schemas to every request; enable only what a project needs",
-      "tool_compatibility": ["claude-code", "cursor", "codex"],
+      "tool_compatibility": [
+        "claude-code",
+        "cursor",
+        "codex"
+      ],
       "conflict_risk": "low",
       "license": null,
       "reviewed_date": "2026-08-26",
@@ -70,7 +81,11 @@
       "install_type": "claude-marketplace",
       "automation_depth": "orchestrated",
       "token_footprint": "mixed - large catalog, but plugin-based install lets you cherry-pick individual plugins instead of the whole set",
-      "tool_compatibility": ["claude-code", "cursor", "codex"],
+      "tool_compatibility": [
+        "claude-code",
+        "cursor",
+        "codex"
+      ],
       "conflict_risk": "medium",
       "license": null,
       "reviewed_date": "2026-08-26",
@@ -86,7 +101,9 @@
       "install_type": "reference-clone",
       "automation_depth": "manual-invoke",
       "token_footprint": "lazy - copy in only the individual agent files a project needs",
-      "tool_compatibility": ["claude-code"],
+      "tool_compatibility": [
+        "claude-code"
+      ],
       "conflict_risk": "low",
       "license": null,
       "reviewed_date": "2026-08-26",
@@ -103,12 +120,15 @@
       "verified_command": "Inside a Claude Code session: `/plugin install superpowers@claude-plugins-official` - already listed in the official marketplace, no separate marketplace add needed.",
       "automation_depth": "manual-invoke",
       "token_footprint": "lazy - native SKILL.md on-demand loading",
-      "tool_compatibility": ["claude-code"],
+      "tool_compatibility": [
+        "claude-code"
+      ],
       "conflict_risk": "low",
       "license": null,
       "reviewed_date": "2026-08-26",
       "pinned_ref": null,
-      "risk_notes": "Passed Anthropic's own marketplace listing bar - the strongest trust signal in this catalog."
+      "risk_notes": "Passed Anthropic's own marketplace listing bar - the strongest trust signal in this catalog.",
+      "command_verified_date": "2026-08-26"
     },
     {
       "id": "composio-awesome-skills",
@@ -135,7 +155,9 @@
       "install_type": "reference-clone",
       "automation_depth": "orchestrated",
       "token_footprint": "n/a - reference/teaching repo, not meant to run wholesale",
-      "tool_compatibility": ["claude-code"],
+      "tool_compatibility": [
+        "claude-code"
+      ],
       "conflict_risk": "medium",
       "license": null,
       "reviewed_date": "2026-08-26",
@@ -151,12 +173,16 @@
       "install_type": "npx-cli",
       "automation_depth": "manual-invoke",
       "token_footprint": "n/a - affects what gets written into project config, not a per-request context cost by itself",
-      "tool_compatibility": ["claude-code"],
+      "tool_compatibility": [
+        "claude-code"
+      ],
       "conflict_risk": "medium",
       "license": null,
       "reviewed_date": "2026-08-26",
       "pinned_ref": null,
-      "risk_notes": "Can write into existing project config - review every file it proposes before accepting."
+      "risk_notes": "Can write into existing project config - review every file it proposes before accepting.",
+      "verified_command": "`npx claude-code-templates@latest` for the interactive browser, or non-interactively e.g. `npx claude-code-templates@latest --agent development-team/frontend-developer --yes` - confirm the exact components before accepting the non-interactive form, since it writes into existing project config.",
+      "command_verified_date": "2026-09-01"
     },
     {
       "id": "awesome-claude-code",
@@ -199,13 +225,21 @@
       "install_type": "npx-cli",
       "automation_depth": "orchestrated",
       "token_footprint": "mixed - large per-query token reduction claimed after an expensive one-time graph build (hours) plus incremental rebuilds (~10 min)",
-      "tool_compatibility": ["claude-code", "cursor", "codex"],
+      "tool_compatibility": [
+        "claude-code",
+        "cursor",
+        "codex"
+      ],
       "conflict_risk": "high",
       "license": "Apache-2.0",
       "reviewed_date": "2026-08-31",
       "pinned_ref": null,
-      "trust_flags": ["implausible star count: 112,842 stars / 10,980 forks at ~5 months old (created 2026-04-03, verified via GitHub API 2026-08-31) - matches the fake-star pattern in arXiv 2412.13459; previously excluded from this catalog for this exact reason"],
-      "risk_notes": "HIGH RISK - re-added after prior exclusion for a statistically implausible star count; flagged, not vetted for trust. Its strict-mode install adds a PreToolUse hook that intercepts file-search tool calls - test interaction with our own local-context.sh/subagent-gate.sh on a throwaway branch before rollout. Functionally overlaps the Local Context Engine's FTS5/BM25 retrieval - run the same query set through both before treating both as necessary. Pin to an exact commit SHA; do not track a floating branch."
+      "trust_flags": [
+        "implausible star count: 112,842 stars / 10,980 forks at ~5 months old (created 2026-04-03, verified via GitHub API 2026-08-31) - matches the fake-star pattern in arXiv 2412.13459; previously excluded from this catalog for this exact reason"
+      ],
+      "risk_notes": "HIGH RISK - re-added after prior exclusion for a statistically implausible star count; flagged, not vetted for trust. Its strict-mode install adds a PreToolUse hook that intercepts file-search tool calls - test interaction with our own local-context.sh/subagent-gate.sh on a throwaway branch before rollout. Functionally overlaps the Local Context Engine's FTS5/BM25 retrieval - run the same query set through both before treating both as necessary. Pin to an exact commit SHA; do not track a floating branch.",
+      "verified_command": "`uv tool install graphifyy` (or `pipx install graphifyy`) to get the CLI, then `graphify install` to register the skill - `graphify claude install` for the Claude-Code-specific hook variant. The PyPI package is `graphifyy` (double y, publisher `captainturbo`) while the CLI command it installs is `graphify` (single y) - verified via PyPI on 2026-09-01: description and maintainer match Graphify-Labs/graphify, not a typosquat, just a taken-name workaround. Still confirm the publisher before running - a package name is not the same guarantee as a signed release.",
+      "command_verified_date": "2026-09-01"
     },
     {
       "id": "caveman",
@@ -216,13 +250,21 @@
       "install_type": "npx-cli",
       "automation_depth": "orchestrated",
       "token_footprint": "mixed - claims net token reduction but adds its own always-on MCP/proxy component to the pipeline",
-      "tool_compatibility": ["claude-code", "cursor", "codex"],
+      "tool_compatibility": [
+        "claude-code",
+        "cursor",
+        "codex"
+      ],
       "conflict_risk": "high",
       "license": "MIT (skill/adoption surfaces); BSL-1.1 (core engine/runtime) - mixed, confirm per-component compatibility with client work-for-hire terms",
       "reviewed_date": "2026-08-31",
       "pinned_ref": null,
-      "trust_flags": ["implausible star count: 101,968 stars / 5,933 forks at ~5 months old (created 2026-04-04, verified via GitHub API 2026-08-31) - matches the fake-star pattern in arXiv 2412.13459"],
-      "risk_notes": "HIGH RISK - star count implausible for repo age; added despite this by explicit decision, not because trust was established. Ships a curl|bash installer and an always-on proxy that rewrites tool output before it reaches the model - read install.sh in full and pin to an exact commit SHA; do not run the one-liner unpinned. BSL-1.1 on the core engine is not fully open-source."
+      "trust_flags": [
+        "implausible star count: 101,968 stars / 5,933 forks at ~5 months old (created 2026-04-04, verified via GitHub API 2026-08-31) - matches the fake-star pattern in arXiv 2412.13459"
+      ],
+      "risk_notes": "HIGH RISK - star count implausible for repo age; added despite this by explicit decision, not because trust was established. Ships a curl|bash installer and an always-on proxy that rewrites tool output before it reaches the model - read install.sh in full and pin to an exact commit SHA; do not run the one-liner unpinned. BSL-1.1 on the core engine is not fully open-source.",
+      "verified_command": "`npx skills add JuliusBrussee/caveman` - the lightweight skill-only path. The repo's own full installer (`curl -fsSL .../install.sh | bash`) additionally sets up an always-on proxy and Claude Code hooks; do not run that unpinned one-liner per this entry's own risk_notes - if the proxy is wanted, fetch install.sh at a pinned ref and read it first.",
+      "command_verified_date": "2026-09-01"
     },
     {
       "id": "grillme",
@@ -233,12 +275,18 @@
       "install_type": "reference-clone",
       "automation_depth": "manual-invoke",
       "token_footprint": "lazy - single skill file; do not import the surrounding ~40-skill collection wholesale",
-      "tool_compatibility": ["claude-code", "cursor", "codex"],
+      "tool_compatibility": [
+        "claude-code",
+        "cursor",
+        "codex"
+      ],
       "conflict_risk": "medium",
       "license": "MIT",
       "reviewed_date": "2026-08-31",
       "pinned_ref": null,
-      "trust_flags": ["implausible star count: 242,415 stars / 20,609 forks at ~7 months old (created 2026-02-03, verified via GitHub API 2026-08-31) - more stars than facebook/react accumulated in 12 years; matches the fake-star pattern in arXiv 2412.13459"],
+      "trust_flags": [
+        "implausible star count: 242,415 stars / 20,609 forks at ~7 months old (created 2026-02-03, verified via GitHub API 2026-08-31) - more stars than facebook/react accumulated in 12 years; matches the fake-star pattern in arXiv 2412.13459"
+      ],
       "risk_notes": "HIGH RISK - the most extreme star/age ratio of any candidate reviewed for this catalog; added despite this by explicit decision. Copy in only the grill-me skill file, not the surrounding collection. Check for overlap with any existing clarifying-interview/planning skill before installing alongside one."
     },
     {
@@ -250,13 +298,19 @@
       "install_type": "claude-marketplace",
       "automation_depth": "orchestrated",
       "token_footprint": "always-loaded - 19 agent + 39 skill descriptors add fixed routing overhead every session regardless of use; measure before adopting (scripts/context_budget.py)",
-      "tool_compatibility": ["claude-code"],
+      "tool_compatibility": [
+        "claude-code"
+      ],
       "conflict_risk": "high",
       "license": "MIT",
       "reviewed_date": "2026-08-31",
       "pinned_ref": null,
-      "trust_flags": ["implausible star count: 38,913 stars / 3,491 forks at ~7.5 months old (created 2026-01-09, verified via GitHub API 2026-08-31) - matches the fake-star pattern in arXiv 2412.13459, less extreme than the other three added here but still disqualifying as a trust signal"],
-      "risk_notes": "HIGH RISK on two independent axes: (1) star count implausible for age; (2) a 19-agent self-orchestrating architecture is exactly what Symfony's subagent-gate.sh + CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1 + denied Agent(Explore/Plan/general-purpose) is designed to block by default. Will not function without an explicit roster-whitelist decision (see the Kit1/Kit2 collision analysis - same fork in the road as `ecc`). At least 6 other 'oh-my-claude*' forks exist with ordinary star counts - confirm this specific fork is the one intended before installing."
+      "trust_flags": [
+        "implausible star count: 38,913 stars / 3,491 forks at ~7.5 months old (created 2026-01-09, verified via GitHub API 2026-08-31) - matches the fake-star pattern in arXiv 2412.13459, less extreme than the other three added here but still disqualifying as a trust signal"
+      ],
+      "risk_notes": "HIGH RISK on two independent axes: (1) star count implausible for age; (2) a 19-agent self-orchestrating architecture is exactly what Symfony's subagent-gate.sh + CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1 + denied Agent(Explore/Plan/general-purpose) is designed to block by default. Will not function without an explicit roster-whitelist decision (see the Kit1/Kit2 collision analysis - same fork in the road as `ecc`). At least 6 other 'oh-my-claude*' forks exist with ordinary star counts - confirm this specific fork is the one intended before installing.",
+      "verified_command": "`/plugin marketplace add https://github.com/Yeachan-Heo/oh-my-claudecode` then `/plugin install oh-my-claudecode` - enter as two separate slash commands, not pasted together, per the repo's own README.",
+      "command_verified_date": "2026-09-01"
     }
   ]
 }

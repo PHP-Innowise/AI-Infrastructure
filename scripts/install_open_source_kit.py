@@ -23,6 +23,9 @@ DEFAULT_RESOURCES = KIT_DIR / "resources.json"
 REGISTRY_DIR = KIT_DIR / "registry"
 MANIFEST_NAME = ".kit3-manifest.json"
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import kit_fetcher  # noqa: E402 - needs sys.path set first
+
 INSTALL_GUIDANCE = {
     "claude-marketplace": (
         "Inside a Claude Code session: `/plugin marketplace add {owner_repo}`, "
@@ -73,6 +76,54 @@ def guidance_for(resource: dict) -> str:
         raise KitError(f"unknown install_type: {resource['install_type']}")
     owner_repo = resource["url"].rstrip("/").split("github.com/", 1)[-1]
     return template.format(owner_repo=owner_repo, url=resource["url"])
+
+
+def refresh_selected(selected: list[dict]) -> dict[str, tuple]:
+    """Fetch current repo metadata + README for each pick, once each.
+
+    Discovery-index entries are skipped - "install" is not a concept for a
+    curated list. A network failure for one resource does not stop the
+    others; `kit_fetcher.refresh` already guarantees that per entry.
+    """
+    results: dict[str, tuple] = {}
+    for entry in selected:
+        if entry["category"] == "discovery-index":
+            continue
+        results[entry["id"]] = kit_fetcher.refresh(entry["url"])
+    return results
+
+
+def resolve_guidance(entry: dict, refresh_result: tuple | None) -> tuple[str, str, list[str]]:
+    """Decide install guidance for one entry, and say where it came from.
+
+    Returns (guidance_text, source, notes). `source` is one of `live_fetch`,
+    `verified_command`, `generic_template` - written into the manifest so the
+    audit trail states how current the recorded command actually is, not just
+    that some text was recorded.
+
+    A fresh fetch is used only when it resolves to exactly one unambiguous
+    candidate. Zero or several candidates fall back to whatever was already
+    trusted, because picking among several would present a guess as a fact -
+    the one thing this whole registry exists to refuse to do.
+    """
+    notes: list[str] = []
+    if refresh_result is not None:
+        metadata, candidates, errors = refresh_result
+        for error in errors:
+            notes.append(f"refresh error: {error}")
+        if len(candidates) == 1:
+            notes.append("refresh found 1 unambiguous candidate in the current README")
+            return candidates[0].command, "live_fetch", notes
+        if len(candidates) > 1:
+            notes.append(
+                f"refresh found {len(candidates)} candidate commands - ambiguous, "
+                "keeping the stored guidance instead of guessing"
+            )
+        elif not errors:
+            notes.append("refresh found 0 install-command candidates in the current README")
+
+    source = "verified_command" if entry.get("verified_command") else "generic_template"
+    return guidance_for(entry), source, notes
 
 
 def print_catalog(resources: list[dict]) -> None:
@@ -173,8 +224,13 @@ def parse_pins(values: list[str]) -> dict[str, str]:
 
 
 def apply_selection(
-    manifest: dict, selected: list[dict], pins: dict[str, str], today: str
+    manifest: dict,
+    selected: list[dict],
+    pins: dict[str, str],
+    today: str,
+    refresh_results: dict[str, tuple] | None = None,
 ) -> dict:
+    refresh_results = refresh_results or {}
     for entry in selected:
         existing = manifest["entries"].get(entry["id"], {})
         # A pin already in the manifest survives a later selection that does not
@@ -189,6 +245,9 @@ def apply_selection(
         # it records what review found - not only what was picked. A warning
         # printed to a terminal survives nothing; this is reviewable in a diff.
         status = registry_status(entry["id"])
+        guidance, guidance_source, _notes = resolve_guidance(
+            entry, refresh_results.get(entry["id"])
+        )
         manifest["entries"][entry["id"]] = {
             "name": entry["name"],
             "url": entry["url"],
@@ -200,16 +259,21 @@ def apply_selection(
             # `guidance`, not `command`: this is what the tool proposed, not a
             # record of what a human actually ran. How something was installed
             # is part of its risk - `curl | bash` is not `git clone` - so the
-            # manifest has to answer "how", not only "what".
+            # manifest has to answer "how", not only "what". `guidance_source`
+            # says whether that answer was checked against the README on this
+            # run (`live_fetch`), taken from a prior manual check
+            # (`verified_command`), or is the generic install_type template.
             "install_method": entry["install_type"],
-            "install_guidance": guidance_for(entry),
+            "install_guidance": guidance,
+            "install_guidance_source": guidance_source,
+            "install_guidance_fetched_at": today if guidance_source == "live_fetch" else None,
             "risk_notes": entry.get("risk_notes"),
             "review": {"status": status, "reviewed": status is not None},
         }
     return manifest
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--resources", type=Path, default=DEFAULT_RESOURCES)
     parser.add_argument("--list", action="store_true", help="print the catalog and exit")
@@ -219,14 +283,27 @@ def parse_args() -> argparse.Namespace:
         "--pin", action="append", default=[], help="record the ref actually installed: ID=REF, repeatable"
     )
     parser.add_argument("--dry-run", action="store_true")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help=(
+            "before recording, fetch each pick's current README from GitHub and "
+            "use its install command if exactly one unambiguous candidate is "
+            "found; otherwise keep the stored guidance. Requires network access; "
+            "unauthenticated GitHub API calls are rate-limited to 60/hour. Opt-in "
+            "because it makes the run network-dependent and non-deterministic - "
+            "off by default so browsing, testing, and offline/CI use stay exactly "
+            "as fast and reliable as recording a selection always has been."
+        ),
+    )
+    args = parser.parse_args(argv)
     if not args.list and args.target is None:
         parser.error("--target is required unless --list is given")
     return args
 
 
-def main() -> int:
-    args = parse_args()
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     try:
         resources = load_resources(args.resources.resolve())
 
@@ -265,13 +342,25 @@ def main() -> int:
         manifest_path = target / MANIFEST_NAME
         manifest = load_manifest(manifest_path)
         today = date.today().isoformat()
-        manifest = apply_selection(manifest, selected, pins, today)
+
+        refresh_results: dict[str, tuple] = {}
+        if args.refresh:
+            print(f"REFRESHING\t{len(selected)} resource(s) against their current README...\n")
+            refresh_results = refresh_selected(selected)
+
+        manifest = apply_selection(manifest, selected, pins, today, refresh_results)
 
         for entry in selected:
             action = "WOULD_SELECT" if args.dry_run else "SELECTED"
             print(f"{action}\t{entry['id']}\t{entry['name']}")
             print(f"  url:  {entry['url']}")
-            print(f"  how:  {guidance_for(entry)}")
+            guidance, guidance_source, guidance_notes = resolve_guidance(
+                entry, refresh_results.get(entry["id"])
+            )
+            source_tag = f" [{guidance_source}]" if args.refresh else ""
+            print(f"  how:  {guidance}{source_tag}")
+            for guidance_note in guidance_notes:
+                print(f"  ~     {guidance_note}")
             print(f"  risk: {entry.get('risk_notes', 'n/a')}")
             note = review_note(entry["id"])
             if note:

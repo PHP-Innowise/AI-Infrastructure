@@ -3,17 +3,29 @@
 
 from __future__ import annotations
 
+import contextlib
+import importlib.util
+import io
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SELECTOR = ROOT / "scripts" / "install_open_source_kit.py"
 CATALOG = ROOT / "install" / "open-source-kit" / "resources.json"
 TIMEOUT = 30
+
+# Loaded in-process (not via subprocess) so --refresh tests can patch
+# kit_fetcher.refresh directly. The subprocess-based `run()` below still
+# exercises the real CLI end to end for every other test in this file.
+_spec = importlib.util.spec_from_file_location("install_open_source_kit", SELECTOR)
+iosk = importlib.util.module_from_spec(_spec)
+sys.modules["install_open_source_kit"] = iosk
+_spec.loader.exec_module(iosk)
 
 REQUIRED_FIELDS = (
     "id",
@@ -77,6 +89,15 @@ class CatalogContractTests(unittest.TestCase):
     def test_verified_command_present_only_when_stated(self) -> None:
         superpowers = next(e for e in self.resources if e["id"] == "obra-superpowers")
         self.assertIn("verified_command", superpowers)
+
+    def test_verified_command_carries_a_verification_date(self) -> None:
+        """A command checked against a README goes stale; the date says how stale."""
+        for entry in self.resources:
+            if entry.get("verified_command"):
+                self.assertIn(
+                    "command_verified_date", entry,
+                    msg=f"{entry['id']} has verified_command with no verification date",
+                )
 
     def test_discovery_index_entries_have_no_tool_compatibility(self) -> None:
         for entry in self.resources:
@@ -288,6 +309,89 @@ class SelectorCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as target:
             result = run("--select", "graphify", "--target", target, "--dry-run")
             self.assertIn("KNOWN RISKS", result.stdout)
+
+
+def _run_quietly(argv: list[str]) -> int:
+    """Call iosk.main() without letting its prints reach the test runner's stdout."""
+    with contextlib.redirect_stdout(io.StringIO()):
+        return iosk.main(argv)
+
+
+class RefreshTests(unittest.TestCase):
+    """--refresh, tested in-process against the mocked kit_fetcher.refresh.
+
+    `run()` above spawns a subprocess, so a mock in this test process would
+    never reach it - these tests call `iosk.main()` directly instead, which is
+    why this file loads install_open_source_kit.py via importlib rather than
+    only shelling out to it.
+    """
+
+    def test_refresh_uses_the_one_unambiguous_candidate(self) -> None:
+        fake_meta = iosk.kit_fetcher.RepoMetadata(1, 1, "2026-09-01T00:00:00Z", 0, "MIT")
+        candidate = iosk.kit_fetcher.Candidate(
+            context="## Install", command="npx real-thing install"
+        )
+        with tempfile.TemporaryDirectory() as target:
+            with unittest.mock.patch.object(
+                iosk.kit_fetcher, "refresh", return_value=(fake_meta, [candidate], [])
+            ):
+                result = _run_quietly(
+                    ["--select", "obra-superpowers", "--target", target, "--refresh"]
+                )
+            self.assertEqual(result, 0)
+            entry = json.loads(
+                (Path(target) / ".kit3-manifest.json").read_text()
+            )["entries"]["obra-superpowers"]
+            self.assertEqual(entry["install_guidance"], "npx real-thing install")
+            self.assertEqual(entry["install_guidance_source"], "live_fetch")
+            self.assertIsNotNone(entry["install_guidance_fetched_at"])
+
+    def test_refresh_falls_back_when_candidates_are_ambiguous(self) -> None:
+        """Picking among several would present a guess as a fact - the one thing
+        this whole registry exists to refuse to do."""
+        c1 = iosk.kit_fetcher.Candidate(context="## npm", command="npm install -g x")
+        c2 = iosk.kit_fetcher.Candidate(context="## pipx", command="pipx install x")
+        with tempfile.TemporaryDirectory() as target:
+            with unittest.mock.patch.object(
+                iosk.kit_fetcher, "refresh", return_value=(None, [c1, c2], [])
+            ):
+                _run_quietly(["--select", "obra-superpowers", "--target", target, "--refresh"])
+            entry = json.loads(
+                (Path(target) / ".kit3-manifest.json").read_text()
+            )["entries"]["obra-superpowers"]
+            self.assertNotEqual(entry["install_guidance_source"], "live_fetch")
+            self.assertIn("/plugin install superpowers@", entry["install_guidance"])
+
+    def test_refresh_falls_back_on_network_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as target:
+            with unittest.mock.patch.object(
+                iosk.kit_fetcher, "refresh",
+                return_value=(None, [], ["boom: no network"]),
+            ):
+                result = _run_quietly(
+                    ["--select", "obra-superpowers", "--target", target, "--refresh"]
+                )
+            self.assertEqual(result, 0)  # a refresh failure is not a run failure
+            entry = json.loads(
+                (Path(target) / ".kit3-manifest.json").read_text()
+            )["entries"]["obra-superpowers"]
+            self.assertEqual(entry["install_guidance_source"], "verified_command")
+
+    def test_discovery_index_entries_are_not_refreshed(self) -> None:
+        """"Install" is not a concept for a curated list - refreshing one is wasted work."""
+        with tempfile.TemporaryDirectory() as target:
+            with unittest.mock.patch.object(iosk.kit_fetcher, "refresh") as mocked:
+                _run_quietly(
+                    ["--select", "awesome-claude-code", "--target", target, "--refresh"]
+                )
+            mocked.assert_not_called()
+
+    def test_without_refresh_flag_kit_fetcher_is_never_called(self) -> None:
+        """The default path stays exactly as network-free as it always was."""
+        with tempfile.TemporaryDirectory() as target:
+            with unittest.mock.patch.object(iosk.kit_fetcher, "refresh") as mocked:
+                _run_quietly(["--select", "obra-superpowers", "--target", target])
+            mocked.assert_not_called()
 
 
 if __name__ == "__main__":
