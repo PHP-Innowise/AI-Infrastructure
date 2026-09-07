@@ -2231,6 +2231,16 @@ class ContextEngineTest(unittest.TestCase):
         self.assertIn("possible GitHub token", packet.stderr)
         self.assertNotIn("ABCDEFGHIJKLMNOPQRSTUVWXYZ", packet.stderr)
 
+    def test_consolidation_counts_applied_promotion_records(self) -> None:
+        directory = self.repository / "project-brain/control/promotions"
+        directory.mkdir(parents=True)
+        for name, status in (("done", "applied"), ("pending", "proposed")):
+            (directory / f"{name}.json").write_text(json.dumps({"status": status}))
+        with mock.patch.object(CONTEXT, "load_config", return_value={}), \
+             mock.patch.object(CONTEXT, "promotable_records", return_value=([], [])):
+            counters = CONTEXT.consolidation_counters(self.repository, "governed")
+        self.assertEqual(1, counters["applied"])
+
     def test_status_reports_document_and_episode_counts(self) -> None:
         self.repository.joinpath("specs/status.md").write_text(
             "# Status\n\nStatus context.\n",
