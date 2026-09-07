@@ -7,14 +7,14 @@
   "reviewed_date": "2026-08-31",
   "reviewed_by": "Kit 3 registry pass - gates applied, source not yet read",
   "status": "known_risks",
-  "status_summary": "Known risks, recorded rather than ruled on. `collisions` is the substantial one: a 19-agent self-orchestrating architecture is what our roster enforcement refuses by construction - Symfony sets CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1, sets CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS=1, denies Agent(Explore), Agent(Plan) and Agent(general-purpose), and gates PreToolUse: Agent|Task through subagent-gate.sh. This is not a judgement on the tool's quality; it will not run under our accelerator without an explicit roster-whitelist decision. `measurability` and `maintenance_ownership` are also unresolved, and the repository identity is unconfirmed - see open_questions.",
+  "status_summary": "Known risks: project maintenance ownership and measured cost remain unresolved. Compatibility with the accelerator roster and nested-agent limits needs testing against a selected component and version; hook coverage does not establish coverage of subprocess execution.",
   "tier": 3,
   "default_state": "disabled",
   "install": {
     "method": "claude-marketplace",
     "pinned_ref": null,
     "namespace_prefix": "omc-",
-    "command": "Inside a Claude Code session: `/plugin marketplace add Yeachan-Heo/oh-my-claudecode`, then install the specific plugin(s) named in the repo README. Confirm the repo identity first - at least seven distinct 'oh-my-claude*' repositories exist.",
+    "command": "`/plugin marketplace add https://github.com/Yeachan-Heo/oh-my-claudecode` then `/plugin install oh-my-claudecode` - enter as two separate slash commands, not pasted together, per the repo's own README.",
     "notes": "Registry never runs this. A human runs it after confirming identity and reading what the plugin registers."
   },
   "binary_gates": {
@@ -38,9 +38,9 @@
       "resolves_by": "Confirm `/plugin uninstall` removes every agent, skill and settings entry the install added, and that nothing is left in the repository after removal."
     },
     "collisions": {
-      "status": "fail",
-      "evidence": "Frontal architectural conflict, verified in this repository on 2026-08-31. Symfony/.claude/settings.json sets CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS=1 and CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1, denies Agent(Explore), Agent(Plan) and Agent(general-purpose), and registers .claude/hooks/subagent-gate.sh on PreToolUse: Agent|Task. A kit whose entire value is 19 specialised agents dispatching each other is refused by that gate by design, and any nested spawn hits depth=1 regardless. Additionally, 19 agents and 39 skills would need namespace-checking against our own roster for name collisions - unassessed, and moot while the architectural conflict stands.",
-      "resolves_by": "Requires the roster-whitelist decision, not a bypass: add named foreign agents to the subagent-gate roster explicitly, leaving enforcement intact for everything else. Disabling the gate or shipping a gate-free profile is the rejected alternative - it removes the property we are engaged for."
+      "status": "unknown",
+      "evidence": "Symfony configuration restricts Agent/Task names and nested dispatch. This may conflict with an external orchestrator. Actual compatibility depends on the selected components and whether work uses Agent/Task or subprocess paths; no complete pinned co-installation test is recorded.",
+      "resolves_by": "Test the selected components against the active host policy, including Agent/Task and subprocess paths, and record a scoped compatibility decision."
     },
     "auto_update": {
       "status": "unknown",
@@ -75,8 +75,7 @@
       "score": 2,
       "evidence": "Active: last push 2026-08-31, MIT licensed, a published project website, a coherent documented architecture. Against: bus factor, issue response time, release/semver discipline and test coverage all unassessed; and the name is heavily duplicated across the ecosystem, which is itself a supply-chain risk (installing the wrong 'oh-my-claude' is an easy mistake to make).",
       "disqualified_signals": [
-        "star count: 38,913 stars / 3,491 forks at ~7.5 months old (created 2026-01-09, verified via GitHub API 2026-08-31). Implausible for the age - less extreme than the other flagged candidates but still disqualifying as a trust signal; matches the pattern in arXiv 2412.13459. Recorded, never scored.",
-        "peer comparison: six sibling repositories with the same name pattern carry 0, 3, 6, 7, 11 and 176 stars respectively (verified via GitHub API 2026-08-31), which is the ordinary range for tools of this kind and age."
+        "Popularity counters are not security evidence and are not scored. No manipulation claim is made about this project."
       ]
     }
   },
@@ -84,12 +83,12 @@
     {
       "ours": ".claude/hooks/subagent-gate.sh + settings.json roster enforcement",
       "relation": "conflicts",
-      "detail": "Not an overlap - a mutual exclusion. Our gate refuses any subagent outside the roster; this kit's value is 19 subagents outside the roster. One of the two must give, and the decision is the roster-whitelist question, not a per-tool judgement. This is the same fork in the road as `ecc`."
+      "detail": "Potential interaction with roster and nesting constraints; test the selected execution paths. A hook for Agent/Task does not by itself establish subprocess enforcement."
     },
     {
       "ours": "Command -> Agent -> Skill pipeline (thin agent, one skill, then stop)",
       "relation": "conflicts",
-      "detail": "Our model forbids automatic chaining: an agent executes exactly one skill and stops. 'Ultrawork'-style self-directed multi-agent execution is the opposite premise. Running both means two orchestration philosophies in one session, and the more automatic one wins by default."
+      "detail": "Potential interaction with roster and nesting constraints; test the selected execution paths. A hook for Agent/Task does not by itself establish subprocess enforcement."
     },
     {
       "ours": "Generated agent rosters (Laravel 43, Symfony 43+, PHP Core, WordPress editions)",

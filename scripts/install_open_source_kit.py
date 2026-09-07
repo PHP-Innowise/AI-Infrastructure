@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Select curated open-source Claude Code resources (Kit 3) and record the choice.
 
-This never downloads or executes third-party code. It lists the reviewed
+This never installs or executes third-party code. It lists the curated
 catalog (`install/open-source-kit/resources.json`), lets the caller pick only
 the resources a project actually needs, prints tool-appropriate install
 guidance for each, and writes/updates a `.kit3-manifest.json` in the target
@@ -12,7 +12,11 @@ from `.infra-manifest.json`.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
+import os
+import secrets
+import stat
 import sys
 from datetime import date
 from pathlib import Path
@@ -25,6 +29,7 @@ MANIFEST_NAME = ".kit3-manifest.json"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import kit_fetcher  # noqa: E402 - needs sys.path set first
+from validate_registry import SAFE_RESOURCE_ID, validate_entry  # noqa: E402
 
 INSTALL_GUIDANCE = {
     "claude-marketplace": (
@@ -45,6 +50,10 @@ INSTALL_GUIDANCE = {
         "Run via `npx` - the repo README names the current package and flags. "
         "Review every file it proposes to write before accepting."
     ),
+    "python-cli": (
+        "Install the named Python CLI with `uv tool install` or `pipx install`, "
+        "then run its documented project-scoped setup command."
+    ),
     "discovery-index": (
         "This is a curated list, not an installable resource. Browse it, then "
         "vet whatever specific resource is found there with this same "
@@ -60,11 +69,35 @@ class KitError(Exception):
 def load_resources(path: Path) -> list[dict]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise KitError(f"resource catalog unreadable: {error}") from error
+    if not isinstance(data, dict):
+        raise KitError("resource catalog must contain a JSON object")
     resources = data.get("resources")
     if not isinstance(resources, list) or not resources:
         raise KitError(f"resource catalog has no resources: {path}")
+    seen = set()
+    for index, entry in enumerate(resources):
+        if not isinstance(entry, dict):
+            raise KitError(f"resource #{index} must be a JSON object")
+        for field in ("id", "name", "url", "category", "description", "install_type"):
+            if not isinstance(entry.get(field), str) or not entry[field].strip():
+                raise KitError(f"resource #{index} has no usable `{field}`")
+        resource_id = entry["id"]
+        if not SAFE_RESOURCE_ID.fullmatch(resource_id):
+            raise KitError(f"unsafe resource id: {resource_id!r}")
+        if resource_id in seen:
+            raise KitError(f"duplicate resource id: {resource_id}")
+        seen.add(resource_id)
+        if entry["install_type"] not in INSTALL_GUIDANCE:
+            raise KitError(f"unknown install_type: {entry['install_type']}")
+        if entry.get("verified_command") is not None and (
+            not isinstance(entry["verified_command"], str) or not entry["verified_command"].strip()
+        ):
+            raise KitError(f"resource {resource_id} has no usable `verified_command`")
+        compatibility = entry.get("tool_compatibility", [])
+        if not isinstance(compatibility, list) or not all(isinstance(item, str) for item in compatibility):
+            raise KitError(f"resource {resource_id} tool_compatibility must be a list of strings")
     return resources
 
 
@@ -96,29 +129,22 @@ def refresh_selected(selected: list[dict]) -> dict[str, tuple]:
 def resolve_guidance(entry: dict, refresh_result: tuple | None) -> tuple[str, str, list[str]]:
     """Decide install guidance for one entry, and say where it came from.
 
-    Returns (guidance_text, source, notes). `source` is one of `live_fetch`,
-    `verified_command`, `generic_template` - written into the manifest so the
-    audit trail states how current the recorded command actually is, not just
-    that some text was recorded.
-
-    A fresh fetch is used only when it resolves to exactly one unambiguous
-    candidate. Zero or several candidates fall back to whatever was already
-    trusted, because picking among several would present a guess as a fact -
-    the one thing this whole registry exists to refuse to do.
+    Returns (guidance_text, source, notes). README candidates are unreviewed
+    discovery evidence, even when there is exactly one. They never replace
+    catalog guidance or inherit its registry review.
     """
     notes: list[str] = []
     if refresh_result is not None:
-        metadata, candidates, errors = refresh_result
+        _metadata, candidates, errors = refresh_result
         for error in errors:
             notes.append(f"refresh error: {error}")
-        if len(candidates) == 1:
-            notes.append("refresh found 1 unambiguous candidate in the current README")
-            return candidates[0].command, "live_fetch", notes
-        if len(candidates) > 1:
+        if candidates:
             notes.append(
-                f"refresh found {len(candidates)} candidate commands - ambiguous, "
-                "keeping the stored guidance instead of guessing"
+                f"refresh found {len(candidates)} unreviewed README candidate(s); "
+                "advisory only, keeping catalog guidance"
             )
+            for candidate in candidates:
+                notes.append(f"unreviewed README candidate: {candidate.command!r}")
         elif not errors:
             notes.append("refresh found 0 install-command candidates in the current README")
 
@@ -173,25 +199,37 @@ def resolve_selection(resources: list[dict], ids: list[str]) -> list[dict]:
     return resolved
 
 
-def registry_status(resource_id: str) -> str | None:
+def registry_status(resource: dict) -> str | None:
     """What the registry found for a catalog id, or None when unreviewed.
 
-    The registry describes; it never refuses. This script installs nothing
-    either way, so refusing would only block writing the choice down - and an
-    install that happened anyway would then be missing from the audit trail.
+    Valid review states are advisory. Invalid or mismatched evidence is an
+    error because it cannot truthfully be attached to the selected resource.
     """
+    resource_id = resource["id"]
+    if not isinstance(resource_id, str) or not SAFE_RESOURCE_ID.fullmatch(resource_id):
+        raise KitError(f"unsafe resource id: {resource_id!r}")
     path = REGISTRY_DIR / f"{resource_id}.json"
     if not path.is_file():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8")).get("status")
-    except (OSError, json.JSONDecodeError):
-        return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise KitError(f"registry entry unreadable for {resource_id}: {error}") from error
+    if not isinstance(data, dict):
+        raise KitError(
+            f"registry entry invalid for {resource_id}: expected a JSON object"
+        )
+    try:
+        errors = validate_entry(data, {resource_id: resource})
+    except Exception as error:  # malformed input must stay inside the CLI boundary
+        raise KitError(f"registry entry invalid for {resource_id}: {error!r}") from error
+    if errors:
+        raise KitError(f"registry entry invalid for {resource_id}: {'; '.join(errors)}")
+    return data["status"]
 
 
-def review_note(resource_id: str) -> str | None:
+def review_note(resource_id: str, status: str | None) -> str | None:
     """One line naming what review found, so a pick is made with eyes open."""
-    status = registry_status(resource_id)
     if status == "clear":
         return None
     reference = f"install/open-source-kit/registry/{resource_id}.json"
@@ -202,15 +240,132 @@ def review_note(resource_id: str) -> str | None:
     return f"OPEN QUESTIONS remain - read {reference} before installing"
 
 
-def load_manifest(path: Path) -> dict:
-    if not path.exists():
-        return {"schema_version": 1, "kit": "open-source-kit", "entries": {}}
+def open_target_directory(path: Path) -> int:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    except AttributeError as error:
+        raise KitError("safe manifest handling is not supported on this platform") from error
+    if not path.is_absolute():
+        raise KitError(f"target directory must be absolute: {path}")
+    descriptor = None
+    try:
+        descriptor = os.open(path.anchor, flags)
+        for part in path.parts[1:]:
+            next_descriptor = os.open(part, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        return descriptor
+    except OSError as error:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise KitError(f"target directory could not be opened safely: {error}") from error
+
+
+def load_manifest(path: Path, directory_fd: int | None = None) -> dict:
+    owns_directory = directory_fd is None
+    if owns_directory:
+        directory_fd = open_target_directory(path.parent)
+    descriptor = None
+    try:
+        try:
+            descriptor = os.open(
+                MANIFEST_NAME, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                dir_fd=directory_fd,
+            )
+        except FileNotFoundError:
+            return {"schema_version": 1, "kit": "open-source-kit", "entries": {}}
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise KitError(f"manifest path must be a regular file: {path}")
+        handle = os.fdopen(descriptor, encoding="utf-8")
+        descriptor = None
+        with handle:
+            data = json.load(handle)
+    except KitError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        if isinstance(error, OSError) and error.errno == errno.ELOOP:
+            raise KitError(f"manifest path must not be a symlink: {path}") from error
         raise KitError(f"existing manifest unreadable: {error}") from error
-    data.setdefault("entries", {})
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if owns_directory:
+            os.close(directory_fd)
+    if not isinstance(data, dict):
+        raise KitError("existing manifest must contain a JSON object")
+    schema_version = data.get("schema_version")
+    if type(schema_version) is not int or schema_version != 1:
+        raise KitError(f"existing manifest has unsupported schema_version: {schema_version!r}")
+    if data.get("kit") != "open-source-kit":
+        raise KitError(f"existing manifest has unexpected kit: {data.get('kit')!r}")
+    entries = data.setdefault("entries", {})
+    if not isinstance(entries, dict):
+        raise KitError("existing manifest `entries` must be a JSON object")
+    for resource_id, entry in entries.items():
+        if not isinstance(entry, dict):
+            raise KitError(
+                f"existing manifest entry {resource_id!r} must be a JSON object"
+            )
     return data
+
+
+def write_manifest(path: Path, manifest: dict, directory_fd: int | None = None) -> None:
+    payload = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    owns_directory = directory_fd is None
+    if owns_directory:
+        directory_fd = open_target_directory(path.parent)
+    temporary_name = f"{MANIFEST_NAME}.{secrets.token_hex(8)}.tmp"
+    descriptor = None
+    try:
+        current_directory = os.stat(path.parent, follow_symlinks=False)
+        if not os.path.samestat(current_directory, os.fstat(directory_fd)):
+            raise KitError("target directory changed while preparing the manifest")
+
+        try:
+            existing = os.stat(
+                MANIFEST_NAME, dir_fd=directory_fd, follow_symlinks=False
+            )
+        except FileNotFoundError:
+            existing = None
+        if existing is not None and stat.S_ISLNK(existing.st_mode):
+            raise KitError(f"manifest path must not be a symlink: {path}")
+        if existing is not None and not stat.S_ISREG(existing.st_mode):
+            raise KitError(f"manifest path must be a regular file: {path}")
+
+        mode = stat.S_IMODE(existing.st_mode) if existing is not None else 0o666
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            mode,
+            dir_fd=directory_fd,
+        )
+        if existing is not None:
+            os.fchmod(descriptor, mode)
+        handle = os.fdopen(descriptor, "w", encoding="utf-8")
+        descriptor = None
+        with handle:
+            handle.write(payload)
+        os.replace(
+            temporary_name,
+            MANIFEST_NAME,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+        temporary_name = ""
+    except KitError:
+        raise
+    except (OSError, NotImplementedError) as error:
+        raise KitError(f"manifest could not be written: {error}") from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary_name:
+            try:
+                os.unlink(temporary_name, dir_fd=directory_fd)
+            except OSError:
+                pass
+        if owns_directory:
+            os.close(directory_fd)
 
 
 def parse_pins(values: list[str]) -> dict[str, str]:
@@ -219,7 +374,10 @@ def parse_pins(values: list[str]) -> dict[str, str]:
         if "=" not in value:
             raise KitError(f"--pin must be ID=REF, got: {value}")
         resource_id, ref = value.split("=", 1)
-        pins[resource_id.strip()] = ref.strip()
+        resource_id, ref = resource_id.strip(), ref.strip()
+        if not SAFE_RESOURCE_ID.fullmatch(resource_id) or not ref:
+            raise KitError(f"--pin must be a safe ID and non-empty REF: {value!r}")
+        pins[resource_id] = ref
     return pins
 
 
@@ -244,7 +402,7 @@ def apply_selection(
         # The manifest is committed to the client project as the audit trail, so
         # it records what review found - not only what was picked. A warning
         # printed to a terminal survives nothing; this is reviewable in a diff.
-        status = registry_status(entry["id"])
+        status = registry_status(entry)
         guidance, guidance_source, _notes = resolve_guidance(
             entry, refresh_results.get(entry["id"])
         )
@@ -260,16 +418,26 @@ def apply_selection(
             # record of what a human actually ran. How something was installed
             # is part of its risk - `curl | bash` is not `git clone` - so the
             # manifest has to answer "how", not only "what". `guidance_source`
-            # says whether that answer was checked against the README on this
-            # run (`live_fetch`), taken from a prior manual check
-            # (`verified_command`), or is the generic install_type template.
+            # names the catalog's prior manual check or generic template.
+            # Fresh README candidates remain separate, unreviewed evidence.
             "install_method": entry["install_type"],
             "install_guidance": guidance,
             "install_guidance_source": guidance_source,
-            "install_guidance_fetched_at": today if guidance_source == "live_fetch" else None,
+            "install_guidance_fetched_at": None,
             "risk_notes": entry.get("risk_notes"),
             "review": {"status": status, "reviewed": status is not None},
         }
+        if entry["id"] in refresh_results:
+            _metadata, candidates, errors = refresh_results[entry["id"]]
+            manifest["entries"][entry["id"]]["readme_refresh"] = {
+                "attempted_at": today,
+                "advisory": True,
+                "candidates": [
+                    {"context": candidate.context, "command": candidate.command}
+                    for candidate in candidates
+                ],
+                "errors": errors,
+            }
     return manifest
 
 
@@ -287,9 +455,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--refresh",
         action="store_true",
         help=(
-            "before recording, fetch each pick's current README from GitHub and "
-            "use its install command if exactly one unambiguous candidate is "
-            "found; otherwise keep the stored guidance. Requires network access; "
+            "fetch each pick's current README from GitHub and record unreviewed "
+            "install candidates separately; catalog guidance stays unchanged. "
+            "Requires network access; "
             "unauthenticated GitHub API calls are rate-limited to 60/hour. Opt-in "
             "because it makes the run network-dependent and non-deterministic - "
             "off by default so browsing, testing, and offline/CI use stay exactly "
@@ -304,6 +472,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    target_fd = None
     try:
         resources = load_resources(args.resources.resolve())
 
@@ -334,13 +503,14 @@ def main(argv: list[str] | None = None) -> int:
                 f"--pin names id(s) not in this selection: {', '.join(unmatched)}"
             )
 
-        target = args.target.expanduser().resolve()
+        target = Path(os.path.abspath(args.target.expanduser()))
         # Checked before any selection output is printed, so a bad path fails
         # with one line instead of a traceback after lines that read as success.
         if not target.is_dir():
             raise KitError(f"--target is not an existing directory: {target}")
         manifest_path = target / MANIFEST_NAME
-        manifest = load_manifest(manifest_path)
+        target_fd = open_target_directory(target)
+        manifest = load_manifest(manifest_path, target_fd)
         today = date.today().isoformat()
 
         refresh_results: dict[str, tuple] = {}
@@ -362,10 +532,11 @@ def main(argv: list[str] | None = None) -> int:
             for guidance_note in guidance_notes:
                 print(f"  ~     {guidance_note}")
             print(f"  risk: {entry.get('risk_notes', 'n/a')}")
-            note = review_note(entry["id"])
+            status = manifest["entries"][entry["id"]]["review"]["status"]
+            note = review_note(entry["id"], status)
             if note:
                 print(f"  !!    {note}")
-            if not pins.get(entry["id"]) and not entry.get("pinned_ref"):
+            if not manifest["entries"][entry["id"]]["pinned_ref"]:
                 print(
                     "  !     not pinned yet - once installed, record the exact ref with "
                     f"`--pin {entry['id']}=<ref>`"
@@ -374,14 +545,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.dry_run:
             print(f"\nWOULD_WRITE\t{manifest_path}")
         else:
-            manifest_path.write_text(
-                json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-            )
+            write_manifest(manifest_path, manifest, target_fd)
             print(f"\nWROTE\t{manifest_path}")
         return 0
     except KitError as error:
         print(f"install-open-source-kit: {error}", file=sys.stderr)
         return 1
+    finally:
+        if target_fd is not None:
+            os.close(target_fd)
 
 
 if __name__ == "__main__":

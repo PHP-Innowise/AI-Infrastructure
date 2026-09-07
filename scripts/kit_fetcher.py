@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """Fetch a Kit 3 catalog resource's current repo metadata and README, and
 extract install-command candidates from it - the mechanism
-`install_open_source_kit.py --refresh` calls before recording an install
-command into a manifest.
+`install_open_source_kit.py --refresh` uses as advisory discovery evidence.
 
 This reads two public GitHub endpoints (repo metadata, raw README) and looks
 for fenced code blocks whose preceding text mentions an install-related
-keyword. It never installs or executes anything, and it never guesses: when
-it finds exactly one unambiguous candidate, that candidate is usable; zero or
-several candidates means "a human still has to read the README", the same
-conclusion as if this script did not exist. A network failure is caught and
-reported, never raised past this module's own functions, so one flaky call
-cannot crash a selection run over other resources.
+keyword. It never installs or executes anything. Every candidate is unreviewed,
+even when only one is found; a human still has to read the README. Network
+failures and malformed metadata are reported, so one flaky call cannot crash
+a selection run over other resources.
 
 Unauthenticated GitHub API calls are rate-limited to 60/hour per IP - fine for
 occasional use, tight if refreshing the full catalog repeatedly in a short
@@ -27,7 +24,7 @@ import argparse
 import json
 import re
 import sys
-import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,11 +41,11 @@ INSTALL_KEYWORDS = (
     "clone", "curl", "marketplace", "setup",
 )
 CODE_BLOCK_RE = re.compile(r"```(?:bash|sh|shell|console|text)?\n(.*?)```", re.DOTALL)
-GITHUB_URL_RE = re.compile(r"github\.com/([^/]+)/([^/]+?)/?$")
+GITHUB_PATH_RE = re.compile(r"/([A-Za-z0-9][A-Za-z0-9-]*)/([A-Za-z0-9_.-]+)/?\Z")
 
 
 class FetchError(Exception):
-    """A network call itself failed - not a parsing problem."""
+    """A network call failed or its response was malformed."""
 
 
 @dataclass
@@ -67,10 +64,24 @@ class Candidate:
 
 
 def parse_github_owner_repo(url: str) -> tuple[str, str] | None:
-    match = GITHUB_URL_RE.search(url.rstrip("/"))
+    if not isinstance(url, str):
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except ValueError:
+        return None
+    if (parsed.scheme != "https" or parsed.netloc.lower() != "github.com"
+            or parsed.query or parsed.fragment):
+        return None
+    match = GITHUB_PATH_RE.fullmatch(parsed.path)
     if not match:
         return None
-    return match.group(1), match.group(2)
+    owner, repo = match.groups()
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+    if not repo or repo in {".", ".."}:
+        return None
+    return owner, repo
 
 
 def _get(url: str, accept: str) -> bytes:
@@ -80,7 +91,7 @@ def _get(url: str, accept: str) -> bytes:
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
             return response.read()
-    except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+    except OSError as error:
         raise FetchError(f"{url}: {error}") from error
 
 
@@ -88,13 +99,26 @@ def fetch_repo_metadata(owner: str, repo: str) -> RepoMetadata:
     raw = _get(f"{GITHUB_API}/repos/{owner}/{repo}", "application/vnd.github+json")
     try:
         data = json.loads(raw)
-    except json.JSONDecodeError as error:
+    except (UnicodeError, json.JSONDecodeError) as error:
         raise FetchError(f"{owner}/{repo}: metadata response was not JSON") from error
+    if not isinstance(data, dict):
+        raise FetchError(f"{owner}/{repo}: metadata response must be a JSON object")
     if "stargazers_count" not in data:
         raise FetchError(
             f"{owner}/{repo}: {data.get('message', 'unexpected API response')}"
         )
-    license_info = data.get("license") or {}
+    for field in ("stargazers_count", "forks_count", "open_issues_count"):
+        if type(data.get(field)) is not int or data[field] < 0:
+            raise FetchError(f"{owner}/{repo}: invalid metadata field {field}")
+    if not isinstance(data.get("pushed_at"), str):
+        raise FetchError(f"{owner}/{repo}: invalid metadata field pushed_at")
+    license_info = data.get("license")
+    if license_info is None:
+        license_info = {}
+    if not isinstance(license_info, dict) or (
+        license_info.get("spdx_id") is not None and not isinstance(license_info["spdx_id"], str)
+    ):
+        raise FetchError(f"{owner}/{repo}: invalid metadata field license")
     return RepoMetadata(
         stars=data["stargazers_count"],
         forks=data["forks_count"],
@@ -113,8 +137,7 @@ def extract_candidates(readme_text: str, context_window: int = 200) -> list[Cand
     """Fenced code blocks whose preceding text mentions an install keyword.
 
     Deliberately simple: a heuristic, not a parser. It exists to narrow a
-    human's search, not to replace their reading of the README - see the
-    module docstring's rule on zero/multiple candidates.
+    human's search, not to replace their reading of the README.
     """
     candidates = []
     for match in CODE_BLOCK_RE.finditer(readme_text):
@@ -185,10 +208,7 @@ def _report(url: str) -> int:
             print(f"    [{c.context[:60]}]")
             for line in c.command.splitlines():
                 print(f"      {line}")
-        if len(candidates) == 1:
-            print("  -> unambiguous: usable as a fresh install command")
-        else:
-            print("  -> ambiguous: a human still has to pick one from the README")
+        print("  -> advisory only: unreviewed README text; review before use")
     else:
         print("  candidates: 0 - a human still has to read the README")
     for error in errors:
