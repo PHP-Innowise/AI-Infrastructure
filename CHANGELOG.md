@@ -26,7 +26,172 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Add the Harness **Clash with a challenger** option for Workspace and Review
+  sessions: the selected provider implements (Edit mode) or reviews (Plan mode)
+  while a different provider challenges the result, alternating for bounded
+  rounds until the challenger accepts. A stdlib runner executes one
+  native turn per participant in the session workspace, parses each fenced JSON
+  verdict, keeps an objection/finding ledger with the exchange behind every
+  item, streams turns labelled by provider and role, and saves the ledger, usage
+  and a Markdown report with the session. Follow-ups with the box ticked start
+  the next cycle with both native sessions resumed; the option can be switched
+  on or off between turns, and additional agents and Ultracode stay disabled.
+
+- Treat empty Harness time budgets as uncapped instead of silently applying the
+  server's 900-second timeout. Show unlimited time in forms and per-agent shares,
+  report explicit time limits in errors, and retain cancellation/watchdog cleanup.
+
+- Allow changing helper count and enabling/disabling delegation between Harness
+  session turns; validate and persist follow-up settings while retaining each
+  launch's original settings and recalculating per-agent budget shares.
+
+- Make the selected Harness helper count mandatory per turn and Creator model
+  phase; allow batches under lower native concurrency. Count distinct native
+  receipts, merge Codex stream/journal evidence, and show confirmed/required
+  launches with shortfall or excess instead of confirming a single helper.
+
+- Attach files to new Harness Sessions and follow-up messages, retain downloads
+  in history, and pass verified local file references to native agent tools.
+
+- Preserve Harness Sessions project preferences across reloads and project
+  switches, and reopen the selected session using its server-side settings.
+
+- Add a draggable vertical size control for Harness AI output, with keyboard
+  resizing and double-click reset while keeping the message composer accessible.
+
+- Recognize Codex V2 helper lifecycle events in Harness activity and delegation
+  verification, fixing false "Helper launch not confirmed" notices after real
+  subagent work. When exec JSON omits those events, check bounded native journal
+  metadata for the same session, workspace and current turn. Preserve V1 spawn
+  receipts and reject malformed or stale activity evidence.
+
+- Require at least one useful native helper when additional agents are enabled
+  and delegation is available, across Harness sessions and Creator phases;
+  allow Claude Agent/Task calls and show per-turn native delegation evidence.
+
+- Add a local project folder picker to Harness Projects & Setup, with navigation,
+  hidden-folder visibility and bounded recursive name search before registration.
+
+- Pass the linked Harness Brain task ID to native hooks, overriding an unrelated
+  inherited task identity instead of falling back to the workspace branch.
+
+- Fix memory status consolidation counters after a promotion by unpacking the
+  promotion iterator records; include a regression check for applied counts.
+
+- Fix Harness SDD artifact names to pass accelerator naming hooks, retain legacy
+  documents, and focus the Brain progress field after selecting a record. Report
+  native USD overspending explicitly and reject over-budget CLI review results.
+
+- Optional Harness planning/editing model selection, with independent thinking
+  effort, SDD phase routing, explicit Workspace mode changes and launch history.
+
+- Harness SDD workflow: select and resume explicit development phases in a native
+  session, inspect specification documents, validate phase prerequisites, and
+  retain phase settings in launch history with existing workspace and budget controls.
+
+- Harness per-agent budget calculator for sessions, Fleet and Creator: convert
+  money/tokens into shared totals, account for concurrent time and Fleet waves,
+  show equal planning shares and retain the launch allocation in usage history.
+
+- Harness target checks: run a selected command against the prepared delivery
+  commit, retain logs and branch/SHA evidence, and gate Apply on successful,
+  unchanged verification. Reuses the session queue, cancellation and timeouts;
+  the UI defaults to requiring a check and restores previews after refresh.
+
+- Harness Worktree delivery: select whole files, preview an immutable commit,
+  preserve unselected staging and edits, then rehearse and apply one commit to a
+  local target branch. Stale source/target previews and dirty/conflicting targets
+  are refused; commit index recovery retains ownership checks after interruption.
+
+- Harness Results & Verification: inspect baseline Git diffs, run explicit local
+  checks with bounded output/time and cancellation, retain independent exit/status
+  evidence and detect changed diffs. Persist per-launch usage and aggregate known
+  money, tokens and time across follow-ups and Creator phases without treating
+  unknown usage as zero or rewriting the agent outcome.
+
+- Harness UI: persist and edit USD, reported-token and elapsed-time budgets for sessions, Fleet and Creator model phases; show last-launch usage, reject stale/active edits, preserve Fleet reservations and keep publication outside model budgets.
+
+- Harness UI: add Infrastructure Creator scan/review/generate/apply and manifest-aware update runs, native provider/model/effort/agent/worktree settings, independent canonical validation, file decisions and durable publication recovery.
+
 ### Added
+
+- Harness Skills records sources, immutable upstream commits and file hashes;
+  provides source refresh, update/removal diffs and single-use apply actions.
+  Local edits, extra files and unsafe paths block mutation. Tracking survives
+  restart, includes locally created skills, and can adopt exact legacy copies.
+- Harness Projects & Setup registers existing projects without a server restart,
+  persists browser-added paths, reports readiness and installs selected edition
+  tools through an immutable file preview. Reuses the accelerator installer's
+  inventory and root-file merge rules, checks for source/target changes before
+  applying, and reports collisions or partial filesystem failures explicitly.
+- Browser sessions can bind a Project Brain task in their actual workspace,
+  preview retrieved context before each turn and refuse stale context at launch.
+  Explicit outcomes retain task revision checks; verified findings and decisions
+  can be proposed, independently reviewed and applied to Memory Bank without
+  automatically storing transcripts or promoting task records.
+- Harness Project Brain browser and Memory Bank operations backed by the installed
+  context CLI: indexed search, audit, validation, index maintenance, attestation,
+  retirement, task/record lifecycle, compaction and privacy-filtered ZIP export.
+  Browsing stays read-only; runtime mutations retain ownership and revision checks.
+- Browser Fleet review runs the existing LangGraph graph with selected reviewers,
+  native Claude/Codex/Cursor adapters, offline rehearsal, stage/reviewer status,
+  persisted checkpoints, report approval/rejection and Markdown download.
+  Reuses workspace isolation and Project Brain audit integration. Parallel budget
+  shares and durable browser reservations prevent retries from reusing unknown
+  spend; failed workers remain retryable failures instead of code findings.
+- Harness project Git status and project/worktree execution selection. New
+  worktrees use committed HEAD and a new branch, preserve the original checkout,
+  and retain their execution directory for native session continuation.
+- Harness Create skill section with an offline Markdown editor, project/tool
+  selection and generated `SKILL.md` preview. Validates skill names and field
+  sizes, quotes YAML metadata, and reuses the existing immutable installation
+  preview and collision-safe writer.
+- Harness Skills browser: select individual skills from catalog sources and
+  install into registered Claude, Codex or Cursor projects after a file preview.
+  Uses the existing pinned Vercel manager in private staging, preserves existing
+  files, rechecks conflicts and paths, and lists installed skills. Adds Vercel,
+  Anthropic and Supabase skill sources to the shared Kit 3 catalog.
+- Browser Harness Memory bank viewer with project/bank selection, a filterable
+  document list and read-only Markdown content. Fixed bank discovery includes
+  the four source editions; bounded reads reject traversal, symbolic links,
+  hard links and nonregular files without executing project memory scripts.
+- Browser Harness model picker with custom IDs and per-model thinking effort
+  choices. Model and effort can change between turns in the same native
+  session; active runs and the other session settings remain fixed. Native
+  Claude/Codex controls, Cursor model-variant guidance, local model metadata,
+  validation and a nullable history migration avoid silently ignored options.
+  Claude choices include explicit Fable/Opus/Sonnet/Haiku versions and clearly
+  labelled auto aliases so users can choose a version instead of a moving alias.
+  Claude Ultracode is an explicit workflow choice requiring additional agents;
+  its helper count is labelled advisory, and ordinary resumed turns disable
+  inherited Ultracode/workflows to preserve their agent controls.
+- Browser Harness sessions can enable or disable additional agents and set
+  a concurrent helper limit of 1–40. Settings persist through resume and
+  restart; existing history migrates with helpers disabled. Codex and Claude
+  receive native per-invocation controls; Cursor's instruction-only behavior
+  and Claude's ultracode exception are visible in the UI.
+- General browser Harness with a standalone localhost server (`./harness-server
+  start/status/stop`), registered projects and native Claude Code, Codex and
+  Cursor Agent sessions. SQLite history, resumable conversations, normalized
+  live events, plan/edit permissions, workflow/context options, cancellation,
+  bounded queue and timeouts use the Python standard library. Kit 1 project
+  assessment, Kit 2 installer previews and the existing Kit 3 catalog live
+  within the same workspace. Host/Origin/token checks protect local API
+  mutations; the separate LangGraph batch runner remains optional.
+- Kit 3 now has a searchable static web catalog and `./kit3` CLI. Search,
+  client/category/review filters, resource details and copyable commands reuse
+  the existing catalog and validated dossiers. `build` produces deployable
+  static HTML; `serve` previews it on localhost without exposing the repository.
+- Agent Skills add/list/update/remove delegate to pinned Vercel Skills 1.5.23.
+  Updates explicitly select project scope by default; `--dry-run` runs no
+  subprocess. Native installation state remains separate from `record` and
+  `.kit3-manifest.json`. Non-skill resources retain manual guides.
+- Kit 3 manifest and registry protections from the prior review: safe
+  descriptor-relative atomic writes, strict identity/schema checks and
+  recomputed review status. README refresh candidates remain advisory and
+  never replace reviewed guidance. CI includes the fetcher and new CLI/site
+  checks; catalog descriptions no longer treat popularity as a safety finding.
+
 
 - **The Kit 3 risk registry (`install/open-source-kit/registry/`) and
   `scripts/validate_registry.py`.** A curated list of other people's
