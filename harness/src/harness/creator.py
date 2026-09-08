@@ -193,14 +193,15 @@ class CreatorManager:
         goal = data.get('goal', '')
         if not isinstance(goal, str) or len(goal.encode()) > 8000 or '\x00' in goal:
             raise SessionError('Use a goal of at most 8000 UTF-8 bytes.')
-        if not shutil.which('bwrap'):
-            raise SessionError('Creator requires bubblewrap on Linux.')
         source = Path(project['path'])
         for boundary in (ROOT, self.sessions.state_dir):
             if source == boundary or source in boundary.parents or boundary in source.parents:
                 raise SessionError('Choose a target outside the Harness source and runner state.')
         if not (source/'composer.json').is_file() and not any(source.glob('*.php')) and not any(source.glob('src/*.php')) and not any(source.glob('app/*.php')):
             raise SessionError('No PHP project entry point detected. Use Infrastructure-Creator stack adaptation separately for a non-PHP target.')
+        # Environment prerequisite last: input and target problems are reported first.
+        if not shutil.which('bwrap'):
+            raise SessionError('Creator requires bubblewrap on Linux.')
         rid = uuid.uuid4().hex
         with self.lock, self.sessions.lock:
             if self.sessions.jobs.full() or self.sessions.stopping.is_set():

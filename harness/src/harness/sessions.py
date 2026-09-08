@@ -1298,8 +1298,10 @@ class Sessions:
             for receipt in delegation.reconcile(native_id, project, launch_started_at, time.time()):
                 self._event(sid, receipt)
             self._event(sid, delegation.summary())
-        self._status(sid, outcome or 'failed')
+        # Record the closing event before the terminal status: readers that wait for
+        # the status to settle must see the complete event history.
         self._event(sid, {"kind": "status", "text": f"Run {outcome}. Process completion is not an independent verification of the task."})
+        self._status(sid, outcome or 'failed')
 
     def close(self):
         self.stopping.set()
