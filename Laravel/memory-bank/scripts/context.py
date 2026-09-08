@@ -2738,7 +2738,7 @@ def consolidation_counters(repository: Path, mode: str) -> dict[str, object]:
         counters["blocked"] = len(blocked)
         counters["applied"] = sum(
             1
-            for promotion in iter_promotions(repository)
+            for _, promotion in iter_promotions(repository)
             if promotion.get("status") == "applied"
         )
     except (BrainError, OSError, ValueError):

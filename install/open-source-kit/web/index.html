@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 24 24%27%3E%3Cpath fill=%27none%27 stroke=%27%236f46c1%27 stroke-width=%272%27 d=%27M12 2 22 7v10l-10 5L2 17V7zM2 7l10 5 10-5M12 12v10%27/%3E%3C/svg%3E">
+  <meta name="description" content="Explore the Open Source Kit catalog of skills, agents, hooks, and MCP tools. Read the evidence and choose what your project needs.">
+  <meta name="color-scheme" content="light">
+  <title>Open Source Kit — Tools for your agents</title>
+  <style>
+    :root { --ink:#171717; --muted:#646464; --line:#e8e8e8; --purple:#6633db; --paper:#fff; --soft:#fafafa; font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:var(--paper); }
+    * { box-sizing:border-box; }
+    body { margin:0; font-size:15px; line-height:1.6; }
+    button,input,select { font:inherit; }
+    button,a,input,select,summary { -webkit-tap-highlight-color:transparent; }
+    a { color:inherit; text-decoration:none; }
+    button { cursor:pointer; }
+    :focus-visible { outline:3px solid #9365f1; outline-offset:4px; }
+    [hidden] { display:none !important; }
+    .wrap { width:min(1200px,calc(100% - 64px)); margin-inline:auto; }
+    .skip { position:absolute; left:24px; top:-100px; z-index:10; padding:10px 16px; background:white; border:1px solid var(--ink); }
+    .skip:focus { top:8px; }
+    .site-header { border-bottom:1px solid var(--line); }
+    .header-inner { min-height:72px; display:flex; align-items:center; justify-content:space-between; gap:24px; }
+    .brand { display:inline-flex; align-items:center; gap:12px; font-size:17px; font-weight:620; letter-spacing:-.4px; white-space:nowrap; }
+    .logo { width:26px; height:26px; flex:none; }
+    nav { align-self:stretch; display:flex; gap:28px; }
+    nav a { display:flex; align-items:center; color:var(--muted); border-bottom:2px solid transparent; font-size:14px; }
+    nav a[aria-current="page"] { border-color:var(--purple); color:var(--ink); }
+    .hero { text-align:center; padding:68px 0 48px; }
+    h1 { margin:0; font-size:clamp(36px,4.6vw,60px); line-height:1.12; letter-spacing:-2.5px; font-weight:690; }
+    .hero p { max-width:770px; margin:20px auto 29px; font-size:18px; color:var(--muted); line-height:1.6; }
+    .terminal { display:flex; align-items:center; min-width:0; gap:16px; background:var(--ink); color:#fff; border:1px solid #292929; border-radius:8px; padding:15px 17px; text-align:left; }
+    .hero .terminal { max-width:710px; margin:auto; }
+    code,.mono { font-family:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace; }
+    .terminal code { flex:1; min-width:0; overflow-wrap:anywhere; font-size:14px; line-height:1.7; }
+    .prompt { color:#a7a7a7; margin-right:12px; user-select:none; }
+    .copy { display:inline-flex; gap:8px; align-items:center; flex:none; border:0; border-left:1px solid #4a4a4a; padding:2px 0 2px 15px; background:transparent; color:inherit; font-size:13px; }
+    .icon { width:17px; height:17px; flex:none; }
+    .filters { display:grid; grid-template-columns:minmax(230px,2.5fr) repeat(3,minmax(140px,1fr)); gap:12px; }
+    .search { display:flex; align-items:center; gap:12px; border:1px solid #d8d8d8; border-radius:7px; padding:0 15px; }
+    .search:focus-within { outline:2px solid var(--purple); outline-offset:1px; }
+    .search svg { color:#666; }
+    .search input { border:0; outline:0; width:100%; min-width:0; padding:12px 0; background:transparent; font-size:14px; color:var(--ink); }
+    .filters select { min-width:0; width:100%; color:var(--ink); background:var(--paper); border:1px solid #d8d8d8; border-radius:7px; padding:12px; font-size:14px; }
+    .sr-only { position:absolute; width:1px; height:1px; padding:0; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+    .results-meta { margin:23px 0 14px; display:flex; align-items:center; justify-content:space-between; color:var(--muted); font-size:13px; }
+    .text-button { border:0; background:none; color:var(--purple); padding:4px 0; font-size:13px; }
+    .resource-head,.resource-row { display:grid; grid-template-columns:minmax(0,2.65fr) minmax(105px,.65fr) minmax(140px,1fr) minmax(140px,.9fr) 18px; gap:22px; align-items:center; }
+    .resource-head { color:var(--muted); font-size:12px; padding:0 14px 12px; }
+    .resource-row { border-top:1px solid var(--line); padding:23px 14px; transition:background .15s ease; }
+    .resource-row:hover { background:var(--soft); }
+    .resource-title { margin:0 0 5px; font-size:15px; font-weight:620; line-height:1.45; letter-spacing:-.2px; }
+    .resource-description { color:var(--muted); font-size:13px; line-height:1.65; margin:0; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+    .category { color:var(--purple); font-size:13px; }
+    .clients { color:#545454; font-size:12px; line-height:1.8; }
+    .review { display:inline-flex; align-items:center; gap:8px; font-size:12px; line-height:1.5; color:var(--muted); }
+    .review::before { content:""; width:7px; height:7px; border-radius:50%; background:#929292; flex:none; }
+    .review.known_risks { color:#8a5300; }
+    .review.known_risks::before { background:#b77a08; }
+    .review.open_questions { color:#875906; }
+    .review.open_questions::before { background:#aa7c24; }
+    .review.clear { color:#22723d; }
+    .review.clear::before { background:#32834d; }
+    .row-arrow { width:16px; height:16px; color:#8a8a8a; }
+    .empty { padding:72px 24px; text-align:center; border-top:1px solid var(--line); }
+    .empty h2 { font-size:21px; font-weight:600; margin:0 0 8px; }
+    .empty p { color:var(--muted); margin:0 0 14px; }
+    .site-footer { border-top:1px solid var(--line); margin-top:32px; padding:28px 0 40px; display:flex; justify-content:space-between; align-items:center; gap:20px; font-size:12px; color:var(--muted); }
+    .site-footer .brand { font-size:13px; color:var(--ink); gap:8px; }
+    .site-footer .logo { width:21px; height:21px; }
+    .detail { padding:38px 0 30px; }
+    .back { display:inline-flex; align-items:center; gap:8px; color:var(--muted); font-size:13px; margin-bottom:34px; }
+    .back:hover { color:var(--purple); }
+    .detail h1 { font-size:clamp(29px,3.5vw,44px); line-height:1.22; letter-spacing:-1.5px; overflow-wrap:anywhere; }
+    .detail-intro { max-width:820px; color:var(--muted); font-size:17px; margin:18px 0 24px; }
+    .detail-meta { display:flex; flex-wrap:wrap; align-items:center; gap:24px; margin-bottom:32px; }
+    .detail-grid { display:grid; grid-template-columns:minmax(0,2fr) minmax(220px,1fr); gap:64px; border-top:1px solid var(--line); padding-top:32px; }
+    .detail h2 { font-size:18px; font-weight:620; margin:0 0 14px; letter-spacing:-.35px; }
+    .detail h3 { font-size:14px; font-weight:600; margin:28px 0 10px; }
+    .detail p { overflow-wrap:anywhere; }
+    .subtle { color:var(--muted); font-size:13px; }
+    .guidance { white-space:pre-wrap; overflow-wrap:anywhere; font-family:inherit; color:#454545; background:var(--soft); border-left:2px solid #ddd; padding:16px 20px; margin:0; font-size:14px; line-height:1.8; }
+    .external { display:inline-flex; align-items:center; gap:8px; color:var(--purple); font-size:13px; }
+    .facts { margin:0; }
+    .facts div { margin-bottom:22px; }
+    .facts dt { font-size:12px; color:var(--muted); margin-bottom:5px; }
+    .facts dd { font-size:13px; margin:0; overflow-wrap:anywhere; }
+    .review-section { margin-top:40px; }
+    .review-section > p { font-size:14px; color:#555; line-height:1.85; }
+    .gate { border-top:1px solid var(--line); padding:16px 0; }
+    .gate summary { cursor:pointer; font-size:14px; }
+    .gate p { color:var(--muted); font-size:13px; line-height:1.8; }
+    .gate .gate-status { color:var(--muted); font-size:12px; margin-left:10px; }
+    .how { max-width:760px; margin:auto; padding-bottom:32px; }
+    .steps { list-style:none; padding:0; counter-reset:step; margin:36px 0; }
+    .steps li { counter-increment:step; display:grid; grid-template-columns:36px 1fr; column-gap:22px; border-top:1px solid var(--line); padding:26px 0; }
+    .steps li::before { content:counter(step,decimal-leading-zero); font:14px ui-monospace,monospace; color:var(--purple); padding-top:4px; }
+    .steps h2 { margin-bottom:7px; }
+    .steps p { margin:0; color:var(--muted); font-size:14px; }
+    .toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); border:1px solid #d8d8d8; box-shadow:0 5px 24px #00000012; background:white; padding:12px 20px; border-radius:8px; font-size:13px; max-width:calc(100% - 32px); z-index:5; }
+    @media (max-width:960px) { .resource-head,.resource-row { grid-template-columns:minmax(0,2fr) minmax(80px,.65fr) minmax(110px,.8fr) 18px; gap:16px; } .resource-head .clients,.resource-row .clients { display:none; } .filters { grid-template-columns:repeat(3,1fr); } .search { grid-column:1 / -1; } .detail-grid { gap:32px; } }
+    @media (max-width:600px) { .wrap { width:calc(100% - 36px); } .header-inner { min-height:64px; gap:16px; } .brand { font-size:14px; gap:8px; } .logo { width:22px; height:22px; } nav { gap:18px; } nav a { font-size:12px; } .hero { padding:44px 0 32px; } h1 { letter-spacing:-1.7px; } .hero p { font-size:16px; margin:18px auto 25px; } .hero .terminal { padding:13px; gap:10px; } .terminal code { font-size:12px; } .copy { padding-left:10px; } .copy span { display:none; } .filters { gap:8px; } .filters select { padding:10px 5px; font-size:12px; } .results-meta { margin-top:20px; } .resource-head { display:none; } .resource-row { grid-template-columns:minmax(0,1fr) auto 16px; gap:10px 14px; padding:20px 2px; } .resource-info { grid-column:1 / 3; } .row-arrow { grid-column:3; grid-row:1 / 3; } .resource-row .category { grid-column:1; } .resource-row .review { grid-column:2; } .resource-description { -webkit-line-clamp:2; } .site-footer { display:block; margin-top:20px; padding:26px 0; } .site-footer p { max-width:290px; margin:13px 0 0; } .detail { padding-top:25px; } .back { margin-bottom:24px; } .detail-grid { grid-template-columns:1fr; gap:32px; } .detail-grid aside { border-top:1px solid var(--line); padding-top:24px; } .detail-meta { gap:14px; } .detail-intro { font-size:15px; } .steps li { gap:14px; } }
+    @media (prefers-reduced-motion:reduce) { * { transition:none !important; } }
+  </style>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site-header"><div class="wrap header-inner">
+    <a class="brand" href="#" aria-label="Open Source Kit catalog"><svg class="logo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round" aria-hidden="true"><path d="m12 2 9 5v10l-9 5-9-5V7Z M3 7l9 5 9-5 M12 12v10"/></svg>Open Source Kit</a>
+    <nav aria-label="Main navigation"><a id="catalog-nav" href="#" aria-current="page">Catalog</a><a id="how-nav" href="#how-it-works">How it works</a></nav>
+  </div></header>
+  <main id="main" class="wrap" tabindex="-1">
+    <section id="catalog-view" aria-label="Resource catalog">
+      <div class="hero"><h1>Good tools. Your choice.</h1><p>Discover skills, agents, and MCP tools. Read the evidence, then add what your project needs.</p><div id="hero-command"></div></div>
+      <form class="filters" id="filters" role="search">
+        <label class="search"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="10.5" cy="10.5" r="7"/><path d="m16 16 5 5"/></svg><span class="sr-only">Search resources</span><input id="search" type="search" placeholder="Search resources…" autocomplete="off"></label>
+        <label><span class="sr-only">Category</span><select id="category"><option value="">All categories</option></select></label>
+        <label><span class="sr-only">Client</span><select id="client"><option value="">All clients</option></select></label>
+        <label><span class="sr-only">Review status</span><select id="review"><option value="">All reviews</option><option value="unreviewed">Not reviewed</option><option value="known_risks">Known risks</option><option value="open_questions">Open questions</option><option value="clear">Reviewed · Clear</option></select></label>
+      </form>
+      <div class="results-meta"><span id="result-count" role="status" aria-live="polite"></span><button class="text-button" id="reset" type="button" hidden>Clear filters</button></div>
+      <div class="resource-head" aria-hidden="true"><span>Resource</span><span>Category</span><span class="clients">Supported clients</span><span>Review status</span><span></span></div>
+      <div id="resources"></div>
+      <div class="empty" id="empty" hidden><h2>No resources found</h2><p>Try another search or broaden your filters.</p><button type="button" class="text-button" id="empty-reset">Clear filters</button></div>
+    </section>
+    <section id="detail-view" class="detail" hidden></section>
+    <section id="how-view" class="detail how" hidden>
+      <a class="back" href="#">← Back to catalog</a><h1>A small kit. A clear choice.</h1>
+      <p class="detail-intro">Start with the tools your project needs. Keep installation in your terminal and the evidence within reach.</p>
+      <ol class="steps">
+        <li><div><h2>Find a resource</h2><p>Search the catalog and filter by category, client, or review status. Open a resource to see its compatibility, source, and recorded risks.</p></div></li>
+        <li><div><h2>Run its command</h2><p>Run from your Kit 3 checkout. Add <code>--target /path/to/project</code> to choose the project; otherwise the current directory is used. Mapped skills use the native skills installer. Other resources open a manual guide. The website never executes commands.</p></div></li>
+        <li><div><h2>Read the evidence</h2><p>A review describes what was checked. “Not reviewed” means there is no dossier; “Known risks” names unresolved findings. The catalog is a starting point for your decision.</p></div></li>
+      </ol>
+      <div id="how-command"></div>
+    </section>
+    <noscript><p>This catalog needs JavaScript for search and resource details. You can also browse it in your terminal with <code>./kit3 find</code>.</p></noscript>
+    <footer class="site-footer"><a class="brand" href="#"><svg class="logo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round" aria-hidden="true"><path d="m12 2 9 5v10l-9 5-9-5V7Z M3 7l9 5 9-5 M12 12v10"/></svg>Open Source Kit</a><p>A catalog is a starting point. Installation stays in your terminal.</p></footer>
+  </main>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <script id="kit3-data" type="application/json">__KIT3_DATA__</script>
+  <script>
+    'use strict';
+    const resources = JSON.parse(document.getElementById('kit3-data').textContent);
+    const $ = id => document.getElementById(id);
+    const categories = { skills:'Skills', subagents:'Subagents', mcp:'MCP servers', hooks:'Hooks', marketplace:'Marketplaces', 'cli-tool':'CLI tools', 'discovery-index':'Discovery lists' };
+    const clients = { codex:'Codex', cursor:'Cursor', 'claude-code':'Claude Code' };
+    const reviews = { unreviewed:'Not reviewed', known_risks:'Known risks', open_questions:'Open questions', clear:'Reviewed · Clear' };
+    const svg = path => { const icon = document.createElementNS('http://www.w3.org/2000/svg','svg'); icon.setAttribute('viewBox','0 0 24 24'); icon.setAttribute('fill','none'); icon.setAttribute('stroke','currentColor'); icon.setAttribute('stroke-width','1.5'); icon.setAttribute('aria-hidden','true'); const p = document.createElementNS(icon.namespaceURI,'path'); p.setAttribute('d',path); icon.append(p); return icon; };
+    const el = (tag, className, text) => { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; };
+    const status = item => item.review_status || 'unreviewed';
+    const reviewLabel = item => el('span',`review ${status(item)}`,reviews[status(item)]);
+    const categoryLabel = item => categories[item.category] || item.category;
+    const clientLabel = item => (item.tool_compatibility || []).map(x => clients[x] || x).join(' · ') || 'Discovery only';
+    let toastTimer;
+    function notify(message) { $('toast').textContent = message; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('toast').hidden = true; },4000); }
+    function terminal(command) {
+      const block = el('div','terminal'); const code = el('code'); const prompt = el('span','prompt','$'); prompt.setAttribute('aria-hidden','true'); code.append(prompt,document.createTextNode(command));
+      const copy = el('button','copy'); copy.type = 'button'; copy.setAttribute('aria-label','Copy command'); const icon = svg('M9 9h12v12H9z M15 6V3H3v12h3'); icon.classList.add('icon'); copy.append(icon,el('span','','Copy'));
+      copy.addEventListener('click',async () => { try { await navigator.clipboard.writeText(command); notify('Command copied. Run it in your terminal.'); } catch (_) { const range = document.createRange(); range.selectNodeContents(code.lastChild); const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range); notify('Clipboard unavailable. Copy the selected command manually.'); } });
+      block.append(code,copy); return block;
+    }
+    const sample = resources.find(item => item.id === 'obra-superpowers' && item.skills_source) || resources.find(item => item.skills_source);
+    $('hero-command').append(terminal(sample ? sample.command : './kit3 find'));
+    $('how-command').append(terminal('./kit3 --help'));
+    for (const value of [...new Set(resources.map(item => item.category))].sort()) { const option = el('option','',categories[value] || value); option.value = value; $('category').append(option); }
+    for (const value of [...new Set(resources.flatMap(item => item.tool_compatibility || []))].sort()) { const option = el('option','',clients[value] || value); option.value = value; $('client').append(option); }
+    function renderResources() {
+      const query = $('search').value.trim().toLowerCase();
+      const visible = resources.filter(item => (!query || [item.id,item.name,item.description,item.url].join(' ').toLowerCase().includes(query)) && (!$('category').value || item.category === $('category').value) && (!$('client').value || (item.tool_compatibility || []).includes($('client').value)) && (!$('review').value || status(item) === $('review').value));
+      visible.sort((a,b) => Number(Boolean(b.skills_source)) - Number(Boolean(a.skills_source)));
+      $('resources').replaceChildren();
+      for (const item of visible) {
+        const row = el('a','resource-row'); row.href = `#resource/${encodeURIComponent(item.id)}`;
+        const info = el('div','resource-info'); info.append(el('h2','resource-title',item.name),el('p','resource-description',item.description));
+        const arrow = svg('m9 5 7 7-7 7'); arrow.classList.add('row-arrow');
+        row.append(info,el('span','category',categoryLabel(item)),el('span','clients',clientLabel(item)),reviewLabel(item),arrow); $('resources').append(row);
+      }
+      $('result-count').textContent = `${visible.length} ${visible.length === 1 ? 'resource' : 'resources'}${visible.length !== resources.length ? ` of ${resources.length}` : ''}`;
+      $('empty').hidden = visible.length > 0;
+      $('reset').hidden = !query && !$('category').value && !$('client').value && !$('review').value;
+    }
+    function clearFilters() { $('filters').reset(); renderResources(); $('search').focus(); }
+    $('filters').addEventListener('submit',event => event.preventDefault());
+    document.querySelector('.skip').addEventListener('click',event => { event.preventDefault(); $('main').focus(); });
+    $('filters').addEventListener('input',renderResources);
+    $('reset').addEventListener('click',clearFilters); $('empty-reset').addEventListener('click',clearFilters);
+    function fact(list,title,value) { const group = el('div'); group.append(el('dt','',title),el('dd','',value || 'Not recorded')); list.append(group); }
+    function renderDetail(item) {
+      const view = $('detail-view'); view.replaceChildren();
+      const back = el('a','back','← Back to catalog'); back.href = '#'; view.append(back);
+      if (!item) { view.append(el('h1','','Resource not found'),el('p','detail-intro','This link does not match a resource in the current catalog.')); return; }
+      view.append(el('h1','',item.name),el('p','detail-intro',item.description));
+      const meta = el('div','detail-meta'); const upstream = el('a','external','View upstream'); upstream.href = item.url; upstream.target = '_blank'; upstream.rel = 'noopener noreferrer'; const arrow = svg('M7 17 17 7 M7 7h10v10'); arrow.classList.add('icon'); upstream.append(arrow); meta.append(el('span','category',categoryLabel(item)),reviewLabel(item),upstream); view.append(meta);
+      const grid = el('div','detail-grid'); const content = el('div'); const aside = el('aside');
+      content.append(el('h2','',item.skills_source ? 'Install skills' : 'Open the installation guide'),terminal(item.command));
+      content.append(el('p','subtle',item.skills_source ? 'Run from your Kit 3 checkout. Add --target /path/to/project to choose the project; otherwise it uses the current directory. Use --agent cursor or --agent claude-code for another client. This path installs skills only, not the upstream plugin or hooks.' : 'This resource uses a manual installation path. The command opens its guide; it does not install the resource.'));
+      content.append(el('h3','','Upstream installation guidance'),el('pre','guidance',item.install_guidance));
+      const review = el('section','review-section'); review.append(el('h2','','Review & evidence'));
+      review.append(el('p','',item.dossier ? item.dossier.status_summary : 'No registry review is recorded for this resource. Its catalog description and compatibility are reference information, not an approval.'));
+      if (item.risk_notes) { review.append(el('h3','','Catalog notes'),el('p','',item.risk_notes)); }
+      if (item.dossier) {
+        for (const [name,gate] of Object.entries(item.dossier.binary_gates)) {
+          const details = el('details','gate'); const summary = el('summary','',name.replaceAll('_',' ')); summary.append(el('span','gate-status',gate.status === 'unknown' ? 'Open question' : gate.status === 'fail' ? 'Risk recorded' : 'Passed'));
+          details.append(summary,el('p','',gate.evidence)); if (gate.resolves_by) { details.append(el('h3','','What would resolve it'),el('p','',gate.resolves_by)); } review.append(details);
+        }
+      }
+      content.append(review);
+      aside.append(el('h2','','Resource details')); const facts = el('dl','facts');
+      fact(facts,'Supported clients',clientLabel(item)); fact(facts,'Install method',item.install_type); fact(facts,'License',item.license || 'Not confirmed — check upstream'); fact(facts,'Automation',item.automation_depth); fact(facts,'Context footprint',item.token_footprint); fact(facts,'Catalog reviewed',item.reviewed_date); fact(facts,'Command checked',item.command_verified_date);
+      if (item.dossier) { fact(facts,'Registry reviewed',item.dossier.reviewed_date); fact(facts,'Review scope',item.dossier.reviewed_by); }
+      aside.append(facts); grid.append(content,aside); view.append(grid);
+    }
+    function route(focus = true) {
+      const hash = window.location.hash.slice(1); const detail = hash.startsWith('resource/'); const how = hash === 'how-it-works';
+      $('catalog-view').hidden = detail || how; $('detail-view').hidden = !detail; $('how-view').hidden = !how;
+      $('catalog-nav').toggleAttribute('aria-current',!how); if (!how) $('catalog-nav').setAttribute('aria-current','page');
+      $('how-nav').toggleAttribute('aria-current',how); if (how) $('how-nav').setAttribute('aria-current','page');
+      let item;
+      if (detail) { let id; try { id = decodeURIComponent(hash.slice(9)); } catch (_) { id = ''; } item = resources.find(resource => resource.id === id); renderDetail(item); }
+      document.title = `${detail ? item ? item.name : 'Resource not found' : how ? 'How it works' : 'Tools for your agents'} — Open Source Kit`;
+      if (focus && hash !== 'main') { $('main').focus({preventScroll:true}); window.scrollTo({top:0,behavior:'instant'}); }
+    }
+    window.addEventListener('hashchange',() => route());
+    renderResources(); route(false);
+  </script>
+</body>
+</html>

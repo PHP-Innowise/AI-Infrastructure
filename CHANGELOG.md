@@ -26,7 +26,268 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Add the Harness **Clash with a challenger** option for Workspace and Review
+  sessions: the selected provider implements (Edit mode) or reviews (Plan mode)
+  while a different provider challenges the result, alternating for bounded
+  rounds until the challenger accepts. A stdlib runner executes one
+  native turn per participant in the session workspace, parses each fenced JSON
+  verdict, keeps an objection/finding ledger with the exchange behind every
+  item, streams turns labelled by provider and role, and saves the ledger, usage
+  and a Markdown report with the session. Follow-ups with the box ticked start
+  the next cycle with both native sessions resumed; the option can be switched
+  on or off between turns, and additional agents and Ultracode stay disabled.
+
+- Treat empty Harness time budgets as uncapped instead of silently applying the
+  server's 900-second timeout. Show unlimited time in forms and per-agent shares,
+  report explicit time limits in errors, and retain cancellation/watchdog cleanup.
+
+- Allow changing helper count and enabling/disabling delegation between Harness
+  session turns; validate and persist follow-up settings while retaining each
+  launch's original settings and recalculating per-agent budget shares.
+
+- Make the selected Harness helper count mandatory per turn and Creator model
+  phase; allow batches under lower native concurrency. Count distinct native
+  receipts, merge Codex stream/journal evidence, and show confirmed/required
+  launches with shortfall or excess instead of confirming a single helper.
+
+- Attach files to new Harness Sessions and follow-up messages, retain downloads
+  in history, and pass verified local file references to native agent tools.
+
+- Preserve Harness Sessions project preferences across reloads and project
+  switches, and reopen the selected session using its server-side settings.
+
+- Add a draggable vertical size control for Harness AI output, with keyboard
+  resizing and double-click reset while keeping the message composer accessible.
+
+- Recognize Codex V2 helper lifecycle events in Harness activity and delegation
+  verification, fixing false "Helper launch not confirmed" notices after real
+  subagent work. When exec JSON omits those events, check bounded native journal
+  metadata for the same session, workspace and current turn. Preserve V1 spawn
+  receipts and reject malformed or stale activity evidence.
+
+- Require at least one useful native helper when additional agents are enabled
+  and delegation is available, across Harness sessions and Creator phases;
+  allow Claude Agent/Task calls and show per-turn native delegation evidence.
+
+- Add a local project folder picker to Harness Projects & Setup, with navigation,
+  hidden-folder visibility and bounded recursive name search before registration.
+
+- Pass the linked Harness Brain task ID to native hooks, overriding an unrelated
+  inherited task identity instead of falling back to the workspace branch.
+
+- Fix memory status consolidation counters after a promotion by unpacking the
+  promotion iterator records; include a regression check for applied counts.
+
+- Fix Harness SDD artifact names to pass accelerator naming hooks, retain legacy
+  documents, and focus the Brain progress field after selecting a record. Report
+  native USD overspending explicitly and reject over-budget CLI review results.
+
+- Optional Harness planning/editing model selection, with independent thinking
+  effort, SDD phase routing, explicit Workspace mode changes and launch history.
+
+- Harness SDD workflow: select and resume explicit development phases in a native
+  session, inspect specification documents, validate phase prerequisites, and
+  retain phase settings in launch history with existing workspace and budget controls.
+
+- Harness per-agent budget calculator for sessions, Fleet and Creator: convert
+  money/tokens into shared totals, account for concurrent time and Fleet waves,
+  show equal planning shares and retain the launch allocation in usage history.
+
+- Harness target checks: run a selected command against the prepared delivery
+  commit, retain logs and branch/SHA evidence, and gate Apply on successful,
+  unchanged verification. Reuses the session queue, cancellation and timeouts;
+  the UI defaults to requiring a check and restores previews after refresh.
+
+- Harness Worktree delivery: select whole files, preview an immutable commit,
+  preserve unselected staging and edits, then rehearse and apply one commit to a
+  local target branch. Stale source/target previews and dirty/conflicting targets
+  are refused; commit index recovery retains ownership checks after interruption.
+
+- Harness Results & Verification: inspect baseline Git diffs, run explicit local
+  checks with bounded output/time and cancellation, retain independent exit/status
+  evidence and detect changed diffs. Persist per-launch usage and aggregate known
+  money, tokens and time across follow-ups and Creator phases without treating
+  unknown usage as zero or rewriting the agent outcome.
+
+- Harness UI: persist and edit USD, reported-token and elapsed-time budgets for sessions, Fleet and Creator model phases; show last-launch usage, reject stale/active edits, preserve Fleet reservations and keep publication outside model budgets.
+
+- Harness UI: add Infrastructure Creator scan/review/generate/apply and manifest-aware update runs, native provider/model/effort/agent/worktree settings, independent canonical validation, file decisions and durable publication recovery.
+
 ### Added
+
+- Harness Skills records sources, immutable upstream commits and file hashes;
+  provides source refresh, update/removal diffs and single-use apply actions.
+  Local edits, extra files and unsafe paths block mutation. Tracking survives
+  restart, includes locally created skills, and can adopt exact legacy copies.
+- Harness Projects & Setup registers existing projects without a server restart,
+  persists browser-added paths, reports readiness and installs selected edition
+  tools through an immutable file preview. Reuses the accelerator installer's
+  inventory and root-file merge rules, checks for source/target changes before
+  applying, and reports collisions or partial filesystem failures explicitly.
+- Browser sessions can bind a Project Brain task in their actual workspace,
+  preview retrieved context before each turn and refuse stale context at launch.
+  Explicit outcomes retain task revision checks; verified findings and decisions
+  can be proposed, independently reviewed and applied to Memory Bank without
+  automatically storing transcripts or promoting task records.
+- Harness Project Brain browser and Memory Bank operations backed by the installed
+  context CLI: indexed search, audit, validation, index maintenance, attestation,
+  retirement, task/record lifecycle, compaction and privacy-filtered ZIP export.
+  Browsing stays read-only; runtime mutations retain ownership and revision checks.
+- Browser Fleet review runs the existing LangGraph graph with selected reviewers,
+  native Claude/Codex/Cursor adapters, offline rehearsal, stage/reviewer status,
+  persisted checkpoints, report approval/rejection and Markdown download.
+  Reuses workspace isolation and Project Brain audit integration. Parallel budget
+  shares and durable browser reservations prevent retries from reusing unknown
+  spend; failed workers remain retryable failures instead of code findings.
+- Harness project Git status and project/worktree execution selection. New
+  worktrees use committed HEAD and a new branch, preserve the original checkout,
+  and retain their execution directory for native session continuation.
+- Harness Create skill section with an offline Markdown editor, project/tool
+  selection and generated `SKILL.md` preview. Validates skill names and field
+  sizes, quotes YAML metadata, and reuses the existing immutable installation
+  preview and collision-safe writer.
+- Harness Skills browser: select individual skills from catalog sources and
+  install into registered Claude, Codex or Cursor projects after a file preview.
+  Uses the existing pinned Vercel manager in private staging, preserves existing
+  files, rechecks conflicts and paths, and lists installed skills. Adds Vercel,
+  Anthropic and Supabase skill sources to the shared Kit 3 catalog.
+- Browser Harness Memory bank viewer with project/bank selection, a filterable
+  document list and read-only Markdown content. Fixed bank discovery includes
+  the four source editions; bounded reads reject traversal, symbolic links,
+  hard links and nonregular files without executing project memory scripts.
+- Browser Harness model picker with custom IDs and per-model thinking effort
+  choices. Model and effort can change between turns in the same native
+  session; active runs and the other session settings remain fixed. Native
+  Claude/Codex controls, Cursor model-variant guidance, local model metadata,
+  validation and a nullable history migration avoid silently ignored options.
+  Claude choices include explicit Fable/Opus/Sonnet/Haiku versions and clearly
+  labelled auto aliases so users can choose a version instead of a moving alias.
+  Claude Ultracode is an explicit workflow choice requiring additional agents;
+  its helper count is labelled advisory, and ordinary resumed turns disable
+  inherited Ultracode/workflows to preserve their agent controls.
+- Browser Harness sessions can enable or disable additional agents and set
+  a concurrent helper limit of 1–40. Settings persist through resume and
+  restart; existing history migrates with helpers disabled. Codex and Claude
+  receive native per-invocation controls; Cursor's instruction-only behavior
+  and Claude's ultracode exception are visible in the UI.
+- General browser Harness with a standalone localhost server (`./harness-server
+  start/status/stop`), registered projects and native Claude Code, Codex and
+  Cursor Agent sessions. SQLite history, resumable conversations, normalized
+  live events, plan/edit permissions, workflow/context options, cancellation,
+  bounded queue and timeouts use the Python standard library. Kit 1 project
+  assessment, Kit 2 installer previews and the existing Kit 3 catalog live
+  within the same workspace. Host/Origin/token checks protect local API
+  mutations; the separate LangGraph batch runner remains optional.
+- Kit 3 now has a searchable static web catalog and `./kit3` CLI. Search,
+  client/category/review filters, resource details and copyable commands reuse
+  the existing catalog and validated dossiers. `build` produces deployable
+  static HTML; `serve` previews it on localhost without exposing the repository.
+- Agent Skills add/list/update/remove delegate to pinned Vercel Skills 1.5.23.
+  Updates explicitly select project scope by default; `--dry-run` runs no
+  subprocess. Native installation state remains separate from `record` and
+  `.kit3-manifest.json`. Non-skill resources retain manual guides.
+- Kit 3 manifest and registry protections from the prior review: safe
+  descriptor-relative atomic writes, strict identity/schema checks and
+  recomputed review status. README refresh candidates remain advisory and
+  never replace reviewed guidance. CI includes the fetcher and new CLI/site
+  checks; catalog descriptions no longer treat popularity as a safety finding.
+
+
+- **The Kit 3 risk registry (`install/open-source-kit/registry/`) and
+  `scripts/validate_registry.py`.** A curated list of other people's
+  repositories is not something we can own or be accountable for on an
+  outstaff engagement; four things are, and they are what the registry
+  records: what was checked and found, isolation, measurement, and removal
+  without residue. The tool list is a consequence of the gates rather than a
+  decision taken ahead of them.
+  - **The registry describes; it does not forbid.** Nothing in it refuses a
+    tool. The selector installs nothing either way - it records a choice and
+    prints a command a human runs - so a refusal would only block writing the
+    choice down, and an install that happened anyway would then be missing
+    from the audit trail entirely. What it produces is a dossier: what was
+    checked, what was found, and what would close each open item. The team
+    decides.
+  - Twelve gates per candidate. Eight are **binary**, answered
+    `pass`/`fail`/`unknown` - `license`, `data_egress`, `pinning`, `uninstall`,
+    `collisions`, `auto_update`, `maintenance_ownership`, `measurability`.
+    Four are **scored** 0-5. They summarise as `clear`, `open_questions`, or
+    `known_risks`; `unknown` is reported as its own state rather than folded
+    into `clear`, because absence of evidence is not evidence of safety.
+  - The status is stored for review but never trusted. The validator
+    recomputes it from the gates and fails when the two disagree, so a stored
+    `clear` cannot outrank a failing gate. The cross-check runs both ways - a
+    status may be neither kinder nor graver than its gates.
+  - `.kit3-manifest.json` carries the status into the client project under
+    `review`, so what review found is visible in a diff long after the
+    terminal output is gone. It also records `install_method`,
+    `install_guidance` and `risk_notes`: how something was installed is part
+    of its risk - `curl | bash` is not `git clone` - and an audit trail that
+    answers "what" but not "how" leaves that in terminal scrollback. The field
+    is `guidance`, not `command`, because the tool knows what it proposed and
+    not what a human actually ran.
+  - **`scripts/kit_fetcher.py` and `install_open_source_kit.py --refresh`.** A
+    stored `verified_command` is a snapshot from whenever someone last read
+    that README by hand and goes stale. `--refresh` checks it against the
+    README as it stands right now, before recording anything: it fetches the
+    repo's current metadata and README from the GitHub API and looks for
+    fenced code blocks near an install-related keyword. It never guesses -
+    exactly one candidate is used and recorded as
+    `install_guidance_source: "live_fetch"` with `install_guidance_fetched_at`;
+    zero or several candidates, or any network failure, falls back to the
+    stored guidance unchanged, because picking among several would present a
+    guess as a fact. Opt-in, not the default: it makes a run network-dependent
+    and non-deterministic, and unauthenticated GitHub API calls are
+    rate-limited to 60/hour - browsing, testing, and recording a selection
+    offline stay exactly as fast and reliable as they always were.
+    Discovery-index entries are skipped, since "install" is not a concept for
+    a curated list. 16 tests exercise the fetcher fully mocked (no live
+    network in the suite), plus 5 more that patch `kit_fetcher.refresh`
+    in-process to prove the selector's fallback behavior end to end -
+    including one asserting `kit_fetcher.refresh` is never even called
+    without the flag. Live-verified against this catalog while writing the
+    fetcher: correctly caught a real GitHub rate-limit error and fell back
+    rather than crashing or writing nothing.
+  - `intersection_map` is mandatory and may not be empty. The hidden cost of
+    Kit 3 is not context, it is two systems doing one job, and an entry with
+    no intersection analysis is unexamined whatever its gates say. Each row is
+    typed `duplicates`/`replaces`/`conflicts`/`complements`.
+  - A gate that is `fail` or `unknown` must carry `resolves_by`, so a finding
+    is a work item rather than a dead end. Unmeasured cost scores 0 and may
+    not coexist with a passing `measurability` gate.
+  - Star count is excluded from scoring by construction. Inflated counts are
+    recorded in `trust_signals.disqualified_signals` as findings, never scored:
+    an implausible count is evidence the signal is fake, not that the code is.
+  - Two worked entries, both `known_risks` on recorded evidence rather than
+    taste. `graphify`'s PreToolUse hook occupies the same interception point
+    as `local-context.sh` with no precedence resolution recorded, and it
+    duplicates the Local Context Engine's retrieval job. `ohmyclaude`'s
+    19-agent self-orchestrating architecture is what `subagent-gate.sh`,
+    `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` and the denied
+    `Agent(Explore|Plan|general-purpose)` entries refuse by construction - it
+    will not run under our accelerator without an explicit roster-whitelist
+    decision. Both also carry unresolved `measurability` and
+    `maintenance_ownership`.
+  - 38 tests cover all three status paths and every enforcement property,
+    including four defects found by adversarial probing before release: a
+    malformed gate crashed the validator with `AttributeError` instead of
+    reporting it (a traceback in CI reads as broken tooling rather than as bad
+    input); `score: true` passed the 0-5 check because `bool` subclasses `int`;
+    and whitespace-only `evidence`, `resolves_by` and `intersection_map`
+    fields satisfied a truthiness test while committing a reviewer to nothing.
+  - Six of fifteen catalog entries (`obra-superpowers`, `caveman`, `graphify`,
+    `ohmyclaude`, `claude-code-templates`, `claude-plugins-community`) carry a
+    `verified_command` checked against the tool's own current README, plus
+    `command_verified_date` recording when. The other nine keep the generic
+    `install_type` guidance instead of a fabricated single answer, because no
+    one unambiguous command exists yet for them (a 93-plugin marketplace, a
+    93-server MCP collection, a teaching repo with no install script) or none
+    has been verified. `graphify`'s command names the PyPI package as
+    `graphifyy` (double y) against the CLI it installs, `graphify` (single y) -
+    checked against PyPI on 2026-09-01: description and maintainer match
+    Graphify-Labs/graphify, a taken-name workaround, not a typosquat.
+    `.kit3-manifest.json` now carries whichever command actually printed, so
+    the audit trail states the real install step, not only that one was
+    proposed.
 
 - **`document_links`, a reverse index from source path to the documents that
   cite it, with `context.py links` and `retrieve --path` (roadmap H4-02,

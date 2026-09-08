@@ -105,6 +105,39 @@ python3 scripts/install_accelerator.py --write-inventories     # only after inte
 Inventories are generated from `git ls-files --cached`; stage new distribution
 files before regenerating or they won't be included.
 
+### Open-source kit selector (Kit 3 - see `install/open-source-kit/README.md`)
+
+```bash
+python3 scripts/install_open_source_kit.py --list                              # browse the reviewed catalog
+python3 scripts/install_open_source_kit.py --target /path/to/client-project     # interactive checkbox-style selection
+python3 scripts/install_open_source_kit.py --select ID1,ID2 --target /path/to/client-project --dry-run
+```
+
+Selects from `install/open-source-kit/resources.json` and writes a
+`.kit3-manifest.json` into the target; it never downloads or executes
+third-party code itself.
+
+The catalog is browsable; the **risk registry**
+(`install/open-source-kit/registry/`, one JSON file per candidate) records what
+review found. Twelve gates — eight binary (`pass`/`fail`/`unknown`), four scored
+0–5 — summarised as `clear`, `open_questions`, or `known_risks`:
+
+```bash
+python3 scripts/validate_registry.py            # report every entry and its status
+python3 scripts/validate_registry.py --check    # CI gate
+python3 scripts/validate_registry.py --id graphify
+python3 -m unittest tests.test_registry
+```
+
+**The registry describes; it does not forbid.** Nothing refuses a tool — the
+selector installs nothing either way, so refusing would only block writing the
+choice down, and an install that happened anyway would then be missing from the
+audit trail. The status is named before selection and written into
+`.kit3-manifest.json`, where it is visible in a diff. A stored `clear` cannot
+outrank a failing gate: the status is recomputed, never trusted. Most catalog
+entries have no registry file yet and report `NOT REVIEWED` — see
+`install/open-source-kit/README.md`.
+
 ### Lint (mirrors CI exactly)
 
 ```bash

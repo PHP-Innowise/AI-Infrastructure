@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "id": "ohmyclaude",
+  "catalog_id": "ohmyclaude",
+  "name": "Yeachan-Heo/oh-my-claudecode",
+  "url": "https://github.com/Yeachan-Heo/oh-my-claudecode",
+  "reviewed_date": "2026-08-31",
+  "reviewed_by": "Kit 3 registry pass - gates applied, source not yet read",
+  "status": "known_risks",
+  "status_summary": "Known risks: project maintenance ownership and measured cost remain unresolved. Compatibility with the accelerator roster and nested-agent limits needs testing against a selected component and version; hook coverage does not establish coverage of subprocess execution.",
+  "tier": 3,
+  "default_state": "disabled",
+  "install": {
+    "method": "claude-marketplace",
+    "pinned_ref": null,
+    "namespace_prefix": "omc-",
+    "command": "`/plugin marketplace add https://github.com/Yeachan-Heo/oh-my-claudecode` then `/plugin install oh-my-claudecode` - enter as two separate slash commands, not pasted together, per the repo's own README.",
+    "notes": "Registry never runs this. A human runs it after confirming identity and reading what the plugin registers."
+  },
+  "binary_gates": {
+    "license": {
+      "status": "pass",
+      "evidence": "MIT, confirmed via GitHub API 2026-08-31. Permissive, compatible with client work-for-hire terms."
+    },
+    "data_egress": {
+      "status": "unknown",
+      "evidence": "Source not read. A multi-agent orchestrator with an 'Ultrawork' parallel-execution mode has broad latitude over what it reads and where output goes; nothing about outbound traffic has been confirmed either way.",
+      "resolves_by": "Read the plugin's agents, skills and any hooks for outbound network calls, telemetry, or credential env var use."
+    },
+    "pinning": {
+      "status": "unknown",
+      "evidence": "Claude Code marketplace plugins install by name from a registered marketplace. Whether that path pins to an immutable ref, or tracks the marketplace's current head, has not been confirmed. A marketplace that auto-serves the latest version would fail both this gate and auto_update.",
+      "resolves_by": "Confirm whether `/plugin install` records and honours an exact ref; if it does not, vendor the specific agent/skill files at a pinned SHA instead of installing the plugin."
+    },
+    "uninstall": {
+      "status": "unknown",
+      "evidence": "Plugin uninstall behaviour and residue in the client repository not confirmed.",
+      "resolves_by": "Confirm `/plugin uninstall` removes every agent, skill and settings entry the install added, and that nothing is left in the repository after removal."
+    },
+    "collisions": {
+      "status": "unknown",
+      "evidence": "Symfony configuration restricts Agent/Task names and nested dispatch. This may conflict with an external orchestrator. Actual compatibility depends on the selected components and whether work uses Agent/Task or subprocess paths; no complete pinned co-installation test is recorded.",
+      "resolves_by": "Test the selected components against the active host policy, including Agent/Task and subprocess paths, and record a scoped compatibility decision."
+    },
+    "auto_update": {
+      "status": "unknown",
+      "evidence": "Marketplace-installed plugins may update when the marketplace is refreshed. Not confirmed for this install path.",
+      "resolves_by": "Confirm whether an installed plugin can change version without an explicit human action."
+    },
+    "maintenance_ownership": {
+      "status": "fail",
+      "evidence": "No owner assigned. If a 19-agent orchestrator misbehaves inside a client's repository mid-engagement, there is no named person whose ticket it is.",
+      "resolves_by": "Name an internal owner, or do not install."
+    },
+    "measurability": {
+      "status": "fail",
+      "evidence": "Unmeasured on our ruler, and the expected cost is structurally significant: 19 agent descriptors plus 39 skill descriptors are startup surface, paid on every session whether or not any of them is invoked. For scale, Symfony's entire measured startup surface today is about 43.8 KB (AGENTS.md 17,959 + skill descriptors 9,728 + commands 6,726 + agents 9,389). This kit adds to exactly that line.",
+      "resolves_by": "Extend scripts/context_budget.py with an external-tree mode and measure the descriptor surface before any adoption discussion."
+    }
+  },
+  "scored_gates": {
+    "automation_depth": {
+      "score": 5,
+      "evidence": "Self-orchestrating by design, with an advertised 'Ultrawork' mode for maximised parallel execution. This is the deepest automation class in the catalog - and the reason it collides with our roster enforcement rather than merely overlapping it."
+    },
+    "token_efficiency": {
+      "score": 0,
+      "evidence": "Unmeasured on our ruler; scores 0 by rule. Structurally this is an always-loaded cost, not a lazy one: descriptors for 19 agents and 39 skills sit in the startup surface regardless of use."
+    },
+    "integration_coverage": {
+      "score": 2,
+      "evidence": "Claude Code only. No Cursor or Codex support, so a mixed-tool team gets an inconsistent contour the day someone opens Cursor."
+    },
+    "trust_signals": {
+      "score": 2,
+      "evidence": "Active: last push 2026-08-31, MIT licensed, a published project website, a coherent documented architecture. Against: bus factor, issue response time, release/semver discipline and test coverage all unassessed; and the name is heavily duplicated across the ecosystem, which is itself a supply-chain risk (installing the wrong 'oh-my-claude' is an easy mistake to make).",
+      "disqualified_signals": [
+        "Popularity counters are not security evidence and are not scored. No manipulation claim is made about this project."
+      ]
+    }
+  },
+  "intersection_map": [
+    {
+      "ours": ".claude/hooks/subagent-gate.sh + settings.json roster enforcement",
+      "relation": "conflicts",
+      "detail": "Potential interaction with roster and nesting constraints; test the selected execution paths. A hook for Agent/Task does not by itself establish subprocess enforcement."
+    },
+    {
+      "ours": "Command -> Agent -> Skill pipeline (thin agent, one skill, then stop)",
+      "relation": "conflicts",
+      "detail": "Potential interaction with roster and nesting constraints; test the selected execution paths. A hook for Agent/Task does not by itself establish subprocess enforcement."
+    },
+    {
+      "ours": "Generated agent rosters (Laravel 43, Symfony 43+, PHP Core, WordPress editions)",
+      "relation": "duplicates",
+      "detail": "19 general-purpose agents against our per-edition rosters of comparable size, built from the target's own evidence. Ours are evidence-scoped to the client's actual stack; these are generic. Name-collision surface unassessed."
+    }
+  ],
+  "lifecycle": {
+    "uninstall_command": null,
+    "residue": "unknown - plugin-managed agents, skills and settings entries; removal completeness unconfirmed",
+    "manifest_tracked": false
+  },
+  "open_questions": [
+    "Identity is unconfirmed. At least seven repositories share this name pattern; this entry reviews Yeachan-Heo/oh-my-claudecode because it is the only one at adoption scale, but the intended candidate has not been confirmed by the requester.",
+    "Is the roster-whitelist mechanism worth building for this tool specifically, or only for a tool that clears the other gates first? Building the whitelist is the larger decision and should not be driven by one rejected candidate.",
+    "What do 19 generic agents add over the evidence-scoped roster the generator already writes for the target?"
+  ]
+}
