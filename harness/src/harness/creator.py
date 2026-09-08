@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import shutil
 import sys
+import tempfile
 import threading
 import uuid
 
@@ -43,25 +44,93 @@ def write_json(path, value):
         temporary.unlink(missing_ok=True)
 
 
-def sandbox_command(workspace, target, command, provider=None, runtime_cache=False):
+SEATBELT = '/usr/bin/sandbox-exec'
+ISOLATION_REQUIRED = 'Creator requires filesystem isolation: bubblewrap on Linux or sandbox-exec on macOS.'
+
+
+def isolation_backend():
+    """Return ('bwrap', path) or ('seatbelt', path); None when neither isolation tool is usable."""
     executable = shutil.which('bwrap')
-    if not executable:
-        raise SessionError('Creator requires bubblewrap on Linux to keep the target read-only during agent runs.')
+    if executable:
+        return 'bwrap', executable
+    if sys.platform == 'darwin' and os.access(SEATBELT, os.X_OK):
+        return 'seatbelt', SEATBELT
+    return None
+
+
+def provider_state_dirs(provider):
+    """Native account state stays with the native CLI; never copy credentials."""
+    if not provider:
+        return []
+    homes = {'codex': [Path(os.environ.get('CODEX_HOME', str(Path.home()/'.codex')))],
+             'claude': [Path.home()/'.claude'],
+             'cursor': [Path.home()/'.cursor', Path.home()/'.config/cursor-agent']}
+    return [home for home in homes[provider] if home.is_dir() and not home.is_symlink()]
+
+
+def _sbpl(path):
+    """Quote a path for the Seatbelt profile language."""
+    return '"' + str(path).replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
+def seatbelt_command(executable, workspace, target, command, homes, common, runtime_cache):
+    """macOS: allow everything except file writes, then re-allow the roots bubblewrap binds writable.
+
+    Later rules win: the target (and a worktree's Git common directory) is denied
+    after the writable roots, and the disposable runtime cache is re-allowed after
+    that deny. Seatbelt cannot overlay a temporary directory, so the installed
+    target's ignored memory-bank/local cache is rebuilt in place during that step.
+    """
+    workspace, target = Path(workspace).resolve(), Path(target).resolve()
+    private_tmp = workspace.parent / 'tmp'
+    private_tmp.mkdir(mode=0o700, exist_ok=True)
+    system_tmp = Path(tempfile.gettempdir()).resolve()
+    if str(system_tmp).startswith('/private/var/folders/'):
+        system_tmp = system_tmp.parent  # the per-user temporary (T) and cache (C) directories
+    writable = [workspace, private_tmp, system_tmp, Path('/private/tmp')] + [home.resolve() for home in homes]
+    lines = ['(version 1)', '(allow default)', '(deny file-write*)',
+             '(allow file-write* (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty") (literal "/dev/random") '
+             '(literal "/dev/urandom") (literal "/dev/dtracehelper") (literal "/dev/ptmx") '
+             '(regex #"^/dev/ttys[0-9]+$") (regex #"^/dev/fd/[0-9]+$"))']
+    lines += [f'(allow file-write* (subpath {_sbpl(path)}))' for path in writable]
+    lines.append(f'(deny file-write* (subpath {_sbpl(target)}))')
+    if common:
+        lines.append(f'(deny file-write* (subpath {_sbpl(Path(common).resolve())}))')
+    if runtime_cache:
+        cache = target / 'memory-bank/local'
+        fd = _root_fd(cache); os.close(fd)
+        lines.append(f'(allow file-write* (subpath {_sbpl(cache.resolve())}))')
+    text = '\n'.join(lines) + '\n'
+    profile = workspace.parent / ('seatbelt-' + hashlib.sha256(text.encode()).hexdigest()[:16] + '.sb')
+    temporary = profile.with_name('.' + uuid.uuid4().hex)
+    try:
+        temporary.write_text(text)
+        temporary.chmod(0o600)
+        os.replace(temporary, profile)
+    finally:
+        temporary.unlink(missing_ok=True)
+    environment = ['/usr/bin/env'] + [f'{name}={private_tmp}' for name in ('TMPDIR', 'TMP', 'TEMP')]
+    return [executable, '-f', str(profile), '--', *environment, *command]
+
+
+def sandbox_command(workspace, target, command, provider=None, runtime_cache=False):
+    backend = isolation_backend()
+    if backend is None:
+        raise SessionError(ISOLATION_REQUIRED + ' It keeps the target read-only during agent runs.')
+    kind, executable = backend
+    common = git_details(target).get('common_dir') if (target/'.git').is_file() else None
+    homes = provider_state_dirs(provider)
+    if kind == 'seatbelt':
+        return seatbelt_command(executable, workspace, target, command, homes, common, runtime_cache)
     args = [executable, '--die-with-parent', '--new-session', '--unshare-pid', '--ro-bind', '/', '/',
             '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp']
-    if (target/'.git').is_file():
-        common = git_details(target).get('common_dir')
-        if common: args += ['--ro-bind', common, common]
-    # Native account state stays with the native CLI; never copy credentials.
+    if common:
+        args += ['--ro-bind', common, common]
     if provider:
         executable_dir = Path(command[0]).resolve().parent
         args += ['--ro-bind', str(executable_dir), str(executable_dir)]
-        homes = {'codex': [Path(os.environ.get('CODEX_HOME', str(Path.home()/'.codex')))],
-                 'claude': [Path.home()/'.claude'],
-                 'cursor': [Path.home()/'.cursor', Path.home()/'.config/cursor-agent']}
-        for home in homes[provider]:
-            if home.is_dir() and not home.is_symlink():
-                args += ['--bind', str(home), str(home)]
+        for home in homes:
+            args += ['--bind', str(home), str(home)]
     args += ['--ro-bind', str(workspace.parent), str(workspace.parent),
              '--bind', str(workspace), str(workspace), '--ro-bind', str(target), str(target),
              '--chdir', str(workspace)]
@@ -146,7 +215,7 @@ class CreatorManager:
         with self.lock, self.sessions.lock:
             ids = [row[0] for row in self.sessions.db.execute('SELECT id FROM creator_runs ORDER BY rowid DESC LIMIT 200')]
             runs = [self._get(rid) for rid in ids]
-        return {'project_id': project_id, 'available': bool(shutil.which('bwrap')), 'runs': [run for run in runs if run['project_id'] == project_id]}
+        return {'project_id': project_id, 'available': isolation_backend() is not None, 'runs': [run for run in runs if run['project_id'] == project_id]}
 
     def get(self, rid):
         with self.lock:
@@ -200,8 +269,8 @@ class CreatorManager:
         if not (source/'composer.json').is_file() and not any(source.glob('*.php')) and not any(source.glob('src/*.php')) and not any(source.glob('app/*.php')):
             raise SessionError('No PHP project entry point detected. Use Infrastructure-Creator stack adaptation separately for a non-PHP target.')
         # Environment prerequisite last: input and target problems are reported first.
-        if not shutil.which('bwrap'):
-            raise SessionError('Creator requires bubblewrap on Linux.')
+        if isolation_backend() is None:
+            raise SessionError(ISOLATION_REQUIRED)
         rid = uuid.uuid4().hex
         with self.lock, self.sessions.lock:
             if self.sessions.jobs.full() or self.sessions.stopping.is_set():

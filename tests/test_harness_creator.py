@@ -165,6 +165,37 @@ print(json.dumps({'type':'turn.completed'}),flush=True)
         with self.assertRaisesRegex(sessions.SessionError,'PHP'):self.manager.start(self.options())
         self.assertEqual(self.store.list(),[])
 
+    def test_seatbelt_backend_confines_writes_like_bubblewrap_and_reports_availability(self):
+        run,directory,_=self.prepared();work=directory/'agent'
+        codex_home=self.root/'codex-home';codex_home.mkdir()
+        rule=lambda kind,path:f'({kind} file-write* (subpath "{Path(path).resolve()}"))'
+        with patch.object(creator,'isolation_backend',return_value=('seatbelt',creator.SEATBELT)),patch.dict(os.environ,{'CODEX_HOME':str(codex_home)}):
+            command=creator.sandbox_command(work,self.target,[sys.executable,'-c','pass'],provider='codex')
+            self.assertEqual((command[0],command[1],command[3],command[4]),(creator.SEATBELT,'-f','--','/usr/bin/env'))
+            self.assertEqual(command[5:8],[f'{name}={directory/"tmp"}' for name in ('TMPDIR','TMP','TEMP')])
+            self.assertEqual(command[8:],[sys.executable,'-c','pass'])
+            self.assertTrue((directory/'tmp').is_dir())
+            profile=Path(command[2]);lines=profile.read_text().splitlines()
+            self.assertEqual((profile.parent,profile.stat().st_mode&0o777,lines[:3]),(directory,0o600,['(version 1)','(allow default)','(deny file-write*)']))
+            for path in (work,directory/'tmp',codex_home): self.assertIn(rule('allow',path),lines)
+            self.assertIn(rule('deny',self.target),lines)
+            self.assertGreater(lines.index(rule('deny',self.target)),lines.index(rule('allow',work)))
+            self.assertNotIn(rule('allow',directory),lines)  # run receipts stay read-only, as under bubblewrap
+            bank=self.target/'memory-bank/local';bank.mkdir(parents=True)
+            cached=creator.sandbox_command(work,self.target,['check'],runtime_cache=True)
+            cached_lines=Path(cached[2]).read_text().splitlines()
+            self.assertNotEqual(cached[2],command[2]);self.assertNotIn(rule('allow',bank),lines)
+            self.assertGreater(cached_lines.index(rule('allow',bank)),cached_lines.index(rule('deny',self.target)))
+        self.assertEqual(creator._sbpl('a"b\\c'),'"a\\"b\\\\c"')
+        with patch.object(creator.shutil,'which',return_value=None):
+            with patch.object(creator.sys,'platform','darwin'),patch.object(creator.os,'access',return_value=True):
+                self.assertEqual(creator.isolation_backend(),('seatbelt',creator.SEATBELT))
+            with patch.object(creator.sys,'platform','linux'):
+                self.assertIsNone(creator.isolation_backend())
+                self.assertFalse(self.manager.list(self.pid)['available'])
+                with self.assertRaisesRegex(sessions.SessionError,'sandbox-exec'):creator.sandbox_command(work,self.target,['check'])
+                with self.assertRaisesRegex(sessions.SessionError,'sandbox-exec'):self.manager.start(self.options())
+
     @unittest.skipUnless(shutil.which('bwrap'),'bubblewrap required')
     def test_claude_generator_shell_permission_keeps_agent_preference_and_boundary(self):
         run,directory,stage=self.prepared();run.update(provider='claude',phase='scan',executable=str(self.fake))

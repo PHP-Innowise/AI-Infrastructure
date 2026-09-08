@@ -24,12 +24,16 @@ to generate, and start a scan. A worktree starts from committed HEAD; uncommitte
 files are not copied. Targets must be outside the Harness source/state trees.
 
 The server copies the existing generator into a private task workspace and runs
-its native workflow in the shared session queue. Linux **bubblewrap** (`bwrap`)
-is required: agent writes are confined to its workspace, temporary files and
-native provider account-state directories; the project and Creator control files
-are mounted read-only. Native authentication remains with each provider. Network
+its native workflow in the shared session queue. Filesystem isolation is
+required: **bubblewrap** (`bwrap`) on Linux, or the built-in **sandbox-exec**
+(Seatbelt) on macOS. Agent writes are confined to the workspace, a private
+temporary directory and native provider account-state directories; the project
+and Creator control files stay read-only (bind mounts on Linux, write denial on
+macOS). Native authentication remains with each provider. Network
 access and native integrations remain available; this is filesystem isolation,
-not a general-purpose sandbox for hostile plugins. Creator model-phase budgets can
+not a general-purpose sandbox for hostile plugins. Apple marks `sandbox-exec`
+as deprecated but still ships it; a provider CLI that must write outside its
+account directory fails inside the profile and reports it. Creator model-phase budgets can
 be changed in the browser; empty time means no time limit. Apply and rollback
 do not inherit model budgets.
 
@@ -44,7 +48,10 @@ revision; the generator prepares a new candidate and ownership manifest.
 **Update existing accelerator** requires `.infra-manifest.json`. Runtime memory
 and Project Brain records cannot be overwritten by the publication plan. Apply
 uses the existing manifest-last publisher, then validates the installed target
-with a disposable SQLite cache; verification does not change the project cache.
+with a disposable SQLite cache. On Linux that cache is a temporary overlay and
+verification does not change the project cache; on macOS the project's ignored
+`memory-bank/local` cache is rebuilt in place, because Seatbelt cannot overlay
+a directory.
 A failed postcheck rolls back; an interrupted publication exposes **Recover
 interrupted publication**. Recovery preserves external edits made since apply
 and reports conflicts instead of silently replacing them. Runs, reports and
@@ -52,7 +59,8 @@ recovery journals survive restarts in the server's private `creator/` directory.
 Apply/recovery cannot be cancelled from either the Creator UI or session API.
 
 Automated coverage uses disposable native CLI fixtures, real bubblewrap mounts
-and the canonical publication/rollback helpers; model-generated content still
+on Linux, an offline check of the generated Seatbelt profile and the canonical
+publication/rollback helpers; model-generated content still
 requires the scan and diff reviews and independent verification gates.
 
 ## Browser server
