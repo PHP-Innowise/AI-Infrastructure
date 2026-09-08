@@ -26,6 +26,15 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Run Harness Creator phases on macOS through the built-in `sandbox-exec`
+  (Seatbelt) profile when bubblewrap is absent: writes are allowed only in the
+  run workspace, a private temporary directory, the per-user temporary space and
+  the provider's account directory; the target and a worktree's Git common
+  directory stay denied, and the disposable runtime-cache check re-allows the
+  project's ignored `memory-bank/local` in place. Creator availability and the
+  start check accept either isolation tool; the Linux bubblewrap policy is
+  unchanged.
+
 - Add the Harness **Clash with a challenger** option for Workspace and Review
   sessions: the selected provider implements (Edit mode) or reviews (Plan mode)
   while a different provider challenges the result, alternating for bounded
