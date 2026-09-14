@@ -28,6 +28,102 @@ edition's own files remain in that edition's changelog.
 
 ### Added
 
+- **The Kit 3 risk registry (`install/open-source-kit/registry/`) and
+  `scripts/validate_registry.py`.** A curated list of other people's
+  repositories is not something we can own or be accountable for on an
+  outstaff engagement; four things are, and they are what the registry
+  records: what was checked and found, isolation, measurement, and removal
+  without residue. The tool list is a consequence of the gates rather than a
+  decision taken ahead of them.
+  - **The registry describes; it does not forbid.** Nothing in it refuses a
+    tool. The selector installs nothing either way - it records a choice and
+    prints a command a human runs - so a refusal would only block writing the
+    choice down, and an install that happened anyway would then be missing
+    from the audit trail entirely. What it produces is a dossier: what was
+    checked, what was found, and what would close each open item. The team
+    decides.
+  - Twelve gates per candidate. Eight are **binary**, answered
+    `pass`/`fail`/`unknown` - `license`, `data_egress`, `pinning`, `uninstall`,
+    `collisions`, `auto_update`, `maintenance_ownership`, `measurability`.
+    Four are **scored** 0-5. They summarise as `clear`, `open_questions`, or
+    `known_risks`; `unknown` is reported as its own state rather than folded
+    into `clear`, because absence of evidence is not evidence of safety.
+  - The status is stored for review but never trusted. The validator
+    recomputes it from the gates and fails when the two disagree, so a stored
+    `clear` cannot outrank a failing gate. The cross-check runs both ways - a
+    status may be neither kinder nor graver than its gates.
+  - `.kit3-manifest.json` carries the status into the client project under
+    `review`, so what review found is visible in a diff long after the
+    terminal output is gone. It also records `install_method`,
+    `install_guidance` and `risk_notes`: how something was installed is part
+    of its risk - `curl | bash` is not `git clone` - and an audit trail that
+    answers "what" but not "how" leaves that in terminal scrollback. The field
+    is `guidance`, not `command`, because the tool knows what it proposed and
+    not what a human actually ran.
+  - **`scripts/kit_fetcher.py` and `install_open_source_kit.py --refresh`.** A
+    stored `verified_command` is a snapshot from whenever someone last read
+    that README by hand and goes stale. `--refresh` checks it against the
+    README as it stands right now, before recording anything: it fetches the
+    repo's current metadata and README from the GitHub API and looks for
+    fenced code blocks near an install-related keyword. It never guesses -
+    exactly one candidate is used and recorded as
+    `install_guidance_source: "live_fetch"` with `install_guidance_fetched_at`;
+    zero or several candidates, or any network failure, falls back to the
+    stored guidance unchanged, because picking among several would present a
+    guess as a fact. Opt-in, not the default: it makes a run network-dependent
+    and non-deterministic, and unauthenticated GitHub API calls are
+    rate-limited to 60/hour - browsing, testing, and recording a selection
+    offline stay exactly as fast and reliable as they always were.
+    Discovery-index entries are skipped, since "install" is not a concept for
+    a curated list. 16 tests exercise the fetcher fully mocked (no live
+    network in the suite), plus 5 more that patch `kit_fetcher.refresh`
+    in-process to prove the selector's fallback behavior end to end -
+    including one asserting `kit_fetcher.refresh` is never even called
+    without the flag. Live-verified against this catalog while writing the
+    fetcher: correctly caught a real GitHub rate-limit error and fell back
+    rather than crashing or writing nothing.
+  - `intersection_map` is mandatory and may not be empty. The hidden cost of
+    Kit 3 is not context, it is two systems doing one job, and an entry with
+    no intersection analysis is unexamined whatever its gates say. Each row is
+    typed `duplicates`/`replaces`/`conflicts`/`complements`.
+  - A gate that is `fail` or `unknown` must carry `resolves_by`, so a finding
+    is a work item rather than a dead end. Unmeasured cost scores 0 and may
+    not coexist with a passing `measurability` gate.
+  - Star count is excluded from scoring by construction. Inflated counts are
+    recorded in `trust_signals.disqualified_signals` as findings, never scored:
+    an implausible count is evidence the signal is fake, not that the code is.
+  - Two worked entries, both `known_risks` on recorded evidence rather than
+    taste. `graphify`'s PreToolUse hook occupies the same interception point
+    as `local-context.sh` with no precedence resolution recorded, and it
+    duplicates the Local Context Engine's retrieval job. `ohmyclaude`'s
+    19-agent self-orchestrating architecture is what `subagent-gate.sh`,
+    `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` and the denied
+    `Agent(Explore|Plan|general-purpose)` entries refuse by construction - it
+    will not run under our accelerator without an explicit roster-whitelist
+    decision. Both also carry unresolved `measurability` and
+    `maintenance_ownership`.
+  - 38 tests cover all three status paths and every enforcement property,
+    including four defects found by adversarial probing before release: a
+    malformed gate crashed the validator with `AttributeError` instead of
+    reporting it (a traceback in CI reads as broken tooling rather than as bad
+    input); `score: true` passed the 0-5 check because `bool` subclasses `int`;
+    and whitespace-only `evidence`, `resolves_by` and `intersection_map`
+    fields satisfied a truthiness test while committing a reviewer to nothing.
+  - Six of fifteen catalog entries (`obra-superpowers`, `caveman`, `graphify`,
+    `ohmyclaude`, `claude-code-templates`, `claude-plugins-community`) carry a
+    `verified_command` checked against the tool's own current README, plus
+    `command_verified_date` recording when. The other nine keep the generic
+    `install_type` guidance instead of a fabricated single answer, because no
+    one unambiguous command exists yet for them (a 93-plugin marketplace, a
+    93-server MCP collection, a teaching repo with no install script) or none
+    has been verified. `graphify`'s command names the PyPI package as
+    `graphifyy` (double y) against the CLI it installs, `graphify` (single y) -
+    checked against PyPI on 2026-09-01: description and maintainer match
+    Graphify-Labs/graphify, a taken-name workaround, not a typosquat.
+    `.kit3-manifest.json` now carries whichever command actually printed, so
+    the audit trail states the real install step, not only that one was
+    proposed.
+
 - **`document_links`, a reverse index from source path to the documents that
   cite it, with `context.py links` and `retrieve --path` (roadmap H4-02,
   H4-03).** Two durable chunks whose only connection was a `sources[]` entry

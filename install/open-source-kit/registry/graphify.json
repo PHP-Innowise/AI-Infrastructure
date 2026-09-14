@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "id": "graphify",
+  "catalog_id": "graphify",
+  "name": "Graphify-Labs/graphify",
+  "url": "https://github.com/Graphify-Labs/graphify",
+  "reviewed_date": "2026-08-31",
+  "reviewed_by": "Kit 3 registry pass - gates applied, source not yet read",
+  "status": "known_risks",
+  "status_summary": "Known risks, recorded rather than ruled on. `collisions`: ships a PreToolUse hook that intercepts file-search tool calls, and in strict mode blocks the first raw source read of a session - the same interception point our own local-context.sh occupies, with no precedence resolution recorded. `measurability`: cost unmeasured on our ruler. `maintenance_ownership`: no named owner. Four further gates are open questions because the source and install script have not been read. None of this forbids the tool - the retrieval claim is credible and worth a bake-off (see intersection_map); it states what a team would be taking on.",
+  "tier": 3,
+  "default_state": "disabled",
+  "install": {
+    "method": "npx-cli",
+    "pinned_ref": null,
+    "namespace_prefix": "graphify-",
+    "command": "graphify install --project   (strict mode adds --strict; both write a CLAUDE.md directive and a PreToolUse hook into the target)",
+    "notes": "Registry never runs this. A human runs it after reading the install path in full."
+  },
+  "binary_gates": {
+    "license": {
+      "status": "pass",
+      "evidence": "Apache-2.0, confirmed via GitHub API 2026-08-31. Permissive, compatible with client work-for-hire terms."
+    },
+    "data_egress": {
+      "status": "unknown",
+      "evidence": "Upstream claims local-first deterministic AST parsing with no external API calls for parsing and no vector store. That claim covers parsing only; it says nothing about telemetry, update checks, or crash reporting. Source not read.",
+      "resolves_by": "Read the CLI and hook source for outbound network calls; confirm whether any usage/telemetry ping exists and whether it can be disabled."
+    },
+    "pinning": {
+      "status": "unknown",
+      "evidence": "Public git repository with versioned branches (v8 observed), so an exact SHA is available in principle. Whether the documented `graphify install` path accepts a pinned ref, or resolves a floating latest at install time, has not been confirmed.",
+      "resolves_by": "Confirm the CLI installs from a pinnable ref; if it does not, fork and install from the fork."
+    },
+    "uninstall": {
+      "status": "unknown",
+      "evidence": "Install writes at least two artifacts into the target (a CLAUDE.md directive and a PreToolUse hook) plus graph data. No uninstall command has been confirmed, and residue after removal is unmeasured.",
+      "resolves_by": "Confirm an uninstall path exists that removes the hook, the CLAUDE.md directive, and the built graph, leaving the client repository as it was."
+    },
+    "collisions": {
+      "status": "fail",
+      "evidence": "Architectural collision at the PreToolUse boundary. Graphify's Claude Code integration installs a PreToolUse hook that intercepts file-search tool calls before they run, and its strict mode blocks the first raw source read of a session outright to force graph use. Our editions already occupy PreToolUse with local-context.sh, and Symfony additionally gates Agent|Task through subagent-gate.sh. Deny-wins means neither hook can weaken the other, but two enforcement systems both refusing a call is a live failure mode, not a theoretical one - and the ordering between them is undefined. No precedence resolution is recorded.",
+      "resolves_by": "Record a hook-precedence resolution: which hook runs first, what happens when both would block, and whether strict mode is permitted at all. Test on a throwaway branch against the current Claude Code version before the resolution is treated as real."
+    },
+    "auto_update": {
+      "status": "unknown",
+      "evidence": "Not confirmed whether the installed CLI or hook self-updates, or whether the graph rebuild path pulls new upstream code.",
+      "resolves_by": "Read the install script and CLI for any self-update or version-check-and-fetch behaviour."
+    },
+    "maintenance_ownership": {
+      "status": "fail",
+      "evidence": "No owner assigned. 1,164 open issues at review time, and no relationship with the maintainer. If the hook breaks a client's session mid-engagement, there is currently no named person whose ticket it is.",
+      "resolves_by": "Either name an internal owner who will fork and carry it, or do not install. Forking makes the answer 'us' and is a deliberate, priced choice."
+    },
+    "measurability": {
+      "status": "fail",
+      "evidence": "Cost is unmeasured on our own ruler. Upstream cites a 71.5x per-query token reduction on a ~92,000-word corpus, which is a vendor claim about a different corpus, not a measurement of what a client engagement would pay. The one-time graph build is reported in hours and incremental rebuild around ten minutes - both unverified, and neither expressed in the startup/per-invocation split that scripts/context_budget.py produces for our own editions.",
+      "resolves_by": "Extend scripts/context_budget.py with an external-tree mode, then measure the installed surface (CLAUDE.md directive + hook) as startup cost and the graph-query path as per-invocation cost."
+    }
+  },
+  "scored_gates": {
+    "automation_depth": {
+      "score": 5,
+      "evidence": "Fully self-orchestrating once installed: the hook fires on every file-search tool call without invocation, and strict mode actively redirects reads. Maximum depth means maximum consequence - this is the reason for scrutiny, not a reason to prefer it."
+    },
+    "token_efficiency": {
+      "score": 0,
+      "evidence": "Unmeasured on our ruler. Scores 0 by rule, which is also what fails the measurability gate. Not a claim that it is inefficient - upstream's claimed direction is plausible - only that we have no number of our own."
+    },
+    "integration_coverage": {
+      "score": 5,
+      "evidence": "Targets Claude Code, Cursor, Codex and Gemini CLI. Covers all three of our supported integrations, though the deepest integration (hook-based) is Claude Code only, so coverage is not uniform."
+    },
+    "trust_signals": {
+      "score": 2,
+      "evidence": "Active: last push 2026-08-30, ~1,629 commits on the v8 branch, permissive license, substantial documentation. Against: 1,164 open issues is a large backlog for a five-month-old project; bus factor, issue response time, release/semver discipline and test coverage are all unassessed; the install path writes an enforcement hook into the target, which is the highest-consequence artifact a third party can add.",
+      "disqualified_signals": [
+        "star count: 112,842 stars / 10,980 forks at ~5 months old (created 2026-04-03, verified via GitHub API 2026-08-31). Statistically implausible for the age; matches the fake-star pattern in arXiv 2412.13459. Recorded, never scored."
+      ]
+    }
+  },
+  "intersection_map": [
+    {
+      "ours": "Local Context Engine (memory-bank/scripts/context_retrieval.py, FTS5/BM25 index)",
+      "relation": "duplicates",
+      "detail": "Both answer 'find me the relevant part of this repository' from a locally built index. Ours indexes policy, skills, docs, specs and Project Brain records; graphify indexes code structure plus docs, schemas and PDFs as a graph. The overlap is the retrieval job itself, not the data model. Until the same question set is run through both, installing both means paying twice for one job - which the memo names as the real hidden cost of Kit 3, above token cost."
+    },
+    {
+      "ours": ".claude/hooks/local-context.sh (PreToolUse)",
+      "relation": "conflicts",
+      "detail": "Both occupy the PreToolUse interception point. Deny-wins protects correctness, but ordering is undefined and a both-block outcome is unhandled. This is what fails the collisions gate."
+    },
+    {
+      "ours": "Memory Bank (git-tracked MEM-*.md chunks)",
+      "relation": "complements",
+      "detail": "No overlap. Memory Bank holds durable authored knowledge with provenance; graphify holds derived structural facts about code. A graph edge is not a memory chunk and neither substitutes for the other."
+    }
+  ],
+  "lifecycle": {
+    "uninstall_command": null,
+    "residue": "unknown - at minimum a CLAUDE.md directive, a PreToolUse hook, and the built graph artifacts; none confirmed removable",
+    "manifest_tracked": false
+  },
+  "open_questions": [
+    "Does the same query set answered by the Local Context Engine get materially better answers from the graph? If not, this is a duplicate, not a kit.",
+    "What is the real one-time build cost on a client-sized monorepo, and what is the staleness policy - rebuild on demand, nightly, or per change?",
+    "Can the PreToolUse hook be installed in non-strict mode only, and does that still deliver the retrieval benefit?"
+  ]
+}
