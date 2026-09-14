@@ -83,6 +83,27 @@ class ParseOwnerRepoTests(unittest.TestCase):
     def test_non_github_url_returns_none(self) -> None:
         self.assertIsNone(kf.parse_github_owner_repo("https://gitlab.com/owner/repo"))
 
+    def test_invalid_hosts_and_paths_never_fetch(self) -> None:
+        urls = (
+            "https://notgithub.com/owner/repo", "https://evil.example/github.com/owner/repo",
+            "https://github.com@evil.example/owner/repo", "https://evil@github.com/owner/repo",
+            "http://github.com/owner/repo", "https://github.com:444/owner/repo",
+            "https://github.com/owner/repo?other=value", "https://github.com/owner/repo#other",
+            "https://github.com/owner/..", "https://github.com/owner/repo/tree/main",
+            "https://[malformed", None,
+        )
+        for url in urls:
+            with self.subTest(url=url), patch.object(kf, "_get") as get:
+                metadata, candidates, errors = kf.refresh(url)
+                self.assertIsNone(metadata)
+                self.assertEqual(candidates, [])
+                self.assertTrue(errors)
+                get.assert_not_called()
+
+    def test_git_suffix_is_removed(self) -> None:
+        self.assertEqual(kf.parse_github_owner_repo("https://github.com/owner/repo.git"),
+                         ("owner", "repo"))
+
 
 class ExtractCandidatesTests(unittest.TestCase):
     def test_one_unambiguous_candidate(self) -> None:
@@ -105,6 +126,22 @@ class ExtractCandidatesTests(unittest.TestCase):
 
 
 class FetchRepoMetadataTests(unittest.TestCase):
+    def test_malformed_metadata_becomes_fetch_error(self) -> None:
+        valid = {"stargazers_count": 1, "forks_count": 0, "open_issues_count": 0,
+                 "pushed_at": "2026-09-05T00:00:00Z", "license": None}
+        cases = [None, [], 42, "text", {"stargazers_count": 1}]
+        cases.extend(dict(valid, **{field: value}) for field, value in (
+            ("stargazers_count", True), ("forks_count", -1),
+            ("open_issues_count", "0"), ("pushed_at", []),
+            ("license", []), ("license", {"spdx_id": 1}),
+        ))
+        for data in cases:
+            with self.subTest(data=data), patch.object(kf, "_get", return_value=json.dumps(data).encode()):
+                with self.assertRaises(kf.FetchError):
+                    kf.fetch_repo_metadata("owner", "repo")
+        with patch.object(kf, "_get", return_value=b"\xff"):
+            with self.assertRaises(kf.FetchError):
+                kf.fetch_repo_metadata("owner", "repo")
     def test_successful_response_is_parsed(self) -> None:
         body = json.dumps({
             "stargazers_count": 42,
@@ -185,6 +222,23 @@ class RefreshTests(unittest.TestCase):
         self.assertIsNone(metadata)
         self.assertEqual(candidates, [])
         self.assertEqual(len(errors), 2)  # metadata call and README call both fail
+
+    def test_timeout_is_bounded_and_reported_for_each_endpoint(self) -> None:
+        with patch("urllib.request.urlopen", side_effect=TimeoutError("timed out")) as get:
+            metadata, candidates, errors = kf.refresh("https://github.com/owner/repo")
+        self.assertIsNone(metadata)
+        self.assertEqual(candidates, [])
+        self.assertEqual(len(errors), 2)
+        self.assertEqual(get.call_count, 2)
+        for call in get.call_args_list:
+            self.assertEqual(call.kwargs["timeout"], kf.TIMEOUT_SECONDS)
+
+    def test_malformed_metadata_does_not_block_readme(self) -> None:
+        with patch.object(kf, "_get", side_effect=[b"[]", README_ONE_CANDIDATE.encode()]):
+            metadata, candidates, errors = kf.refresh("https://github.com/owner/repo")
+        self.assertIsNone(metadata)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(len(errors), 1)
 
 
 if __name__ == "__main__":

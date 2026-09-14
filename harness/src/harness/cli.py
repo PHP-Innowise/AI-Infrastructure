@@ -61,7 +61,8 @@ def main(argv: list[str] | None = None) -> int:
     shared.add_argument("--worker", default="claude-cli")
     shared.add_argument("--lenses", help="comma-separated roster agent names")
     shared.add_argument("--model")
-    shared.add_argument("--budget-usd", type=float, default=5.0)
+    shared.add_argument("--budget-usd", type=lambda value: None if value.lower() == 'none' else float(value), default=None,
+                        help="Optional USD budget for this graph attempt (Claude/dry-run only); default: none")
     shared.add_argument("--worker-timeout", type=int, default=1800)
     shared.add_argument("--state-dir", default="state")
     shared.add_argument("--reports-dir", default="reports")

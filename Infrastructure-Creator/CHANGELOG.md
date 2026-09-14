@@ -6,6 +6,13 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Fixed
 
+- **`memory-seed` asset `context.py` counted promotion iterator records instead of
+  applied promotions in memory status.** The generator copies the shared
+  memory/context core verbatim into every generated project, so the asset now
+  carries the same consolidation-counter fix as the editions (see the root
+  `CHANGELOG.md`), the `.claude`/`.cursor` mirrors are regenerated, and the
+  policy lock is regenerated (`e5fb4cae`).
+
 - **`profile-synthesizer` still told itself to stamp plan schema `1.4`.** Schema
   1.6 bumped the skill's own guardrail (`validate_skill_quality.py`'s
   `CURRENT_PLAN_SCHEMA`) to require emitting 1.6 and retiring 1.0-1.5 to audit

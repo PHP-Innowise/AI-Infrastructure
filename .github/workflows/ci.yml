@@ -133,7 +133,27 @@ jobs:
         # failing binary gate fails here rather than reaching a client project.
         run: python3 scripts/validate_registry.py --check
       - name: Kit 3 registry and catalog regression tests
-        run: python3 -m unittest tests.test_registry tests.test_open_source_kit
+        run: python3 -m unittest tests.test_registry tests.test_open_source_kit tests.test_kit_fetcher tests.test_kit3 tests.test_kit3_catalog
+      - name: Native browser harness regression tests
+        run: python3 -m unittest tests.test_harness_providers tests.test_harness_sessions tests.test_harness_web tests.test_harness_process_guard tests.test_harness_skills tests.test_harness_fleet tests.test_harness_knowledge tests.test_harness_task_context tests.test_harness_setup tests.test_harness_creator tests.test_harness_results tests.test_harness_delivery tests.test_harness_clash
+
+  harness-fleet:
+    name: Offline Fleet runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install optional graph runtime
+        run: |
+          python3 -m venv harness/.venv
+          harness/.venv/bin/python -m pip install -e harness
+      - name: Graph and checkpoint regression tests
+        run: harness/.venv/bin/python -m unittest discover -s harness/tests -p 'test_*.py'
+      - name: Browser Fleet integration without model calls
+        run: python3 -m unittest tests.test_harness_fleet
 
   lint:
     name: lint
@@ -145,13 +165,12 @@ jobs:
         with:
           python-version: "3.x"
       - name: Bash syntax check (bash -n)
-        # 'collect' carries no .sh extension but is a shell script; listing it
-        # explicitly keeps every tracked shell file inside the gate.
-        run: git ls-files -z -- '*.sh' 'collect' | xargs -0 -r -n1 bash -n
+        # These launchers carry no .sh extension; include them in shell checks.
+        run: git ls-files -z -- '*.sh' 'collect' 'kit3' 'harness-server' | xargs -0 -r -n1 bash -n
       - name: ShellCheck (severity gate error)
         run: |
           shellcheck --version
-          git ls-files -z -- '*.sh' 'collect' | xargs -0 -r shellcheck -S error
+          git ls-files -z -- '*.sh' 'collect' 'kit3' 'harness-server' | xargs -0 -r shellcheck -S error
       - name: Validate JSON
         run: |
           git ls-files -z -- '*.json' | while IFS= read -r -d '' f; do

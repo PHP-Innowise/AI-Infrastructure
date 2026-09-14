@@ -7,16 +7,22 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+import threading
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.checkpoint.memory import InMemorySaver
+try:
+    from langgraph.checkpoint.sqlite import SqliteSaver
+except ImportError:
+    SqliteSaver = None
 
 from harness.blackboard import Blackboard
 from harness.config import HarnessConfig
 from harness.graphs.fleet_review import build_graph, dedupe, parse_findings, resume_command
-from harness.workers import DryRunWorker
+from harness.workers import DryRunWorker, WorkerResult
 
 FINDINGS = {
     "code-reviewer": json.dumps({"findings": [
@@ -76,11 +82,7 @@ class FleetReviewTest(unittest.TestCase):
         self.worker = DryRunWorker(script=dict(FINDINGS))
         self.blackboard = RecordingBlackboard()
         self.config.state_dir.mkdir(parents=True)
-        self.saver = SqliteSaver(
-            sqlite3.connect(
-                str(self.config.checkpoint_path), check_same_thread=False
-            )
-        )
+        self.saver = InMemorySaver()
         self.graph = build_graph(
             self.config, self.worker, self.blackboard, self.saver
         )
@@ -150,6 +152,178 @@ class FleetReviewTest(unittest.TestCase):
         })
         self.assertEqual(["code-reviewer"], state["skipped"])
         self.assertEqual([], worker.calls)
+
+    def test_observer_identifies_budget_stop_without_disclosing_worker_errors(self):
+        events = []
+        def worker(prompt, config):
+            return WorkerResult(text='', ok=False, cost_usd=1.62,
+                                error='private provider diagnostic', limit_reached='USD')
+        graph = build_graph(self.config, worker, RecordingBlackboard(), observer=events.append)
+        with self.assertRaisesRegex(RuntimeError, 'USD budget'):
+            graph.invoke({'scope':'s', 'task_id':'harness/budget-stop', 'thread_id':'budget-stop',
+                          'lenses':['code-reviewer']})
+        failure = next(e for e in events if e.get('kind') == 'fleet_reviewer' and e.get('status') == 'failed')
+        self.assertEqual(failure['limit_reached'], 'USD')
+        self.assertNotIn('private', json.dumps(events))
+
+    def test_parallel_reviewers_receive_disjoint_remaining_budget_allowances(self) -> None:
+        config = replace(self.config, budget_usd=0.5)
+        allowances = []
+        barrier = threading.Barrier(2)
+
+        def worker(prompt, allocated):
+            allowances.append(allocated.budget_usd)
+            self.assertEqual(len(allocated.lenses), 1)
+            self.assertIn(allocated.lenses[0], prompt)
+            barrier.wait(timeout=3)
+            return WorkerResult(text='{"findings": []}', ok=True, cost_usd=allocated.budget_usd)
+
+        graph = build_graph(config, worker, RecordingBlackboard(), None)
+        state = graph.invoke({
+            "scope": "s", "task_id": "harness/budget", "thread_id": "budget",
+            "lenses": list(config.lenses), "cost_usd": 0.2,
+        }, config={"max_concurrency": 2})
+        self.assertEqual(sorted(allowances), [0.15, 0.15])
+        self.assertAlmostEqual(state["cost_usd"], 0.5)
+        self.assertEqual(state["skipped"], [])
+
+    def test_dry_run_does_not_invent_spending_above_its_allowance(self) -> None:
+        config = replace(self.config, budget_usd=0.5)
+        worker = DryRunWorker(cost_per_call_usd=1.0)
+        events = []
+        with self.assertRaisesRegex(RuntimeError, "Reviewer .* failed"):
+            build_graph(config, worker, RecordingBlackboard(), observer=events.append).invoke({
+                "scope": "s", "task_id": "harness/budget", "thread_id": "budget",
+                "lenses": list(config.lenses),
+            })
+        self.assertTrue(worker.calls)
+        failed = [item for item in events if item.get("status") == "failed"]
+        self.assertTrue(failed)
+        self.assertTrue(all(item["cost_usd"] == 0.0 for item in failed))
+        self.assertFalse(any(item.get("stage") == "gate" for item in events))
+
+    def test_unpriced_reviewers_keep_total_unknown_and_direct_mode_does_not_spawn(self) -> None:
+        config = replace(self.config, budget_usd=None, delegate_to_roster=False, thinking_effort="high")
+        calls = []
+
+        def worker(prompt, allocated):
+            calls.append(prompt)
+            self.assertIsNone(allocated.budget_usd)
+            self.assertEqual(len(allocated.lenses), 1)
+            self.assertIn(allocated.lenses[0], prompt)
+            self.assertEqual(allocated.thinking_effort, "high")
+            return WorkerResult(text='{"findings": []}', ok=True,
+                                cost_usd=None if "security-reviewer" in prompt else 0.1)
+
+        graph = build_graph(config, worker, self.blackboard, self.saver)
+        state = graph.invoke({"scope": "s", "task_id": "harness/unpriced", "thread_id": "unpriced",
+                              "lenses": list(config.lenses)},
+                             config={"configurable": {"thread_id": "unpriced"}})
+        self.assertIsNone(state["cost_usd"])
+        self.assertIsNone(state["__interrupt__"][0].value["cost_usd"])
+        self.assertTrue(all("Do not spawn additional agents" in prompt for prompt in calls))
+        self.assertFalse(any("Use the Task tool" in prompt for prompt in calls))
+        final = graph.invoke(resume_command(True), config={"configurable": {"thread_id": "unpriced"}})
+        self.assertIn("cost: unknown", final["report"])
+        self.assertEqual(len(calls), 2)
+
+    def test_observer_reports_failures_and_resume_does_not_repeat_reviewers_or_waiting(self) -> None:
+        events = []
+        calls = []
+        recovered = False
+
+        def worker(prompt, allocated):
+            calls.append(prompt)
+            if "security-reviewer" in prompt and not recovered:
+                return WorkerResult(text="", ok=False, cost_usd=None, duration_seconds=0.5,
+                                    error="private native diagnostic")
+            return WorkerResult(text=FINDINGS["code-reviewer"], ok=True, cost_usd=0.1,
+                                duration_seconds=0.25)
+
+        graph = build_graph(replace(self.config, budget_usd=None), worker, self.blackboard,
+                            self.saver, observer=events.append)
+        options = {"configurable": {"thread_id": "events"}}
+        with self.assertRaisesRegex(RuntimeError, "Reviewer security-reviewer failed") as error:
+            graph.invoke({"scope": "s", "task_id": "harness/events", "thread_id": "events",
+                          "lenses": list(self.config.lenses)}, config=options)
+        self.assertNotIn("private native diagnostic", str(error.exception))
+        self.assertEqual(events[0], {"kind": "fleet_stage", "stage": "scope", "status": "running"})
+        reviewers = [item for item in events if item["kind"] == "fleet_reviewer"]
+        self.assertEqual(len(reviewers), 4)
+        failed = next(item for item in reviewers if item["status"] == "failed")
+        self.assertEqual((failed["lens"], failed["error"]), ("security-reviewer", "Reviewer failed."))
+        self.assertIsNone(failed["cost_usd"])
+        self.assertNotIn("private native diagnostic", json.dumps(events))
+        self.assertNotIn("capsule", json.dumps(events))
+        self.assertEqual(len(calls), 2)
+        self.assertFalse(any(item.get("stage") == "gate" for item in events))
+        recovered = True
+        retried = graph.invoke(None, config=options)
+        self.assertIn("__interrupt__", retried)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sum("code-reviewer" in prompt for prompt in calls), 1)
+        self.assertFalse(any("failed" in item["claim"] for item in retried["findings"]))
+        graph.invoke(resume_command(False), config=options)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sum(item.get("stage") == "gate" and item["status"] == "waiting"
+                             for item in events), 1)
+        self.assertEqual(events[-1], {"kind": "fleet_stage", "stage": "record", "status": "completed"})
+
+    @unittest.skipUnless(SqliteSaver is not None, "Install langgraph-checkpoint-sqlite for persistence coverage")
+    def test_sqlite_gate_reopens_without_repeating_completed_reviewers(self) -> None:
+        options = {"configurable": {"thread_id": "persisted"}}
+        connection = sqlite3.connect(str(self.config.checkpoint_path), check_same_thread=False)
+        try:
+            graph = build_graph(self.config, self.worker, self.blackboard, SqliteSaver(connection))
+            graph.invoke({"scope": "s", "task_id": "harness/persisted", "thread_id": "persisted",
+                          "lenses": list(self.config.lenses)}, config=options)
+        finally:
+            connection.close()
+        self.assertEqual(len(self.worker.calls), 2)
+        reopened = sqlite3.connect(str(self.config.checkpoint_path), check_same_thread=False)
+        try:
+            graph = build_graph(self.config, self.worker, self.blackboard, SqliteSaver(reopened))
+            final = graph.invoke(resume_command(True), config=options)
+        finally:
+            reopened.close()
+        self.assertTrue(final["approved"])
+        self.assertEqual(len(self.worker.calls), 2)
+
+    @unittest.skipUnless(SqliteSaver is not None, "Install langgraph-checkpoint-sqlite for persistence coverage")
+    def test_sqlite_failed_node_retries_after_reopen_without_repeating_successful_peer(self) -> None:
+        attempts = {"code-reviewer": 0, "security-reviewer": 0}
+        allow_failure = True
+        config = replace(self.config, budget_usd=None)
+
+        def worker(prompt, allocated):
+            lens = "security-reviewer" if "security-reviewer" in prompt else "code-reviewer"
+            attempts[lens] += 1
+            if lens == "security-reviewer" and allow_failure:
+                return WorkerResult(text="", ok=False, error="private provider failure")
+            return WorkerResult(text=FINDINGS[lens], ok=True, cost_usd=0.1)
+
+        options = {"configurable": {"thread_id": "partial"}}
+        connection = sqlite3.connect(str(self.config.checkpoint_path), check_same_thread=False)
+        try:
+            graph = build_graph(config, worker, self.blackboard, SqliteSaver(connection))
+            with self.assertRaisesRegex(RuntimeError, "Reviewer security-reviewer failed"):
+                graph.invoke({"scope": "s", "task_id": "harness/partial", "thread_id": "partial",
+                              "lenses": list(self.config.lenses)}, config=options)
+        finally:
+            connection.close()
+        self.assertEqual(attempts, {"code-reviewer": 1, "security-reviewer": 1})
+        allow_failure = False
+        reopened = sqlite3.connect(str(self.config.checkpoint_path), check_same_thread=False)
+        try:
+            graph = build_graph(config, worker, self.blackboard, SqliteSaver(reopened))
+            state = graph.invoke(None, config=options)
+            self.assertIn("__interrupt__", state)
+            final = graph.invoke(resume_command(True), config=options)
+        finally:
+            reopened.close()
+        self.assertEqual(attempts, {"code-reviewer": 1, "security-reviewer": 2})
+        self.assertTrue(final["approved"])
+        self.assertNotIn("private provider failure", final["report"])
 
     def test_underspecified_capsule_refuses_dispatch(self) -> None:
         class StrictBlackboard(RecordingBlackboard):

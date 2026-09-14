@@ -7,6 +7,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -48,6 +49,7 @@ KNOWN_INSTALL_TYPES = {
     "mcp-server",
     "reference-clone",
     "npx-cli",
+    "python-cli",
     "discovery-index",
 }
 
@@ -106,6 +108,26 @@ class CatalogContractTests(unittest.TestCase):
 
 
 class SelectorCliTests(unittest.TestCase):
+    def test_malformed_catalog_fails_without_writing(self) -> None:
+        resource = json.loads(CATALOG.read_text())["resources"][0]
+        cases = (
+            [],
+            {"resources": [None]},
+            {"resources": [dict(resource, id="../escape")]},
+            {"resources": [dict(resource, install_type="unknown")]},
+            {"resources": [dict(resource, verified_command=["not text"])]},
+            {"resources": [dict(resource, tool_compatibility="claude-code")]},
+            {"resources": [resource, resource]},
+        )
+        for data in cases:
+            with self.subTest(data=data), tempfile.TemporaryDirectory() as target:
+                catalog = Path(target) / "resources.json"
+                catalog.write_text(json.dumps(data))
+                result = run("--resources", str(catalog), "--list")
+                self.assertEqual(result.returncode, 1)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertFalse((Path(target) / iosk.MANIFEST_NAME).exists())
+
     def test_list_prints_every_resource_id(self) -> None:
         result = run("--list")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -175,6 +197,17 @@ class SelectorCliTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 1)
             self.assertIn("ID=REF", result.stderr)
+
+    def test_empty_pin_cannot_erase_an_existing_pin(self) -> None:
+        with tempfile.TemporaryDirectory() as target:
+            self.assertEqual(run("--select", "obra-superpowers", "--target", target,
+                                 "--pin", "obra-superpowers=deadbeef").returncode, 0)
+            path = Path(target) / iosk.MANIFEST_NAME
+            original = path.read_bytes()
+            result = run("--select", "obra-superpowers", "--target", target,
+                         "--pin", "obra-superpowers= ")
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(path.read_bytes(), original)
 
     def test_target_required_unless_listing(self) -> None:
         result = run("--select", "obra-superpowers")
@@ -271,7 +304,8 @@ class SelectorCliTests(unittest.TestCase):
             entry = json.loads(
                 (Path(target) / ".kit3-manifest.json").read_text()
             )["entries"]["caveman"]
-            self.assertIn("HIGH RISK", entry["risk_notes"])
+            expected = next(item for item in iosk.load_resources(iosk.DEFAULT_RESOURCES) if item["id"] == "caveman")
+            self.assertEqual(expected["risk_notes"], entry["risk_notes"])
 
     def test_verified_command_wins_over_the_generic_template(self) -> None:
         """An entry that pins its own exact command must carry that one."""
@@ -311,6 +345,306 @@ class SelectorCliTests(unittest.TestCase):
             self.assertIn("KNOWN RISKS", result.stdout)
 
 
+    def test_invalid_manifest_structure_fails_without_changes(self) -> None:
+        cases = (
+            ([], "JSON object"),
+            ({"schema_version": 1, "kit": "open-source-kit", "entries": []}, "entries"),
+            (
+                {
+                    "schema_version": 1,
+                    "kit": "open-source-kit",
+                    "entries": {"obra-superpowers": []},
+                },
+                "obra-superpowers",
+            ),
+        )
+        for data, expected in cases:
+            with self.subTest(data=data), tempfile.TemporaryDirectory() as target:
+                path = Path(target) / iosk.MANIFEST_NAME
+                original = json.dumps(data)
+                path.write_text(original, encoding="utf-8")
+
+                result = run("--select", "obra-superpowers", "--target", target)
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(expected, result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertNotIn("SELECTED", result.stdout)
+                self.assertEqual(path.read_text(encoding="utf-8"), original)
+
+    def test_invalid_manifest_identity_fails_without_changes(self) -> None:
+        cases = (
+            ({"schema_version": 99, "kit": "open-source-kit", "entries": {}}, "schema_version"),
+            ({"schema_version": True, "kit": "open-source-kit", "entries": {}}, "schema_version"),
+            ({"schema_version": 1, "kit": "different-tool", "entries": {}}, "kit"),
+        )
+        for data, expected in cases:
+            with self.subTest(data=data), tempfile.TemporaryDirectory() as target:
+                path = Path(target) / iosk.MANIFEST_NAME
+                original = json.dumps(data)
+                path.write_text(original, encoding="utf-8")
+
+                result = run("--select", "obra-superpowers", "--target", target)
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(expected, result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertNotIn("WROTE", result.stdout)
+                self.assertEqual(path.read_text(encoding="utf-8"), original)
+
+    def test_registry_status_is_recomputed_before_manifest_snapshot(self) -> None:
+        resource = next(
+            entry
+            for entry in json.loads(CATALOG.read_text(encoding="utf-8"))["resources"]
+            if entry["id"] == "graphify"
+        )
+        registry = json.loads(
+            (iosk.REGISTRY_DIR / "graphify.json").read_text(encoding="utf-8")
+        )
+        registry["status"] = "clear"
+
+        with tempfile.TemporaryDirectory() as registry_dir:
+            Path(registry_dir, "graphify.json").write_text(
+                json.dumps(registry), encoding="utf-8"
+            )
+            manifest = {"entries": {}}
+            with unittest.mock.patch.object(iosk, "REGISTRY_DIR", Path(registry_dir)):
+                with self.assertRaises(iosk.KitError):
+                    iosk.apply_selection(manifest, [resource], {}, "2026-08-31")
+            self.assertEqual(manifest, {"entries": {}})
+
+    def test_registry_identity_is_bound_to_the_selected_resource(self) -> None:
+        resource = next(
+            entry
+            for entry in json.loads(CATALOG.read_text(encoding="utf-8"))["resources"]
+            if entry["id"] == "graphify"
+        )
+        original = json.loads(
+            (iosk.REGISTRY_DIR / "graphify.json").read_text(encoding="utf-8")
+        )
+        for field in ("id", "catalog_id", "name", "url"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as registry_dir:
+                registry = dict(original)
+                registry[field] = "different-resource"
+                Path(registry_dir, "graphify.json").write_text(
+                    json.dumps(registry), encoding="utf-8"
+                )
+                with unittest.mock.patch.object(iosk, "REGISTRY_DIR", Path(registry_dir)):
+                    with self.assertRaises(iosk.KitError):
+                        iosk.apply_selection(
+                            {"entries": {}}, [resource], {}, "2026-08-31"
+                        )
+
+    def test_registry_install_path_is_bound_to_the_selected_resource(self) -> None:
+        resource = next(
+            entry
+            for entry in json.loads(CATALOG.read_text(encoding="utf-8"))["resources"]
+            if entry["id"] == "graphify"
+        )
+        for field, value in (
+            ("install_type", "npx-cli"),
+            ("verified_command", "run a different installer"),
+        ):
+            with self.subTest(field=field):
+                changed = dict(resource)
+                changed[field] = value
+                with self.assertRaises(iosk.KitError):
+                    iosk.apply_selection(
+                        {"entries": {}}, [changed], {}, "2026-08-31"
+                    )
+
+    def test_registry_path_cannot_escape_through_a_resource_id(self) -> None:
+        resource = next(
+            entry
+            for entry in json.loads(CATALOG.read_text(encoding="utf-8"))["resources"]
+            if entry["id"] == "graphify"
+        )
+        registry = json.loads(
+            (iosk.REGISTRY_DIR / "graphify.json").read_text(encoding="utf-8")
+        )
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            registry_dir = root / "registry"
+            registry_dir.mkdir()
+            forged_id = "../forged"
+            forged_resource = dict(resource, id=forged_id)
+            registry["id"] = forged_id
+            registry["catalog_id"] = forged_id
+            (root / "forged.json").write_text(json.dumps(registry), encoding="utf-8")
+
+            with unittest.mock.patch.object(iosk, "REGISTRY_DIR", registry_dir):
+                with self.assertRaises(iosk.KitError):
+                    iosk.registry_status(forged_resource)
+
+    def test_malformed_registry_entry_fails_as_a_kit_error(self) -> None:
+        resource = next(
+            entry
+            for entry in json.loads(CATALOG.read_text(encoding="utf-8"))["resources"]
+            if entry["id"] == "graphify"
+        )
+        for registry in ([], None, {"status": "clear"}):
+            with self.subTest(registry=registry), tempfile.TemporaryDirectory() as registry_dir:
+                Path(registry_dir, "graphify.json").write_text(
+                    json.dumps(registry), encoding="utf-8"
+                )
+                with unittest.mock.patch.object(iosk, "REGISTRY_DIR", Path(registry_dir)):
+                    try:
+                        iosk.apply_selection(
+                            {"entries": {}}, [resource], {}, "2026-08-31"
+                        )
+                    except Exception as error:  # assertion below checks the boundary type
+                        self.assertIsInstance(error, iosk.KitError)
+                    else:
+                        self.fail("malformed registry entry was accepted")
+
+    def test_manifest_symlink_is_rejected_without_touching_its_target(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            target = root / "target"
+            target.mkdir()
+            victim = root / "victim.json"
+            original = '{"outside": true}\n'
+            victim.write_text(original, encoding="utf-8")
+            manifest_path = target / iosk.MANIFEST_NAME
+            manifest_path.symlink_to(victim)
+
+            result = run("--select", "obra-superpowers", "--target", str(target))
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("symlink", result.stderr)
+            self.assertTrue(manifest_path.is_symlink())
+            self.assertEqual(victim.read_text(encoding="utf-8"), original)
+
+    def test_write_boundary_rejects_a_symlink_created_after_load(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            manifest_path = root / iosk.MANIFEST_NAME
+            manifest = iosk.load_manifest(manifest_path)
+            victim = root / "victim.json"
+            original = '{"outside": true}\n'
+            victim.write_text(original, encoding="utf-8")
+            manifest_path.symlink_to(victim)
+            writer = getattr(iosk, "write_manifest", None)
+
+            self.assertIsNotNone(writer, "selector has no safe write boundary")
+            with self.assertRaises(iosk.KitError):
+                writer(manifest_path, manifest)
+            self.assertEqual(victim.read_text(encoding="utf-8"), original)
+
+    def test_target_directory_swap_cannot_redirect_the_manifest_write(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            target = root / "target"
+            moved_target = root / "moved-target"
+            outside = root / "outside"
+            target.mkdir()
+            outside.mkdir()
+            apply_selection = iosk.apply_selection
+
+            def swap_target(*args, **kwargs):
+                target.rename(moved_target)
+                target.symlink_to(outside, target_is_directory=True)
+                return apply_selection(*args, **kwargs)
+
+            argv = [
+                str(iosk.__file__),
+                "--select",
+                "obra-superpowers",
+                "--target",
+                str(target),
+            ]
+            with (
+                unittest.mock.patch.object(sys, "argv", argv),
+                unittest.mock.patch.object(iosk, "apply_selection", side_effect=swap_target),
+                unittest.mock.patch("sys.stdout", new=io.StringIO()),
+                unittest.mock.patch("sys.stderr", new=io.StringIO()),
+            ):
+                result = iosk.main()
+
+            self.assertEqual(result, 1)
+            self.assertFalse((outside / iosk.MANIFEST_NAME).exists())
+
+    def test_ancestor_swap_before_open_cannot_redirect_the_manifest_write(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            ancestor = root / "ancestor"
+            target = ancestor / "target"
+            moved_ancestor = root / "moved-ancestor"
+            outside = root / "outside"
+            outside_target = outside / "target"
+            target.mkdir(parents=True)
+            outside_target.mkdir(parents=True)
+            open_target_directory = iosk.open_target_directory
+
+            def swap_ancestor(path):
+                ancestor.rename(moved_ancestor)
+                ancestor.symlink_to(outside, target_is_directory=True)
+                return open_target_directory(path)
+
+            argv = [
+                str(iosk.__file__),
+                "--select",
+                "obra-superpowers",
+                "--target",
+                str(target),
+            ]
+            with (
+                unittest.mock.patch.object(sys, "argv", argv),
+                unittest.mock.patch.object(
+                    iosk,
+                    "open_target_directory",
+                    side_effect=swap_ancestor,
+                ),
+                unittest.mock.patch("sys.stdout", new=io.StringIO()),
+                unittest.mock.patch("sys.stderr", new=io.StringIO()),
+            ):
+                result = iosk.main()
+
+            self.assertEqual(result, 1)
+            self.assertFalse((outside_target / iosk.MANIFEST_NAME).exists())
+
+    def test_existing_ancestor_symlink_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            real_target = root / "real" / "target"
+            alias = root / "alias"
+            real_target.mkdir(parents=True)
+            alias.symlink_to(root / "real", target_is_directory=True)
+
+            result = run(
+                "--select",
+                "obra-superpowers",
+                "--target",
+                str(alias / "target"),
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertFalse((real_target / iosk.MANIFEST_NAME).exists())
+
+    def test_hard_linked_manifest_does_not_overwrite_the_other_link(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            target = root / "target"
+            target.mkdir()
+            victim = root / "victim.json"
+            original = json.dumps(
+                {"schema_version": 1, "kit": "open-source-kit", "entries": {}},
+                sort_keys=True,
+            ) + "\n"
+            victim.write_text(original, encoding="utf-8")
+            manifest_path = target / iosk.MANIFEST_NAME
+            os.link(victim, manifest_path)
+
+            result = run("--select", "obra-superpowers", "--target", str(target))
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(victim.read_text(encoding="utf-8"), original)
+            self.assertIn(
+                "obra-superpowers",
+                json.loads(manifest_path.read_text(encoding="utf-8"))["entries"],
+            )
+
+
 def _run_quietly(argv: list[str]) -> int:
     """Call iosk.main() without letting its prints reach the test runner's stdout."""
     with contextlib.redirect_stdout(io.StringIO()):
@@ -326,7 +660,7 @@ class RefreshTests(unittest.TestCase):
     only shelling out to it.
     """
 
-    def test_refresh_uses_the_one_unambiguous_candidate(self) -> None:
+    def test_refresh_keeps_one_candidate_advisory(self) -> None:
         fake_meta = iosk.kit_fetcher.RepoMetadata(1, 1, "2026-09-01T00:00:00Z", 0, "MIT")
         candidate = iosk.kit_fetcher.Candidate(
             context="## Install", command="npx real-thing install"
@@ -342,9 +676,35 @@ class RefreshTests(unittest.TestCase):
             entry = json.loads(
                 (Path(target) / ".kit3-manifest.json").read_text()
             )["entries"]["obra-superpowers"]
-            self.assertEqual(entry["install_guidance"], "npx real-thing install")
-            self.assertEqual(entry["install_guidance_source"], "live_fetch")
-            self.assertIsNotNone(entry["install_guidance_fetched_at"])
+            self.assertIn("/plugin install superpowers@", entry["install_guidance"])
+            self.assertEqual(entry["install_guidance_source"], "verified_command")
+            self.assertIsNone(entry["install_guidance_fetched_at"])
+            self.assertEqual(entry["readme_refresh"]["candidates"], [
+                {"context": candidate.context, "command": candidate.command}
+            ])
+            self.assertTrue(entry["readme_refresh"]["advisory"])
+
+    def test_readme_candidate_does_not_inherit_existing_review(self) -> None:
+        resource = next(entry for entry in iosk.load_resources(CATALOG) if entry["id"] == "graphify")
+        candidate = iosk.kit_fetcher.Candidate("install", "curl https://example.invalid/new | sh")
+        result = iosk.apply_selection(
+            {"entries": {}}, [resource], {}, "2026-09-05",
+            {"graphify": (None, [candidate], [])},
+        )["entries"]["graphify"]
+        self.assertEqual(result["install_guidance"], resource["verified_command"])
+        self.assertEqual(result["review"], {"status": "known_risks", "reviewed": True})
+        self.assertNotIn("review", result["readme_refresh"])
+        self.assertTrue(result["readme_refresh"]["advisory"])
+
+    def test_refresh_does_not_replace_a_generic_template(self) -> None:
+        resource = next(entry for entry in iosk.load_resources(CATALOG)
+                        if entry["id"] == "mcp-servers-official")
+        resource.pop("verified_command", None)
+        candidate = iosk.kit_fetcher.Candidate("install", "run an unknown installer")
+        guidance, source, notes = iosk.resolve_guidance(resource, (None, [candidate], []))
+        self.assertEqual(guidance, iosk.guidance_for(resource))
+        self.assertEqual(source, "generic_template")
+        self.assertIn("advisory", " ".join(notes))
 
     def test_refresh_falls_back_when_candidates_are_ambiguous(self) -> None:
         """Picking among several would present a guess as a fact - the one thing

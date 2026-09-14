@@ -8,6 +8,7 @@ are bound to nodes by closure at build time, and only data lives in state.
 from __future__ import annotations
 
 import os
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -28,7 +29,9 @@ class HarnessConfig:
     worker: str = "claude-cli"
     lenses: tuple[str, ...] = DEFAULT_LENSES
     model: str | None = None
-    budget_usd: float = 5.0
+    budget_usd: float | None = 5.0
+    thinking_effort: str | None = None
+    delegate_to_roster: bool = True
     worker_timeout_seconds: int = 1800
     max_turns: int = 40
     permission_mode: str = "dontAsk"
@@ -46,8 +49,22 @@ class HarnessConfig:
     def __post_init__(self) -> None:
         if not self.project.is_dir():
             raise ValueError(f"Project directory not found: {self.project}")
-        if self.budget_usd <= 0:
-            raise ValueError("budget_usd must be positive")
+        if self.budget_usd is not None and (
+            isinstance(self.budget_usd, bool)
+            or not isinstance(self.budget_usd, (int, float))
+            or not math.isfinite(self.budget_usd)
+            or self.budget_usd <= 0
+        ):
+            raise ValueError("budget_usd must be a positive finite number or None")
+        if type(self.delegate_to_roster) is not bool:
+            raise ValueError("delegate_to_roster must be a boolean")
+        if self.thinking_effort is not None and (
+            not isinstance(self.thinking_effort, str)
+            or not self.thinking_effort.strip()
+            or self.thinking_effort.startswith("-")
+            or any(ord(char) < 32 or ord(char) == 127 for char in self.thinking_effort)
+        ):
+            raise ValueError("thinking_effort must be a nonempty effort name or None")
 
     @property
     def checkpoint_path(self) -> Path:

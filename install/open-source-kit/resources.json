@@ -10,8 +10,8 @@
     "conflict_risk - chance of colliding with a generated Kit 1/Kit 2 agent, skill, or hook name, or double-firing a hook",
     "license - confirm at install time when null here; do not assume permissive",
     "pinned_ref - null until a project actually pins one; record it with install_open_source_kit.py --pin ID=REF",
-    "trust_flags - known-fake or inflated trust signals (e.g. a statistically implausible star count) that must not be read as endorsement; absent means no known issue",
-    "verified_command / command_verified_date - a literal, primary-source-confirmed install command and the date it was checked against the repo's own README; absent means the generic install_type guidance is still what prints, because no single unambiguous command exists or none has been checked yet"
+    "verified_command / command_verified_date - a literal, primary-source-confirmed install command and the date it was checked against the repo's own README; absent means the generic install_type guidance is still what prints, because no single unambiguous command exists or none has been checked yet",
+    "skills_source - structured source for the optional Vercel Skills adapter; installs SKILL.md content only, not plugins, hooks, proxies or MCP servers"
   ],
   "resources": [
     {
@@ -19,7 +19,7 @@
       "name": "Anthropic Official Plugin Marketplace",
       "category": "marketplace",
       "url": "https://github.com/anthropics/claude-plugins-official",
-      "description": "Anthropic's own curated marketplace (~36 internal + ~220 external listings) - the safest first stop since Anthropic vets these before listing.",
+      "description": "Anthropic-maintained plugin marketplace. Choose and review individual plugins for the target project.",
       "install_type": "claude-marketplace",
       "automation_depth": "index-only",
       "token_footprint": "n/a - depends on what is installed from it",
@@ -97,7 +97,7 @@
       "name": "VoltAgent/awesome-claude-code-subagents",
       "category": "subagents",
       "url": "https://github.com/VoltAgent/awesome-claude-code-subagents",
-      "description": "100+ subagents organized by category, each documenting an explicit minimal tool allowlist - a strong reference for least-privilege subagent design.",
+      "description": "Collection of Claude Code subagents that can be selected individually. Tool permissions vary by agent; inspect the chosen file.",
       "install_type": "reference-clone",
       "automation_depth": "manual-invoke",
       "token_footprint": "lazy - copy in only the individual agent files a project needs",
@@ -115,20 +115,23 @@
       "name": "obra/superpowers (+ superpowers-skills)",
       "category": "skills",
       "url": "https://github.com/obra/superpowers",
-      "description": "Well-regarded core skills library (TDD, debugging, collaboration patterns); listed in Anthropic's own official marketplace.",
+      "description": "Skills for planning, test-driven development, debugging and code review. Also distributed as a plugin; the skills-only path omits plugin hooks and configuration.",
       "install_type": "claude-marketplace",
       "verified_command": "Inside a Claude Code session: `/plugin install superpowers@claude-plugins-official` - already listed in the official marketplace, no separate marketplace add needed.",
       "automation_depth": "manual-invoke",
       "token_footprint": "lazy - native SKILL.md on-demand loading",
       "tool_compatibility": [
-        "claude-code"
+        "claude-code",
+        "codex",
+        "cursor"
       ],
       "conflict_risk": "low",
       "license": null,
       "reviewed_date": "2026-08-26",
       "pinned_ref": null,
       "risk_notes": "Passed Anthropic's own marketplace listing bar - the strongest trust signal in this catalog.",
-      "command_verified_date": "2026-08-26"
+      "command_verified_date": "2026-08-26",
+      "skills_source": "obra/superpowers"
     },
     {
       "id": "composio-awesome-skills",
@@ -222,7 +225,7 @@
       "category": "skills",
       "url": "https://github.com/Graphify-Labs/graphify",
       "description": "Parses a codebase (code, docs, SQL schemas, configs, PDFs) into a local, deterministic knowledge graph via tree-sitter AST parsing; a /graphify skill for Claude Code, Cursor, Codex, and Gemini CLI, no vector store.",
-      "install_type": "npx-cli",
+      "install_type": "python-cli",
       "automation_depth": "orchestrated",
       "token_footprint": "mixed - large per-query token reduction claimed after an expensive one-time graph build (hours) plus incremental rebuilds (~10 min)",
       "tool_compatibility": [
@@ -234,11 +237,8 @@
       "license": "Apache-2.0",
       "reviewed_date": "2026-08-31",
       "pinned_ref": null,
-      "trust_flags": [
-        "implausible star count: 112,842 stars / 10,980 forks at ~5 months old (created 2026-04-03, verified via GitHub API 2026-08-31) - matches the fake-star pattern in arXiv 2412.13459; previously excluded from this catalog for this exact reason"
-      ],
-      "risk_notes": "HIGH RISK - re-added after prior exclusion for a statistically implausible star count; flagged, not vetted for trust. Its strict-mode install adds a PreToolUse hook that intercepts file-search tool calls - test interaction with our own local-context.sh/subagent-gate.sh on a throwaway branch before rollout. Functionally overlaps the Local Context Engine's FTS5/BM25 retrieval - run the same query set through both before treating both as necessary. Pin to an exact commit SHA; do not track a floating branch.",
-      "verified_command": "`uv tool install graphifyy` (or `pipx install graphifyy`) to get the CLI, then `graphify install` to register the skill - `graphify claude install` for the Claude-Code-specific hook variant. The PyPI package is `graphifyy` (double y, publisher `captainturbo`) while the CLI command it installs is `graphify` (single y) - verified via PyPI on 2026-09-01: description and maintainer match Graphify-Labs/graphify, not a typosquat, just a taken-name workaround. Still confirm the publisher before running - a package name is not the same guarantee as a signed release.",
+      "risk_notes": "May add Claude Code hooks and overlap the Local Context Engine. Test integration with the project's existing hooks; local-context.sh runs at SessionStart. Review data egress, scope and uninstall behavior for the selected version. Token savings have not been measured here.",
+      "verified_command": "Install the Python CLI with `uv tool install graphifyy` or `pipx install graphifyy`. Read `graphify --help` and the installed version's setup help before enabling its project integration; flags and scope differ between releases.",
       "command_verified_date": "2026-09-01"
     },
     {
@@ -259,12 +259,10 @@
       "license": "MIT (skill/adoption surfaces); BSL-1.1 (core engine/runtime) - mixed, confirm per-component compatibility with client work-for-hire terms",
       "reviewed_date": "2026-08-31",
       "pinned_ref": null,
-      "trust_flags": [
-        "implausible star count: 101,968 stars / 5,933 forks at ~5 months old (created 2026-04-04, verified via GitHub API 2026-08-31) - matches the fake-star pattern in arXiv 2412.13459"
-      ],
-      "risk_notes": "HIGH RISK - star count implausible for repo age; added despite this by explicit decision, not because trust was established. Ships a curl|bash installer and an always-on proxy that rewrites tool output before it reaches the model - read install.sh in full and pin to an exact commit SHA; do not run the one-liner unpinned. BSL-1.1 on the core engine is not fully open-source.",
+      "risk_notes": "The skills-only path is separate from the full installer, proxy and hooks. Review licensing and the selected component. Installing a skill does not isolate it or prove token savings.",
       "verified_command": "`npx skills add JuliusBrussee/caveman` - the lightweight skill-only path. The repo's own full installer (`curl -fsSL .../install.sh | bash`) additionally sets up an always-on proxy and Claude Code hooks; do not run that unpinned one-liner per this entry's own risk_notes - if the proxy is wanted, fetch install.sh at a pinned ref and read it first.",
-      "command_verified_date": "2026-09-01"
+      "command_verified_date": "2026-09-01",
+      "skills_source": "JuliusBrussee/caveman"
     },
     {
       "id": "grillme",
@@ -284,9 +282,6 @@
       "license": "MIT",
       "reviewed_date": "2026-08-31",
       "pinned_ref": null,
-      "trust_flags": [
-        "implausible star count: 242,415 stars / 20,609 forks at ~7 months old (created 2026-02-03, verified via GitHub API 2026-08-31) - more stars than facebook/react accumulated in 12 years; matches the fake-star pattern in arXiv 2412.13459"
-      ],
       "risk_notes": "HIGH RISK - the most extreme star/age ratio of any candidate reviewed for this catalog; added despite this by explicit decision. Copy in only the grill-me skill file, not the surrounding collection. Check for overlap with any existing clarifying-interview/planning skill before installing alongside one."
     },
     {
@@ -305,12 +300,76 @@
       "license": "MIT",
       "reviewed_date": "2026-08-31",
       "pinned_ref": null,
-      "trust_flags": [
-        "implausible star count: 38,913 stars / 3,491 forks at ~7.5 months old (created 2026-01-09, verified via GitHub API 2026-08-31) - matches the fake-star pattern in arXiv 2412.13459, less extreme than the other three added here but still disqualifying as a trust signal"
-      ],
-      "risk_notes": "HIGH RISK on two independent axes: (1) star count implausible for age; (2) a 19-agent self-orchestrating architecture is exactly what Symfony's subagent-gate.sh + CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1 + denied Agent(Explore/Plan/general-purpose) is designed to block by default. Will not function without an explicit roster-whitelist decision (see the Kit1/Kit2 collision analysis - same fork in the road as `ecc`). At least 6 other 'oh-my-claude*' forks exist with ordinary star counts - confirm this specific fork is the one intended before installing.",
+      "risk_notes": "Multi-agent orchestration may conflict with project roster rules and nested-agent limits. Inspect the selected version's Agent/Task and subprocess paths separately; a roster hook does not cover every possible execution path. Namespace, cost and lifecycle need project-level verification.",
       "verified_command": "`/plugin marketplace add https://github.com/Yeachan-Heo/oh-my-claudecode` then `/plugin install oh-my-claudecode` - enter as two separate slash commands, not pasted together, per the repo's own README.",
       "command_verified_date": "2026-09-01"
+    },
+    {
+      "id": "vercel-agent-skills",
+      "name": "Vercel Agent Skills",
+      "category": "skills",
+      "url": "https://github.com/vercel-labs/agent-skills",
+      "description": "Vercel-maintained development skills for React and Next.js performance, component composition, web interface review and deployment. Select individual skills from the collection.",
+      "install_type": "reference-clone",
+      "automation_depth": "manual-invoke",
+      "token_footprint": "lazy - depends on the selected skills and their supporting references",
+      "tool_compatibility": [
+        "claude-code",
+        "cursor",
+        "codex"
+      ],
+      "conflict_risk": "medium",
+      "license": "MIT",
+      "reviewed_date": "2026-09-05",
+      "pinned_ref": null,
+      "risk_notes": "Source and skills/*/SKILL.md layout checked; individual skills remain unreviewed. Review selected instructions and scripts for overlap with project policy. Deployment skills can upload project contents when invoked; installation is not authorization to deploy.",
+      "verified_command": "`npx skills add vercel-labs/agent-skills` - the source's documented Skills CLI entry point; choose only the individual skills wanted.",
+      "command_verified_date": "2026-09-05",
+      "skills_source": "vercel-labs/agent-skills"
+    },
+    {
+      "id": "anthropic-skills",
+      "name": "Anthropic Skills",
+      "category": "skills",
+      "url": "https://github.com/anthropics/skills",
+      "description": "Anthropic's collection of Agent Skills examples, including frontend design, web application testing, MCP development and skill creation, alongside creative and document workflows.",
+      "install_type": "reference-clone",
+      "automation_depth": "manual-invoke",
+      "token_footprint": "lazy - depends on the selected skills, references and helper scripts",
+      "tool_compatibility": [
+        "claude-code",
+        "cursor",
+        "codex"
+      ],
+      "conflict_risk": "medium",
+      "license": "Mixed - many examples Apache-2.0; document skills docx/pdf/pptx/xlsx are source-available under their own terms",
+      "reviewed_date": "2026-09-05",
+      "pinned_ref": null,
+      "risk_notes": "Source and skills/*/SKILL.md layout checked; individual skills remain unreviewed. These are demonstration skills, not a compatibility guarantee for every client. Review each selected skill's license, instructions, dependencies and scripts; document skills are not all open source.",
+      "skills_source": "anthropics/skills"
+    },
+    {
+      "id": "supabase-agent-skills",
+      "name": "Supabase Agent Skills",
+      "category": "skills",
+      "url": "https://github.com/supabase/agent-skills",
+      "description": "Supabase development and PostgreSQL best-practice skills covering database design, query performance, authentication, integrations and row-level security.",
+      "install_type": "reference-clone",
+      "automation_depth": "manual-invoke",
+      "token_footprint": "lazy - selected skill instructions plus task-specific references",
+      "tool_compatibility": [
+        "claude-code",
+        "cursor",
+        "codex"
+      ],
+      "conflict_risk": "medium",
+      "license": "MIT",
+      "reviewed_date": "2026-09-05",
+      "pinned_ref": null,
+      "risk_notes": "Source and skills/*/SKILL.md layout checked; individual skills remain unreviewed. Review recommendations against the project's database and access policies. Installing these instructions does not configure Supabase credentials, authorize database changes or install the repository's MCP configuration.",
+      "verified_command": "`npx skills add supabase/agent-skills` - use `--skill supabase` or `--skill supabase-postgres-best-practices` to select a documented individual skill.",
+      "command_verified_date": "2026-09-05",
+      "skills_source": "supabase/agent-skills"
     }
   ]
 }
