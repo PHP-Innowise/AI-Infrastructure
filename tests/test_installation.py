@@ -708,6 +708,15 @@ class CleanInstallTest(unittest.TestCase):
             )
             changelog = target / "CHANGELOG.md"
             changelog.write_text("# Existing project history\n", encoding="utf-8")
+            gitignore = target / ".gitignore"
+            gitignore.write_text("*.md\n/docs/\n", encoding="utf-8")
+            source_path = "docs/install-memory-source.md"
+            source = target / source_path
+            source.parent.mkdir()
+            source.write_text(
+                "# Install memory source\n\nThe copper rule is authoritative.\n",
+                encoding="utf-8",
+            )
             initialized = run(
                 "git",
                 "-c",
@@ -717,6 +726,25 @@ class CleanInstallTest(unittest.TestCase):
                 str(target),
             )
             self.assertEqual(0, initialized.returncode, initialized.stderr)
+            tracked = run(
+                "git",
+                "add",
+                "-f",
+                "--",
+                ".gitignore",
+                source_path,
+                cwd=target,
+            )
+            self.assertEqual(0, tracked.returncode, tracked.stderr)
+            ignored_without_index = run(
+                "git", "check-ignore", "--no-index", "--quiet", "--", source_path,
+                cwd=target,
+            )
+            self.assertEqual(0, ignored_without_index.returncode)
+            tracked_despite_ignore = run(
+                "git", "check-ignore", "--quiet", "--", source_path, cwd=target
+            )
+            self.assertEqual(1, tracked_despite_ignore.returncode)
             if os.name != "nt":
                 env_file.chmod(0)
                 app_db.chmod(0)
@@ -730,6 +758,7 @@ class CleanInstallTest(unittest.TestCase):
                     str(target),
                     "--tool",
                     tool,
+                    "--merge-existing",
                 )
                 self.assertEqual(0, result.returncode, result.stderr)
                 expected = len(data["installed"]["shared"]) + len(
@@ -738,7 +767,11 @@ class CleanInstallTest(unittest.TestCase):
                 copies = [
                     line for line in result.stdout.splitlines() if line.startswith("COPY\t")
                 ]
-                self.assertEqual(expected, len(copies))
+                self.assertEqual(expected - 1, len(copies))
+                self.assertIn(
+                    "MERGE\tshared\t.gitignore\t.gitignore",
+                    result.stdout.splitlines(),
+                )
                 self.assertEqual(
                     "COMPLETE\t{}\ttools={}\tfiles={}\tdry_run=false".format(
                         edition, tool, expected
@@ -758,6 +791,8 @@ class CleanInstallTest(unittest.TestCase):
                 )
                 self.assertNotIn("MEM-0001", installed_index)
                 self.assertNotIn("chunks/", installed_index)
+                self.assertIn("*.md\n", gitignore.read_text(encoding="utf-8"))
+                self.assertIn("/docs/\n", gitignore.read_text(encoding="utf-8"))
                 self.assertEqual(
                     "# Existing project history\n",
                     changelog.read_text(encoding="utf-8"),
@@ -771,6 +806,12 @@ class CleanInstallTest(unittest.TestCase):
                     }
                 )
                 local_db = target / "memory-bank" / "local" / "install-test.db"
+                context_command = (
+                    sys.executable,
+                    "memory-bank/scripts/context.py",
+                    "--db",
+                    str(local_db),
+                )
                 commands = (
                     (sys.executable, "memory-bank/scripts/validate.py"),
                     (
@@ -779,35 +820,82 @@ class CleanInstallTest(unittest.TestCase):
                         "--root",
                         ".",
                     ),
-                    (
-                        sys.executable,
-                        "memory-bank/scripts/context.py",
-                        "--db",
-                        str(local_db),
-                        "status",
-                        "--json",
-                    ),
-                    (
-                        sys.executable,
-                        "memory-bank/scripts/context.py",
-                        "--db",
-                        str(local_db),
-                        "validate",
-                        "--json",
-                    ),
-                    (
-                        sys.executable,
-                        "memory-bank/scripts/context.py",
-                        "--db",
-                        str(local_db),
-                        "index",
-                        "--json",
-                    ),
+                    (*context_command, "status", "--json"),
+                    (*context_command, "validate", "--json"),
+                    (*context_command, "index", "--json"),
                 )
                 for command in commands:
                     smoke = run(*command, cwd=target, env=command_env)
                     self.assertEqual(0, smoke.returncode, smoke.stderr)
                     self.assertNotIn("must-not-be-read", smoke.stdout + smoke.stderr)
+
+                start = run(
+                    *context_command,
+                    "start",
+                    "--task-id",
+                    "install-memory-smoke",
+                    "--goal",
+                    "Prove installed governed memory",
+                    "--source",
+                    source_path,
+                    "--json",
+                    cwd=target,
+                    env=command_env,
+                )
+                self.assertEqual(0, start.returncode, start.stderr)
+                started = json.loads(start.stdout)
+                self.assertEqual("project-brain", started["authority"])
+                self.assertEqual([source_path], started["sources"])
+
+                create = run(
+                    *context_command,
+                    "brain-create",
+                    "finding",
+                    "--external-id",
+                    "install-memory-finding",
+                    "--title",
+                    "Installed runtime remembers the copper rule",
+                    "--source",
+                    source_path,
+                    "--json",
+                    cwd=target,
+                    env=command_env,
+                )
+                self.assertEqual(0, create.returncode, create.stderr)
+                created = json.loads(create.stdout)
+                self.assertEqual("finding", created["type"])
+                self.assertEqual([source_path], created["sources"])
+                self.assertEqual(source_path, created["source_fingerprints"][0]["path"])
+
+                reindex = run(
+                    *context_command,
+                    "index",
+                    "--json",
+                    cwd=target,
+                    env=command_env,
+                )
+                self.assertEqual(0, reindex.returncode, reindex.stderr)
+                self.assertGreaterEqual(json.loads(reindex.stdout)["brain"], 2)
+
+                links = run(
+                    *context_command,
+                    "links",
+                    "--path",
+                    source_path,
+                    "--json",
+                    cwd=target,
+                    env=command_env,
+                )
+                self.assertEqual(0, links.returncode, links.stderr)
+                linked = json.loads(links.stdout)
+                self.assertEqual(source_path, linked["path"])
+                self.assertTrue(
+                    {"brain-task", "brain-finding"}
+                    <= {item["kind"] for item in linked["documents"]}
+                )
+                self.assertTrue(
+                    all(item["ref_path"] == source_path for item in linked["documents"])
+                )
                 self.assertFalse((target / "APPLICATION_EXECUTED").exists())
             finally:
                 if os.name != "nt":

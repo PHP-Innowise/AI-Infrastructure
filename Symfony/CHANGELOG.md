@@ -11,6 +11,13 @@ it at the top of every session.
 
 ## Unreleased
 
+### Changed
+
+- Memory promotion policy now matches runtime configuration: eligible verified
+  terminal records may be applied unattended only when automatic promotion is
+  enabled and remain explicitly marked as unreviewed; otherwise an independent
+  human review is required.
+
 ### Added
 
 - **Workflow skills now produce and retire durable knowledge, and the

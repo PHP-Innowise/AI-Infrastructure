@@ -53,7 +53,7 @@ TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$ROOT_DIR" branch --show-current 2>/dev/nu
 # them would index twice, because retrieval refreshes the index itself.
 # --ephemeral keeps the per-request manifest, including the query text, in
 # ignored local state instead of shared Git history.
-ARGUMENTS=(refresh)
+ARGUMENTS=(refresh --host claude)
 if [ -n "$QUERY" ] && [ -n "$TASK_ID" ]; then
   ARGUMENTS+=(--query "$QUERY" --task-id "$TASK_ID" --ephemeral)
 fi

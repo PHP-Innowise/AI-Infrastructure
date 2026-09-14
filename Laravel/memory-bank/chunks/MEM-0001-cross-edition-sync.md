@@ -4,11 +4,20 @@
   "title": "Keep shared workflows aligned across AI editions",
   "type": "convention",
   "status": "active",
-  "scope": ["accelerator", "tooling"],
-  "tags": ["claude", "cursor", "codex", "skills", "synchronization"],
+  "scope": [
+    "accelerator",
+    "tooling"
+  ],
+  "tags": [
+    "claude",
+    "cursor",
+    "codex",
+    "skills",
+    "synchronization"
+  ],
   "created": "2026-07-18",
-  "last_verified": "2026-07-30",
-  "review_after": "2027-01-30",
+  "last_verified": "2026-08-31",
+  "review_after": "2027-08-31",
   "sources": [
     "specs/MANIFEST.md",
     ".agents/README.md",
@@ -16,7 +25,25 @@
     ".codex/README.md"
   ],
   "supersedes": [],
-  "superseded_by": null
+  "superseded_by": null,
+  "source_digests": [
+    {
+      "path": ".agents/README.md",
+      "sha256": "619e8cb619d4a937a666b2deef1febb72dff9937bccf7cc38fbf94b2423c8407"
+    },
+    {
+      "path": ".codex/README.md",
+      "sha256": "73dc58fcc0ecef31f7b89b8af460e106ee7bd2ca624b81fdd8764c0250c835c8"
+    },
+    {
+      "path": ".cursor/README.md",
+      "sha256": "751fc34e39033b2ebe1cadfd8e532fae0f9d3211d0c4cdd996cd337cf8d49d3e"
+    },
+    {
+      "path": "specs/MANIFEST.md",
+      "sha256": "cf4d8cb9c29da2634a4792d77ac51de2bba24701dc78e84801b6508b07397110"
+    }
+  ]
 }
 ---
 

@@ -18,9 +18,31 @@
     ]
   },
   "id": "UUIDV4",
+  "host": "cli",
+  "entry_point": "retrieve",
+  "local_episode_count": 0,
+  "phase_seconds": {
+    "index": 0.0,
+    "retrieval": 0.0,
+    "stat": 0.0
+  },
   "provider": "sqlite-fts5",
   "query": "Query",
-  "schema_version": 1,
+  "query_source": "prompt",
+  "schema_version": 3,
+  "gate": {
+    "decision": "retrieve",
+    "mode": "shadow",
+    "reason": "new-selection",
+    "signals": {
+      "distinctive_matches": 0,
+      "informative_terms": 0,
+      "no_match": [],
+      "query_unchanged_from_previous_turn": false,
+      "selection_identical_to_previous_turn": false,
+      "top_score": null
+    }
+  },
   "selected": [],
   "task_id": "UUIDV4",
   "task_revision": 1,
@@ -30,6 +52,7 @@
     "evidence": 0,
     "handoff": 0,
     "hard": 12000,
+    "local_episodes": 0,
     "policy": 0,
     "target": 8000,
     "total": 0
