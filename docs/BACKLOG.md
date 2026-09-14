@@ -152,3 +152,32 @@ append-only файла и есть аудит-трейл. Governed CAS на со
 2. догнать IC до hand-built orchestration (Stage A–C в форджах),
 3. измерить economy на consumer-проектах,
 4. добавлять flows/graphs только под реальные multi-step сценарии.
+
+## Утверждённые планы (2026-09-08, по разбору outstaff-кита)
+
+Отдельные документы в `docs/plans/`, решения по развилкам зафиксированы:
+
+- [Engagement Posture: обязательное интервью о позе вовлечения +
+  posture-gated guardrails](plans/2026-09-08-engagement-posture-guardrails.md) —
+  IC-only, слой секьюрности: видимость для клиента (`.git/info/exclude`),
+  кто коммитит, черновики vs публикации, границы автоматизации и данных.
+- [Усиление /flow-feature](plans/2026-09-08-feature-flow-hardening.md) —
+  все издания: pre-flight (чистое дерево/worktree), spec-гейт до плана,
+  артефакты-черновики MR/трекера, явный критерий аварийного выхода.
+- [adoption-review: приживается ли установленный
+  акселератор](plans/2026-09-08-adoption-review.md) — скрипт-счётчик по
+  транскриптам + скилл-вердикты Used/Dormant/Rejected; закрывает
+  «Economy-2 attribution → prune skills» из этого бэклога.
+- [Упрощение SDD + маршрутизация по размеру
+  задачи](plans/2026-09-08-sdd-simplification.md) — ответ на жалобы
+  «с SDD очень долго»: правило выбора флоу, lite-трек Specify+Plan,
+  настраиваемые чекпоинты Implement; не удаление.
+
+## Утверждённый план (2026-09-11, по разбору AI-инфраструктуры SmileExpress)
+
+- [Cost-aware model routing: план-гейт и ограниченная
+  эскалация](plans/2026-09-11-cost-aware-model-routing.md) — все издания:
+  скилл `plan-escalation` поверх существующего `model:` frontmatter,
+  контракт контекста (план + причина + diff, никогда полная беседа),
+  потолок 2 раунда, выход — правка плана; вторая ось к маршрутизации
+  sdd-simplification (размер → флоу, форма задачи → модель).
