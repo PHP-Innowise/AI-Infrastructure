@@ -543,7 +543,7 @@
           <div class="agent-options"><label class="checkbox"><input id="creator-agents" type="checkbox">Use additional agents</label><label class="agent-count-field">Required helpers<input id="creator-count" type="number" min="1" max="40" value="3" disabled></label></div><p class="knowledge-note">When enabled, exactly this many helpers must be launched in each model phase. Lower concurrency can be handled in batches; explain any unmet count caused by provider restrictions or shared budgets.</p>
           <fieldset class="skills-tools"><legend>Generate integrations for</legend><div class="skills-tool-options"><label class="checkbox"><input type="checkbox" name="creator-tool" value="claude" checked>Claude Code</label><label class="checkbox"><input type="checkbox" name="creator-tool" value="codex" checked>Codex</label><label class="checkbox"><input type="checkbox" name="creator-tool" value="cursor" checked>Cursor</label></div></fieldset>
           <label class="field">Requirements (optional)<textarea id="creator-goal" rows="3" maxlength="8000" placeholder="Project constraints and the accelerator you need"></textarea></label>
-          <p class="knowledge-note">PHP projects · Linux with bubblewrap. The provider prepares artifacts with the target mounted read-only. Applying files is a separate reviewed action. Worktrees start from committed HEAD.</p>
+          <p class="knowledge-note">PHP projects · bubblewrap on Linux or sandbox-exec on macOS. The provider prepares artifacts with the target kept read-only. Applying files is a separate reviewed action. Worktrees start from committed HEAD.</p>
           <div id="creator-budgets"></div>
           <button type="submit" class="button primary" id="creator-start">Start scan</button>
         </form>
@@ -2572,7 +2572,7 @@
         if (epoch!==creatorUi.epoch || state.view!=='creator') return;
         creatorUi.available=data.available;
         $('creator-git').textContent=git.is_git ? `Current branch: ${git.branch || 'detached HEAD'}${git.dirty?' · uncommitted changes':''}` : 'No Git repository. Use the current project folder.';
-        if (!data.available) showError('creator-error','Install bubblewrap to enable Creator runs on this Linux server.');
+        if (!data.available) showError('creator-error','Creator needs filesystem isolation: install bubblewrap on Linux, or run the server on macOS where sandbox-exec is built in.');
         const selected=rid || $('creator-runs').value;
         setOptions($('creator-runs'),data.runs,r=>`${r.created_at} · ${r.operation} · ${r.status}`,r=>r.id,selected);
         if (data.runs.length) await readCreator($('creator-runs').value,epoch);
