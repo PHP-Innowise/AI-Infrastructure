@@ -45,11 +45,11 @@ RULE_FILE="$RULES_DIR/working-memory.mdc"
 CAPSULE_STATUS=1
 if command -v timeout > /dev/null 2>&1; then
   CAPSULE=$(timeout "$BUDGET_SECONDS" python3 "$CONTEXT_CLI" hook-context \
-    --task-id "$TASK_ID" 2>/dev/null)
+    --host cursor --task-id "$TASK_ID" 2>/dev/null)
   CAPSULE_STATUS=$?
 else
   CAPSULE=$(python3 "$CONTEXT_CLI" hook-context \
-    --task-id "$TASK_ID" 2>/dev/null)
+    --host cursor --task-id "$TASK_ID" 2>/dev/null)
   CAPSULE_STATUS=$?
 fi
 # The rendered capsule always opens with the working line. Anything else is a

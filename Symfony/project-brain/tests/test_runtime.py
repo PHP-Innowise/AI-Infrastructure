@@ -176,6 +176,34 @@ class RuntimeHarness(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         return json.loads(result.stdout)
 
+    def resolve_verified_finding(
+        self, record: dict, progress: str = "Verified reusable consequence."
+    ) -> dict:
+        verified = brain.update_record(
+            self.repository,
+            record["id"],
+            expected_revision=record["revision"],
+            progress=None,
+            next_steps=[],
+            files=[],
+            sources=[],
+            actor="alice",
+            authority="verified",
+            reason="Verified against the cited source",
+        )
+        return brain.update_record(
+            self.repository,
+            record["id"],
+            expected_revision=verified["revision"],
+            progress=progress,
+            next_steps=[],
+            files=[],
+            sources=[],
+            actor="alice",
+            transition_to="resolved",
+            reason="Resolved after verification",
+        )
+
 
 class ProjectBrainRuntimeTest(RuntimeHarness):
     def test_governed_capsule_enforces_layer_and_character_contract_deterministically(
@@ -403,7 +431,7 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
         self.assertEqual(0, payload.returncode, payload.stderr)
         manifest = self.latest_manifest(json.loads(payload.stdout))
 
-        self.assertEqual(2, manifest["schema_version"], manifest)
+        self.assertEqual(3, manifest["schema_version"], manifest)
         self.assertEqual("explicit", manifest["query_source"], manifest)
         phases = manifest["phase_seconds"]
         self.assertEqual({"stat", "index", "retrieval"}, set(phases), phases)
@@ -417,6 +445,72 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
         self.assertGreaterEqual(entry["score"], 0)
         self.assertIsInstance(entry["rank"], int)
         self.assertGreaterEqual(entry["rank"], 1)
+
+    def test_manifest_records_safe_host_and_entry_point_provenance(self) -> None:
+        self.start("TASK-HOST-PROVENANCE")
+        self.repository.joinpath("specs/authority.md").write_text(
+            "# Authority\n\ncobalt authority specification detail.\n",
+            encoding="utf-8",
+        )
+        for host in ("cli", "claude", "codex", "cursor"):
+            with self.subTest(host=host):
+                result = self.run_cli(
+                    "retrieve", "cobalt authority",
+                    "--task-id", "TASK-HOST-PROVENANCE",
+                    "--host", host, "--ephemeral", "--json",
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                manifest = self.latest_manifest(json.loads(result.stdout))
+                self.assertEqual(host, manifest["host"], manifest)
+                self.assertEqual("retrieve", manifest["entry_point"], manifest)
+
+        context = self.run_cli(
+            "context", "cobalt authority",
+            "--task-id", "TASK-HOST-PROVENANCE",
+            "--host", "cli", "--ephemeral", "--json",
+        )
+        self.assertEqual(0, context.returncode, context.stderr)
+        self.assertEqual(
+            "context", self.latest_manifest(json.loads(context.stdout))["entry_point"]
+        )
+        hook = self.run_cli(
+            "hook-context", "--task-id", "TASK-HOST-PROVENANCE",
+            "--host", "cursor", "--json",
+        )
+        self.assertEqual(0, hook.returncode, hook.stderr)
+        self.assertEqual(
+            "hook-context", self.latest_manifest(json.loads(hook.stdout))["entry_point"]
+        )
+        refresh = self.run_cli(
+            "refresh", "--query", "cobalt authority",
+            "--task-id", "TASK-HOST-PROVENANCE", "--host", "claude",
+            "--ephemeral", "--json",
+        )
+        self.assertEqual(0, refresh.returncode, refresh.stderr)
+        self.assertEqual(
+            "refresh",
+            self.latest_manifest(json.loads(refresh.stdout)["capsule"])["entry_point"],
+        )
+
+    def test_retrieval_manifest_template_satisfies_the_v3_schema(self) -> None:
+        template = json.loads(
+            EDITION.joinpath(
+                "project-brain/templates/retrieval-manifest.json"
+            ).read_text(encoding="utf-8")
+        )
+        template.update(
+            {
+                "id": "00000000-0000-4000-8000-000000000010",
+                "created_at": "2026-08-31T00:00:00+00:00",
+                "task_id": "00000000-0000-4000-8000-000000000011",
+            }
+        )
+        self.assertEqual(3, template["schema_version"], template)
+        self.assertEqual(0, template["local_episode_count"], template)
+        self.assertEqual(0, template["token_estimates"]["local_episodes"], template)
+        brain.validate_schema_file(
+            EDITION, "retrieval-manifest.schema.json", template
+        )
 
     def test_manifest_records_where_the_query_came_from(self) -> None:
         # A gate that cannot tell a real request from a branch name would be
@@ -536,15 +630,84 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
         )
         self.assertEqual([], brain.validate_repository(self.repository))
 
-        # A manifest that claims version 2 must carry what version 2 promises.
-        incomplete_id = "00000000-0000-4000-8000-000000000003"
+        # Version 2 remains valid after version 3 adds host provenance.
+        version_2_id = "00000000-0000-4000-8000-000000000003"
+        version_2 = {
+            **legacy,
+            "schema_version": 2,
+            "id": version_2_id,
+            "query_source": "explicit",
+            "phase_seconds": {"stat": None, "index": None, "retrieval": 0.0},
+            "gate": {
+                "decision": "retrieve",
+                "mode": "shadow",
+                "reason": "new-selection",
+                "signals": {
+                    "informative_terms": 1,
+                    "distinctive_matches": 0,
+                    "top_score": None,
+                    "no_match": [],
+                    "query_unchanged_from_previous_turn": False,
+                    "selection_identical_to_previous_turn": False,
+                },
+            },
+        }
+        (manifests / f"{version_2_id}.json").write_text(
+            json.dumps(version_2, indent=2), encoding="utf-8"
+        )
+        self.assertEqual([], brain.validate_repository(self.repository))
+
+        version_3_id = "00000000-0000-4000-8000-000000000004"
+        version_3 = {
+            **version_2,
+            "schema_version": 3,
+            "id": version_3_id,
+            "host": "cli",
+            "entry_point": "retrieve",
+            "local_episode_count": 0,
+            "token_estimates": {
+                **version_2["token_estimates"],
+                "local_episodes": 0,
+            },
+        }
+        (manifests / f"{version_3_id}.json").write_text(
+            json.dumps(version_3, indent=2), encoding="utf-8"
+        )
+        self.assertEqual([], brain.validate_repository(self.repository))
+
+        # A manifest that claims version 3 must carry host provenance.
+        incomplete_id = "00000000-0000-4000-8000-000000000005"
         (manifests / f"{incomplete_id}.json").write_text(
-            json.dumps({**legacy, "schema_version": 2, "id": incomplete_id}, indent=2),
+            json.dumps({**version_2, "schema_version": 3, "id": incomplete_id}, indent=2),
             encoding="utf-8",
         )
         errors = brain.validate_repository(self.repository)
         self.assertTrue(
             any("strict schema" in error for error in errors), errors
+        )
+
+        # The top-level keys alone are not enough: version 3's token total must
+        # say how much locally replayed context it includes. Versions 1 and 2
+        # above keep their historical token shape.
+        incomplete_token_id = "00000000-0000-4000-8000-000000000006"
+        (manifests / f"{incomplete_token_id}.json").write_text(
+            json.dumps(
+                {
+                    **version_3,
+                    "id": incomplete_token_id,
+                    "token_estimates": version_2["token_estimates"],
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        errors = brain.validate_repository(self.repository)
+        self.assertTrue(
+            any(
+                incomplete_token_id in error and "token estimates" in error
+                for error in errors
+            ),
+            errors,
         )
 
     def test_hook_query_comes_from_the_task_not_the_branch_name(self) -> None:
@@ -708,6 +871,196 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
             changed["gate"]["signals"]["query_unchanged_from_previous_turn"],
             changed["gate"],
         )
+
+    def test_repeat_gate_retrieves_when_selected_content_changes(self) -> None:
+        self.gate_fixture("TASK-GATE-CONTENT")
+        self.retrieve_gated("TASK-GATE-CONTENT", "cobalt authority")
+        self.repository.joinpath("specs/authority.md").write_text(
+            "# Authority\n\ncobalt authority specification changed in place.\n",
+            encoding="utf-8",
+        )
+
+        capsule, manifest = self.retrieve_gated(
+            "TASK-GATE-CONTENT", "cobalt authority", "--gate", "enforce"
+        )
+
+        self.assertEqual("retrieve", manifest["gate"]["decision"], manifest)
+        self.assertFalse(
+            manifest["gate"]["signals"]["selection_identical_to_previous_turn"],
+            manifest,
+        )
+        self.assertTrue(capsule["semantic"], capsule)
+
+    def test_gate_baseline_isolated_by_host_and_entry_point(self) -> None:
+        self.gate_fixture("TASK-GATE-BASELINE-SCOPE")
+        self.retrieve_gated("TASK-GATE-BASELINE-SCOPE", "cobalt authority")
+
+        other_host, host_manifest = self.retrieve_gated(
+            "TASK-GATE-BASELINE-SCOPE", "cobalt authority",
+            "--host", "claude", "--gate", "enforce",
+        )
+        self.assertEqual("retrieve", host_manifest["gate"]["decision"], host_manifest)
+        self.assertTrue(other_host["semantic"], other_host)
+
+        context = self.run_cli(
+            "context", "cobalt authority",
+            "--task-id", "TASK-GATE-BASELINE-SCOPE",
+            "--ephemeral", "--host", "cli", "--gate", "enforce", "--json",
+        )
+        self.assertEqual(0, context.returncode, context.stderr)
+        context_capsule = json.loads(context.stdout)
+        context_manifest = self.latest_manifest(context_capsule)
+        self.assertEqual("retrieve", context_manifest["gate"]["decision"], context_manifest)
+
+        repeated = self.run_cli(
+            "context", "cobalt authority",
+            "--task-id", "TASK-GATE-BASELINE-SCOPE",
+            "--ephemeral", "--host", "cli", "--gate", "enforce", "--json",
+        )
+        self.assertEqual(0, repeated.returncode, repeated.stderr)
+        self.assertEqual(
+            "skip",
+            self.latest_manifest(json.loads(repeated.stdout))["gate"]["decision"],
+        )
+
+    def test_local_episode_participates_in_gate_before_the_decision(self) -> None:
+        self.start("TASK-GATE-EPISODE")
+        recorded = self.run_cli(
+            "record",
+            "--summary", "Vermilion semaphore rollout",
+            "--outcome", "The rollout completed cleanly under the scarlet protocol.",
+            "--json",
+        )
+        self.assertEqual(0, recorded.returncode, recorded.stderr)
+
+        capsule, manifest = self.retrieve_gated(
+            "TASK-GATE-EPISODE", "vermilion semaphore", "--gate", "enforce"
+        )
+
+        self.assertEqual("retrieve", manifest["gate"]["decision"], manifest)
+        self.assertNotIn("episodic", manifest["gate"]["signals"]["no_match"])
+        self.assertEqual(1, len(capsule["episodic"]), capsule)
+        self.assertEqual("Vermilion semaphore rollout", capsule["episodic"][0]["summary"])
+        self.assertEqual(1, manifest["local_episode_count"], manifest)
+        local_tokens = manifest["token_estimates"]["local_episodes"]
+        self.assertGreater(local_tokens, 0, manifest)
+        self.assertEqual(
+            sum(
+                manifest["token_estimates"][name]
+                for name in (
+                    "policy", "handoff", "durable", "dynamic", "evidence",
+                    "local_episodes",
+                )
+            ),
+            manifest["token_estimates"]["total"],
+        )
+        self.assertNotIn("scarlet protocol", json.dumps(manifest))
+
+    def test_prompt_refresh_keeps_terms_found_only_in_local_episodes(self) -> None:
+        self.start("TASK-PROMPT-EPISODE")
+        self.repository.joinpath("specs/developing.md").write_text(
+            "# Developing\n\nDeveloping guidance for this repository.\n",
+            encoding="utf-8",
+        )
+        recorded = self.run_cli(
+            "record",
+            "--summary", "Amber viaduct rollout",
+            "--outcome", "The local episode completed cleanly.",
+            "--json",
+        )
+        self.assertEqual(0, recorded.returncode, recorded.stderr)
+
+        refreshed = self.run_cli(
+            "refresh", "--query", "developing amber viaduct",
+            "--task-id", "TASK-PROMPT-EPISODE", "--ephemeral",
+            "--host", "codex", "--gate", "enforce", "--json",
+        )
+
+        self.assertEqual(0, refreshed.returncode, refreshed.stderr)
+        capsule = json.loads(refreshed.stdout)["capsule"]
+        self.assertIsNotNone(capsule, refreshed.stdout)
+        manifest = self.latest_manifest(capsule)
+        self.assertEqual("retrieve", manifest["gate"]["decision"], manifest)
+        self.assertEqual(1, manifest["local_episode_count"], manifest)
+        self.assertEqual("Amber viaduct rollout", capsule["episodic"][0]["summary"])
+
+    def test_local_episode_cannot_bypass_the_target_budget(self) -> None:
+        self.start("TASK-GATE-EPISODE-BUDGET")
+        recorded = self.run_cli(
+            "record",
+            "--summary", "Obsidian walrus replay",
+            "--outcome", "x" * 33_000,
+            "--json",
+        )
+        self.assertEqual(0, recorded.returncode, recorded.stderr)
+
+        capsule, manifest = self.retrieve_gated(
+            "TASK-GATE-EPISODE-BUDGET", "obsidian walrus", "--gate", "enforce"
+        )
+
+        self.assertEqual([], capsule["episodic"], capsule)
+        self.assertEqual("skip", manifest["gate"]["decision"], manifest)
+        self.assertEqual("empty-after-filter", manifest["gate"]["reason"], manifest)
+        self.assertEqual(0, manifest["local_episode_count"], manifest)
+        self.assertEqual(0, manifest["token_estimates"]["local_episodes"], manifest)
+        self.assertIn(
+            {"path": "local-episode", "reason": "budget"},
+            manifest["excluded"],
+        )
+
+    def test_cursor_retrieves_when_the_task_revision_changes(self) -> None:
+        task = self.start("TASK-GATE-CURSOR-REVISION")
+        for index in range(10):
+            self.repository.joinpath(f"specs/revision-filler-{index}.md").write_text(
+                f"# Filler {index}\n\nUnrelated boilerplate paragraph {index}.\n",
+                encoding="utf-8",
+            )
+        first = self.run_cli(
+            "hook-context", "--task-id", "TASK-GATE-CURSOR-REVISION",
+            "--host", "cursor", "--gate", "enforce", "--json",
+        )
+        self.assertEqual(0, first.returncode, first.stderr)
+        first_manifest = self.latest_manifest(json.loads(first.stdout))
+        self.assertEqual("retrieve", first_manifest["gate"]["decision"], first_manifest)
+
+        updated = self.run_cli(
+            "update", "--task-id", "TASK-GATE-CURSOR-REVISION",
+            "--revision", str(task["revision"]), "--phase", "implementation", "--json",
+        )
+        self.assertEqual(0, updated.returncode, updated.stderr)
+        second = self.run_cli(
+            "hook-context", "--task-id", "TASK-GATE-CURSOR-REVISION",
+            "--host", "cursor", "--gate", "enforce", "--json",
+        )
+        self.assertEqual(0, second.returncode, second.stderr)
+        manifest = self.latest_manifest(json.loads(second.stdout))
+        self.assertEqual("retrieve", manifest["gate"]["decision"], manifest)
+        self.assertGreater(manifest["task_revision"], first_manifest["task_revision"])
+
+    def test_gate_distinguishes_no_relevant_match_from_filtered_results(self) -> None:
+        task = self.start("TASK-GATE-EMPTY-REASONS")
+        self.assertEqual(0, self.run_cli("index", "--json").returncode)
+        connection = context_cli.connect(
+            context_cli.default_database(self.repository)
+        )
+        try:
+            no_match = retrieval.retrieve(
+                connection, self.repository, "vermilion semaphore", task["task_uuid"],
+                limit=3,
+            )
+            self.assertEqual("no-relevant-match", no_match["gate"]["reason"], no_match)
+
+            self.repository.joinpath("specs/authority.md").write_text(
+                "# Changed\n\nCobalt authority source changed after indexing.\n",
+                encoding="utf-8",
+            )
+            filtered = retrieval.retrieve(
+                connection, self.repository, "cobalt authority", task["task_uuid"],
+                limit=3,
+            )
+            self.assertEqual("empty-after-filter", filtered["gate"]["reason"], filtered)
+        finally:
+            connection.close()
 
     def test_enforce_withholds_the_selection_and_says_it_did(self) -> None:
         self.gate_fixture("TASK-GATE-ENFORCE")
@@ -1451,17 +1804,31 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
             )
 
     def test_promotion_requires_independent_review_and_applies_to_memory(self) -> None:
-        task = brain.create_task(
+        finding = brain.create_record(
             self.repository,
-            "TASK-PROMOTE",
-            "Produce reusable knowledge.",
+            "finding",
+            "FIND-PROMOTE",
+            "Cobalt authority is reusable.",
             [],
             ["specs/authority.md"],
             owner="alice",
+            authority="verified",
+        )
+        finding = brain.update_record(
+            self.repository,
+            finding["id"],
+            expected_revision=finding["revision"],
+            progress="The cobalt authority rule applies across later requests.",
+            next_steps=[],
+            files=[],
+            sources=[],
+            actor="alice",
+            transition_to="resolved",
+            reason="Resolved after verification",
         )
         proposal = brain.create_promotion(
             self.repository,
-            [task["id"]],
+            [finding["id"]],
             "Cobalt authority",
             "The cobalt authority rule is reusable.",
             proposer="alice",
@@ -1475,7 +1842,8 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
         )
         applied = brain.apply_promotion(self.repository, proposal["id"])
         self.assertEqual("applied", applied["status"])
-        memory_id = self.expected_memory_id(task["id"])
+        self.assertEqual("approved", applied["outcome"])
+        memory_id = self.expected_memory_id(finding["id"])
         self.assertEqual(memory_id, applied["destination_memory_id"])
         self.assertTrue(
             self.repository.joinpath(
@@ -1493,6 +1861,200 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
             "1", self.repository.joinpath("memory-bank/.memory-counter").read_text().strip()
         )
 
+    def test_reviewed_apply_rejects_every_ineligible_source(self) -> None:
+        def source(name: str) -> str:
+            relative = f"specs/{name}.md"
+            self.repository.joinpath(relative).write_text(
+                f"# {name}\n\nCanonical evidence for {name}.\n",
+                encoding="utf-8",
+            )
+            return relative
+
+        def resolved_finding(
+            external_id: str,
+            source_path: str,
+            *,
+            authority: str = "verified",
+            privacy: str = "team",
+            progress: Optional[str] = None,
+        ) -> dict:
+            title = f"{external_id} reusable consequence"
+            record = brain.create_record(
+                self.repository,
+                "finding",
+                external_id,
+                title,
+                [],
+                [source_path],
+                owner="alice",
+                authority=authority,
+                privacy=privacy,
+            )
+            return brain.update_record(
+                self.repository,
+                record["id"],
+                expected_revision=record["revision"],
+                progress=(
+                    f"{external_id} remains reusable across later work."
+                    if progress is None
+                    else progress
+                ),
+                next_steps=[],
+                files=[],
+                sources=[],
+                actor="alice",
+                transition_to="resolved",
+                reason="Resolved",
+            )
+
+        task_source = source("human-task")
+        task = brain.create_task(
+            self.repository,
+            "TASK-HUMAN-SOURCE",
+            "Task progress is not durable knowledge.",
+            [],
+            [task_source],
+            owner="alice",
+        )
+        open_source = source("human-open")
+        open_finding = brain.create_record(
+            self.repository,
+            "finding",
+            "FIND-HUMAN-OPEN",
+            "Open finding",
+            [],
+            [open_source],
+            owner="alice",
+            authority="verified",
+        )
+        observed_source = source("human-observed")
+        observed = resolved_finding(
+            "FIND-HUMAN-OBSERVED", observed_source, authority="observed"
+        )
+        private_source = source("human-private")
+        private = resolved_finding(
+            "FIND-HUMAN-PRIVATE", private_source, privacy="private"
+        )
+        stale_source = source("human-stale")
+        stale = resolved_finding("FIND-HUMAN-STALE", stale_source)
+        empty_source = source("human-empty")
+        empty = resolved_finding("FIND-HUMAN-EMPTY", empty_source, progress="")
+        repeated_source = source("human-repeated")
+        repeated = resolved_finding(
+            "FIND-HUMAN-REPEATED",
+            repeated_source,
+            progress="FIND-HUMAN-REPEATED reusable consequence.",
+        )
+
+        scenarios = (
+            ("task", task, "task records are not promotable", None),
+            ("open", open_finding, "finding status open is not promotable", None),
+            ("observed", observed, "authority is observed, not verified", None),
+            ("private", private, "privacy private is not allowed", None),
+            ("stale", stale, "cited source changed", stale_source),
+            ("empty", empty, "no content beyond its own title", None),
+            ("repeated", repeated, "no content beyond its own title", None),
+        )
+        for name, record, message, changed_source in scenarios:
+            with self.subTest(name=name):
+                proposal = brain.create_promotion(
+                    self.repository,
+                    [record["id"]],
+                    f"Reviewed {name} source",
+                    f"Reviewed consequence for {name} source.",
+                    proposer="alice",
+                )
+                brain.review_promotion(
+                    self.repository,
+                    proposal["id"],
+                    reviewer="human-reviewer",
+                    approve=True,
+                )
+                if changed_source is not None:
+                    self.repository.joinpath(changed_source).write_text(
+                        "# Changed\n\nThe cited evidence changed after review.\n",
+                        encoding="utf-8",
+                    )
+                with self.assertRaisesRegex(brain.BrainError, message):
+                    brain.apply_promotion(self.repository, proposal["id"])
+
+        self.assertEqual([], list(self.repository.joinpath("memory-bank/chunks").glob("*.md")))
+
+    def test_apply_rejects_outcome_that_misstates_review_provenance(self) -> None:
+        for review_mode, wrong_outcome in (
+            ("human", "approved-without-review"),
+            ("automatic", "approved"),
+        ):
+            with self.subTest(review_mode=review_mode):
+                record = brain.create_record(
+                    self.repository,
+                    "finding",
+                    f"FIND-OUTCOME-{review_mode.upper()}",
+                    f"{review_mode} provenance",
+                    [],
+                    ["specs/authority.md"],
+                    owner="alice",
+                )
+                record = self.resolve_verified_finding(
+                    record, f"{review_mode} provenance remains explicit."
+                )
+                proposal = brain.create_promotion(
+                    self.repository,
+                    [record["id"]],
+                    f"{review_mode} provenance",
+                    "Reviewed consequence.",
+                    proposer="alice",
+                    review_mode=review_mode,
+                )
+                if review_mode == "human":
+                    brain.review_promotion(
+                        self.repository,
+                        proposal["id"],
+                        reviewer="human-reviewer",
+                        approve=True,
+                    )
+                else:
+                    brain.auto_review_promotion(self.repository, proposal["id"])
+                path = self.repository.joinpath(
+                    "project-brain/control/promotions", f"{proposal['id']}.json"
+                )
+                tampered = json.loads(path.read_text(encoding="utf-8"))
+                tampered["outcome"] = wrong_outcome
+                path.write_text(json.dumps(tampered), encoding="utf-8")
+
+                with self.assertRaisesRegex(brain.BrainError, "outcome"):
+                    brain.apply_promotion(self.repository, proposal["id"])
+
+        self.assertEqual([], list(self.repository.joinpath("memory-bank/chunks").glob("*.md")))
+
+    def test_legacy_applied_promotion_outcome_stays_readable(self) -> None:
+        record = brain.create_record(
+            self.repository,
+            "finding",
+            "FIND-LEGACY-OUTCOME",
+            "Legacy promotion outcome",
+            [],
+            ["specs/authority.md"],
+            owner="alice",
+        )
+        proposal = brain.create_promotion(
+            self.repository,
+            [record["id"]],
+            "Legacy promotion outcome",
+            "Historical content.",
+            proposer="alice",
+        )
+        proposal.update(
+            status="applied",
+            reviewer="human-reviewer",
+            reviewed_at=proposal["created_at"],
+            outcome="promoted",
+            destination_memory_id="MEM-legacy",
+            destination_revision=1,
+        )
+
+        brain.validate_promotion_record(self.repository, proposal)
+
     def test_promotions_from_different_records_allocate_distinct_ids(self) -> None:
         applied = []
         records = []
@@ -1505,6 +2067,9 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
                 [],
                 ["specs/authority.md"],
                 owner="alice",
+            )
+            record = self.resolve_verified_finding(
+                record, f"Reusable consequence {suffix}."
             )
             records.append(record)
             proposal = brain.create_promotion(
@@ -1540,6 +2105,7 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
             ["specs/authority.md"],
             owner="alice",
         )
+        record = self.resolve_verified_finding(record)
         proposal = brain.create_promotion(
             self.repository,
             [record["id"]],
@@ -1588,6 +2154,7 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
             ["specs/authority.md"],
             owner="alice",
         )
+        finding = self.resolve_verified_finding(finding)
         proposal = brain.create_promotion(
             self.repository,
             [finding["id"]],
@@ -1661,6 +2228,7 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
             ["specs/authority.md"],
             owner="alice",
         )
+        finding = self.resolve_verified_finding(finding)
         proposal = brain.create_promotion(
             self.repository,
             [finding["id"]],
@@ -1712,6 +2280,7 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
             ["specs/authority.md"],
             owner="alice",
         )
+        finding = self.resolve_verified_finding(finding)
         proposal = brain.create_promotion(
             self.repository,
             [finding["id"]],
@@ -1770,6 +2339,7 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
             ["specs/authority.md"],
             owner="alice",
         )
+        finding = self.resolve_verified_finding(finding)
         proposal = brain.create_promotion(
             self.repository,
             [finding["id"]],
@@ -2568,9 +3138,9 @@ class EpisodicPillarTest(RuntimeHarness):
 class RetrievalReportTest(RuntimeHarness):
     """Manifests were written and never read; this is the reader."""
 
-    def retrieve(self, task: str, query: str) -> dict:
+    def retrieve(self, task: str, query: str, *extra: str) -> dict:
         result = self.run_cli(
-            "retrieve", query, "--task-id", task, "--ephemeral", "--json"
+            "retrieve", query, "--task-id", task, "--ephemeral", "--json", *extra
         )
         self.assertEqual(0, result.returncode, result.stderr)
         return json.loads(result.stdout)
@@ -2603,9 +3173,69 @@ class RetrievalReportTest(RuntimeHarness):
         self.assertEqual(2, report["gate"]["decided"], report)
         # The second turn repeats the first, so the gate records a skip even
         # though shadow mode delivered it anyway.
-        self.assertEqual(0.5, report["gate"]["skip_rate"], report)
+        self.assertEqual(2, report["gate"]["shadow_decided"], report)
+        self.assertEqual(1, report["gate"]["would_skip"], report)
+        self.assertEqual(0.5, report["gate"]["would_skip_rate"], report)
+        self.assertEqual(0, report["gate"]["withheld"], report)
         self.assertIn("repeat-retrieval", report["gate"]["skip_reasons"], report)
         self.assertGreater(report["phase_seconds"]["retrieval"]["samples"], 0)
+        self.assertEqual(2, report["token_estimates"]["total"]["samples"], report)
+        self.assertGreater(report["no_match"].get("episodic", 0), 0, report)
+        self.assertEqual(
+            [
+                {
+                    "decision": "retrieve", "query_source": "explicit",
+                    "host": "cli", "entry_point": "retrieve", "mode": "shadow",
+                    "turns": 1,
+                },
+                {
+                    "decision": "skip", "query_source": "explicit",
+                    "host": "cli", "entry_point": "retrieve", "mode": "shadow",
+                    "turns": 1,
+                },
+            ],
+            report["gate"]["slices"],
+        )
+
+    def test_report_separates_shadow_verdicts_from_enforced_withholding(self) -> None:
+        self.retrieve("TASK-REPORT", "cobalt authority", "--gate", "off")
+        self.retrieve("TASK-REPORT", "cobalt authority", "--gate", "shadow")
+        self.retrieve("TASK-REPORT", "cobalt authority", "--gate", "enforce")
+
+        report = self.report()
+
+        self.assertEqual(2, report["gate"]["decided"], report)
+        self.assertEqual(1, report["gate"]["shadow_decided"], report)
+        self.assertEqual(1, report["gate"]["would_skip"], report)
+        self.assertEqual(1.0, report["gate"]["would_skip_rate"], report)
+        self.assertEqual(1, report["gate"]["enforce_decided"], report)
+        self.assertEqual(1, report["gate"]["withheld"], report)
+        self.assertEqual(1.0, report["gate"]["withheld_rate"], report)
+        self.assertEqual(
+            {("shadow", "skip"), ("enforce", "skip")},
+            {
+                (item["mode"], item["decision"])
+                for item in report["gate"]["slices"]
+            },
+            report,
+        )
+
+    def test_episode_only_turn_is_not_reported_as_empty(self) -> None:
+        recorded = self.run_cli(
+            "record",
+            "--summary", "Vermilion semaphore replay",
+            "--outcome", "The rollout completed cleanly.",
+            "--json",
+        )
+        self.assertEqual(0, recorded.returncode, recorded.stderr)
+        self.retrieve("TASK-REPORT", "vermilion semaphore")
+
+        report = self.report()
+
+        self.assertEqual(0, report["empty_selection"], report)
+        self.assertEqual(1, report["local_episode_count"], report)
+        self.assertEqual(1, report["token_estimates"]["local_episodes"]["samples"], report)
+        self.assertGreater(report["token_estimates"]["local_episodes"]["p50"], 0)
 
     def test_both_top_scores_are_reported_because_they_diverge(self) -> None:
         # `top_candidate` is the best candidate before any policy filter;
@@ -2649,7 +3279,7 @@ class RetrievalReportTest(RuntimeHarness):
 
         report = self.report()
         self.assertEqual(2, report["turns"], report)
-        self.assertEqual({"1": 1, "2": 1}, report["schema_versions"], report)
+        self.assertEqual({"1": 1, "3": 1}, report["schema_versions"], report)
         # One of the two could answer the gate question; the report says so
         # rather than dividing by two.
         self.assertEqual(1, report["gate"]["decided"], report)
@@ -3470,6 +4100,37 @@ class PathLinkedRetrievalTest(DocumentLinkTest):
             self.delivered(self.capsule("--path", "app/Nothing.php")),
         )
 
+    def test_filtered_path_links_are_not_reported_as_no_relevant_match(self) -> None:
+        self.first.unlink()
+        self.second.unlink()
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            binding = context_cli.governed_binding(connection, "TASK-PATH")
+            capsule = retrieval.retrieve(
+                connection,
+                self.repository,
+                "vermilion semaphore",
+                binding["task_uuid"],
+                limit=3,
+                paths=[self.SOURCE],
+                gate_mode="enforce",
+            )
+        finally:
+            connection.close()
+
+        self.assertEqual("skip", capsule["gate"]["decision"], capsule)
+        self.assertEqual("empty-after-filter", capsule["gate"]["reason"], capsule)
+        self.assertTrue(
+            self.chunk_paths()
+            <= {
+                item["path"]
+                for item in json.loads(
+                    (self.repository / capsule["manifest"]).read_text(encoding="utf-8")
+                )["excluded"]
+            },
+            capsule,
+        )
+
 
 class ChunkSourceDigestTest(BankFixture):
     """A durable chunk that can notice its own citation moved on."""
@@ -3635,6 +4296,53 @@ class ChunkSourceDigestTest(BankFixture):
 
 class AutomaticWorkingMemoryTest(RuntimeHarness):
     """Cover the automated read and write paths the memory hooks depend on."""
+
+    def test_changed_paths_are_edition_relative_and_collapse_untracked_trees(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="nested-edition-test-") as temporary:
+            git_root = Path(temporary)
+            edition = git_root / "Symfony"
+            (edition / "Task").mkdir(parents=True)
+            (git_root / "sibling").mkdir()
+            (edition / "tracked.txt").write_text("base\n", encoding="utf-8")
+            (edition / "Task/README.md").write_text("# Task\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "init", "--quiet", str(git_root)], check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(git_root), "add", "Symfony/tracked.txt",
+                 "Symfony/Task/README.md"],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(git_root), "-c", "user.name=Test",
+                 "-c", "user.email=test@example.test", "commit", "-qm", "base"],
+                check=True,
+                capture_output=True,
+            )
+
+            (edition / "tracked.txt").write_text("changed\n", encoding="utf-8")
+            (edition / "new.txt").write_text("new\n", encoding="utf-8")
+            (edition / ".env.local").write_text("TOKEN=private\n", encoding="utf-8")
+            for index in range(300):
+                generated = edition / "Task/app/vendor/cache" / str(index) / "item.php"
+                generated.parent.mkdir(parents=True, exist_ok=True)
+                generated.write_text("generated\n", encoding="utf-8")
+            (git_root / "sibling/outside.txt").write_text(
+                "outside\n", encoding="utf-8"
+            )
+
+            paths, excluded = context_cli.changed_paths(edition)
+
+        self.assertEqual([".env.local"], excluded)
+        self.assertEqual(
+            ["Task/app/", "new.txt", "tracked.txt"], sorted(paths)
+        )
+        self.assertLessEqual(len(paths) + len(excluded), 4)
+        self.assertNotIn("sibling/outside.txt", paths)
 
     def test_hook_context_warms_four_turns_then_switches_to_governed(self) -> None:
         self.repository.joinpath("safe.php").write_text(
@@ -4760,6 +5468,136 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         # The bank itself must show which knowledge no human approved.
         self.assertIn("auto-promoted", chunk.read_text(encoding="utf-8"))
 
+    def test_verified_finding_completes_the_real_memory_journey(self) -> None:
+        self.enable_automatic_promotion()
+        self.start("TASK-MEMORY-E2E")
+        created = self.run_cli(
+            "brain-create", "finding",
+            "--external-id", "TASK-MEMORY-E2E-F1",
+            "--title", "Quartz falcon retry boundary",
+            "--source", "specs/authority.md",
+            "--json",
+        )
+        self.assertEqual(0, created.returncode, created.stderr)
+        finding = json.loads(created.stdout)
+
+        verified = self.run_cli(
+            "brain-update", "--record-id", finding["id"],
+            "--revision", "auto", "--authority", "verified",
+            "--reason", "Verified: authority source re-read", "--json",
+        )
+        self.assertEqual(0, verified.returncode, verified.stderr)
+        authority_transition = json.loads(verified.stdout)["transitions"][-1]
+        self.assertEqual(
+            {
+                "from": "observed",
+                "to": "verified",
+                "actor": "local",
+                "reason": "Verified: authority source re-read",
+            },
+            {
+                key: authority_transition[key]
+                for key in ("from", "to", "actor", "reason")
+            },
+        )
+
+        resolved = self.run_cli(
+            "brain-update", "--record-id", finding["id"],
+            "--revision", "auto",
+            "--progress",
+            "Quartz falcon retries stop after the third guarded dispatch.",
+            "--transition", "resolved",
+            "--reason", "Resolved after verification", "--json",
+        )
+        self.assertEqual(0, resolved.returncode, resolved.stderr)
+        self.assertEqual("resolved", json.loads(resolved.stdout)["status"])
+
+        self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
+        flushed = self.run_cli(
+            "turn", "--task-id", "TASK-MEMORY-E2E", "--flush", "--json"
+        )
+        self.assertEqual(0, flushed.returncode, flushed.stderr)
+        promoted = json.loads(flushed.stdout)["promoted"]
+        self.assertEqual(1, len(promoted), promoted)
+        self.assertEqual(finding["id"], promoted[0]["record_id"])
+        memory_id = promoted[0]["memory_id"]
+        chunk = next(
+            (self.repository / "memory-bank/chunks").glob(f"{memory_id}-*.md")
+        )
+        metadata, _ = brain.parse_markdown_record(chunk)
+        finding_path = (
+            f"project-brain/dynamic/findings/{finding['id']}.md"
+        )
+        self.assertEqual("domain", metadata["type"])
+        self.assertEqual("active", metadata["status"])
+        self.assertIn("auto-promoted", metadata["tags"])
+        self.assertEqual(
+            [finding_path, "specs/authority.md"], metadata["sources"]
+        )
+        self.assertEqual(
+            [finding_path, "specs/authority.md"],
+            [item["path"] for item in metadata["source_digests"]],
+        )
+
+        current = json.loads(
+            self.run_cli(
+                "get", "--task-id", "TASK-MEMORY-E2E", "--json"
+            ).stdout
+        )
+        completed = self.run_cli(
+            "complete", "--task-id", "TASK-MEMORY-E2E",
+            "--revision", str(current["revision"]),
+            "--outcome", "Memory journey verified.",
+            "--verification", "temporary end-to-end regression passed",
+            "--source", "specs/authority.md", "--json",
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        completion = json.loads(completed.stdout)
+        self.assertEqual("completed", completion["status"])
+        self.assertIsNotNone(completion["episode_id"])
+
+        status_result = self.run_cli("status", "--json")
+        self.assertEqual(0, status_result.returncode, status_result.stderr)
+        status = json.loads(status_result.stdout)
+        self.assertEqual(1, status["episodes"], status)
+        self.assertEqual(0, status["working"], status)
+        self.assertEqual(1, status["consolidation"]["applied"], status)
+        self.assertEqual(1, status["consolidation"]["chunks"], status)
+
+        promotion = json.loads(
+            next(
+                (self.repository / "project-brain/control/promotions").glob("*.json")
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual("applied", promotion["status"])
+        self.assertEqual("automatic", promotion["review_mode"])
+        self.assertIsNone(promotion["reviewer"])
+        self.assertEqual("approved-without-review", promotion["outcome"])
+        self.assertEqual(memory_id, promotion["destination_memory_id"])
+
+        audit = self.run_cli("bank-audit", "--json")
+        self.assertEqual(0, audit.returncode, audit.stderr)
+        self.assertEqual(
+            {
+                "chunks": 1,
+                "source_changed": [],
+                "overdue_review": [],
+                "undigested": [],
+                "duplicates": [],
+            },
+            json.loads(audit.stdout),
+        )
+
+        self.start("TASK-MEMORY-READER")
+        retrieved = self.run_cli(
+            "retrieve", "quartz falcon third guarded dispatch",
+            "--task-id", "TASK-MEMORY-READER",
+            "--gate", "off", "--ephemeral", "--json",
+        )
+        self.assertEqual(0, retrieved.returncode, retrieved.stderr)
+        selected = [item["path"] for item in json.loads(retrieved.stdout)["selected"]]
+        self.assertIn(chunk.relative_to(self.repository).as_posix(), selected)
+
     def test_a_promoted_chunk_declares_what_it_was_promoted_from(self) -> None:
         # Every promotion wrote `type: decision` whatever it promoted, so a
         # resolved bug and a closed incident both entered the bank claiming to
@@ -4887,19 +5725,13 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         metadata = json.loads(chunk.read_text(encoding="utf-8").split("---")[1])
         self.assertNotIn("src/ReadModel.php", metadata["sources"])
 
-    def test_a_citation_whose_file_is_gone_is_not_carried(self) -> None:
-        """Reachable: the file is deleted between review and apply.
-
-        Without the guard `apply_promotion` writes a chunk citing a file that
-        is not there, `validate_metadata` raises, and a promotion with nothing
-        to do with that file fails outright.
-        """
+    def test_a_citation_deleted_after_review_blocks_apply(self) -> None:
         self.repository.joinpath("specs/doomed.md").write_text(
             "# Doomed\n\nAbout to be deleted.\n", encoding="utf-8"
         )
         record = brain.create_record(
             self.repository, "decision", "DEC-GONE", "Queues drain before deploy",
-            [], ["specs/doomed.md"], owner="alice",
+            [], ["specs/doomed.md"], owner="alice", authority="verified",
         )
         brain.update_record(
             self.repository, record["id"], expected_revision=record["revision"],
@@ -4916,11 +5748,11 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         )
         self.repository.joinpath("specs/doomed.md").unlink()
 
-        applied = brain.apply_promotion(self.repository, proposal["id"])
-        self.assertEqual("applied", applied["status"])
-        chunk = next((self.repository / "memory-bank/chunks").glob("MEM-*.md"))
-        metadata = json.loads(chunk.read_text(encoding="utf-8").split("---")[1])
-        self.assertNotIn("specs/doomed.md", metadata["sources"])
+        with self.assertRaisesRegex(brain.BrainError, "cited source changed"):
+            brain.apply_promotion(self.repository, proposal["id"])
+        self.assertEqual(
+            [], list((self.repository / "memory-bank/chunks").glob("MEM-*.md"))
+        )
 
     def test_a_source_tree_lost_entirely_to_gitignore_is_reported(self) -> None:
         """The silent case, found on a real installation.

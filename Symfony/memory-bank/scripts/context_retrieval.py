@@ -173,11 +173,11 @@ RULE_FILE="$RULES_DIR/working-memory.mdc"
 CAPSULE_STATUS=1
 if command -v timeout > /dev/null 2>&1; then
   CAPSULE=$(timeout "$BUDGET_SECONDS" python3 "$CONTEXT_CLI" hook-context \
-    --task-id "$TASK_ID" 2>/dev/null)
+    --host cursor --task-id "$TASK_ID" 2>/dev/null)
   CAPSULE_STATUS=$?
 else
   CAPSULE=$(python3 "$CONTEXT_CLI" hook-context \
-    --task-id "$TASK_ID" 2>/dev/null)
+    --host cursor --task-id "$TASK_ID" 2>/dev/null)
   CAPSULE_STATUS=$?
 fi
 # The rendered capsule always opens with the working line. Anything else is a
@@ -234,11 +234,11 @@ CAPSULE_STATUS=3
 if command -v python3 > /dev/null 2>&1 && [ -f "$CONTEXT_CLI" ] && [ -n "$CAPSULE_TASK_ID" ]; then
   if command -v timeout > /dev/null 2>&1; then
     CAPSULE=$(timeout "$CAPSULE_BUDGET_SECONDS" python3 "$CONTEXT_CLI" hook-context \
-      --task-id "$CAPSULE_TASK_ID" 2>/dev/null)
+      --host cursor --task-id "$CAPSULE_TASK_ID" 2>/dev/null)
     CAPSULE_STATUS=$?
   else
     CAPSULE=$(python3 "$CONTEXT_CLI" hook-context \
-      --task-id "$CAPSULE_TASK_ID" 2>/dev/null)
+      --host cursor --task-id "$CAPSULE_TASK_ID" 2>/dev/null)
     CAPSULE_STATUS=$?
   fi
 fi
@@ -377,6 +377,7 @@ MIRROR_RULES: dict[str, Any] = {
                             "SKILLS_DIR=\"$ROOT_DIR/.claude/skills\"",
                             "SKILLS_DIR=\"$ROOT_DIR/.agents/skills\"",
                         ],
+                        ["--host claude", "--host codex"],
                         [" .claude; do", " .agents .codex; do"],
                         [
                             "- /debugger to investigate the root cause",
@@ -507,6 +508,7 @@ CROSS_EDITION_CORE_MANIFEST = (
     "project-brain/schemas/**/*",
     "project-brain/PROTOCOL.md",
     "project-brain/tests/*.py",
+    "project-brain/tests/fixtures/memory-probes.json",
     # The hooks are the only automatic entry into the memory core, so a hook
     # that forks silently forks the engine as surely as a module would: an
     # edition whose UserPromptSubmit hook truncates the prompt asks the core a
@@ -546,16 +548,16 @@ CROSS_EDITION_ALLOWED_DRIFT = {
 }
 
 MANIFEST_SCOPES = ("governed", "local")
-# Version 2 adds `query_source` and `phase_seconds` at the top level and
-# `score`/`rank`/`match` inside `selected[]`. Version 1 manifests written by
-# an earlier build stay valid: the validator keys its strict key set off the
-# declared version rather than off one hard-coded set.
-MANIFEST_SCHEMA_VERSION = 2
+# Version 3 adds the host and retrieval entry point. Older manifests stay
+# valid: the validator keys its strict key set off the declared version.
+MANIFEST_SCHEMA_VERSION = 3
 # Where the query that produced a retrieval came from. `prompt` is the user's
 # own request, `task` the goal and state of the active task, `task-id` a bare
 # identifier or branch name with no task text behind it, and `explicit` an
 # operator-supplied query on the CLI.
 QUERY_SOURCES = ("prompt", "task", "task-id", "explicit")
+RETRIEVAL_HOSTS = ("cli", "claude", "codex", "cursor")
+RETRIEVAL_ENTRY_POINTS = ("context", "retrieve", "refresh", "hook-context")
 # Whether a turn retrieves at all. `off` never decides; `shadow` decides and
 # records the decision but always retrieves; `enforce` acts on it. The default
 # is `shadow` on purpose: the project rejected an embedding similarity floor on
@@ -1881,20 +1883,46 @@ def _candidates(
     return result, diagnostics
 
 
-def _retrieval_signature(query: str, paths: Iterable[str]) -> dict[str, str]:
+def _retrieval_signature(
+    query: str,
+    selections: Iterable[tuple[str, str]],
+    task_revision: int,
+) -> dict[str, str]:
     """What identifies a retrieval for the purpose of noticing a repeat.
 
     Not the capsule: the returned packet carries a fresh manifest UUID every
     call, and the rendered form folds in an automatic checkpoint sentence and
     a last-turn summary that both move on their own. The invariant that
     actually holds across a repeated turn is the distilled query plus the set
-    of paths it selected.
+    of selected identities and content hashes. The task revision is separate:
+    Cursor's query can stay unchanged while its rendered working state moves.
     """
-    ordered = sorted(set(paths))
+    ordered = sorted(set(selections))
     return {
         "query": hashlib.sha256(query.encode("utf-8")).hexdigest(),
-        "paths": hashlib.sha256("\n".join(ordered).encode("utf-8")).hexdigest(),
+        "paths": hashlib.sha256(
+            "\n".join(f"{identity}\0{source_hash}" for identity, source_hash in ordered).encode(
+                "utf-8"
+            )
+        ).hexdigest(),
+        "task_revision": str(task_revision),
     }
+
+
+def _retrieval_baseline_key(task_uuid: str, host: str, entry_point: str) -> str:
+    return f"{task_uuid}:{host}:{entry_point}"
+
+
+def _episode_signature(episode: dict[str, Any]) -> tuple[str, str]:
+    content = _serialized_episode(episode)
+    return (
+        f"episode:{episode.get('id')}",
+        hashlib.sha256(content.encode("utf-8")).hexdigest(),
+    )
+
+
+def _serialized_episode(episode: dict[str, Any]) -> str:
+    return json.dumps(episode, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _load_last_retrievals(connection: sqlite3.Connection) -> dict[str, Any]:
@@ -1912,7 +1940,7 @@ def _load_last_retrievals(connection: sqlite3.Connection) -> dict[str, Any]:
 
 
 def _remember_retrieval(
-    connection: sqlite3.Connection, task_uuid: str, signature: dict[str, str]
+    connection: sqlite3.Connection, baseline_key: str, signature: dict[str, str]
 ) -> None:
     """Record this retrieval so the next turn can recognize a repeat.
 
@@ -1921,8 +1949,8 @@ def _remember_retrieval(
     record costs one un-skipped turn, which is the safe direction.
     """
     stored = _load_last_retrievals(connection)
-    stored.pop(task_uuid, None)
-    stored[task_uuid] = signature
+    stored.pop(baseline_key, None)
+    stored[baseline_key] = signature
     if len(stored) > LAST_RETRIEVAL_RETENTION:
         for stale in list(stored)[: len(stored) - LAST_RETRIEVAL_RETENTION]:
             stored.pop(stale, None)
@@ -1944,6 +1972,7 @@ def gate_decision(
     previous: Optional[dict[str, Any]],
     diagnostics: dict[str, Any],
     no_match: list[str],
+    matched_count: int,
     selected_count: int,
 ) -> dict[str, Any]:
     """Decide whether this turn was worth retrieving for, and say why.
@@ -1961,6 +1990,10 @@ def gate_decision(
     selection_identical = (
         bool(previous) and previous.get("paths") == signature["paths"]
     )
+    task_revision_unchanged = (
+        bool(previous)
+        and previous.get("task_revision") == signature["task_revision"]
+    )
     signals = {
         "informative_terms": diagnostics.get("informative_terms", 0),
         "distinctive_matches": diagnostics.get("distinctive_matches", 0),
@@ -1975,9 +2008,12 @@ def gate_decision(
         # Nothing survived relevance, so retrieving and skipping deliver the
         # same thing. Naming it makes the empty turn countable instead of
         # indistinguishable from a turn that was never gated.
-        return {"decision": "skip", "mode": mode, "reason": "no-match", "signals": signals}
-    if query_unchanged and selection_identical:
+        reason = "no-relevant-match" if matched_count == 0 else "empty-after-filter"
+        return {"decision": "skip", "mode": mode, "reason": reason, "signals": signals}
+    if query_unchanged and selection_identical and task_revision_unchanged:
         return {"decision": "skip", "mode": mode, "reason": "repeat-retrieval", "signals": signals}
+    if query_unchanged and selection_identical and not task_revision_unchanged:
+        return {"decision": "retrieve", "mode": mode, "reason": "task-changed", "signals": signals}
     return {"decision": "retrieve", "mode": mode, "reason": "new-selection", "signals": signals}
 
 
@@ -2372,6 +2408,9 @@ def retrieve(
     phase_seconds: Optional[dict[str, Any]] = None,
     gate_mode: str = RETRIEVAL_GATE_DEFAULT,
     paths: Optional[list[str]] = None,
+    host: str = "cli",
+    entry_point: str = "retrieve",
+    local_episodes: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     """Assemble governed context and record the manifest that justifies it.
 
@@ -2396,14 +2435,26 @@ def retrieve(
         raise RetrievalError(
             f"Retrieval gate must be one of {', '.join(RETRIEVAL_GATE_MODES)}"
         )
+    if host not in RETRIEVAL_HOSTS:
+        raise RetrievalError(
+            f"Retrieval host must be one of {', '.join(RETRIEVAL_HOSTS)}"
+        )
+    if entry_point not in RETRIEVAL_ENTRY_POINTS:
+        raise RetrievalError(
+            "Retrieval entry point must be one of "
+            f"{', '.join(RETRIEVAL_ENTRY_POINTS)}"
+        )
     task = get_task(repository, task_identifier)
     config = load_config(repository)
+    local_episodes = list(local_episodes or [])
     candidates, diagnostics = _candidates(connection, query, max(20, limit * 10))
     # Taken before any filter runs, so "nothing matched" cannot be confused
     # with "everything that matched was withheld". Only the layers a governed
     # capsule fills from this call are answered for; the episodic layer is
     # assembled by the caller and reports itself.
     matched_layers = {item["layer"] for item in candidates}
+    if local_episodes:
+        matched_layers.add("episodic")
     no_match = [
         layer
         for layer in ("procedural", "semantic", "episodic")
@@ -2417,6 +2468,7 @@ def retrieve(
     # still deliver a path-linked document on the same turn: the first says
     # the caller's words found nothing there, the second says the caller's
     # path did.
+    path_matched_count = 0
     if paths:
         linked, link_excluded = _path_candidates(
             connection,
@@ -2425,6 +2477,7 @@ def retrieve(
             paths,
             {item["path"] for item in filtered},
         )
+        path_matched_count = len(linked) + len(link_excluded)
         filter_excluded.extend(link_excluded)
         # Ahead of the query's own matches, because `_apply_budgets` and the
         # per-layer ladder both honour input order and the caller named these.
@@ -2499,6 +2552,17 @@ def retrieve(
         *semantic_ranked[:CAPSULE_SEMANTIC_LIMIT],
         *episodic_ranked[:CAPSULE_EPISODIC_LIMIT],
     ]
+    local_episode_selected = local_episodes[
+        : max(0, CAPSULE_EPISODIC_LIMIT - len(episodic_ranked[:CAPSULE_EPISODIC_LIMIT]))
+    ]
+    local_episode_tokens = sum(
+        _estimate_tokens(_serialized_episode(episode))
+        for episode in local_episode_selected
+    )
+    selected_tokens = sum(item["estimated_tokens"] for item in capsule_selected)
+    if local_episode_selected and selected_tokens + local_episode_tokens > TARGET_BUDGET:
+        local_episode_selected = []
+        budget_excluded.append({"path": "local-episode", "reason": "budget"})
     capsule_paths = {item["path"] for item in capsule_selected}
     layer_excluded = [
         {
@@ -2517,15 +2581,24 @@ def retrieve(
     # previous_turn` is a claim about what the capsule delivers, and after the
     # episodic-layer filter and the 2+3 truncation above that is only now
     # known. Deciding earlier would describe a set the capsule never carried.
-    signature = _retrieval_signature(query, (item["path"] for item in selected))
-    previous = _load_last_retrievals(connection).get(task["id"])
+    signature = _retrieval_signature(
+        query,
+        [
+            *((item["path"], item["source_hash"]) for item in selected),
+            *(_episode_signature(episode) for episode in local_episode_selected),
+        ],
+        task["revision"],
+    )
+    baseline_key = _retrieval_baseline_key(task["id"], host, entry_point)
+    previous = _load_last_retrievals(connection).get(baseline_key)
     gate = gate_decision(
         gate_mode,
         signature=signature,
         previous=previous if isinstance(previous, dict) else None,
         diagnostics=diagnostics,
         no_match=no_match,
-        selected_count=len(selected),
+        matched_count=len(candidates) + len(local_episodes) + path_matched_count,
+        selected_count=len(selected) + len(local_episode_selected),
     )
     withheld = gate["mode"] == "enforce" and gate["decision"] == "skip"
     if withheld:
@@ -2533,14 +2606,19 @@ def retrieve(
         # query: the work is already done and cost nothing extra. What is
         # withheld is the claim "this is relevant right now".
         selected = []
+        local_episode_selected = []
         layer_excluded = []
     else:
         # Remembered only for a turn that actually delivered, so the next turn
         # compares against the last real retrieval rather than against a skip.
-        _remember_retrieval(connection, task["id"], signature)
+        _remember_retrieval(connection, baseline_key, signature)
     usage = {category: 0 for category in BUDGETS}
     for item in selected:
         usage[item["category"]] += item["estimated_tokens"]
+    usage["local_episodes"] = sum(
+        _estimate_tokens(_serialized_episode(episode))
+        for episode in local_episode_selected
+    )
     usage["total"] = sum(usage.values())
     usage["target"] = TARGET_BUDGET
     usage["hard"] = HARD_BUDGET
@@ -2552,6 +2630,7 @@ def retrieve(
         "query": query,
         "task_id": task["id"],
         "task_revision": task["revision"],
+        "local_episode_count": len(local_episode_selected),
         "filters": {
             "privacy": config["allowed_privacy"],
             "owners": config["owners"],
@@ -2589,6 +2668,8 @@ def retrieve(
         # A manifest that records only the selection cannot answer whether a
         # bad retrieval was a bad query or a bad ranking.
         "query_source": query_source,
+        "host": host,
+        "entry_point": entry_point,
         "gate": gate,
         "phase_seconds": {
             "stat": _phase_value(phase_seconds, "stat"),
@@ -2625,6 +2706,7 @@ def retrieve(
         for item in group
         if item["layer"] == "episodic"
     ][:CAPSULE_EPISODIC_LIMIT]
+    episodic.extend(local_episode_selected[: CAPSULE_EPISODIC_LIMIT - len(episodic)])
     semantic = [
         *groups["handoff"], *groups["durable"], *groups["dynamic"], *groups["evidence"]
     ][:CAPSULE_SEMANTIC_LIMIT]

@@ -1454,9 +1454,9 @@ def validate_repository(repository: Path) -> list[str]:
             except (OSError, json.JSONDecodeError, BrainError, KeyError) as error:
                 errors.append(f"{path}: {error}")
     # Keyed off the manifest's own declared version rather than one frozen
-    # set: version 2 adds retrieval provenance and the gate verdict, and a
-    # consuming project's version 1 manifests must keep validating instead of
-    # turning its Definition of Done red the day the engine is upgraded.
+    # set: version 2 adds query provenance and the gate verdict, version 3 adds
+    # host provenance, and older manifests must keep validating instead of
+    # turning a consuming project's Definition of Done red after an upgrade.
     #
     # The gate joined version 2 rather than opening a version 3 because
     # version 2 has not been released: it and the gate land in the same
@@ -1472,6 +1472,20 @@ def validate_repository(repository: Path) -> list[str]:
     manifest_keys_by_version = {
         1: version_1_keys,
         2: version_1_keys | {"query_source", "phase_seconds", "gate"},
+        3: version_1_keys
+        | {
+            "query_source", "phase_seconds", "gate", "host", "entry_point",
+            "local_episode_count",
+        },
+    }
+    version_1_token_keys = {
+        "policy", "handoff", "durable", "dynamic", "evidence", "total",
+        "target", "hard",
+    }
+    manifest_token_keys_by_version = {
+        1: version_1_token_keys,
+        2: version_1_token_keys,
+        3: version_1_token_keys | {"local_episodes"},
     }
     manifests = brain_root(repository) / "control" / "retrieval-manifests"
     if manifests.is_dir():
@@ -1495,7 +1509,12 @@ def validate_repository(repository: Path) -> list[str]:
                 if manifest["id"] != path.stem:
                     raise BrainError("retrieval manifest ID does not match filename")
                 estimates = manifest["token_estimates"]
-                if not isinstance(estimates, dict) or estimates.get("total", 0) > estimates.get("hard", 12000):
+                expected_token_keys = manifest_token_keys_by_version[manifest["schema_version"]]
+                if not isinstance(estimates, dict) or set(estimates) != expected_token_keys:
+                    raise BrainError(
+                        "retrieval manifest token estimates do not match strict schema"
+                    )
+                if estimates.get("total", 0) > estimates.get("hard", 12000):
                     raise BrainError("retrieval manifest exceeds hard token ceiling")
             except (OSError, json.JSONDecodeError, BrainError, KeyError, TypeError) as error:
                 errors.append(f"{path}: {error}")
@@ -1700,6 +1719,28 @@ def validate_promotion_record(
         # An automatic promotion must not name a reviewer: the record has to
         # state plainly that no human approved it.
         raise BrainError("automatic promotion must not claim a reviewer")
+    expected_outcome = (
+        "approved-without-review"
+        if promotion["review_mode"] == "automatic"
+        else "approved"
+    )
+    if promotion["status"] == "proposed" and promotion["outcome"] is not None:
+        raise BrainError("proposed promotion outcome must be null")
+    if promotion["status"] == "rejected" and promotion["outcome"] != "rejected":
+        raise BrainError("rejected promotion outcome must be rejected")
+    if (
+        promotion["status"] in {"reviewed", "applied"}
+        and promotion["outcome"] != expected_outcome
+        # v1 used `promoted` after apply. Keep those tracked records readable;
+        # the reviewed boundary below never accepts or emits that legacy value.
+        and not (
+            promotion["status"] == "applied"
+            and promotion["outcome"] == "promoted"
+        )
+    ):
+        raise BrainError(
+            f"{promotion['review_mode']} promotion outcome must be {expected_outcome}"
+        )
     for source in promotion["source_records"]:
         if (
             not isinstance(source, dict)
@@ -1879,6 +1920,35 @@ def promotion_content(record: dict[str, Any]) -> Optional[str]:
     return "\n\n".join(sections)
 
 
+def promotion_eligibility_error(
+    repository: Path, record: dict[str, Any], config: dict[str, Any]
+) -> Optional[str]:
+    promotable = PROMOTABLE_STATES.get(record["type"])
+    if promotable is None:
+        return f"{record['type']} records are not promotable"
+    if record["status"] not in promotable:
+        return f"{record['type']} status {record['status']} is not promotable"
+    if record["authority"] != "verified":
+        return f"authority is {record['authority']}, not verified"
+    if record["privacy"] not in config["allowed_privacy"]:
+        return f"privacy {record['privacy']} is not allowed for retrieval"
+    if promotion_content(record) is None:
+        return "record carries no content beyond its own title"
+    if sources_are_fresh(repository, record):
+        return None
+    stale = [
+        item["path"]
+        for item in record["source_fingerprints"]
+        if not sources_are_fresh(
+            repository,
+            {"sources": [item["path"]], "source_fingerprints": [item]},
+        )
+    ]
+    return "cited source changed since the record was written: " + ", ".join(
+        stale or record["sources"]
+    )
+
+
 def promotable_records(
     repository: Path, config: dict[str, Any]
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
@@ -1909,25 +1979,8 @@ def promotable_records(
             continue
         if record["status"] not in PROMOTABLE_STATES.get(record["type"], set()):
             continue
-        reason: Optional[str] = None
-        if record["authority"] != "verified":
-            reason = f"authority is {record['authority']}, not verified"
-        elif record["privacy"] not in config["allowed_privacy"]:
-            reason = f"privacy {record['privacy']} is not allowed for retrieval"
-        elif not sources_are_fresh(repository, record):
-            stale = [
-                item["path"]
-                for item in record["source_fingerprints"]
-                if not sources_are_fresh(
-                    repository, {"sources": [item["path"]], "source_fingerprints": [item]}
-                )
-            ]
-            reason = "cited source changed since the record was written: " + ", ".join(
-                stale or record["sources"]
-            )
         content = promotion_content(record)
-        if reason is None and content is None:
-            reason = "record carries no content beyond its own title"
+        reason = promotion_eligibility_error(repository, record, config)
         if reason is not None:
             blocked.append({"record_id": record["id"], "reason": reason})
             continue
@@ -2584,6 +2637,7 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
             not proposal.get("reviewer") and not automatic
         ):
             raise BrainError("Promotion requires an approved human review before apply")
+        config = load_config(repository)
         # What the promoted records themselves cited, carried through to the
         # chunk. Without this the citation chain breaks at promotion: the
         # chunk names the record, the record names the document, and nothing
@@ -2609,6 +2663,9 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
                 or current["revision"] != source["revision"]
             ):
                 raise BrainError(f"Promotion source revision changed: {source['id']}")
+            ineligible = promotion_eligibility_error(repository, current, config)
+            if ineligible is not None:
+                raise BrainError(f"Promotion source is not eligible: {ineligible}")
             for cited in current.get("sources") or []:
                 if not isinstance(cited, str):
                     continue
@@ -2687,7 +2744,6 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
                     + "; ".join(validation_errors)
                 )
             proposal["status"] = "applied"
-            proposal["outcome"] = "promoted"
             proposal["destination_memory_id"] = memory_id
             proposal["destination_revision"] = 1
             proposal["updated_at"] = utc_now()
