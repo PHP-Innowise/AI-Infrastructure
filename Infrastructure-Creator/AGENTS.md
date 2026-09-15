@@ -63,8 +63,8 @@ Infrastructure-Creator intentionally has no `memory-bank/` of its own: its job i
 - Every proposed skill MUST prove distinct selection, owned scope, procedure,
   output, evidence, and routing value. Catalog membership alone is not a reason
   to generate it; unsupported or overlapping skills are pruned or merged.
-  Two exceptions are unconditional by design: the runtime-fixed memory
-  quartet, and the **golden development set** (`requirements-analyst`,
+  Two exceptions are unconditional by design: the six runtime-fixed
+  memory-continuity guides, and the **golden development set** (`requirements-analyst`,
   `coding`, `refactorer`, `testing`, `debugging`, `performance`,
   `code-review`, `security-review`) - the
   loop every codebase lives in is always generated, in any weather. Evidence
@@ -121,6 +121,13 @@ Infrastructure-Creator intentionally has no `memory-bank/` of its own: its job i
   stamped target `AGENTS.md` and `.infra-manifest.json`. `infra-update` MUST NOT
   overwrite any file whose hash differs from that manifest without an explicit
   per-file human decision, and MUST NOT touch files the manifest does not list.
+- The generated `context-save`/`context-load` pair is the only portable
+  continuation surface. A user-requested visible transcript may be embedded
+  only in the explicit `tasks/TASK-NNN/context-save-*.md` artifact created by
+  `context-save --detail full --transcript`; it MUST NOT enter Project Brain,
+  Memory Bank, SQLite, automatic retrieval, hooks, or an exported shared chat.
+  A generator MUST never scrape private account/session files or invent an
+  unavailable client export.
 - Root `.gitignore` is a narrowly scoped shared-file exception: forges declare
   exact requirements, only generation/update orchestration composes them, and
   a pre-existing file is changed only by explicit append approval with

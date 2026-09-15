@@ -142,7 +142,7 @@ All output from this run lives under `tasks/TASK-{NNN}/` in Infrastructure-Creat
 
 ## What Will Be Generated (see profile sections 11-12 for full detail)
 - **Skills:** [dynamic evidence-gated count] - each has a distinct
-  necessity/scope/procedure/output/routing contract; the memory quartet remains
+  necessity/scope/procedure/output/routing contract; the six memory-continuity guides remain
   because its runtime is always installed
 - **Agents & commands:** [counts from section 11.2, for the selected edition(s)]
 - **Memory bank:** [count] cohesive confirmed concepts planned in section 12, each linked to canonical sources

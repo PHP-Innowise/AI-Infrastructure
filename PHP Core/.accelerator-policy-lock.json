@@ -45,6 +45,8 @@
     ".agents/skills/codebase-mapper/SKILL.md": "28d08c6bc4464a33324cf8ab327aa45fa04b6446ab6a5b79bddb808cf0974d2c",
     ".agents/skills/coder-frontend/SKILL.md": "c476a3b8cccec224747acfc50c2febf0c1ef3190dde289fba422be23358dd3c3",
     ".agents/skills/coder/SKILL.md": "aaca8db1863584526b2304ea56084164645e916cd3a1d0f97607c11238a4c814",
+    ".agents/skills/context-load/SKILL.md": "7ad59f10d85b754589629c29444f9b537d5972ee373b97ee86b649a5c56e1aad",
+    ".agents/skills/context-save/SKILL.md": "276ba5ff4ca20fe34e182ab6781bf19d96afb8f19c0446a00b7a433dcebca0bf",
     ".agents/skills/council/SKILL.md": "52490ae421cafdffa1d30895ae990a76994331627f5fb425b753bc051c4f5062",
     ".agents/skills/database-designer/SKILL.md": "c7b4b82335cd697798b4ab5fcec623b440d940727e4904a0c457789736261a1b",
     ".agents/skills/dependency-manager/SKILL.md": "7e720e2aab5a1443f23d7f48dc0e9b2770127fac7fc34d1fb0c2d63760906d84",
@@ -175,6 +177,8 @@
     ".claude/commands/codebase-mapper.md": "0b7c4dc9bdda7fe2772a4c49ad02b22a528f091b34a3ea96d8be22c11cfa8bae",
     ".claude/commands/coder-frontend.md": "88b90c8d27ad024cd218e4e83f118d6e5ddcb4abf9c3dd25fb29a3ba5bb7310c",
     ".claude/commands/coder.md": "f77383412daad28b73568401cac90b6fa6e604ae2e2a835d49db62b789c89678",
+    ".claude/commands/context-load.md": "00b616ae551e03f221c35d44a4fa74a75e351a59c95ff7fb6391d0827eb1981f",
+    ".claude/commands/context-save.md": "fe13f3f96694067b9681da6e45d803637fa47574754ebcc5bdf7055bf3b0f20a",
     ".claude/commands/council.md": "5bf4149f55bfa2d2c3224f1acafb01d2f5e6c7b32fe16ae7b5457bdd30fc47f7",
     ".claude/commands/database-designer.md": "670b3f67ec6bc0599b613350309a88b161a42e03412c2d78b18d0c99b19ad8ec",
     ".claude/commands/debugger.md": "74df4b3172739afcd52f6ff56db518059a9c2ce0c62af9d8cd43d4f17a04a8a3",
@@ -212,9 +216,9 @@
     ".cursor/rules/safety-and-verification.mdc": "5e8cb5bfd3d427836e521417a2a7e68bd1b3a00a25a1d174df61b29e5471344f",
     ".cursor/rules/subagent-policy.mdc": "b2200867b3141faedb982cb12cc58158015ef5d9294c0f8b193bb8b70f61f201",
     ".cursor/skills/skill-creator/SKILL.md": "f1bac11cf8ab0e6acb40196165aab0f8e87556a4e182ff00894b6ee11af3a2a5",
-    "AGENTS.md": "2bbfa8d979624c32be558ee019c3adf6c0127adb54fc2bed948d236d0bbfa28e"
+    "AGENTS.md": "0b4bf3231e0ec42ac05a0f54eb402399ff23aa36fa9565403128e5b6af42e541"
   },
-  "policy_digest": "92a0435be15d2c6179b32a1f1833daf7e619823543a6526cfc20fb4f4b8302be",
+  "policy_digest": "9508cc514543a101b712e5e15d51f2a54ce5229503746f075dadb61f1817ee94",
   "release": "2.0.0",
   "schema_version": 1
 }

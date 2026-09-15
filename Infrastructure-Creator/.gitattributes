@@ -82,6 +82,7 @@
 .claude/skills/memory-seed/assets/runtime-contract.json -diff linguist-generated=true
 .claude/skills/memory-seed/assets/scripts/brain_runtime.py -diff linguist-generated=true
 .claude/skills/memory-seed/assets/scripts/context.py -diff linguist-generated=true
+.claude/skills/memory-seed/assets/scripts/context_handoff.py -diff linguist-generated=true
 .claude/skills/memory-seed/assets/scripts/context_retrieval.py -diff linguist-generated=true
 .claude/skills/memory-seed/assets/scripts/telemetry.py -diff linguist-generated=true
 .claude/skills/memory-seed/assets/scripts/validate.py -diff linguist-generated=true
@@ -220,6 +221,7 @@
 .cursor/skills/memory-seed/assets/runtime-contract.json -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/scripts/brain_runtime.py -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/scripts/context.py -diff linguist-generated=true
+.cursor/skills/memory-seed/assets/scripts/context_handoff.py -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/scripts/context_retrieval.py -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/scripts/telemetry.py -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/scripts/validate.py -diff linguist-generated=true

@@ -124,6 +124,37 @@ class RuntimeContractTest(unittest.TestCase):
         self.assertIn("project-brain/dynamic/tasks/", supported)
         self.assertIn("project-brain/control/messages/", supported)
 
+    def test_portable_handoff_module_and_forms_are_shipped(self) -> None:
+        """Generated targets must receive the full explicit handoff contract."""
+        paths = self.contract["path_contracts"]
+        self.assertIn(
+            "memory-bank/scripts/context_handoff.py", paths["required_skeleton"]
+        )
+        creatable = {item["path"] for item in paths["creatable"]}
+        self.assertIn("tasks/TASK-NNN/context-save-*.md", creatable)
+
+        forms = set(self.contract["commands"]["portable_handoff"])
+        self.assertIn(
+            "python3 memory-bank/scripts/context.py context-save "
+            "--input INPUT.json --output tasks/TASK-NNN/context-save-TIMESTAMP.md "
+            "--detail full --source-client CLIENT --transcript "
+            "VISIBLE-EXPORT.md --json",
+            forms,
+        )
+        self.assertIn(
+            "python3 memory-bank/scripts/context.py context-load "
+            "--input HANDOFF.md --include-transcript --json",
+            forms,
+        )
+        self.assertEqual(
+            ["exclusive-new portable continuation handoff", "curated context and an explicit visible transcript for detail full"],
+            self.contract["runtime_fixed_skills"]["context-save"]["owns"],
+        )
+        self.assertEqual(
+            ["read-only portable handoff validation", "source-fingerprint drift reporting", "explicit transcript inclusion"],
+            self.contract["runtime_fixed_skills"]["context-load"]["owns"],
+        )
+
     def test_registry_points_to_runtime_contract_and_requires_invariant_mapping(self) -> None:
         registry = json.loads(REGISTRY.read_text(encoding="utf-8"))
         referenced = (REGISTRY.parent / registry["runtime_contract"]).resolve()

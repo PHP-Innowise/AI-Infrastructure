@@ -11,6 +11,11 @@ it at the top of every session.
 
 ## Unreleased
 
+- Add `context-save` and `context-load` for Codex, Claude Code and Cursor:
+  save a summary or selected topic, preserve an explicitly exported conversation
+  verbatim in full mode, and check source drift before the next task.
+  Shared runtime changes are recorded in the root changelog.
+
 ### Changed
 
 - Memory promotion policy now matches runtime configuration: eligible verified

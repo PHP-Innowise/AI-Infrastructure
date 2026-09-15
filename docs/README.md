@@ -10,6 +10,7 @@ your situation.
   and [Safe Adoption Guide](ADOPTION.md)
 - **Configure Claude Code, Cursor, or Codex:** [Tool Integrations](TOOL-INTEGRATIONS.md)
 - **Choose governed or lightweight context:** [Context Modes](CONTEXT-MODES.md)
+- **Carry context into the next task:** [Context Handoff](CONTEXT-HANDOFF.md)
 - **Operate Project Brain and memory:** [Context and Memory Operations](OPERATIONS.md)
 - **Understand security boundaries:** [Security and Trust Boundaries](SECURITY.md)
 - **Diagnose installation or runtime problems:** [Troubleshooting](TROUBLESHOOTING.md)

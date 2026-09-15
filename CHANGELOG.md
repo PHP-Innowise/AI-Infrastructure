@@ -26,6 +26,15 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Add portable `context-save` / `context-load` workflows for Codex, Claude Code
+  and Cursor across all four editions: summary, topic-scoped and detailed
+  continuation documents with verbatim native exports in full mode, explicit
+  provenance and file fingerprints, read-only drift checks, bounded validated
+  input, explicit-only transcript loading and index exclusion.
+  Include the shared runtime in generator assets and verify installed clients.
+  Account for the two new utility skills in the affected context budgets;
+  existing startup descriptor and command ceilings remain unchanged.
+
 - Run Harness Creator phases on macOS through the built-in `sandbox-exec`
   (Seatbelt) profile when bubblewrap is absent: writes are allowed only in the
   run workspace, a private temporary directory, the per-user temporary space and

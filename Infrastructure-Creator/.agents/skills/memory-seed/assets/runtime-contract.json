@@ -4,6 +4,7 @@
   "authority": {
     "canonical_sources": [
       "memory-bank/scripts/context.py",
+      "memory-bank/scripts/context_handoff.py",
       "memory-bank/scripts/brain_runtime.py",
       "memory-bank/scripts/context_retrieval.py",
       "project-brain/PROTOCOL.md"
@@ -55,6 +56,7 @@
       "memory-bank/INDEX.md",
       "memory-bank/templates/chunk.md",
       "memory-bank/scripts/context.py",
+      "memory-bank/scripts/context_handoff.py",
       "memory-bank/scripts/brain_runtime.py",
       "memory-bank/scripts/context_retrieval.py",
       "memory-bank/scripts/validate.py",
@@ -84,6 +86,10 @@
       "project-brain/local/"
     ],
     "creatable": [
+      {
+        "path": "tasks/TASK-NNN/context-save-*.md",
+        "via": "context.py context-save from curated JSON and, for detail full, an explicit visible transcript export"
+      },
       {
         "path": "memory-bank/local/context.db",
         "via": "any context.py command that opens the runtime"
@@ -140,6 +146,13 @@
       "python3 memory-bank/scripts/context.py refresh",
       "python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID"
     ],
+    "portable_handoff": [
+      "python3 memory-bank/scripts/context.py context-save --input INPUT.json --output tasks/TASK-NNN/context-save-TIMESTAMP.md --detail summary --source-client CLIENT --json",
+      "python3 memory-bank/scripts/context.py context-save --input INPUT.json --output tasks/TASK-NNN/context-save-TIMESTAMP.md --detail topic --topic TOPIC --source-client CLIENT --json",
+      "python3 memory-bank/scripts/context.py context-save --input INPUT.json --output tasks/TASK-NNN/context-save-TIMESTAMP.md --detail full --source-client CLIENT --transcript VISIBLE-EXPORT.md --json",
+      "python3 memory-bank/scripts/context.py context-load --input HANDOFF.md --json",
+      "python3 memory-bank/scripts/context.py context-load --input HANDOFF.md --include-transcript --json"
+    ],
     "checkpoint": {
       "automatic_or_manual_flush": "python3 memory-bank/scripts/context.py turn --task-id ID --flush",
       "buffered_turn": "python3 memory-bank/scripts/context.py turn --task-id ID",
@@ -163,7 +176,12 @@
       "python3 memory-bank/scripts/context.py validate": "validate active and archived Brain records, the governed control plane and the repository index",
       "python3 memory-bank/scripts/context.py parity --json": "compare the canonical mirrors across editions and fail on drift in mirrored skills, hooks, commands, agents or governance documents",
       "python3 memory-bank/scripts/validate.py": "validate the durable memory bank: chunk frontmatter, statuses and the bank index",
-      "python3 memory-bank/scripts/validate.py --summary": "print durable memory bank status counts from chunk frontmatter without printing chunk contents"
+      "python3 memory-bank/scripts/validate.py --summary": "print durable memory bank status counts from chunk frontmatter without printing chunk contents",
+      "python3 memory-bank/scripts/context.py context-save --input INPUT.json --output tasks/TASK-NNN/context-save-TIMESTAMP.md --detail summary --source-client CLIENT --json": "create one exclusive-new portable summary handoff from a curated payload, writing only the named artifact",
+      "python3 memory-bank/scripts/context.py context-save --input INPUT.json --output tasks/TASK-NNN/context-save-TIMESTAMP.md --detail topic --topic TOPIC --source-client CLIENT --json": "create one exclusive-new portable topic handoff from a curated payload, writing only the named artifact",
+      "python3 memory-bank/scripts/context.py context-save --input INPUT.json --output tasks/TASK-NNN/context-save-TIMESTAMP.md --detail full --source-client CLIENT --transcript VISIBLE-EXPORT.md --json": "create one exclusive-new portable full handoff from a curated payload and explicit visible transcript export, writing only the named artifact",
+      "python3 memory-bank/scripts/context.py context-load --input HANDOFF.md --json": "validate one explicit portable handoff and report source-fingerprint drift without loading transcript content or writing files",
+      "python3 memory-bank/scripts/context.py context-load --input HANDOFF.md --include-transcript --json": "validate one explicit portable handoff, include its explicit visible transcript, and report source-fingerprint drift without writing files"
     },
     "outcomes": {
       "python3 memory-bank/scripts/context.py status": [
@@ -213,6 +231,56 @@
           "exit": 0,
           "meaning": "prints the durable memory bank chunk status counts"
         }
+      ],
+      "python3 memory-bank/scripts/context.py context-save --input INPUT.json --output tasks/TASK-NNN/context-save-TIMESTAMP.md --detail summary --source-client CLIENT --json": [
+        {
+          "exit": 0,
+          "meaning": "creates the new portable summary handoff and reports its path"
+        },
+        {
+          "exit": 1,
+          "meaning": "reports invalid curated input, unsafe content, or an existing output path without changing runtime state"
+        }
+      ],
+      "python3 memory-bank/scripts/context.py context-save --input INPUT.json --output tasks/TASK-NNN/context-save-TIMESTAMP.md --detail topic --topic TOPIC --source-client CLIENT --json": [
+        {
+          "exit": 0,
+          "meaning": "creates the new portable topic handoff and reports its path"
+        },
+        {
+          "exit": 1,
+          "meaning": "reports invalid topic or curated input, unsafe content, or an existing output path without changing runtime state"
+        }
+      ],
+      "python3 memory-bank/scripts/context.py context-save --input INPUT.json --output tasks/TASK-NNN/context-save-TIMESTAMP.md --detail full --source-client CLIENT --transcript VISIBLE-EXPORT.md --json": [
+        {
+          "exit": 0,
+          "meaning": "creates the new full handoff with the explicit visible transcript and reports its path"
+        },
+        {
+          "exit": 1,
+          "meaning": "reports missing, unsafe, or invalid transcript/input or an existing output path without changing runtime state"
+        }
+      ],
+      "python3 memory-bank/scripts/context.py context-load --input HANDOFF.md --json": [
+        {
+          "exit": 0,
+          "meaning": "prints validated curated context and source-fingerprint drift without transcript content"
+        },
+        {
+          "exit": 1,
+          "meaning": "reports malformed or unsafe input without changing runtime state"
+        }
+      ],
+      "python3 memory-bank/scripts/context.py context-load --input HANDOFF.md --include-transcript --json": [
+        {
+          "exit": 0,
+          "meaning": "prints validated curated context, explicit visible transcript, and source-fingerprint drift"
+        },
+        {
+          "exit": 1,
+          "meaning": "reports malformed or unsafe input without changing runtime state"
+        }
       ]
     }
   },
@@ -244,6 +312,19 @@
       "owns": [
         "manual refresh",
         "status and layer-health reporting"
+      ]
+    },
+    "context-save": {
+      "owns": [
+        "exclusive-new portable continuation handoff",
+        "curated context and an explicit visible transcript for detail full"
+      ]
+    },
+    "context-load": {
+      "owns": [
+        "read-only portable handoff validation",
+        "source-fingerprint drift reporting",
+        "explicit transcript inclusion"
       ]
     }
   }

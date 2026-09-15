@@ -93,6 +93,24 @@ SQLite stores only a local binding/cache and optional replay episode. Use
 
 For an argument-free refresh, invoke the AI skill `memory` (or `/memory` in Claude/Cursor). In governed mode it validates Project Brain and refreshes only the disposable source index; it never derives a branch task or writes competing SQLite progress. `checkpoint` follows the same authority gate and captures sanitized local Working Memory only when lightweight mode is explicitly configured. Both workflows stop without completing tasks, applying promotions, or editing tracked sources.
 
+### Portable Context for the Next Task
+
+Use `context-save summary`, `context-save topic <subject>`, or `context-save
+full --transcript <export-path>` in Codex, and `/context-save` with the same arguments in Claude Code or
+Cursor. The current agent writes a curated Markdown continuation document,
+with source fingerprints, under `tasks/TASK-NNN/context-save-<timestamp>.md`.
+`full` additionally preserves an explicitly supplied visible-conversation export
+verbatim. Missing exports are reported, never replaced with a fabricated history.
+Snapshots stay out of automatic indexing; transcript text is returned only by
+`context-load --include-transcript`.
+
+In a new task, use `context-load <path>` (or `/context-load <path>`). It checks
+format and source drift and returns historical context without modifying Brain
+records or SQLite. Copy the document first when changing machines/checkouts.
+The snapshot does not replace governed progress, complete work, or preserve
+permissions for future actions. The exact procedures are the installed
+`context-save` and `context-load` skills; both are available in every client.
+
 ### Task Capsule
 
 At the start of a complex request and before a complex phase handoff, the agent

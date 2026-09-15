@@ -28,6 +28,7 @@ REQUIRED_SHARED = (
     "memory-bank/README.md",
     "memory-bank/INDEX.md",
     "memory-bank/scripts/context.py",
+    "memory-bank/scripts/context_handoff.py",
     "memory-bank/scripts/validate.py",
     "project-brain/PROTOCOL.md",
     "project-brain/config/runtime.json",
@@ -38,6 +39,16 @@ REQUIRED_TOOLS = {
     "cursor": (".cursor/hooks/bash-validator.sh", ".cursor/skills/memory-bank/SKILL.md"),
     "codex": (".codex/hooks/bash-validator.sh", ".agents/skills/memory-bank/SKILL.md"),
 }
+# Every selected tool must carry the portable continuation entry points.
+for _tool, _skill_root in (("claude", ".claude"), ("cursor", ".cursor"), ("codex", ".agents")):
+    REQUIRED_TOOLS[_tool] += tuple(
+        f"{_skill_root}/skills/{name}/SKILL.md" for name in ("context-save", "context-load")
+    )
+    if _tool != "codex":
+        REQUIRED_TOOLS[_tool] += tuple(
+            f".{_tool}/commands/{name}.md" for name in ("context-save", "context-load")
+        )
+
 REQUIRED_SOURCE_EXCLUSIONS = (
     "CHANGELOG.md",
     "examples/completed-task/writing-plans-plan.md",
@@ -812,6 +823,47 @@ class CleanInstallTest(unittest.TestCase):
                     "--db",
                     str(local_db),
                 )
+                # Exercise the installed facade and imported module before
+                # another command creates SQLite.
+                handoff_input = target.parent / "handoff-input.json"
+                handoff_input.write_text(json.dumps({
+                    "goal": "Continue checking the copper rule",
+                    "summary": "The contract is ready for review",
+                    "next_steps": ["Check the current source"],
+                    "files": [source_path],
+                }), encoding="utf-8")
+                transcript = target.parent / "visible-export.txt"
+                marker = "Verbatim conversation sentinel"
+                transcript.write_bytes((marker + "\r\nCopper rule discussion.\r\n").encode())
+                for detail in ("summary", "topic", "full"):
+                    handoff = target / "tasks/TASK-001" / f"context-save-{detail}.md"
+                    extra = ("--topic", "copper rule") if detail == "topic" else ()
+                    if detail == "full":
+                        extra = ("--transcript", str(transcript))
+                    saved = run(
+                        *context_command, "context-save", "--input", str(handoff_input),
+                        "--output", str(handoff), "--detail", detail,
+                        "--source-client", tool, "--json", *extra,
+                        cwd=target, env=command_env,
+                    )
+                    self.assertEqual(0, saved.returncode, saved.stderr)
+                    self.assertTrue(handoff.is_file())
+                    loaded = run(
+                        *context_command, "context-load", "--input", str(handoff), "--json",
+                        cwd=target, env=command_env,
+                    )
+                    self.assertEqual(0, loaded.returncode, loaded.stderr)
+                    self.assertIn("The contract is ready for review", loaded.stdout)
+                    self.assertNotIn(marker, loaded.stdout)
+                    if detail == "full":
+                        full = run(
+                            *context_command, "context-load", "--input", str(handoff),
+                            "--include-transcript", "--json", cwd=target, env=command_env,
+                        )
+                        self.assertEqual(0, full.returncode, full.stderr)
+                        self.assertIn(marker, full.stdout)
+                self.assertFalse(local_db.exists(), "save/load must not create SQLite")
+
                 commands = (
                     (sys.executable, "memory-bank/scripts/validate.py"),
                     (

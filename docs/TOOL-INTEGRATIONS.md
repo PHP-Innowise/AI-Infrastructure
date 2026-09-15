@@ -235,6 +235,14 @@ key is absent, so a schema mismatch may become a no-op rather than blocking the
 turn. After a Codex upgrade, test each safety hook with a benign representative
 operation and inspect hook diagnostics before relying on enforcement.
 
+## Save and Load Context Across Clients
+
+Use `context-save summary`, `context-save topic <subject>`, or `context-save
+full --transcript <export-path>` in Codex; Claude Code and Cursor expose the same names with `/`.
+`context-load <path>` loads the resulting portable Markdown and reports source
+changes before continuation. Both run in the current conversation. See
+[Context Handoff](CONTEXT-HANDOFF.md) for examples, limits and the terminal API.
+
 ## Optional External Companion: Batch Harness
 
 Unattended multi-stage pipelines (nightly fleet review, mass migrations)

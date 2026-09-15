@@ -6,7 +6,7 @@
       "descriptor_bytes": 11870,
       "command_bytes": 7425,
       "agent_bytes": 10613,
-      "frontmatter_bytes": 19368,
+      "frontmatter_bytes": 20370,
       "body_bytes": 370217,
       "skills": 47
     },
@@ -15,7 +15,7 @@
       "descriptor_bytes": 9728,
       "command_bytes": 6726,
       "agent_bytes": 9389,
-      "frontmatter_bytes": 15564,
+      "frontmatter_bytes": 16566,
       "body_bytes": 192210,
       "skills": 50
     },
@@ -24,9 +24,9 @@
       "descriptor_bytes": 9227,
       "command_bytes": 5175,
       "agent_bytes": 7506,
-      "frontmatter_bytes": 14844,
-      "body_bytes": 208474,
-      "skills": 37
+      "frontmatter_bytes": 15846,
+      "body_bytes": 224362,
+      "skills": 39
     },
     "WordPress": {
       "agents_md_bytes": 18450,

@@ -4,6 +4,12 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Added
+
+- Seed the portable context save/load runtime and generate its client entry
+  points so newly generated projects can carry curated continuation documents
+  between Codex, Claude Code and Cursor.
+
 ### Fixed
 
 - **`memory-seed` asset `context.py` counted promotion iterator records instead of

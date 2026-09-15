@@ -25,6 +25,8 @@
 .claude/skills/coder-frontend/SKILL.md -diff linguist-generated=true
 .claude/skills/coder/SKILL.md -diff linguist-generated=true
 .claude/skills/console-scheduler/SKILL.md -diff linguist-generated=true
+.claude/skills/context-load/SKILL.md -diff linguist-generated=true
+.claude/skills/context-save/SKILL.md -diff linguist-generated=true
 .claude/skills/council/SKILL.md -diff linguist-generated=true
 .claude/skills/database-designer/SKILL.md -diff linguist-generated=true
 .claude/skills/dependency-manager/SKILL.md -diff linguist-generated=true
@@ -162,6 +164,8 @@
 .cursor/commands/coder-frontend.md -diff linguist-generated=true
 .cursor/commands/coder.md -diff linguist-generated=true
 .cursor/commands/console-scheduler.md -diff linguist-generated=true
+.cursor/commands/context-load.md -diff linguist-generated=true
+.cursor/commands/context-save.md -diff linguist-generated=true
 .cursor/commands/council.md -diff linguist-generated=true
 .cursor/commands/database-designer.md -diff linguist-generated=true
 .cursor/commands/debugger.md -diff linguist-generated=true
@@ -214,6 +218,8 @@
 .cursor/skills/coder-frontend/SKILL.md -diff linguist-generated=true
 .cursor/skills/coder/SKILL.md -diff linguist-generated=true
 .cursor/skills/console-scheduler/SKILL.md -diff linguist-generated=true
+.cursor/skills/context-load/SKILL.md -diff linguist-generated=true
+.cursor/skills/context-save/SKILL.md -diff linguist-generated=true
 .cursor/skills/council/SKILL.md -diff linguist-generated=true
 .cursor/skills/database-designer/SKILL.md -diff linguist-generated=true
 .cursor/skills/dependency-manager/SKILL.md -diff linguist-generated=true
