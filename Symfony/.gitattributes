@@ -107,6 +107,7 @@
 .codex/GOLDEN-PRINCIPLES.md -diff linguist-generated=true
 .codex/STABILIZATION.md -diff linguist-generated=true
 .codex/hooks/bash-validator.sh -diff linguist-generated=true
+.codex/hooks/context-continuity.sh -diff linguist-generated=true
 .codex/hooks/file-naming-validator.sh -diff linguist-generated=true
 .codex/hooks/local-context.sh -diff linguist-generated=true
 .codex/hooks/loop-detection.sh -diff linguist-generated=true
@@ -206,6 +207,7 @@
 .cursor/commands/verify.md -diff linguist-generated=true
 .cursor/commands/writing-plans.md -diff linguist-generated=true
 .cursor/hooks/bash-validator.sh -diff linguist-generated=true
+.cursor/hooks/context-continuity.sh -diff linguist-generated=true
 .cursor/hooks/file-naming-validator.sh -diff linguist-generated=true
 .cursor/hooks/local-context.sh -diff linguist-generated=true
 .cursor/hooks/loop-detection.sh -diff linguist-generated=true

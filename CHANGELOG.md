@@ -26,6 +26,8 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Add trusted automatic same-branch context continuity across Codex, Claude Code, and Cursor. The shared runtime stores bounded documented visible content only in ignored `.context-handoff/`, restores a historical excerpt through native hook envelopes, never mutates Brain/Bank/SQLite, and offers `CONTEXT_CONTINUITY_DISABLED=1` as a process-local opt-out. Native transcript availability and hook lifecycle delivery remain client-dependent; repository tests use synthetic payloads rather than live accounts. Mirror generation also reconciles hook executable bits with their canonical scripts.
+
 - Add portable `context-save` / `context-load` workflows for Codex, Claude Code
   and Cursor across all four editions: summary, topic-scoped and detailed
   continuation documents with verbatim native exports in full mode, explicit

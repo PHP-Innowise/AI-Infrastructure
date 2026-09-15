@@ -50,3 +50,20 @@ Codex tool identifiers and payload keys may still differ from Claude Code. Both
 scripts fail open (`exit 0`) when a key is missing, so a payload mismatch
 degrades to "no capsule this turn" rather than a broken turn. If the capsule
 never appears, check the payload keys before assuming the wiring is wrong.
+
+## Automatic conversation continuity
+
+`context-continuity.sh capture` runs on `UserPromptSubmit` (`prompt`) and `Stop` (`last_assistant_message`);
+`context-continuity.sh restore` runs on `SessionStart`. Installed infrastructure
+enables this path by default: no save/load command or confirmation is required.
+The hook calls `memory-bank/scripts/context_continuity.py`, writes private local
+state under the ignored `.context-handoff/`, and sends a bounded excerpt of the
+previous conversation to the next session through native hook context output.
+Only the current repository and branch qualify. Prior conversation text is
+untrusted background; it cannot authorize actions in the new task.
+
+Native hook transcripts are optional and format-dependent. When unavailable,
+the final assistant text still supplies continuity. Full history is never
+injected automatically or placed in Project Brain, Memory Bank, or SQLite.
+Capture is silent; both actions fail open under `CONTEXT_HOOK_BUDGET` (default
+5 seconds). See the repository's context-handoff guide for limitations.

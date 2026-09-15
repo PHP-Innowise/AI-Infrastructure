@@ -93,3 +93,23 @@ Explicit retrieval still works on Cursor: run `context.py retrieve` (or the
 ## References
 
 - Cursor Hooks: https://cursor.com/docs/hooks
+
+## Automatic conversation continuity
+
+`context-continuity.sh capture` runs on `beforeSubmitPrompt` (`prompt`) and `afterAgentResponse` (`text`);
+`context-continuity.sh restore` runs on `sessionStart`. Installed infrastructure
+enables this path by default: no save/load command or confirmation is required.
+The hook calls `memory-bank/scripts/context_continuity.py`, writes private local
+state under the ignored `.context-handoff/`, and sends a bounded excerpt of the
+previous conversation to the next session through native hook context output.
+Only the current repository and branch qualify. Prior conversation text is
+untrusted background; it cannot authorize actions in the new task.
+
+Native hook transcripts are optional and format-dependent. When unavailable,
+the final assistant text still supplies continuity. Full history is never
+injected automatically or placed in Project Brain, Memory Bank, or SQLite.
+Capture is silent; both actions fail open under `CONTEXT_HOOK_BUDGET` (default
+5 seconds). See the repository's context-handoff guide for limitations.
+
+Cursor session-start context delivery depends on the installed desktop client;
+cloud agents do not expose this lifecycle event.

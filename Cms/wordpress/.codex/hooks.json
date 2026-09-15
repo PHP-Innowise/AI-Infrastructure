@@ -6,6 +6,11 @@
           {
             "type": "command",
             "command": ".codex/hooks/local-context.sh"
+          },
+          {
+            "type": "command",
+            "command": ".codex/hooks/context-continuity.sh restore",
+            "additionalContextLimit": 2000
           }
         ]
       }
@@ -17,6 +22,10 @@
             "type": "command",
             "command": ".codex/hooks/working-memory-read.sh",
             "additionalContextLimit": 4000
+          },
+          {
+            "type": "command",
+            "command": ".codex/hooks/context-continuity.sh capture"
           }
         ]
       }
@@ -27,6 +36,10 @@
           {
             "type": "command",
             "command": ".codex/hooks/working-memory-write.sh"
+          },
+          {
+            "type": "command",
+            "command": ".codex/hooks/context-continuity.sh capture"
           }
         ]
       }

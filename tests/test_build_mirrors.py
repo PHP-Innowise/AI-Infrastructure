@@ -22,6 +22,7 @@ Run: python3 -m unittest tests.test_build_mirrors
 from __future__ import annotations
 
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -66,6 +67,31 @@ TYPO_RULES = {
         },
     ],
 }
+
+
+class TestExecutableHooks(unittest.TestCase):
+    def test_generated_hook_is_executable_and_mode_drift_is_repaired(self):
+        with tempfile.TemporaryDirectory(prefix="executable-hook-") as temporary:
+            edition = Path(temporary)
+            source = edition / ".claude/hooks/continuity.sh"
+            source.parent.mkdir(parents=True)
+            source.write_text("#!/bin/sh\nprintf 'captured'\n")
+            source.chmod(0o755)
+            rules = {"classes": [{
+                "name": "hooks", "canonical": ".claude/hooks",
+                "mirrors": {".cursor/hooks": {"transform": "copy"}},
+            }]}
+            problems, _ = bm.process_edition(edition, rules, None, write=True)
+            self.assertEqual(problems, [])
+            target = edition / ".cursor/hooks/continuity.sh"
+            result = subprocess.run([str(target)], capture_output=True, text=True, check=True)
+            self.assertEqual(result.stdout, "captured")
+            target.chmod(0o644)
+            problems, _ = bm.process_edition(edition, rules, None, write=False)
+            self.assertTrue(any("executable bits differ" in item for item in problems))
+            bm.process_edition(edition, rules, None, write=True)
+            self.assertEqual(target.stat().st_mode & 0o111, 0o111)
+            self.assertEqual(bm.process_edition(edition, rules, None, write=False), ([], []))
 
 
 class TestOnlyClassReversePass(unittest.TestCase):

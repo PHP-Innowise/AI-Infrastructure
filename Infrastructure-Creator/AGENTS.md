@@ -121,6 +121,15 @@ Infrastructure-Creator intentionally has no `memory-bank/` of its own: its job i
   stamped target `AGENTS.md` and `.infra-manifest.json`. `infra-update` MUST NOT
   overwrite any file whose hash differs from that manifest without an explicit
   per-file human decision, and MUST NOT touch files the manifest does not list.
+- Generated output MUST enable trusted automatic same-branch continuation for
+  every selected client through `context-continuity.sh` and
+  `memory-bank/scripts/context_continuity.py`. It may capture only documented
+  visible hook fields or an explicitly supplied native visible export into
+  ignored `.context-handoff/`; it MUST NOT bypass client trust, scrape private
+  account/session storage, retain hidden reasoning or tool envelopes, write
+  Project Brain/Memory Bank/SQLite, or claim lifecycle-dependent content is a
+  complete live session. `CONTEXT_CONTINUITY_DISABLED=1`, `true`, or `yes`
+  disables it for the process.
 - The generated `context-save`/`context-load` pair is the only portable
   continuation surface. A user-requested visible transcript may be embedded
   only in the explicit `tasks/TASK-NNN/context-save-*.md` artifact created by

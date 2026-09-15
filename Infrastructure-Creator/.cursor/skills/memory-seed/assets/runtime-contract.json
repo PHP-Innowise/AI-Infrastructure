@@ -5,6 +5,7 @@
     "canonical_sources": [
       "memory-bank/scripts/context.py",
       "memory-bank/scripts/context_handoff.py",
+      "memory-bank/scripts/context_continuity.py",
       "memory-bank/scripts/brain_runtime.py",
       "memory-bank/scripts/context_retrieval.py",
       "project-brain/PROTOCOL.md"
@@ -57,6 +58,7 @@
       "memory-bank/templates/chunk.md",
       "memory-bank/scripts/context.py",
       "memory-bank/scripts/context_handoff.py",
+      "memory-bank/scripts/context_continuity.py",
       "memory-bank/scripts/brain_runtime.py",
       "memory-bank/scripts/context_retrieval.py",
       "memory-bank/scripts/validate.py",
@@ -89,6 +91,10 @@
       {
         "path": "tasks/TASK-NNN/context-save-*.md",
         "via": "context.py context-save from curated JSON and, for detail full, an explicit visible transcript export"
+      },
+      {
+        "path": ".context-handoff/",
+        "via": "trusted enabled context-continuity hooks; local ignored same-repository, same-branch visible-context snapshots only"
       },
       {
         "path": "memory-bank/local/context.db",
@@ -181,7 +187,9 @@
       "python3 memory-bank/scripts/context.py context-save --input INPUT.json --output tasks/TASK-NNN/context-save-TIMESTAMP.md --detail topic --topic TOPIC --source-client CLIENT --json": "create one exclusive-new portable topic handoff from a curated payload, writing only the named artifact",
       "python3 memory-bank/scripts/context.py context-save --input INPUT.json --output tasks/TASK-NNN/context-save-TIMESTAMP.md --detail full --source-client CLIENT --transcript VISIBLE-EXPORT.md --json": "create one exclusive-new portable full handoff from a curated payload and explicit visible transcript export, writing only the named artifact",
       "python3 memory-bank/scripts/context.py context-load --input HANDOFF.md --json": "validate one explicit portable handoff and report source-fingerprint drift without loading transcript content or writing files",
-      "python3 memory-bank/scripts/context.py context-load --input HANDOFF.md --include-transcript --json": "validate one explicit portable handoff, include its explicit visible transcript, and report source-fingerprint drift without writing files"
+      "python3 memory-bank/scripts/context.py context-load --input HANDOFF.md --include-transcript --json": "validate one explicit portable handoff, include its explicit visible transcript, and report source-fingerprint drift without writing files",
+      "python3 memory-bank/scripts/context_continuity.py --root ROOT --host CLIENT --event capture": "quietly capture only the documented visible hook payload in ignored same-repository, same-branch local continuity storage",
+      "python3 memory-bank/scripts/context_continuity.py --root ROOT --host CLIENT --event restore --json": "return a bounded historical same-branch visible-context envelope for the host without mutating Brain, Bank, or SQLite"
     },
     "outcomes": {
       "python3 memory-bank/scripts/context.py status": [
@@ -281,8 +289,24 @@
           "exit": 1,
           "meaning": "reports malformed or unsafe input without changing runtime state"
         }
+      ],
+      "python3 memory-bank/scripts/context_continuity.py --root ROOT --host CLIENT --event capture": [
+        {
+          "exit": 0,
+          "meaning": "silently captures a validated bounded visible payload when trusted hook input and branch identity are available; otherwise stores nothing"
+        }
+      ],
+      "python3 memory-bank/scripts/context_continuity.py --root ROOT --host CLIENT --event restore --json": [
+        {
+          "exit": 0,
+          "meaning": "silently returns the host-native bounded historical-context envelope when a validated same-branch snapshot exists; otherwise returns no context"
+        }
       ]
-    }
+    },
+    "automatic_continuity": [
+      "python3 memory-bank/scripts/context_continuity.py --root ROOT --host CLIENT --event capture",
+      "python3 memory-bank/scripts/context_continuity.py --root ROOT --host CLIENT --event restore --json"
+    ]
   },
   "runtime_fixed_skills": {
     "memory-bank": {
@@ -327,5 +351,23 @@
         "explicit transcript inclusion"
       ]
     }
+  },
+  "automatic_continuity": {
+    "enabled_by": "trusted enabled native project hooks; never bypass client trust or permissions",
+    "disabled_by": "CONTEXT_CONTINUITY_DISABLED=1, true, or yes",
+    "storage": ".context-handoff/",
+    "scope": "local ignored same-repository, same-Git-branch convenience state; excluded from Project Brain, Memory Bank, SQLite, automatic retrieval, and Git",
+    "visible_input": "documented visible prompt or assistant text, or an explicit visible .txt/.md/.markdown export; known JSONL shapes are projected to visible user/assistant text only",
+    "excluded_input": "private account/session stores, hidden reasoning, system/tool envelopes, arbitrary JSONL, and invented transcript text",
+    "restore": "bounded historical excerpt with provenance; partial/projected/lifecycle-delayed input is never claimed to be a full live session",
+    "hosts": [
+      "claude",
+      "codex",
+      "cursor"
+    ],
+    "events": [
+      "capture",
+      "restore"
+    ]
   }
 }

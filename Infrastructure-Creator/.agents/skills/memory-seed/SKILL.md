@@ -20,7 +20,7 @@ bundle passes.
 - **`memory-bank/`** - the durable, indexed shared-memory layer, plus the **context-brain runtime** under `memory-bank/scripts/`: `context.py` (the CLI facade), `brain_runtime.py` (governed Project Brain runtime), `context_retrieval.py` (local SQLite/BM25 retrieval), and `validate.py` (the bank validator). The runtime is dependency-free (standard library only) and stack-agnostic.
 - **`project-brain/`** - the governed control plane for active work: dynamic records (tasks, findings, bugs, incidents, decisions, events), handoffs, the append-only agent message channel that orchestrated flows write to, retrieval manifests, promotion proposals, schemas, and `PROTOCOL.md`. The runtime under `memory-bank/scripts/` operates it.
 
-`skill-forge` separately generates the operational skills that drive this layer in every selected edition (`memory-bank`, `project-brain`, `checkpoint`, `memory`, `context-save`, `context-load` - see `skill-forge/references/php-process-skills.md`), and `hook-forge` generates the working-memory hooks (`working-memory-read.sh` / `working-memory-write.sh`) that call `memory-bank/scripts/context.py refresh` / `turn` automatically. `assets/runtime-contract.json` is the canonical machine-readable source for the six guides' paths, SQLite checkpoint/turn tables, creatable artifacts, command forms, and ownership split. The paths this skill creates are the contract those hooks and skills depend on - never rename them.
+`skill-forge` separately generates the operational skills that drive this layer in every selected edition (`memory-bank`, `project-brain`, `checkpoint`, `memory`, `context-save`, `context-load` - see `skill-forge/references/php-process-skills.md`). `hook-forge` generates the working-memory hooks and a trusted `context-continuity.sh` adapter that calls `memory-bank/scripts/context_continuity.py` for bounded, same-branch visible-context capture and restore. `assets/runtime-contract.json` is the canonical machine-readable source for the six guides' paths, continuity boundaries, SQLite checkpoint/turn tables, creatable artifacts, command forms, and ownership split. The paths this skill creates are the contract those hooks and skills depend on - never rename them.
 
 The profile's section 12 ("Memory Bank Preview") already lists exactly what this skill is expected to seed. It plans one chunk per cohesive durable concept, composed only from confirmed evidence, rather than one tiny chunk per factual line. This skill's job is to **fulfill that preview**, not re-derive it: same count, same concepts, same sources. If the target changed, flag drift rather than silently seeding stale content.
 
@@ -34,7 +34,7 @@ Into the required generation root, create:
 - `memory-bank/README.md`, `memory-bank/INDEX.md`, `memory-bank/.memory-counter` (written fresh)
 - `memory-bank/runtime-contract.json` (copied verbatim from `assets/runtime-contract.json`)
 - `memory-bank/templates/chunk.md` (copied verbatim from `assets/templates/chunk.md`)
-- `memory-bank/scripts/context.py`, `memory-bank/scripts/context_handoff.py`, `memory-bank/scripts/brain_runtime.py`, `memory-bank/scripts/context_retrieval.py`, `memory-bank/scripts/validate.py` (copied verbatim from `assets/scripts/`)
+- `memory-bank/scripts/context.py`, `memory-bank/scripts/context_handoff.py`, `memory-bank/scripts/context_continuity.py`, `memory-bank/scripts/brain_runtime.py`, `memory-bank/scripts/context_retrieval.py`, `memory-bank/scripts/validate.py` (copied verbatim from `assets/scripts/`)
 - `memory-bank/local/.gitkeep` (gitignored machine-local state: the disposable SQLite index `context.db`, turn buffers, ephemeral manifests)
 - `memory-bank/chunks/MEM-{NNNN}-{short-slug}.md` per seeded chunk (starting at `MEM-0001`)
 
@@ -47,7 +47,7 @@ Into the required generation root, create:
 
 **Target `.gitignore` requirements:** do not read or modify the root file.
 Write `tasks/TASK-{N}/gitignore-requirements/memory-seed.json` containing the
-exact sorted requirements `["__pycache__/", "memory-bank/local/"]`.
+exact sorted requirements `[".context-handoff/", "__pycache__/", "memory-bank/local/"]`.
 `infra-generate`/`infra-update` are the sole root-file composers.
 
 Append a log to `tasks/TASK-{N}/memory-seed-log.md`.
@@ -115,7 +115,7 @@ All other `runtime.json` values are shipped defaults (`mode: governed`, `automat
 - [MEM-0001: title (source)]
 - ...
 
-**Runtime:** memory-bank/scripts/ (context.py, context_handoff.py, brain_runtime.py, context_retrieval.py, validate.py - verbatim)
+**Runtime:** memory-bank/scripts/ (context.py, context_handoff.py, context_continuity.py, brain_runtime.py, context_retrieval.py, validate.py - verbatim)
 **Project Brain:** project-brain/ skeleton (framework slug: [slug], canonical edition: [.agents/.claude/.cursor])
 **Counter:** [value]
 **validate.py:** [pass/fail] | **context.py validate:** [pass/fail] | **context.py status:** [pass/fail]
@@ -141,7 +141,7 @@ skill-flow-composer, once all forges have finished.
 - MUST explain in Verification, per cited source, what its exact range proves and what change triggers re-review; a bare list of paths explains nothing.
 - MUST run all three checks in step 7 and fix every reported error before reporting success.
 - MUST create ONE shared `memory-bank/` and ONE shared `project-brain/` at the target root, not per edition, and MUST NOT rename any runtime path (`hook-forge`'s working-memory hooks call `memory-bank/scripts/context.py` at exactly that path).
-- MUST make the six runtime-fixed memory-continuity guides compile from `assets/runtime-contract.json`; generic prose, guessed flags, and paths not listed as required or creatable cannot override it.
+- MUST make the six runtime-fixed memory-continuity guides compile from `assets/runtime-contract.json`; generic prose, guessed flags, and paths not listed as required or creatable cannot override it. The trusted automatic-continuity adapter is local ignored state only: it receives documented visible hook fields, never reads private stores or hidden reasoning, and never writes Project Brain, Memory Bank, or SQLite.
 
 ## Final Output
 

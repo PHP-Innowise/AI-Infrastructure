@@ -28,6 +28,7 @@ REQUIRED_SHARED = (
     "memory-bank/README.md",
     "memory-bank/INDEX.md",
     "memory-bank/scripts/context.py",
+    "memory-bank/scripts/context_continuity.py",
     "memory-bank/scripts/context_handoff.py",
     "memory-bank/scripts/validate.py",
     "project-brain/PROTOCOL.md",
@@ -39,6 +40,30 @@ REQUIRED_TOOLS = {
     "cursor": (".cursor/hooks/bash-validator.sh", ".cursor/skills/memory-bank/SKILL.md"),
     "codex": (".codex/hooks/bash-validator.sh", ".agents/skills/memory-bank/SKILL.md"),
 }
+CONTINUITY_HOOKS = {
+    "claude": ".claude/hooks/context-continuity.sh",
+    "cursor": ".cursor/hooks/context-continuity.sh",
+    "codex": ".codex/hooks/context-continuity.sh",
+}
+CONTINUITY_REGISTRATIONS = {
+    "claude": {
+        "SessionStart": (".claude/hooks/context-continuity.sh restore",),
+        "UserPromptSubmit": (".claude/hooks/context-continuity.sh capture",),
+        "Stop": (".claude/hooks/context-continuity.sh capture",),
+    },
+    "cursor": {
+        "sessionStart": (".cursor/hooks/context-continuity.sh restore",),
+        "beforeSubmitPrompt": (".cursor/hooks/context-continuity.sh capture",),
+        "afterAgentResponse": (".cursor/hooks/context-continuity.sh capture",),
+    },
+    "codex": {
+        "SessionStart": (".codex/hooks/context-continuity.sh restore",),
+        "UserPromptSubmit": (".codex/hooks/context-continuity.sh capture",),
+        "Stop": (".codex/hooks/context-continuity.sh capture",),
+    },
+}
+for _tool, _hook in CONTINUITY_HOOKS.items():
+    REQUIRED_TOOLS[_tool] += (_hook,)
 # Every selected tool must carry the portable continuation entry points.
 for _tool, _skill_root in (("claude", ".claude"), ("cursor", ".cursor"), ("codex", ".agents")):
     REQUIRED_TOOLS[_tool] += tuple(
@@ -61,11 +86,17 @@ REQUIRED_SOURCE_EXCLUSIONS = (
 )
 
 
-def run(*args: str, cwd: Path = ROOT, env: dict[str, str] | None = None):
+def run(
+    *args: str,
+    cwd: Path = ROOT,
+    env: dict[str, str] | None = None,
+    input_text: str | None = None,
+):
     return subprocess.run(
         list(args),
         cwd=cwd,
         env=env,
+        input=input_text,
         capture_output=True,
         text=True,
         timeout=TIMEOUT,
@@ -699,6 +730,38 @@ class CleanInstallTest(unittest.TestCase):
             )
         self.assertEqual("[]", shipped.strip())
 
+    def _continuity_registrations(self, target: Path, tool: str) -> dict[str, list[str]]:
+        settings = target / (".claude/settings.json" if tool == "claude" else f".{tool}/hooks.json")
+        parsed = json.loads(settings.read_text(encoding="utf-8"))
+        registered: dict[str, list[str]] = {}
+        for event, groups in parsed["hooks"].items():
+            commands: list[str] = []
+            for group in groups:
+                hooks = group.get("hooks", [group])
+                commands.extend(
+                    hook["command"] for hook in hooks if isinstance(hook.get("command"), str)
+                )
+            registered[event] = commands
+        return registered
+
+    def _continuity_text(self, tool: str, output: str) -> str:
+        payload = json.loads(output)
+        if tool == "cursor":
+            return payload["additional_context"]
+        return payload["hookSpecificOutput"]["additionalContext"]
+
+    def _run_continuity_hook(
+        self, target: Path, tool: str, action: str, payload: dict[str, str]
+    ) -> subprocess.CompletedProcess[str]:
+        # Hooks are registered as a project-relative executable.  Invoke that
+        # exact installed file from outside the project to prove it derives its
+        # root from its own location rather than the caller's current directory.
+        return run(
+            str(target / CONTINUITY_HOOKS[tool]), action,
+            cwd=target.parent,
+            input_text=json.dumps(payload),
+        )
+
     def _run_clean_install(self, edition: str, tool: str, data: dict) -> None:
         with tempfile.TemporaryDirectory(prefix="clean install ") as raw:
             target = Path(raw).resolve()
@@ -791,6 +854,10 @@ class CleanInstallTest(unittest.TestCase):
                 )
                 for path in (*REQUIRED_SHARED, *REQUIRED_TOOLS[tool]):
                     self.assertTrue((target / path).is_file(), path)
+                self.assertTrue(
+                    os.access(target / CONTINUITY_HOOKS[tool], os.X_OK),
+                    "registered continuity hook must be executable",
+                )
 
                 for path in data["excluded_tracked_paths"]:
                     if path == "CHANGELOG.md":
@@ -863,6 +930,85 @@ class CleanInstallTest(unittest.TestCase):
                         self.assertEqual(0, full.returncode, full.stderr)
                         self.assertIn(marker, full.stdout)
                 self.assertFalse(local_db.exists(), "save/load must not create SQLite")
+
+                registrations = self._continuity_registrations(target, tool)
+                for event, commands in CONTINUITY_REGISTRATIONS[tool].items():
+                    for command in commands:
+                        self.assertIn(command, registrations.get(event, []), (tool, event, command))
+                self.assertIn(".context-handoff", gitignore.read_text(encoding="utf-8"))
+
+                session = "clean-install-continuity"
+                prompt_marker = "Automatic continuity prompt sentinel for {}".format(tool)
+                response_marker = "Automatic continuity response sentinel for {}".format(tool)
+                prompt_payload = {
+                    "session_id": session,
+                    "conversation_id": session,
+                    "prompt": prompt_marker,
+                }
+                response_payload = {
+                    "session_id": session,
+                    "conversation_id": session,
+                    "last_assistant_message": response_marker,
+                    "text": response_marker,
+                }
+                prompt_capture = self._run_continuity_hook(
+                    target, tool, "capture", prompt_payload
+                )
+                self.assertEqual(0, prompt_capture.returncode, prompt_capture.stderr)
+                self.assertEqual("", prompt_capture.stdout)
+                response_capture = self._run_continuity_hook(
+                    target, tool, "capture", response_payload
+                )
+                self.assertEqual(0, response_capture.returncode, response_capture.stderr)
+                self.assertEqual("", response_capture.stdout)
+                storage = target / ".context-handoff"
+                snapshots = sorted(storage.glob("*.json"))
+                self.assertEqual(1, len(snapshots))
+                ignored_snapshot = run(
+                    "git", "check-ignore", "--quiet", "--", str(snapshots[0].relative_to(target)),
+                    cwd=target,
+                )
+                self.assertEqual(0, ignored_snapshot.returncode, ignored_snapshot.stderr)
+                self.assertFalse(local_db.exists(), "continuity hooks must not create SQLite")
+
+                restored = self._run_continuity_hook(target, tool, "restore", {})
+                self.assertEqual(0, restored.returncode, restored.stderr)
+                restored_text = self._continuity_text(tool, restored.stdout)
+                self.assertIn(prompt_marker, restored_text)
+                self.assertIn(response_marker, restored_text)
+
+                other_host = "cursor" if tool != "cursor" else "claude"
+                cross_host = run(
+                    sys.executable, str(target / "memory-bank/scripts/context_continuity.py"),
+                    "--root", str(target), "--host", other_host,
+                    "--event", "restore", "--json", cwd=target.parent,
+                )
+                self.assertEqual(0, cross_host.returncode, cross_host.stderr)
+                self.assertIn(response_marker, self._continuity_text(other_host, cross_host.stdout))
+
+                for key, value in (("user.email", "install@example.test"), ("user.name", "Install Test")):
+                    configured = run("git", "config", key, value, cwd=target)
+                    self.assertEqual(0, configured.returncode, configured.stderr)
+                staged = run("git", "add", "-f", "--", ".gitignore", source_path, cwd=target)
+                self.assertEqual(0, staged.returncode, staged.stderr)
+                committed = run("git", "commit", "-qm", "continuity test baseline", cwd=target)
+                self.assertEqual(0, committed.returncode, committed.stderr)
+                switched = run("git", "switch", "-q", "-c", "continuity-isolation", cwd=target)
+                self.assertEqual(0, switched.returncode, switched.stderr)
+                foreign = self._run_continuity_hook(target, tool, "restore", {})
+                self.assertEqual(0, foreign.returncode, foreign.stderr)
+                self.assertEqual("", foreign.stdout, "a different branch must not restore prior context")
+                malformed = run(
+                    str(target / CONTINUITY_HOOKS[tool]), "capture",
+                    cwd=target.parent, input_text="{not JSON",
+                )
+                self.assertEqual(0, malformed.returncode, malformed.stderr)
+                self.assertEqual("", malformed.stdout)
+                returned = run("git", "switch", "-q", "main", cwd=target)
+                self.assertEqual(0, returned.returncode, returned.stderr)
+                restored_main = self._run_continuity_hook(target, tool, "restore", {})
+                self.assertEqual(0, restored_main.returncode, restored_main.stderr)
+                self.assertIn(response_marker, self._continuity_text(tool, restored_main.stdout))
 
                 commands = (
                     (sys.executable, "memory-bank/scripts/validate.py"),

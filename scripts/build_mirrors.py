@@ -296,14 +296,32 @@ def process_edition(
             for rel, blob in expected.items():
                 target = mirror / rel
                 actual = target.read_bytes() if target.is_file() else None
-                if actual == blob:
+                # Hook registrations execute the path directly. A newly
+                # generated script must retain the canonical executable bits;
+                # matching bytes alone can otherwise ship an unusable hook.
+                executable = (
+                    (canonical / rel).stat().st_mode & 0o111
+                    if cls["name"] == "hooks" and rel.endswith(".sh") else None
+                )
+                mode_drift = (
+                    executable is not None and actual is not None
+                    and target.stat().st_mode & 0o111 != executable
+                )
+                if actual == blob and not mode_drift:
                     continue
                 if write:
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(blob)
+                    if actual != blob:
+                        target.write_bytes(blob)
+                    if executable is not None:
+                        target.chmod((target.stat().st_mode & 0o666) | executable)
                     written.append(f"{label}/{mirror_rel}/{rel}")
                 else:
-                    state = "missing from mirror" if actual is None else "differs from canon"
+                    state = (
+                        "executable bits differ from canon" if actual == blob
+                        else "missing from mirror" if actual is None
+                        else "differs from canon"
+                    )
                     problems.append(
                         f"{label}: [{cls['name']}] {mirror_rel}/{rel} {state} "
                         f"({cls['canonical']}/{rel})"

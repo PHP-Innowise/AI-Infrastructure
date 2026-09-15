@@ -93,23 +93,41 @@ SQLite stores only a local binding/cache and optional replay episode. Use
 
 For an argument-free refresh, invoke the AI skill `memory` (or `/memory` in Claude/Cursor). In governed mode it validates Project Brain and refreshes only the disposable source index; it never derives a branch task or writes competing SQLite progress. `checkpoint` follows the same authority gate and captures sanitized local Working Memory only when lightweight mode is explicitly configured. Both workflows stop without completing tasks, applying promotions, or editing tracked sources.
 
-### Portable Context for the Next Task
+### Automatic Context Continuity
+
+Trusted enabled client hooks make same-branch continuation automatic in Codex,
+Claude Code, and Cursor. The hooks capture only documented visible prompt or
+assistant text into ignored local `.context-handoff/` and restore a bounded
+historical excerpt at the next available session start. It is a convenience
+layer: it is outside Project Brain, Memory Bank, SQLite, automatic indexing,
+and Git; it never changes task state or preserves authorization. Verify restored
+claims against current sources.
+
+Client lifecycle data can be unavailable, delayed, partial, or projected. A
+recognised JSONL input contains only projected visible user/assistant text and
+is never a complete session. The runtime never scans account/session storage,
+hidden reasoning, tool envelopes, or private client data. Set
+`CONTEXT_CONTINUITY_DISABLED=1` (also `true` or `yes`) to disable it. Hooks must
+be enabled through the client's ordinary project trust mechanism; repository
+tests use synthetic payloads and do not prove live-account event delivery.
+
+### Portable Context for Another Machine or Review
 
 Use `context-save summary`, `context-save topic <subject>`, or `context-save
-full --transcript <export-path>` in Codex, and `/context-save` with the same arguments in Claude Code or
-Cursor. The current agent writes a curated Markdown continuation document,
-with source fingerprints, under `tasks/TASK-NNN/context-save-<timestamp>.md`.
-`full` additionally preserves an explicitly supplied visible-conversation export
-verbatim. Missing exports are reported, never replaced with a fabricated history.
+full --transcript <export-path>` in Codex, and `/context-save` with the same
+arguments in Claude Code or Cursor only when a portable, reviewable artifact is
+needed. The current agent writes a curated Markdown continuation document with
+source fingerprints under `tasks/TASK-NNN/context-save-<timestamp>.md`. `full`
+additionally preserves an explicitly supplied visible-conversation export
+verbatim. Missing exports are reported, never replaced with fabricated history.
 Snapshots stay out of automatic indexing; transcript text is returned only by
 `context-load --include-transcript`.
 
-In a new task, use `context-load <path>` (or `/context-load <path>`). It checks
-format and source drift and returns historical context without modifying Brain
-records or SQLite. Copy the document first when changing machines/checkouts.
-The snapshot does not replace governed progress, complete work, or preserve
-permissions for future actions. The exact procedures are the installed
-`context-save` and `context-load` skills; both are available in every client.
+In another checkout or machine, use `context-load <path>` (or
+`/context-load <path>`). It checks format and source drift without modifying
+Brain records or SQLite. The snapshot does not replace governed progress,
+complete work, or preserve permissions for future actions. The exact procedures
+are the installed `context-save` and `context-load` skills.
 
 ### Task Capsule
 
