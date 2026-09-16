@@ -146,3 +146,9 @@ skill-flow-composer, once all forges have finished.
 ## Final Output
 
 Return the seeded chunk list (ID, cohesive concept title, canonical sources), how it compares to section 12's preview, the framework slug and canonical edition written to `runtime.json`, the final counter value, the three validator/smoke results, the log path, and the next step (`skill-flow-composer`).
+
+The automatic_continuity contract also owns frozen `.context-handoff/merges/`
+archives and selected chat merging through `context-load merge`. Preserve every
+source separately, keep conflicts unresolved, bind merges to new task identity,
+and retain frozen sources across live-snapshot rotation. Native task creation
+is client-capability dependent; never claim an archive is already a native task.

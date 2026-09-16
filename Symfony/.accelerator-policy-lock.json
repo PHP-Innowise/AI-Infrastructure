@@ -61,7 +61,7 @@
     ".agents/skills/coder/SKILL.md": "6af3db4accd8d24643d303583ef6364500b84e685ef10b3e4dc8619158bf4610",
     ".agents/skills/console-command-coder/SKILL.md": "78a9479a0d542b0a7bb55e41f223e68abe9968ce4efd7f2fd9365c7bd557c2c4",
     ".agents/skills/container-reviewer/SKILL.md": "7917c8b4b76d557386d269f0600830c57468c6e5b0c91b5436312ed27489b5f1",
-    ".agents/skills/context-load/SKILL.md": "7ad59f10d85b754589629c29444f9b537d5972ee373b97ee86b649a5c56e1aad",
+    ".agents/skills/context-load/SKILL.md": "36129a3ce1a8c666d2804bc8e42c759ce74138fc6ed405df0c8498a7765847b2",
     ".agents/skills/context-save/SKILL.md": "276ba5ff4ca20fe34e182ab6781bf19d96afb8f19c0446a00b7a433dcebca0bf",
     ".agents/skills/council/SKILL.md": "19b3f7d2297f04f730738d887fbdd118f791fc31841db20e154816596c7c0415",
     ".agents/skills/database-designer/SKILL.md": "a3965f8a8fe03ded704c7a6f6f6b62cdf738049c2e397a10a29c80eb935f966a",
@@ -220,7 +220,7 @@
     ".claude/commands/coder.md": "75ddfceed7b993857e3274ae3fb12c1b98525fd0e2e90811344ab87ecff031a0",
     ".claude/commands/console-command-coder.md": "e73109d2680824a9bc47b1a27157aaada61b652f67117949911069a4c76b7d7f",
     ".claude/commands/container-reviewer.md": "98c88cf761dea5962d7707a75ef7f75d5c42cb0196ddf0166065bca1c7419a92",
-    ".claude/commands/context-load.md": "00b616ae551e03f221c35d44a4fa74a75e351a59c95ff7fb6391d0827eb1981f",
+    ".claude/commands/context-load.md": "e9bd1c5710259dddc4387e40f21de2e4cec4aab9673f44200d614f3eaac52b7b",
     ".claude/commands/context-save.md": "fe13f3f96694067b9681da6e45d803637fa47574754ebcc5bdf7055bf3b0f20a",
     ".claude/commands/council.md": "5bf4149f55bfa2d2c3224f1acafb01d2f5e6c7b32fe16ae7b5457bdd30fc47f7",
     ".claude/commands/database-designer.md": "6de813dacb5211f2313705a6983b820959e3936c153b18461c535d3883ca9851",
@@ -260,16 +260,16 @@
     ".claude/skills/SKILL FLOW.md": "4688e568966c3991ab1b0194830c5be6c94b19371d293c1e863e31817d232411",
     ".claude/skills/skill-creator/SKILL.md": "af64157158595234d0e4c8dbc6508c7a03afea0bacf28a2073b951a45d7e3197",
     ".codex/config.toml": "d86cb424b3b23726ffd3239d4ba2a864cc93424a3ee301a4bdbc7b1e82d09927",
-    ".codex/hooks.json": "7c494287d6a8ade5274d17eab81d8352928e674c8ee3fd18859b01600192ae27",
+    ".codex/hooks.json": "f7e3794f66d5e4afe4fc3e8079d2ccbf554d453a077df2b91329424ebdb57324",
     ".cursor/hooks.json": "a6b64d2be739f6c3eba122ab63b8b7c059bc3d33246ee162bc5fb99319dc4096",
     ".cursor/rules/accelerator-workflow.mdc": "7d0125b363af86456164901e8f3df2f01fa3cc4941200045e1aa5f070a45df2c",
     ".cursor/rules/php-standards.mdc": "baa7fbf67e55c51dec0634dd58bd8ab20917f5a16a63976122eb21b7a123c81f",
     ".cursor/rules/safety-and-verification.mdc": "9d7f8114809d3c130290f9df3cc2116da47776c197d1ace5099be62523903b63",
     ".cursor/rules/subagent-policy.mdc": "b2200867b3141faedb982cb12cc58158015ef5d9294c0f8b193bb8b70f61f201",
     ".cursor/skills/skill-creator/SKILL.md": "85238e56099797fdd695cbc2cc65e6958e9ad7806a7e32121bd5a37ccd7e3323",
-    "AGENTS.md": "a8b00efacf758f42e9f770f6a7a629263c3636e4242c5cc83d5fc7b05af4416e"
+    "AGENTS.md": "e88c81114755c0745ff39b9cefaae866feb563083cd9e4bf69466cafe91ff658"
   },
-  "policy_digest": "ab7da071ed8c3ed3728cef75cac06fbfb6eab1f94772ba537429bc6332d79a92",
+  "policy_digest": "d986b8dfa784aa068dc94919b88b51e23fd67fdfe51e3c6f6279b1773ca276e1",
   "release": "2.0.0",
   "schema_version": 1
 }

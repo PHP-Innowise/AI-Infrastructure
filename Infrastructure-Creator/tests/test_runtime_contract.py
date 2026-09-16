@@ -151,7 +151,7 @@ class RuntimeContractTest(unittest.TestCase):
             self.contract["runtime_fixed_skills"]["context-save"]["owns"],
         )
         self.assertEqual(
-            ["read-only portable handoff validation", "source-fingerprint drift reporting", "explicit transcript inclusion"],
+            ["read-only portable handoff validation", "source-fingerprint drift reporting", "explicit transcript inclusion", "selected local chat merge for a new task"],
             self.contract["runtime_fixed_skills"]["context-load"]["owns"],
         )
 

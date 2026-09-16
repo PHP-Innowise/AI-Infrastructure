@@ -4,6 +4,8 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+- Merge multiple captured chats into a new Codex, Claude Code, or Cursor task: frozen source archives, source-attributed previews, explicit conflict handling, same-branch automatic selection, and optional `context-load merge` source selection. Reopening preserves the merge; native task creation remains client-capability dependent.
+
 ### Added
 
 - Seed the portable context save/load runtime and generate its client entry

@@ -26,6 +26,10 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Add Harness UI **Merge chats** for 2–8 selected conversations into a fresh Codex, Claude or Cursor task, with frozen source histories, readable context, private archives, retry/restart recovery and bounded storage. Explicit Harness merges suppress automatic hook restore while retaining progress capture.
+
+- Merge multiple captured chats into a new Codex, Claude Code, or Cursor task: frozen source archives, source-attributed previews, explicit conflict handling, same-branch automatic selection, and optional `context-load merge` source selection. Reopening preserves the merge; native task creation remains client-capability dependent.
+
 - Add trusted automatic same-branch context continuity across Codex, Claude Code, and Cursor. The shared runtime stores bounded documented visible content only in ignored `.context-handoff/`, restores a historical excerpt through native hook envelopes, never mutates Brain/Bank/SQLite, and offers `CONTEXT_CONTINUITY_DISABLED=1` as a process-local opt-out. Native transcript availability and hook lifecycle delivery remain client-dependent; repository tests use synthetic payloads rather than live accounts. Mirror generation also reconciles hook executable bits with their canonical scripts.
 
 - Add portable `context-save` / `context-load` workflows for Codex, Claude Code

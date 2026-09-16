@@ -57,9 +57,9 @@ CONTINUITY_REGISTRATIONS = {
         "afterAgentResponse": (".cursor/hooks/context-continuity.sh capture",),
     },
     "codex": {
-        "SessionStart": (".codex/hooks/context-continuity.sh restore",),
-        "UserPromptSubmit": (".codex/hooks/context-continuity.sh capture",),
-        "Stop": (".codex/hooks/context-continuity.sh capture",),
+        "SessionStart": ('"$(git rev-parse --show-toplevel)/.codex/hooks/context-continuity.sh" restore',),
+        "UserPromptSubmit": ('"$(git rev-parse --show-toplevel)/.codex/hooks/context-continuity.sh" capture',),
+        "Stop": ('"$(git rev-parse --show-toplevel)/.codex/hooks/context-continuity.sh" capture',),
     },
 }
 for _tool, _hook in CONTINUITY_HOOKS.items():
@@ -753,9 +753,15 @@ class CleanInstallTest(unittest.TestCase):
     def _run_continuity_hook(
         self, target: Path, tool: str, action: str, payload: dict[str, str]
     ) -> subprocess.CompletedProcess[str]:
-        # Hooks are registered as a project-relative executable.  Invoke that
-        # exact installed file from outside the project to prove it derives its
-        # root from its own location rather than the caller's current directory.
+        # Exercise Codex's actual shell registration from a subdirectory,
+        # including spaces in the checkout path. Other adapters also derive
+        # their root from the installed executable rather than caller cwd.
+        if tool == "codex":
+            nested = target / "src"
+            nested.mkdir(exist_ok=True)
+            event = "SessionStart" if action == "restore" else "UserPromptSubmit"
+            command = next(command for command in self._continuity_registrations(target, tool)[event] if "context-continuity.sh" in command)
+            return run("bash", "-c", command, cwd=nested, input_text=json.dumps(payload))
         return run(
             str(target / CONTINUITY_HOOKS[tool]), action,
             cwd=target.parent,
@@ -971,17 +977,41 @@ class CleanInstallTest(unittest.TestCase):
                 self.assertEqual(0, ignored_snapshot.returncode, ignored_snapshot.stderr)
                 self.assertFalse(local_db.exists(), "continuity hooks must not create SQLite")
 
-                restored = self._run_continuity_hook(target, tool, "restore", {})
+                second_marker = "Second chat decision and completed checks"
+                second_capture = self._run_continuity_hook(target, tool, "capture", {
+                    "session_id": "second-source", "conversation_id": "second-source",
+                    "prompt": second_marker,
+                })
+                self.assertEqual(0, second_capture.returncode, second_capture.stderr)
+                target_payload = {"session_id": "merged-target", "conversation_id": "merged-target"}
+                restored = self._run_continuity_hook(target, tool, "restore", target_payload)
                 self.assertEqual(0, restored.returncode, restored.stderr)
                 restored_text = self._continuity_text(tool, restored.stdout)
                 self.assertIn(prompt_marker, restored_text)
                 self.assertIn(response_marker, restored_text)
+                self.assertIn(second_marker, restored_text)
+                self.assertIn("Source 2", restored_text)
+                archive = next((storage / "merges").glob("*.json"))
+                self.assertEqual(2, len(json.loads(archive.read_text())["sources"]))
+                repeated = self._run_continuity_hook(target, tool, "restore", target_payload)
+                self.assertEqual(restored.stdout, repeated.stdout)
+                self._run_continuity_hook(target, tool, "capture", {
+                    **target_payload, "last_assistant_message": "Merged task new progress",
+                    "text": "Merged task new progress",
+                })
+                resumed = self._run_continuity_hook(target, tool, "restore", target_payload)
+                resumed_text = self._continuity_text(tool, resumed.stdout)
+                self.assertIn("Current task progress", resumed_text)
+                self.assertIn("Merged task new progress", resumed_text)
+                self.assertIn(prompt_marker, resumed_text)
+                self.assertIn(second_marker, resumed_text)
 
                 other_host = "cursor" if tool != "cursor" else "claude"
                 cross_host = run(
                     sys.executable, str(target / "memory-bank/scripts/context_continuity.py"),
                     "--root", str(target), "--host", other_host,
                     "--event", "restore", "--json", cwd=target.parent,
+                    input_text=json.dumps(target_payload),
                 )
                 self.assertEqual(0, cross_host.returncode, cross_host.stderr)
                 self.assertIn(response_marker, self._continuity_text(other_host, cross_host.stdout))
@@ -995,7 +1025,7 @@ class CleanInstallTest(unittest.TestCase):
                 self.assertEqual(0, committed.returncode, committed.stderr)
                 switched = run("git", "switch", "-q", "-c", "continuity-isolation", cwd=target)
                 self.assertEqual(0, switched.returncode, switched.stderr)
-                foreign = self._run_continuity_hook(target, tool, "restore", {})
+                foreign = self._run_continuity_hook(target, tool, "restore", target_payload)
                 self.assertEqual(0, foreign.returncode, foreign.stderr)
                 self.assertEqual("", foreign.stdout, "a different branch must not restore prior context")
                 malformed = run(
@@ -1006,7 +1036,7 @@ class CleanInstallTest(unittest.TestCase):
                 self.assertEqual("", malformed.stdout)
                 returned = run("git", "switch", "-q", "main", cwd=target)
                 self.assertEqual(0, returned.returncode, returned.stderr)
-                restored_main = self._run_continuity_hook(target, tool, "restore", {})
+                restored_main = self._run_continuity_hook(target, tool, "restore", target_payload)
                 self.assertEqual(0, restored_main.returncode, restored_main.stderr)
                 self.assertIn(response_marker, self._continuity_text(tool, restored_main.stdout))
 

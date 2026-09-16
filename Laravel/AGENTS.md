@@ -153,6 +153,10 @@ This policy is shared across editions. The same accelerator is mirrored for **Cl
   bound to this repository and Git branch. They never scrape client stores or
   hidden reasoning, index the snapshot, or write Brain/Bank/SQLite. Missing,
   partial, delayed, or projected client content is not proof of a full session.
+  New tasks merge up to eight same-branch chats, preserving attributed sources
+  in a frozen local archive; resumed tasks keep their source set. Read the archive
+  for omitted decisions/progress, preserve conflicts, and verify current sources.
+  `context-load merge` selects specific chats for a new task.
   Set `CONTEXT_CONTINUITY_DISABLED=1` (also `true` or `yes`) to opt out.
 - MAY preserve an explicitly requested visible conversation export with
   `context-save full` in a standalone task artifact. Load it only explicitly;

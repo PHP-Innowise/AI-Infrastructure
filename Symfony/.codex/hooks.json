@@ -9,8 +9,8 @@
           },
           {
             "type": "command",
-            "command": ".codex/hooks/context-continuity.sh restore",
-            "additionalContextLimit": 2000
+            "command": "\"$(git rev-parse --show-toplevel)/.codex/hooks/context-continuity.sh\" restore",
+            "additionalContextLimit": 6000
           }
         ]
       }
@@ -25,7 +25,7 @@
           },
           {
             "type": "command",
-            "command": ".codex/hooks/context-continuity.sh capture"
+            "command": "\"$(git rev-parse --show-toplevel)/.codex/hooks/context-continuity.sh\" capture"
           }
         ]
       }
@@ -39,7 +39,7 @@
           },
           {
             "type": "command",
-            "command": ".codex/hooks/context-continuity.sh capture"
+            "command": "\"$(git rev-parse --show-toplevel)/.codex/hooks/context-continuity.sh\" capture"
           }
         ]
       }
