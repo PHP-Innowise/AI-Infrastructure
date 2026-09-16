@@ -152,7 +152,7 @@
     ".agents/skills/web-design-guidelines/SKILL.md": "24163cb29955de6c98af1183931a152948cdcf4dfa772c6ac39efbd83ecca191",
     ".agents/skills/woocommerce/SKILL.md": "56198003a7175fbcff72a1648901b5f11ac0263d32b45dc6e69107d6cfbd5f08",
     ".agents/skills/wp-cli/SKILL.md": "158fbc388a9dce89311c2257a36f967ed0d13e95348d0c8802f5737d9c9dea8c",
-    ".agents/skills/writing-plans/SKILL.md": "8e086a95e9c4543dfe6e82c246ce7ec70ba046ba51f6ef2e78d154733f81527a",
+    ".agents/skills/writing-plans/SKILL.md": "ffbbe12944da135ec5efe76c7e6c8802fdc473996fe9a8578208b49c01110b4b",
     ".claude/DOD.md": "aa3858fafe332478afd719786c8b2df9070cff4f03ac90fd3bc7dd3e1bc9b55b",
     ".claude/GOLDEN-PRINCIPLES.md": "d187f74646bc5a5b1a78a3903829eb2520cf0668b2903503d7652e6bcf2c54a2",
     ".claude/STABILIZATION.md": "18a3e8089b9dfdd353d131cc1233b5070c7701e42c1aff6063f54d14200ee364",
@@ -258,7 +258,7 @@
     ".cursor/skills/skill-creator/SKILL.md": "f1bac11cf8ab0e6acb40196165aab0f8e87556a4e182ff00894b6ee11af3a2a5",
     "AGENTS.md": "c61182250e6e7dbe1f084804cf848beabc9046687aa185e692525ba20a87c8b6"
   },
-  "policy_digest": "4f598f5d67bd88101a7c8248159db7f24169770849e27e9bdb76bc930c9330e1",
+  "policy_digest": "45514391dfa94eb2302449e41b314db51650db97360d546f4dc41046c76f6f2d",
   "release": "2.0.0",
   "schema_version": 1
 }
