@@ -18,7 +18,13 @@ into Memory Bank. A failed send retains the selected files for correction.
 ## System orchestration in the browser
 
 **System Orchestration** coordinates development changes across registered
-service repositories. Load a relative `system.json`, inspect the declared graph,
+service repositories. Choose **Choose system folder**, then **Create / edit system**.
+Use **Add service folder** to browse existing folders; selected folders are
+registered automatically. Fill the system name and each service's ID, team,
+description, capabilities, contracts, dependencies and context sources, then
+**Save system**. The application writes `system.json` and service passports;
+no JSON editing is required. Existing systems open in the same form.
+Alternatively, load an existing relative `system.json`. Inspect the declared graph,
 capabilities and memory ownership, select a starting service or changed contract,
 and prepare a bounded context/impact plan. Review its sources before execution.
 The backend checks freshness again when queued work actually starts.
@@ -35,7 +41,8 @@ native task references and the knowledge handoff. Cancel stops provider trees;
 recovery requires an explicit resume and an explicit dispatch retry after an
 ambiguous interruption. Inspect partial edits before accepting changed sources.
 Completed dispatches are skipped, and server restart never automatically resumes
-work. Register external service roots in **Projects & Setup** first; the manifest
+work. The folder picker registers external service roots; existing manifests
+can also use roots registered in **Projects & Setup**. The manifest
 cannot grant host filesystem access. See the [system orchestration guide](../docs/AI-SYSTEM-ORCHESTRATION.md#harness-ui).
 
 ## Infrastructure Creator in the browser

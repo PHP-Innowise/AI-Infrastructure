@@ -4,17 +4,21 @@ function systemFailure(error) {
   if (error.name !== 'AbortError') { $('system-error').textContent=error.message; $('system-error').hidden=false; }
 }
 function systemControls() {
-  const run=systemUi.detail, busy=systemUi.pending || !state.bootstrap, live=Boolean(run?.active);
-  for (const id of ['system-project','system-config','system-load','system-prepare','system-runs','system-refresh','system-provider','system-mode','system-timeout','system-reviewed','system-retry','system-accept-changes']) {
-    $(id).disabled=busy || (['system-provider','system-mode','system-timeout','system-reviewed'].includes(id) && Boolean(run?.session_id));
+  const run=systemUi.detail, busy=systemUi.pending || !state.bootstrap || (typeof systemEditor!=='undefined' && systemEditor.pending), live=Boolean(run?.active);
+  const editing=typeof systemEditor!=='undefined' && (systemEditor.pending || systemEditor.dirty);
+  for (const id of ['system-project','system-config','system-load','system-edit','system-choose-project','system-prepare','system-runs','system-refresh','system-provider','system-mode','system-timeout','system-reviewed','system-retry','system-accept-changes']) {
+    const editorLocked=editing && ['system-project','system-config','system-load','system-choose-project','system-prepare'].includes(id);
+    $(id).disabled=busy || editorLocked || (['system-provider','system-mode','system-timeout','system-reviewed'].includes(id) && Boolean(run?.session_id));
   }
-  $('system-execute').disabled=busy || !run || live || Boolean(run.session_id) || run.plan.status!=='needs_review' || !run.providers?.some(p=>p.id===$('system-provider').value && p.available) || !$('system-reviewed').checked;
-  $('system-resume').disabled=busy || live || !run?.providers?.some(p=>p.id===run.provider && p.available);
+  $('system-execute').disabled=busy || editing || !run || live || Boolean(run.session_id) || run.plan.status!=='needs_review' || !run.providers?.some(p=>p.id===$('system-provider').value && p.available) || !$('system-reviewed').checked;
+  $('system-resume').disabled=busy || editing || live || !run?.providers?.some(p=>p.id===run.provider && p.available);
   $('system-cancel').disabled=busy || !live;
+  if(typeof editorControls==='function') editorControls();
 }
 function systemReset() {
   clearTimeout(systemUi.timer); systemUi.controller?.abort(); ++systemUi.epoch;
   systemUi.catalog=null; systemUi.detail=null;
+  if(typeof closeSystemEditor==='function') closeSystemEditor();
   $('system-catalog').hidden=true; $('system-run').hidden=true; $('system-error').hidden=true;
   $('system-message').textContent=''; $('system-reviewed').checked=false;
 }

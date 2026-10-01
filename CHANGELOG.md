@@ -26,6 +26,14 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Create and edit system orchestration in Harness through a folder browser and
+  forms for service ownership, capabilities, contracts, dependencies and context
+  sources. Register selected folders and generate metadata without JSON input.
+  Validate the full graph before saving, reject stale forms/files, preserve file
+  permissions and recover interrupted multi-file saves with a durable journal.
+  Block metadata writes/recovery during active sessions; retain detected external
+  edits as conflicts. Cover localhost API, persistence and failure paths.
+
 - Support Claude Code and Cursor Agent for system workers in the CLI and Harness
   UI alongside Codex. Share native permission/delegation flags, validate Claude
   structured output and Cursor terminal reports, bound Cursor prompt bytes,

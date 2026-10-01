@@ -152,8 +152,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(200, self.server.page, 'text/html; charset=utf-8')
             elif path in ('/kit3/', '/kit3/index.html'):
                 self.reply(200, self.server.catalog, 'text/html; charset=utf-8')
-            elif path == '/system.js':
-                self.reply(200, (ROOT / 'harness/web/system.js').read_bytes(), 'text/javascript; charset=utf-8')
+            elif path in ('/system.js', '/system-editor.js'):
+                self.reply(200, (ROOT / 'harness/web' / path[1:]).read_bytes(), 'text/javascript; charset=utf-8')
             elif path == '/api/health':
                 self.reply(200, {'ok': True, 'instance': self.server.instance})
             elif path == '/api/bootstrap':
@@ -302,10 +302,15 @@ class Handler(BaseHTTPRequestHandler):
             path = urlsplit(self.path).path
             # Quoted Markdown at the creator's byte limit can double in its JSON envelope.
             upload = path == '/api/sessions' or path.startswith('/api/sessions/') and path.endswith('/messages') and len(path.split('/')) == 5
-            data = self.read_json(MAX_JSON_BYTES if upload else 131072 if path == '/api/skills/create-preview' else 65536)
+            data = self.read_json(MAX_JSON_BYTES if upload else 131072 if path == '/api/skills/create-preview' else 2 * 1024 * 1024 if path == '/api/systems/preview' else 65536)
             if path.startswith('/api/skills/') and urlsplit(self.path).query:
                 raise SessionError('Invalid skill request.')
-            if path == '/api/systems/catalog':
+            if path in ('/api/systems/editor', '/api/systems/service', '/api/systems/preview', '/api/systems/apply'):
+                if urlsplit(self.path).query:
+                    raise SessionError('Invalid system editor request.')
+                action = {'editor': 'load', 'service': 'service', 'preview': 'preview', 'apply': 'apply'}[path.rsplit('/', 1)[1]]
+                self.reply(200, self.server.systems.edit(action, data))
+            elif path == '/api/systems/catalog':
                 self.reply(200, self.server.systems.catalog(data))
             elif path == '/api/system-runs':
                 self.reply(201, self.server.systems.prepare(data))

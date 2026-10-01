@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / 'scripts'))
 from ai_system_lib import System, SystemError, open_directory
 import ai_system_execution as execution
 from .sessions import SessionError, ACTIVE, open_project_path, now
+from .system_editor import SystemEditor
 
 
 def boundary(function):
@@ -42,6 +43,7 @@ def run_id(value):
 class SystemManager:
     def __init__(self, sessions):
         self.sessions = sessions
+        self.editor = SystemEditor(sessions)
         self.root = sessions.state_dir / 'ai-system'
         self.root.mkdir(mode=0o700, exist_ok=True)
         fd = open_directory(self.root)
@@ -65,7 +67,11 @@ class SystemManager:
         os.close(fd)
         # A manifest declares relationships, never host filesystem permissions.
         roots = [p['path'] for p in self.sessions.projects.values()]
-        return System(Path(project['path']) / config_path, roots), roots
+        self.editor.check_recovery(Path(project['path']), config_path)
+        system = System(Path(project['path']) / config_path, roots)
+        for service in system.services.values():
+            self.editor.check_recovery(service['root'], service['manifest_path'])
+        return system, roots
 
     def _record(self, rid):
         run_id(rid)
@@ -90,6 +96,16 @@ class SystemManager:
         self.sessions.db.execute('INSERT OR REPLACE INTO system_runs (id,data,project_id) VALUES (?,?,?)',
                                  (record['id'], json.dumps(record, ensure_ascii=False), record['project_id']))
         self.sessions.db.commit()
+
+    @boundary
+    def edit(self, action, data):
+        with self.sessions.lock:
+            try:
+                return getattr(self.editor, action)(data)
+            except (SessionError, SystemError):
+                raise
+            except (KeyError, TypeError, ValueError):
+                raise SessionError('Invalid system editor fields.') from None
 
     @boundary
     def catalog(self, data):

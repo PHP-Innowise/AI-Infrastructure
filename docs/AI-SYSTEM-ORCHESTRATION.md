@@ -453,8 +453,45 @@ remain integration prerequisites.
 
 ## Harness UI
 
-Open **System Orchestration** in `./harness-server`. Choose a registered project
-and a relative manifest path (`system.json` by default), then **Load system**.
+Open **System Orchestration** in `./harness-server`. To create a system entirely
+in the application:
+
+1. **Choose system folder** in the folder browser. Use an existing directory
+   where the shared system map will be stored.
+2. **Create / edit system**, enter the system name, then **Add service folder**
+   for each existing service repository or monorepo subdirectory. Choosing a
+   folder registers it automatically; an existing passport is loaded into fields.
+3. Fill service ID, owning team, responsibility and whether its dependencies
+   have been surveyed. Expand **Capabilities**, **Provided contracts**,
+   **Consumed contracts**, and **Sources of context** to add/remove rows.
+   Source paths are relative to that service folder; shared source paths are
+   relative to the system folder. Lists of paths/keywords accept one per line.
+4. **Save system** validates the whole declared graph, generates `system.json`
+   and `ai-service.json` files, and refreshes the map. No JSON input is needed.
+   Service folder references are generated relative to the system file, so a
+   checkout can move when its directory layout is retained. Each Harness instance
+   still registers its own external service folders before accessing them.
+
+The same form edits existing systems. **Close editor** retains the current
+draft within this page; **Discard changes** drops it. Drafts do not survive a
+page reload. Removing a service unregisters it from this system; its existing
+passport is kept. Update consumers when changing/removing provider IDs or
+contract IDs, because dangling references are rejected before writing.
+Choosing another empty service folder retains that card's entered metadata;
+choosing a folder with a passport loads its existing metadata.
+
+Saving uses a one-use preview, file fingerprints and directory identities.
+Stale forms/files are rejected. A durable journal restores partial saves after
+failure/restart, preserves detected external content/permission changes as a
+recovery conflict, and acknowledges a fully completed save. Metadata writes
+and recovery wait until queued/running Harness sessions finish. Existing file
+permissions are preserved; new files are private (`0600`). Avoid concurrent
+external metadata writers: POSIX replacement has a small check-to-rename window
+that optimistic fingerprints cannot protect against. Coordinator workspace locks
+serialize cooperating system workers, not arbitrary external editors.
+
+You can also choose a registered project and a relative manifest path
+(`system.json` by default), then **Load system**.
 The graph represents declared contracts. Service cards show capability status
 and source paths; planned capabilities remain labelled planned. The memory
 ownership panel shows the system/service Brain and Memory Bank locations,
@@ -493,6 +530,13 @@ detached provider groups as well as ordinary descendants.
 Local API surface (existing Host/Origin/CSRF boundaries apply):
 
 - `POST /api/systems/catalog`: `project_id`, relative `config_path`.
+- `POST /api/systems/editor`: load/create form data for `project_id`, `config_path`.
+- `POST /api/systems/service`: load/default a passport for registered `project_id`
+  and optional relative `folder` (default `.`).
+- `POST /api/systems/preview`: validate complete form data with its `revision`
+  and per-passport `fingerprint`; returns a one-use `preview_id` lasting ten minutes.
+- `POST /api/systems/apply`: consume that `preview_id` and save metadata. Folder
+  roots are derived server-side from project registration, never client-supplied.
 - `POST /api/system-runs`: the same identity plus `task`, `change_id`, optional
   `services`, `contracts`, `budget` and `depth`.
 - `GET /api/system-runs?project_id=...` and `GET /api/system-runs/<id>`:
@@ -505,7 +549,7 @@ Local API surface (existing Host/Origin/CSRF boundaries apply):
 Run the HTTP/queue/native-runtime regression suite with:
 
 ```bash
-python3 -m unittest tests.test_harness_system_orchestration
+python3 -m unittest tests.test_harness_system_orchestration tests.test_harness_system_editor
 ```
 
 These tests use deterministic Codex, Claude and Cursor format fixtures, without paid model calls.
@@ -515,6 +559,18 @@ These tests use deterministic Codex, Claude and Cursor format fixtures, without 
 These are screenshots of the running localhost Harness using a synthetic
 three-service system and deterministic native-format provider fixtures.
 Reported checks are fixture assertions; no real model or customer system was used.
+
+The form-authoring example starts with existing empty service folders, enters
+all metadata in the browser, checks an invalid contract without losing the draft,
+saves/reopens/edits the system, and completes a Cursor fixture run:
+
+![Choose service folders in the application](images/ai-system/editor-folders.jpg)
+
+![Enter service ownership and capabilities with forms](images/ai-system/editor-form.jpg)
+
+![Saved map generated from form fields](images/ai-system/editor-map.jpg)
+
+![Completed Cursor run for the form-authored system](images/ai-system/editor-run.jpg)
 
 ![Declared service graph and capabilities](images/ai-system/map.jpg)
 
