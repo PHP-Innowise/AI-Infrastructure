@@ -153,7 +153,10 @@ def sandbox_command(workspace, target, command, provider=None, runtime_cache=Fal
 
 def read_plan(task, name, optional=False):
     value = load_file(task, name, required=not optional)
-    paths = [] if value is None else value['body'].decode('utf-8').splitlines()
+    try:
+        paths = [] if value is None else value['body'].decode('utf-8').splitlines()
+    except UnicodeDecodeError:
+        raise SessionError('Publication plans must use UTF-8 text.') from None
     paths = [path for path in paths if path.strip()]
     if len(paths) > 5000 or len(paths) != len(set(paths)):
         raise SessionError('Publication plans must contain distinct bounded paths.')

@@ -26,6 +26,10 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Fix native Windows Harness guard shutdown and private-state ownership on
+  elevated runners. Reject non-UTF-8 Creator plans with a controlled error and
+  make pipe and plan fixtures independent of Windows newline/encoding defaults.
+
 - Add native Windows/Git Bash Harness runtime support: working Python fallback,
   Job Object process cleanup, threaded bounded pipe reads, retained admission
   locks, rooted no-reparse filesystem operations and private state ACLs.

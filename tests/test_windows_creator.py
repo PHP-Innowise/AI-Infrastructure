@@ -116,11 +116,20 @@ class WindowsCreatorContracts(unittest.TestCase):
         for name in invalid:
             with self.subTest(name=name), self.assertRaises(ValueError):
                 pub.normalize_relative_path(name)
-            (task / creator.PLAN_NAMES[0]).write_text(name + '\n')
+            (task / creator.PLAN_NAMES[0]).write_text(name + '\n', encoding='utf-8')
             with self.subTest(plan=name), self.assertRaises(creator.SessionError):
                 creator.read_plan(task, creator.PLAN_NAMES[0])
         self.assertEqual(pub.normalize_relative_path('memory-bank/chunks/valid.md'),
                          'memory-bank/chunks/valid.md')
+
+    def test_plan_rejects_non_utf8_bytes_without_exposing_contents(self):
+        task = self.work / creator.TASK; task.mkdir(parents=True)
+        for body in (b'x/LPT\xb9\n', b'PRIVATE PLAN SENTINEL\xff'):
+            with self.subTest(body=body):
+                (task / creator.PLAN_NAMES[0]).write_bytes(body)
+                with self.assertRaisesRegex(creator.SessionError, 'must use UTF-8 text') as error:
+                    creator.read_plan(task, creator.PLAN_NAMES[0])
+                self.assertNotIn('PRIVATE PLAN SENTINEL', str(error.exception))
 
     def validator(self):
         creator.publication_helpers()
@@ -154,6 +163,15 @@ class WindowsCreatorContracts(unittest.TestCase):
             input='native input', text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), ['native input', str(self.work), str(self.work)])
+
+    def test_trampoline_preserves_binary_line_endings(self):
+        child = Path(windows_creator.__file__).with_name('windows_creator_child.py')
+        body = b'native input\r\nsecond line\n\x00\xff'
+        result = subprocess.run([sys.executable, str(child), str(self.work), sys.executable, '-c',
+            'import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())'],
+            input=body, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, body)
 
     def test_installed_validation_copy_is_removed_when_runtime_validation_fails(self):
         task = self.work / creator.TASK; task.mkdir(parents=True)

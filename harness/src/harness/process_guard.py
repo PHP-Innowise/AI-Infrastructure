@@ -71,7 +71,11 @@ def _watchdog_eof(fd: int, stopped: threading.Event) -> threading.Thread:
                 pass
         except OSError:
             pass
-        stopped.set()
+        finally:
+            try:
+                os.close(fd)
+            finally:
+                stopped.set()
     thread = threading.Thread(target=wait, daemon=True)
     thread.start()
     return thread
@@ -119,7 +123,10 @@ def _run_windows(watchdog_fd: int, command: list[str], lock_fd: int | None = Non
         raise ValueError('A watchdog handle and native executable are required.')
     _windows_job()  # Fail closed before an unguarded native process can start.
     stopped = threading.Event()
-    _watchdog_eof(watchdog_fd, stopped)
+    # Windows CRT _close waits for a concurrent _read on the same descriptor.
+    # Give the reader its own duplicate so normal child exit can close the
+    # guard's descriptor even while the owner retains the watchdog writer.
+    _watchdog_eof(os.dup(watchdog_fd), stopped)
     try:
         child = _windows_child(command, lock_fd, original_lock_fd)
         while True:

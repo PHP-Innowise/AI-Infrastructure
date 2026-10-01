@@ -7,6 +7,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import windows_security
@@ -31,6 +33,12 @@ class WindowsPrivateDirectoryTests(unittest.TestCase):
             self.assertEqual(windows_security.secure_private_dir(state), state)
             descriptor = windows_security.fs.open_target_directory(state, security=True)
             try:
+                user = windows_security._CurrentUser()
+                owner, security = windows_security._owner(windows_security.fs.raw_handle(descriptor))
+                try:
+                    self.assertTrue(windows_security._advapi32.EqualSid(owner, user.sid))
+                finally:
+                    windows_security._kernel32.LocalFree(security)
                 protected, entries = windows_security._acl_summary(descriptor)
             finally:
                 windows_security.fs.close(descriptor)
@@ -42,6 +50,11 @@ class WindowsPrivateDirectoryTests(unittest.TestCase):
             root = windows_security.fs.open_target_directory(state)
             child = windows_security.fs.open_security('sessions.sqlite3', dir_fd=root)
             try:
+                owner, security = windows_security._owner(windows_security.fs.raw_handle(child))
+                try:
+                    self.assertTrue(windows_security._advapi32.EqualSid(owner, user.sid))
+                finally:
+                    windows_security._kernel32.LocalFree(security)
                 protected, entries = windows_security._acl_summary(child)
                 self.assertTrue(protected)
                 self.assertEqual({sid for _, _, sid in entries}, {current, "S-1-5-18"})
@@ -59,6 +72,26 @@ class WindowsPrivateDirectoryTests(unittest.TestCase):
                 self.assertEqual(windows_security.secure_private_dir(state), state)
             finally:
                 windows_security.fs.close(lock)
+
+    def test_only_token_user_and_explicit_default_owner_are_accepted(self):
+        # Exercise group-default ownership even if this runner's actual
+        # TokenOwner happens to equal TokenUser.
+        user = SimpleNamespace(sid=101, owner_sid=202)
+        api = windows_security._advapi32
+        for owner in (101, 202, 303):
+            with self.subTest(owner=owner), \
+                    patch.object(windows_security, '_owner', return_value=(owner, None)), \
+                    patch.object(api, 'EqualSid', side_effect=lambda a, b: a == b), \
+                    patch.object(windows_security, '_descriptor') as descriptor:
+                if owner == 303:
+                    with self.assertRaises(windows_security.StateSecurityError):
+                        windows_security._protect(1, user)
+                    descriptor.assert_not_called()
+                else:
+                    # Stop before passing fixture pointers into native APIs.
+                    descriptor.side_effect = RuntimeError('ownership accepted')
+                    with self.assertRaisesRegex(RuntimeError, 'ownership accepted'):
+                        windows_security._protect(1, user)
 
     def test_junction_is_refused_without_reading_the_external_sentinel(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -45,7 +45,7 @@ class ProcessRuntimeTests(unittest.TestCase):
 
     def test_pipe_readers_preserve_chunks_with_bounded_per_pipe_queue(self):
         process = subprocess.Popen(
-            [sys.executable, "-u", "-c", "import sys; sys.stdout.write('first\\n'); sys.stdout.flush(); sys.stdout.write('second\\n'); sys.stdout.flush()"],
+            [sys.executable, "-u", "-c", "import sys; sys.stdout.buffer.write(b'first\\nsecond\\r\\n'); sys.stdout.buffer.flush()"],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         )
         readers = process_runtime.PipeReaders(chunk_size=4)
@@ -60,7 +60,7 @@ class ProcessRuntimeTests(unittest.TestCase):
                     break
                 body.extend(event.body)
             self.assertEqual(process.wait(timeout=3), 0)
-            self.assertEqual(bytes(body), b"first\nsecond\n")
+            self.assertEqual(bytes(body), b"first\nsecond\r\n")
         finally:
             readers.close()
             if process.poll() is None:
@@ -173,6 +173,34 @@ class WindowsJobObjectTests(unittest.TestCase):
                 if process is not None:
                     process_runtime.reap_tree(process)
                     process.stderr.close()
+
+    def test_normal_exit_kills_descendant_while_watchdog_writer_remains_open(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            marker = Path(temporary) / 'descendant.pid'
+            read_fd, write_fd = os.pipe()
+            process = None
+            try:
+                code = (
+                    "import pathlib,subprocess,sys; "
+                    "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)']); "
+                    f"pathlib.Path({str(marker)!r}).write_text(str(child.pid)); sys.exit(7)"
+                )
+                process = process_runtime.launch_guarded(
+                    [sys.executable, '-c', code], read_fd, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+                os.close(read_fd); read_fd = None
+                stdout, stderr = process.communicate(timeout=5)
+                self.assertEqual(process.returncode, 7, stderr)
+                self.assertEqual(stdout, b'')
+                self.assertTrue(marker.exists())
+                self.wait_for(lambda: not self.running(int(marker.read_text())))
+            finally:
+                if read_fd is not None: os.close(read_fd)
+                os.close(write_fd)
+                if process is not None:
+                    process_runtime.reap_tree(process)
+                    process.stdout.close(); process.stderr.close()
 
     def test_owner_loss_kills_direct_child_and_its_descendant(self):
         with tempfile.TemporaryDirectory() as temporary:

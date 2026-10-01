@@ -27,6 +27,7 @@ if WINDOWS:
 
     TOKEN_QUERY = 0x0008
     TokenUser = 1
+    TokenOwner = 4
     ERROR_INSUFFICIENT_BUFFER = 122
     SE_FILE_OBJECT = 1
     OWNER_SECURITY_INFORMATION = 0x00000001
@@ -47,6 +48,9 @@ if WINDOWS:
 
     class TOKEN_USER(ctypes.Structure):
         _fields_ = [("User", SID_AND_ATTRIBUTES)]
+
+    class TOKEN_OWNER(ctypes.Structure):
+        _fields_ = [("Owner", ctypes.c_void_p)]
 
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     _advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
@@ -105,12 +109,24 @@ if WINDOWS:
                 if not _advapi32.GetTokenInformation(token, TokenUser, self.buffer, size, ctypes.byref(size)):
                     raise _unsafe()
                 self.sid = ctypes.cast(self.buffer, ctypes.POINTER(TOKEN_USER)).contents.User.Sid
+                size = w.DWORD()
+                ok = _advapi32.GetTokenInformation(token, TokenOwner, None, 0, ctypes.byref(size))
+                if ok or ctypes.get_last_error() != ERROR_INSUFFICIENT_BUFFER or not size.value:
+                    raise _unsafe()
+                # SID pointers refer into these buffers; retain both for all
+                # subsequent ownership checks.
+                self.owner_buffer = (ctypes.c_byte * size.value)()
+                if not _advapi32.GetTokenInformation(token, TokenOwner, self.owner_buffer, size, ctypes.byref(size)):
+                    raise _unsafe()
+                self.owner_sid = ctypes.cast(self.owner_buffer, ctypes.POINTER(TOKEN_OWNER)).contents.Owner
+                if not self.owner_sid:
+                    raise _unsafe()
                 sid_text = w.LPWSTR()
                 if not self.sid or not _advapi32.ConvertSidToStringSidW(self.sid, ctypes.byref(sid_text)):
                     raise _unsafe()
                 try:
                     self.sid_text = sid_text.value
-                    self.sddl = "D:P(A;OICI;FA;;;" + self.sid_text + ")(A;OICI;FA;;;SY)"
+                    self.sddl = "O:" + self.sid_text + "D:P(A;OICI;FA;;;" + self.sid_text + ")(A;OICI;FA;;;SY)"
                 finally:
                     _kernel32.LocalFree(ctypes.cast(sid_text, ctypes.c_void_p))
             finally:
@@ -142,7 +158,12 @@ if WINDOWS:
     def _protect(handle, user):
         owner, owner_descriptor = _owner(handle)
         try:
-            if not owner or not _advapi32.EqualSid(owner, user.sid):
+            # New objects use TokenOwner, which may be an enabled group for an
+            # elevated process. Accept only this token's explicit default owner
+            # or user, then make the user the owner and protect the DACL.
+            # Leaving a group owner would retain that group's implicit WRITE_DAC.
+            if not owner or not (_advapi32.EqualSid(owner, user.sid)
+                                 or _advapi32.EqualSid(owner, user.owner_sid)):
                 raise _unsafe()
         finally:
             _kernel32.LocalFree(owner_descriptor)
@@ -153,8 +174,8 @@ if WINDOWS:
                 raise _unsafe()
             result = _advapi32.SetSecurityInfo(
                 w.HANDLE(handle), SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                None, None, dacl, None,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                user.sid, None, dacl, None,
             )
             if result:
                 raise _unsafe()

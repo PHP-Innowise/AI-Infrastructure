@@ -300,7 +300,7 @@ else:
             for index, part in enumerate(parts):
                 access = FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE
                 if security and index == len(parts) - 1:
-                    access |= 0x00020000 | 0x00040000
+                    access |= 0x00020000 | 0x00040000 | 0x00080000
                 child = _open_relative(fd, part, access,
                                        options=FILE_DIRECTORY_FILE)
                 os.close(fd); fd = child
@@ -349,7 +349,7 @@ else:
         return _open_relative(dir_fd, name, FILE_READ_ATTRIBUTES | SYNCHRONIZE)
 
     def open_security(name, *, dir_fd, directory=False):
-        access = FILE_READ_ATTRIBUTES | SYNCHRONIZE | 0x00020000 | 0x00040000
+        access = FILE_READ_ATTRIBUTES | SYNCHRONIZE | 0x00020000 | 0x00040000 | 0x00080000
         if directory:
             access |= FILE_LIST_DIRECTORY | FILE_TRAVERSE
         return _open_relative(dir_fd, name, access,
@@ -457,7 +457,7 @@ else:
         if not security_descriptor:
             raise ValueError('A private directory requires a security descriptor.')
         return _open_relative(parent_fd, name,
-                              FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE | 0x00020000 | 0x00040000,
+                              FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE | 0x00020000 | 0x00040000 | 0x00080000,
                               FILE_CREATE, FILE_DIRECTORY_FILE,
                               security_descriptor=security_descriptor)
 
