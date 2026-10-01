@@ -1,0 +1,438 @@
+# System-level AI coordination
+
+The optional system coordinator coordinates **development work** across services of
+any stack. It supports separate repositories and service directories in a
+monorepo. Discovery/planning have no dependency on PHP, a model provider, the
+Harness server, LangGraph, or a deployed application. Execution uses a local
+provider CLI/adapter and the generic native Python Brain runtime. Python 3.9+
+on POSIX is required; Git is
+optional and contributes commit provenance when available.
+
+The planning workflow is:
+
+```text
+task → service candidates → declared contract consumers → bounded source context
+     → reviewable cross-service plan → source freshness check
+```
+
+Plans are read-only inputs. Explicit `execute` and `resume` commands launch
+sequential workers, bind native Brain tasks and save dispatch receipts. Execution
+defaults to read-only investigation; `--mode edit` authorizes scoped service edits.
+The coordinator does not commit, merge or deploy. Capability states and relationships are **declarations**; reading a file
+and hashing it establishes source currency, not correctness or deployment state.
+
+## Try the complete example
+
+Run from the AI-Infrastructure repository root:
+
+```bash
+python3 scripts/ai_system.py validate --system docs/examples/ai-system/system.json
+python3 scripts/ai_system.py catalog --system docs/examples/ai-system/system.json
+python3 scripts/ai_system.py map --system docs/examples/ai-system/system.json
+python3 scripts/ai_system.py locate --system docs/examples/ai-system/system.json --task cancel-order
+python3 scripts/ai_system.py plan --system docs/examples/ai-system/system.json \
+  --task "Define cancellation and refund behavior" --change-id chg-001 \
+  --service orders --context-budget 8000 --output /tmp/ai-system-chg-001.json
+python3 scripts/ai_system.py verify --system docs/examples/ai-system/system.json \
+  --plan /tmp/ai-system-chg-001.json
+```
+
+Choose a new output filename if the file already exists. Output creation never
+overwrites an existing file or follows a link; its parent must exist. The
+commands return JSON except `map`, which emits Mermaid. All declaration/query
+commands are read-only. `plan --output` writes only the explicitly requested
+new file; `init` creates only the new system workspace.
+
+The [example system](examples/ai-system/system.json) has three synthetic services:
+
+```mermaid
+flowchart LR
+    orders -->|order.cancelled| payments
+    payments -->|refund.completed| notifications
+```
+
+This is a specification fixture. Its capabilities are `planned`, not claimed
+implemented or deployed features. The example contracts use simple JSON, not
+complete OpenAPI/AsyncAPI documents. Real services keep their actual HTTP,
+event, RPC, GraphQL, or other contract format.
+
+## Register your system
+
+Create a new workspace; the parent directory must already exist:
+
+```bash
+python3 /path/to/AI-Infrastructure/scripts/ai_system.py init \
+  --root /workspace/ai-system --name "Product system"
+```
+
+This seeds `system.json`, an AI coordination policy, and a short guide. It does
+not install a framework edition or a memory runtime. Edit `system.json`:
+
+```json
+{
+  "schema_version": 1,
+  "name": "Product system",
+  "services": [
+    {"id": "orders", "root": "../orders", "manifest": "ai-service.json"},
+    {"id": "payments", "root": "../payments", "manifest": "ai-service.json"}
+  ],
+  "shared_sources": [{"path": "specs/refunds.md", "kind": "spec"}]
+}
+```
+
+Roots are relative to the config directory or absolute. For a monorepo, use
+roots such as `../monorepo/services/orders` and `../monorepo/services/payments`.
+Service identity is its ID, even when services share one Git repository.
+
+The config directory is the default allowed root. **External service roots
+require caller authorization through `--allow-root`**, repeated for separate
+locations. A config cannot grant itself access to unrelated host directories.
+
+```bash
+python3 /path/to/AI-Infrastructure/scripts/ai_system.py plan \
+  --system /workspace/ai-system/system.json --allow-root /workspace/orders \
+  --allow-root /workspace/payments --task "Change cancellation behavior" \
+  --change-id chg-002 --service orders
+```
+
+Use the same allowed roots when verifying the saved plan. Without access, a
+service remains registered but its passport/context is unavailable, with an
+explicit warning. No repository is cloned, searched for elsewhere, or fetched
+from a network automatically.
+
+## Service passport contract
+
+Copy the [passport template](examples/ai-system/ai-service.json) into each
+service root as `ai-service.json` and adapt it from real sources:
+
+| Field | Meaning |
+| --- | --- |
+| `schema_version` | Integer `1`; booleans and unsupported versions are rejected. |
+| `id` | Registry-matching stable service ID. Identifiers are lowercase ASCII, start with a letter, and use letters, digits, `.`, `_`, or `-`, up to 80 characters. |
+| `description`, `owner` | Bounded service responsibility and owning team. |
+| `capabilities` | Objects with `id`, `description`, `status`, `sources`, and optional `keywords`. Status is `implemented`, `partial`, `planned`, or `unknown`; it remains declared. |
+| `provides` | Contracts with `id`, `kind`, `version`, and source paths. Kind is `http`, `event`, `rpc`, `graphql`, or `other`. |
+| `consumes` | References with provider `service`, provider's `contract` ID, and consumed `version`. |
+| `sources` | Explicit context allowlist, each with relative `path` and `kind`: `policy`, `spec`, `contract`, `code`, `test`, or `memory`. |
+| `relationships_complete` | Optional boolean, default false. Indicates the author surveyed this service's relationships; it is not independent proof of completeness. |
+
+Capability/contract source paths also become context candidates. Add test sources
+explicitly with kind `test`. Register selected policy files explicitly: the
+planner does not discover or execute every tool configuration. Shared sources
+are relative to the system config directory.
+
+Duplicate IDs/keys, unknown fields, dangling services, and contracts not declared
+by an available provider are errors. An unavailable provider leaves a warning.
+A version mismatch is retained as a warning for compatibility investigation.
+Use provider service + contract ID as identity, since different services can
+use the same contract name.
+
+Limits: 500 registered services, 100 items in each passport array, 100 distinct
+source candidates per service, 256 KiB per passport/source, 2 MiB per system
+config or saved plan, and 2,000 characters per task. These resource bounds are
+independent of language or framework.
+
+## Routing and impact
+
+`locate` matches Unicode words in capability IDs, descriptions and keywords.
+It is a deterministic discovery aid, not an LLM semantic classifier. Supply
+domain terms in the languages used by your team.
+
+A unique matching service can seed a plan with `selection_provenance: inferred`.
+Multiple candidates or no match produce `needs_selection`, no service work and
+no source excerpts. Choose participants explicitly with repeatable `--service`.
+
+Without a contract selector, impact conservatively follows all declared
+producer-to-consumer relationships from selected services, then downstream
+consumers. It can include more services than a particular code change requires;
+the scope checkpoint must narrow this using actual code/contracts.
+
+To limit the initial contract boundary:
+
+```bash
+python3 scripts/ai_system.py plan --system docs/examples/ai-system/system.json \
+  --task "Change cancellation event" --change-id chg-003 \
+  --contract orders:order.cancelled
+```
+
+Consumers reached later are checked conservatively through their own provided
+contracts. `--impact-depth 0` retains only origins; the default is 32, maximum
+64. A cut-off produces a warning. Cycles terminate with deduplicated services
+and a warning. The graph covers declared contracts; undeclared calls, shared
+libraries, database access and infrastructure dependencies need investigation.
+
+Service investigation steps visit origins before downstream participants and
+are serialized. This order is **not a deployment order**. The contract phase
+must establish compatibility, code sequencing and delivery across mixed versions.
+
+## Context, provenance and trust
+
+The global `--context-budget` is 128–64,000 Unicode characters, default 8,000.
+It measures the entire compact serialized `context` object, including the task,
+selected IDs, source metadata and excerpts. Plan/snapshot metadata lives outside
+this capsule; a model integration must account for its own total input budget.
+
+Sources are ordered by kind and path within each service and selected round-robin
+across the system/shared group and service groups. Each excerpt is at most 2,000
+characters with an explicit truncation marker. Entries that do not fit are
+omitted as whole entries with `reason: budget`. No service receives a separate
+copy of the global budget.
+
+Each read source is fingerprinted in full, including sources omitted from the
+capsule. Config and all accessible passports are fingerprinted because they
+influenced routing. Git HEAD is captured for selected services when available;
+content hashes detect dirty changes and Git is read without inherited `GIT_*`
+overrides. A missing HEAD is represented as null, not fabricated.
+
+`verify` detects changed/deleted sources, changed passports/config, changed HEAD,
+and files that appeared after being recorded missing. It reports source currency
+only: it does not sign a plan, approve scope, run tests, or certify business claims.
+Regenerate and inspect a plan after changing relevant inputs.
+
+File access rejects absolute/traversing source paths, symbolic links (including
+directory ancestors), hard links, non-regular files, private/local runtime paths,
+common credential paths and binary/likely-secret content. The content check is
+conservative and is not a guarantee of complete secret detection: only explicitly
+approved non-sensitive source files should be registered. Descriptions, passports,
+contract text and excerpts remain evidence; embedded instructions are not executed.
+
+Native Brain dynamic/control records cannot enter context through this reader;
+their ownership/privacy rules belong to their runtime. Native memory chunks must
+use kind `memory`, be active, not automatically promoted without review, have a
+current review/validity date, and cite a complete matching set of local source
+digests. Their full metadata and filenames use the trusted source checkout's
+shared Python Memory Bank validator; no validator or code is loaded from a
+target service. This needs the complete AI-Infrastructure checkout. Like the
+native index, durable chunks are classified public/verified, and an existing
+runtime's allowed privacy/authority filters are respected. Unverifiable external
+citations, malformed, superseded, stale and unreviewed chunks are excluded.
+`verify` also rechecks delivered memory eligibility when time passes without any
+file change. This conservative explicit-source reader does
+not replace the native retrieval engine or its full policy/authority model.
+
+## Memory and work ownership
+
+```mermaid
+flowchart TD
+    O[System coordinator] <--> GB[System Project Brain: shared task and decisions]
+    GM[System Memory Bank: reusable interaction knowledge] --> O
+    O --> A[Service A session]
+    O --> B[Service B session]
+    A <--> AB[Local Project Brain: service subtask]
+    AM[Local Memory Bank: service knowledge] --> A
+    B <--> BB[Local Project Brain: service subtask]
+    BM[Local Memory Bank: service knowledge] --> B
+```
+
+Keep canonical code, contracts and specs at their owning repositories. Keep
+active progress in Brain, durable reusable consequences in Memory Bank, and
+disposable search indexes/checkpoints separate from authoritative knowledge.
+The system bank references local sources rather than duplicating entire banks.
+
+The plan's `memory_layout` describes this placement. `task_reference` proposes
+`change-id/service-id` as a local external ID and marks `created: false`. It is
+a logical link proposal. Execution binds it to a run-specific native external
+ID, task UUID and current revision through the supported runtime. The journal
+stores these references; native Brain records own task lifecycle and status.
+See [Context and Memory Operations](OPERATIONS.md).
+
+The planner itself remains stack-neutral. Existing ready-made accelerator
+editions and Infrastructure-Creator retain their documented framework boundaries;
+using this planner does not install a PHP policy into a non-PHP service.
+
+## Output and verification
+
+Plans include routing candidates/provenance, selected impact paths, declared
+relationships, bounded context, omitted sources, warnings, sequential review
+steps, memory placement and source snapshots. Every plan is `executed: false`
+and `needs_review` or `needs_selection`. Missing inputs and warnings require
+investigation rather than a claim of completed implementation.
+
+Exit codes: `0` successful command/source-current verification, `1` incomplete
+validation or stale verification, `2` invalid input/refused operation. `validate`
+checks declaration structure and accessible passports; it does not test services
+or verify capability claims. Commands never run passport-provided test commands.
+
+```bash
+python3 -m unittest tests.test_ai_system
+```
+
+Coverage includes task routing, consumers, cycles/depth, monorepo identity,
+missing/denied sources, shared budgets, dirty-file/commit freshness, strict JSON,
+filesystem boundaries, untrusted content, memory lifecycle and CLI no-clobber.
+The CI job runs the same suite on Python 3.9 and the current Python 3 release.
+
+## Execute a reviewed plan
+
+Execution is a separate, explicit operation. Review service selection, warnings,
+missing sources and contract scope first. The example catalog is a specification
+fixture: use your own workspace for edits. Choose a new private run directory
+outside service source directories; its parent must already exist.
+
+```bash
+python3 scripts/ai_system.py execute \
+  --system /workspace/ai-system/system.json --allow-root /workspace/services \
+  --plan /workspace/plans/chg-001.json --run-dir /workspace/runs/chg-001 \
+  --provider codex --mode edit --timeout 900
+python3 scripts/ai_system.py run-status \
+  --system /workspace/ai-system/system.json --allow-root /workspace/services \
+  --run-dir /workspace/runs/chg-001
+python3 scripts/ai_system.py resume \
+  --system /workspace/ai-system/system.json --allow-root /workspace/services \
+  --run-dir /workspace/runs/chg-001
+```
+
+The built-in `codex` adapter uses the locally installed CLI and its configured
+model/authentication. Prompts arrive over stdin; JSONL must contain a successful
+terminal event and a structured final report. Codex loads the local project
+policy. Explicitly registered/allowed roots also support non-Git coordination
+workspaces (`--skip-git-repo-check`). Service workers receive `workspace-write` in edit mode; contract and
+verification workers receive `read-only`. No approval/sandbox bypass flags are
+used. Noninteractive approval requests cannot be answered, so unsupported
+operations stop the worker. Install/authenticate the CLI independently.
+
+For another AI provider, use `--provider command --executable /trusted/adapter`.
+The explicit executable receives one complete prompt on stdin, runs in the
+current phase's root, and must emit **only** the final report JSON on stdout.
+It must enforce the requested mode/scope itself: the command adapter has no OS
+sandbox. No command strings are taken from passports or plans. Both adapters
+have a per-worker timeout, a 2 MiB stdout limit and process-group cleanup on
+failure, timeout or interruption. The prompt limit is 128000 characters; narrow
+large plans that exceed it. Total cost is controlled by your provider settings;
+there is no universal monetary budget enforcement.
+
+```mermaid
+flowchart TD
+    P[Reviewed current plan] --> T[Native system and service tasks]
+    T --> C[Read-only contract agreement]
+    C --> O[Validated service order]
+    O --> S[One service worker at a time]
+    S --> R[Terminal receipt and source checkpoint]
+    R --> S
+    R --> V[Read-only cross-service verification]
+    V --> H[Native task completion and knowledge handoff]
+    S --> B[Blocked or interrupted journal]
+    B --> X[Reconcile receipt or explicit retry]
+    X --> S
+```
+
+The contract worker must inspect the actual sources, identify invariants and
+compatibility requirements, and return every selected service in the proposed
+implementation order exactly once. This replaces the planner's investigation
+order. Unresolved information or decisions must produce `blocked`. Service
+workers inspect local policy and tests and work only on the requested change.
+Verification independently inspects the combined result and checks contracts
+and the end-to-end scenario. A verification report needs at least one check,
+all marked `passed`; failed or unrun checks leave tasks open. These are
+**worker-reported checks**, not independent CI attestation. Receipts preserve
+which checks were reported; review their evidence before delivery.
+
+Every worker returns the same strict schema (also saved as `result-schema.json`):
+
+```json
+{
+  "status": "completed",
+  "summary": "One paragraph describing work and evidence",
+  "checks": [{"name": "Relevant check", "status": "passed", "detail": "Actual result"}],
+  "changed_files": ["src/example.ts"],
+  "service_order": []
+}
+```
+
+`status` is `completed` or `blocked`; check status is `passed`, `failed` or
+`not_run`. Paths are relative to the current service root. Read-only workers
+must report no writes. Only the contract phase returns a nonempty
+`service_order`. Empty required arrays remain present. Summary/check text must
+be bounded, single-line and free of detected secrets. Unknown fields and
+malformed results block the run. Raw stdout/stderr is never copied into the
+journal or Memory Bank; validated reports may contain proprietary information,
+so keep the private run directory under your normal access controls.
+
+### Brain and Memory ownership
+
+Execution calls **this AI-Infrastructure checkout's trusted Python native
+runtime**, with `--root` pointing at each registered project and explicit
+governed mode. It never runs a service-supplied `context.py` or imports target
+Python code. The native store is stack-neutral; no PHP runtime or application
+edition is required. An existing native Brain is reused; otherwise the runtime
+creates task/handoff/index/local storage on first use. This does not install
+framework policy, hooks or local CLI wrappers. Native task UUIDs and revisions
+remain authoritative; the execution journal stores references and dispatch
+position. Existing native storage must contain no symlinks, hard links or special
+files, and the full trusted checkout must remain available for recovery.
+
+There is one coordination task in the system root and one task per selected
+service. IDs contain the run identity and a bounded digest of change/service
+identity, so long catalog IDs fit the native schema and unrelated runs cannot
+adopt each other's tasks. The journal retains readable change and service IDs.
+All tasks share a run-specific native owner; writes use fresh numeric revisions.
+A lost local SQLite binding is repaired through `rebind`, preserving the same
+UUID. Workers do not own task lifecycle. Tasks close only after every worker
+and verification have reported complete; partial closure is reconciled without
+repeating workers.
+
+`handoff.json` records task references, report summaries, receipt paths and the
+knowledge publishing step. Native handoffs preserve active work in each Brain;
+local completion episodes remain in that project's Context Engine. Reusable
+service knowledge belongs in its service Memory Bank; cross-service contract
+choices belong in the system specs/Brain/Memory Bank. Review and publish those
+lessons through each owning runtime's promotion workflow. Execution does not
+turn raw prompts or unreviewed worker claims into verified durable memory.
+
+### Recovery and freshness
+
+`run.json` and `checkpoint.json` are atomically replaced and fsynced. Each
+attempt has an immutable `PHASE-aN.json` receipt. The run directory must be new
+and is created with mode 0700; files use 0600. A launch identity and input hash
+are persisted **before** starting a worker. Do not manually edit journal files.
+
+On resume, completed steps are skipped. A success receipt left behind by a
+crash finalizes only its native/journal metadata, without running AI again.
+If source edits have not yet reached the checkpoint, inspect them and resume
+with `--accept-source-changes`. A failed worker or interruption **without a
+success receipt** may already have edited files: repeating it requires naming
+that step explicitly:
+
+```bash
+python3 scripts/ai_system.py resume \
+  --system /workspace/ai-system/system.json --allow-root /workspace/services \
+  --run-dir /workspace/runs/chg-001 --retry-step service-orders
+# After inspecting partial source edits, also add --accept-source-changes.
+```
+
+The original plan must be fresh before any task creation. Sources are checked
+before each dispatch. After a successful edit, only changed registered sources
+explicitly listed in that worker's `changed_files` are adopted into the next
+checkpoint. Interrupted partial edits require explicit acceptance and must
+remain inside that worker's service scope. Passports, system config, commit
+changes, newly appearing missing sources, expired/ineligible memory and changes
+in other services require a new plan/run. Canonical excerpts are reread before
+launch; editing a saved excerpt does not replace its cited source.
+
+Freshness covers **registered/fingerprinted inputs**, not every file in a
+repository. Unregistered edits and changes by unrelated tools during a dispatch
+cannot be reliably attributed. Work in caller-prepared exclusive checkouts
+or worktrees; this CLI uses the explicitly registered directories and never
+creates, resets or cleans Git worktrees. It preserves preexisting dirty files.
+Run/workspace locks serialize this coordinator's jobs, including services in
+the same Git checkout; unrelated editors and Git commands do not honor those
+locks. The Codex sandbox's filesystem boundary follows its CLI/workspace
+configuration, while a monorepo service root may share a broader repository;
+use isolated checkout roots where hard write isolation is required.
+
+For execution, exit `0` means worker-reported completion, `1` means a saved
+blocked/interrupted run, and `2` means invalid/refused input or a reconciliation
+error (the existing journal retains its state). `run-status` reads the journal
+without launching AI or mutating native tasks. It reports historical run state,
+not current deployment or new validation of a completed change.
+
+```bash
+python3 -m unittest tests.test_ai_system tests.test_ai_system_execution
+```
+
+Execution tests use the actual trusted native Brain CLI with temporary projects
+and deterministic subprocess adapters. They test ordering, receipts, Codex argv,
+read-only/edit behavior, CAS conflicts, lost bindings, failure/timeout, stale
+sources, crash recovery and ambiguous partial writes. They do not make paid
+provider calls. Real provider credentials and end-to-end product environments
+remain integration prerequisites.

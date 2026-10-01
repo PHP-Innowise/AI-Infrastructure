@@ -6,6 +6,23 @@ on:
   pull_request:
 
 jobs:
+  system-orchestration:
+    name: "system orchestration (Python ${{ matrix.python }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      matrix:
+        python: ["3.9", "3.x"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Test universal system planning and execution
+        run: python3 -m unittest tests.test_ai_system tests.test_ai_system_execution
+      - name: Validate synthetic service catalog
+        run: python3 scripts/ai_system.py validate --system docs/examples/ai-system/system.json
+
   tests:
     name: "tests (${{ matrix.suite }})"
     runs-on: ubuntu-latest

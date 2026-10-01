@@ -26,6 +26,17 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Add an optional stack-neutral system planner (`scripts/ai_system.py`) for
+  service passports, declared contract impact, globally budgeted context,
+  Mermaid maps and cross-service plans. Preserve local Brain/Memory ownership,
+  require explicit access to external roots, fingerprint sources/commits and
+  detect changed or newly available inputs. Include a synthetic three-service
+  example and stdlib regression coverage. Add explicit sequential Codex/custom
+  adapter execution, native system/service Brain tasks, structured terminal
+  receipts, source checkpoints and crash-safe reconciliation. Require explicit
+  retries for ambiguous writes; complete tasks only after reported cross-service
+  verification and preserve knowledge handoff without promoting raw context.
+
 - Run Harness Creator phases on macOS through the built-in `sandbox-exec`
   (Seatbelt) profile when bubblewrap is absent: writes are allowed only in the
   run workspace, a private temporary directory, the per-user temporary space and
