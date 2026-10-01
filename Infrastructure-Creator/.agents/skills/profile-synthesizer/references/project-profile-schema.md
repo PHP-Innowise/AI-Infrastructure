@@ -384,7 +384,7 @@ resolve the command itself, a recorded baseline is cross-checked against that
 resolution rather than trusted.
 
 **A runtime command is graded against its contract, not against the target.**
-The memory quartet verifies itself with the seeded runtime, and on a first
+The six memory-continuity guides verify themselves with the seeded runtime, and on a first
 generation that runtime does not exist on the target yet - the generation
 installs it - so there is no unmodified target to observe and ADR-002's model
 has no subject. The runtime is fixed and shipped by this generator, so its
@@ -629,10 +629,10 @@ A rejection is a judgement about the target and is held to the target:
 real Markdown anchor. This prevents a plan from inventing a catalog reference
 or silently omitting candidates from the selected/rejected inventory.
 
-### The runtime-fixed quartet: what it is measured by
+### The six runtime-fixed memory-continuity guides: what they are measured by
 
-`memory-bank`, `project-brain`, `checkpoint`, and `memory` carry
-`kind: "runtime-fixed"` and are the only candidates the registry marks
+`memory-bank`, `project-brain`, `checkpoint`, `memory`, `context-save`, and
+`context-load` carry `kind: "runtime-fixed"` and are the only candidates the registry marks
 `"mode": "runtime-fixed"`. They are generated unconditionally because
 `memory-seed` installs the runtime they operate in the same generation run.
 
@@ -851,7 +851,7 @@ Each line is a scannable, generalized signal (never named after a specific frame
 - Pre-existing accelerator in target: [yes/no + which folders]
 
 ### 11.1 Skills To Generate
-Inventory is evidence-gated across all categories. There are no fixed category counts. The memory quartet is the sole exception because the generated runtime always exists.
+Inventory is evidence-gated across all categories. There are no fixed category counts. The six memory-continuity guides are the sole exception because the generated runtime always exists.
 
 - Plan file: `tasks/TASK-{N}/skill-generation-plan.json`
 - Selected: one line per skill: `[name]` (`[category]`) - `[necessity rationale]` - evidence: `[EV ids and target-relative paths]`.
@@ -870,7 +870,7 @@ Inventory is evidence-gated across all categories. There are no fixed category c
 
 ## 12. Memory Bank Preview
 
-One shared memory layer will be created at the target root, spanning two roots: `memory-bank/` (`README.md`, `INDEX.md`, `.memory-counter`, `templates/chunk.md`, `local/.gitkeep`, `chunks/`, and the dependency-free context-brain runtime `scripts/context.py` + `scripts/brain_runtime.py` + `scripts/context_retrieval.py` + `scripts/validate.py`) and the governed `project-brain/` control plane skeleton (`PROTOCOL.md`, schemas, record/control templates, config with the target's framework slug in `runtime.json`, empty indexes, and `.gitkeep`-held record directories). The automatic working-memory hooks `hook-forge` generates call this runtime; the memory quartet skills (`memory-bank`, `project-brain`, `checkpoint`, `memory`) operate it. `memory-seed` seeds one chunk per **cohesive durable concept** below, composed only from `confirmed` facts - never an `inferred` or `unknown` one. A chunk may group tightly related facts (for example, one invoice-lifecycle concept containing its confirmed statuses, transitions, guards, and audit consequence) instead of producing one tiny chunk per line. It MUST link to canonical sources rather than copying full specs, schemas, permission matrices, test inventories, or incident reports. This table is the authoritative seed plan: `memory-seed` MUST produce this same set of chunks (same count, same concepts, same sources) at generation time; any difference is drift and must be flagged.
+One shared memory layer will be created at the target root, spanning two roots: `memory-bank/` (`README.md`, `INDEX.md`, `.memory-counter`, `templates/chunk.md`, `local/.gitkeep`, `chunks/`, and the dependency-free context-brain runtime `scripts/context.py` + `scripts/context_handoff.py` + `scripts/brain_runtime.py` + `scripts/context_retrieval.py` + `scripts/validate.py`) and the governed `project-brain/` control plane skeleton (`PROTOCOL.md`, schemas, record/control templates, config with the target's framework slug in `runtime.json`, empty indexes, and `.gitkeep`-held record directories). The automatic working-memory hooks `hook-forge` generates call this runtime; the six memory-continuity skills (`memory-bank`, `project-brain`, `checkpoint`, `memory`, `context-save`, `context-load`) operate it. `context-save` may embed a user-requested visible transcript only in its explicit task artifact; it never sends one to Project Brain, Memory Bank, SQLite, hooks, or automatic retrieval. `memory-seed` seeds one chunk per **cohesive durable concept** below, composed only from `confirmed` facts - never an `inferred` or `unknown` one. A chunk may group tightly related facts (for example, one invoice-lifecycle concept containing its confirmed statuses, transitions, guards, and audit consequence) instead of producing one tiny chunk per line. It MUST link to canonical sources rather than copying full specs, schemas, permission matrices, test inventories, or incident reports. This table is the authoritative seed plan: `memory-seed` MUST produce this same set of chunks (same count, same concepts, same sources) at generation time; any difference is drift and must be flagged.
 
 | Planned ID | Title | Type | Source |
 | --- | --- | --- | --- |
@@ -896,7 +896,7 @@ One shared memory layer will be created at the target root, spanning two roots: 
 - Section 1 MUST list at least one edition and MUST cite the interview as its source (never assumed).
 - Every line in sections 2-8 (including 3.1 and 3.2) MUST carry a confidence tag; every section 8 finding MUST also carry source type.
 - Section 8.5 MUST distinguish discovered statuses from evidenced transitions; section 8.6 MUST state permission-matrix completeness; section 8.8 MUST distinguish risk indicators from documented severity/approval.
-- Section 11.1 MUST equal JSON `skills[]` exactly. Every selected candidate satisfies its reference contract; every rejected candidate records the missing trigger/evidence. Only the memory quartet is unconditional.
+- Section 11.1 MUST equal JSON `skills[]` exactly. Every selected candidate satisfies its reference contract; every rejected candidate records the missing trigger/evidence. Only the six memory-continuity guides are unconditional.
 - JSON MUST use schema 1.6 and satisfy the typed capability, procedure,
   verification, provider-safety, path, invariant, evidence-anchor, routing-case,
   flow, ownership, reciprocal-routing, uniqueness, reference, normalized-glob,

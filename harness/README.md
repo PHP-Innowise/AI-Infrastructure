@@ -15,6 +15,45 @@ Filenames and sizes are validated, and stored bytes are checked before use.
 Attachments are reference data and are not automatically executed or promoted
 into Memory Bank. A failed send retains the selected files for correction.
 
+## Merge chats into a new task
+
+In **Sessions → Merge chats**, select 2–8 inactive chats from the current
+project, choose **Continue**, then select Codex, Claude or Cursor and adjust the
+new task before choosing **Merge into new task**. Sources may use different
+providers. The destination starts a fresh native session in the current project
+folder. The original chats remain available through the source links.
+
+The new task preserves an immutable, attributed copy of each source's visible
+user and assistant messages, including decisions and progress written there.
+**View saved context** shows those messages by source. A bounded preview and the
+full local archive path are passed on the first launch; the agent must read
+omitted context and reconcile conflicting decisions against the current code.
+Conflicts remain explicitly unevaluated until then. Nested merges retain their
+inherited sources. Later source edits do not change the saved snapshot.
+
+This covers conversations captured by Harness, not external client chat lists
+or a full native transcript export. Tool output, hidden reasoning and attached
+file contents are not copied. Native file-read permissions still apply; an
+agent that cannot read the full archive must report the limitation. Claude
+receives access to the individual archive directory. This is not a read-only
+filesystem boundary in Edit mode: changing that file causes later integrity
+checks to fail, while the database snapshot remains available in the UI.
+The existing automatic
+project hooks keep capturing progress; their automatic restore is suppressed
+for this explicit merge so unrelated sources are not added.
+
+Active chats and Creator, Fleet or Clash runs cannot be selected. A source is
+limited to 512 KiB of visible messages and 10,000 events; an archive to 2 MiB;
+stored archives to 128 and 64 MiB of serialized history. Exceeding a limit
+rejects the new merge without truncating or deleting saved context. Archives
+live privately in the Harness state directory and SQLite, outside project Git.
+Retries with the same request identity create at most one task. After a server
+restart, a merged task that has not acquired a native session offers
+**Restart merged task**. This explicitly reruns the initial request; inspect any
+partial work first. Automatic duplicate-request retries only requeue targets
+that never started a launch. Once a native session exists, use ordinary continuation.
+Startup removes orphan archives left by a crash before the database commit.
+
 ## Infrastructure Creator in the browser
 
 Choose **Infrastructure Creator** (also available through Kit 1), a registered

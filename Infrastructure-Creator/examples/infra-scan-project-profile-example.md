@@ -154,8 +154,8 @@
 
 **Frontend:** skipped - no UI surface detected.
 
-**Process & Workflow (18):**
-`requirements-analyst`, `researcher`, `brainstorming`, `council`, `writing-plans`, `using-git-worktrees`, `systematic-debugger`, `refactorer`, `dependency-manager`, `review-pr`, `finishing-branch`, `documentation-generator`, `skill-creator`, `reflect`, `memory-bank`, `project-brain`, `checkpoint`, `memory`. The memory quartet (the last four) operates the shared seeded layer: `memory-bank` through retrieve/capture/supersede/audit modes, `project-brain` through the governed control plane, `checkpoint`/`memory` as manual companions to the automatic working-memory hooks.
+**Process & Workflow (20):**
+`requirements-analyst`, `researcher`, `brainstorming`, `council`, `writing-plans`, `using-git-worktrees`, `systematic-debugger`, `refactorer`, `dependency-manager`, `review-pr`, `finishing-branch`, `documentation-generator`, `skill-creator`, `reflect`, `memory-bank`, `project-brain`, `checkpoint`, `memory`, `context-save`, `context-load`. The six memory-continuity guides operate the shared seeded layer: `memory-bank` through retrieve/capture/supersede/audit modes, `project-brain` through the governed control plane, `checkpoint`/`memory` as manual companions to the automatic working-memory hooks, and `context-save`/`context-load` as explicit portable handoff controls. A visible transcript is included only for a user-requested full task artifact and never in automatic retrieval.
 
 **Universal PHP (7):**
 - `coding` - Laravel 11/PHP 8.2 implementation respecting Billing invariants and Pint

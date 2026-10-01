@@ -30,6 +30,17 @@
     .brand-name { font-size:13px; letter-spacing:-.2px; font-weight:650; line-height:1.4; }
     .brand-subtitle { color:var(--muted); font-size:11px; letter-spacing:.25px; }
     .new-session { display:flex; align-items:center; justify-content:center; gap:8px; margin:0 4px 20px; min-height:39px; border:1px solid #dbdbe1; border-radius:7px; background:white; color:var(--ink); font-size:13px; font-weight:550; }
+    .merge-panel { margin:12px 0; padding:14px 16px; border:1px solid #d8d5e5; border-radius:10px; background:#faf9fd; }
+    .merge-panel h3 { margin:0 0 6px; font-size:14px; }
+    .merge-panel p { margin:6px 0; font-size:12px; color:var(--muted); }
+    .merge-list { display:grid; gap:8px; max-height:320px; overflow:auto; margin:16px 0; }
+    .merge-choice { display:flex; align-items:flex-start; gap:10px; border:1px solid #dedde4; border-radius:8px; padding:12px; }
+    .merge-choice:has(input:checked) { border-color:#8d79bd; background:#f6f2ff; }
+    .merge-choice input { margin-top:3px; }
+    .merge-choice strong,.merge-choice small { display:block; overflow-wrap:anywhere; }
+    .merge-choice small { margin-top:5px; color:var(--muted); }
+    .merge-source-links { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+    #merge-chats { margin-top:-10px; }
     .new-session:hover { border-color:#bebbc8; }
     .navigation { display:flex; flex-direction:column; gap:4px; }
     .nav-item { display:flex; align-items:center; gap:11px; width:100%; border:0; border-radius:6px; padding:10px 12px; background:transparent; color:#65656d; text-align:left; font-size:13px; }
@@ -414,6 +425,7 @@
     <aside class="sidebar" id="sidebar" aria-label="Workspace navigation">
       <div class="brand"><span class="brand-mark"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="m12 2 9 5v10l-9 5-9-5V7Z M3 7l9 5 9-5 M12 12v10"/></svg></span><div><div class="brand-name">AI Infrastructure</div><div class="brand-subtitle">Harness</div></div></div>
       <button class="new-session" id="new-session" type="button"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 5v14 M5 12h14"/></svg>New session</button>
+      <button class="new-session" id="merge-chats" type="button">Merge chats</button>
       <nav class="navigation" aria-label="Main navigation">
         <button class="nav-item" type="button" data-view="setup"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h7l2 3h9v11H3Z M3 6V4h7l2 2 M15 12v5 M12.5 14.5h5"/></svg>Projects &amp; Setup</button>
         <button class="nav-item" type="button" data-view="sessions" aria-current="page"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h16v12H9l-5 4Z"/></svg>Sessions</button>
@@ -500,7 +512,7 @@
           <div class="waiting" id="waiting" role="status" hidden><span class="status-dot running"></span><span id="waiting-text">Session running…</span></div>
           <p class="error-text" id="events-error" role="alert" hidden></p>
         </div></div>
-        <div class="composer-area" id="composer-area"><div class="composer-wrap"><p class="error-text" id="composer-error" role="alert" hidden></p><form class="composer" id="session-form"><label class="sr-only" id="prompt-label" for="prompt">Task or follow-up message</label><textarea id="prompt" placeholder="Describe a task for this project…" required rows="3"></textarea><input id="attachment-input" type="file" multiple hidden><div class="attachment-list" id="attachment-list" aria-label="Files to attach" hidden></div><p class="error-text" id="attachment-error" role="alert" hidden></p><div class="composer-actions"><button class="button attach-button" id="attach-files" type="button" aria-describedby="attachment-hint">Attach files</button><span class="composer-note" id="composer-note">Ctrl / ⌘ + Enter to send</span><button class="button primary" id="send" type="submit" disabled><span id="send-label">Start session</span><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 19V5 M6 11l6-6 6 6"/></svg></button></div><p class="composer-note" id="attachment-hint">Up to 5 files · 4 MiB each · 8 MiB total. Files are sent with your message.</p></form><p class="composer-caption" id="composer-caption">The runner uses your selected provider's native CLI.</p></div></div>
+        <div class="composer-area" id="composer-area"><div class="composer-wrap"><section class="merge-panel" id="merge-context" aria-label="Merged source chats" hidden><h3 id="merge-context-title">Merged sources</h3><p id="merge-context-note"></p><div class="merge-source-links" id="merge-context-sources"></div><button class="button" id="merge-clear" type="button">Cancel merge</button><button class="button primary" id="merge-restart" type="button" hidden>Restart merged task</button><button class="button" id="merge-archive" type="button" hidden>View saved context</button><div id="merge-archive-content" tabindex="0" hidden style="max-height:260px;overflow:auto"></div></section><p class="error-text" id="composer-error" role="alert" hidden></p><form class="composer" id="session-form"><label class="sr-only" id="prompt-label" for="prompt">Task or follow-up message</label><textarea id="prompt" placeholder="Describe a task for this project…" required rows="3"></textarea><input id="attachment-input" type="file" multiple hidden><div class="attachment-list" id="attachment-list" aria-label="Files to attach" hidden></div><p class="error-text" id="attachment-error" role="alert" hidden></p><div class="composer-actions"><button class="button attach-button" id="attach-files" type="button" aria-describedby="attachment-hint">Attach files</button><span class="composer-note" id="composer-note">Ctrl / ⌘ + Enter to send</span><button class="button primary" id="send" type="submit" disabled><span id="send-label">Start session</span><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 19V5 M6 11l6-6 6 6"/></svg></button></div><p class="composer-note" id="attachment-hint">Up to 5 files · 4 MiB each · 8 MiB total. Files are sent with your message.</p></form><p class="composer-caption" id="composer-caption">The runner uses your selected provider's native CLI.</p></div></div>
       </section>
       <section class="view" id="results-view" aria-label="Results and verification" hidden><div class="page-scroll"><div class="page-content">
         <div class="page-heading"><h2>Results &amp; Verification</h2><p id="results-workspace"></p></div>
@@ -629,6 +641,13 @@
       <noscript><p class="connection-loading">This local Harness interface needs JavaScript to connect to the runner.</p></noscript>
     </main>
   </div>
+  <dialog class="folder-picker" id="merge-picker" aria-labelledby="merge-picker-title">
+    <h2 id="merge-picker-title">Merge chats into a new task</h2>
+    <p>Choose 2–8 inactive chats from the current project. Each chat keeps its own context, decisions and progress. Source branches may differ.</p>
+    <div class="merge-list" id="merge-options"></div>
+    <p id="merge-selection-count" role="status">0 chats selected</p>
+    <div class="page-toolbar"><button class="button" type="button" id="merge-picker-cancel">Cancel</button><button class="button primary" type="button" id="merge-picker-continue" disabled>Continue with selected chats</button></div>
+  </dialog>
   <dialog class="folder-picker" id="folder-picker" aria-labelledby="folder-picker-title" aria-describedby="folder-picker-description">
     <div class="folder-picker-head"><h2 id="folder-picker-title">Choose a project folder</h2><button class="button" id="folder-picker-close" type="button" aria-label="Close folder browser">Close</button></div>
     <p class="knowledge-note" id="folder-picker-description">Browse folders on the computer running Harness. Select a folder, then add it to your projects.</p>
@@ -710,6 +729,66 @@
     const createSkillState = {selectedAgents:new Set(),agentsInitialized:false,touched:new Set(),pending:null,epoch:0,preview:null,resultProjectId:null};
     const projectGitState = {projectId:null,data:null,pending:false,error:null,epoch:0,controller:null};
     const fleetUi = {lenses:new Set(),initialized:false,reviewers:new Map(),stage:null,resultKey:null,reportOpenedFor:null};
+    const mergeUi = {draft:null, selected:new Set(), archiveEpoch:0};
+    function mergeEligible(session, projectId) { return session.project_id === projectId && !['queued','running','awaiting_context'].includes(session.status) && !session.creator && !session.fleet && !session.clash; }
+    function renderMergeContext() {
+      const merge = state.selected?.merge || mergeUi.draft;
+      $('merge-context').hidden = !merge;
+      $('merge-clear').hidden = !mergeUi.draft;
+      $('merge-clear').disabled = Boolean(state.pending);
+      $('merge-archive').hidden = !state.selected?.merge;
+      $('merge-restart').hidden = !state.selected?.merge || Boolean(state.selected.native_session_id) || !['interrupted','failed'].includes(state.selected.status);
+      $('merge-restart').disabled = Boolean(state.pending);
+      $('attachment-hint').hidden = Boolean(mergeUi.draft);
+      $('merge-context-sources').replaceChildren();
+      if (!merge) return;
+      $('merge-context-title').textContent = `${merge.sources.length} source chats · ${state.selectedId ? 'saved context' : 'new task'}`;
+      $('merge-context-note').textContent = state.selectedId ? 'Frozen Harness-visible history. Decisions and progress remain attributed; conflicting decisions require verification.' : 'Choose the destination provider and describe the new task below. Sources stay unchanged. The task starts in this project folder.';
+      if (!$('merge-restart').hidden) $('merge-context-note').textContent += ' Restart reruns the initial request with these sources; check any partial work from the interrupted attempt.';
+      for (const source of merge.sources) {
+        const button = el('button','button',`${source.title || 'Untitled'} · ${source.provider}${source.branch ? ' · '+source.branch : ''}`); button.type='button'; button.disabled=Boolean(state.pending);
+        button.addEventListener('click',()=>selectSession(source.id)); $('merge-context-sources').append(button);
+      }
+    }
+    function resetMerge() { mergeUi.draft=null; mergeUi.archiveEpoch++; $('merge-archive-content').hidden=true; $('merge-archive-content').textContent=''; }
+    $('merge-chats').addEventListener('click', async () => {
+      if (state.pending || !state.bootstrap) return;
+      await refreshSessions();
+      mergeUi.selected.clear(); $('merge-options').replaceChildren();
+      const options = state.sessions.filter(session=>mergeEligible(session,$('project').value));
+      for (const session of options) {
+        const label=el('label','merge-choice'), checkbox=el('input'); checkbox.type='checkbox'; checkbox.value=session.id;
+        const info=el('span'); info.append(el('strong','',session.title || 'Untitled chat'),el('small','',`${session.provider} · ${sessionStatusLabel(session)}${session.branch ? ' · '+session.branch : ''}`));
+        checkbox.addEventListener('change',()=>{ if(checkbox.checked) mergeUi.selected.add(session.id); else mergeUi.selected.delete(session.id); $('merge-selection-count').textContent=`${mergeUi.selected.size} chats selected`; $('merge-picker-continue').disabled=mergeUi.selected.size<2 || mergeUi.selected.size>8; });
+        label.append(checkbox,info); $('merge-options').append(label);
+      }
+      if (options.length<2) $('merge-options').append(el('p','empty-note','Finish at least two chats in this project to merge them.'));
+      $('merge-selection-count').textContent='0 chats selected'; $('merge-picker-continue').disabled=true; $('merge-picker').showModal();
+    });
+    $('merge-picker-cancel').addEventListener('click',()=>$('merge-picker').close());
+    $('merge-picker-continue').addEventListener('click',()=>{
+      if (mergeUi.selected.size<2 || mergeUi.selected.size>8) return;
+      const sources=state.sessions.filter(session=>mergeUi.selected.has(session.id)); const projectId=$('project').value;
+      $('merge-picker').close(); newSession('Continue the work from these chats. Preserve each source’s decisions and progress, identify conflicts, and propose the next steps.',projectId);
+      mergeUi.draft={sources,request_id:crypto.randomUUID(),requestBody:null};
+      $('workflow').value='native'; $('workspace').value='project'; resetBrainLink(); restoreClashSettings(null); clearAttachments(); updateControls();
+    });
+    $('merge-clear').addEventListener('click',()=>{ if(!state.pending){resetMerge();updateControls();} });
+    $('merge-restart').addEventListener('click',async()=>{
+      if (state.pending) return;
+      state.pending='restart-merge'; updateControls();
+      try { const data=await api(`/api/sessions/${encodeURIComponent(state.selectedId)}/restart-merge`,{method:'POST',body:{}}); upsert(data.session); await pollSession(state.epoch); }
+      catch(error){showError('composer-error',textError(error));}
+      finally{state.pending=null;updateControls();}
+    });
+    $('merge-archive').addEventListener('click',async()=>{
+      const id=state.selectedId, epoch=++mergeUi.archiveEpoch; $('merge-archive').disabled=true;
+      try { const bundle=await api(`/api/sessions/${encodeURIComponent(id)}/merge`); if(id===state.selectedId && epoch===mergeUi.archiveEpoch){ const view=$('merge-archive-content'); view.replaceChildren();
+          const addSources=(sources,depth=0)=>{ for(const source of sources || []) { const section=el('section','merge-panel'); section.append(el('h3','',`${depth ? 'Inherited · ' : ''}${source.title} · ${source.provider}`)); if(source.branch) section.append(el('p','',`Source branch: ${source.branch}`)); for(const message of source.messages || []) { section.append(el('strong','',message.role==='user'?'You':'Assistant')); const text=el('p','',message.text); text.style.whiteSpace='pre-wrap'; section.append(text); } view.append(section); if(source.inherited_context && depth<20) addSources(source.inherited_context.sources,depth+1); } };
+          addSources(bundle.sources); view.hidden=false; } }
+      catch(error){showError('composer-error',textError(error));}
+      finally{$('merge-archive').disabled=false;}
+    });
     const active = session => session && ['queued','running'].includes(session.status);
     const isFleetSession = session => session?.workflow === 'fleet-review';
     const statusLabel = value => ({queued:'Queued',running:'Running',completed:'Process complete',failed:'Failed',cancelled:'Cancelled',interrupted:'Interrupted',awaiting_context:'Review context',awaiting_approval:'Awaiting approval',rejected:'Report rejected'})[value] || value || 'Ready';
@@ -1458,7 +1537,7 @@
       const workspaceValid = updateWorkspaceControls();
       const sddValid = updateSddControls(); const clashValid = updateClashControls(); const clashMode = clashSelected();
       const fleetValid = updateFleetSettingsControls(); const budgetValid = sessionBudgetControls();
-      $('new-session').disabled = pending;
+      $('new-session').disabled = pending; $('merge-chats').disabled = pending || !ready;
       for (const button of $('history').querySelectorAll('button')) button.disabled = pending;
       for (const id of ['project','provider','workflow','project-context']) $(id).disabled = !ready || hasSession || pending;
       const agentsLocked = !ready || pending || state.loading || active(state.selected) || existingFleet || awaitingContext || Boolean(state.selected?.creator);
@@ -1502,6 +1581,19 @@
       $('provider-hint').textContent = dryRun ? 'Offline dry-run can use any provider selection; no native CLI is launched.' : !ready ? 'Authentication uses your native CLI. Credentials stay out of this browser.' : !provider?.available ? 'No provider is ready. Install and sign in with a native CLI, then restart the Harness server.' : `${provider.detail || `${provider.name} is available.`} Native authentication stays in your terminal.`;
       $('agent-hint').textContent = clashMode ? 'Clash participants run without additional agents; neither the first participant nor the challenger can delegate.' : fleet ? 'This limit controls concurrent reviewers. Each reviewer works independently and cannot launch nested agents.' : ultracode ? 'Ultracode requires exactly the selected number of helpers per turn, excluding the main agent. Use batches if needed. Native workflow availability and concurrency limits apply; unverified helper counts are shown in the result.' : `The selected number of helpers is required on every turn, excluding the main agent. If concurrency is lower, use successive batches.${provider?.agent_control_detail ? ` ${provider.agent_control_detail}` : ''}`;
       $('waiting').hidden = !isActive; $('waiting-text').textContent = linked && !state.selected.brain.context_id ? 'Preparing workspace and context. The provider has not started this turn.' : state.selected?.status === 'queued' ? 'Queued — waiting for an available runner.' : existingFleet ? 'Fleet review is running. Stage and reviewer updates appear above.' : isClashSession(state.selected) ? `${providerFor(state.selected.provider)?.name || state.selected.provider} and ${providerFor(state.selected.clash?.challenger)?.name || 'the challenger'} are clashing. Turn events appear above.` : `${providerFor(state.selected?.provider)?.name || 'Agent'} is running. New events will appear here.`;
+      if (mergeUi.draft) {
+        for (const id of ['project','workflow','workspace','brain-link-enabled','clash-enabled','attach-files']) $(id).disabled=true;
+        $('send').disabled ||= mergeUi.draft.sources.length<2 || mergeUi.draft.sources.length>8;
+        if (!pending) $('send-label').textContent='Merge into new task';
+      }
+      renderMergeContext();
+      if (!$('merge-restart').hidden) {
+        for (const id of ['mode','model-choice','model','thinking-effort','agents-enabled','agent-count','clash-enabled']) $(id).disabled=true;
+        updateModelRoutingControls(true);
+        $('send-label').textContent='Restart available above';
+        $('composer-note').textContent='Use Restart merged task above.';
+        $('composer-caption').textContent='Restart uses the saved initial request, provider settings and source context.';
+      }
       $('welcome').hidden = hasSession || fleet; updateHeader(); updateSkillsControls(); updateKnowledgeControls(); updateSetupControls(); renderFleetSession(); renderClashSession(); renderLinkedSession(); resultControls();
     }
     function applySessionSettings(session, restoreModel = true) { $('sdd-feature').value = session.sdd?.feature || ''; $('sdd-phase').value = session.sdd?.phase || 'specify'; for (const id of ['project','provider','workflow','mode']) $(id).value = session[id === 'project' ? 'project_id' : id] || (id === 'mode' ? 'plan' : id === 'workflow' ? 'native' : ''); $('project-context').checked = Boolean(session.project_context); if (restoreModel || active(session) || isFleetSession(session)) { $('agents-enabled').checked = session.agents_enabled === true; $('agent-count').value = Number.isInteger(session.agent_count) ? session.agent_count : defaultAgentCount(); } $('workspace').value = session.workspace === 'worktree' ? 'worktree' : 'project'; $('worktree-branch').value = session.workspace === 'worktree' ? session.branch || '' : ''; restoreBudgets('session-budgets',session.budgets,session.id+':'+session.budget_revision); restoreModelRouting(session.model_routing); restoreClashSettings(session.clash || null); if (isFleetSession(session)) restoreFleetSettings(session.fleet); if (restoreModel || isFleetSession(session)) refreshModelChoices(session.model || null,session.thinking_effort || null); loadProjectGit(); }
@@ -1521,6 +1613,7 @@
     $('prompt').addEventListener('keydown',event => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); if (!$('send').disabled) $('session-form').requestSubmit(); } });
     function stopPolling() { clearTimeout(state.pollTimer); state.pollTimer = null; state.pollController?.abort(); state.pollController = null; }
     function newSession(prompt = '', projectId = $('project').value) {
+      resetMerge();
       saveSessionPreferences();
       clearAttachments();
       stopPolling(); state.epoch++; state.selectedId = null; state.selected = null; state.loading = false; state.eventIds.clear(); state.assistantTexts.clear(); $('events').replaceChildren(); $('prompt').value = prompt;
@@ -1659,6 +1752,7 @@
     }
     async function selectSession(id) {
       if (state.pending) return;
+      resetMerge();
       clearAttachments();
       saveSessionPreferences(); ++preferenceEpoch; restoringSessionPreferences = false;
       stopPolling(); const epoch = ++state.epoch; state.selectedId = id; state.selected = state.sessions.find(item => item.id === id) || null; state.eventIds.clear(); state.assistantTexts.clear(); state.loading = true;
@@ -1674,7 +1768,15 @@
       const body = followup ? turn : {...turn,budgets:sessionBudgets(),project_id:$('project').value,provider:$('provider').value,mode:$('mode').value,workflow:$('workflow').value,project_context:$('project-context').checked,workspace:$('workspace').value,...($('workspace').value === 'worktree' && $('worktree-branch').value.trim() ? {worktree_branch:$('worktree-branch').value.trim()} : {}),...(fleetSelected() ? {fleet:fleetSettings()} : {}),...($('brain-link-enabled').checked ? {brain:brainLinkConfig()} : {})};
       try {
         if (attachedFiles.length) body.attachments = await Promise.all(attachedFiles.map(encodeAttachment));
-        const data = await api(followup ? `/api/sessions/${encodeURIComponent(state.selectedId)}/messages` : '/api/sessions',{method:'POST',body});
+        let endpoint=followup ? `/api/sessions/${encodeURIComponent(state.selectedId)}/messages` : '/api/sessions', requestBody=body;
+        if (!followup && mergeUi.draft) {
+          endpoint='/api/sessions/merge';
+          const signature=JSON.stringify(body);
+          if(mergeUi.draft.requestBody && mergeUi.draft.requestBody!==signature) mergeUi.draft.request_id=crypto.randomUUID();
+          mergeUi.draft.requestBody=signature;
+          requestBody={source_ids:mergeUi.draft.sources.map(source=>source.id),request_id:mergeUi.draft.request_id,destination:body};
+        }
+        const data = await api(endpoint,{method:'POST',body:requestBody});
         if (!followup && !data.session?.id) throw new Error('The runner did not return a session. Refresh the session list before retrying.');
         if (data.session) { upsert(data.session); if (followup) applySessionSettings(data.session); } $('prompt').value = ''; clearAttachments();
         if (!followup) { state.pending = null; await selectSession(data.session.id); }

@@ -74,7 +74,7 @@ infra-scan <path-to-php-project>          (read-only; never writes into the targ
         security-review generate on every run, tailored to this target's own
         paths, commands, test topology, CI, and conventions - evidence narrows
         their scope, never removes them (plus the always-installed memory
-        quartet: twelve guaranteed skills)
+        continuity six: fourteen guaranteed skills)
 
    <-- REVIEW THE PROFILE (what you read here is what infra-generate will build) -->
 
@@ -136,7 +136,7 @@ only the native integration directories selected during `clarifying-interview`:
   evidence anchors, capability and path contracts, and claim-linked critical
   invariants. Provider skills are non-networked by default.
   - **Architecture, design, and frontend** skills exist only where the detected structure and UI surface justify a separate operational workflow.
-  - **Process and universal PHP** skills are selected and adapted to the target's actual conventions/tooling instead of being emitted as a fixed list. The memory quartet (`memory-bank`, `project-brain`, `checkpoint`, `memory`) remains because the generator always installs that runtime.
+  - **Process and universal PHP** skills are selected and adapted to the target's actual conventions/tooling instead of being emitted as a fixed list. The six memory-continuity guides (`memory-bank`, `project-brain`, `checkpoint`, `memory`, `context-save`, `context-load`) remain because the generator always installs that runtime.
   - **Framework-specialty** (evidence-gated, one per confirmed pattern) - e.g. ORM patterns, migration safety, async/queue jobs, event-boundary review, caching strategy, file storage, auth scaffolding, form/validator design, admin panel, console commands, test-data factories - generated only where the scan found real evidence, never speculatively.
   - **Integrations** (one per detected package/service) - e.g. a payment-integration skill if a Stripe SDK was found, a queue skill if a Redis/SQS worker was found.
   - **Domain** (0 or more, evidence-gated) - one bounded-context review skill only when multiple confirmed rules create a coherent purpose, e.g. `billing-rules-review`; never one skill per rule/entity/status.

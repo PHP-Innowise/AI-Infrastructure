@@ -11,6 +11,15 @@ it at the top of every session.
 
 ## Unreleased
 
+- Merge multiple captured chats into a new Codex, Claude Code, or Cursor task: frozen source archives, source-attributed previews, explicit conflict handling, same-branch automatic selection, and optional `context-load merge` source selection. Reopening preserves the merge; native task creation remains client-capability dependent.
+
+- Add trusted automatic same-branch context continuity for Codex, Claude Code and Cursor. Hooks store bounded documented visible text only in ignored `.context-handoff/`, restore historical excerpts without Brain/Bank/SQLite writes, and support an explicit process-local opt-out. Client lifecycle delivery remains capability-dependent; synthetic tests do not prove a live account.
+
+- Add `context-save` and `context-load` for Codex, Claude Code and Cursor:
+  save a summary or selected topic, preserve an explicitly exported conversation
+  verbatim in full mode, and check source drift before the next task.
+  Shared runtime changes are recorded in the root changelog.
+
 ### Changed
 
 - Memory promotion policy now matches runtime configuration: eligible verified
