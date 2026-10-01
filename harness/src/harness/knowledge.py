@@ -19,6 +19,8 @@ import time
 import uuid
 import zipfile
 
+from .filesystem import fs
+from . import process_runtime
 from .sessions import SessionError, open_project_path, read_context
 
 RECORD_TYPES = ('task', 'finding', 'bug', 'incident', 'decision', 'event')
@@ -183,7 +185,7 @@ class KnowledgeManager:
         if selected is not None:
             try:
                 descriptor = open_project_path(project, prefix + 'project-brain', directory=True)
-                os.close(descriptor)
+                fs.close(descriptor)
                 brain_available = True
             except OSError:
                 pass
@@ -224,7 +226,7 @@ class KnowledgeManager:
                 except OSError:
                     continue
                 try:
-                    with os.scandir(descriptor) as names:
+                    with fs.scandir(descriptor) as names:
                         for item in names:
                             scanned += 1
                             if scanned > 5000 or len(entries) >= 500 or consumed >= 8 * 1024 * 1024:
@@ -239,7 +241,7 @@ class KnowledgeManager:
                             consumed += min(content[0], 65536)
                             entries.append(_entry(relative, *content)[0])
                 finally:
-                    os.close(descriptor)
+                    fs.close(descriptor)
                 if truncated:
                     break
         entries.sort(key=lambda item: (item['category'], item['title'].casefold(), item['path']))
@@ -260,23 +262,23 @@ class KnowledgeManager:
                 while pending:
                     current = pending.pop()
                     try:
-                        with os.scandir(current) as names:
+                        with fs.scandir(current) as names:
                             for item in names:
                                 scanned += 1
                                 if scanned > 20000:
                                     raise SessionError('Knowledge storage exceeds the supported file count.')
                                 metadata = item.stat(follow_symlinks=False)
                                 if stat.S_ISDIR(metadata.st_mode):
-                                    pending.append(os.open(item.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=current))
+                                    pending.append(fs.open(item.name, os.O_RDONLY | fs.O_DIRECTORY | fs.O_NOFOLLOW, dir_fd=current))
                                 elif not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
                                     raise SessionError('Knowledge storage contains links or unsupported file types.')
                     finally:
-                        os.close(current)
+                        fs.close(current)
             except OSError as error:
                 raise SessionError('Knowledge storage changed or contains unsafe paths.') from error
             finally:
                 for descriptor in pending:
-                    os.close(descriptor)
+                    fs.close(descriptor)
 
     def _arguments(self, action, data):
         arguments = [action]
@@ -371,17 +373,15 @@ class KnowledgeManager:
     def _execute(self, command, root):
         read_fd, write_fd = os.pipe()
         process = None
-        selector = selectors.DefaultSelector()
+        selector = process_runtime.PipeSelector()
         output = [bytearray(), bytearray()]
         try:
-            guarded = [sys.executable, str(Path(__file__).with_name('process_guard.py')), str(read_fd), '--', *command]
             environment = {key: value for key, value in os.environ.items() if key not in ('PYTHONPATH', 'PYTHONHOME')}
             environment['PYTHONDONTWRITEBYTECODE'] = '1'
-            process = subprocess.Popen(guarded, cwd=root, env=environment, stdin=subprocess.DEVNULL,
-                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
-                                       pass_fds=(read_fd, self.sessions.runner_lock))
+            process = process_runtime.launch_guarded(command, read_fd, lock_fd=self.sessions.runner_lock, cwd=root, env=environment, stdin=subprocess.DEVNULL,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             self.process = process
-            os.close(read_fd)
+            fs.close(read_fd)
             read_fd = None
             selector.register(process.stdout, selectors.EVENT_READ, 0)
             selector.register(process.stderr, selectors.EVENT_READ, 1)
@@ -392,10 +392,10 @@ class KnowledgeManager:
                 if time.monotonic() - started > EXECUTION_TIMEOUT:
                     raise SessionError('Knowledge operation timed out. Refresh the records before retrying; changes may have been applied.')
                 ready = selector.select(.1)
-                if not ready and process.poll() is not None:
+                if not ready and process.poll() is not None and not process_runtime.WINDOWS:
                     break
                 for key, _ in ready:
-                    chunk = os.read(key.fileobj.fileno(), 65536)
+                    chunk = selector.read(key.fileobj, 65536)
                     if not chunk:
                         selector.unregister(key.fileobj)
                         continue
@@ -405,15 +405,14 @@ class KnowledgeManager:
             return process.wait(timeout=3), bytes(output[0]), bytes(output[1])
         finally:
             if read_fd is not None:
-                os.close(read_fd)
-            os.close(write_fd)
+                fs.close(read_fd)
+            fs.close(write_fd)
             if process is not None:
                 try:
                     process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
                     pass
-                self.sessions._signal(process, signal.SIGKILL)
-                process.wait(timeout=3)
+                process_runtime.reap_tree(process, owner=self.sessions)
                 process.stdout.close()
                 process.stderr.close()
             self.process = None
@@ -431,7 +430,7 @@ class KnowledgeManager:
                     relative = _path(path.relative_to(destination).as_posix())
                     descriptor = open_project_path(destination, relative)
                     try:
-                        metadata = os.fstat(descriptor)
+                        metadata = fs.fstat(descriptor)
                         count += 1
                         total += metadata.st_size
                         if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
@@ -447,7 +446,7 @@ class KnowledgeManager:
                             raise SessionError('Export changed while it was being read.')
                         archive.writestr(relative, data)
                     finally:
-                        os.close(descriptor)
+                        fs.close(descriptor)
         return stream.getvalue()
 
     def _inspect_runtime(self, root, request):

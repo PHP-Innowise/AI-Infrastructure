@@ -26,6 +26,19 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Fix native Windows Harness guard shutdown and private-state ownership on
+  elevated runners. Reject non-UTF-8 Creator plans with a controlled error and
+  make pipe and plan fixtures independent of Windows newline/encoding defaults.
+
+- Add native Windows/Git Bash Harness runtime support: working Python fallback,
+  Job Object process cleanup, threaded bounded pipe reads, retained admission
+  locks, rooted no-reparse filesystem operations and private state ACLs.
+  Launch supported npm CLI shims directly through Node.js, support Windows
+  Fleet venv paths and Project Brain process locks, and add a native Windows
+  acceptance CI job. Creator also supports native Windows through Codex elevated
+  permission profiles, with read-only project/control roots, per-phase boundary
+  probes and disposable installed-runtime validation copies.
+
 - Run Harness Creator phases on macOS through the built-in `sandbox-exec`
   (Seatbelt) profile when bubblewrap is absent: writes are allowed only in the
   run workspace, a private temporary directory, the per-user temporary space and

@@ -7,14 +7,16 @@ import json
 import os
 from pathlib import Path
 import selectors
-import shlex
 import signal
 import subprocess
 import sys
 import time
 import uuid
 
+from .filesystem import fs
+from . import process_runtime
 from .sessions import ACTIVE, SessionError, git_details, now, read_context
+from .windows_commands import split_command
 
 OUTPUT_LIMIT = 512 * 1024
 
@@ -92,16 +94,16 @@ class Results:
         store=self.sessions
         if not cleanup and (store.stopping.is_set() or sid in store.cancelled):
             return {'output':'','exit_code':None,'reason':'interrupted' if store.stopping.is_set() else 'cancelled','seconds':0}
-        read_fd,write_fd=os.pipe(); process=None; selector=selectors.DefaultSelector()
+        read_fd,write_fd=os.pipe(); process=None; selector=process_runtime.PipeSelector()
         output=bytearray(); reason=None; started=time.monotonic()
         try:
             env={k:v for k,v in os.environ.items() if not k.startswith('GIT_')}
             env.update(GIT_TERMINAL_PROMPT='0',PYTHONDONTWRITEBYTECODE='1')
             if env_extra: env.update(env_extra)
-            process=subprocess.Popen([sys.executable,str(Path(__file__).with_name('process_guard.py')),str(read_fd),'--',*command],
+            process=process_runtime.launch_guarded(command,read_fd,lock_fd=store.runner_lock,
                 cwd=root,env=env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
-                start_new_session=True,pass_fds=(read_fd,store.runner_lock))
-            os.close(read_fd); read_fd=None
+                )
+            fs.close(read_fd); read_fd=None
             if sid:
                 with store.lock: store.active[sid]=process
             selector.register(process.stdout,selectors.EVENT_READ)
@@ -110,7 +112,7 @@ class Results:
                     reason='interrupted' if store.stopping.is_set() else 'cancelled'; break
                 if time.monotonic()-started > timeout: reason='timed_out'; break
                 for key,_ in selector.select(.1):
-                    chunk=os.read(key.fileobj.fileno(),65536)
+                    chunk=selector.read(key.fileobj,65536)
                     if not chunk: selector.unregister(key.fileobj); continue
                     output.extend(chunk[:OUTPUT_LIMIT-len(output)])
                     if update: update(output.decode('utf-8',errors='replace'))
@@ -122,11 +124,10 @@ class Results:
                 try: process.wait(timeout=max(.1,timeout-(time.monotonic()-started)))
                 except subprocess.TimeoutExpired: reason='timed_out'
         finally:
-            if read_fd is not None: os.close(read_fd)
-            os.close(write_fd)
+            if read_fd is not None: fs.close(read_fd)
+            fs.close(write_fd)
             if process:
-                store._signal(process,signal.SIGKILL)
-                process.wait(timeout=3); process.stdout.close()
+                process_runtime.reap_tree(process, owner=store); process.stdout.close()
             selector.close()
             if sid:
                 with store.lock: store.active.pop(sid,None)
@@ -139,7 +140,7 @@ class Results:
         if not info['is_git'] or not info['head']:
             return {'available':False,'id':None,'complete':False,'message':'A Git repository with a commit is required for a diff. Checks can still run in this workspace.'}
         base=session.get('result_base') or {}; head=base.get('head') or info['head']
-        command=['git','--no-optional-locks','-c','core.hooksPath=/dev/null','-c','core.fsmonitor=false','-c','color.ui=false']
+        command=['git','--no-optional-locks','-c','core.hooksPath=' + os.devnull,'-c','core.fsmonitor=false','-c','color.ui=false']
         def git(*args):
             value=self.capture(command+list(args),root)
             if value['exit_code'] and not value['reason']: raise SessionError('Could not read the workspace diff; its original commit may be unavailable.')
@@ -184,7 +185,7 @@ class Results:
         command=data['command']; timeout=data['timeout']
         if not isinstance(command,str) or not command.strip() or len(command.encode())>4000 or any(ord(c)<32 for c in command):
             raise SessionError('Enter one command of at most 4000 bytes.')
-        try: argv=shlex.split(command)
+        try: argv=split_command(command)
         except ValueError: raise SessionError('Check command quoting.') from None
         if not argv or len(argv)>100 or any(arg in ('|','||','&&',';','>','>>','<') for arg in argv):
             raise SessionError('Run one command at a time; shell operators are not expanded.')

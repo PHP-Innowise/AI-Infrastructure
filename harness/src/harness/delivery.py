@@ -11,6 +11,7 @@ import tempfile
 import time
 import uuid
 
+from .filesystem import fs
 from .sessions import SessionError, git_details
 from .setup import _root_fd, _read, _metadata, _safe_path
 
@@ -38,7 +39,7 @@ class Delivery:
 
     def _git(self, root, *args, env=None, allowed=(0,), cleanup=False):
         result = self.sessions.results.capture(
-            ['git', '--no-optional-locks', '--literal-pathspecs', '-c', 'core.hooksPath=/dev/null',
+            ['git', '--no-optional-locks', '--literal-pathspecs', '-c', 'core.hooksPath=' + os.devnull,
              '-c', 'core.fsmonitor=false', '-c', 'commit.gpgSign=false', '-c', 'color.ui=false',
              '-c', 'merge.autoStash=false', '-C', str(root), *args], root, timeout=30,
             env_extra={'GIT_NO_REPLACE_OBJECTS':'1', **(env or {})}, cleanup=cleanup)
@@ -86,14 +87,14 @@ class Delivery:
     def _index(self, root):
         path = self._git_path(root, 'index')
         try:
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            fd = fs.open(path, os.O_RDONLY | fs.O_NOFOLLOW | fs.O_NONBLOCK)
             try:
-                meta = os.fstat(fd)
+                meta = fs.fstat(fd)
                 if not stat.S_ISREG(meta.st_mode) or meta.st_nlink != 1 or meta.st_size > 64*1024*1024:
                     raise SessionError('The Git index is unsafe or exceeds the delivery limit.')
-                with os.fdopen(os.dup(fd), 'rb') as stream: body = stream.read(64*1024*1024+1)
+                with os.fdopen(fs.dup(fd), 'rb') as stream: body = stream.read(64*1024*1024+1)
                 if len(body) > 64*1024*1024: raise SessionError('The Git index exceeds the delivery limit.')
-            finally: os.close(fd)
+            finally: fs.close(fd)
         except FileNotFoundError: body = b''
         except OSError: raise SessionError('The Git index is unavailable or linked.') from None
         return path, body
@@ -118,7 +119,7 @@ class Delivery:
                 value=_read(fd,item['path']); fingerprints.append((item,_metadata(value)))
                 size += value['bytes'] if value else 0
                 if size>64*1024*1024: raise SessionError('Pending files exceed the 64 MiB delivery limit.')
-        finally: os.close(fd)
+        finally: fs.close(fd)
         _,index=self._index(root); meta=root.stat()
         key=digest(json.dumps([info['head'],info['branch'],str(root),meta.st_dev,meta.st_ino,digest(index),fingerprints],sort_keys=True).encode())
         return {'snapshot_id':key,'files':files}
@@ -207,7 +208,11 @@ class Delivery:
         if lock.is_symlink() or (meta.st_dev,meta.st_ino)!=tuple(value['identity']) or digest(lock.read_bytes())!=value['after'] or digest(body)!=value['before']:
             raise SessionError('The Git index changed during recovery; inspect it before continuing.')
         if head==value['commit']:
-            os.replace(lock,index)
+            parent = fs.open_target_directory(index.parent)
+            try:
+                fs.replace(lock.name, index.name, src_dir_fd=parent, dst_dir_fd=parent)
+            finally:
+                fs.close(parent)
             self.sessions._event(value['sid'],{'kind':'status','text':'Recovered the index for delivered commit '+head+'.'})
         elif head==value['old']: lock.unlink()
         else: raise SessionError('The branch moved during recovery; inspect the interrupted commit.')
@@ -219,7 +224,7 @@ class Delivery:
             if self._pending(root,info)['snapshot_id']!=preview['_snapshot']: raise SessionError('Workspace changed. Preview the commit again.')
             index,original=self._index(root); lock=Path(str(index)+'.lock'); fd=None; journal=None
             try:
-                try: fd=os.open(lock,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+                try: fd=fs.open(lock,os.O_WRONLY|os.O_CREAT|os.O_EXCL|fs.O_NOFOLLOW,0o600)
                 except FileExistsError: raise SessionError('Git is busy: index.lock already exists.') from None
                 if self._pending(root,git_details(root,include_status=False))['snapshot_id']!=preview['_snapshot']:
                     raise SessionError('Workspace changed. Preview the commit again.')
@@ -232,8 +237,8 @@ class Delivery:
                     if not original: self._git(root,'read-tree','--empty',env=env)
                     self._git(root,'reset','--quiet',commit,'--',*preview['_paths'],env=env)
                     updated=temp_index.read_bytes()
-                with os.fdopen(os.dup(fd),'wb') as stream: stream.write(updated);stream.flush();os.fsync(stream.fileno())
-                meta=os.fstat(fd)
+                with os.fdopen(fs.dup(fd),'wb') as stream: stream.write(updated);stream.flush();os.fsync(stream.fileno())
+                meta=fs.fstat(fd)
                 value={'sid':sid,'index':str(index),'branch':info['branch'],'old':info['head'],'commit':commit,
                        'before':digest(original),'after':digest(updated),'identity':[meta.st_dev,meta.st_ino]}
                 journal=self.folder/('transaction-'+uuid.uuid4().hex+'.json')
@@ -241,12 +246,12 @@ class Delivery:
                 if self._text(root,'symbolic-ref','HEAD')!='refs/heads/'+info['branch']: raise SessionError('The source branch changed.')
                 self._git(root,'update-ref','-m','Harness: '+preview['message'].splitlines()[0],
                           'refs/heads/'+info['branch'],commit,info['head'])
-                os.close(fd);fd=None
+                fs.close(fd);fd=None
                 self._recover(journal);journal=None
                 self.sessions._event(sid,{'kind':'status','text':'Committed selected files: '+commit+'.'})
                 return {'ok':True,'commit':commit,'detail':'Selected files committed; unselected edits and staging are preserved.'}
             finally:
-                if fd is not None: os.close(fd)
+                if fd is not None: fs.close(fd)
                 if journal and journal.exists():
                     try: self._recover(journal)
                     except Exception: self.blocked[sid]='An interrupted Git commit needs inspection before another delivery.'
