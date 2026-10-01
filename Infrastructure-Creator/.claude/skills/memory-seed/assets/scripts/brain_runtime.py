@@ -4,19 +4,37 @@
 from __future__ import annotations
 
 import contextlib
-import fcntl
+import errno
 import hashlib
 import json
 import os
 import re
 import tempfile
 import threading
+import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
 from validate import FILENAME_PATTERN as BANK_FILENAME_PATTERN, validate_bank
+
+
+def _file_lock(handle, unlock=False):
+    if os.name != "nt":
+        import fcntl
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN if unlock else fcntl.LOCK_EX)
+        return
+    import msvcrt
+    while True:
+        handle.seek(0)
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK if unlock else msvcrt.LK_NBLCK, 1)
+            return
+        except OSError as error:
+            if unlock or error.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                raise
+            time.sleep(.05)
 
 
 SCHEMA_VERSION = 1
@@ -240,13 +258,13 @@ def mutation_lock(repository: Path) -> Iterator[None]:
                 depths[key] -= 1
             return
         with lock_path.open("a+", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            _file_lock(handle)
             depths[key] = 1
             try:
                 yield
             finally:
                 depths.pop(key, None)
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                _file_lock(handle, unlock=True)
 
 
 def atomic_write(path: Path, content: str) -> None:

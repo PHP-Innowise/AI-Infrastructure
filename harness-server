@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 HARNESS_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-exec python3 "$HARNESS_ROOT/harness/src/harness/web.py" "$@"
+for interpreter in python3 python; do
+    if "$interpreter" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1; then
+        exec "$interpreter" "$HARNESS_ROOT/harness/src/harness/web.py" "$@"
+    fi
+done
+echo 'harness-server: Python 3.10+ is required; install Python and make python3 or python available in PATH.' >&2
+exit 127

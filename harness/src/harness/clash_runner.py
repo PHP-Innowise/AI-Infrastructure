@@ -20,6 +20,7 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from harness import process_runtime
 from harness import clash, providers
 from harness.sessions import SessionError, run_git
 
@@ -66,8 +67,15 @@ def run_turn(command, cwd, stdin_text, provider, tags, environment):
     """Stream one native run, forwarding public events tagged with the clash role."""
     turn = Turn()
     started = time.monotonic()
-    process = subprocess.Popen(command, cwd=cwd, env=environment, stdin=subprocess.PIPE,
-                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    read_fd, write_fd = os.pipe()
+    try:
+        process = process_runtime.launch_guarded(command, read_fd, cwd=cwd, env=environment,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except Exception:
+        os.close(write_fd)
+        raise
+    finally:
+        os.close(read_fd)
 
     def feed():
         try:
@@ -85,15 +93,15 @@ def run_turn(command, cwd, stdin_text, provider, tags, environment):
     writer = threading.Thread(target=feed, daemon=True)
     writer.start()
     buffer, total, terminal, failed, tools = b'', 0, False, False, 0
-    selector = selectors.DefaultSelector()
+    selector = process_runtime.PipeSelector()
     selector.register(process.stdout, selectors.EVENT_READ)
     try:
         while True:
             if not selector.select(.2):
-                if process.poll() is not None:
+                if process.poll() is not None and not process_runtime.WINDOWS:
                     break
                 continue
-            chunk = os.read(process.stdout.fileno(), 65536)
+            chunk = selector.read(process.stdout, 65536)
             buffer += chunk or b'\n'
             total += len(chunk)
             if len(buffer) > 2 * 1024 * 1024 or total > OUTPUT_LIMIT:
@@ -148,13 +156,14 @@ def run_turn(command, cwd, stdin_text, provider, tags, environment):
         turn.ok = False
         turn.error = str(error) if isinstance(error, SessionError) else 'The native participant could not be read.'
     finally:
+        os.close(write_fd)
+        reaped = process_runtime.reap_tree(process)
         selector.close()
         process.stdout.close()
-        if process.poll() is None:
-            process.kill()
-            process.wait()
         writer.join(timeout=1)
         turn.seconds = round(time.monotonic() - started, 3)
+        if not reaped:
+            raise SessionError("Participant cleanup could not be confirmed. Clash stopped before another turn.")
     return turn
 
 

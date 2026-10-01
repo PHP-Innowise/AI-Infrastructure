@@ -14,6 +14,7 @@ import uuid
 
 from .sessions import SessionError, model_settings, now, DEFAULT_AGENT_COUNT, MAX_AGENTS, git_details, validate_budgets, DEFAULT_BUDGETS
 from .setup import _read, _root_fd, _identity, _diff, _metadata
+from .filesystem import fs
 
 ROOT = Path(__file__).resolve().parents[3]
 GENERATOR = ROOT / 'Infrastructure-Creator'
@@ -45,11 +46,15 @@ def write_json(path, value):
 
 
 SEATBELT = '/usr/bin/sandbox-exec'
-ISOLATION_REQUIRED = 'Creator requires filesystem isolation: bubblewrap on Linux or sandbox-exec on macOS.'
+ISOLATION_REQUIRED = ('Creator requires filesystem isolation: bubblewrap on Linux, sandbox-exec on macOS, '
+                      'or Codex with elevated Windows sandbox and permission-profile support on Windows.')
 
 
-def isolation_backend():
-    """Return ('bwrap', path) or ('seatbelt', path); None when neither isolation tool is usable."""
+def isolation_backend(executable=None):
+    """Discover a platform-appropriate sandbox; never use Git Bash bwrap on Windows."""
+    if os.name == 'nt':
+        from .windows_creator import backend
+        return backend(executable)
     executable = shutil.which('bwrap')
     if executable:
         return 'bwrap', executable
@@ -113,13 +118,18 @@ def seatbelt_command(executable, workspace, target, command, homes, common, runt
     return [executable, '-f', str(profile), '--', *environment, *command]
 
 
-def sandbox_command(workspace, target, command, provider=None, runtime_cache=False):
-    backend = isolation_backend()
+def sandbox_command(workspace, target, command, provider=None, runtime_cache=False, sandbox_executable=None, protected_roots=()):
+    backend = isolation_backend(sandbox_executable) if sandbox_executable else isolation_backend()
     if backend is None:
         raise SessionError(ISOLATION_REQUIRED + ' It keeps the target read-only during agent runs.')
     kind, executable = backend
     common = git_details(target).get('common_dir') if (target/'.git').is_file() else None
     homes = provider_state_dirs(provider)
+    if kind == 'windows-codex':
+        from .windows_creator import command as windows_command
+        if runtime_cache:
+            raise SessionError('Windows installed validation requires a disposable validation copy.')
+        return windows_command(executable, workspace, target, command, homes, common, ROOT, protected_roots)
     if kind == 'seatbelt':
         return seatbelt_command(executable, workspace, target, command, homes, common, runtime_cache)
     args = [executable, '--die-with-parent', '--new-session', '--unshare-pid', '--ro-bind', '/', '/',
@@ -144,12 +154,13 @@ def sandbox_command(workspace, target, command, provider=None, runtime_cache=Fal
 def read_plan(task, name, optional=False):
     value = load_file(task, name, required=not optional)
     paths = [] if value is None else value['body'].decode('utf-8').splitlines()
-    paths = [path.strip() for path in paths if path.strip()]
+    paths = [path for path in paths if path.strip()]
     if len(paths) > 5000 or len(paths) != len(set(paths)):
         raise SessionError('Publication plans must contain distinct bounded paths.')
     for path in paths:
-        if (not path or Path(path).is_absolute() or '..' in Path(path).parts or str(Path(path)) != path
-                or '\\' in path or any(ord(c) < 32 for c in path)):
+        try:
+            publication_helpers().normalize_relative_path(path)
+        except ValueError:
             raise SessionError('An output plan contains an unsafe path.')
     return paths
 
@@ -215,7 +226,14 @@ class CreatorManager:
         with self.lock, self.sessions.lock:
             ids = [row[0] for row in self.sessions.db.execute('SELECT id FROM creator_runs ORDER BY rowid DESC LIMIT 200')]
             runs = [self._get(rid) for rid in ids]
-        return {'project_id': project_id, 'available': isolation_backend() is not None, 'runs': [run for run in runs if run['project_id'] == project_id]}
+        return {'project_id': project_id, 'available': self._backend() is not None,
+                'isolation_required': ISOLATION_REQUIRED, 'runs': [run for run in runs if run['project_id'] == project_id]}
+
+    def _backend(self):
+        if os.name == 'nt':
+            provider = self.sessions.providers.get('codex', {})
+            return isolation_backend(provider.get('executable')) if provider.get('available') else None
+        return isolation_backend()
 
     def get(self, rid):
         with self.lock:
@@ -264,13 +282,25 @@ class CreatorManager:
             raise SessionError('Use a goal of at most 8000 UTF-8 bytes.')
         source = Path(project['path'])
         for boundary in (ROOT, self.sessions.state_dir):
-            if source == boundary or source in boundary.parents or boundary in source.parents:
+            left, right = os.path.normcase(os.path.abspath(source)), os.path.normcase(os.path.abspath(boundary))
+            try:
+                overlap = os.path.commonpath((left, right)) in (left, right)
+            except ValueError:
+                overlap = False
+            if overlap:
                 raise SessionError('Choose a target outside the Harness source and runner state.')
         if not (source/'composer.json').is_file() and not any(source.glob('*.php')) and not any(source.glob('src/*.php')) and not any(source.glob('app/*.php')):
             raise SessionError('No PHP project entry point detected. Use Infrastructure-Creator stack adaptation separately for a non-PHP target.')
         # Environment prerequisite last: input and target problems are reported first.
-        if isolation_backend() is None:
+        if self._backend() is None:
             raise SessionError(ISOLATION_REQUIRED)
+        fd = _root_fd(source)
+        try:
+            manifest = _read(fd, '.infra-manifest.json')
+            if operation == 'update' and manifest is None:
+                raise SessionError('Update requires the existing .infra-manifest.json; no ownership is inferred.')
+        finally:
+            os.close(fd)
         rid = uuid.uuid4().hex
         with self.lock, self.sessions.lock:
             if self.sessions.jobs.full() or self.sessions.stopping.is_set():
@@ -278,7 +308,7 @@ class CreatorManager:
             target, workspace, branch, common = self.sessions._new_workspace(project, data, rid)
             fd = _root_fd(target)
             try:
-                identity = list(_identity(os.fstat(fd)))
+                identity = list(_identity(fs.fstat(fd)))
                 manifest = _read(fd, '.infra-manifest.json')
                 if operation == 'update' and manifest is None:
                     raise SessionError('Update requires the existing .infra-manifest.json; no ownership is inferred.')
@@ -312,6 +342,12 @@ class CreatorManager:
             journal.rename(journal.with_name('journal-'+nonce))
         run.update(phase=phase, result_file='result-'+nonce+'.json', status={'scan':'scanning','generate':'generating','apply':'applying','rollback':'rolling_back'}[phase])
         request = {**run, 'directory': str(self.root/run['id']), 'executable': self.sessions.providers[run['provider']]['executable']}
+        if os.name == 'nt':
+            backend = self._backend()
+            if backend is None:
+                raise SessionError(ISOLATION_REQUIRED)
+            request['sandbox_executable'] = backend[1]
+            request['protected_roots'] = [self.sessions.project(run['project_id'])['path'], str(self.sessions.state_dir)]
         write_json(self.root/run['id']/('request-'+nonce+'.json'), request)
         session = self.sessions.create({'project_id':run['project_id'],'provider':run['provider'],
             'prompt':f"Creator {phase}: {Path(run['target']).name}", 'mode':'edit','workflow':'native',
@@ -446,7 +482,7 @@ def build_preview(run, directory):
     entries, before, payloads, dirs = [], {}, {}, {}
     fd = _root_fd(target); stage_fd = _root_fd(staging)
     try:
-        if list(_identity(os.fstat(fd))) != run['identity']: raise SessionError('Target directory changed.')
+        if list(_identity(fs.fstat(fd))) != run['identity']: raise SessionError('Target directory changed.')
         budget, diff_budget = 0, 256000
         for path in paths+removals+watched:
             old = _read(fd,path,dirs); before[path] = _metadata(old)

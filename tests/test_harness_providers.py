@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "harness" / "src"))
-from harness import providers
+from harness import providers, windows_commands
 
 
 class BudgetTests(unittest.TestCase):
@@ -124,6 +124,26 @@ class CommandTests(unittest.TestCase):
             self.assertEqual("--mode" in command, mode == "plan")
             self.assertFalse({"--force", "--yolo", "--trust", "--approve-mcps", "--stream-partial-output"} & set(command))
             self.assertIsNone(providers.input_text("cursor", self.prompt))
+
+    def test_windows_npm_codex_shim_uses_node_and_metadata_not_cmd(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            shim = root / "codex.cmd"
+            shim.write_text("untrusted batch text", encoding="utf-8")
+            package = root / "node_modules" / "@openai" / "codex"
+            script = package / "bin" / "codex.js"
+            script.parent.mkdir(parents=True)
+            script.write_text("console.log('fixture')", encoding="utf-8")
+            (package / "package.json").write_text(
+                '{"name":"@openai/codex","bin":{"codex":"bin/codex.js"}}', encoding="utf-8")
+            node = root / "node.exe"
+            node.write_bytes(b"fixture")
+            with patch.object(windows_commands, "WINDOWS", True), patch.object(
+                    windows_commands.shutil, "which", side_effect=lambda name: str(node) if name in ("node.exe", "node") else None):
+                command = providers.build_command("codex", str(shim), self.project, self.prompt)
+        self.assertEqual(command[:2], [str(node), str(script)])
+        self.assertEqual(command[-1], "-")
+        self.assertNotIn("cmd.exe", command)
 
     def test_enabled_claude_uses_concurrency_and_depth_limits_on_fresh_and_resumed_runs(self):
         for count in (1, 3, 40):
