@@ -323,17 +323,23 @@ class CreatorManager:
         return self.get(run['id'])
 
     def act(self, rid, data):
-        if not isinstance(data, dict) or set(data) - {'action','revision','answers','preview_id','replace','budgets'}:
+        if not isinstance(data, dict) or set(data) - {'action','revision','answers','preview_id','replace','budgets','routing'}:
             raise SessionError('Invalid Creator action.')
         with self.lock:
             run = self._get(rid)
-            if type(data.get('revision')) is not int or data['revision'] != run['revision']:
-                raise SessionError('This Creator view is stale. Refresh before continuing.')
             action = data.get('action')
-            if action == 'cancel' and run['status'] in ('scanning','generating','applying','rolling_back'):
+            # Cancel runs before the revision guard: a background poll may have
+            # already advanced the revision (the phase ended between the poll and
+            # the click), and a cancel must never be refused as "stale" - it is
+            # idempotent and must always report the live state back.
+            if action == 'cancel':
                 if run['status'] in ('applying','rolling_back'):
                     raise SessionError('Publication is completing its verification/rollback. Wait for its result.')
-                self.sessions.cancel(run['session_id']); return self.get(rid)
+                if run['status'] in ('scanning','generating'):
+                    self.sessions.cancel(run['session_id'])
+                return self.get(rid)
+            if type(data.get('revision')) is not int or data['revision'] != run['revision']:
+                raise SessionError('This Creator view is stale. Refresh before continuing.')
             if run['status'] in ('scanning','generating','applying','rolling_back'):
                 raise SessionError('Wait for the current phase to finish.')
             if action == 'rollback' and run['recovery_available']:
@@ -351,6 +357,7 @@ class CreatorManager:
             if 'budgets' in data:
                 raise SessionError('Save budgets before starting a phase.')
             if action == 'rescan' and run['status'] != 'complete':
+                self._apply_routing(run, data)
                 run.pop('approved', None)
                 run['answers'] = data.get('answers', '')
                 if not isinstance(run['answers'],str) or len(run['answers'].encode())>16000 or '\x00' in run['answers']:
@@ -358,10 +365,12 @@ class CreatorManager:
                 run['revision'] += 1
                 return self._launch(run, 'scan')
             if action == 'generate' and run['status'] == 'review':
+                self._apply_routing(run, data)
                 run['approved'] = self._profile_hashes(run)
                 run['revision'] += 1
                 return self._launch(run, 'generate')
             if action == 'revise' and run['status'] in ('review','needs_input','preview','failed','interrupted','cancelled','rolled_back'):
+                self._apply_routing(run, data)
                 answers = data.get('answers', '')
                 if not isinstance(answers,str) or not answers.strip() or len(answers.encode()) > 16000 or '\x00' in answers:
                     raise SessionError('Enter corrections or answers (up to 16000 UTF-8 bytes).')
@@ -384,6 +393,28 @@ class CreatorManager:
                 run['revision'] += 1
                 return self._launch(run, 'apply')
             raise SessionError('This action is not available in the current Creator phase.')
+
+    def _apply_routing(self, run, data):
+        """Re-launching a phase may change model, effort and additional agents.
+
+        The run's provider, tools and operation stay frozen - they define what
+        the run is - but how it executes (model, thinking effort, and the helper
+        count) is a property of the next launch, not of the run's identity.
+        Without this a corrected model/effort/helper count was silently ignored
+        and the stale value re-ran. Omitted fields keep the run's current value.
+        """
+        routing = data.get('routing')
+        if routing is None:
+            return
+        if not isinstance(routing, dict) or set(routing) - {'model', 'thinking_effort', 'agents_enabled', 'agent_count'}:
+            raise SessionError('Invalid routing options.')
+        model, effort = model_settings(run['provider'], routing, previous=run)
+        enabled = routing.get('agents_enabled', run['agents_enabled'])
+        count = routing.get('agent_count', run['agent_count'])
+        if type(enabled) is not bool or type(count) is not int or not 1 <= count <= MAX_AGENTS:
+            raise SessionError('Invalid additional-agent settings.')
+        run['model'], run['thinking_effort'] = model, effort
+        run['agents_enabled'], run['agent_count'] = enabled, count
 
     def _profile_hashes(self, run):
         return profile_hashes(self.root/run['id'])

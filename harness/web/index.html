@@ -2586,6 +2586,11 @@
         const data=await api(`/api/creator/${encodeURIComponent(rid)}`);
         if(epoch!==creatorUi.epoch || state.view!=='creator') return;
         if(creatorUi.detail?.run.id!==rid || creatorUi.detail?.run.revision!==data.run.revision) $('creator-answers').value='';
+        // On switching to a different run, mirror its settings into the form so
+        // the fields show what a re-launch would apply (and what the user then
+        // edits), instead of leaving stale defaults. Not on every poll - that
+        // would wipe edits while a phase runs.
+        if(creatorUi.detail?.run.id!==data.run.id){const r=data.run;$('creator-model').value=r.model||'';$('creator-effort').value=r.thinking_effort||'';$('creator-agents').checked=r.agents_enabled===true;$('creator-count').value=Number.isInteger(r.agent_count)?r.agent_count:defaultAgentCount();creatorControls();}
         creatorUi.detail=data; renderCreator();
         if(creatorBusy(data.run)) creatorUi.timer=setTimeout(()=>readCreator(rid,epoch),2000);
       } catch(error) { if(epoch===creatorUi.epoch) showError('creator-action-error',textError(error)); }
@@ -2639,6 +2644,7 @@
       const body={action,revision:data.run.revision};
       if(action==='budgets') body.budgets=readBudgets('creator-run-budgets');
       if(['revise','rescan'].includes(action)) body.answers=$('creator-answers').value;
+      if(['revise','rescan','generate'].includes(action)) body.routing={model:$('creator-model').value.trim() || null,thinking_effort:$('creator-effort').value || null,agents_enabled:$('creator-agents').checked,agent_count:$('creator-count').valueAsNumber};
       if(action==='apply') { body.preview_id=data.preview.preview_id; body.replace=[...document.querySelectorAll('.creator-replace:checked')].map(i=>i.value); }
       for(const b of $('creator-actions').querySelectorAll('button')) b.disabled=true;
       creatorControls(); showError('creator-action-error','');
