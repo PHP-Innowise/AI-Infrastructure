@@ -26,6 +26,12 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Support Claude Code and Cursor Agent for system workers in the CLI and Harness
+  UI alongside Codex. Share native permission/delegation flags, validate Claude
+  structured output and Cursor terminal reports, bound Cursor prompt bytes,
+  and pin provider/executable across recovery. Preserve legacy Codex requests.
+  Cover native reports, modes, retry and cancellation with deterministic CLIs.
+
 - Integrate system orchestration into Harness UI: declared service graphs,
   capabilities and memory ownership, reviewed context/impact plans, sequential
   Codex execution through the shared queue, live receipts/native task references,

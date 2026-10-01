@@ -291,11 +291,25 @@ verification workers receive `read-only`. No approval/sandbox bypass flags are
 used. Noninteractive approval requests cannot be answered, so unsupported
 operations stop the worker. Install/authenticate the CLI independently.
 
+Use `--provider claude` for Claude Code or `--provider cursor` for Cursor Agent.
+All native CLIs use the same trusted permission/delegation flags as Harness.
+Claude receives stdin and a `--json-schema` result envelope; only a successful
+terminal `structured_output` object is accepted. Cursor receives the prompt as
+one argv item and must return a successful terminal `result` containing the
+report JSON. Interim assistant text is insufficient. Read-only dispatches use
+Claude plan permissions or Cursor plan mode; edit dispatches use Claude
+`acceptEdits` or Cursor's enabled sandbox without bypass flags. Cursor's prompt
+is capped at 120000 UTF-8 bytes before launch; narrow oversized plans. Cursor's
+helper prohibition is an instruction because its CLI has no verified native
+helper-disable switch. Install/authenticate each CLI independently. Optional
+`--executable /trusted/cli` overrides discovery. The chosen provider, executable
+and executable digest are pinned in the journal; resume cannot switch providers.
+
 For another AI provider, use `--provider command --executable /trusted/adapter`.
 The explicit executable receives one complete prompt on stdin, runs in the
 current phase's root, and must emit **only** the final report JSON on stdout.
 It must enforce the requested mode/scope itself: the command adapter has no OS
-sandbox. No command strings are taken from passports or plans. Both adapters
+sandbox. No command strings are taken from passports or plans. All adapters
 have a per-worker timeout, a 2 MiB stdout limit and process-group cleanup on
 failure, timeout or interruption. The prompt limit is 128000 characters; narrow
 large plans that exceed it. Total cost is controlled by your provider settings;
@@ -431,7 +445,7 @@ python3 -m unittest tests.test_ai_system tests.test_ai_system_execution
 ```
 
 Execution tests use the actual trusted native Brain CLI with temporary projects
-and deterministic subprocess adapters. They test ordering, receipts, Codex argv,
+and deterministic subprocess adapters. They test ordering, receipts, native CLI argv and terminal envelopes,
 read-only/edit behavior, CAS conflicts, lost bindings, failure/timeout, stale
 sources, crash recovery and ambiguous partial writes. They do not make paid
 provider calls. Real provider credentials and end-to-end product environments
@@ -453,10 +467,11 @@ Its service list denotes participants; the contract dispatch later establishes
 the actual implementation order. Task line breaks are normalized to spaces.
 
 After reviewing the scope/context, choose read-only investigation or service
-edits and a timeout per worker, then **Execute with Codex**. System dispatches
+edits, **Codex / Claude Code / Cursor Agent**, and a timeout per worker, then
+**Execute reviewed plan**. System dispatches
 share the existing Harness queue, runner lock, cancellation and watchdog. They
-currently use Codex's default model; other provider/model/agent controls from
-ordinary sessions do not apply. No arbitrary executable can be passed by API.
+use the selected CLI's default model. The provider is fixed after launch and
+recovery keeps it. Ordinary session model/agent controls do not apply. No arbitrary executable can be passed by API.
 Access to external roots comes exclusively from registered Harness projects.
 
 The run view polls persisted dispatches and displays receipts, reported checks,
@@ -483,7 +498,8 @@ Local API surface (existing Host/Origin/CSRF boundaries apply):
 - `GET /api/system-runs?project_id=...` and `GET /api/system-runs/<id>`:
   persisted plans and current/historical run details.
 - `POST /api/system-runs/<id>`: `action`, current integer `revision`; execute
-  accepts `mode`/`timeout`, resume accepts `retry_step`/`accept_source_changes`,
+  accepts optional `provider` (`codex`, `claude`, `cursor`; default `codex`),
+  `mode`/`timeout`; resume accepts `retry_step`/`accept_source_changes`,
   and cancel has no extra options. Unknown fields are rejected.
 
 Run the HTTP/queue/native-runtime regression suite with:
@@ -492,12 +508,12 @@ Run the HTTP/queue/native-runtime regression suite with:
 python3 -m unittest tests.test_harness_system_orchestration
 ```
 
-These tests use deterministic Codex-format fixtures, not paid model calls.
+These tests use deterministic Codex, Claude and Cursor format fixtures, without paid model calls.
 
 ### UI screenshots
 
 These are screenshots of the running localhost Harness using a synthetic
-three-service system and a deterministic Codex-format provider fixture.
+three-service system and deterministic native-format provider fixtures.
 Reported checks are fixture assertions; no real model or customer system was used.
 
 ![Declared service graph and capabilities](images/ai-system/map.jpg)
@@ -507,3 +523,12 @@ Reported checks are fixture assertions; no real model or customer system was use
 ![Reviewable impact plan and context budget](images/ai-system/plan.jpg)
 
 ![Persisted dispatch receipts and native tasks after explicit recovery](images/ai-system/results.jpg)
+
+Provider selection and completed Claude/Cursor runs use fixture CLIs, with
+actual queue dispatch, receipts and native Brain task lifecycle:
+
+![Choose Codex, Claude Code or Cursor Agent](images/ai-system/providers.jpg)
+
+![Completed Claude fixture dispatches](images/ai-system/claude.jpg)
+
+![Completed Cursor fixture dispatches](images/ai-system/cursor.jpg)

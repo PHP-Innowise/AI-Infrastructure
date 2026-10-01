@@ -34,14 +34,18 @@ def main():
         if directory != args.request.parent:
             raise SystemError('System request directory changed')
         system = System(request['system_file'], request['allowed_roots'])
+        provider = request.get('provider', 'codex')  # Legacy requests used Codex.
+        if provider not in execution.NATIVE_PROVIDERS:
+            raise SystemError('Invalid system worker provider')
         journal = directory / 'execution'
         if (journal / 'run.json').exists():
             state = execution.validate_state(system, journal)
-            if state['executable'] != execution.executable_path('codex', request['executable']):
+            if (state['provider'] != provider or
+                    state['executable'] != execution.executable_path(provider, request['executable'])):
                 raise SystemError('Configured provider changed; prepare a new plan')
         else:
             plan = execution.load(directory, 'approved-plan.json')
-            state = execution.create_run(system, plan, journal, 'codex', request['executable'],
+            state = execution.create_run(system, plan, journal, provider, request['executable'],
                                          request['mode'], request['timeout'])
         emit('status', 'Sequential system dispatch started. Progress and receipts are saved after each dispatch.')
         state = execution.drive_run(system, journal, state, request['retry_step'], request['accept_source_changes'])

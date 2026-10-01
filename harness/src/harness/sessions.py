@@ -656,7 +656,7 @@ class Sessions:
         if _system_run is not None:
             if (not isinstance(_system_run, dict) or set(_system_run) != {'run_id', 'nonce'}
                     or any(not isinstance(v, str) or not re.fullmatch('[a-f0-9]{32}', v) for v in _system_run.values())
-                    or _creator is not None or data.get('provider') != 'codex'
+                    or _creator is not None or data.get('provider') not in ('codex', 'claude', 'cursor')
                     or data.get('workflow') != 'native' or data.get('workspace', 'project') != 'project'):
                 raise SessionError('Invalid internal system run.')
         from .attachments import validate as validate_attachments

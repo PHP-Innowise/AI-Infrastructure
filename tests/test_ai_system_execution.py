@@ -20,6 +20,9 @@ from ai_system_lib import System, SystemError, digest, encoded
 ADAPTER = '''#!/usr/bin/env python3
 import json, os, pathlib, sys
 prompt = sys.stdin.read()
+if "--workspace" in sys.argv:
+    assert not prompt, "Cursor must use argv rather than stdin"
+    prompt = sys.argv[sys.argv.index("--") + 1]
 value = json.loads(prompt.split("Dispatch input:\\n", 1)[1])
 root = pathlib.Path.cwd()
 marker = root / "fail-worker"
@@ -45,6 +48,14 @@ if "--json" in sys.argv:
     print(json.dumps({"type": "thread.started", "thread_id": "fixture"}))
     print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps(report)}}))
     print(json.dumps({"type": "turn.completed"}))
+elif "--json-schema" in sys.argv:
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                      "result": "", "structured_output": report}))
+elif "--workspace" in sys.argv:
+    print(json.dumps({"type": "assistant", "model_call_id": "fixture", "message":
+        {"role": "assistant", "content": [{"type": "text", "text": "Interim analysis"}]}}))
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                      "result": json.dumps(report)}))
 else:
     print(json.dumps(report))
 '''
@@ -108,6 +119,59 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual("completed", resumed["status"])
         self.assertEqual(files, {p.name: p.read_bytes() for p in self.run_dir.glob("*.json")})
         self.assertEqual("Scoped edit for orders", (self.root / "orders/spec.md").read_text())
+
+    def test_oversized_cursor_plan_is_refused_before_journal_or_native_tasks(self):
+        for sid in ('orders', 'payments'):
+            root = self.root / sid
+            passport = json.loads((root / 'ai-service.json').read_text())
+            for number in range(8):
+                source = 'large-' + str(number) + '.md'
+                (root / source).write_text('😀' * 2000)
+                passport['sources'].append({'path': source, 'kind': 'spec'})
+            (root / 'ai-service.json').write_text(json.dumps(passport))
+        system = self.system()
+        plan = system.plan('Inspect contract', 'chg-large', ['orders', 'payments'], budget=64000)
+        with self.assertRaisesRegex(SystemError, 'argument byte limit'):
+            execution.create_run(system, plan, self.run_dir, 'cursor', self.adapter, 'read-only', 10)
+        self.assertFalse(self.run_dir.exists())
+        for root in (self.workspace, self.root / 'orders', self.root / 'payments'):
+            self.assertFalse((root / 'project-brain').exists())
+
+    def test_claude_and_cursor_native_tasks_argv_and_modes(self):
+        original = execution.run_process
+        for provider in ('claude', 'cursor'):
+            for mode in ('read-only', 'edit'):
+                with self.subTest(provider=provider, mode=mode):
+                    self.run_dir = self.root / ('run-' + provider + '-' + mode)
+                    calls = []
+                    def spy(command, cwd, stdin, timeout):
+                        if command[0] == str(self.adapter):
+                            calls.append((command, cwd, stdin))
+                        return original(command, cwd, stdin, timeout)
+                    with mock.patch.object(execution, 'run_process', side_effect=spy):
+                        state = self.run_all(provider=provider, mode=mode)
+                    self.assertEqual('completed', state['status'])
+                    self.assertEqual(provider, execution.validate_state(self.system(), self.run_dir)['provider'])
+                    self.assertEqual(3, len(state['closed_tasks']))
+                    self.assertEqual(4, len(calls))
+                    for index, (command, cwd, stdin) in enumerate(calls):
+                        service_mode = mode if index in (1, 2) else 'read-only'
+                        self.assertEqual(Path(state['roots'][state['steps'][index]['service']]), cwd)
+                        if provider == 'claude':
+                            self.assertEqual('json', command[command.index('--output-format') + 1])
+                            self.assertEqual('acceptEdits' if service_mode == 'edit' else 'plan',
+                                             command[command.index('--permission-mode') + 1])
+                            self.assertIn('--json-schema', command)
+                            self.assertIn('Agent', command)
+                            self.assertIn('Dispatch input:', stdin)
+                        else:
+                            self.assertEqual('', stdin)
+                            self.assertEqual(str(cwd), command[command.index('--workspace') + 1])
+                            self.assertIn('--disable-auto-update', command)
+                            self.assertEqual('enabled', command[command.index('--sandbox') + 1])
+                            self.assertEqual(service_mode == 'read-only', '--mode' in command)
+                            self.assertNotIn('--force', command)
+                            self.assertIn('Dispatch input:', command[-1])
 
     def test_codex_adapter_argv_and_jsonl(self):
         original = execution.run_process

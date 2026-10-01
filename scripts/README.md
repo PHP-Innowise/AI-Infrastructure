@@ -11,7 +11,7 @@ states an external command requirement. Run examples from the repository root.
 
 ## Catalog
 
-### `ai_system.py` / `ai_system_lib.py` / `ai_system_execution.py`
+### `ai_system.py` / `ai_system_lib.py` / `ai_system_execution.py` / `ai_system_providers.py`
 
 **Purpose and status.** Optional stack-neutral system coordination companion;
 source-only and not part of installed editions. It accepts explicit service
@@ -30,13 +30,14 @@ python3 scripts/ai_system.py plan --system docs/examples/ai-system/system.json \
   `execute`, `resume`, `run-status`.
 - Dependencies: Python 3.9+ standard library on POSIX; optional Git provenance.
   Execution uses the trusted checkout native runtime and a locally configured
-  Codex CLI or an explicitly selected provider adapter.
+  Codex, Claude Code or Cursor Agent CLI, or an explicitly selected provider adapter.
+  Native adapters share stdlib Harness command/permission builders.
 - Writes: `init` creates a new system workspace; `plan --output` creates only a
   new requested file. `execute`/`resume` write private journals and native tasks;
   `--mode edit` enables scoped worker edits. Declaration/query commands are read-only.
 - Access: external service roots require repeatable caller `--allow-root`;
   passport metadata cannot authorize arbitrary filesystem access.
-- Tests: `python3 -m unittest tests.test_ai_system tests.test_ai_system_execution`, also in the dedicated CI job.
+- Tests: `python3 -m unittest tests.test_ai_system tests.test_ai_system_providers tests.test_ai_system_execution`, also in the dedicated CI job.
 - Full contract and sample: [System-level AI Coordination](../docs/AI-SYSTEM-ORCHESTRATION.md).
 
 ### `build_mirrors.py`

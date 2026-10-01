@@ -118,7 +118,7 @@ class SystemManager:
             execution.save(directory, 'approved-plan.json', plan, new=True)
             record = {'id': rid, 'revision': 0, 'created_at': now(), 'project_id': data['project_id'],
                       'config_path': data['config_path'], 'system': plan['system'], 'change_id': plan['change_id'],
-                      'session_id': None, 'mode': None, 'timeout': None}
+                      'session_id': None, 'provider': None, 'mode': None, 'timeout': None}
             self._save(record)
             return self.get(rid)
 
@@ -133,6 +133,7 @@ class SystemManager:
     def _view(self, record, detail=True):
         result = dict(record)
         session = self.sessions.get(record['session_id']) if record['session_id'] else None
+        result['provider'] = record.get('provider') or (session['provider'] if session else None)
         result['session_status'] = session['status'] if session else None
         result['active'] = bool(session and session['status'] in ACTIVE)
         directory = self.root / record['id']
@@ -162,6 +163,9 @@ class SystemManager:
         if detail:
             result['plan'] = execution.load(directory, 'approved-plan.json')
             result['events'] = self.sessions.events(record['session_id'])[-30:] if session else []
+            result['providers'] = [{'id': pid, 'name': self.sessions.providers.get(pid, {}).get('name', pid),
+                                    'available': bool(self.sessions.providers.get(pid, {}).get('available'))}
+                                   for pid in execution.NATIVE_PROVIDERS]
             result['codex_available'] = bool(self.sessions.providers.get('codex', {}).get('available'))
         return result
 
@@ -172,13 +176,13 @@ class SystemManager:
 
     @boundary
     def act(self, rid, data):
-        options(data, ('action', 'revision'), ('mode', 'timeout', 'retry_step', 'accept_source_changes'))
+        options(data, ('action', 'revision'), ('mode', 'timeout', 'provider', 'retry_step', 'accept_source_changes'))
         with self.sessions.lock:
             record = self._record(rid)
             if type(data['revision']) is not int or data['revision'] != record['revision']:
                 raise SessionError('Run changed in another view. Refresh before acting.')
             action = data['action']
-            allowed = {'execute': {'action', 'revision', 'mode', 'timeout'},
+            allowed = {'execute': {'action', 'revision', 'mode', 'timeout', 'provider'},
                        'resume': {'action', 'revision', 'retry_step', 'accept_source_changes'},
                        'cancel': {'action', 'revision'}}
             if action not in allowed or set(data) - allowed[action]:
@@ -199,12 +203,16 @@ class SystemManager:
                 execution.selected_plan(system, plan)
                 if not system.verify(plan)['fresh']:
                     raise SessionError('Plan is stale. Prepare and review a new plan.')
+                provider_id = data.get('provider', 'codex')
+                if not isinstance(provider_id, str) or provider_id not in execution.NATIVE_PROVIDERS:
+                    raise SessionError('Choose Codex, Claude or Cursor for system execution.')
                 mode, timeout = data.get('mode', 'read-only'), data.get('timeout', 900)
                 if mode not in ('read-only', 'edit') or type(timeout) is not int or not 1 <= timeout <= 86400:
                     raise SessionError('Choose read-only/edit and a worker timeout of 1..86400 seconds.')
             else:
                 if record['session_id'] is None or view['status'] == 'completed':
                     raise SessionError('Only unfinished launches can be resumed.')
+                provider_id = view['provider'] or 'codex'
                 mode, timeout = record['mode'], record['timeout']
                 if type(data.get('accept_source_changes', False)) is not bool:
                     raise SessionError('Source change acknowledgement must be a boolean.')
@@ -213,21 +221,23 @@ class SystemManager:
                     raise SessionError('Choose the interrupted or blocked dispatch to retry.')
                 if (directory / 'execution' / 'run.json').exists():
                     state = execution.validate_state(system, directory / 'execution')
+                    if state['provider'] != provider_id:
+                        raise SessionError('Saved provider does not match the launch. Prepare a new plan.')
                     if retry is not None and retry not in {s['id'] for s in state['steps'] if s['status'] in ('running', 'interrupted', 'blocked')}:
                         raise SessionError('Only an unfinished dispatch may be retried.')
                 elif not system.verify(plan)['fresh']:
                     raise SessionError('Plan is stale. Prepare and review a new plan.')
-            provider = self.sessions.providers.get('codex', {})
+            provider = self.sessions.providers.get(provider_id, {})
             if not provider.get('available'):
-                raise SessionError('System execution currently requires an available Codex CLI.')
+                raise SessionError('The selected system provider CLI is unavailable.')
             nonce = uuid.uuid4().hex
             request = {'directory': str(directory), 'system_file': str(system.config), 'allowed_roots': roots,
-                       'executable': provider['executable'], 'mode': mode, 'timeout': timeout,
+                       'provider': provider_id, 'executable': provider['executable'], 'mode': mode, 'timeout': timeout,
                        'retry_step': data.get('retry_step'), 'accept_source_changes': data.get('accept_source_changes', False)}
             execution.save(directory, 'request-' + nonce + '.json', request, new=True)
-            record.update(pending_nonce=nonce, mode=mode, timeout=timeout, revision=record['revision'] + 1)
+            record.update(pending_nonce=nonce, provider=provider_id, mode=mode, timeout=timeout, revision=record['revision'] + 1)
             self._save(record)
-            session = self.sessions.create({'project_id': record['project_id'], 'provider': 'codex',
+            session = self.sessions.create({'project_id': record['project_id'], 'provider': provider_id,
                        'workflow': 'native', 'mode': 'edit' if mode == 'edit' else 'plan',
                        'prompt': 'System orchestration: ' + plan['context']['task'], 'project_context': False,
                        'agents_enabled': False, 'budgets': {'seconds': None, 'tokens': None, 'usd': None}},

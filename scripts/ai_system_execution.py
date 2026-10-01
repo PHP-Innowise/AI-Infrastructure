@@ -14,7 +14,6 @@ import json
 import os
 from pathlib import Path
 import selectors
-import shutil
 import signal
 import stat
 import subprocess
@@ -26,6 +25,8 @@ import uuid
 from ai_system_lib import (MAX_BYTES, MAX_SERVICES, SECRET, System, SystemError,
                            absolute, digest, encoded, fields, identifier, items,
                            open_directory, parse_json, read_file, relative, text)
+
+from ai_system_providers import NATIVE_PROVIDERS, discover_executable, invocation, worker_result
 
 RUNTIME = Path(__file__).resolve().parent.parent / "PHP Core/memory-bank/scripts/context.py"
 MAX_OUTPUT = 2 * 1024 * 1024
@@ -331,24 +332,6 @@ def result_schema(selected):
                 "service_order": {"type": "array", "items": {"type": "string", "enum": selected}}}}
 
 
-def worker_result(raw, provider):
-    if provider == "command":
-        return parse_json(raw)
-    answer, terminal, failed = None, False, False
-    for line in raw.splitlines():
-        event = parse_json(line)
-        if not isinstance(event, dict):
-            raise SystemError("Invalid Codex event")
-        terminal |= event.get("type") == "turn.completed"
-        failed |= event.get("type") in {"turn.failed", "error"}
-        item = event.get("item")
-        if isinstance(item, dict) and item.get("type") == "agent_message":
-            answer = item.get("text")
-    if not terminal or failed or not isinstance(answer, str):
-        raise SystemError("Worker did not return a successful terminal result")
-    return parse_json(answer.encode("utf-8"))
-
-
 def prompt_for(state, plan, step, prior, directory):
     goal = {"contracts": "Inspect policies and contracts; resolve invariants, compatibility and implementation order. Return service_order for every participant. Block if decisions or information needed for safe work are missing.",
             "verify": "Independently inspect changes and worker claims, check producer/consumer compatibility and the end-to-end acceptance scenario. Run applicable checks. Report missing checks honestly; do not edit files."}.get(
@@ -451,7 +434,7 @@ def executable_path(provider, executable):
     if executable is None:
         if provider == "command":
             raise SystemError("Command provider requires an explicit trusted --executable")
-        executable = shutil.which("codex")
+        executable = discover_executable(provider)
     if not executable:
         raise SystemError("Worker executable was not found")
     # CLI launchers are often symlinks; only the explicitly selected executable
@@ -475,17 +458,12 @@ def create_run(system, plan, directory, provider, executable, mode, timeout):
     selected = selected_plan(system, plan)
     if not system.verify(plan)["fresh"]:
         raise SystemError("Plan is stale; regenerate it before execution")
-    if provider not in {"codex", "command"} or mode not in {"read-only", "edit"}:
+    if provider not in {*NATIVE_PROVIDERS, "command"} or mode not in {"read-only", "edit"}:
         raise SystemError("Invalid worker provider or mode")
     if type(timeout) is not int or not 1 <= timeout <= 86400:
         raise SystemError("Worker timeout must be 1..86400 seconds")
     executable = executable_path(provider, executable)
     directory = absolute(directory)
-    parent = open_directory(directory.parent)
-    try:
-        os.mkdir(directory.name, 0o700, dir_fd=parent)
-    finally:
-        os.close(parent)
     run_id = uuid.uuid4().hex
     roots = {"__system__": str(system.root), **{sid: str(system.services[sid]["root"]) for sid in selected}}
     state = {"schema_version": 1, "kind": "ai-system-run", "run_id": run_id,
@@ -502,6 +480,18 @@ def create_run(system, plan, directory, provider, executable, mode, timeout):
     for phase, sid in [("contracts", "__system__")] + [("service-" + sid, sid) for sid in selected] + [("verify", "__system__")]:
         state["steps"].append({"id": phase, "service": sid,
             "mode": mode if sid != "__system__" else "read-only", "status": "pending", "attempt": 0})
+    if provider == 'cursor':
+        # Refuse an oversized initial dispatch before creating native tasks or a journal.
+        for step in state['steps']:
+            preview = dict(step, dispatch_id='0' * 32)
+            prompt = prompt_for(state, plan, preview, [], directory)
+            invocation(provider, executable, Path(roots[step['service']]), prompt,
+                       result_schema(selected), directory / 'result-schema.json', step['mode'])
+    parent = open_directory(directory.parent)
+    try:
+        os.mkdir(directory.name, 0o700, dir_fd=parent)
+    finally:
+        os.close(parent)
     save(directory, "plan.json", plan, new=True)
     save(directory, "checkpoint.json", plan, new=True)
     save(directory, "result-schema.json", result_schema(selected), new=True)
@@ -526,7 +516,7 @@ def validate_state(system, directory, for_execution=True):
             or state["change_id"] != plan["change_id"]
             or state["plan_sha256"] != digest((encoded(plan) + "\n").encode("utf-8"))):
         raise SystemError("Execution journal does not match current roots or original plan")
-    if state["mode"] not in {"edit", "read-only"} or state["provider"] not in {"codex", "command"}:
+    if state["mode"] not in {"edit", "read-only"} or state["provider"] not in {*NATIVE_PROVIDERS, "command"}:
         raise SystemError("Invalid saved execution options")
     if type(state["timeout"]) is not int or not 1 <= state["timeout"] <= 86400:
         raise SystemError("Invalid saved timeout")
@@ -700,23 +690,20 @@ def execute_run(system, directory, state, retry_step=None, accept_source_changes
                 if not current.verify(plan)["fresh"]:
                     raise SystemError("Sources changed between dispatches; prepare a new plan")
                 prior = reports(directory, state)
-                step["attempt"] += 1
-                if step["attempt"] > 100:
+                if step["attempt"] >= 100:
                     raise SystemError("Dispatch retry limit reached")
-                step["dispatch_id"], step["status"] = uuid.uuid4().hex, "running"
-                prompt = prompt_for(state, plan, step, prior, directory)
+                preview = dict(step, dispatch_id=uuid.uuid4().hex, status="running", attempt=step["attempt"] + 1)
+                prompt = prompt_for(state, plan, preview, prior, directory)
                 if len(prompt) > 128000:
                     raise SystemError("Worker prompt exceeds 128000 characters; narrow the plan")
-                step["input_sha256"] = digest(prompt.encode("utf-8"))
+                command, stdin = invocation(state["provider"], state["executable"],
+                    Path(state["roots"][step["service"]]), prompt, result_schema(state["selected"]),
+                    directory / "result-schema.json", step["mode"])
+                step.update(preview, input_sha256=digest(prompt.encode("utf-8")))
                 save(directory, "run.json", state)  # Persist BEFORE any process/write.
                 brains[step["service"]].progress(state["tasks"][step["service"]],
                     "Dispatch " + step["dispatch_id"] + " started: " + step["id"])
-                command = [state["executable"]]
-                if state["provider"] == "codex":
-                    command += ["--ask-for-approval", "never", "exec", "--cd", state["roots"][step["service"]],
-                                "--sandbox", "workspace-write" if step["mode"] == "edit" else "read-only",
-                                "--skip-git-repo-check", "--json", "--output-schema", str(directory / "result-schema.json"), "-"]
-                result = run_process(command, Path(state["roots"][step["service"]]), prompt, state["timeout"])
+                result = run_process(command, Path(state["roots"][step["service"]]), stdin, state["timeout"])
                 receipt = {"dispatch_id": step["dispatch_id"], "phase": step["id"],
                            "input_sha256": digest(prompt.encode("utf-8")), "mode": step["mode"],
                            "returncode": result["returncode"], "error": result["error"],

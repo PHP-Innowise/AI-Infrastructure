@@ -5,11 +5,11 @@ function systemFailure(error) {
 }
 function systemControls() {
   const run=systemUi.detail, busy=systemUi.pending || !state.bootstrap, live=Boolean(run?.active);
-  for (const id of ['system-project','system-config','system-load','system-prepare','system-runs','system-refresh','system-mode','system-timeout','system-reviewed','system-retry','system-accept-changes']) {
-    $(id).disabled=busy || (['system-mode','system-timeout','system-reviewed'].includes(id) && Boolean(run?.session_id));
+  for (const id of ['system-project','system-config','system-load','system-prepare','system-runs','system-refresh','system-provider','system-mode','system-timeout','system-reviewed','system-retry','system-accept-changes']) {
+    $(id).disabled=busy || (['system-provider','system-mode','system-timeout','system-reviewed'].includes(id) && Boolean(run?.session_id));
   }
-  $('system-execute').disabled=busy || !run || live || Boolean(run.session_id) || run.plan.status!=='needs_review' || !run.codex_available || !$('system-reviewed').checked;
-  $('system-resume').disabled=busy || live;
+  $('system-execute').disabled=busy || !run || live || Boolean(run.session_id) || run.plan.status!=='needs_review' || !run.providers?.some(p=>p.id===$('system-provider').value && p.available) || !$('system-reviewed').checked;
+  $('system-resume').disabled=busy || live || !run?.providers?.some(p=>p.id===run.provider && p.available);
   $('system-cancel').disabled=busy || !live;
 }
 function systemReset() {
@@ -45,7 +45,7 @@ async function systemRead(id) {
     if(state.view!=='systems' || epoch!==systemUi.epoch || run.project_id!==$('system-project').value) return;
     const changed=systemUi.detail?.id!==run.id;
     systemUi.detail=run;
-    if(changed) { $('system-reviewed').checked=false; $('system-accept-changes').checked=false; }
+    if(changed) { $('system-reviewed').checked=false; $('system-accept-changes').checked=false; $('system-provider').replaceChildren(); }
     renderSystemRun();
     if(run.active) systemUi.timer=setTimeout(()=>systemRead(id),1100);
   } catch(error) { if(epoch===systemUi.epoch) systemFailure(error); }
@@ -139,7 +139,10 @@ function renderSystemRun() {
   $('system-plan-json').textContent=JSON.stringify(plan,null,2);
   $('system-launch').hidden=Boolean(run.session_id);
   $('system-recovery').hidden=!run.session_id || run.active || run.status==='completed';
-  $('system-provider-note').textContent=run.codex_available?'Execution uses the configured Codex CLI and its default model. Read-only runs create native Brain task records. Edit mode writes in each service’s current checkout.':'Codex CLI is unavailable. Planning and catalog browsing remain available. Claude and Cursor execution adapters are not yet supported for system runs.';
+  const selected=run.provider || $('system-provider').value || 'codex';
+  setOptions($('system-provider'),run.providers || [],p=>`${p.name}${p.available?'':' · unavailable'}`,p=>p.id,selected);
+  for(const option of $('system-provider').options) option.disabled=!run.providers?.find(p=>p.id===option.value)?.available;
+  systemProviderNote();
   const previous=$('system-retry').value;
   setOptions($('system-retry'),[{id:'',label:'Reconcile saved receipt / continue pending dispatch'},...(execution?.steps || []).filter(s=>['running','interrupted','blocked'].includes(s.status)).map(s=>({id:s.id,label:`Retry ${s.id} · ${s.status}`}))],s=>s.label,s=>s.id,previous);
   $('system-cancel').hidden=!run.active; $('system-open-session').hidden=!run.session_id;
@@ -165,7 +168,7 @@ $('system-plan-form').addEventListener('submit',event=>{
   event.preventDefault(); if(!systemUi.catalog) return;
   const body={project_id:$('system-project').value,config_path:$('system-config').value,task:$('system-task').value,change_id:$('system-change-id').value,services:[...$('system-services').querySelectorAll('input:checked')].map(i=>i.value),contracts:$('system-contracts').value.split(',').map(s=>s.trim()).filter(Boolean),budget:Number($('system-budget').value)};
   systemMutation('/api/system-runs',body,run=>{
-    systemUi.detail=run; $('system-reviewed').checked=false;
+    systemUi.detail=run; $('system-reviewed').checked=false; $('system-provider').replaceChildren();
     for(const empty of [...$('system-runs').options].filter(option=>!option.value)) empty.remove();
     const option=el('option','',`${run.change_id} · ${run.status} · ${run.id.slice(0,8)}`); option.value=run.id;
     $('system-runs').prepend(option); $('system-runs').value=run.id;
@@ -176,8 +179,13 @@ async function systemAction(action,extra={}) {
   const run=systemUi.detail;if(!run) return;
   await systemMutation('/api/system-runs/'+run.id,{action,revision:run.revision,...extra},updated=>{systemUi.detail=updated;renderSystemRun();});
 }
+function systemProviderNote() {
+  const run=systemUi.detail, provider=(run?.providers || []).find(p=>p.id===(run.provider || $('system-provider').value));
+  $('system-provider-note').textContent=provider?.available?`${provider.name} uses its configured CLI and default model. The provider is fixed after launch. Read-only runs create native Brain task records. Edit mode writes in each service’s current checkout.`:'Selected provider CLI is unavailable. Planning and catalog browsing remain available.';
+}
+$('system-provider').addEventListener('change',()=>{systemProviderNote();systemControls();});
 $('system-reviewed').addEventListener('change',systemControls);
-$('system-execute').addEventListener('click',()=>{if($('system-reviewed').checked) systemAction('execute',{mode:$('system-mode').value,timeout:Number($('system-timeout').value)});});
+$('system-execute').addEventListener('click',()=>{if($('system-reviewed').checked) systemAction('execute',{provider:$('system-provider').value,mode:$('system-mode').value,timeout:Number($('system-timeout').value)});});
 $('system-cancel').addEventListener('click',()=>systemAction('cancel'));
 $('system-resume').addEventListener('click',()=>systemAction('resume',{...($('system-retry').value?{retry_step:$('system-retry').value}:{}),accept_source_changes:$('system-accept-changes').checked}));
 $('system-refresh').addEventListener('click',systemHistory);

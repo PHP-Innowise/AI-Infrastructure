@@ -23,9 +23,10 @@ capabilities and memory ownership, select a starting service or changed contract
 and prepare a bounded context/impact plan. Review its sources before execution.
 The backend checks freshness again when queued work actually starts.
 
-Execution currently uses the configured **Codex** CLI and its default model.
-Claude/Cursor and arbitrary browser-supplied commands are not supported for
-system runs. Workers run sequentially through the same single Harness queue;
+Choose **Codex, Claude Code or Cursor Agent** in the reviewed plan. Each uses
+its configured CLI and default model. The provider is fixed after launch,
+including recovery. Browser requests cannot supply executables. Workers run
+sequentially through the same single Harness queue;
 read-only is the default. Native system/service Brain task records are written
 even in read-only mode. Edit mode uses each service's current checkout.
 

@@ -1,4 +1,4 @@
-"""Real localhost API, native Brain and deterministic Codex subprocesses."""
+"""Real localhost API, native Brain and deterministic native CLI subprocesses."""
 from __future__ import annotations
 
 import json
@@ -35,8 +35,8 @@ class HarnessSystemTests(unittest.TestCase):
         self.adapter.write_text(ADAPTER)
         self.adapter.chmod(0o700)
         discovery = patch.object(providers, 'discover_providers', return_value=[{
-            'id': 'codex', 'name': 'Fixture Codex', 'available': True,
-            'executable': str(self.adapter), 'detail': 'Deterministic fixture; no model calls'}])
+            'id': pid, 'name': 'Fixture ' + pid, 'available': True,
+            'executable': str(self.adapter), 'detail': 'Deterministic fixture; no model calls'} for pid in ('codex', 'claude', 'cursor')])
         discovery.start(); self.addCleanup(discovery.stop)
         models = patch.object(providers, 'model_options', return_value={'models': [], 'efforts': [], 'detail': 'Fixture'})
         models.start(); self.addCleanup(models.stop)
@@ -69,6 +69,74 @@ class HarnessSystemTests(unittest.TestCase):
                 return result
             time.sleep(.05)
         self.fail('System run did not settle')
+
+    def test_native_provider_selection_and_pinned_recovery(self):
+        for pid in ('claude', 'cursor'):
+            with self.subTest(provider=pid):
+                marker = self.project / 'services/orders/fail-worker'
+                marker.write_text('fixture failure')
+                run = self.prepare(change_id='change-' + pid)
+                self.assertEqual({'codex', 'claude', 'cursor'}, {p['id'] for p in run['providers']})
+                self.assertTrue(all('executable' not in p for p in run['providers']))
+                status, run, _ = self.act(run, 'execute', provider=pid, mode='read-only')
+                self.assertEqual(200, status, run)
+                run = self.wait_run(run)
+                self.assertEqual('blocked', run['status'])
+                self.assertEqual(pid, run['provider'])
+                self.assertEqual(pid, run['execution']['provider'])
+                session = self.server.sessions.get(run['session_id'])
+                self.assertEqual(pid, session['provider'])
+                self.assertEqual(400, self.act(run, 'resume', provider='codex')[0])
+                self.server.sessions.providers[pid]['available'] = False
+                self.assertEqual(400, self.act(run, 'resume', retry_step='service-orders')[0])
+                self.server.sessions.providers[pid]['available'] = True
+                marker.unlink()
+                status, run, _ = self.act(run, 'resume', retry_step='service-orders')
+                self.assertEqual(200, status, run)
+                run = self.wait_run(run)
+                self.assertEqual('completed', run['status'])
+                self.assertEqual(pid, run['provider'])
+                self.assertEqual(5, len(run['receipts']))
+                self.assertTrue(all(t['closed'] for t in run['execution']['tasks'].values()))
+                self.assertEqual(1, next(s for s in run['execution']['steps'] if s['id']=='contracts')['attempt'])
+                self.assertEqual(2, next(s for s in run['execution']['steps'] if s['id']=='service-orders')['attempt'])
+
+    def test_legacy_codex_request_and_metadata_remain_recoverable(self):
+        marker = self.project / 'fail-worker'
+        marker.touch()
+        run = self.prepare()
+        status, run, _ = self.act(run, 'execute', timeout=10)
+        self.assertEqual(200, status, run)
+        run = self.wait_run(run)
+        self.assertEqual('blocked', run['status'])
+        with self.server.sessions.lock:
+            record = self.server.systems._record(run['id'])
+            record.pop('provider')
+            self.server.systems._save(record)
+        run = self.request('/api/system-runs/' + run['id'])[1]
+        self.assertEqual('codex', run['provider'])
+        directory = self.server.systems.root / run['id']
+        request_file = next(directory.glob('request-*.json'))
+        request = json.loads(request_file.read_text())
+        request.pop('provider')
+        request['retry_step'] = 'contracts'
+        request_file.write_text(json.dumps(request))
+        marker.unlink()
+        result = subprocess.run([sys.executable, str(ROOT / 'harness/src/harness/system_runner.py'),
+                                 '--request', str(request_file)], capture_output=True, timeout=30)
+        self.assertEqual(0, result.returncode, result.stdout)
+        done = self.request('/api/system-runs/' + run['id'])[1]
+        self.assertEqual('completed', done['status'])
+        self.assertEqual('codex', done['execution']['provider'])
+
+    def test_unavailable_or_untrusted_provider_cannot_launch(self):
+        run = self.prepare()
+        self.server.sessions.providers['claude']['available'] = False
+        for extra in ({'provider': 'claude'}, {'provider': {}}, {'provider': 'command'},
+                      {'provider': 'cursor', 'executable': str(self.adapter)}):
+            self.assertEqual(400, self.act(run, 'execute', **extra)[0])
+        self.assertFalse((self.project / 'project-brain').exists())
+        self.assertFalse(self.server.sessions.list())
 
     def test_catalog_and_http_authority_boundaries(self):
         body = {'project_id': self.project_id, 'config_path': 'system.json'}
@@ -118,7 +186,7 @@ class HarnessSystemTests(unittest.TestCase):
         run = self.prepare(task='Investigate order cancellation.\nCheck contract consumers.')
         self.assertEqual('Investigate order cancellation. Check contract consumers.', run['plan']['context']['task'])
         self.assertEqual(400, self.act(run, 'execute', revision=True)[0])
-        self.assertEqual(400, self.act(run, 'execute', provider='claude')[0])
+        self.assertEqual(400, self.act(run, 'execute', provider='unknown')[0])
         self.assertEqual(400, self.act(run, 'execute', timeout=True)[0])
         (self.project/'services/orders/specs/cancellation.md').write_text('Changed source')
         self.assertEqual(400, self.act(run, 'execute')[0])
@@ -164,7 +232,15 @@ class HarnessSystemTests(unittest.TestCase):
         self.assertEqual(1, steps['contracts']['attempt'])
         self.assertEqual(2, steps['service-orders']['attempt'])
 
+    def test_cancel_claude_and_cursor_reaps_workers_and_preserves_provider(self):
+        for pid in ('claude', 'cursor'):
+            with self.subTest(provider=pid):
+                self._cancel_reaps_detached_worker_and_descendant(pid)
+
     def test_cancel_reaps_detached_worker_and_descendant(self):
+        self._cancel_reaps_detached_worker_and_descendant('codex')
+
+    def _cancel_reaps_detached_worker_and_descendant(self, provider):
         extra = '''
 if (root / "hold-worker").exists():
     import subprocess, time
@@ -175,7 +251,7 @@ if (root / "hold-worker").exists():
         self.adapter.write_text(ADAPTER.replace('marker = root / "fail-worker"', extra+'\nmarker = root / "fail-worker"'))
         marker = self.project/'hold-worker'; marker.touch()
         run = self.prepare()
-        status, queued, _ = self.act(run, 'execute', timeout=120)
+        status, queued, _ = self.act(run, 'execute', timeout=120, provider=provider)
         self.assertEqual(200, status, queued)
         pid_file = self.project/'worker-pids.json'
         deadline = time.monotonic()+15
@@ -191,6 +267,8 @@ if (root / "hold-worker").exists():
             while self.alive(pid) and time.monotonic()<deadline:
                 time.sleep(.05)
             self.assertFalse(self.alive(pid), 'Provider descendant survived cancellation')
+        self.assertEqual(provider, stopped['provider'])
+        pid_file.unlink()
         marker.unlink()
         status, resumed, _ = self.act(stopped, 'resume', retry_step='contracts')
         self.assertEqual(200, status, resumed)
@@ -204,7 +282,7 @@ if (root / "hold-worker").exists():
                 raise OSError('Simulated interruption before linking the session')
             return original(record)
         with patch.object(self.server.systems, '_save', side_effect=crash_after_enqueue):
-            self.assertEqual(400, self.act(run, 'execute', timeout=10)[0])
+            self.assertEqual(400, self.act(run, 'execute', timeout=10, provider='claude')[0])
         # The saved pending nonce discovers the already committed session. A
         # retry must never create another session or execute the plan twice.
         recovered = self.request('/api/system-runs/'+run['id'])[1]
@@ -223,6 +301,7 @@ if (root / "hold-worker").exists():
         self.thread.start(); self.token = self.server.token
         restored = self.request('/api/system-runs/'+run['id'])[1]
         self.assertEqual('completed', restored['status'])
+        self.assertEqual('claude', restored['provider'])
         self.assertEqual(done['session_id'], restored['session_id'])
         self.assertEqual(400, self.act(restored, 'execute')[0])
 

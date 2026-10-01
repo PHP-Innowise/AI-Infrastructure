@@ -85,7 +85,7 @@ def parser():
         if name in {"execute", "resume", "run-status"}:
             command.add_argument("--run-dir", type=Path, required=True)
         if name == "execute":
-            command.add_argument("--provider", choices=("codex", "command"), default="codex")
+            command.add_argument("--provider", choices=("codex", "claude", "cursor", "command"), default="codex")
             command.add_argument("--executable", help="explicit trusted CLI/adapter executable")
             command.add_argument("--mode", choices=("read-only", "edit"), default="read-only")
             command.add_argument("--timeout", type=int, default=900, help="seconds per worker")
