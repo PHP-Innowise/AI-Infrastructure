@@ -28,6 +28,7 @@ from harness.skills import SkillManager
 from harness.knowledge import KnowledgeManager
 from harness.setup import SetupManager
 from harness.creator import CreatorManager
+from harness.system_orchestration import SystemManager
 from harness.project_browser import browse_projects
 from build_kit3_catalog import build_site
 from install_accelerator import EDITIONS
@@ -46,6 +47,7 @@ class HarnessServer(ThreadingHTTPServer):
             self.sessions.knowledge = self.knowledge
             self.setup_manager = SetupManager(self.sessions)
             self.creator = CreatorManager(self.sessions)
+            self.systems = SystemManager(self.sessions)
             self.token = secrets.token_urlsafe(32)
             self.instance = secrets.token_hex(16)
             self.catalog_dir = tempfile.TemporaryDirectory(prefix='harness-catalog-')
@@ -143,12 +145,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         parsed = urlsplit(self.path)
         path = parsed.path
+        query = parse_qs(parsed.query, keep_blank_values=True)
         store = self.server.sessions
         try:
             if path == '/':
                 self.reply(200, self.server.page, 'text/html; charset=utf-8')
             elif path in ('/kit3/', '/kit3/index.html'):
                 self.reply(200, self.server.catalog, 'text/html; charset=utf-8')
+            elif path == '/system.js':
+                self.reply(200, (ROOT / 'harness/web/system.js').read_bytes(), 'text/javascript; charset=utf-8')
             elif path == '/api/health':
                 self.reply(200, {'ok': True, 'instance': self.server.instance})
             elif path == '/api/bootstrap':
@@ -163,6 +168,14 @@ class Handler(BaseHTTPRequestHandler):
                 if parsed.query:
                     raise SessionError('Invalid project setup request.')
                 self.reply(200, self.server.setup_manager.status(path.split('/')[3]))
+            elif path == '/api/system-runs':
+                if set(query) != {'project_id'} or len(query['project_id']) != 1:
+                    raise SessionError('Select a registered system project.')
+                self.reply(200, self.server.systems.list(query['project_id'][0]))
+            elif path.startswith('/api/system-runs/') and len(path.split('/')) == 4:
+                if query:
+                    raise SessionError('Invalid system run request.')
+                self.reply(200, self.server.systems.get(path.split('/')[3]))
             elif path == '/api/creator':
                 query = parse_qs(parsed.query, keep_blank_values=True)
                 if set(query) != {'project_id'} or len(query['project_id']) != 1:
@@ -292,7 +305,13 @@ class Handler(BaseHTTPRequestHandler):
             data = self.read_json(MAX_JSON_BYTES if upload else 131072 if path == '/api/skills/create-preview' else 65536)
             if path.startswith('/api/skills/') and urlsplit(self.path).query:
                 raise SessionError('Invalid skill request.')
-            if path == '/api/creator':
+            if path == '/api/systems/catalog':
+                self.reply(200, self.server.systems.catalog(data))
+            elif path == '/api/system-runs':
+                self.reply(201, self.server.systems.prepare(data))
+            elif path.startswith('/api/system-runs/') and len(path.split('/')) == 4:
+                self.reply(200, self.server.systems.act(path.split('/')[3], data))
+            elif path == '/api/creator':
                 if urlsplit(self.path).query: raise SessionError('Invalid Creator request.')
                 self.reply(201, self.server.creator.start(data))
             elif path.startswith('/api/creator/') and len(path.split('/')) == 4:

@@ -1,0 +1,273 @@
+"""Real localhost API, native Brain and deterministic Codex subprocesses."""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+from unittest.mock import patch
+
+from tests import test_harness_web as http_helpers
+from tests.test_ai_system_execution import ADAPTER
+from harness import providers, web
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class HarnessSystemTests(unittest.TestCase):
+    request = http_helpers.HarnessWebTests.request
+    post = http_helpers.HarnessWebTests.post
+    close_server = http_helpers.HarnessWebTests.close_server
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.project = self.root / 'project'
+        shutil.copytree(ROOT / 'docs/examples/ai-system', self.project)
+        self.adapter = self.root / 'fixture-codex'
+        self.adapter.write_text(ADAPTER)
+        self.adapter.chmod(0o700)
+        discovery = patch.object(providers, 'discover_providers', return_value=[{
+            'id': 'codex', 'name': 'Fixture Codex', 'available': True,
+            'executable': str(self.adapter), 'detail': 'Deterministic fixture; no model calls'}])
+        discovery.start(); self.addCleanup(discovery.stop)
+        models = patch.object(providers, 'model_options', return_value={'models': [], 'efforts': [], 'detail': 'Fixture'})
+        models.start(); self.addCleanup(models.stop)
+        self.server = web.HarnessServer(('127.0.0.1', 0), self.root / 'state', [self.project])
+        self.closed = False
+        self.thread = threading.Thread(target=self.server.serve_forever,
+                                       kwargs={'poll_interval': .01}, daemon=True)
+        self.thread.start(); self.addCleanup(self.close_server)
+        self.project_id = next(iter(self.server.sessions.projects))
+        self.token = self.server.token
+
+    def prepare(self, **changes):
+        data = {'project_id': self.project_id, 'config_path': 'system.json',
+                'task': 'Investigate order cancellation and its consumers', 'change_id': 'change-001',
+                'services': ['orders'], **changes}
+        status, result, _ = self.post('/api/system-runs', data)
+        self.assertEqual(201, status, result)
+        return result
+
+    def act(self, run, action, **changes):
+        return self.post('/api/system-runs/' + run['id'],
+                         {'action': action, 'revision': run['revision'], **changes})
+
+    def wait_run(self, run, timeout=30):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            status, result, _ = self.request('/api/system-runs/' + run['id'])
+            self.assertEqual(200, status, result)
+            if not result['active']:
+                return result
+            time.sleep(.05)
+        self.fail('System run did not settle')
+
+    def test_catalog_and_http_authority_boundaries(self):
+        body = {'project_id': self.project_id, 'config_path': 'system.json'}
+        self.assertEqual(403, self.post('/api/systems/catalog', body, headers={'X-Harness-Token': None})[0])
+        status, data, _ = self.post('/api/systems/catalog', body)
+        self.assertEqual(200, status, data)
+        self.assertEqual(3, len(data['catalog']['services']))
+        self.assertIn('flowchart', data['diagram'])
+        self.assertEqual(200, self.request('/system.js')[0])
+        for config in ('../project/system.json', str(self.project/'system.json'), './system.json'):
+            self.assertEqual(400, self.post('/api/systems/catalog', {**body, 'config_path': config})[0])
+        (self.project/'linked.json').symlink_to(self.project/'system.json')
+        self.assertEqual(400, self.post('/api/systems/catalog', {**body, 'config_path': 'linked.json'})[0])
+        for field in ('allow_roots', 'executable', 'run_dir', 'provider'):
+            self.assertEqual(400, self.post('/api/systems/catalog', {**body, field: str(self.root)})[0])
+        self.assertEqual(400, self.request('/api/system-runs?project_id=missing')[0])
+        self.assertEqual(404, self.request('/api/system-runs/../../etc/passwd')[0])
+
+    def test_external_service_requires_registered_project(self):
+        outside = self.root/'outside'
+        shutil.copytree(self.project/'services/orders', outside)
+        config = json.loads((self.project/'system.json').read_text())
+        config['services'][0]['root'] = str(outside)
+        (self.project/'system.json').write_text(json.dumps(config))
+        body = {'project_id': self.project_id, 'config_path': 'system.json'}
+        data = self.post('/api/systems/catalog', body)[1]
+        service = next(s for s in data['catalog']['services'] if s['id']=='orders')
+        self.assertEqual('denied', service['access'])
+        run = self.prepare()
+        self.assertEqual(400, self.act(run, 'execute')[0])
+        self.assertFalse((outside/'project-brain').exists())
+        self.server.sessions.add_project({'path': str(outside)})
+        self.assertEqual('available', next(s for s in self.post('/api/systems/catalog', body)[1]['catalog']['services'] if s['id']=='orders')['access'])
+
+    def test_history_limit_is_per_project(self):
+        run = self.prepare()
+        other = self.root/'other-project'; other.mkdir()
+        project = self.server.sessions.add_project({'path': str(other)})
+        with self.server.sessions.lock:
+            for number in range(201):
+                self.server.systems._save({**run, 'id': format(number, '032x'), 'project_id': project['id']})
+        status, history, _ = self.request('/api/system-runs?project_id='+self.project_id)
+        self.assertEqual(200, status, history)
+        self.assertEqual([run['id']], [record['id'] for record in history['runs']])
+
+    def test_stale_selection_and_settings_fail_before_native_task_mutation(self):
+        run = self.prepare(task='Investigate order cancellation.\nCheck contract consumers.')
+        self.assertEqual('Investigate order cancellation. Check contract consumers.', run['plan']['context']['task'])
+        self.assertEqual(400, self.act(run, 'execute', revision=True)[0])
+        self.assertEqual(400, self.act(run, 'execute', provider='claude')[0])
+        self.assertEqual(400, self.act(run, 'execute', timeout=True)[0])
+        (self.project/'services/orders/specs/cancellation.md').write_text('Changed source')
+        self.assertEqual(400, self.act(run, 'execute')[0])
+        self.assertFalse((self.project/'project-brain').exists())
+        run = self.prepare(services=[], task='Unmatched topic')
+        self.assertEqual('needs_selection', run['plan']['status'])
+        self.assertEqual(400, self.act(run, 'execute')[0])
+
+    def test_actual_queue_receipts_native_tasks_and_protected_followups(self):
+        run = self.prepare()
+        status, queued, _ = self.act(run, 'execute', mode='read-only', timeout=10)
+        self.assertEqual(200, status, queued)
+        self.assertTrue(queued['active'])
+        self.assertEqual(400, self.act(run, 'execute')[0])
+        result = self.wait_run(queued)
+        self.assertEqual('completed', result['status'], result['events'])
+        self.assertEqual(5, len(result['receipts']))
+        self.assertTrue(all(task['closed'] and task['uuid'] for task in result['execution']['tasks'].values()))
+        self.assertIn('knowledge', result['handoff'])
+        self.assertEqual(400, self.act(result, 'execute')[0])
+        self.assertEqual(400, self.act(result, 'resume')[0])
+        sid = result['session_id']
+        self.assertEqual(400, self.post('/api/sessions/'+sid+'/messages', {'prompt':'Run a new command'})[0])
+        status, listing, _ = self.request('/api/system-runs?project_id='+self.project_id)
+        self.assertEqual(200, status)
+        self.assertEqual('completed', listing['runs'][0]['status'])
+
+    def test_failure_explicit_retry_skips_completed_workers(self):
+        marker = self.project/'services/orders/fail-worker'; marker.touch()
+        run = self.prepare()
+        status, queued, _ = self.act(run, 'execute', timeout=10)
+        self.assertEqual(200, status, queued)
+        blocked = self.wait_run(queued)
+        self.assertEqual('blocked', blocked['status'])
+        steps = {s['id']: s for s in blocked['execution']['steps']}
+        self.assertEqual('completed', steps['contracts']['status'])
+        marker.unlink()
+        status, resumed, _ = self.act(blocked, 'resume', retry_step='service-orders')
+        self.assertEqual(200, status, resumed)
+        done = self.wait_run(resumed)
+        self.assertEqual('completed', done['status'], done['events'])
+        steps = {s['id']: s for s in done['execution']['steps']}
+        self.assertEqual(1, steps['contracts']['attempt'])
+        self.assertEqual(2, steps['service-orders']['attempt'])
+
+    def test_cancel_reaps_detached_worker_and_descendant(self):
+        extra = '''
+if (root / "hold-worker").exists():
+    import subprocess, time
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    (root / "worker-pids.json").write_text(json.dumps([os.getpid(), child.pid]))
+    time.sleep(120)
+'''
+        self.adapter.write_text(ADAPTER.replace('marker = root / "fail-worker"', extra+'\nmarker = root / "fail-worker"'))
+        marker = self.project/'hold-worker'; marker.touch()
+        run = self.prepare()
+        status, queued, _ = self.act(run, 'execute', timeout=120)
+        self.assertEqual(200, status, queued)
+        pid_file = self.project/'worker-pids.json'
+        deadline = time.monotonic()+15
+        while not pid_file.exists() and time.monotonic()<deadline:
+            time.sleep(.05)
+        self.assertTrue(pid_file.exists())
+        pids = json.loads(pid_file.read_text())
+        self.assertEqual(200, self.act(queued, 'cancel')[0])
+        stopped = self.wait_run(queued)
+        self.assertEqual('interrupted', stopped['status'])
+        for pid in pids:
+            deadline = time.monotonic()+5
+            while self.alive(pid) and time.monotonic()<deadline:
+                time.sleep(.05)
+            self.assertFalse(self.alive(pid), 'Provider descendant survived cancellation')
+        marker.unlink()
+        status, resumed, _ = self.act(stopped, 'resume', retry_step='contracts')
+        self.assertEqual(200, status, resumed)
+        self.assertEqual('completed', self.wait_run(resumed)['status'])
+
+    def test_durable_pending_launch_recovers_lost_session_link(self):
+        run = self.prepare()
+        original = self.server.systems._save
+        def crash_after_enqueue(record):
+            if record['session_id'] is not None and not record.get('pending_nonce'):
+                raise OSError('Simulated interruption before linking the session')
+            return original(record)
+        with patch.object(self.server.systems, '_save', side_effect=crash_after_enqueue):
+            self.assertEqual(400, self.act(run, 'execute', timeout=10)[0])
+        # The saved pending nonce discovers the already committed session. A
+        # retry must never create another session or execute the plan twice.
+        recovered = self.request('/api/system-runs/'+run['id'])[1]
+        self.assertIsNotNone(recovered['session_id'])
+        self.assertIsNone(recovered['pending_nonce'])
+        self.assertEqual(1, len(self.server.sessions.list()))
+        self.assertIsNotNone(self.server.sessions.get(recovered['session_id'])['system_run'])
+        self.assertEqual(400, self.act(recovered, 'execute')[0])
+        done = self.wait_run(recovered)
+        self.assertEqual('completed', done['status'])
+        self.close_server()
+        self.server = web.HarnessServer(('127.0.0.1',0), self.root/'state', [self.project])
+        self.closed = False
+        self.thread = threading.Thread(target=self.server.serve_forever,
+                                       kwargs={'poll_interval': .01}, daemon=True)
+        self.thread.start(); self.token = self.server.token
+        restored = self.request('/api/system-runs/'+run['id'])[1]
+        self.assertEqual('completed', restored['status'])
+        self.assertEqual(done['session_id'], restored['session_id'])
+        self.assertEqual(400, self.act(restored, 'execute')[0])
+
+    def test_watchdog_reaps_worker_when_executor_is_killed(self):
+        pid_file = self.root/'orphan-pids.json'
+        child = ('import os,sys,subprocess,time,json,pathlib; '
+                 'p=subprocess.Popen([sys.executable,"-c","import time; time.sleep(120)"]); '
+                 'pathlib.Path('+repr(str(pid_file))+').write_text(json.dumps([os.getpid(),p.pid])); '
+                 'time.sleep(120)')
+        owner_code = ('import sys,pathlib; sys.path.insert(0,'+repr(str(ROOT/'scripts'))+'); '
+                      'import ai_system_execution as e; e.PROCESS_GUARD=pathlib.Path('
+                      +repr(str(ROOT/'harness/src/harness/process_guard.py'))+'); '
+                      'e.run_process([sys.executable,"-c",'+repr(child)+'],pathlib.Path('
+                      +repr(str(self.root))+'),"",120)')
+        owner = subprocess.Popen([sys.executable,'-c',owner_code], stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, start_new_session=True)
+        try:
+            deadline = time.monotonic()+10
+            while not pid_file.exists() and time.monotonic()<deadline:
+                time.sleep(.05)
+            self.assertTrue(pid_file.exists())
+            pids = json.loads(pid_file.read_text())
+            owner.kill(); owner.wait(timeout=5)
+            for pid in pids:
+                deadline = time.monotonic()+5
+                while self.alive(pid) and time.monotonic()<deadline:
+                    time.sleep(.05)
+                self.assertFalse(self.alive(pid), 'Provider survived executor death')
+        finally:
+            if owner.poll() is None:
+                owner.kill()
+            owner.wait(timeout=5)
+
+    @staticmethod
+    def alive(pid):
+        try:
+            # A zombie has exited; the host's init is responsible for reaping it.
+            proc = Path('/proc')/str(pid)/'stat'
+            if proc.exists() and proc.read_text().split(') ',1)[1].startswith('Z'):
+                return False
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+
+
+if __name__ == '__main__':
+    unittest.main()

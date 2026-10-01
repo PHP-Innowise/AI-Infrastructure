@@ -30,6 +30,8 @@ from ai_system_lib import (MAX_BYTES, MAX_SERVICES, SECRET, System, SystemError,
 RUNTIME = Path(__file__).resolve().parent.parent / "PHP Core/memory-bank/scripts/context.py"
 MAX_OUTPUT = 2 * 1024 * 1024
 MAX_STATE = 8 * MAX_BYTES
+# Harness supplies its trusted watchdog. Standalone CLI behavior is unchanged.
+PROCESS_GUARD = None
 
 
 def guarded_input(function):
@@ -144,13 +146,21 @@ def run_process(command, cwd, stdin, timeout):
     output = bytearray()
     failure = None
     process = None
+    watchdog_read = watchdog_write = None
     with tempfile.TemporaryFile() as source:
         source.write(stdin.encode("utf-8"))
         source.seek(0)
         try:
+            if PROCESS_GUARD is not None:
+                watchdog_read, watchdog_write = os.pipe()
+                command = [sys.executable, str(PROCESS_GUARD), str(watchdog_read), '--', *command]
             process = subprocess.Popen(command, cwd=str(cwd), stdin=source,
                                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                       start_new_session=True)
+                                       start_new_session=True,
+                                       pass_fds=(watchdog_read,) if watchdog_read is not None else ())
+            if watchdog_read is not None:
+                os.close(watchdog_read)
+                watchdog_read = None
             with selectors.DefaultSelector() as selector:
                 selector.register(process.stdout, selectors.EVENT_READ)
                 while selector.get_map():
@@ -177,6 +187,9 @@ def run_process(command, cwd, stdin, timeout):
         except OSError:
             failure = "start_failed"
         finally:
+            for fd in (watchdog_read, watchdog_write):
+                if fd is not None:
+                    os.close(fd)
             if process is not None:
                 # Even a successful leader may leave children with closed pipes.
                 try:

@@ -26,6 +26,14 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Integrate system orchestration into Harness UI: declared service graphs,
+  capabilities and memory ownership, reviewed context/impact plans, sequential
+  Codex execution through the shared queue, live receipts/native task references,
+  cancellation and explicit recovery. Derive filesystem access from registered
+  projects; preserve pending launch identity across crashes and stop detached
+  worker trees through nested watchdogs. Cover real HTTP/native Brain paths on
+  Python 3.9 and current Python using deterministic provider fixtures.
+
 - Add an optional stack-neutral system planner (`scripts/ai_system.py`) for
   service passports, declared contract impact, globally budgeted context,
   Mermaid maps and cross-service plans. Preserve local Brain/Memory ownership,

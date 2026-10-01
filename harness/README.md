@@ -15,6 +15,28 @@ Filenames and sizes are validated, and stored bytes are checked before use.
 Attachments are reference data and are not automatically executed or promoted
 into Memory Bank. A failed send retains the selected files for correction.
 
+## System orchestration in the browser
+
+**System Orchestration** coordinates development changes across registered
+service repositories. Load a relative `system.json`, inspect the declared graph,
+capabilities and memory ownership, select a starting service or changed contract,
+and prepare a bounded context/impact plan. Review its sources before execution.
+The backend checks freshness again when queued work actually starts.
+
+Execution currently uses the configured **Codex** CLI and its default model.
+Claude/Cursor and arbitrary browser-supplied commands are not supported for
+system runs. Workers run sequentially through the same single Harness queue;
+read-only is the default. Native system/service Brain task records are written
+even in read-only mode. Edit mode uses each service's current checkout.
+
+Saved runs show dispatch state, worker-reported checks, scoped changed files,
+native task references and the knowledge handoff. Cancel stops provider trees;
+recovery requires an explicit resume and an explicit dispatch retry after an
+ambiguous interruption. Inspect partial edits before accepting changed sources.
+Completed dispatches are skipped, and server restart never automatically resumes
+work. Register external service roots in **Projects & Setup** first; the manifest
+cannot grant host filesystem access. See the [system orchestration guide](../docs/AI-SYSTEM-ORCHESTRATION.md#harness-ui).
+
 ## Infrastructure Creator in the browser
 
 Choose **Infrastructure Creator** (also available through Kit 1), a registered

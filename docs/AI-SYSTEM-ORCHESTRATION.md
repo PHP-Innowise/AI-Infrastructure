@@ -436,3 +436,74 @@ read-only/edit behavior, CAS conflicts, lost bindings, failure/timeout, stale
 sources, crash recovery and ambiguous partial writes. They do not make paid
 provider calls. Real provider credentials and end-to-end product environments
 remain integration prerequisites.
+
+## Harness UI
+
+Open **System Orchestration** in `./harness-server`. Choose a registered project
+and a relative manifest path (`system.json` by default), then **Load system**.
+The graph represents declared contracts. Service cards show capability status
+and source paths; planned capabilities remain labelled planned. The memory
+ownership panel shows the system/service Brain and Memory Bank locations,
+without claiming those records already exist.
+
+Select starting services or supply changed contract IDs, describe the task, and
+**Prepare plan**. Contract consumers enter the impact scope automatically. The
+plan includes context excerpts, omitted sources, warnings and fingerprints.
+Its service list denotes participants; the contract dispatch later establishes
+the actual implementation order. Task line breaks are normalized to spaces.
+
+After reviewing the scope/context, choose read-only investigation or service
+edits and a timeout per worker, then **Execute with Codex**. System dispatches
+share the existing Harness queue, runner lock, cancellation and watchdog. They
+currently use Codex's default model; other provider/model/agent controls from
+ordinary sessions do not apply. No arbitrary executable can be passed by API.
+Access to external roots comes exclusively from registered Harness projects.
+
+The run view polls persisted dispatches and displays receipts, reported checks,
+changed files, native task UUIDs and the handoff. A successful worker exit alone
+does not complete a run. Final verification needs at least one reported passed
+check and no missing/failed reported checks. Durable knowledge publication
+remains a separate review through the owning runtime. No commit, push, merge or
+deployment is performed by this execution flow.
+
+Use **Cancel run** for active work and **Resume saved run** for unfinished runs.
+Select the interrupted/blocked dispatch explicitly before retrying. Inspect
+partial edits and acknowledge changed sources only when appropriate. A saved
+successful receipt is reconciled instead of rerunning its worker. Pending launch
+identity is saved before enqueue and linked to the session during recovery.
+After server restart, sessions are interrupted; nothing is resumed automatically.
+Cancellation and loss of the server/executor close nested watchdogs, stopping
+detached provider groups as well as ordinary descendants.
+
+Local API surface (existing Host/Origin/CSRF boundaries apply):
+
+- `POST /api/systems/catalog`: `project_id`, relative `config_path`.
+- `POST /api/system-runs`: the same identity plus `task`, `change_id`, optional
+  `services`, `contracts`, `budget` and `depth`.
+- `GET /api/system-runs?project_id=...` and `GET /api/system-runs/<id>`:
+  persisted plans and current/historical run details.
+- `POST /api/system-runs/<id>`: `action`, current integer `revision`; execute
+  accepts `mode`/`timeout`, resume accepts `retry_step`/`accept_source_changes`,
+  and cancel has no extra options. Unknown fields are rejected.
+
+Run the HTTP/queue/native-runtime regression suite with:
+
+```bash
+python3 -m unittest tests.test_harness_system_orchestration
+```
+
+These tests use deterministic Codex-format fixtures, not paid model calls.
+
+### UI screenshots
+
+These are screenshots of the running localhost Harness using a synthetic
+three-service system and a deterministic Codex-format provider fixture.
+Reported checks are fixture assertions; no real model or customer system was used.
+
+![Declared service graph and capabilities](images/ai-system/map.jpg)
+
+![System and service memory ownership](images/ai-system/memory.jpg)
+
+![Reviewable impact plan and context budget](images/ai-system/plan.jpg)
+
+![Persisted dispatch receipts and native tasks after explicit recovery](images/ai-system/results.jpg)

@@ -405,6 +405,27 @@
     @media (max-width:760px) { .app { grid-template-columns:minmax(0,1fr); } .sidebar { position:fixed; z-index:20; inset:0 auto 0 0; width:265px; transform:translateX(-100%); transition:transform .18s ease; box-shadow:12px 0 40px #17112214; } .sidebar[data-open="true"] { transform:translateX(0); } .scrim[data-open="true"] { display:block; position:fixed; inset:0; background:#18132140; z-index:19; border:0; border-radius:0; } .menu-toggle { display:inline-flex; width:30px; margin-left:-6px; } .topbar { min-height:65px; padding:13px 18px; gap:10px; } .topbar-heading { display:flex; align-items:center; gap:10px; min-width:0; } .topbar h1 { font-size:13px; } .topbar p { font-size:10px; } .header-actions { gap:8px; } .header-actions .button { padding:7px 9px; font-size:11px; } .header-actions .status { font-size:10px; } .configuration { padding:15px 18px 12px; } .settings-grid { gap:9px; } input[type="text"],.field input[type="number"],select { min-height:35px; font-size:11px; padding:7px; } .configuration-bottom { display:block; margin-top:11px; } .provider-hint { max-width:none; text-align:left; margin-top:9px; font-size:10px; } .conversation-inner { padding:25px 20px 8px; } .welcome { margin:28px auto; } .welcome h2 { font-size:25px; } .welcome p { font-size:12px; } .welcome-links { gap:7px; margin-top:20px; } .welcome-links .button { padding:8px 10px; font-size:11px; } .composer-area { padding:10px 14px 13px; } .composer { padding:12px; } .composer textarea { min-height:58px; font-size:13px; } .composer-note { font-size:9px; } .composer-caption { font-size:9px; } .page-scroll { padding:27px 20px; } .page-heading h2 { font-size:25px; } .accelerator { grid-template-columns:43px minmax(0,1fr); gap:14px; } .accelerator h3 { font-size:17px; } .banner { margin:10px 14px 0; font-size:11px; gap:10px; padding:10px; } .catalog-toolbar { padding:12px 16px; font-size:11px; } .file-row { grid-template-columns:minmax(0,1fr) 62px 50px; gap:9px; } .file-path { font-size:11px; } }
     @media (max-width:400px) { .settings-grid { grid-template-columns:1fr 1fr; } .settings-grid .model-field { grid-column:auto; } .header-actions .status { max-width:65px; white-space:normal; line-height:1.3; } .topbar h1 { max-width:150px; } .configuration { padding:12px 14px; } .composer-note { max-width:135px; } .accelerator-actions { display:block; } .accelerator-actions .button { margin-top:10px; } }
     @media (prefers-reduced-motion:reduce) { * { scroll-behavior:auto !important; transition:none !important; animation:none !important; } }
+    .system-toolbar { display:grid; grid-template-columns:minmax(160px,1fr) minmax(180px,1fr) auto; gap:14px; align-items:end; }
+    .system-map { margin:18px 0; overflow:auto; border:1px solid var(--line); border-radius:10px; background:#faf8fe; }
+    .system-map svg { display:block; width:100%; min-width:560px; }
+    .system-cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; }
+    .system-card { border:1px solid var(--line); border-radius:8px; padding:16px; min-width:0; }
+    .system-card h3 { margin:0 0 8px; font-size:14px; }
+    .system-card p { font-size:11px; color:var(--muted); overflow-wrap:anywhere; line-height:1.7; margin:6px 0; }
+    .system-choice { display:flex; gap:9px; align-items:center; font-size:12px; font-weight:600; }
+    .system-choice input { accent-color:var(--purple); }
+    .system-links { display:flex; flex-wrap:wrap; gap:7px; margin-top:12px; }
+    .system-flow { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:9px; margin:16px 0; }
+    .system-stage { border:1px solid var(--line); border-radius:7px; padding:12px; font-size:11px; line-height:1.7; overflow-wrap:anywhere; }
+    .system-stage.completed { border-color:#afcfb8; background:#f3faf5; }
+    .system-stage.running { border-color:var(--purple); background:#f6f0fd; }
+    .system-stage.blocked,.system-stage.interrupted { border-color:#e6c49f; background:#fff8ef; }
+    .system-stage strong { display:block; font-size:12px; }
+    .system-json { white-space:pre-wrap; overflow-wrap:anywhere; max-height:350px; overflow:auto; font-size:11px; background:var(--soft); padding:14px; border-radius:7px; }
+    .system-history { display:flex; gap:8px; align-items:end; margin-top:20px; }
+    .system-history .field { flex:1; }
+    .system-note { font-size:12px; line-height:1.8; color:var(--muted); }
+    @media (max-width:760px) { .system-toolbar { grid-template-columns:1fr; } .system-cards { grid-template-columns:1fr; } }
   </style>
 </head>
 <body>
@@ -417,6 +438,7 @@
       <nav class="navigation" aria-label="Main navigation">
         <button class="nav-item" type="button" data-view="setup"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h7l2 3h9v11H3Z M3 6V4h7l2 2 M15 12v5 M12.5 14.5h5"/></svg>Projects &amp; Setup</button>
         <button class="nav-item" type="button" data-view="sessions" aria-current="page"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h16v12H9l-5 4Z"/></svg>Sessions</button>
+        <button class="nav-item" type="button" data-view="systems"><span class="icon" aria-hidden="true">⌘</span>System Orchestration</button>
         <button class="nav-item" type="button" data-view="creator"><span class="icon" aria-hidden="true">◇</span>Infrastructure Creator</button>
         <button class="nav-item" type="button" data-view="context"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M5 3h9l5 5v13H5Z M14 3v6h5 M8 13h8 M8 17h6"/></svg>Project context</button>
         <button class="nav-item" type="button" data-view="brain"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M8 4h8v5H8Z M4 15h6v5H4Z M15 15h6v5h-6Z M12 9v3H7v3 M12 12h6v3"/></svg>Project Brain</button>
@@ -531,6 +553,37 @@
           <p class="knowledge-note">A passed check means this command exited with code 0. It does not certify every requirement or an entire project.</p><div id="results-checks"></div>
         </section>
         <section aria-label="Launch usage history"><h3>Launch history &amp; total usage</h3><p class="knowledge-note" id="results-usage-note"></p><p id="results-totals" role="status"></p><div id="results-launches"></div></section>
+      </div></div></section>
+      <section class="view" id="systems-view" aria-label="System Orchestration" hidden><div class="page-scroll"><div class="page-content">
+        <div class="page-heading"><h2>System Orchestration</h2><p>Coordinate a change across services, contracts and their own project memory.</p></div>
+        <div class="system-toolbar">
+          <label class="field">System project<select id="system-project"></select></label>
+          <label class="field">System manifest<input id="system-config" value="system.json" maxlength="1024" placeholder="Relative path to system.json"></label>
+          <button class="button" type="button" id="system-load">Load system</button>
+        </div>
+        <p class="system-note">Register service repositories in Projects &amp; Setup before loading an external root. The manifest declares relationships; access comes from registered projects.</p>
+        <p class="error-text" id="system-error" role="alert" hidden></p><p class="skills-action-status" id="system-message" role="status"></p>
+        <div id="system-catalog" hidden>
+          <h3 id="system-name"></h3><p class="system-note" id="system-catalog-summary"></p>
+          <div class="system-map" id="system-map"></div><div class="system-cards" id="system-services"></div>
+          <details class="skills-preview"><summary>Declared contracts and memory ownership</summary><div id="system-relationships"></div><p class="system-note">System Brain coordinates the change. Each service owns its tasks and Memory Bank. Local SQLite indexes are disposable. Receipts become durable knowledge only through the owning runtime’s review and promotion workflow.</p><div id="system-banks" class="system-cards"></div></details>
+          <form id="system-plan-form" class="skills-preview"><h3>Prepare a change</h3><p class="system-note">Select a starting service above, or leave the selection empty for capability routing. Contract consumers are added to the impact plan.</p><div class="knowledge-form-grid">
+            <label class="field wide">Task<textarea id="system-task" required maxlength="2000" rows="3" placeholder="Describe the change and the expected result"></textarea></label>
+            <label class="field">Change ID<input id="system-change-id" required maxlength="80" value="change-001" pattern="[a-z0-9][a-z0-9._-]*"></label>
+            <label class="field">Changed contracts (optional)<input id="system-contracts" maxlength="2000" placeholder="Comma-separated declared contract IDs"></label>
+            <label class="field">Context budget (characters)<input id="system-budget" type="number" min="128" max="64000" value="8000" required></label>
+          </div><div class="skills-actions"><button class="button primary" id="system-prepare" type="submit">Prepare plan</button></div></form>
+        </div>
+        <div class="system-history"><label class="field">Saved plans &amp; runs<select id="system-runs"><option value="">No saved plans</option></select></label><button type="button" class="button" id="system-refresh">Refresh</button></div>
+        <section id="system-run" class="skills-preview" hidden><h3 id="system-run-title"></h3><p id="system-run-status" class="skills-action-status" role="status"></p><p id="system-plan-summary" class="system-note"></p><div id="system-flow" class="system-flow"></div>
+          <details><summary>Review context, impact, warnings and source fingerprints</summary><pre id="system-plan-json" class="system-json"></pre></details>
+          <div id="system-launch" class="skills-actions"><label class="field">Worker mode<select id="system-mode"><option value="read-only">Read-only investigation</option><option value="edit">Edit each selected service</option></select></label><label class="field">Timeout per worker (seconds)<input id="system-timeout" type="number" min="1" max="86400" value="900"></label><label class="checkbox"><input id="system-reviewed" type="checkbox">I reviewed the scope and context</label><button type="button" class="button primary" id="system-execute">Execute with Codex</button></div>
+          <p class="system-note" id="system-provider-note">Execution uses your configured Codex CLI with its default model, sequential workers and native tasks. Read-only runs still create Brain task records. Edit mode writes in each service’s current checkout.</p>
+          <div id="system-recovery" class="skills-preview" hidden><h3>Recover an unfinished run</h3><p class="system-note">Inspect the saved receipts and workspace before retrying. Completed dispatches are skipped. An interrupted dispatch may have made partial edits.</p><label class="field">Dispatch to retry<select id="system-retry"></select></label><label class="checkbox"><input id="system-accept-changes" type="checkbox">I inspected and accept partial source changes</label><button type="button" class="button" id="system-resume">Resume saved run</button></div>
+          <div class="skills-actions"><button type="button" class="button danger" id="system-cancel" hidden>Cancel run</button><button type="button" class="button" id="system-open-session" hidden>Open runner session</button></div>
+          <section id="system-results" hidden><h3 style="margin-top:24px">Dispatch receipts</h3><p class="system-note">Checks and completion below are worker-reported. Inspect evidence before delivery. Execution creates no commit, merge or deployment.</p><div id="system-receipts" class="system-cards"></div><h3 style="margin-top:24px">Native task references</h3><div id="system-native-tasks" class="system-cards"></div><p id="system-handoff" class="system-note"></p></section>
+          <pre id="system-events" class="system-json" hidden></pre>
+        </section>
       </div></div></section>
       <section class="view" id="creator-view" aria-label="Infrastructure Creator" hidden><div class="page-scroll"><div class="page-content">
         <div class="page-heading"><h2>Build the project's accelerator.</h2><p>Scan → Review → Generate → Apply. Update an existing accelerator using its ownership manifest.</p></div>
@@ -1124,10 +1177,12 @@
       if (state.view === 'brain' && view !== 'brain') { cancelBrainRequests(); cancelKnowledgeRead('brain'); }
       if (state.view === 'creator' && view !== 'creator') { clearTimeout(creatorUi.timer); ++creatorUi.epoch; }
       if(state.view==='results' && view!=='results') { clearTimeout(resultUi.timer); ++resultUi.epoch; resultUi.pending=false; ++deliveryUi.epoch; deliveryUi.data=null; invalidateDeliveryPreview(); }
+      if (state.view === 'systems' && view !== 'systems' && typeof systemUi !== 'undefined') { clearTimeout(systemUi.timer); ++systemUi.epoch; systemUi.controller?.abort(); }
       state.view = view;
-      for (const name of ['sessions','results','setup','creator','context','brain','memory','skills','create-skill','accelerators','kit3']) $(`${name}-view`).hidden = name !== view;
+      for (const name of ['sessions','results','setup','creator','systems','context','brain','memory','skills','create-skill','accelerators','kit3']) $(`${name}-view`).hidden = name !== view;
       for (const button of document.querySelectorAll('.navigation [data-view]')) { if (button.dataset.view === view) button.setAttribute('aria-current','page'); else button.removeAttribute('aria-current'); }
       if (view === 'results') loadResults();
+      if (view === 'systems' && typeof openSystems === 'function') openSystems();
       if (view === 'creator') openCreator();
       if (view === 'setup') openSetup();
       if (view === 'context') loadContext();
@@ -1182,6 +1237,7 @@
         if (!sessionPreferencesReady) await restoreSessionPreferences();
         else if (state.selectedId) { stopPolling(); await pollSession(state.epoch); }
         if (state.view === 'creator') openCreator();
+        if (state.view === 'systems' && typeof openSystems === 'function') openSystems();
         if (state.view === 'setup') openSetup(true);
         if (state.view === 'context') loadContext();
         if (state.view === 'memory') loadMemory();
@@ -1282,8 +1338,8 @@
     $('refresh-sessions').addEventListener('click',refreshSessions);
     function updateHeader() {
       const session = state.selected;
-      $('page-title').textContent = state.view === 'sessions' ? session?.title || 'AI Infrastructure Harness' : ({results:'Results & Verification',creator:'Infrastructure Creator',setup:'Projects & Setup',context:'Project context',brain:'Project Brain',memory:'Memory bank',skills:'Skills','create-skill':'Create skill',accelerators:'Accelerators',kit3:'Open Source Kit'})[state.view];
-      $('page-subtitle').textContent = state.view === 'sessions' && session ? `${projectFor(session.project_id)?.name || 'Project'} · ${isFleetSession(session) ? 'Fleet review · ' : isClashSession(session) ? `Clash vs ${providerFor(session.clash?.challenger)?.name || session.clash?.challenger || 'challenger'} · ` : ''}${providerFor(session.provider)?.name || session.provider}` : ({results:session?.title || 'Choose a session',creator:'Reviewed generation and manifest-aware updates',sessions:'Your local workspace for agent sessions',setup:'Register projects and review accelerator installation',context:'The context available to your agents',brain:'Shared tasks, evidence, and decisions',memory:'Browse, search, and maintain project memory',skills:'Select and install skills for your project','create-skill':'Write and save your own project skill',accelerators:'Three ways to equip a project',kit3:'A catalog within your Harness'})[state.view];
+      $('page-title').textContent = state.view === 'sessions' ? session?.title || 'AI Infrastructure Harness' : ({systems:'System Orchestration',results:'Results & Verification',creator:'Infrastructure Creator',setup:'Projects & Setup',context:'Project context',brain:'Project Brain',memory:'Memory bank',skills:'Skills','create-skill':'Create skill',accelerators:'Accelerators',kit3:'Open Source Kit'})[state.view];
+      $('page-subtitle').textContent = state.view === 'sessions' && session ? `${projectFor(session.project_id)?.name || 'Project'} · ${isFleetSession(session) ? 'Fleet review · ' : isClashSession(session) ? `Clash vs ${providerFor(session.clash?.challenger)?.name || session.clash?.challenger || 'challenger'} · ` : ''}${providerFor(session.provider)?.name || session.provider}` : ({systems:'Service map, reviewed plans and sequential execution',results:session?.title || 'Choose a session',creator:'Reviewed generation and manifest-aware updates',sessions:'Your local workspace for agent sessions',setup:'Register projects and review accelerator installation',context:'The context available to your agents',brain:'Shared tasks, evidence, and decisions',memory:'Browse, search, and maintain project memory',skills:'Select and install skills for your project','create-skill':'Write and save your own project skill',accelerators:'Three ways to equip a project',kit3:'A catalog within your Harness'})[state.view];
       $('open-results').hidden=!session || state.view!=='sessions';
       $('open-results').disabled=Boolean(state.pending || state.loading);
       $('session-status').hidden = state.view !== 'sessions' || !session;
@@ -2668,5 +2724,6 @@
     $('creator-runs').addEventListener('change',()=>readCreator($('creator-runs').value)); $('creator-refresh').addEventListener('click',()=>loadCreator());
     bootstrap();
   </script>
+  <script src="/system.js"></script>
 </body>
 </html>
