@@ -164,8 +164,18 @@ class WindowsJobObjectTests(unittest.TestCase):
                     fs.open_lock(state / 'runner.lock')
                 os.close(write_fd); write_fd = None
                 process.wait(timeout=5)
-                replacement = fs.open_lock(state / 'runner.lock')
-                fs.close(replacement)
+                # Guard exit requests Job termination; the child releases its
+                # inherited lock handle when that asynchronous teardown ends.
+                def lock_released():
+                    try:
+                        replacement = fs.open_lock(state / 'runner.lock')
+                    except PermissionError as error:
+                        if error.winerror == 32:
+                            return False
+                        raise
+                    fs.close(replacement)
+                    return True
+                self.wait_for(lock_released)
             finally:
                 if read_fd is not None: os.close(read_fd)
                 if write_fd is not None: os.close(write_fd)
