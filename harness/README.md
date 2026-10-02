@@ -20,10 +20,25 @@ into Memory Bank. A failed send retains the selected files for correction.
 **System Orchestration** coordinates development changes across registered
 service repositories. Choose **Choose system folder**, then **Create / edit system**.
 Use **Add service folder** to browse existing folders; selected folders are
-registered automatically. Fill the system name and each service's ID, team,
-description, capabilities, contracts, dependencies and context sources, then
+registered automatically. Select **Codex, Claude Code or Cursor Agent**, then
+**Fill with AI** to discover the system name, service IDs, owners, responsibilities,
+capabilities, contracts, dependencies and context sources from a bounded evidence
+snapshot. The ordinary forms are populated automatically, with cited files and
+uncertainties available for review. Unknown owners stay `unknown`; complete
+dependency coverage stays unconfirmed. Review or adjust the result, then
 **Save system**. The application writes `system.json` and service passports;
 no JSON editing is required. Existing systems open in the same form.
+AI scanning uses the single Harness queue, supports cancellation and restores
+its original draft after interruption/reload. It requires bubblewrap on Linux or
+`sandbox-exec` on macOS, plus an installed/authenticated native CLI. The agent
+reads copied evidence; original service folders and unrelated projects are absent
+from its filesystem. OS/CLI runtime and that provider's native account state remain
+available for login and normal CLI operation. This is not isolation from the
+provider's own account/history data. Secret patterns, links, binaries, dependency
+trees and ineligible memory chunks are excluded. Limits are 50 services, 120 files
+and 1 MiB per root, 64 KiB per file, 8 MiB total; omissions are reported. Sources
+are checked again before accepting results and at both save stages. Manual
+editing remains available when a CLI or isolation backend is unavailable.
 Alternatively, load an existing relative `system.json`. Inspect the declared graph,
 capabilities and memory ownership, select a starting service or changed contract,
 and prepare a bounded context/impact plan. Review its sources before execution.

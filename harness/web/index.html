@@ -567,11 +567,18 @@
           <button class="button" type="button" id="system-edit">Create / edit system</button>
           <button class="button" type="button" id="system-choose-project">Choose system folder</button>
         </div>
-        <p class="system-note">Choose a system folder, then create or edit your system. Select service folders and enter their details in the form; selected folders are registered automatically.</p>
+          <p class="system-note">Choose a system folder, then create or edit your system. Select service folders and use Fill with AI or edit their details; selected folders are registered automatically.</p>
         <p class="error-text" id="system-error" role="alert" hidden></p><p class="skills-action-status" id="system-message" role="status"></p>
         <form id="system-editor" class="skills-preview" hidden aria-label="System editor" novalidate>
           <h3>Create / edit system</h3><p class="system-note" id="system-editor-location"></p>
           <label class="field">System name<input id="system-editor-name" type="text" required maxlength="200"></label>
+          <section class="skills-preview" aria-label="AI service discovery">
+            <h3>Fill service details with AI</h3>
+            <p class="system-note">Choose service folders, then let AI inspect their code, interfaces, policies, tests and eligible memory. Review the filled forms before saving. Source folders stay read-only during the scan.</p>
+            <div class="knowledge-form-grid"><label class="field">AI discovery provider<select id="system-discovery-provider"></select></label><label class="field">Scan timeout (seconds)<input id="system-discovery-timeout" type="number" value="900" min="1" max="86400"></label></div>
+            <div class="skills-actions"><button class="button primary" type="button" id="system-discovery-start">Fill with AI</button><button class="button" type="button" id="system-discovery-cancel" hidden>Cancel AI scan</button></div>
+            <p id="system-discovery-status" role="status"></p><div id="system-discovery-report" hidden></div>
+          </section>
           <div id="system-editor-services"></div>
           <div class="skills-actions"><button class="button" type="button" id="system-editor-add">Add service folder</button></div>
           <details class="skills-preview"><summary>Shared sources of context</summary><p class="system-note">Paths are relative to the system folder. Add shared policies, specifications or memory used across services.</p><div id="system-editor-shared"></div></details>
@@ -2746,5 +2753,6 @@
   </script>
   <script src="/system.js"></script>
   <script src="/system-editor.js"></script>
+  <script src="/system-discovery.js"></script>
 </body>
 </html>

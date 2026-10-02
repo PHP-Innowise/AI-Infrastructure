@@ -453,6 +453,17 @@ remain integration prerequisites.
 
 ## Harness UI
 
+The AI fill flow populates editable service fields and produces a usable contract
+map after Save. These screenshots use synthetic service folders and deterministic
+native-format CLI fixtures. An authenticated Codex scan of the same two-service
+scenario was also completed and its output passed the final proposal validator.
+Claude/Cursor model calls and the macOS runtime were not exercised; native
+adapter envelopes and the generated Seatbelt profile have automated coverage.
+
+![AI fills editable service passports](images/ai-system/discovery-filled.png)
+
+![Saved contract map from AI-filled service data](images/ai-system/discovery-map.png)
+
 Open **System Orchestration** in `./harness-server`. To create a system entirely
 in the application:
 
@@ -461,8 +472,13 @@ in the application:
 2. **Create / edit system**, enter the system name, then **Add service folder**
    for each existing service repository or monorepo subdirectory. Choosing a
    folder registers it automatically; an existing passport is loaded into fields.
-3. Fill service ID, owning team, responsibility and whether its dependencies
-   have been surveyed. Expand **Capabilities**, **Provided contracts**,
+3. Select an installed/authenticated **Codex, Claude Code or Cursor Agent** and
+   click **Fill with AI**. AI inspects copied code, interfaces, documentation,
+   project policy, tests and eligible Memory Bank chunks, then fills the system
+   name, IDs, team, responsibility, capabilities, contracts, dependencies and
+   context sources. Inspect cited files and uncertainties. Unsupported ownership
+   stays `unknown`; complete dependency coverage remains unconfirmed. You can
+   edit every inferred field or fill fields manually. Expand **Capabilities**, **Provided contracts**,
    **Consumed contracts**, and **Sources of context** to add/remove rows.
    Source paths are relative to that service folder; shared source paths are
    relative to the system folder. Lists of paths/keywords accept one per line.
@@ -473,12 +489,41 @@ in the application:
    still registers its own external service folders before accessing them.
 
 The same form edits existing systems. **Close editor** retains the current
-draft within this page; **Discard changes** drops it. Drafts do not survive a
-page reload. Removing a service unregisters it from this system; its existing
+draft within this page; **Discard changes** drops it. Manual-only drafts do not
+survive reload. AI scans retain their captured draft in private Harness state;
+reopening the editor reconnects to the last scan for that project/config. Completed
+results are restored only while their evidence is fresh. Cancellation or server
+restart preserves the original editable draft and never applies a partial result.
+Removing a service unregisters it from this system; its existing
 passport is kept. Update consumers when changing/removing provider IDs or
 contract IDs, because dangling references are rejected before writing.
 Choosing another empty service folder retains that card's entered metadata;
 choosing a folder with a passport loads its existing metadata.
+
+AI discovery runs through the same serialized queue as other Harness work. It
+requires bubblewrap on Linux or `sandbox-exec` on macOS. The filesystem read
+allow-list exposes copied evidence, disposable scratch space, standard OS/CLI
+runtime and the selected provider's account state needed for native login/session
+operation; it never mounts original service folders. Native account state can
+contain that provider's own history/configuration and is intentionally available
+to the CLI. Projects overlapping those account/runtime roots are refused.
+No project code or hooks are executed by the discovery collector. Copied file
+contents are untrusted evidence, never instructions. A native model may use tools
+within its sandbox; review is still required for semantic accuracy.
+
+The collector skips links/hard links, known credential paths, secret patterns,
+binaries, generated/dependency directories and private Brain/local-memory data.
+Memory Bank chunks use the existing native eligibility contract: reviewed,
+active, public/verified, current source digests and permitted project privacy
+policy. A scan handles up to 50 service folders, 120 files/1 MiB per root,
+64 KiB per file and 8 MiB total. Reported omissions prevent any completeness
+claim. The native answer must match every frozen service ID and use captured
+relative source paths; implemented capabilities require code/test evidence,
+ownership and consumed contracts require their own evidence, and dependencies
+must match selected providers' declared contract versions. Invalid or incomplete
+answers are rejected as a whole. Evidence and metadata fingerprints are checked
+before/after the model call, when retrieving a proposal, before save preview and
+under the final save lock. Changing service folders requires another scan.
 
 Saving uses a one-use preview, file fingerprints and directory identities.
 Stale forms/files are rejected. A durable journal restores partial saves after
@@ -534,9 +579,14 @@ Local API surface (existing Host/Origin/CSRF boundaries apply):
 - `POST /api/systems/service`: load/default a passport for registered `project_id`
   and optional relative `folder` (default `.`).
 - `POST /api/systems/preview`: validate complete form data with its `revision`
-  and per-passport `fingerprint`; returns a one-use `preview_id` lasting ten minutes.
+  and per-passport `fingerprint`; AI-filled drafts also carry `discovery_id` to
+  recheck their source evidence. Returns a one-use `preview_id` lasting ten minutes.
 - `POST /api/systems/apply`: consume that `preview_id` and save metadata. Folder
   roots are derived server-side from project registration, never client-supplied.
+- `POST /api/system-discoveries`: `editor` draft, native `provider` and optional
+  `timeout` (1..86400 seconds); captures evidence and queues a read-only scan.
+- `GET /api/system-discoveries/{session_id}`: status, events, original draft and
+  a completed fresh proposal. Cancel through `POST /api/sessions/{session_id}/cancel`.
 - `POST /api/system-runs`: the same identity plus `task`, `change_id`, optional
   `services`, `contracts`, `budget` and `depth`.
 - `GET /api/system-runs?project_id=...` and `GET /api/system-runs/<id>`:

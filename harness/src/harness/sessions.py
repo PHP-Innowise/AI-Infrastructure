@@ -401,7 +401,7 @@ class Sessions:
                                  ('thinking_effort', 'TEXT'),
                                  ('workspace', "TEXT NOT NULL DEFAULT 'project'"),
                                  ('branch', 'TEXT'), ('git_common_dir', 'TEXT'),
-                                 ('fleet', 'TEXT'), ('fleet_result', 'TEXT'), ('fleet_action', 'TEXT'), ('brain', 'TEXT'), ('creator', 'TEXT'), ('system_run', 'TEXT'), ('budgets', 'TEXT'), ('budget_usage', 'TEXT'),
+                                 ('fleet', 'TEXT'), ('fleet_result', 'TEXT'), ('fleet_action', 'TEXT'), ('brain', 'TEXT'), ('creator', 'TEXT'), ('system_run', 'TEXT'), ('system_discovery', 'TEXT'), ('budgets', 'TEXT'), ('budget_usage', 'TEXT'),
                                  ('budget_revision', 'INTEGER NOT NULL DEFAULT 0'), ('result_base','TEXT'), ('sdd','TEXT'), ('model_routing','TEXT'),
                                  ('clash', 'TEXT'), ('clash_result', 'TEXT')):
             if name not in columns:
@@ -449,7 +449,7 @@ class Sessions:
         result = dict(row)
         result["project_context"] = bool(result["project_context"])
         result["agents_enabled"] = bool(result["agents_enabled"])
-        for field in ('fleet', 'fleet_result', 'brain', 'creator', 'system_run', 'budgets', 'budget_usage', 'result_base', 'sdd', 'model_routing', 'clash', 'clash_result'):
+        for field in ('fleet', 'fleet_result', 'brain', 'creator', 'system_run', 'system_discovery', 'budgets', 'budget_usage', 'result_base', 'sdd', 'model_routing', 'clash', 'clash_result'):
             result[field] = json.loads(result[field]) if result[field] else None
         result['budgets'] = result['budgets'] or {**DEFAULT_BUDGETS, 'seconds':self.timeout, 'usd': result['fleet']['budget_usd'] if result['fleet'] else None}
         result['agent_budget_plan']=agent_budget_plan(result)
@@ -526,6 +526,10 @@ class Sessions:
         if session.get('creator'):
             if project != self.state_dir / 'creator' / session['creator']['run_id'] / 'agent':
                 raise SessionError('Creator workspace changed.')
+            return project
+        if session.get('system_discovery'):
+            if project != self.state_dir / 'system-discovery' / session['system_discovery']['run_id'] / 'agent':
+                raise SessionError('AI discovery workspace changed.')
             return project
         if session['workspace'] == 'project':
             if project != source:
@@ -648,7 +652,7 @@ class Sessions:
         return {'project_id': key, 'banks': banks, 'bank_id': bank,
                 'entries': entries, 'truncated': truncated}
 
-    def create(self, data, *, _creator=None, _system_run=None):
+    def create(self, data, *, _creator=None, _system_run=None, _system_discovery=None):
         if not isinstance(data, dict):
             raise SessionError("Session options must be a JSON object.")
         if set(data) - {"project_id", "provider", "prompt", "mode", "workflow", "model", "thinking_effort", "project_context", "agents_enabled", "agent_count", "workspace", "worktree_branch", "fleet", "brain", "budgets", "sdd", "model_routing", "attachments", "clash"}:
@@ -659,6 +663,14 @@ class Sessions:
                     or _creator is not None or data.get('provider') not in ('codex', 'claude', 'cursor')
                     or data.get('workflow') != 'native' or data.get('workspace', 'project') != 'project'):
                 raise SessionError('Invalid internal system run.')
+        if _system_discovery is not None:
+            if (not isinstance(_system_discovery, dict) or set(_system_discovery) != {'run_id', 'nonce'}
+                    or any(not isinstance(v, str) or not re.fullmatch('[a-f0-9]{32}', v) for v in _system_discovery.values())
+                    or _creator is not None or _system_run is not None
+                    or data.get('provider') not in ('codex', 'claude', 'cursor')
+                    or data.get('workflow') != 'native' or data.get('mode') != 'plan'
+                    or data.get('agents_enabled', False) or data.get('workspace', 'project') != 'project'):
+                raise SessionError('Invalid internal AI discovery request.')
         from .attachments import validate as validate_attachments
         files = validate_attachments(data.get('attachments', []))
         prompt = validate_prompt(data.get('prompt'))
@@ -716,14 +728,17 @@ class Sessions:
                     raise SessionError('Invalid internal Creator request.')
                 path = self.state_dir / 'creator' / _creator['run_id'] / 'agent'
                 workspace, branch, common = 'creator', None, None
+            elif _system_discovery:
+                path = self.state_dir / 'system-discovery' / _system_discovery['run_id'] / 'agent'
+                workspace, branch, common = 'system-discovery', None, None
             else:
                 path, workspace, branch, common = self._new_workspace(project, data, sid)
             attached = self.attachments.save(sid, files)
             self.db.execute("""INSERT INTO sessions
                 (id,title,project_id,project_path,provider,model,mode,workflow,project_context,
                  status,native_session_id,created_at,updated_at,agents_enabled,agent_count,thinking_effort,
-                 workspace,branch,git_common_dir,fleet,fleet_action,brain,system_run)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (sid, prompt[:80], project['id'], str(path), provider['id'], model, mode, workflow, int(context), 'queued', None, now(), now(), int(agents_enabled), agent_count, effort, workspace, branch, common, json.dumps(fleet) if fleet else None, 'start' if fleet else None, json.dumps(brain) if brain else None, json.dumps(_system_run) if _system_run else None))
+                 workspace,branch,git_common_dir,fleet,fleet_action,brain,system_run,system_discovery)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (sid, prompt[:80], project['id'], str(path), provider['id'], model, mode, workflow, int(context), 'queued', None, now(), now(), int(agents_enabled), agent_count, effort, workspace, branch, common, json.dumps(fleet) if fleet else None, 'start' if fleet else None, json.dumps(brain) if brain else None, json.dumps(_system_run) if _system_run else None, json.dumps(_system_discovery) if _system_discovery else None))
             self.db.commit()
             self.db.execute('UPDATE sessions SET budgets=?,sdd=?,model_routing=?,clash=? WHERE id=?',
                             (json.dumps(budgets), json.dumps(sdd_settings) if sdd_settings else None,
@@ -743,7 +758,7 @@ class Sessions:
             raise SessionError('Provide budgets and their current revision.')
         with self.lock:
             session = self.get(sid)
-            if session.get('system_run'):
+            if session.get('system_run') or session.get('system_discovery'):
                 raise SessionError('Use System Orchestration to control this run.')
             if session['creator']:
                 raise SessionError('Change Creator budgets at its review checkpoint.')
@@ -775,7 +790,7 @@ class Sessions:
         files = validate_attachments(options.get('attachments', []))
         with self.lock:
             session = self.get(sid)
-            if session.get('system_run'):
+            if session.get('system_run') or session.get('system_discovery'):
                 raise SessionError('Use System Orchestration to resume this run.')
             if session.get('creator'):
                 raise SessionError('Use the Infrastructure Creator review checkpoints to continue.')
@@ -1036,6 +1051,7 @@ class Sessions:
         clash_settings = session.get('clash')
         creator = session.get('creator')
         system_run = session.get('system_run')
+        discovery = session.get('system_discovery')
         budgets = session['budgets']
         run_timeout = budgets['seconds']
         action = None
@@ -1101,6 +1117,9 @@ class Sessions:
                                  'attachment_dirs': self.attachments.directories(sid), 'baseline': base.get('head'),
                                  'context': self._prompt({**session, 'agents_enabled': False, 'workflow': 'native', 'sdd': None}, '')}, ensure_ascii=False)
             command = [sys.executable, str(Path(__file__).with_name('clash_runner.py'))]
+        elif discovery:
+            request = self.state_dir / 'system-discovery' / discovery['run_id'] / ('request-' + discovery['nonce'] + '.json')
+            command = [sys.executable, str(Path(__file__).with_name('discovery_runner.py')), '--request', str(request)]
         elif system_run:
             request = self.state_dir / 'ai-system' / system_run['run_id'] / ('request-' + system_run['nonce'] + '.json')
             command = [sys.executable, str(Path(__file__).with_name('system_runner.py')), '--request', str(request)]
@@ -1166,7 +1185,7 @@ class Sessions:
         count, output_bytes = 0, 0
         outcome, terminal, saw_error, fleet_outcome = None, False, False, None
         native_id = session['native_session_id']
-        delegation = providers.DelegationTracker(provider, session['agent_count']) if session['agents_enabled'] and not fleet and not creator and not system_run else None
+        delegation = providers.DelegationTracker(provider, session['agent_count']) if session['agents_enabled'] and not fleet and not creator and not system_run and not discovery else None
         budget_usage = {'tokens':None,'cost_usd':None,'seconds':0,'limit_reached':None}
         def save_usage():
             budget_usage['seconds'] = round(time.monotonic()-started,3)
@@ -1176,7 +1195,7 @@ class Sessions:
         try:
             def write_input():
                 try:
-                    stdin = None if creator or system_run else prompt if fleet or clash_settings else providers.input_text(provider, prompt)
+                    stdin = None if creator or system_run or discovery else prompt if fleet or clash_settings else providers.input_text(provider, prompt)
                     if stdin is not None:
                         process.stdin.write(stdin.encode('utf-8'))
                         process.stdin.flush()
@@ -1223,7 +1242,7 @@ class Sessions:
                     if clash_settings:
                         clean_events = [event] if event.get('kind') in ('clash_turn', 'clash_state', 'session', 'result', 'error', 'status', 'text', 'usage', 'tool') else []
                     else:
-                        clean_events = ([event] if event.get('kind') in ('fleet_stage', 'fleet_reviewer', 'fleet_state', 'result', 'error', 'status', 'text', 'usage', 'delegation', 'tool') else []) if fleet or creator or system_run else providers.normalize_event(provider, event)
+                        clean_events = ([event] if event.get('kind') in ('fleet_stage', 'fleet_reviewer', 'fleet_state', 'result', 'error', 'status', 'text', 'usage', 'delegation', 'tool') else []) if fleet or creator or system_run or discovery else providers.normalize_event(provider, event)
                     for clean in clean_events:
                         text = clean.get('text')
                         if isinstance(text, str):

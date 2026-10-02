@@ -5,11 +5,13 @@ function editorControls() {
   for(const id of ['system-choose-project','system-project','system-config','system-load']) $(id).disabled=systemEditor.pending || systemEditor.dirty || systemUi.pending || !state.bootstrap;
   $('system-edit').disabled=systemEditor.pending || systemUi.pending || !state.bootstrap;
   $('system-editor-add').disabled=$('system-editor-save').disabled=systemEditor.pending || !systemEditor.data;
-  $('system-editor-save').textContent=systemEditor.pending?'Saving…':'Save system';
+  $('system-editor-save').textContent=systemEditor.pending?'Working…':'Save system';
+  if(typeof discoveryControls==='function') discoveryControls();
 }
 function closeSystemEditor() {
   if(systemEditor.pending) return;
   ++systemEditor.epoch; systemEditor.data=null; systemEditor.dirty=false; $('system-editor').hidden=true;
+  if(typeof resetDiscovery==='function') resetDiscovery();
 }
 function editorError(error) { $('system-editor-error').textContent=error.message; $('system-editor-error').hidden=false; }
 function editorChanged() { systemEditor.dirty=true; $('system-editor-status').textContent='Unsaved changes';systemControls(); }
@@ -118,9 +120,10 @@ async function openSystemEditor() {
     const data=await api('/api/systems/editor',{method:'POST',body:{project_id:$('system-project').value,config_path:$('system-config').value}});
     if(epoch!==systemEditor.epoch) return;
     systemEditor.data=data;systemEditor.dirty=false;renderSystemEditor();$('system-editor-status').textContent='Choose service folders and fill their details. Save updates the system map.';
+    if(typeof restoreDiscovery==='function') await restoreDiscovery();
     $('system-editor').scrollIntoView({behavior:'smooth',block:'start'});
   } catch(error) { $('system-editor').hidden=false; editorError(error); }
-  finally {systemEditor.pending=false;systemControls();}
+  finally {systemEditor.pending=typeof systemDiscovery!=='undefined' && systemDiscovery.active;systemControls();}
 }
 $('system-edit').addEventListener('click',()=>{
   if(systemEditor.data && systemEditor.dirty) { $('system-editor').hidden=false; $('system-editor').scrollIntoView({block:'start'}); return; }
@@ -136,7 +139,7 @@ $('system-choose-project').addEventListener('click',event=>chooseProjectFolder(p
 $('system-editor-add').addEventListener('click',()=>editorPickService());
 $('system-editor-name').addEventListener('input',()=>{if(systemEditor.data) systemEditor.data.name=$('system-editor-name').value;editorChanged();});
 $('system-editor-close').addEventListener('click',()=>{ $('system-editor').hidden=true; });
-$('system-editor-discard').addEventListener('click',()=>{closeSystemEditor();systemControls();});
+$('system-editor-discard').addEventListener('click',()=>{if(typeof discoveryRemember==='function') discoveryRemember(null);closeSystemEditor();systemControls();});
 $('system-editor').addEventListener('submit',async event=>{
   event.preventDefault(); if(systemEditor.pending || !systemEditor.data) return;
   for(const input of $('system-editor').querySelectorAll(':invalid')) {
@@ -149,6 +152,7 @@ $('system-editor').addEventListener('submit',async event=>{
     const prepared=await api('/api/systems/preview',{method:'POST',body:{...data,services}});
     const saved=await api('/api/systems/apply',{method:'POST',body:{preview_id:prepared.preview_id}});
     systemEditor.data=saved.editor;systemEditor.dirty=false;renderSystemEditor();renderSystemCatalog(saved);
+    if(typeof discoveryRemember==='function') discoveryRemember(null);
     $('system-editor-status').textContent='System saved. The service map is updated.';
   } catch(error) {editorError(error);$('system-editor-status').textContent='Save did not complete. Your form is retained; reload existing metadata before retrying if files changed.';}
   finally {systemEditor.pending=false;systemControls();}

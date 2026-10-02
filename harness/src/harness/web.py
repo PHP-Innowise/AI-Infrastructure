@@ -29,6 +29,7 @@ from harness.knowledge import KnowledgeManager
 from harness.setup import SetupManager
 from harness.creator import CreatorManager
 from harness.system_orchestration import SystemManager
+from harness.system_discovery import DiscoveryManager
 from harness.project_browser import browse_projects
 from build_kit3_catalog import build_site
 from install_accelerator import EDITIONS
@@ -48,6 +49,7 @@ class HarnessServer(ThreadingHTTPServer):
             self.setup_manager = SetupManager(self.sessions)
             self.creator = CreatorManager(self.sessions)
             self.systems = SystemManager(self.sessions)
+            self.discovery = DiscoveryManager(self.sessions, self.systems.editor)
             self.token = secrets.token_urlsafe(32)
             self.instance = secrets.token_hex(16)
             self.catalog_dir = tempfile.TemporaryDirectory(prefix='harness-catalog-')
@@ -152,7 +154,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(200, self.server.page, 'text/html; charset=utf-8')
             elif path in ('/kit3/', '/kit3/index.html'):
                 self.reply(200, self.server.catalog, 'text/html; charset=utf-8')
-            elif path in ('/system.js', '/system-editor.js'):
+            elif path in ('/system.js', '/system-editor.js', '/system-discovery.js'):
                 self.reply(200, (ROOT / 'harness/web' / path[1:]).read_bytes(), 'text/javascript; charset=utf-8')
             elif path == '/api/health':
                 self.reply(200, {'ok': True, 'instance': self.server.instance})
@@ -172,6 +174,10 @@ class Handler(BaseHTTPRequestHandler):
                 if set(query) != {'project_id'} or len(query['project_id']) != 1:
                     raise SessionError('Select a registered system project.')
                 self.reply(200, self.server.systems.list(query['project_id'][0]))
+            elif path.startswith('/api/system-discoveries/') and len(path.split('/')) == 4:
+                if query:
+                    raise SessionError('Invalid AI discovery request.')
+                self.reply(200, self.server.discovery.get(path.split('/')[3]))
             elif path.startswith('/api/system-runs/') and len(path.split('/')) == 4:
                 if query:
                     raise SessionError('Invalid system run request.')
@@ -302,10 +308,14 @@ class Handler(BaseHTTPRequestHandler):
             path = urlsplit(self.path).path
             # Quoted Markdown at the creator's byte limit can double in its JSON envelope.
             upload = path == '/api/sessions' or path.startswith('/api/sessions/') and path.endswith('/messages') and len(path.split('/')) == 5
-            data = self.read_json(MAX_JSON_BYTES if upload else 131072 if path == '/api/skills/create-preview' else 2 * 1024 * 1024 if path == '/api/systems/preview' else 65536)
+            data = self.read_json(MAX_JSON_BYTES if upload else 131072 if path == '/api/skills/create-preview' else 2 * 1024 * 1024 if path in ('/api/systems/preview', '/api/system-discoveries') else 65536)
             if path.startswith('/api/skills/') and urlsplit(self.path).query:
                 raise SessionError('Invalid skill request.')
-            if path in ('/api/systems/editor', '/api/systems/service', '/api/systems/preview', '/api/systems/apply'):
+            if path == '/api/system-discoveries':
+                if urlsplit(self.path).query:
+                    raise SessionError('Invalid AI discovery request.')
+                self.reply(201, self.server.discovery.start(data))
+            elif path in ('/api/systems/editor', '/api/systems/service', '/api/systems/preview', '/api/systems/apply'):
                 if urlsplit(self.path).query:
                     raise SessionError('Invalid system editor request.')
                 action = {'editor': 'load', 'service': 'service', 'preview': 'preview', 'apply': 'apply'}[path.rsplit('/', 1)[1]]
@@ -355,6 +365,8 @@ class Handler(BaseHTTPRequestHandler):
                 if urlsplit(self.path).query:
                     raise SessionError('Invalid session action query.')
                 _, _, _, sid, action = path.split('/')
+                if store.get(sid).get('system_discovery') and action != 'cancel':
+                    raise SessionError('AI discovery sessions only support cancellation. Start a new scan in the system editor.')
                 if action == 'messages' and 'prompt' in data and not set(data) - {'prompt', 'model', 'thinking_effort', 'sdd', 'model_routing', 'mode', 'attachments', 'agents_enabled', 'agent_count', 'clash'}:
                     self.reply(200, {'session': store.send(sid, data['prompt'], {k: v for k, v in data.items() if k != 'prompt'})})
                 elif action == 'check':

@@ -19,7 +19,9 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Test universal system planning and execution
-        run: python3 -m unittest tests.test_ai_system tests.test_ai_system_providers tests.test_ai_system_execution tests.test_harness_system_orchestration tests.test_harness_system_editor
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y bubblewrap
+          python3 -m unittest tests.test_ai_system tests.test_ai_system_providers tests.test_ai_system_execution tests.test_harness_system_orchestration tests.test_harness_system_editor tests.test_harness_system_discovery
       - name: Validate synthetic service catalog
         run: python3 scripts/ai_system.py validate --system docs/examples/ai-system/system.json
 

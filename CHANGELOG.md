@@ -26,6 +26,14 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Automatically fill Harness system/service forms through Codex, Claude or
+  Cursor from bounded, filtered evidence snapshots. Show sources/uncertainties,
+  validate every service and contract, retain unknown ownership and incomplete
+  dependency coverage, and require fresh evidence at preview and final save.
+  Use the existing serialized queue/watchdog for cancellation/restart; isolate
+  source reads from original projects while allowing native CLI runtime/account
+  state. Cover real subprocess adapters and the visible browser form flow.
+
 - Create and edit system orchestration in Harness through a folder browser and
   forms for service ownership, capabilities, contracts, dependencies and context
   sources. Register selected folders and generate metadata without JSON input.

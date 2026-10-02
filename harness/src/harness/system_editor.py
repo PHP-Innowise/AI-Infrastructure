@@ -192,7 +192,11 @@ class SystemEditor:
                 'revision': digest(encoded(fingerprints).encode())}
 
     def preview(self, data):
-        fields(data, ('project_id', 'config_path', 'revision', 'name', 'services', 'shared_sources'))
+        fields(data, ('project_id', 'config_path', 'revision', 'name', 'services', 'shared_sources'), ('discovery_id',))
+        discovery = None
+        if 'discovery_id' in data:
+            from .system_discovery import receipt
+            discovery = receipt(self.sessions, data['discovery_id'], data)
         current = self.load({'project_id': data['project_id'], 'config_path': data['config_path']})
         if data['revision'] != current['revision']:
             raise SessionError('System files changed. Reload the editor before saving.')
@@ -246,7 +250,7 @@ class SystemEditor:
             self.previews.pop(next(iter(self.previews)))
         self.previews[key] = {'created': time.monotonic(), 'project_id': data['project_id'],
                               'config_path': data['config_path'], 'files': files, 'system': system,
-                              'size': transaction_bytes}
+                              'size': transaction_bytes, 'discovery_request': discovery}
         return {'preview_id': key, 'catalog': system.catalog(), 'file_count': len(files)}
 
     def apply(self, data):
@@ -259,6 +263,9 @@ class SystemEditor:
             raise SessionError('Wait for active sessions to finish before saving system metadata.')
         root, _ = self.location(preview['project_id'], preview['config_path'])
         with workspace_locks(preview['system'], list(preview['system'].services)):
+            if preview.get('discovery_request'):
+                from .system_discovery import check_fresh
+                check_fresh(preview['discovery_request'])
             for f in preview['files']:
                 if snapshot(Path(f['root']), f['name']) != f['before']:
                     raise SessionError('System files changed. Reload the editor before saving.')
