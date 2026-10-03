@@ -26,6 +26,19 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Calm the Harness Sessions screen. The launch fields sit in one row, and Mode
+  appears only when the workflow leaves it open. Optional settings (helpers,
+  Clash, workspace, Brain task, budgets, separate models) become chips that
+  show their current value and open one panel at a time. An open session
+  collapses to a single summary line with **Next-turn settings**. Fleet review
+  ticks its helpers itself, the SDD slug waits for input before showing an
+  error, and hints, budget, Clash and composer copy keep only what matters at
+  the moment of decision. Consecutive activity steps fold into one row, and a
+  failed run shows one error card. Both Harness pages now take font size,
+  weight, line height and radius from scale tokens, with spacing on a 4px grid;
+  `tests.test_harness_web` enforces this. One field style replaces seven
+  copies, and muted text and focus rings gain contrast.
+
 - Add a dark theme to the Harness browser workspace: a System / Light / Dark
   switch at the bottom of the sidebar, stored in the browser and applied before
   first paint, so a dark page never flashes white; **System** follows the OS

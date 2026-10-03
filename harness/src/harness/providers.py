@@ -24,7 +24,7 @@ from typing import Optional
 PROVIDERS = {"claude": "Claude Code", "codex": "Codex", "cursor": "Cursor Agent"}
 PROBE_TIMEOUT = 3
 AGENT_CONTROL_DETAILS = {
-    "claude": "Requires the selected helper count per turn. Native concurrency limits apply; Ultracode uses its own workflow limits.",
+    "claude": "Native concurrency limits apply; Ultracode uses its own workflow limits.",
     "codex": "Uses Codex's native limit for concurrent helpers; the main agent runs separately.",
     "cursor": "Instruction only: Cursor has no verified CLI control to disable helpers or cap concurrency.",
 }

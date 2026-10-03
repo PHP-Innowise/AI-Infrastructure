@@ -1488,10 +1488,26 @@ class HarnessThemeTests(unittest.TestCase):
                                  "every token needs a light and a dark value")
                 self.assertEqual(COLOR_LITERAL.findall(css.replace(light, "").replace(dark, "")), [],
                                  "add a token to both :root sets instead of a literal color")
+                defined = set(re.findall(r"(--[\w-]+)\s*:", " ".join(re.findall(r":root[^{]*\{([^}]*)\}", css))))
                 runtime = set(re.findall(r"setProperty\('(--[\w-]+)'", html))
-                self.assertLessEqual(set(re.findall(r"var\((--[\w-]+)", css)) - runtime, tokens)
+                self.assertLessEqual(set(re.findall(r"var\((--[\w-]+)", css)) - runtime, defined)
         switch = re.findall(r'<input type="radio" name="theme" value="(\w+)">', THEMED_PAGES[0].read_text(encoding="utf-8"))
         self.assertEqual(switch, ["system", "light", "dark"])
+
+    def test_stylesheets_take_type_and_shape_from_the_scale_and_space_from_the_grid(self):
+        for page in THEMED_PAGES:
+            with self.subTest(page=page.relative_to(ROOT).as_posix()):
+                html = page.read_text(encoding="utf-8")
+                rules = re.sub(r":root[^{]*\{[^}]*\}", "", html[html.index("<style>"):html.index("</style>")])
+                for prop in ("font-size", "line-height", "font-weight", "border-radius", "font"):
+                    literal = [value for value in re.findall(rf"(?<![\w-]){prop}:\s*([^;}}]+)", rules)
+                               if any(unit != "%" and float(number) for number, unit in
+                                      re.findall(r"(?<![\w-])(\d*\.?\d+)(px|em|rem|%)?(?!\w)", re.sub(r"var\([^)]*\)", "", value)))]
+                    self.assertEqual(literal, [], f"{prop} must come from a scale token")
+                spacing = re.findall(r"(?<![\w-])(?:padding|margin|gap|row-gap|column-gap)(?:-[a-z]+)?:\s*([^;}]+)", rules)
+                off_grid = sorted({px for value in spacing for px in re.findall(r"(\d+(?:\.\d+)?)px", value)
+                                   if float(px) not in (1, 2, 4, 8, 12, 16, 24, 32, 48, 64)})
+                self.assertEqual(off_grid, [], "spacing must sit on the 4px grid")
 
     @unittest.skipUnless(shutil.which("node"), "Theme script check requires Node")
     def test_saved_theme_applies_before_first_paint_in_the_harness_and_its_catalog(self):
