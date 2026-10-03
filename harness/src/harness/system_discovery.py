@@ -14,6 +14,7 @@ from ai_system_lib import (System, SystemError, digest, encoded, fields, identif
                            read_file, relative, SECRET, source, text)
 from ai_system_execution import load, save
 from .creator import isolation_backend
+from .discovery_sandbox import sandbox_problem
 from .sessions import ACTIVE, SessionError
 from .system_editor import snapshot
 
@@ -274,6 +275,11 @@ class DiscoveryManager:
         self.sessions, self.editor = sessions, editor
 
     def start(self, data):
+        # Probe the sandbox outside the server lock: it starts a short process. A host
+        # that blocks bubblewrap gets the actual reason instead of a failed scan later.
+        problem = isolation_backend() and sandbox_problem()
+        if problem:
+            raise SessionError(problem)
         # Discard only staging directories created by this failed request, before
         # any job can own them. Serialized starts keep this set stable.
         try:

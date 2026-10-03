@@ -19,6 +19,9 @@ function discoveryControls() {
     select.value=providers.some(p=>p.id===prior && p.available)?prior:providers.find(p=>p.available)?.id || '';
     systemDiscovery.providerKey=key;
   }
+  // A host that blocks the sandbox is named before a scan is attempted; start re-checks it.
+  const sandbox=state.bootstrap?.runtime?.discovery_sandbox;
+  $('system-discovery-sandbox').textContent=sandbox || ''; $('system-discovery-sandbox').hidden=!sandbox;
   $('system-discovery-start').disabled=systemEditor.pending || !systemEditor.data?.services.length || !providers.some(p=>p.id===select.value && p.available);
   $('system-discovery-cancel').hidden=!systemDiscovery.active;
   $('system-discovery-cancel').disabled=!systemDiscovery.id;

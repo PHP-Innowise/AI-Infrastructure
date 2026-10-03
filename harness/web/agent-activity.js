@@ -35,7 +35,7 @@ function createAgentPanel(root, {emptyText='No agent has started yet.', labels={
     if(event.kind==='agent') {
       // Lifecycle lists are trimmed by the runner; *_count carries the full size.
       if(event.status==='running') Object.assign(agent,{status:'running',started:event.at,service:event.service,mode:event.mode,provider:event.provider,root:event.root,readable:event.readable||[],writable:event.writable||[],readableCount:event.readable_count,writableCount:event.writable_count});
-      else Object.assign(agent,{status:event.status,finished:event.at,ok:event.ok,error:event.error,duration:event.duration_seconds,summary:event.summary,changed:event.changed_files||[],changedCount:event.changed_files_count,checks:event.checks,tokens:Number.isFinite(event.tokens)?event.tokens:agent.tokens,cost:event.cost_usd});
+      else Object.assign(agent,{status:event.status,finished:event.at,ok:event.ok,error:event.error,duration:event.duration_seconds,summary:event.summary,changed:event.changed_files||[],changedCount:event.changed_files_count,checks:event.checks,reason:event.reason,tokens:Number.isFinite(event.tokens)?event.tokens:agent.tokens,cost:event.cost_usd});
     } else if(event.kind==='usage') {
       const tokens=['input_tokens','output_tokens','cache_read_input_tokens','cache_creation_input_tokens'].reduce((sum,name)=>sum+(Number.isFinite(event[name])?event[name]:0),0);
       if(!agent.finished) agent.tokens+=tokens;
@@ -87,7 +87,7 @@ function createAgentPanel(root, {emptyText='No agent has started yet.', labels={
     const current=agent.status==='running' ? agent.last : null;
     if(current) button.append(el('p','agent-card-now',`${current.type==='tool' ? (current.tool || 'Tool')+' · ' : ''}${describe(current)}`.slice(0,180)));
     else if(agent.earlier) button.append(el('p','agent-card-summary','Completed in an earlier launch.'));
-    else if(agent.summary || agent.error || agent.goal) button.append(el('p','agent-card-summary',(agent.summary || (agent.error ? humanLabel(String(agent.error)) : agent.goal)).slice(0,180)));
+    else if(agent.summary || agent.reason || agent.error || agent.goal) button.append(el('p','agent-card-summary',(agent.summary || agent.reason || (agent.error ? humanLabel(String(agent.error)) : agent.goal)).slice(0,180)));
     const stats=[agentCount(agent.tools,'tool call'),agentCount(agent.messages,'message'),agentTokens(agent.tokens),Number.isFinite(agent.cost) && agent.cost>0 ? `$${agent.cost.toFixed(4)}` : '',agentCount(agent.changedCount || agent.changed?.length,'changed file')].filter(Boolean).join(' · ');
     if(stats) button.append(el('p','agent-card-stats',stats));
     button.addEventListener('click',()=>{panel.selected=selection(agent); panel.follow=false; followInput.checked=false; render();});
@@ -122,7 +122,7 @@ function createAgentPanel(root, {emptyText='No agent has started yet.', labels={
     const label=agents.find(a=>a.id===chosen.id)?.label || chosen.agent;
     heading.append(el('strong','',label),el('span','',[chosen.provider ? (providerFor(chosen.provider)?.name || chosen.provider) : '',chosen.root || ''].filter(Boolean).join(' · ')));
     list.replaceChildren(...(chosen.events.length ? chosen.events.map(row) : [el('li','agent-placeholder',chosen.status==='running' ? 'Waiting for the first action…' : 'No activity was recorded for this agent.')]));
-    if(chosen.summary || chosen.error) list.append(el('li',`agent-outcome ${chosen.ok ? 'ok' : 'failed'}`,chosen.summary || humanLabel(String(chosen.error))));
+    if(chosen.summary || chosen.reason || chosen.error) list.append(el('li',`agent-outcome ${chosen.ok ? 'ok' : 'failed'}`,[chosen.summary,chosen.reason].filter(Boolean).join('\n') || humanLabel(String(chosen.error))));
     if(stick) list.scrollTop=list.scrollHeight;
   }
   async function fetchEvents(epoch) {

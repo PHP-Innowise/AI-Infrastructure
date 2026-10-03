@@ -100,6 +100,21 @@ class ActivityStreamTests(unittest.TestCase):
         self.assertIn('display limit', self.events[-1]['text'])
         self.assertEqual((services[:12], 20), (self.events[0]['readable'], self.events[0]['readable_count']))
 
+    def test_failed_agent_carries_the_cli_error_and_its_fix(self):
+        stream = self.stream()
+        stream.start('service-orders', 1, '/work/system/services/orders')
+        stream.line(line({'type': 'assistant', 'error': 'authentication_failed', 'message': {'role': 'assistant', 'content': []}}))
+        stream.line(line({'type': 'result', 'subtype': 'success', 'is_error': True,
+                          'result': 'Failed to authenticate: OAuth session expired and could not be refreshed'}))
+        stream.finish('blocked', ok=False, error='worker_exit_failure')
+        reason = self.events[-1]['reason']
+        self.assertIn('Claude Code is not signed in or its login expired (Failed to authenticate', reason)
+        self.assertIn('claude auth login', reason)
+        self.assertEqual(reason, stream.reasons['service-orders'])
+        stream.start('verify', 1, '/work/system')
+        stream.finish('completed', ok=True, error=None)
+        self.assertNotIn('reason', self.events[-1])
+
     def test_discovery_aliases_cursor_thinking_and_closed_output(self):
         stream = self.stream('cursor', {Path('/work/agent/evidence/000001.txt'): ('orders', 'src/app.py')})
         stream.start('discovery', 1, '/work/agent')

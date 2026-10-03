@@ -45,6 +45,14 @@ edition's own files remain in that edition's changelog.
   is pinned in the journal; older journals resume with the own-service scope.
 - Fix intermittent HTTP 400 responses while polling a live system run: a journal
   file being published by link-then-unlink is read on the next poll instead.
+- Replace the opaque `Native AI discovery CLI failed` with the actual cause: an
+  expired or missing CLI login (with `claude auth login`, `codex login` or
+  `cursor-agent login`), a sandbox that cannot start (with AppArmor and
+  user-namespace hints), a CLI that cannot start inside the sandbox, a timeout or
+  a rate limit. Blocked system dispatches show the same CLI reason on the agent
+  card and in the run log. Probe bubblewrap before queueing a scan and warn in the
+  editor. Document troubleshooting, including an AppArmor profile for bubblewrap,
+  and enable user namespaces for the discovery tests on GitHub's Ubuntu runners.
 
 - Automatically fill Harness system/service forms through Codex, Claude or
   Cursor from bounded, filtered evidence snapshots. Show sources/uncertainties,

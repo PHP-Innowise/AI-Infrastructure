@@ -680,6 +680,75 @@ access; the scratch location is shown as `/workspace`.
 
 ![Discovery agent reading copied evidence, shown with original service paths](images/ai-system/discovery-agent.jpg)
 
+### Troubleshooting AI discovery
+
+A failed **Fill with AI** scan names its cause in the editor. The **Agent** panel
+shows the errors the CLI itself reported, and the runner transcript in
+**Sessions** keeps the same trail. Earlier builds reported most of the causes
+below only as `Native AI discovery CLI failed`. System runs use the same explanation
+for a blocked agent: it appears on the agent's card and in the run log, while the
+journal keeps its generic code (for example `worker_exit_failure`).
+
+| Message starts with | Cause | Fix |
+| --- | --- | --- |
+| `… is not signed in or its login expired` | The native CLI cannot authenticate. A stored login can expire even while a status command still lists it. | Sign in again in a terminal with `claude auth login`, `codex login` or `cursor-agent login`, then retry. |
+| `The AI discovery sandbox cannot start` / `could not start` | The host does not allow the unprivileged user namespaces that bubblewrap needs. | See [Allow bubblewrap](#allow-bubblewrap-on-ubuntu-2310-and-later). |
+| `… could not start inside the AI discovery sandbox` | The CLI executable is not reachable inside the sandbox, for example a wrapper script. | Start Harness with the standalone executable: `--claude-bin`, `--codex-bin` or `--cursor-bin`. |
+| `… reached the scan timeout` | The scan ran longer than **Scan timeout**. | Increase the timeout or scan fewer service folders. |
+| `… reported a usage or rate limit` | Provider quota or rate limit. | Retry later or choose another provider. |
+| `… exited with code N` | Anything else; the last line of the CLI's error output is shown. | Run the CLI once in a terminal to check its installation and login. |
+
+When the sandbox cannot start on this host, the editor shows that warning before
+any scan is queued; reload the page after fixing the host.
+
+#### Allow bubblewrap on Ubuntu 23.10 and later
+
+Ubuntu restricts unprivileged user namespaces through AppArmor
+(`kernel.apparmor_restrict_unprivileged_userns=1`), so `bwrap` fails with messages
+such as `setting up uid map: Permission denied`. Check the host with:
+
+```bash
+bwrap --unshare-pid --ro-bind / / --proc /proc --dev /dev true && echo sandbox-ok
+```
+
+Allow user namespaces for bubblewrap only, with an AppArmor profile. Any program
+can then use namespaces through `bwrap`; confirm this fits your security policy.
+
+```bash
+sudo tee /etc/apparmor.d/bwrap > /dev/null <<'EOF'
+abi <abi/4.0>,
+include <tunables/global>
+
+profile bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+
+  include if exists <local/bwrap>
+}
+EOF
+sudo apparmor_parser -r /etc/apparmor.d/bwrap
+```
+
+Alternatively, lift the restriction for the whole system. This is weaker, and it
+lasts until reboot unless you also add the setting to `/etc/sysctl.d/`:
+
+```bash
+sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+```
+
+Other hosts: older Debian kernels need `kernel.unprivileged_userns_clone=1`,
+`user.max_user_namespaces` must be above 0, and containers such as Docker often
+block user namespaces, so run Harness on the host. CI sets the same sysctl on
+GitHub's Ubuntu runners before the discovery tests.
+
+#### Claude configuration notice
+
+Inside the sandbox, Claude Code does not see `~/.claude.json` and prints
+`Claude configuration file not found` with a command to restore a backup. Ignore
+it and do **not** run that restore command: those backups are empty configurations
+created by the sandboxed run and would replace your real `~/.claude.json`. Small
+`.claude.json.backup.*` files from sandboxed runs in `~/.claude/backups` are safe
+to delete. Harness leaves this notice out of failure messages.
+
 ### UI screenshots
 
 These are screenshots of the running localhost Harness using a synthetic

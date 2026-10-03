@@ -29,6 +29,11 @@ marker = root / "fail-worker"
 if marker.exists():
     print("untrusted error output is never persisted")
     sys.exit(7)
+if (root / "auth-failure-worker").exists() and "--json-schema" in sys.argv:
+    print(json.dumps({"type": "assistant", "error": "authentication_failed", "message": {"role": "assistant", "content": []}}))
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": True,
+                      "result": "Failed to authenticate: OAuth session expired and could not be refreshed"}))
+    sys.exit(1)
 if (root / "interrupt-worker").exists():
     import time
     time.sleep(5)
@@ -614,6 +619,12 @@ class ExecutionTests(unittest.TestCase):
         result = execution.run_process([str(script)], self.root, "", 10, on_line=lines.append)
         self.assertEqual([b"one", b"two", b"three"], lines)
         self.assertEqual(b"one\ntwo\nthree", result["stdout"])
+        self.assertNotIn("stderr_tail", result)
+        noisy = self.root / "noisy"
+        noisy.write_text("#!/usr/bin/env python3\nimport sys\nsys.stderr.write('x' * 9000 + 'last words')\n")
+        noisy.chmod(0o700)
+        tail = execution.run_process([str(noisy)], self.root, "", 10, stderr_tail=True)["stderr_tail"]
+        self.assertEqual((4096, b"last words"), (len(tail), tail[-10:]))
         def broken(line):
             raise RuntimeError("display failure")
         result = execution.run_process([str(script)], self.root, "", 10, on_line=broken)

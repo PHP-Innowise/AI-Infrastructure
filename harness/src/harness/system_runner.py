@@ -47,6 +47,7 @@ def observer_for(state):
                           duration_seconds=event.get('duration_seconds'), summary=report.get('summary'),
                           changed_files=(report.get('changed_files') or [])[:100],
                           checks={name: sum(c['status'] == name for c in checks) for name in ('passed', 'failed', 'not_run')})
+    observe.stream = stream
     return observe
 
 
@@ -81,9 +82,15 @@ def main():
             state = execution.create_run(system, plan, journal, provider, request['executable'],
                                          request['mode'], request['timeout'], request.get('access', 'service'))
         emit('status', 'Sequential system dispatch started. Progress and receipts are saved after each dispatch.')
+        observe = observer_for(state)
         state = execution.drive_run(system, journal, state, request['retry_step'], request['accept_source_changes'],
-                                    observer=observer_for(state))
+                                    observer=observe)
         ok = state['status'] == 'completed'
+        stopped = next((s for s in state['steps'] if s['status'] in ('blocked', 'interrupted')), None)
+        reason = stopped and observe.stream.reasons.get(stopped['id'])
+        if reason:
+            # The journal keeps a generic code; the CLI's own error says what to fix.
+            emit('error', LABELS.get(stopped['id'], stopped['service'] + ' agent') + ': ' + reason)
         emit('text', state['error'] or 'Worker-reported checks completed; native tasks closed and handoff saved.')
         emit('result', 'System run ' + state['status'], ok=ok)
         return 0 if ok else 1

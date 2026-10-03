@@ -429,6 +429,7 @@
     .system-history { display:flex; gap:8px; align-items:end; margin-top:20px; }
     .system-history .field { flex:1; }
     .system-note { font-size:12px; line-height:1.8; color:var(--muted); }
+    .system-warning { margin:10px 0; padding:9px 12px; border:1px solid #e6c49f; border-radius:7px; background:#fff8ef; color:#7a4f19; font-size:12px; line-height:1.7; overflow-wrap:anywhere; }
     .agents-section { margin:22px 0; }
     .agents-toolbar { display:flex; align-items:end; flex-wrap:wrap; gap:10px 14px; }
     .agents-toolbar h3 { margin:0; }
@@ -620,6 +621,7 @@
           <section class="skills-preview" aria-label="AI service discovery">
             <h3>Fill service details with AI</h3>
             <p class="system-note">Choose service folders, then let AI inspect their code, interfaces, policies, tests and eligible memory. Review the filled forms before saving. Source folders stay read-only during the scan.</p>
+            <p class="system-warning" id="system-discovery-sandbox" role="alert" hidden></p>
             <div class="knowledge-form-grid"><label class="field">AI discovery provider<select id="system-discovery-provider"></select></label><label class="field">Scan timeout (seconds)<input id="system-discovery-timeout" type="number" value="900" min="1" max="86400"></label></div>
             <div class="skills-actions"><button class="button primary" type="button" id="system-discovery-start">Fill with AI</button><button class="button" type="button" id="system-discovery-cancel" hidden>Cancel AI scan</button></div>
             <p id="system-discovery-status" role="status"></p>

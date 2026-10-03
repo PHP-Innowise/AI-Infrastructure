@@ -385,6 +385,23 @@ if (root / "hold-worker").exists():
         usage = self.server.sessions.get(run['session_id'])['budget_usage']
         self.assertEqual(15 * len(lifecycle) // 2, usage['tokens'])
 
+    def test_blocked_dispatch_names_the_cli_error_and_its_fix(self):
+        marker = self.project / 'services/orders/auth-failure-worker'
+        marker.touch()
+        run = self.prepare(change_id='change-auth')
+        status, run, _ = self.act(run, 'execute', provider='claude')
+        self.assertEqual(200, status, run)
+        run = self.wait_run(run)
+        self.assertEqual(('blocked', 'worker_exit_failure'), (run['status'], run['execution']['error']))
+        reasons = [e['text'] for e in run['events'] if e['kind'] == 'error' and 'orders agent' in e['text']]
+        self.assertEqual(1, len(reasons), run['events'])
+        self.assertIn('Claude Code is not signed in or its login expired', reasons[0])
+        self.assertIn('claude auth login', reasons[0])
+        finished = [e for e in self.session_events(run['session_id']) if e['kind'] == 'agent' and e['status'] == 'blocked']
+        self.assertEqual(['service-orders'], [e['agent'] for e in finished])
+        self.assertIn('claude auth login', finished[0]['reason'])
+        marker.unlink()
+
     @staticmethod
     def alive(pid):
         try:

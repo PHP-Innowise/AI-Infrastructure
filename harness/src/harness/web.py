@@ -30,6 +30,7 @@ from harness.setup import SetupManager
 from harness.creator import CreatorManager
 from harness.system_orchestration import SystemManager
 from harness.system_discovery import DiscoveryManager
+from harness.discovery_sandbox import sandbox_problem
 from harness.project_browser import browse_projects
 from build_kit3_catalog import build_site
 from install_accelerator import EDITIONS
@@ -86,7 +87,9 @@ class HarnessServer(ThreadingHTTPServer):
                 {'id': 'kit2', 'name': 'Kit 2 · Ready-made editions', 'description': 'Preview and install an edition through Projects & Setup.', 'editions': list(EDITIONS)},
                 {'id': 'kit3', 'name': 'Kit 3 · Open Source Kit', 'description': 'Discover community tools and their installation commands.'},
             ],
+            # Probed per page load so a host fix is visible after a reload.
             'runtime': {'timeout_seconds': self.sessions.timeout, 'max_active': 1,
+                        'discovery_sandbox': sandbox_problem(),
                         'max_agents': MAX_AGENTS, 'default_agent_count': DEFAULT_AGENT_COUNT,
                         'fleet': {key: value for key, value in fleet_runtime().items() if key != 'executable'}},
         }

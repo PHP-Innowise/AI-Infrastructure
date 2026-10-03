@@ -14,8 +14,8 @@ sys.path.insert(0, str(ROOT / 'harness/src'))
 import ai_system_execution as execution
 from ai_system_lib import SystemError, encoded
 from ai_system_providers import invocation, worker_result
-from harness.agent_activity import ActivityStream
-from harness.discovery_sandbox import sandbox_command
+from harness.agent_activity import CLI, ActivityStream, explain, redact
+from harness.discovery_sandbox import GUIDE, namespace_hint, sandbox_command
 from harness.sessions import SessionError
 from harness.system_discovery import check_fresh, result_schema, validate_proposal
 
@@ -26,6 +26,33 @@ def emit(kind, **value):
 
 def send(event):
     print(json.dumps(event, ensure_ascii=False), flush=True)
+
+
+# Claude prints these when the sandbox hides ~/.claude.json; they never explain a failure.
+NOISE = re.compile(r'configuration file not found|backup file exists|manually restore', re.I)
+
+
+def failure(provider, process, reported, timeout):
+    """The most specific actionable reason a native discovery call failed."""
+    name = CLI[provider][0]
+    if process['error'] == 'timeout':
+        return f'{name} reached the scan timeout ({timeout} s). Increase Scan timeout or scan fewer service folders.'
+    if process['error'] == 'output_limit':
+        return f'{name} produced more than 2 MiB of output. Scan fewer service folders.'
+    if process['error'] == 'start_failed':
+        return f'The {name} CLI could not be started. Check its installation. ' + GUIDE
+    lines = [line.strip() for line in process.get('stderr_tail', b'').decode('utf-8', 'replace').splitlines() if line.strip()]
+    sandbox = next((line for line in reversed(lines) if line.startswith('bwrap:')), None)
+    if sandbox and not reported:
+        if 'execvp' in sandbox:
+            return (f'The {name} CLI could not start inside the AI discovery sandbox ({sandbox[:200]}). '
+                    f'Use a standalone {name} executable outside its account folder. ' + GUIDE)
+        return f'The AI discovery sandbox could not start ({sandbox[:200]}). ' + namespace_hint() + GUIDE
+    if reported:
+        return explain(provider, reported)
+    detail = next((redact(line)[:300] for line in reversed(lines) if not NOISE.search(line)), None)
+    return (f'{name} exited with code {process["returncode"]}' + (f' ({detail})' if detail else '') +
+            '. Run it once in a terminal to check its installation and login. ' + GUIDE)
 
 
 def main():
@@ -78,10 +105,16 @@ Discovery input:
         stream.start('discovery', 1, workspace, label='Discovery agent', service='__system__', mode='read-only',
                      provider=request['provider'], root=str(workspace), readable=ids, writable=[])
         emit('status', text='AI is inspecting captured service evidence.')
-        process = execution.run_process(command, workspace, stdin, request['timeout'], on_line=stream.line)
+        process = execution.run_process(command, workspace, stdin, request['timeout'], on_line=stream.line,
+                                        stderr_tail=True)
         if process['error'] or process['returncode']:
-            raise SessionError(process['error'] or 'Native AI discovery CLI failed. Check its installation and login.')
-        report = worker_result(process['stdout'], request['provider'])
+            raise SessionError(failure(request['provider'], process, stream.last_error, request['timeout']))
+        try:
+            report = worker_result(process['stdout'], request['provider'])
+        except SystemError:
+            if stream.last_error:  # A terminal error result can still exit with code 0.
+                raise SessionError(explain(request['provider'], stream.last_error)) from None
+            raise
         validate_proposal(report, request)
         check_fresh(request)
         execution.save(directory, 'proposal.json', report, new=True)

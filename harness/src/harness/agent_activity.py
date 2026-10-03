@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 
 from ai_system_lib import SECRET, inside
 from .providers import ACTIVITY_THINKING_LIMIT, activity_events, total_tokens
@@ -25,6 +26,21 @@ HARD_EVENT_LIMIT = 4500
 HARD_BYTE_LIMIT = 3_600_000
 AGENT_EVENT_LIMIT = 400
 LIST_LIMIT = 12
+CLI = {'claude': ('Claude Code', 'claude auth login'), 'codex': ('Codex', 'codex login'),
+       'cursor': ('Cursor Agent', 'cursor-agent login')}
+AUTH_ERROR = re.compile(r'authenticat|logged in|log in|login|oauth|api key|unauthori[sz]ed|forbidden|\b40[13]\b', re.I)
+LIMIT_ERROR = re.compile(r'rate.?limit|usage limit|quota|\b429\b|overloaded', re.I)
+
+
+def explain(provider, reason):
+    """A provider-reported error with the action that usually resolves it."""
+    name, login = CLI.get(provider, (provider, None))
+    if login and AUTH_ERROR.search(reason):
+        return (f'{name} is not signed in or its login expired ({reason}). '
+                f'Sign in again in a terminal with "{login}", then retry.')
+    if LIMIT_ERROR.search(reason):
+        return f'{name} reported a usage or rate limit ({reason}). Retry later or choose another provider.'
+    return f'{name} reported: {reason}'
 
 
 def now():
@@ -61,12 +77,14 @@ class ActivityStream:
         self.count = self.bytes = 0
         self.limited = self.silenced = False
         self.agent = None
+        self.reasons = {}
 
     def start(self, agent, attempt, cwd, **details):
         self.agent = {'agent': agent, 'attempt': attempt}
         self.cwd = Path(cwd)
         self.agent_count = 0
         self.agent_limited = False
+        self.last_error = None
         self.thinking = ''
         self.usage = {'tokens': 0, 'cost_usd': 0.0, 'reported': False}
         label = details.pop('label', agent)
@@ -82,6 +100,9 @@ class ActivityStream:
                  'text': f"{self.agent['agent']} {status}"}
         if isinstance(summary, str) and summary:
             event['summary'] = redact(summary[:300])
+        if status != 'completed' and self.last_error:
+            # The CLI's own last error explains a failure better than an exit code.
+            event['reason'] = self.reasons[self.agent['agent']] = explain(self.provider, self.last_error)
         if self.usage['reported']:
             event['tokens'] = self.usage['tokens']
             event['cost_usd'] = round(self.usage['cost_usd'], 6)
@@ -116,6 +137,8 @@ class ActivityStream:
             self._flush_thinking()
             if item['type'] == 'thinking_end':
                 return
+        if item['type'] == 'error' and isinstance(item.get('text'), str) and item['text'].strip():
+            self.last_error = redact(' '.join(item['text'].split()))[:300]
         if item['type'] == 'usage':
             fields = {key: value for key, value in item.items() if key != 'type'}
             self.usage['reported'] = True

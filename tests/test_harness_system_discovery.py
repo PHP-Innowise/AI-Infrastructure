@@ -54,6 +54,12 @@ if 'MISSING_SERVICE' in all_text:
     report['services'].pop()
 if 'BAD_DEPENDENCY' in all_text:
     reports[-1]['passport']['consumes'][0]['version'] = '2'
+if 'AUTH_FAILURE' in all_text:
+    print(json.dumps({'type': 'assistant', 'error': 'authentication_failed', 'message': {'role': 'assistant', 'content': []}}))
+    print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': True,
+                      'result': 'Failed to authenticate: OAuth session expired and could not be refreshed'}))
+    sys.stderr.write('Claude configuration file not found at: /home/user/.claude.json\\n')
+    sys.exit(1)
 if '--json' in sys.argv:
     print(json.dumps({'type': 'item.completed', 'item': {'type': 'agent_message', 'text': json.dumps(report)}}))
     print(json.dumps({'type': 'turn.completed'}))
@@ -156,6 +162,49 @@ class DiscoveryTests(unittest.TestCase):
         reads = [e for e in events if e['kind'] == 'agent_activity' and e.get('tool') == 'Read']
         self.assertEqual([('discovery', 'orders', 'README.md')], [(e['agent'], e['service'], e['path']) for e in reads])
         self.assertTrue(all(e['kind'] in ('status', 'text', 'error', 'result') for e in job['events']))
+
+    def test_blocked_sandbox_is_named_before_any_scan_is_queued(self):
+        from harness import discovery_sandbox
+        from subprocess import CompletedProcess
+        denied = CompletedProcess([], 1, '', 'bwrap: setting up uid map: Permission denied\n')
+        def sysctl(name):
+            return '1' if name == 'kernel.apparmor_restrict_unprivileged_userns' else None
+        with patch.object(discovery_sandbox, '_probe', return_value=denied), \
+                patch.object(discovery_sandbox, '_sysctl', side_effect=sysctl):
+            status, result, _ = self.post('/api/system-discoveries', {'editor': self.draft(), 'provider': 'claude'})
+            boot = self.request('/api/bootstrap')[1]
+        self.assertEqual(400, status, result)
+        for message in (result['error'], boot['runtime']['discovery_sandbox']):
+            self.assertIn('setting up uid map: Permission denied', message)
+            self.assertIn('AppArmor', message)
+            self.assertIn('Troubleshooting AI discovery', message)
+        self.assertFalse(self.server.sessions.list())
+        self.assertIsNone(self.request('/api/bootstrap')[1]['runtime']['discovery_sandbox'])
+
+    def test_expired_cli_login_is_reported_with_its_fix(self):
+        (self.project / 'orders/README.md').write_text('AUTH_FAILURE')
+        job = self.wait_job(self.start(provider='claude'))
+        self.assertEqual('failed', job['status'], job)
+        failure = next(e['text'] for e in job['events'] if e['kind'] == 'error')
+        self.assertIn('Claude Code is not signed in or its login expired', failure)
+        self.assertIn('OAuth session expired', failure)
+        self.assertIn('claude auth login', failure)
+        self.assertNotIn('configuration file not found', failure)
+        finished = [e for e in self.server.sessions.events(job['id']) if e['kind'] == 'agent'][-1]
+        self.assertEqual(('blocked', True), (finished['status'], 'claude auth login' in finished['reason']))
+
+    def test_failure_reasons_name_the_cause_and_skip_cli_noise(self):
+        from harness.discovery_runner import failure
+        base = {'returncode': 1, 'error': None, 'stdout': b'', 'stderr_tail': b''}
+        cases = [({'stderr_tail': b'bwrap: setting up uid map: Permission denied\n'}, None, 'sandbox could not start'),
+                 ({'stderr_tail': b'bwrap: execvp /opt/codex: No such file or directory\n'}, None, 'could not start inside'),
+                 ({'error': 'timeout'}, None, 'scan timeout (30 s)'),
+                 ({}, 'Rate limit reached: 429', 'usage or rate limit'),
+                 ({'returncode': 2, 'stderr_tail': b'Error: unexpected token\nA backup file exists at: /x\n'}, None,
+                  'exited with code 2 (Error: unexpected token)')]
+        for changes, reported, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertIn(expected, failure('codex', {**base, **changes}, reported, 30))
 
     def test_invalid_ai_output_is_not_exposed_as_a_partial_proposal(self):
         for marker in ('BAD_PATH', 'MISSING_SERVICE', 'BAD_DEPENDENCY', 'FAIL_DISCOVERY'):

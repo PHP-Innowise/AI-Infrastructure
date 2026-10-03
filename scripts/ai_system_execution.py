@@ -142,10 +142,12 @@ def workspace_locks(system, selected):
         yield
 
 
-def run_process(command, cwd, stdin, timeout, on_line=None):
+def run_process(command, cwd, stdin, timeout, on_line=None, stderr_tail=False):
     """Bound output, feed stdin without pipe deadlock, reap the process group.
 
     on_line receives each complete stdout line as it arrives, for display only.
+    stderr_tail returns the last 4 KiB of stderr for failure diagnostics; it is
+    never written to the journal.
     """
     started = time.monotonic()
     output = bytearray()
@@ -174,6 +176,7 @@ def run_process(command, cwd, stdin, timeout, on_line=None):
             on_line = None  # Display only: an observer never changes the dispatch.
     process = None
     watchdog_read = watchdog_write = None
+    errors = tempfile.TemporaryFile() if stderr_tail else None
     with tempfile.TemporaryFile() as source:
         source.write(stdin.encode("utf-8"))
         source.seek(0)
@@ -182,7 +185,8 @@ def run_process(command, cwd, stdin, timeout, on_line=None):
                 watchdog_read, watchdog_write = os.pipe()
                 command = [sys.executable, str(PROCESS_GUARD), str(watchdog_read), '--', *command]
             process = subprocess.Popen(command, cwd=str(cwd), stdin=source,
-                                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                       stdout=subprocess.PIPE,
+                                       stderr=errors if errors is not None else subprocess.DEVNULL,
                                        start_new_session=True,
                                        pass_fds=(watchdog_read,) if watchdog_read is not None else ())
             if watchdog_read is not None:
@@ -227,9 +231,14 @@ def run_process(command, cwd, stdin, timeout, on_line=None):
                     pass
                 process.wait()
                 process.stdout.close()
-    return {"returncode": process.returncode if process is not None else None,
-            "error": failure, "stdout": bytes(output[:MAX_OUTPUT]),
-            "duration_seconds": round(time.monotonic() - started, 3)}
+    result = {"returncode": process.returncode if process is not None else None,
+              "error": failure, "stdout": bytes(output[:MAX_OUTPUT]),
+              "duration_seconds": round(time.monotonic() - started, 3)}
+    if errors is not None:
+        with errors:
+            errors.seek(max(0, errors.seek(0, os.SEEK_END) - 4096))
+            result["stderr_tail"] = errors.read()
+    return result
 
 
 def guard_brain(root):

@@ -39,6 +39,10 @@ trees and ineligible memory chunks are excluded. Limits are 50 services, 120 fil
 and 1 MiB per root, 64 KiB per file, 8 MiB total; omissions are reported. Sources
 are checked again before accepting results and at both save stages. Manual
 editing remains available when a CLI or isolation backend is unavailable.
+A failed scan names its cause (for example an expired CLI login with the command
+to sign in again, or a host that blocks bubblewrap's user namespaces), and the
+editor warns before scanning when the sandbox cannot start on this host. See
+[Troubleshooting AI discovery](../docs/AI-SYSTEM-ORCHESTRATION.md#troubleshooting-ai-discovery).
 Alternatively, load an existing relative `system.json`. Inspect the declared graph,
 capabilities and memory ownership, select a starting service or changed contract,
 and prepare a bounded context/impact plan. Review its sources before execution.

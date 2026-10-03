@@ -4,10 +4,58 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 import shutil
+import subprocess
 
 from ai_system_lib import inside
 from .creator import isolation_backend, provider_state_dirs, _sbpl
 from .sessions import SessionError
+
+
+GUIDE = 'See "Troubleshooting AI discovery" in docs/AI-SYSTEM-ORCHESTRATION.md.'
+
+
+def _sysctl(name):
+    try:
+        return Path('/proc/sys', *name.split('.')).read_text().strip()
+    except OSError:
+        return None
+
+
+def namespace_hint():
+    """Why this host may refuse unprivileged user namespaces, which bubblewrap needs."""
+    if _sysctl('kernel.apparmor_restrict_unprivileged_userns') == '1':
+        return ('AppArmor restricts unprivileged user namespaces on this host (Ubuntu 23.10 and later). '
+                'Allow bubblewrap with an AppArmor profile, or set kernel.apparmor_restrict_unprivileged_userns=0. ')
+    if _sysctl('kernel.unprivileged_userns_clone') == '0':
+        return 'Unprivileged user namespaces are disabled: set kernel.unprivileged_userns_clone=1. '
+    if _sysctl('user.max_user_namespaces') == '0':
+        return 'user.max_user_namespaces is 0: raise it to allow user namespaces. '
+    return 'User namespaces may be blocked by a container or security policy; run Harness on the host. '
+
+
+def _probe(executable):
+    # The namespaces and mounts every discovery sandbox needs, around a no-op.
+    return subprocess.run([executable, '--unshare-pid', '--ro-bind', '/', '/', '--proc', '/proc',
+                           '--dev', '/dev', 'true'], stdin=subprocess.DEVNULL, capture_output=True,
+                          text=True, errors='replace', timeout=10, check=False)
+
+
+def sandbox_problem():
+    """None when the isolation backend starts a process here; otherwise an actionable reason."""
+    backend = isolation_backend()
+    if not backend:
+        return 'AI discovery requires bubblewrap on Linux or sandbox-exec on macOS. ' + GUIDE
+    kind, executable = backend
+    if kind != 'bwrap':
+        return None
+    try:
+        probe = _probe(executable)
+    except (OSError, subprocess.TimeoutExpired):
+        return 'bubblewrap could not be started. Check its installation. ' + GUIDE
+    if probe.returncode == 0:
+        return None
+    detail = next((line.strip() for line in reversed(probe.stderr.splitlines()) if line.strip()), 'no details')
+    return ('The AI discovery sandbox cannot start (' + detail[:200] + '). ' + namespace_hint() + GUIDE)
 
 
 def runtime_paths(command):
