@@ -154,7 +154,7 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(self.snapshot(self.project), before)
         self.assertFalse(any(item.get("authenticated") is True for item in empty["providers"]))
         self.assertFalse(any("executable" in item for item in empty["providers"]))
-        self.assertTrue(any("authentication is not checked" in item for item in empty["diagnostics"]))
+        self.assertTrue(any("authentication is not checked" in item for item in empty["scope"]))
         preview = self.manager.preview(self.options(tools=["codex"]))
         self.manager.install({"preview_id": preview["preview_id"]})
         status = self.manager.status(self.project_id)
@@ -205,7 +205,7 @@ class SetupTests(unittest.TestCase):
             result = self.manager.status(self.project_id)
             self.assertTrue(result['git']['is_git'])
             self.assertIsNone(result['git']['dirty'])
-            self.assertTrue(any('not inspected' in message for message in result['diagnostics']))
+            self.assertTrue(any('not inspected' in message for message in result['scope']))
             self.assertFalse(marker.exists(), 'Setup executed a project clean filter')
             self.assertFalse(monitor_marker.exists(), 'Setup executed a project fsmonitor')
             # The fixture actually exercises the filter path. Workflow callers

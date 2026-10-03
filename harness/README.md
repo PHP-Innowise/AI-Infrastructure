@@ -196,6 +196,12 @@ executable does **not** prove that its account is logged in.
 
 ### Workspace options
 
+The sidebar has five sections: **Sessions**, **Knowledge** (Project Brain,
+Memory bank and Context files tabs), **Skills** (Library and Create skill
+tabs), **Accelerators** (Overview, Infrastructure Creator and Open Source Kit
+tabs) and **Projects & Setup**. Every view has its own address, such as
+`#/brain` or `#/creator`, so a reload or the browser's Back button returns to it.
+
 - **Projects & Setup:** add an existing project, inspect its Git state and
   accelerator readiness, select an edition and target tools, then preview and
   install the reviewed files. The resulting project is available in the session,
@@ -205,7 +211,11 @@ executable does **not** prove that its account is logged in.
   additional-agent switch and a concurrent helper limit (1–40, default 3).
   Shows the selected project's Git branch and changes, with a refresh control.
   Choose the project directory or a new Git worktree with an optional new branch name.
-  Native messages and tool status appear as they arrive. Cancel stops the
+  The launch fields sit in one row; optional settings are chips (Helpers, Clash,
+  Run in, Brain task, Budgets, Models) that show their current value and open one
+  panel at a time. An open session collapses to one summary line; **Next-turn
+  settings** expands what a follow-up can change. Native messages appear as they
+  arrive, and consecutive tool and status steps fold into one row. Cancel stops the
   process group; follow-ups resume the same native session and workspace directory.
 - **Clash with a challenger:** a checkbox on Workspace and Review sessions that
   pits the selected provider against a different challenger provider on the
@@ -217,7 +227,7 @@ executable does **not** prove that its account is logged in.
   reviewers run directly through the selected Claude/Codex/Cursor provider in
   plan mode, without nested helpers. The additional-agent limit bounds concurrent
   reviewers. Offline dry-run uses labelled synthetic findings and no model calls.
-- **Results & usage:** open a session's changed files and Git diff, run an explicit
+- **Results & verification:** a tab of the open session. Inspect its changed files and Git diff, run an explicit
   test/lint command in its workspace, and inspect persisted output, exit code and
   check status separately from the agent outcome. Shows every recorded launch
   and total reported tokens, USD and run time; missing provider usage stays unknown.
@@ -240,12 +250,13 @@ executable does **not** prove that its account is logged in.
   handoffs, promotion records and archives. Start tasks, create operational
   records, update progress and complete tasks through the existing governed
   runtime. Numeric revisions protect updates and completion against stale edits.
-- **Accelerators:** Kit 1 opens **Infrastructure Creator** for the full
-  Scan → Review → Generate → Apply workflow and manifest-aware updates.
-  Kit 2 opens the same **Projects & Setup** installer for Laravel, Symfony,
-  PHP Core or WordPress.
-- **Open Source Kit:** the existing Kit 3 catalog, filters, dossiers and
-  copyable installation commands inside the same browser workspace.
+- **Accelerators:** the Overview tab presents the three kits. Kit 1 is the
+  **Infrastructure Creator** tab for the full Scan → Review → Generate → Apply
+  workflow and manifest-aware updates. Kit 2 opens the **Projects & Setup**
+  installer for Laravel, Symfony, PHP Core or WordPress.
+- **Open Source Kit:** the Kit 3 catalog, filters, dossiers and copyable
+  installation commands as a tab of Accelerators; inside the Harness the catalog
+  drops its own header, hero and footer. **Open in new tab** shows it standalone.
 - **Skills:** choose a registered project and a catalog source, click **Load
   skills**, select individual skills and Claude/Codex/Cursor, then **Preview
   installation** and **Install selected skills**. The preview lists every
@@ -565,6 +576,17 @@ per-process token and matching Origin/Host; static routes do not expose
 repository files. This is a personal local tool, not a remotely hosted or
 multi-user service. Fleet review runs the existing LangGraph graph in a separate
 local Python process, with the same queue and workspace checks as native sessions.
+
+#### Interface copy
+
+Keep the browser workspace quiet as it grows:
+
+- A hint is one short sentence (about 12 words) and appears where a decision is made.
+- No text for a disabled or unchecked control, except a provider limit that applies in that state.
+- Show status only on change or trouble; a working state needs no "available" or "complete" line.
+- Say each fact once, next to the control it concerns. Reference text goes behind a **?** toggle.
+- Errors appear after the user acts, not on arrival.
+- Never shorten away what will run, write or spend at the moment of decision.
 
 ### Connect and prepare a project
 

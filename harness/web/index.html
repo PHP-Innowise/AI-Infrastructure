@@ -246,10 +246,15 @@
     .error-text { color:var(--error); font-size:var(--text-ui); margin:0 0 12px; white-space:pre-wrap; overflow-wrap:anywhere; }
     .page-scroll { overflow:auto; padding:32px 48px; min-height:0; flex:1; }
     .page-content { max-width:1000px; margin:auto; }
-    .page-heading { margin-bottom:32px; }
-    .page-heading h2 { margin:0 0 12px; font-size:var(--text-display); line-height:var(--leading-tight); font-weight:var(--weight-strong); }
-    .page-heading p { max-width:700px; margin:0; color:var(--muted); font-size:var(--text-body); line-height:var(--leading-body); }
-    .page-toolbar { display:flex; align-items:flex-end; gap:12px; margin-bottom:32px; }
+    .view-tabs { display:flex; gap:4px; padding:0 24px; border-bottom:1px solid var(--line); overflow-x:auto; flex:none; }
+    .view-tab { position:relative; padding:8px 8px 12px; border:0; background:transparent; color:var(--muted); font-size:var(--text-ui); white-space:nowrap; }
+    .view-tab:hover { color:var(--ink); }
+    .view-tab[aria-current="page"] { color:var(--ink); font-weight:var(--weight-strong); }
+    .view-tab[aria-current="page"]::after { content:""; position:absolute; left:8px; right:8px; bottom:-1px; height:2px; border-radius:var(--radius-sm); background:var(--purple); }
+    .topbar:has(+ .view-tabs:not([hidden])) { border-bottom:0; }
+    .results-toolbar { align-items:center; }
+    .results-workspace { flex:1; min-width:0; margin:0; color:var(--muted); font-size:var(--text-ui); overflow-wrap:anywhere; white-space:pre-line; }
+    .page-toolbar { display:flex; align-items:flex-end; gap:12px; margin-bottom:16px; }
     .page-toolbar .field { width:310px; max-width:70%; }
     .context-summary { display:flex; justify-content:space-between; gap:24px; font-size:var(--text-ui); color:var(--muted); margin:0 0 16px; }
     .file-list { border-top:1px solid var(--line); }
@@ -267,13 +272,10 @@
     .accelerator .small-note { margin:12px 0 0; font-size:var(--text-ui); color:var(--faint); }
     .preview-output { border:1px solid var(--line); background:var(--soft); padding:16px; border-radius:var(--radius); max-height:420px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; font:var(--text-ui)/var(--leading-body) var(--font-mono); }
     .preview-heading { margin:24px 0 12px; font-size:var(--text-body); }
-    .catalog-toolbar { padding:12px 32px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; gap:16px; color:var(--muted); font-size:var(--text-ui); }
-    .catalog-toolbar a { white-space:nowrap; font-size:var(--text-ui); }
     .catalog-frame { width:100%; border:0; min-height:0; flex:1; background:var(--paper); }
     .scrim { display:none; }
     .connection-loading { padding:16px 32px; color:var(--muted); font-size:var(--text-ui); }
     .memory-page { display:flex; flex-direction:column; min-height:0; flex:1; padding:32px 32px; }
-    .memory-page .page-heading { margin-bottom:24px; }
     .memory-toolbar { display:grid; grid-template-columns:minmax(150px,1fr) minmax(150px,1fr) auto; gap:12px; align-items:end; }
     .memory-filter { margin:16px 0 12px; }
     .memory-filter input { width:100%; }
@@ -345,7 +347,7 @@
     .setup-readiness-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }
     .setup-check { padding:16px; border:1px solid var(--line); border-radius:var(--radius); min-width:0; }
     .setup-check strong { display:block; font-size:var(--text-meta); font-weight:var(--weight-strong); margin-bottom:8px; }
-    .setup-check span { display:block; color:var(--muted); font-size:var(--text-ui); line-height:var(--leading-body); overflow-wrap:anywhere; }
+    .setup-check span { display:block; white-space:pre-line; color:var(--muted); font-size:var(--text-ui); line-height:var(--leading-body); overflow-wrap:anywhere; }
     .setup-providers { display:grid; gap:8px; margin-top:16px; }
     .setup-provider { display:flex; align-items:baseline; gap:12px; font-size:var(--text-ui); line-height:var(--leading-body); }
     .setup-provider span { color:var(--muted); }
@@ -371,7 +373,7 @@
     .knowledge-page .memory-layout { flex:none; min-height:350px; }
     .knowledge-page .memory-files { max-height:530px; }
     .knowledge-page .memory-body { min-height:280px; max-height:65vh; }
-    .knowledge-tools { flex:none; margin:0 0 16px; padding:12px 16px; border:1px solid var(--line); border-radius:var(--radius-md); background:var(--purple-faint); }
+    .knowledge-tools { flex:none; margin:12px 0 16px; padding:12px 16px; border:1px solid var(--line); border-radius:var(--radius-md); background:var(--purple-faint); }
     .knowledge-tools > summary { cursor:pointer; color:var(--ink); font-size:var(--text-ui); font-weight:var(--weight-strong); padding:4px 0; }
     .knowledge-tools[open] > summary { margin-bottom:16px; }
     .knowledge-note { font-size:var(--text-ui); color:var(--muted); line-height:var(--leading-body); margin:12px 0; overflow-wrap:anywhere; }
@@ -459,7 +461,7 @@
     @media (max-width:760px) { .memory-page { padding:24px 24px; overflow:auto; } .memory-toolbar { grid-template-columns:1fr 1fr; gap:12px; } .memory-toolbar .button { grid-column:1 / -1; justify-self:start; } .memory-layout { display:block; flex:none; } .memory-files { max-height:235px; } .memory-details { padding-top:24px; } .memory-body { min-height:240px; max-height:65vh; } }
     @media (min-width:1650px) { .app { grid-template-columns:275px minmax(0,1fr); } .topbar { padding-inline:48px; } }
     @media (max-width:1150px) { .app { grid-template-columns:222px minmax(0,1fr); } .topbar,.configuration { padding-inline:24px; } .composer-area { padding-inline:24px; } .page-scroll { padding:32px; } }
-    @media (max-width:760px) { .app { grid-template-columns:minmax(0,1fr); } .sidebar { position:fixed; z-index:20; inset:0 auto 0 0; width:265px; transform:translateX(-100%); transition:transform .18s ease; } .sidebar[data-open="true"] { transform:translateX(0); box-shadow:12px 0 40px var(--shadow); } .composer-note.shortcut { display:none; } .scrim[data-open="true"] { display:block; position:fixed; inset:0; background:var(--scrim); z-index:19; border:0; border-radius:0; } .menu-toggle { display:inline-flex; margin-left:-8px; } .topbar { min-height:56px; padding:8px 16px; gap:12px; } .topbar-heading { display:flex; align-items:center; gap:12px; min-width:0; } .header-actions { gap:8px; } .header-actions .button { padding:0 8px; } .configuration { padding:12px 16px; } .settings-grid { gap:8px; } .settings-grid > .field { flex-basis:calc(50% - 4px); } .conversation-inner { padding:24px 24px 8px; } .welcome { margin:32px auto; } .welcome-links { gap:8px; margin-top:24px; } .composer-area { padding:12px 16px 12px; } .composer { padding:12px; } .page-scroll { padding:24px 24px; } .accelerator { grid-template-columns:43px minmax(0,1fr); gap:16px; } .banner { margin:12px 16px 0; gap:12px; padding:12px; } .catalog-toolbar { padding:12px 16px; } .file-row { grid-template-columns:minmax(0,1fr) 62px 50px; gap:8px; } }
+    @media (max-width:760px) { .app { grid-template-columns:minmax(0,1fr); } .sidebar { position:fixed; z-index:20; inset:0 auto 0 0; width:265px; transform:translateX(-100%); transition:transform .18s ease; } .sidebar[data-open="true"] { transform:translateX(0); box-shadow:12px 0 40px var(--shadow); } .composer-note.shortcut { display:none; } .scrim[data-open="true"] { display:block; position:fixed; inset:0; background:var(--scrim); z-index:19; border:0; border-radius:0; } .menu-toggle { display:inline-flex; margin-left:-8px; } .topbar { min-height:56px; padding:8px 16px; gap:12px; } .view-tabs { padding:0 8px; } .topbar-heading { display:flex; align-items:center; gap:12px; min-width:0; } .header-actions { gap:8px; } .header-actions .button { padding:0 8px; } .configuration { padding:12px 16px; } .settings-grid { gap:8px; } .settings-grid > .field { flex-basis:calc(50% - 4px); } .conversation-inner { padding:24px 24px 8px; } .welcome { margin:32px auto; } .welcome-links { gap:8px; margin-top:24px; } .composer-area { padding:12px 16px 12px; } .composer { padding:12px; } .page-scroll { padding:24px 24px; } .accelerator { grid-template-columns:43px minmax(0,1fr); gap:16px; } .banner { margin:12px 16px 0; gap:12px; padding:12px; } .file-row { grid-template-columns:minmax(0,1fr) 62px 50px; gap:8px; } }
     @media (max-width:400px) { .header-actions .status { max-width:65px; white-space:normal; line-height:var(--leading-tight); } .topbar h1 { max-width:150px; } .composer-note { max-width:135px; } .accelerator-actions { display:block; } .accelerator-actions .button { margin-top:12px; } }
     @media (prefers-reduced-motion:reduce) { * { scroll-behavior:auto !important; transition:none !important; animation:none !important; } }
   </style>
@@ -472,16 +474,11 @@
       <div class="brand"><span class="brand-mark"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="m12 2 9 5v10l-9 5-9-5V7Z M3 7l9 5 9-5 M12 12v10"/></svg></span><div><div class="brand-name">AI Infrastructure</div><div class="brand-subtitle">Harness</div></div></div>
       <button class="new-session" id="new-session" type="button"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 5v14 M5 12h14"/></svg>New session</button>
       <nav class="navigation" aria-label="Main navigation">
-        <button class="nav-item" type="button" data-view="setup"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h7l2 3h9v11H3Z M3 6V4h7l2 2 M15 12v5 M12.5 14.5h5"/></svg>Projects &amp; Setup</button>
-        <button class="nav-item" type="button" data-view="sessions" aria-current="page"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h16v12H9l-5 4Z"/></svg>Sessions</button>
-        <button class="nav-item" type="button" data-view="creator"><span class="icon" aria-hidden="true">◇</span>Infrastructure Creator</button>
-        <button class="nav-item" type="button" data-view="context"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M5 3h9l5 5v13H5Z M14 3v6h5 M8 13h8 M8 17h6"/></svg>Project context</button>
-        <button class="nav-item" type="button" data-view="brain"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M8 4h8v5H8Z M4 15h6v5H4Z M15 15h6v5h-6Z M12 9v3H7v3 M12 12h6v3"/></svg>Project Brain</button>
-        <button class="nav-item" type="button" data-view="memory"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h6a4 4 0 0 1 4 4v13a5 5 0 0 0-4-2H4Z M14 8a4 4 0 0 1 4-4h3v15h-3a5 5 0 0 0-4 2"/></svg>Memory bank</button>
-        <button class="nav-item" type="button" data-view="skills"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="m8 5-6 7 6 7 M16 5l6 7-6 7 M14 3l-4 18"/></svg>Skills</button>
-        <button class="nav-item" type="button" data-view="create-skill"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M12 4H4v16h16v-8 M10 14l1-4 8-8 3 3-8 8Z M17 4l3 3"/></svg>Create skill</button>
-        <button class="nav-item" type="button" data-view="accelerators"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="m13 2-9 12h7l-1 8 10-12h-8Z"/></svg>Accelerators</button>
-        <button class="nav-item" type="button" data-view="kit3"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h7v7H3z M14 4h7v7h-7z M3 15h7v6H3z M14 15h7v6h-7z"/></svg>Open Source Kit</button>
+        <button class="nav-item" type="button" data-nav="sessions" aria-current="page"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h16v12H9l-5 4Z"/></svg>Sessions</button>
+        <button class="nav-item" type="button" data-nav="knowledge"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h6a4 4 0 0 1 4 4v13a5 5 0 0 0-4-2H4Z M14 8a4 4 0 0 1 4-4h3v15h-3a5 5 0 0 0-4 2"/></svg>Knowledge</button>
+        <button class="nav-item" type="button" data-nav="skills"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="m8 5-6 7 6 7 M16 5l6 7-6 7 M14 3l-4 18"/></svg>Skills</button>
+        <button class="nav-item" type="button" data-nav="accelerators"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="m13 2-9 12h7l-1 8 10-12h-8Z"/></svg>Accelerators</button>
+        <button class="nav-item" type="button" data-nav="setup"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h7l2 3h9v11H3Z M3 6V4h7l2 2 M15 12v5 M12.5 14.5h5"/></svg>Projects &amp; Setup</button>
       </nav>
       <div class="history-header"><span>Recent sessions</span><button class="icon-button" id="refresh-sessions" type="button" aria-label="Refresh sessions"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2 6 M20 4v7h-7"/></svg></button></div>
       <div class="history" id="history"><p class="history-empty">Connecting to the local runner…</p></div>
@@ -489,7 +486,8 @@
         <div class="theme-control"><span id="theme-label">Theme</span><div class="theme-switch" role="radiogroup" aria-labelledby="theme-label"><label title="Match the system theme"><input type="radio" name="theme" value="system"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h18v12H3Z M8 20h8 M12 16v4"/></svg><span class="sr-only">System</span></label><label title="Light theme"><input type="radio" name="theme" value="light"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2.5 M12 19.5V22 M2 12h2.5 M19.5 12H22 M4.9 4.9l1.8 1.8 M17.3 17.3l1.8 1.8 M4.9 19.1l1.8-1.8 M17.3 6.7l1.8-1.8"/></svg><span class="sr-only">Light</span></label><label title="Dark theme"><input type="radio" name="theme" value="dark"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z"/></svg><span class="sr-only">Dark</span></label></div></div></div>
     </aside>
     <main class="main" id="main" tabindex="-1">
-      <header class="topbar"><div class="topbar-heading"><button class="icon-button menu-toggle" id="menu-toggle" type="button" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 6h16 M4 12h16 M4 18h16"/></svg></button><div class="topbar-title"><h1 id="page-title">AI Infrastructure Harness</h1><p id="page-subtitle">Your local workspace for agent sessions</p></div></div><div class="header-actions"><button type="button" class="button" id="open-results" hidden>Results &amp; usage</button><span class="status" id="session-status" role="status" hidden></span><button type="button" class="button danger" id="cancel-session" hidden>Cancel session</button></div></header>
+      <header class="topbar"><div class="topbar-heading"><button class="icon-button menu-toggle" id="menu-toggle" type="button" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 6h16 M4 12h16 M4 18h16"/></svg></button><div class="topbar-title"><h1 id="page-title">AI Infrastructure Harness</h1><p id="page-subtitle">Your local workspace for agent sessions</p></div></div><div class="header-actions"><a class="button" id="open-kit3" href="/kit3/" target="_blank" rel="noopener noreferrer" hidden>Open in new tab ↗</a><span class="status" id="session-status" role="status" hidden></span><button type="button" class="button danger" id="cancel-session" hidden>Cancel session</button></div></header>
+      <nav class="view-tabs" id="view-tabs" aria-label="Section views" hidden></nav>
       <div class="banner" id="connection-banner" role="alert" hidden><p id="connection-message"></p><button type="button" id="reconnect">Reconnect</button></div>
       <div class="connection-loading" id="connecting" role="status">Loading projects and native providers…</div>
       <section class="view" id="sessions-view" aria-label="Agent sessions">
@@ -583,8 +581,7 @@
         <div class="composer-area" id="composer-area"><div class="composer-wrap"><p class="error-text" id="composer-error" role="alert" hidden></p><form class="composer" id="session-form"><label class="sr-only" id="prompt-label" for="prompt">Task or follow-up message</label><textarea id="prompt" placeholder="Describe a task for this project…" required rows="3"></textarea><input id="attachment-input" type="file" multiple hidden><div class="attachment-list" id="attachment-list" aria-label="Files to attach" hidden></div><p class="error-text" id="attachment-error" role="alert" hidden></p><div class="composer-actions"><button class="button attach-button" id="attach-files" type="button" aria-describedby="attachment-hint">Attach files</button><span class="composer-note" id="composer-note">Ctrl / ⌘ + Enter to send</span><button class="button primary" id="send" type="submit" disabled><span id="send-label">Start session</span><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 19V5 M6 11l6-6 6 6"/></svg></button></div><p class="composer-note" id="attachment-hint" hidden>Up to 5 files · 4 MiB each · 8 MiB total. Files are sent with your message.</p></form><p class="composer-caption" id="composer-caption" hidden></p></div></div>
       </section>
       <section class="view" id="results-view" aria-label="Results and verification" hidden><div class="page-scroll"><div class="page-content">
-        <div class="page-heading"><h2>Results &amp; Verification</h2><p id="results-workspace"></p></div>
-        <div class="page-toolbar"><button type="button" class="button" id="results-back">Back to session</button><button type="button" class="button" id="results-refresh">Refresh results</button></div>
+        <div class="page-toolbar results-toolbar"><p class="results-workspace" id="results-workspace"></p><button type="button" class="button" id="results-refresh">Refresh results</button></div>
         <p class="error-text" id="results-error" role="alert" hidden></p>
         <p id="results-status" role="status"></p>
         <details class="fleet-report" open><summary>Changed files &amp; diff</summary><p class="knowledge-note" id="results-base"></p><p class="knowledge-note" id="results-diff-note"></p><pre class="fleet-report-text" id="results-files" tabindex="0"></pre><pre class="fleet-report-text" id="results-diff" tabindex="0"></pre></details>
@@ -592,38 +589,37 @@
           <p class="knowledge-note" id="delivery-availability">Loading delivery options…</p><p class="error-text" id="delivery-error" role="alert" hidden></p><p id="delivery-status" role="status"></p>
           <div id="delivery-options" hidden>
             <p class="knowledge-note" id="delivery-workspace"></p>
-            <form id="delivery-commit-form"><h4>1. Commit selected files</h4><p class="knowledge-note">These are pending changes against the worktree's current HEAD. The Results diff above covers the session baseline and can also include earlier commits. Selecting a file commits its whole current content, including staged and unstaged changes.</p>
+            <form id="delivery-commit-form"><h4>1. Commit selected files</h4><p class="knowledge-note">Pending changes against the worktree HEAD. Selecting a file commits its whole current content, staged and unstaged.</p>
               <div class="file-list" id="delivery-files" role="group" aria-label="Files to commit"></div>
               <div class="page-toolbar"><label class="field" style="flex:1;max-width:100%">Commit message<input type="text" id="delivery-message" maxlength="4000" aria-describedby="delivery-message-error" required></label></div><p class="error-text" id="delivery-message-error" hidden></p><button type="submit" class="button" id="delivery-commit-preview-button" disabled>Preview selected files</button>
             </form>
             <div id="delivery-commit-preview" hidden><p class="knowledge-note" id="delivery-commit-summary"></p><pre class="fleet-report-text" id="delivery-commit-files" tabindex="0"></pre><pre class="fleet-report-text" id="delivery-commit-diff" tabindex="0"></pre><p class="knowledge-note" id="delivery-commit-checks"></p><p class="knowledge-note" id="delivery-commit-note"></p><button type="button" class="button" id="delivery-commit" disabled>Commit reviewed files locally</button></div>
-            <form id="delivery-preview-form"><h4>2. Preview one commit on a local branch</h4><p class="knowledge-note">Choose one commit to transfer. The preview checks whether that commit can be applied to the target branch.</p>
+            <form id="delivery-preview-form"><h4>2. Preview one commit on a local branch</h4><p class="knowledge-note">Pick one commit; the preview checks that it applies to the target branch.</p>
               <div class="page-toolbar"><label class="field">Commit<select id="delivery-source" required></select></label><label class="field">Target local branch<select id="delivery-target" required></select></label></div>
               <label class="checkbox"><input type="checkbox" id="delivery-check-required" checked>Require a target check before Apply</label>
               <div class="page-toolbar"><label class="field" style="flex:1">Target check command<input type="text" id="delivery-check-command" maxlength="4000" placeholder="e.g. python3 -m unittest tests.test_example"></label><label class="field">Timeout (seconds)<input type="number" id="delivery-check-timeout" min="1" max="3600" value="300" step="1"></label></div>
-              <p class="knowledge-note">Runs only when you click Run target checks, in a temporary worktree of the resulting target commit. Use a trusted command; no model is called. Dependencies and ignored files are not copied. One command; shell operators are not expanded.</p><button type="submit" class="button" id="delivery-preview-button" disabled>Preview transfer</button>
+              <p class="knowledge-note">Runs only when you click Run target checks, in a temporary worktree of the result — no dependencies or ignored files. One trusted command, no shell operators, no model.</p><button type="submit" class="button" id="delivery-preview-button" disabled>Preview transfer</button>
             </form>
             <div id="delivery-preview" hidden><h4>3. Review and apply</h4><p class="knowledge-note" id="delivery-preview-summary"></p><pre class="fleet-report-text" id="delivery-preview-files" tabindex="0"></pre><pre class="fleet-report-text" id="delivery-preview-diff" tabindex="0"></pre><p class="knowledge-note" id="delivery-preview-checks"></p><p class="knowledge-note" id="delivery-preview-note"></p><p class="knowledge-note" id="delivery-check-status" role="status"></p><pre class="fleet-report-text" id="delivery-check-output" tabindex="0"></pre><button type="button" class="button" id="delivery-run-check" disabled>Run target checks</button><button type="button" class="button" id="delivery-cancel-check" hidden>Cancel target check</button><button type="button" class="button primary" id="delivery-apply" disabled>Apply reviewed commit locally</button></div>
           </div>
         </section>
-        <section aria-label="Run verification"><h3>Run a project check</h3><p class="knowledge-note">Runs locally in this session's workspace and may change files. Choose a test or lint command you trust. One command at a time; shell operators are not expanded. This does not call a model.</p>
+        <section aria-label="Run verification"><h3>Run a project check</h3><p class="knowledge-note">Runs in this session's workspace and may change files. One trusted command, no shell operators, no model.</p>
           <form id="check-form"><div class="page-toolbar"><label class="field" style="flex:1">Check command<input type="text" id="check-command" maxlength="4000" placeholder="e.g. python3 -m unittest tests.test_example" required></label><label class="field">Check timeout (seconds)<input type="number" id="check-timeout" min="1" max="3600" step="1" value="300" required></label></div><button class="button primary" type="submit" id="check-start" disabled>Run check</button></form>
-          <p class="knowledge-note">A passed check means this command exited with code 0. It does not certify every requirement or an entire project.</p><div id="results-checks"></div>
+          <p class="knowledge-note">Passed means exit code 0, not that the project is verified.</p><div id="results-checks"></div>
         </section>
         <section aria-label="Launch usage history"><h3>Launch history &amp; total usage</h3><p class="knowledge-note" id="results-usage-note"></p><p id="results-totals" role="status"></p><div id="results-launches"></div></section>
       </div></div></section>
       <section class="view" id="creator-view" aria-label="Infrastructure Creator" hidden><div class="page-scroll"><div class="page-content">
-        <div class="page-heading"><h2>Build the project's accelerator.</h2><p>Scan → Review → Generate → Apply. Update an existing accelerator using its ownership manifest.</p></div>
         <form id="creator-form">
           <div class="page-toolbar"><label class="field">Project<select id="creator-project"></select></label><label class="field">Operation<select id="creator-operation"><option value="generate">Create accelerator</option><option value="update">Update existing accelerator</option></select></label></div>
-          <div class="page-toolbar"><label class="field">Provider<select id="creator-provider"></select></label><label class="field">Model<input id="creator-model" type="text" list="creator-models" placeholder="Provider default" maxlength="160"><datalist id="creator-models"></datalist></label><label class="field">Thinking effort<select id="creator-effort"></select></label></div>
-          <p class="knowledge-note" id="creator-model-detail"></p>
+          <div class="page-toolbar"><label class="field">Provider<select id="creator-provider"></select></label><label class="field"><span class="field-label">Model<button class="explain" type="button" aria-controls="creator-model-detail" aria-expanded="false" aria-label="About model choices">?</button></span><input id="creator-model" type="text" list="creator-models" placeholder="Provider default" maxlength="160"><datalist id="creator-models"></datalist></label><label class="field">Thinking effort<select id="creator-effort"></select></label></div>
+          <p class="knowledge-note" id="creator-model-detail" hidden></p>
           <div class="page-toolbar"><label class="field">Workspace<select id="creator-workspace"><option value="project">Current project folder</option><option value="worktree">New Git worktree</option></select></label><label class="field" id="creator-branch-field" hidden>New branch<input type="text" id="creator-branch" maxlength="256" placeholder="Automatic branch name"></label><button type="button" class="button" id="creator-refresh">Refresh</button></div>
           <p class="knowledge-note" id="creator-git" role="status"></p>
-          <div class="agent-options"><label class="checkbox"><input id="creator-agents" type="checkbox">Use additional agents</label><label class="agent-count-field">Required helpers<input id="creator-count" type="number" min="1" max="40" value="3" disabled></label></div><p class="knowledge-note">When enabled, exactly this many helpers must be launched in each model phase. Lower concurrency can be handled in batches; explain any unmet count caused by provider restrictions or shared budgets.</p>
+          <div class="agent-options"><label class="checkbox"><input id="creator-agents" type="checkbox">Use additional agents</label><label class="agent-count-field">Required helpers<input id="creator-count" type="number" min="1" max="40" value="3" disabled></label></div><p class="knowledge-note" id="creator-agent-hint"></p>
           <fieldset class="skills-tools"><legend>Generate integrations for</legend><div class="skills-tool-options"><label class="checkbox"><input type="checkbox" name="creator-tool" value="claude" checked>Claude Code</label><label class="checkbox"><input type="checkbox" name="creator-tool" value="codex" checked>Codex</label><label class="checkbox"><input type="checkbox" name="creator-tool" value="cursor" checked>Cursor</label></div></fieldset>
           <label class="field">Requirements (optional)<textarea id="creator-goal" rows="3" maxlength="8000" placeholder="Project constraints and the accelerator you need"></textarea></label>
-          <p class="knowledge-note">PHP projects · bubblewrap on Linux or sandbox-exec on macOS. The provider prepares artifacts with the target kept read-only. Applying files is a separate reviewed action. Worktrees start from committed HEAD.</p>
+          <p class="knowledge-note">PHP projects only. Scans run sandboxed with your project read-only; applying files is a separate review.<span id="creator-worktree-note" hidden> Worktrees start from committed HEAD.</span></p>
           <div id="creator-budgets"></div>
           <button type="submit" class="button primary" id="creator-start">Start scan</button>
         </form>
@@ -641,17 +637,15 @@
         </section>
       </div></div></section>
       <section class="view" id="setup-view" aria-label="Projects and Setup" hidden><div class="page-scroll"><div class="page-content">
-        <div class="page-heading"><h2>A workspace ready for your agents.</h2><p>Add an existing local project, inspect what is installed, and review an accelerator’s file changes before installing it.</p></div>
-        <form class="setup-register" id="setup-register-form"><h3>Add an existing project</h3><div class="setup-register-row"><label class="field">Absolute project path<input id="setup-project-path" type="text" placeholder="/home/you/projects/my-app" autocomplete="off" spellcheck="false" maxlength="1024" required></label><button class="button" id="setup-browse" type="button">Browse…</button><button class="button" id="setup-register" type="submit">Add project</button></div><p class="knowledge-note">Registers a local folder with this runner. No model or installation is started.</p><p class="error-text" id="setup-register-error" role="alert" hidden></p><p class="knowledge-note" id="setup-register-status" role="status" hidden></p></form>
-        <div class="setup-toolbar"><label class="field">Registered project<select id="setup-project"></select></label><button class="button" id="setup-refresh" type="button">Refresh readiness</button><button class="button" id="setup-refresh-projects" type="button">Refresh projects</button></div><p class="knowledge-note" id="setup-project-location"></p><p class="error-text" id="setup-readiness-error" role="alert" hidden></p><p class="knowledge-note" id="setup-readiness-status" role="status"></p>
-        <section class="setup-readiness" id="setup-readiness" aria-label="Project readiness" hidden><div class="setup-readiness-grid" id="setup-readiness-grid"></div><div class="setup-providers" id="setup-providers"></div><div id="setup-diagnostics"></div><p class="knowledge-note">Readiness reports detected files and native CLIs. Sign in through each provider’s native CLI.</p><button class="button" id="setup-start-session" type="button">Start session in this project</button></section>
-        <section class="setup-install" aria-label="Accelerator installation"><h3>Install a ready-made accelerator</h3><label class="field">Edition<select id="setup-edition" disabled><option value="">Select a project first</option></select></label><p class="knowledge-note" id="setup-edition-detail"></p><fieldset class="skills-tools"><legend>Target tools</legend><div class="skills-tool-options" id="setup-tools"></div></fieldset><p class="knowledge-note">Preview the exact file actions, text diffs, and collisions. Installation uses only the reviewed selection.</p><button class="button" id="setup-preview-button" type="button" disabled>Preview accelerator installation</button><p class="knowledge-note" id="setup-action-status" role="status" hidden></p><p class="error-text" id="setup-action-error" role="alert" hidden></p></section>
+        <form class="setup-register" id="setup-register-form"><h3>Add an existing project</h3><div class="setup-register-row"><label class="field">Absolute project path<input id="setup-project-path" type="text" placeholder="/home/you/projects/my-app" autocomplete="off" spellcheck="false" maxlength="1024" required></label><button class="button" id="setup-browse" type="button">Browse…</button><button class="button" id="setup-register" type="submit">Add project</button></div><p class="knowledge-note">Registers the folder only; nothing runs or installs.</p><p class="error-text" id="setup-register-error" role="alert" hidden></p><p class="knowledge-note" id="setup-register-status" role="status" hidden></p></form>
+        <div class="setup-toolbar"><label class="field">Registered project<select id="setup-project"></select></label><button class="button" id="setup-refresh-projects" type="button">Refresh</button></div><p class="knowledge-note" id="setup-project-location"></p><p class="error-text" id="setup-readiness-error" role="alert" hidden></p><p class="knowledge-note" id="setup-readiness-status" role="status"></p>
+        <section class="setup-readiness" id="setup-readiness" aria-label="Project readiness" hidden><div class="setup-readiness-grid" id="setup-readiness-grid"></div><div class="setup-providers" id="setup-providers"></div><div id="setup-diagnostics"></div><button class="button" id="setup-start-session" type="button">Start session in this project</button></section>
+        <section class="setup-install" aria-label="Accelerator installation"><h3>Install a ready-made accelerator</h3><label class="field">Edition<select id="setup-edition" disabled><option value="">Select a project first</option></select></label><p class="knowledge-note" id="setup-edition-detail"></p><fieldset class="skills-tools"><legend>Target tools</legend><div class="skills-tool-options" id="setup-tools"></div></fieldset><p class="knowledge-note">You review every file change before anything is written.</p><button class="button" id="setup-preview-button" type="button" disabled>Preview accelerator installation</button><p class="knowledge-note" id="setup-action-status" role="status" hidden></p><p class="error-text" id="setup-action-error" role="alert" hidden></p></section>
         <section class="setup-preview" id="setup-preview" aria-label="Accelerator installation preview" hidden><h3>Review the proposed files</h3><p class="knowledge-note" id="setup-preview-target"></p><p class="knowledge-note" id="setup-preview-summary"></p><p class="memory-notice" id="setup-collisions" hidden></p><div class="setup-preview-controls"><label class="field"><span class="sr-only">Filter preview actions</span><select id="setup-preview-actions"><option value="changed">Changed files</option><option value="all">All files</option><option value="collision">Collisions</option></select></label><label class="memory-filter"><span class="sr-only">Filter preview by path</span><input id="setup-preview-path" type="search" placeholder="Find a file path…" autocomplete="off"></label></div><p class="knowledge-note" id="setup-preview-count"></p><div class="setup-file-list" id="setup-preview-files"></div><p class="knowledge-note" id="setup-preview-note"></p><button class="button primary" id="setup-install-button" type="button" disabled>Install reviewed accelerator</button></section>
-        <section class="setup-result" id="setup-result" aria-label="Accelerator installation result" hidden><h3 id="setup-result-title"></h3><p class="knowledge-note" id="setup-result-target"></p><p class="knowledge-note" id="setup-result-summary"></p><pre class="setup-result-paths" id="setup-result-paths" tabindex="0"></pre><p class="knowledge-note">Refresh readiness and create a new agent session to use newly installed project instructions.</p></section>
+        <section class="setup-result" id="setup-result" aria-label="Accelerator installation result" hidden><h3 id="setup-result-title"></h3><p class="knowledge-note" id="setup-result-target"></p><p class="knowledge-note" id="setup-result-summary"></p><pre class="setup-result-paths" id="setup-result-paths" tabindex="0"></pre><p class="knowledge-note">A new session loads the installed instructions.</p><button class="button primary" id="setup-result-start" type="button">Start session in this project</button></section>
       </div></div></section>
-      <section class="view" id="context-view" aria-label="Project context" hidden><div class="page-scroll"><div class="page-content"><div class="page-heading"><h2>Keep the project in view.</h2><p>Policy, memory, and project files reported by the local runner. Choose whether to include project context when you start a session.</p></div><div class="page-toolbar"><label class="field">Project<select id="context-project"></select></label><button type="button" class="button" id="refresh-context">Refresh</button></div><p class="error-text" id="context-error" role="alert" hidden></p><div class="context-summary" id="context-summary" role="status"></div><div class="file-list" id="context-files"></div></div></div></section>
+      <section class="view" id="context-view" aria-label="Project context" hidden><div class="page-scroll"><div class="page-content"><div class="page-toolbar"><label class="field">Project<select id="context-project"></select></label><button type="button" class="button" id="refresh-context">Refresh</button></div><p class="error-text" id="context-error" role="alert" hidden></p><div class="context-summary" id="context-summary" role="status"></div><div class="file-list" id="context-files"></div></div></div></section>
       <section class="view" id="brain-view" aria-label="Project Brain" hidden><div class="memory-page knowledge-page">
-        <div class="page-heading"><h2>The project's working record.</h2><p>Browse tasks, findings, decisions, and handoffs. Use record tools for explicit updates; browsing does not run the context CLI.</p></div>
         <div class="memory-toolbar"><label class="field">Project<select id="brain-project"></select></label><label class="field">Project Brain<select id="brain-bank" disabled><option value="">Choose a project</option></select></label><button class="button" id="refresh-brain" type="button">Refresh</button></div>
         <div id="brain-tools"></div>
         <div class="brain-filter-row"><label class="field"><span class="sr-only">Project Brain category</span><select id="brain-category"><option value="">All categories</option></select></label><label class="memory-filter"><span class="sr-only">Filter Brain by title, path, ID, or status</span><input id="brain-filter" type="search" placeholder="Filter by title, path, ID, or status…" autocomplete="off"></label></div>
@@ -661,36 +655,32 @@
         </div>
       </div></section>
       <section class="view" id="memory-view" aria-label="Memory bank" hidden><div class="memory-page knowledge-page">
-        <div class="page-heading"><h2>Read the project's memory.</h2><p>Browse durable knowledge and local notes. Use the tools below to search the index or maintain the bank; browsing alone runs no commands.</p></div>
         <div class="memory-toolbar"><label class="field">Project<select id="memory-project"></select></label><label class="field">Memory bank<select id="memory-bank" disabled><option value="">Choose a project</option></select></label><button class="button" id="refresh-memory" type="button">Refresh</button></div>
         <div id="memory-tools"></div>
         <label class="memory-filter"><span class="sr-only">Filter memory by title, path, or status</span><input id="memory-filter" type="search" placeholder="Filter by title, path, or status…" autocomplete="off" disabled></label>
         <div class="memory-summary"><span id="memory-count" role="status"></span><span id="memory-bank-path"></span></div>
         <p class="error-text" id="memory-error" role="alert" hidden></p>
         <div class="memory-layout"><div class="memory-files-pane"><div class="memory-files" id="memory-files" aria-label="Memory files"></div><p class="memory-notice" id="memory-list-notice" hidden>The server returned a limited list of files. Filtering searches only this list.</p></div>
-          <section class="memory-details" id="memory-details" aria-label="Selected memory file"><header id="memory-detail-header" hidden><h3 id="memory-title"></h3><p class="memory-detail-path" id="memory-path"></p><p class="memory-detail-meta" id="memory-meta"></p></header><p class="memory-message" id="memory-message" role="status">Choose a project to read its memory bank.</p><p class="error-text" id="memory-file-error" role="alert" hidden></p><p class="memory-notice" id="memory-content-notice" hidden>This file exceeds the viewer limit. Only the returned portion is shown.</p><pre class="memory-body" id="memory-content" tabindex="0" aria-label="Memory file content" hidden></pre></section>
+          <section class="memory-details" id="memory-details" aria-label="Selected memory file"><header id="memory-detail-header" hidden><h3 id="memory-title"></h3><p class="memory-detail-path" id="memory-path"></p><p class="memory-detail-meta" id="memory-meta"></p></header><details class="brain-metadata" id="memory-metadata" hidden><summary>Metadata</summary><pre class="knowledge-result" id="memory-metadata-content" tabindex="0"></pre></details><p class="memory-message" id="memory-message" role="status">Choose a project to read its memory bank.</p><p class="error-text" id="memory-file-error" role="alert" hidden></p><p class="memory-notice" id="memory-content-notice" hidden>This file exceeds the viewer limit. Only the returned portion is shown.</p><pre class="memory-body" id="memory-content" tabindex="0" aria-label="Memory file content" hidden></pre></section>
         </div>
       </div></section>
       <section class="view" id="skills-view" aria-label="Skills" hidden><div class="page-scroll"><div class="page-content">
-        <div class="page-heading"><h2>Equip your agents.</h2><p>Choose development skills from a source, select your tools, and review the files before installing them into a project.</p></div>
         <div class="skills-toolbar"><label class="field">Project<select id="skills-project"></select></label><label class="field">Skill source<select id="skills-source" disabled><option value="">Loading sources…</option></select></label><div class="skills-source-actions"><button class="button" id="skills-discover" type="button" disabled>Load skills</button><button class="button" id="skills-source-refresh" type="button" disabled>Refresh source</button></div></div>
         <p class="skills-source-detail"><span id="skills-source-description"></span><a id="skills-source-link" target="_blank" rel="noopener noreferrer" hidden>View source ↗</a></p>
         <p class="skills-note" id="skills-availability" role="status">Loading the local skill installer…</p><p class="error-text" id="skills-catalog-error" role="alert" hidden></p>
         <fieldset class="skills-tools"><legend>Install for these tools</legend><div class="skills-tool-options" id="skills-agents"></div></fieldset>
-        <p class="skills-note">Project installation. Existing differing files are kept; conflicts block installation. Start a new agent session to load new skills.</p>
+        <p class="skills-note">Differing files are kept; conflicts block installation.</p>
         <div class="skills-selection"><label class="memory-filter"><span class="sr-only">Filter skills by name, ID, or description</span><input type="search" id="skills-filter" placeholder="Filter skills by name or description…" autocomplete="off" disabled></label><div class="skills-selection-header"><span id="skills-selection-count" role="status">No skills loaded</span><span id="skills-visible-count"></span></div><div class="skills-list" id="skills-list" aria-label="Available skills"><p class="empty-note">Choose a source and load its skills to make a selection.</p></div><p class="skills-note" id="skills-discovery-notice" hidden></p></div>
         <div class="skills-actions"><button class="button" id="skills-preview-button" type="button" disabled>Preview installation</button><span class="skills-note">Select at least one skill and one tool.</span></div>
         <p class="skills-action-status" id="skills-action-status" role="status" hidden></p><p class="error-text" id="skills-action-error" role="alert" hidden></p>
         <section class="skills-preview" id="skills-preview" aria-label="Installation preview" hidden><h3>Files to install</h3><p class="skills-preview-context" id="skills-preview-context"></p><p id="skills-preview-summary"></p><div class="skills-file-list" id="skills-preview-files"></div><p class="skills-note" id="skills-preview-note"></p><button class="button primary" id="skills-install" type="button" disabled>Install selected skills</button></section>
-        <section class="skills-result" id="skills-result" aria-label="Installation result" hidden><h3>Installation complete</h3><p class="skills-preview-context" id="skills-result-context"></p><p id="skills-result-summary"></p><div class="skills-file-list" id="skills-result-files"></div></section>
-        <section class="skills-installed" aria-label="Installed skills"><div class="skills-installed-toolbar"><h3>Installed in this project</h3><div class="skills-installed-controls"><label class="sr-only" for="skills-installed-agent">Filter installed skills by tool</label><select id="skills-installed-agent"><option value="">All tools</option></select><button class="button" id="skills-installed-refresh" type="button">Refresh</button></div></div><p class="skills-note" id="skills-installed-status" role="status"></p><p class="error-text" id="skills-installed-error" role="alert" hidden></p><div id="skills-installed-list"></div></section>
-        <p class="skills-note">Untracked skills have no saved source or file hashes. Preview installation from the matching source to track an exact copy. Extra or modified files are kept.</p>
+        <section class="skills-result" id="skills-result" aria-label="Installation result" hidden><h3>Installation complete</h3><p class="skills-note">Start a new session to load the installed skills.</p><p class="skills-preview-context" id="skills-result-context"></p><p id="skills-result-summary"></p><div class="skills-file-list" id="skills-result-files"></div></section>
+        <section class="skills-installed" aria-label="Installed skills"><div class="skills-installed-toolbar"><h3>Installed in this project</h3><div class="skills-installed-controls"><label class="sr-only" for="skills-installed-agent">Filter installed skills by tool</label><select id="skills-installed-agent"><option value="">All tools</option></select><button class="button" id="skills-installed-refresh" type="button">Refresh</button></div></div><p class="skills-note" id="skills-installed-status" role="status"></p><details class="skills-untracked-help" id="skills-untracked-help" hidden><summary>Why untracked?</summary><p class="skills-note">Installed outside Harness: no saved source or file hashes. To track one, preview it from its source; your files are kept.</p></details><p class="error-text" id="skills-installed-error" role="alert" hidden></p><div id="skills-installed-list"></div></section>
         <p class="error-text" id="skills-change-error" role="alert" hidden></p>
         <section class="skills-preview" id="skills-change" aria-label="Skill change preview" hidden><h3 id="skills-change-title">Review skill change</h3><p id="skills-change-context" class="skills-note"></p><p id="skills-change-version" class="skills-installed-path"></p><p id="skills-change-summary" role="status"></p><div id="skills-change-files"></div><p class="skills-note" id="skills-change-note"></p><button class="button" id="skills-change-apply" type="button" disabled>Apply reviewed update</button></section>
         <pre class="skills-result" id="skills-change-result" role="status" hidden></pre>
       </div></div></section>
       <section class="view" id="create-skill-view" aria-label="Create skill" hidden><div class="page-scroll"><div class="page-content">
-        <div class="page-heading"><h2>Write a project skill.</h2><p>Describe when a skill should be used and give the agent its instructions. Preview the generated SKILL.md before saving it for your selected tools.</p></div>
         <form class="create-skill-editor" id="create-skill-form" novalidate>
           <div class="create-skill-grid"><label class="field"><span>Project</span><select id="create-skill-project" required aria-describedby="create-skill-project-error"></select><span class="error-text" id="create-skill-project-error" role="alert" hidden></span></label><label class="field"><span>Skill name</span><input id="create-skill-name" type="text" required maxlength="64" pattern="[a-z0-9]+(-[a-z0-9]+)*" placeholder="review-database-migrations" autocomplete="off" spellcheck="false" aria-describedby="create-skill-name-hint create-skill-name-error"><span class="create-skill-helper" id="create-skill-name-hint">Use lowercase letters, numbers, and single hyphens. Up to 64 characters.</span><span class="error-text" id="create-skill-name-error" role="alert" hidden></span></label></div>
           <fieldset class="skills-tools" aria-describedby="create-skill-agents-error"><legend>Save for these tools</legend><div class="skills-tool-options" id="create-skill-agents"></div><p class="error-text" id="create-skill-agents-error" role="alert" hidden></p></fieldset>
@@ -704,8 +694,8 @@
         <section class="skills-preview" id="create-skill-preview" aria-label="Generated skill preview" hidden><h3>Review your skill</h3><p class="skills-preview-context" id="create-skill-preview-context"></p><p id="create-skill-preview-summary"></p><h4 class="create-skill-preview-heading">SKILL.md</h4><pre class="create-skill-preview-content" id="create-skill-content" tabindex="0" aria-label="Generated SKILL.md content"></pre><h4 class="create-skill-preview-heading">Target files</h4><div class="skills-file-list" id="create-skill-preview-files"></div><p class="skills-note" id="create-skill-preview-note"></p><button class="button primary" id="create-skill-save" type="button" disabled>Save skill</button></section>
         <section class="skills-result" id="create-skill-result" aria-label="Created skill result" hidden><h3>Skill saved</h3><p class="skills-preview-context" id="create-skill-result-context"></p><p id="create-skill-result-summary"></p><div class="skills-file-list" id="create-skill-result-files"></div><p class="skills-note">Start a new agent session to load your skill.</p><button class="button" id="create-skill-view-installed" type="button">View installed skills</button></section>
       </div></div></section>
-      <section class="view" id="accelerators-view" aria-label="Accelerators" hidden><div class="page-scroll"><div class="page-content"><div class="page-heading"><h2>A starting point that fits.</h2><p>Generate a project-specific accelerator, preview a ready-made edition, or choose individual open-source tools.</p></div><div class="page-toolbar"><label class="field">Target project<select id="accelerator-project"></select></label></div><div id="accelerators"></div></div></div></section>
-      <section class="view" id="kit3-view" aria-label="Open Source Kit" hidden><div class="catalog-toolbar"><span>Skills, agents, MCP tools, and their review evidence.</span><a href="/kit3/" target="_blank" rel="noopener noreferrer">Open catalog in a new tab ↗</a></div><iframe id="kit3-frame" class="catalog-frame" title="Open Source Kit resource catalog"></iframe></section>
+      <section class="view" id="accelerators-view" aria-label="Accelerators" hidden><div class="page-scroll"><div class="page-content"><div class="page-toolbar"><label class="field">Target project<select id="accelerator-project"></select></label></div><div id="accelerators"></div></div></div></section>
+      <section class="view" id="kit3-view" aria-label="Open Source Kit" hidden><iframe id="kit3-frame" class="catalog-frame" title="Open Source Kit resource catalog"></iframe></section>
       <noscript><p class="connection-loading">This local Harness interface needs JavaScript to connect to the runner.</p></noscript>
     </main>
   </div>
@@ -1168,8 +1158,6 @@
       } catch(error) { if(epoch===resultUi.epoch) { $('delivery-availability').textContent='Refresh results to reload delivery options.'; showError('results-error',textError(error)); } }
       finally { if(epoch===resultUi.epoch) { resultUi.pending=false; resultControls(); } }
     }
-    $('open-results').addEventListener('click',()=>{resultUi.data=null; setView('results');});
-    $('results-back').addEventListener('click',()=>{setView('sessions'); pollSession(state.epoch);});
     $('results-refresh').addEventListener('click',loadResults);
     $('check-command').addEventListener('input',resultControls); $('check-timeout').addEventListener('input',resultControls);
     $('check-form').addEventListener('submit',async event=>{
@@ -1231,14 +1219,37 @@
       if (sessionOptions.open && $('sessions-view').contains(document.activeElement)) { const chip = $('option-'+sessionOptions.open); sessionOptions.open = null; renderSessionOptions(); chip.focus(); }
     });
     document.querySelector('.skip').addEventListener('click',event => { event.preventDefault(); $('main').focus(); });
-    function setView(view) {
+    // Five sections; each groups related views behind tabs. Every view has its own #/view address.
+    const viewGroups = {sessions:['sessions','results'],knowledge:['brain','memory','context'],skills:['skills','create-skill'],accelerators:['accelerators','creator','kit3'],setup:['setup']};
+    const viewLabels = {sessions:'Conversation',results:'Results & verification',brain:'Project Brain',memory:'Memory bank',context:'Context files',skills:'Library','create-skill':'Create skill',accelerators:'Overview',creator:'Infrastructure Creator',kit3:'Open Source Kit',setup:'Projects & Setup'};
+    const groupOf = view => Object.keys(viewGroups).find(group => viewGroups[group].includes(view));
+    const lastViewInGroup = {};
+    function viewFromHash() { const view = decodeURIComponent(location.hash.replace(/^#\/?/,'')); return groupOf(view) ? view : null; }
+    const initialView = viewFromHash(); let initialRouteApplied = false;
+    function renderViewTabs() {
+      const views = viewGroups[groupOf(state.view)].filter(view => view !== 'results' || state.selectedId);
+      $('view-tabs').hidden = views.length < 2; $('view-tabs').replaceChildren();
+      for (const view of views) {
+        const tab = el('button','view-tab',viewLabels[view]); tab.type = 'button'; if (view === state.view) tab.setAttribute('aria-current','page');
+        tab.addEventListener('click',() => openView(view)); $('view-tabs').append(tab);
+      }
+    }
+    function openView(view) {
+      if (view === state.view) return;
+      const fromResults = state.view === 'results'; if (view === 'results') resultUi.data = null;
+      setView(view); if (view === 'sessions' && fromResults) pollSession(state.epoch);
+    }
+    for (const button of document.querySelectorAll('.navigation [data-nav]')) button.addEventListener('click',() => { const group = button.dataset.nav; openView(group === 'sessions' ? 'sessions' : lastViewInGroup[group] || viewGroups[group][0]); });
+    window.addEventListener('popstate',() => { const view = viewFromHash() || 'sessions'; if (view !== state.view) setView(view === 'results' && !state.selectedId ? 'sessions' : view,false); });
+    function setView(view, record = true) {
       if (state.view === 'memory' && view !== 'memory') { cancelMemoryRequests(); cancelKnowledgeRead('memory'); }
       if (state.view === 'brain' && view !== 'brain') { cancelBrainRequests(); cancelKnowledgeRead('brain'); }
       if (state.view === 'creator' && view !== 'creator') { clearTimeout(creatorUi.timer); ++creatorUi.epoch; }
       if(state.view==='results' && view!=='results') { clearTimeout(resultUi.timer); ++resultUi.epoch; resultUi.pending=false; ++deliveryUi.epoch; deliveryUi.data=null; invalidateDeliveryPreview(); }
-      state.view = view;
-      for (const name of ['sessions','results','setup','creator','context','brain','memory','skills','create-skill','accelerators','kit3']) $(`${name}-view`).hidden = name !== view;
-      for (const button of document.querySelectorAll('.navigation [data-view]')) { if (button.dataset.view === view) button.setAttribute('aria-current','page'); else button.removeAttribute('aria-current'); }
+      state.view = view; lastViewInGroup[groupOf(view)] = view;
+      for (const name of Object.values(viewGroups).flat()) $(`${name}-view`).hidden = name !== view;
+      for (const button of document.querySelectorAll('.navigation [data-nav]')) { if (button.dataset.nav === groupOf(view)) button.setAttribute('aria-current','page'); else button.removeAttribute('aria-current'); }
+      if (record && viewFromHash() !== view) history[location.hash ? 'pushState' : 'replaceState'](null,'','#/'+view);
       if (view === 'results') loadResults();
       if (view === 'creator') openCreator();
       if (view === 'setup') openSetup();
@@ -1249,7 +1260,7 @@
       if (view === 'create-skill') openCreateSkill();
       if (view === 'sessions') loadProjectGit();
       if (view === 'kit3' && !$('kit3-frame').getAttribute('src')) $('kit3-frame').src = '/kit3/';
-      updateHeader(); setMenu(false);
+      renderViewTabs(); updateHeader(); setMenu(false);
     }
     for (const button of document.querySelectorAll('[data-view]')) button.addEventListener('click',() => setView(button.dataset.view));
     function setOptions(select, items, getLabel, getValue, previous) {
@@ -1292,6 +1303,7 @@
         $('connection-banner').hidden = true; populateSettings(); renderHistory();
         if (!sessionPreferencesReady) await restoreSessionPreferences();
         else if (state.selectedId) { stopPolling(); await pollSession(state.epoch); }
+        if (initialView && !initialRouteApplied) { initialRouteApplied = true; if (initialView !== state.view) setView(initialView === 'results' && !state.selectedId ? 'sessions' : initialView,false); }
         if (state.view === 'creator') openCreator();
         if (state.view === 'setup') openSetup(true);
         if (state.view === 'context') loadContext();
@@ -1378,26 +1390,37 @@
     window.addEventListener('pagehide',() => saveSessionPreferences());
     document.addEventListener('visibilitychange',() => { if (document.visibilityState === 'hidden') saveSessionPreferences(); });
     function dateLabel(value) { const date = new Date(typeof value === 'number' && value < 1e12 ? value * 1000 : value); return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString(undefined,{month:'short',day:'numeric'}); }
+    function openHistorySession(id) {
+      const session = state.sessions.find(item => item.id === id); if (!session) return;
+      if (session.creator) { setView('creator'); $('creator-project').value = session.project_id; loadCreator(session.creator.run_id); } else selectSession(session.id);
+    }
     function renderHistory() {
-      const list = $('history'); list.replaceChildren();
-      if (!state.sessions.length) { list.append(el('p','history-empty','Your sessions will appear here.')); return; }
-      for (const session of [...state.sessions].sort((a,b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')))) {
-        const button = el('button','history-item'); button.type = 'button'; button.title = session.title || 'Untitled session'; if (session.id === state.selectedId) button.setAttribute('aria-current','true');
-        button.append(el('span','history-title',session.title || 'Untitled session'));
-        const meta = el('span','history-meta'); meta.append(el('span',`status-dot ${session.status}`),document.createTextNode(`${isFleetSession(session) ? 'Fleet · ' : isClashSession(session) ? 'Clash · ' : ''}${sessionStatusLabel(session)}${session.updated_at ? ` · ${dateLabel(session.updated_at)}` : ''}`)); button.append(meta);
-        button.addEventListener('click',() => { if(session.creator) { setView('creator'); $('creator-project').value=session.project_id; loadCreator(session.creator.run_id); } else selectSession(session.id); }); list.append(button);
-      }
+      const list = $('history');
+      if (!state.sessions.length) { list.replaceChildren(el('p','history-empty','Your sessions will appear here.')); return; }
+      list.querySelector('.history-empty')?.remove();
+      const rows = new Map([...list.querySelectorAll('.history-item')].map(button => [button.dataset.id,button]));
+      [...state.sessions].sort((a,b) => String(b.updated_at || '').localeCompare(String(a.updated_at || ''))).forEach((session,index) => {
+        let button = rows.get(session.id); rows.delete(session.id);
+        if (!button) { button = el('button','history-item'); button.type = 'button'; button.dataset.id = session.id; button.append(el('span','history-title'),el('span','history-meta')); button.addEventListener('click',() => openHistorySession(button.dataset.id)); }
+        const title = session.title || 'Untitled session', meta = `${isFleetSession(session) ? 'Fleet · ' : isClashSession(session) ? 'Clash · ' : ''}${sessionStatusLabel(session)}${session.updated_at ? ` · ${dateLabel(session.updated_at)}` : ''}`;
+        if (button.title !== title) { button.title = title; button.firstChild.textContent = title; }
+        if (button.lastChild.dataset.text !== `${session.status}|${meta}`) { button.lastChild.replaceChildren(el('span',`status-dot ${session.status}`),document.createTextNode(meta)); button.lastChild.dataset.text = `${session.status}|${meta}`; }
+        if (session.id === state.selectedId) button.setAttribute('aria-current','true'); else button.removeAttribute('aria-current');
+        if (list.children[index] !== button) list.insertBefore(button,list.children[index] || null);
+      });
+      for (const button of rows.values()) button.remove();
     }
     function upsert(session) { if (!session?.id) return; const index = state.sessions.findIndex(item => item.id === session.id); if (index < 0) state.sessions.unshift(session); else state.sessions[index] = session; if (state.selectedId === session.id) state.selected = session; renderHistory(); }
     async function refreshSessions() { $('refresh-sessions').disabled = true; try { const data = await api('/api/sessions'); state.sessions = data.sessions || []; renderHistory(); } catch (error) { showError('events-error',textError(error)); } finally { $('refresh-sessions').disabled = false; } }
     $('refresh-sessions').addEventListener('click',refreshSessions);
     function updateHeader() {
       const session = state.selected;
-      $('page-title').textContent = state.view === 'sessions' ? session?.title || 'New session' : ({results:'Results & Verification',creator:'Infrastructure Creator',setup:'Projects & Setup',context:'Project context',brain:'Project Brain',memory:'Memory bank',skills:'Skills','create-skill':'Create skill',accelerators:'Accelerators',kit3:'Open Source Kit'})[state.view];
-      $('page-subtitle').textContent = state.view === 'sessions' && session ? `${projectFor(session.project_id)?.name || 'Project'} · ${isFleetSession(session) ? 'Fleet review · ' : isClashSession(session) ? `Clash vs ${providerFor(session.clash?.challenger)?.name || session.clash?.challenger || 'challenger'} · ` : ''}${providerFor(session.provider)?.name || session.provider}` : ({results:session?.title || 'Choose a session',creator:'Reviewed generation and manifest-aware updates',sessions:[projectFor($('project').value)?.name,providerFor($('provider').value)?.name].filter(Boolean).join(' · '),setup:'Register projects and review accelerator installation',context:'The context available to your agents',brain:'Shared tasks, evidence, and decisions',memory:'Browse, search, and maintain project memory',skills:'Select and install skills for your project','create-skill':'Write and save your own project skill',accelerators:'Three ways to equip a project',kit3:'A catalog within your Harness'})[state.view];
-      $('open-results').hidden=!session || state.view!=='sessions';
-      $('open-results').disabled=Boolean(state.pending || state.loading);
-      $('session-status').hidden = state.view !== 'sessions' || !session;
+      const sessionLine = session ? `${projectFor(session.project_id)?.name || 'Project'} · ${isFleetSession(session) ? 'Fleet review · ' : isClashSession(session) ? `Clash vs ${providerFor(session.clash?.challenger)?.name || session.clash?.challenger || 'challenger'} · ` : ''}${providerFor(session.provider)?.name || session.provider}` : '';
+      $('page-title').textContent = ['sessions','results'].includes(state.view) ? session?.title || 'New session' : {knowledge:'Knowledge',skills:'Skills',accelerators:'Accelerators',setup:'Projects & Setup'}[groupOf(state.view)];
+      $('page-subtitle').textContent = ['sessions','results'].includes(state.view) ? session ? sessionLine : [projectFor($('project').value)?.name,providerFor($('provider').value)?.name].filter(Boolean).join(' · ') : ({brain:'Browsing runs no commands.',memory:'Browsing runs no commands.',context:'Files added to a session when Project context is on.'})[state.view] || '';
+      $('page-subtitle').hidden = !$('page-subtitle').textContent;
+      $('open-kit3').hidden = state.view !== 'kit3';
+      $('session-status').hidden = !['sessions','results'].includes(state.view) || !session;
       $('session-status').replaceChildren(); if (session) $('session-status').append(el('span',`status-dot ${session.status}`),document.createTextNode(sessionStatusLabel(session)));
       $('cancel-session').hidden = !['sessions','results'].includes(state.view) || !active(session);
       $('cancel-session').disabled = Boolean(state.pending); $('cancel-session').textContent = state.pending === 'cancel' ? 'Cancelling…' : state.view==='results' && resultUi.data?.checks.some(check=>['queued','running'].includes(check.status)) ? 'Cancel check' : 'Cancel session';
@@ -1889,7 +1912,7 @@
       const id = $('context-project').value; if (!id || !state.bootstrap) return; const epoch = ++state.contextEpoch; $('refresh-context').disabled = true; $('context-summary').textContent = 'Reading project context…'; $('context-files').replaceChildren(); showError('context-error','');
       try {
         const data = await api(`/api/projects/${encodeURIComponent(id)}/context`); if (epoch !== state.contextEpoch) return;
-        const files = data.files || []; $('context-summary').replaceChildren(el('span','',data.context_available ? 'Project context is available.' : 'No project context is available.'),el('span','',`${files.filter(file => file.exists).length} of ${files.length} files present`));
+        const files = data.files || []; $('context-summary').replaceChildren(el('span','',data.context_available ? `${files.filter(file => file.exists).length} of ${files.length} files present` : 'No project context files were found.'));
         if (!files.length) $('context-files').append(el('p','empty-note','No context files were reported for this project.'));
         for (const file of files) { const row = el('div','file-row'); row.append(el('span','file-path',file.path),el('span','file-status',file.exists ? 'Present' : 'Missing'),el('span','file-size',file.exists ? bytesLabel(file.bytes) : '—')); $('context-files').append(row); }
       } catch (error) { if (epoch === state.contextEpoch) { $('context-summary').textContent = ''; showError('context-error',textError(error)); } }
@@ -1897,7 +1920,7 @@
     }
     $('context-project').addEventListener('change',loadContext); $('refresh-context').addEventListener('click',loadContext);
     function cancelMemoryRequests() { memoryState.listEpoch++; memoryState.fileEpoch++; memoryState.listController?.abort(); memoryState.fileController?.abort(); memoryState.listController = null; memoryState.fileController = null; }
-    function clearMemoryContent(message) { $('memory-detail-header').hidden = true; $('memory-content').hidden = true; $('memory-content').textContent = ''; $('memory-content-notice').hidden = true; showError('memory-file-error',''); $('memory-message').textContent = message; $('memory-message').hidden = !message; }
+    function clearMemoryContent(message) { $('memory-detail-header').hidden = true; $('memory-metadata').hidden = true; $('memory-content').hidden = true; $('memory-content').textContent = ''; $('memory-content-notice').hidden = true; showError('memory-file-error',''); $('memory-message').textContent = message; $('memory-message').hidden = !message; }
     function memoryKind(kind) { return ({chunk:'Memory chunk',local:'Local note',document:'Document'})[kind] || kind; }
     function renderMemoryFiles() {
       const query = $('memory-filter').value.trim().toLowerCase();
@@ -1949,7 +1972,9 @@
         const query = new URLSearchParams({bank:bankId,path}); const data = await api(`/api/projects/${encodeURIComponent(projectId)}/memory?${query}`,{signal:controller.signal});
         if (epoch !== memoryState.fileEpoch || bankEpoch !== memoryState.listEpoch) return;
         $('memory-title').textContent = data.title || data.path; $('memory-path').textContent = data.path; $('memory-meta').textContent = [memoryKind(data.kind),data.id,data.status,bytesLabel(data.bytes)].filter(Boolean).join(' · '); Object.assign(entry,data); updateKnowledgeControls();
-        $('memory-content').textContent = typeof data.content === 'string' ? data.content : ''; $('memory-content').hidden = false; $('memory-content').scrollTop = 0; $('memory-message').hidden = true; $('memory-content-notice').hidden = !data.truncated;
+        const content = typeof data.content === 'string' ? data.content : '', front = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(content);
+        $('memory-metadata').hidden = !front; $('memory-metadata-content').textContent = front ? front[1] : '';
+        $('memory-content').textContent = front ? content.slice(front[0].length).replace(/^\s+/,'') : content; $('memory-content').hidden = false; $('memory-content').scrollTop = 0; $('memory-message').hidden = true; $('memory-content-notice').hidden = !data.truncated;
         if (scrollToContent && window.matchMedia('(max-width:760px)').matches) $('memory-details').scrollIntoView({block:'nearest',behavior:'instant'});
       } catch (error) { if (error.name !== 'AbortError' && epoch === memoryState.fileEpoch && bankEpoch === memoryState.listEpoch) { $('memory-message').hidden = true; showError('memory-file-error',textError(error)); } }
       finally { if (epoch === memoryState.fileEpoch) memoryState.fileController = null; }
@@ -2101,7 +2126,7 @@
       const entries = brainState.entries.filter(entry => (!category || brainCategory(entry) === category) && [entry.title,entry.path,entry.id,entry.external_id,entry.status,entry.owner,entry.type].join(' ').toLowerCase().includes(query)); $('brain-files').replaceChildren();
       for (const entry of entries) { const button = el('button','memory-entry'); button.type = 'button'; if (entry.path === brainState.path) button.setAttribute('aria-current','true'); button.append(el('span','memory-entry-title',entry.title || entry.path),el('span','memory-entry-path',entry.path),el('span','memory-entry-meta',[entry.type,entry.status,entry.phase,Number.isInteger(entry.revision) ? `rev ${entry.revision}` : '',bytesLabel(entry.bytes)].filter(Boolean).join(' · '))); button.addEventListener('click',() => selectBrainEntry(entry.path,true)); $('brain-files').append(button); }
       $('brain-count').textContent = `${entries.length}${query || category ? ` of ${brainState.entries.length}` : ''} records${brainState.truncated ? ' · listing limited' : ''}`;
-      if (!entries.length) $('brain-files').append(el('p','empty-note',query || category ? 'No records match this category and filter.' : brainState.bankId ? 'No readable Project Brain records in this root.' : 'No Project Brain found in this project.'));
+      if (!entries.length) $('brain-files').append(el('p','empty-note',query || category ? 'No records match this category and filter.' : brainState.bankId ? 'No records yet. Start a task from Record tools & maintenance.' : 'No Project Brain found in this project.'));
     }
     async function loadBrain({bank = brainState.bankId,preserve = true} = {}) {
       const projectId = $('brain-project').value; const projectChanged = projectId !== brainState.projectId; if (projectChanged) { bank = null; preserve = false; $('brain-filter').value = ''; $('brain-category').value = ''; }
@@ -2116,7 +2141,7 @@
         if (epoch !== brainState.listEpoch) return; brainState.banks = data.banks || []; brainState.bankId = data.bank_id || null; brainState.entries = data.entries || []; brainState.truncated = Boolean(data.truncated); setOptions($('brain-bank'),brainState.banks,item => item.name,item => item.id,brainState.bankId);
         $('brain-root').textContent = data.bank_id ? `${data.root ? `${data.root}/` : ''}project-brain` : ''; $('brain-list-notice').hidden = !brainState.truncated; renderBrainCategories(); renderBrainFiles(); loadKnowledgeMetadata('brain');
         const entry = brainState.entries.find(item => item.path === previousPath && brainState.bankId === bank) || brainState.entries.find(item => brainCategory(item) === 'tasks' || item.type === 'task') || brainState.entries[0];
-        if (entry) selectBrainEntry(entry.path); else clearBrainContent(data.brain_available === false ? 'No Project Brain exists in this knowledge root.' : 'No readable Project Brain records.');
+        if (entry) selectBrainEntry(entry.path); else clearBrainContent(data.brain_available === false ? 'No Project Brain exists in this knowledge root.' : '');
       } catch (error) { if (error.name !== 'AbortError' && epoch === brainState.listEpoch) { $('brain-count').textContent = ''; showError('brain-error',textError(error)); clearBrainContent('Project Brain could not be loaded. Refresh to try again.'); } }
       finally { if (epoch === brainState.listEpoch) { brainState.listController = null; updateKnowledgeControls(); } }
     }
@@ -2317,7 +2342,7 @@
       const ready = Boolean(state.bootstrap) && !state.authFailed; const busy = Boolean(setupState.pending); const locked = busy || setupState.registerPending || setupState.projectsPending; const project = projectFor($('setup-project').value); const available = project && project.available !== false && (setupState.projectId !== project.id || setupState.data?.available !== false);
       $('setup-project-path').disabled = !ready || locked; $('setup-register').disabled = !ready || locked; $('setup-register').textContent = setupState.registerPending ? 'Adding project…' : 'Add project';
       $('setup-browse').disabled = !ready || locked;
-      $('setup-project').disabled = !state.bootstrap || locked; $('setup-refresh-projects').disabled = !ready || locked; $('setup-refresh').disabled = !ready || locked || setupState.loading || !project;
+      $('setup-project').disabled = !state.bootstrap || locked; $('setup-refresh-projects').disabled = !ready || locked;
       $('setup-edition').disabled = !ready || locked || setupState.loading || !available || !setupState.data?.editions?.length;
       for (const input of $('setup-tools').querySelectorAll('input')) input.disabled = !ready || locked || setupState.loading || !available;
       $('setup-preview-button').disabled = !ready || locked || setupState.loading || !available || setupState.projectId !== project?.id || !setupState.data || !$('setup-edition').value || !setupState.tools.size;
@@ -2335,7 +2360,8 @@
       const git = data.git || {}; const gitLabel = git.is_git ? `${git.branch || (git.head ? 'Detached HEAD' : 'Unborn branch')}${git.head ? ` · ${git.head.slice(0,8)}` : ''}${git.dirty === true ? ' · uncommitted changes' : git.dirty === false && git.head ? ' · clean' : ''}` : git.reason || 'No Git repository detected';
       const checks = [['Git checkout',gitLabel],['Recorded edition',data.installed_edition ? `${data.installed_edition} · ${data.payload_verified ? 'matches the reviewed payload' : 'payload differs or is unverified'}` : 'No edition recorded by Setup'],['Project files',[['policy','Policy'],['memory_runtime','Memory runtime'],['brain_runtime','Brain runtime']].map(([key,name]) => `${name}: ${data.readiness?.[key] ? 'present' : 'not detected'}`).join('\n')]];
       for (const [label,text] of checks) { const card = el('div','setup-check'); card.append(el('strong','',label),el('span','',text)); $('setup-readiness-grid').append(card); }
-      for (const provider of data.providers || []) { const row = el('div','setup-provider'); row.append(el('strong','',`${provider.name || provider.id}: ${provider.available ? 'CLI available' : 'CLI unavailable'}`),el('span','',provider.detail || '')); $('setup-providers').append(row); }
+      for (const provider of data.providers || []) { const row = el('div','setup-provider'); row.append(el('strong','',`${provider.name || provider.id} · ${provider.available ? 'CLI found' : 'CLI unavailable'}`)); if (!provider.available && provider.detail) row.append(el('span','',provider.detail)); $('setup-providers').append(row); }
+      if (data.scope?.length) $('setup-diagnostics').append(el('p','knowledge-note',data.scope.map(String).join(' ')));
       for (const diagnostic of data.diagnostics || []) $('setup-diagnostics').append(el('p','memory-notice',String(diagnostic)));
     }
     function renderSetupTools() {
@@ -2351,8 +2377,8 @@
       if (!projectId) { setupState.loading = false; setupState.controller = null; updateSetupControls(); return; }
       try { const data = await api(`/api/projects/${encodeURIComponent(projectId)}/setup`,{signal:controller.signal}); if (epoch !== setupState.epoch || projectId !== $('setup-project').value) return;
         if (data.project_id !== projectId || !Array.isArray(data.editions) || !Array.isArray(data.tools)) throw new Error('The runner returned incomplete project setup information. Refresh readiness to try again.');
-        setupState.data = data; if (typeof data.available === 'boolean' && projectFor(projectId)) projectFor(projectId).available = data.available; $('setup-project-location').textContent = data.path || projectFor(projectId)?.path || ''; $('setup-readiness-status').textContent = projectFor(projectId)?.available === false ? 'This registered project is currently unavailable. Its path is kept in the project list.' : 'Project inspection complete.';
-        const preferred = setupState.preferredEdition || $('setup-edition').value || data.installed_edition; setOptions($('setup-edition'),data.editions,item => item.name,item => item.id,preferred); setupState.preferredEdition = null; renderSetupReadiness(); renderSetupTools();
+        setupState.data = data; if (typeof data.available === 'boolean' && projectFor(projectId)) projectFor(projectId).available = data.available; $('setup-project-location').textContent = data.path || projectFor(projectId)?.path || ''; $('setup-readiness-status').textContent = projectFor(projectId)?.available === false ? 'This registered project is currently unavailable. Its path is kept in the project list.' : '';
+        const preferred = setupState.preferredEdition || $('setup-edition').value || data.installed_edition; setOptions($('setup-edition'),[{id:'',name:'Choose an edition…'},...data.editions],item => item.name,item => item.id,preferred || ''); setupState.preferredEdition = null; renderSetupReadiness(); renderSetupTools();
       } catch (error) { if (error.name !== 'AbortError' && epoch === setupState.epoch) { $('setup-readiness-status').textContent = projectFor(projectId)?.available === false ? 'The registered folder is unavailable. Restore its path or add an existing folder.' : 'Project inspection could not finish.'; showError('setup-readiness-error',textError(error)); } }
       finally { if (epoch === setupState.epoch) { setupState.loading = false; setupState.controller = null; updateSetupControls(); } }
     }
@@ -2394,11 +2420,12 @@
         if (typeof data.ok !== 'boolean' || !Array.isArray(data.installed) || !Array.isArray(data.merged) || !Array.isArray(data.unchanged)) throw new Error('The runner returned an incomplete installation result. Some files may have been written. Refresh readiness and prepare a new preview before retrying.');
         confirmed = data.ok; $('setup-result-title').textContent = data.ok ? 'Accelerator installation complete' : 'Installation did not complete'; $('setup-result-target').textContent = label; $('setup-result-summary').textContent = data.summary || (data.ok ? 'Reviewed files were installed.' : 'Check the reported file results before preparing another preview.'); $('setup-result-paths').textContent = [...data.installed.map(path => `Installed  ${path}`),...data.merged.map(path => `Merged     ${path}`),...data.unchanged.map(path => `Unchanged  ${path}`)].join('\n'); $('setup-result').hidden = false; showError('setup-action-error',data.ok ? '' : data.error || 'Installation may be partial. Review the reported files and prepare a new preview.'); $('setup-action-status').textContent = data.ok ? 'Installation complete. Refreshing project readiness…' : 'Installation did not complete. Refresh readiness and prepare a new preview.';
       } catch (error) { if (epoch === setupState.previewEpoch) { $('setup-action-status').textContent = 'Installation was not confirmed.'; showError('setup-action-error',`${textError(error)} The preview is consumed. Refresh readiness and generate a new preview before retrying.${error.status === 0 ? ' The connection was lost; some files may have been installed.' : ''}`); } }
-      finally { if (epoch === setupState.previewEpoch) { setupState.pending = null; updateSetupControls(); if ($('setup-project').value === selection.project_id) await loadSetup({preservePreview:true}); if (confirmed) $('setup-action-status').textContent = setupState.data ? 'Installation complete. Project readiness refreshed.' : 'Installation complete. Refresh readiness to inspect the project.'; } }
+      finally { if (epoch === setupState.previewEpoch) { setupState.pending = null; $('setup-preview').hidden = true; $('setup-preview-files').replaceChildren(); updateSetupControls(); if ($('setup-project').value === selection.project_id) await loadSetup({preservePreview:true}); if (confirmed) $('setup-action-status').textContent = setupState.data ? 'Installation complete. Project readiness refreshed.' : 'Installation complete. Refresh readiness to inspect the project.'; } }
     }
-    $('setup-register-form').addEventListener('submit',registerProject); $('setup-refresh-projects').addEventListener('click',refreshProjects); $('setup-refresh').addEventListener('click',() => loadSetup()); $('setup-project').addEventListener('change',() => loadSetup()); $('setup-edition').addEventListener('change',() => invalidateSetupPreview('Edition changed. Prepare a new preview.'));
+    $('setup-register-form').addEventListener('submit',registerProject); $('setup-refresh-projects').addEventListener('click',refreshProjects); $('setup-project').addEventListener('change',() => loadSetup()); $('setup-edition').addEventListener('change',() => invalidateSetupPreview('Edition changed. Prepare a new preview.'));
     $('setup-preview-button').addEventListener('click',previewSetup); $('setup-install-button').addEventListener('click',installSetup); $('setup-preview-actions').addEventListener('change',renderSetupPreviewFiles); $('setup-preview-path').addEventListener('input',renderSetupPreviewFiles);
     $('setup-start-session').addEventListener('click',() => { if (!$('setup-start-session').disabled) newSession('',$('setup-project').value); });
+    $('setup-result-start').addEventListener('click',() => { if (!$('setup-start-session').disabled) newSession('',$('setup-project').value); });
     function skillsSelection() { return {project_id:$('skills-project').value,source_id:$('skills-source').value,skills:[...skillsState.selectedSkills].sort(),agents:[...skillsState.selectedAgents].sort()}; }
     function skillsSelectionKey() { return JSON.stringify(skillsSelection()); }
     function skillAgentName(id) { return skillsState.catalog?.agents.find(agent => agent.id === id)?.name || id; }
@@ -2435,7 +2462,7 @@
       $('skills-source-description').textContent = source?.description || ''; $('skills-source-link').hidden = true; $('skills-source-link').removeAttribute('href');
       if (source?.url) { try { const url = new URL(source.url); if (['https:','http:'].includes(url.protocol)) { $('skills-source-link').href = url.href; $('skills-source-link').hidden = false; } } catch (_) {} }
     }
-    function clearDiscoveredSkills() { skillsState.discoveredSourceId = null; skillsState.skills = []; skillsState.selectedSkills.clear(); $('skills-filter').value = ''; $('skills-discovery-notice').hidden = true; invalidateSkillsPreview(); renderSkillChoices(); }
+    function clearDiscoveredSkills() { $('skills-availability').hidden = false; skillsState.discoveredSourceId = null; skillsState.skills = []; skillsState.selectedSkills.clear(); $('skills-filter').value = ''; $('skills-discovery-notice').hidden = true; invalidateSkillsPreview(); renderSkillChoices(); }
     function visibleSkills() { const query = $('skills-filter').value.trim().toLowerCase(); return skillsState.skills.filter(skill => [skill.id,skill.name,skill.description].join(' ').toLowerCase().includes(query)); }
     function renderSkillCounts() { $('skills-selection-count').textContent = skillsState.discoveredSourceId ? `${skillsState.selectedSkills.size} of ${skillsState.skills.length} selected` : 'No skills loaded'; $('skills-visible-count').textContent = $('skills-filter').value.trim() ? `${visibleSkills().length} matching` : ''; }
     function renderSkillChoices() {
@@ -2469,7 +2496,7 @@
         const agentIds = data.agents.map(agent => agent.id); skillsState.selectedAgents = new Set([...skillsState.selectedAgents].filter(id => agentIds.includes(id)));
         if (!skillsState.agentsInitialized) { const preferred = agentIds.includes($('provider').value) ? $('provider').value : agentIds.includes('codex') ? 'codex' : agentIds[0]; if (preferred) skillsState.selectedAgents.add(preferred); skillsState.agentsInitialized = true; }
         if (before !== skillsSelectionKey()) invalidateSkillsPreview();
-        $('skills-availability').textContent = [data.detail || (data.available ? 'The local skill installer is available.' : 'Skill installation is unavailable.'),data.sources.length ? 'Load skills downloads the selected source and may take a few minutes on the first load.' : 'No skill sources are configured.'].join(' ');
+        $('skills-availability').textContent = !data.available ? data.detail || 'Skill installation is unavailable.' : !data.sources.length ? 'No skill sources are configured.' : 'The first load downloads the source and can take minutes.';
         renderSkillSource(); renderSkillAgents();
       } catch (error) { if (epoch === skillsState.catalogEpoch) { skillsState.catalogError = true; skillsState.preview = null; $('skills-availability').textContent = 'The skill catalog is unavailable. Reopen Skills or reconnect to try again.'; showError('skills-catalog-error',textError(error)); } }
       finally { if (epoch === skillsState.catalogEpoch) { skillsState.catalogPending = false; if (state.view === 'create-skill' || createSkillState.agentsInitialized) renderCreateSkillAgents(); updateSkillsControls(); } }
@@ -2485,7 +2512,7 @@
         if (data.source_id !== sourceId || !Array.isArray(data.skills)) throw new Error('The runner returned an unexpected skill selection. Load the source again.');
         skillsState.discoveredSourceId = sourceId; skillsState.skills = data.skills;
         $('skills-discovery-notice').textContent = data.notice || ''; $('skills-discovery-notice').hidden = !data.notice;
-        setSkillsActionStatus(`${data.skills.length} ${data.skills.length === 1 ? 'skill is' : 'skills are'} available. Select the skills you want to install.`); renderSkillChoices();
+        setSkillsActionStatus(''); $('skills-availability').hidden = true; renderSkillChoices();
       } catch (error) { if (epoch === skillsState.actionEpoch) { setSkillsActionStatus(''); showError('skills-action-error',error.status === 0 ? 'The connection was lost while loading skills. Reconnect, then load the source again.' : textError(error)); } }
       finally { if (epoch === skillsState.actionEpoch) { skillsState.pending = null; updateSkillsControls(); } }
     }
@@ -2583,7 +2610,7 @@
       const holder = $('skills-installed-list'); holder.replaceChildren(); const agent = $('skills-installed-agent').value;
       const visible = skillsState.installed.filter(skill => !agent || skill.agent === agent);
       for (const skill of visible) {
-        const row = el('div','skills-file'); const copy = el('div'); copy.append(el('p','skills-installed-name',`${skill.name} · ${skillAgentName(skill.agent)}`),el('div','skills-installed-path',skill.path),el('p','skills-note',skill.managed ? `${skill.source} · ${skill.revision} · ${humanLabel(skill.state)}` : 'Untracked installation'));
+        const row = el('div','skills-file'); const copy = el('div'); copy.append(el('p','skills-installed-name',`${skill.name} · ${skillAgentName(skill.agent)}`),el('div','skills-installed-path',skill.path)); if (skill.managed) copy.append(el('p','skills-note',`${skill.source} · ${skill.revision} · ${humanLabel(skill.state)}`));
         const actions = el('div','skills-actions');
         if (skill.managed) {
           if (skill.source_id !== 'local') { const update = el('button','button','Check update'); update.type = 'button'; update.setAttribute('aria-label',`Check update for ${skill.name} in ${skillAgentName(skill.agent)}`); update.addEventListener('click',() => previewSkillChange(skill,'update')); actions.append(update); }
@@ -2592,7 +2619,9 @@
         row.append(copy,actions); holder.append(row);
       }
       if (skillsState.installedPending || skillsState.installedError) return;
-      $('skills-installed-status').textContent = !skillsState.installedProjectId ? 'Choose a project to see its installed skills.' : `${visible.length} ${visible.length === 1 ? 'skill' : 'skills'}${agent ? ` for ${skillAgentName(agent)}` : ' across all tools'}.`;
+      const managed = visible.filter(skill => skill.managed).length, untracked = visible.length - managed;
+      $('skills-installed-status').textContent = !skillsState.installedProjectId ? 'Choose a project to see its installed skills.' : `${visible.length} installed${agent ? ` for ${skillAgentName(agent)}` : ''}${!visible.length ? '' : !managed ? ' · all untracked' : untracked ? ` · ${managed} managed · ${untracked} untracked` : ' · all managed'}`;
+      $('skills-untracked-help').hidden = !untracked;
       if (!visible.length && skillsState.installedProjectId) holder.append(el('p','empty-note',agent ? 'No installed skills were found for this tool.' : 'No installed skills were found in this project.'));
     }
     async function refreshInstalledSkills() {
@@ -2638,7 +2667,7 @@
       for (const input of $('create-skill-agents').querySelectorAll('input')) input.disabled = !state.bootstrap || pending;
       showError('create-skill-agents-error',createSkillState.touched.has('agents') ? errors.agents || '' : '');
       $('create-skill-bytes').textContent = `${new TextEncoder().encode($('create-skill-instructions').value).length.toLocaleString()} / 32,000 UTF-8 bytes`;
-      $('create-skill-preview-button').disabled = !ready || pending || !createSkillState.agentsInitialized || Object.keys(errors).length > 0;
+      $('create-skill-preview-button').disabled = !ready || pending || !createSkillState.agentsInitialized;
       $('create-skill-preview-button').textContent = createSkillState.pending === 'preview' ? 'Preparing preview…' : 'Preview skill';
       $('create-skill-save').disabled = !ready || pending || Object.keys(errors).length > 0 || !createSkillState.preview?.can_install || !createSkillState.preview?.preview_id || createSkillState.preview.draftKey !== createSkillDraftKey();
       $('create-skill-save').textContent = createSkillState.pending === 'save' ? 'Saving skill…' : 'Save skill';
@@ -2670,7 +2699,7 @@
     async function previewCreateSkill(event) {
       event?.preventDefault(); if (createSkillState.pending) return;
       for (const name of ['project','name','agents','description','instructions']) createSkillState.touched.add(name); updateCreateSkillControls();
-      if ($('create-skill-preview-button').disabled) { const first = Object.keys(createSkillErrors())[0]; if (first === 'agents') $('create-skill-agents').querySelectorAll('input')[0]?.focus(); else if (first) $(`create-skill-${first}`).focus(); return; }
+      if ($('create-skill-preview-button').disabled || Object.keys(createSkillErrors()).length) { const first = Object.keys(createSkillErrors())[0]; if (first === 'agents') $('create-skill-agents').querySelectorAll('input')[0]?.focus(); else if (first) $(`create-skill-${first}`).focus(); return; }
       const draft = createSkillDraft(); const draftKey = createSkillDraftKey(); invalidateCreateSkillPreview(); createSkillState.pending = 'preview'; const epoch = ++createSkillState.epoch;
       setCreateSkillStatus('Generating SKILL.md and checking the target files…'); updateCreateSkillControls();
       try {
@@ -2681,7 +2710,7 @@
         for (const file of data.files) appendSkillFile($('create-skill-preview-files'),file.path,file.status,({new:'New',identical:'Identical',conflict:'Conflict'})[file.status] || file.status);
         if (!data.files.length) $('create-skill-preview-files').append(el('p','skills-note','No target files were returned.'));
         $('create-skill-preview-note').textContent = data.can_install ? 'Save copies the new files and keeps identical files unchanged.' : 'Saving is blocked. Address the reported issues, then preview the skill again.';
-        $('create-skill-preview').hidden = false; setCreateSkillStatus(data.can_install ? 'Preview ready. Review SKILL.md and its target paths before saving.' : 'This preview cannot be saved. No project files have been changed.');
+        $('create-skill-preview').hidden = false; $('create-skill-preview').scrollIntoView({block:'nearest'}); setCreateSkillStatus(data.can_install ? 'Preview ready. Review SKILL.md and its target paths before saving.' : 'This preview cannot be saved. No project files have been changed.');
       } catch (error) { if (epoch === createSkillState.epoch) { setCreateSkillStatus(''); showError('create-skill-action-error',error.status === 0 ? 'The connection was lost while preparing your skill. Your draft is still here. Reconnect and preview it again.' : textError(error)); } }
       finally { if (epoch === createSkillState.epoch) { createSkillState.pending = null; renderCreateSkillAgents(); updateCreateSkillControls(); } }
     }
@@ -2740,7 +2769,8 @@
     function creatorControls() {
       $('creator-runs').disabled=creatorUi.pending;
       $('creator-count').max=String(maxAgentCount()); $('creator-count').disabled=!$('creator-agents').checked || creatorUi.pending;
-      $('creator-branch-field').hidden=$('creator-workspace').value!=='worktree';
+      $('creator-branch-field').hidden=$('creator-workspace').value!=='worktree'; $('creator-worktree-note').hidden=$('creator-workspace').value!=='worktree';
+      const helpers=$('creator-count').valueAsNumber; $('creator-agent-hint').textContent=$('creator-agents').checked && Number.isInteger(helpers) ? `Each scan and generate phase launches exactly ${helpers} ${helpers===1?'helper':'helpers'}, in batches if needed.` : '';
       $('creator-start').disabled=creatorUi.pending || !creatorUi.available || !providerFor($('creator-provider').value)?.available;
       for (const input of $('creator-form').querySelectorAll('input,textarea,select,button')) if (input.id!=='creator-start' && input.id!=='creator-count') input.disabled=creatorUi.pending;
       creatorBudgetControls();
@@ -2786,7 +2816,7 @@
         // the fields show what a re-launch would apply (and what the user then
         // edits), instead of leaving stale defaults. Not on every poll - that
         // would wipe edits while a phase runs.
-        if(creatorUi.detail?.run.id!==data.run.id){const r=data.run;$('creator-model').value=r.model||'';$('creator-effort').value=r.thinking_effort||'';$('creator-agents').checked=r.agents_enabled===true;$('creator-count').value=Number.isInteger(r.agent_count)?r.agent_count:defaultAgentCount();creatorControls();}
+        if(creatorUi.detail?.run.id!==data.run.id){const r=data.run;if(r.provider && [...$('creator-provider').options].some(option=>option.value===r.provider)) $('creator-provider').value=r.provider;$('creator-model').value=r.model||'';creatorModels();$('creator-effort').value=r.thinking_effort||'';if(r.thinking_effort && $('creator-effort').value!==r.thinking_effort){const option=el('option','',r.thinking_effort);option.value=r.thinking_effort;$('creator-effort').append(option);$('creator-effort').value=r.thinking_effort;}$('creator-agents').checked=r.agents_enabled===true;$('creator-count').value=Number.isInteger(r.agent_count)?r.agent_count:defaultAgentCount();creatorControls();}
         creatorUi.detail=data; renderCreator();
         if(creatorBusy(data.run)) creatorUi.timer=setTimeout(()=>readCreator(rid,epoch),2000);
       } catch(error) { if(epoch===creatorUi.epoch) showError('creator-action-error',textError(error)); }

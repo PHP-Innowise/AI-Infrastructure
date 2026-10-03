@@ -506,7 +506,7 @@ class SetupManager:
             'payload_verified': False, 'git': {'is_git': False},
             'providers': [{key: value for key, value in provider.items() if key in ('id', 'name', 'available', 'detail')}
                           for provider in self.sessions.providers.values()],
-            'diagnostics': ['Provider availability means the CLI was found; authentication is not checked.']}
+            'scope': ['CLI found; authentication is not checked.'], 'diagnostics': []}
         source_fd = None
         try:
             source_fd = _root_fd(self.source_root)
@@ -562,10 +562,10 @@ class SetupManager:
                             result['diagnostics'].append('Installed files differ from the last successful Setup receipt.')
             try:
                 result['git'] = git_details(Path(project['path']), include_status=False)
-                result['diagnostics'].append('Git branch metadata only; working-tree changes were not inspected.')
+                result['scope'].append('Git branch only; the working tree was not inspected.')
             except SessionError:
                 result['diagnostics'].append('Git metadata is unavailable. Project execution can still use local files.')
-            result['diagnostics'].append('Readiness is a static file check; project scripts and hooks were not executed.')
+            result['scope'].append('Static file check; no project scripts or hooks ran.')
         except (SessionError, ValueError, TypeError, AttributeError):
             result['diagnostics'].append('The project is missing, unsafe, or contains invalid setup metadata. Restore it before setup.')
         finally:

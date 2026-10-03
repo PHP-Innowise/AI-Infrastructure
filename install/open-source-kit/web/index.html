@@ -10,6 +10,7 @@
   <script>
     // Inside the Harness (same origin) its theme choice applies, live; elsewhere the system theme does.
     (() => {
+      if (window.self !== window.top) document.documentElement.dataset.embedded = 'true';
       const system = window.matchMedia('(prefers-color-scheme: dark)');
       const apply = () => {
         let saved = null;
@@ -28,6 +29,10 @@
     /* Type, shape and control scale shared with the Harness. Spacing uses a 4px grid. */
     :root { --font-sans:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; --font-mono:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace; --text-meta:11px; --text-ui:12px; --text-body:13px; --text-title:15px; --text-display:20px; --text-hero:28px; --weight-regular:400; --weight-strong:600; --leading-tight:1.25; --leading-ui:1.45; --leading-body:1.6; --radius-sm:4px; --radius:6px; --radius-md:8px; --radius-lg:12px; --control-height:36px; }
     * { box-sizing:border-box; }
+    /* Inside the Harness the frame already sits under its own title: keep the catalog and its two tabs only. */
+    :root[data-embedded="true"] .brand,:root[data-embedded="true"] .hero,:root[data-embedded="true"] .site-footer { display:none; }
+    :root[data-embedded="true"] .header-inner { min-height:48px; justify-content:flex-start; }
+    :root[data-embedded="true"] #catalog-view { padding-top:24px; }
     body { margin:0; font-size:var(--text-title); line-height:var(--leading-body); }
     button,input,select { font:inherit; }
     button,a,input,select,summary { -webkit-tap-highlight-color:transparent; }

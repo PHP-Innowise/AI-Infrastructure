@@ -26,6 +26,22 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Regroup the Harness into five sections: Sessions, Knowledge (Project Brain,
+  Memory bank, Context files), Skills (Library, Create skill), Accelerators
+  (Overview, Infrastructure Creator, Open Source Kit) and Projects & Setup.
+  Tabs replace the separate entries, every view has its own `#/view` address,
+  and Results & verification becomes a tab of the open session. Slogan headings
+  give way to one title per view, and the embedded Kit 3 catalog drops its own
+  header, hero and footer. Setup readiness now separates the constant `scope`
+  notes from real `diagnostics`, so only problems are highlighted. Copy across
+  Setup, Creator, Skills, Knowledge and Results is cut to the decision point;
+  the README gains interface copy rules. Fixes: Creator no longer posts a
+  `null` thinking effort when a run's provider differs from the form; Setup
+  hides a used preview after installing and no longer preselects an edition;
+  Create skill shows what is missing when clicked; Recent sessions keeps focus
+  while a session runs; Memory documents open on their text, with front matter
+  under Metadata.
+
 - Calm the Harness Sessions screen. The launch fields sit in one row, and Mode
   appears only when the workflow leaves it open. Optional settings (helpers,
   Clash, workspace, Brain task, budgets, separate models) become chips that
