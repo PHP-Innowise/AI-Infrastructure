@@ -26,6 +26,75 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Show a live **Agents** panel for System Orchestration runs and AI scans: one
+  card per contract, service, verification or discovery agent with state, time,
+  granted folders, tool calls, tokens and changed files, plus a timeline of its
+  messages, reasoning summaries, plans and tool targets. Workers stream native
+  output line by line; Claude workers now use `stream-json` with the same
+  `--json-schema` terminal `structured_output`. Activity is display-only,
+  redacted, bounded per agent and launch, and never stores file contents, diffs,
+  command output or prompts. Run details list each launch; runner status no
+  longer disappears behind the first page of events.
+- Add `--access all` (browser default: **All selected services**) so every
+  system worker can read all selected service folders and, in edit mode, change
+  files in any of them; the system folder stays read-only. Claude receives the
+  folders through `--add-dir`, Codex through writable roots; Cursor is limited to
+  the own-service scope. Cross-service changes are reported as
+  `<service-id>/<path>` and adopted only when reported. Contract and verification
+  workers now read every selected service under Claude in both scopes. The scope
+  is pinned in the journal; older journals resume with the own-service scope.
+- Fix intermittent HTTP 400 responses while polling a live system run: a journal
+  file being published by link-then-unlink is read on the next poll instead.
+- Replace the opaque `Native AI discovery CLI failed` with the actual cause: an
+  expired or missing CLI login (with `claude auth login`, `codex login` or
+  `cursor-agent login`), a sandbox that cannot start (with AppArmor and
+  user-namespace hints), a CLI that cannot start inside the sandbox, a timeout or
+  a rate limit. Blocked system dispatches show the same CLI reason on the agent
+  card and in the run log. Probe bubblewrap before queueing a scan and warn in the
+  editor. Document troubleshooting, including an AppArmor profile for bubblewrap,
+  and enable user namespaces for the discovery tests on GitHub's Ubuntu runners.
+
+- Automatically fill Harness system/service forms through Codex, Claude or
+  Cursor from bounded, filtered evidence snapshots. Show sources/uncertainties,
+  validate every service and contract, retain unknown ownership and incomplete
+  dependency coverage, and require fresh evidence at preview and final save.
+  Use the existing serialized queue/watchdog for cancellation/restart; isolate
+  source reads from original projects while allowing native CLI runtime/account
+  state. Cover real subprocess adapters and the visible browser form flow.
+
+- Create and edit system orchestration in Harness through a folder browser and
+  forms for service ownership, capabilities, contracts, dependencies and context
+  sources. Register selected folders and generate metadata without JSON input.
+  Validate the full graph before saving, reject stale forms/files, preserve file
+  permissions and recover interrupted multi-file saves with a durable journal.
+  Block metadata writes/recovery during active sessions; retain detected external
+  edits as conflicts. Cover localhost API, persistence and failure paths.
+
+- Support Claude Code and Cursor Agent for system workers in the CLI and Harness
+  UI alongside Codex. Share native permission/delegation flags, validate Claude
+  structured output and Cursor terminal reports, bound Cursor prompt bytes,
+  and pin provider/executable across recovery. Preserve legacy Codex requests.
+  Cover native reports, modes, retry and cancellation with deterministic CLIs.
+
+- Integrate system orchestration into Harness UI: declared service graphs,
+  capabilities and memory ownership, reviewed context/impact plans, sequential
+  Codex execution through the shared queue, live receipts/native task references,
+  cancellation and explicit recovery. Derive filesystem access from registered
+  projects; preserve pending launch identity across crashes and stop detached
+  worker trees through nested watchdogs. Cover real HTTP/native Brain paths on
+  Python 3.9 and current Python using deterministic provider fixtures.
+
+- Add an optional stack-neutral system planner (`scripts/ai_system.py`) for
+  service passports, declared contract impact, globally budgeted context,
+  Mermaid maps and cross-service plans. Preserve local Brain/Memory ownership,
+  require explicit access to external roots, fingerprint sources/commits and
+  detect changed or newly available inputs. Include a synthetic three-service
+  example and stdlib regression coverage. Add explicit sequential Codex/custom
+  adapter execution, native system/service Brain tasks, structured terminal
+  receipts, source checkpoints and crash-safe reconciliation. Require explicit
+  retries for ambiguous writes; complete tasks only after reported cross-service
+  verification and preserve knowledge handoff without promoting raw context.
+
 - Run Harness Creator phases on macOS through the built-in `sandbox-exec`
   (Seatbelt) profile when bubblewrap is absent: writes are allowed only in the
   run workspace, a private temporary directory, the per-user temporary space and

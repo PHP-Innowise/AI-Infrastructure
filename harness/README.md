@@ -15,6 +15,70 @@ Filenames and sizes are validated, and stored bytes are checked before use.
 Attachments are reference data and are not automatically executed or promoted
 into Memory Bank. A failed send retains the selected files for correction.
 
+## System orchestration in the browser
+
+**System Orchestration** coordinates development changes across registered
+service repositories. Choose **Choose system folder**, then **Create / edit system**.
+Use **Add service folder** to browse existing folders; selected folders are
+registered automatically. Select **Codex, Claude Code or Cursor Agent**, then
+**Fill with AI** to discover the system name, service IDs, owners, responsibilities,
+capabilities, contracts, dependencies and context sources from a bounded evidence
+snapshot. The ordinary forms are populated automatically, with cited files and
+uncertainties available for review. Unknown owners stay `unknown`; complete
+dependency coverage stays unconfirmed. Review or adjust the result, then
+**Save system**. The application writes `system.json` and service passports;
+no JSON editing is required. Existing systems open in the same form.
+AI scanning uses the single Harness queue, supports cancellation and restores
+its original draft after interruption/reload. It requires bubblewrap on Linux or
+`sandbox-exec` on macOS, plus an installed/authenticated native CLI. The agent
+reads copied evidence; original service folders and unrelated projects are absent
+from its filesystem. OS/CLI runtime and that provider's native account state remain
+available for login and normal CLI operation. This is not isolation from the
+provider's own account/history data. Secret patterns, links, binaries, dependency
+trees and ineligible memory chunks are excluded. Limits are 50 services, 120 files
+and 1 MiB per root, 64 KiB per file, 8 MiB total; omissions are reported. Sources
+are checked again before accepting results and at both save stages. Manual
+editing remains available when a CLI or isolation backend is unavailable.
+A failed scan names its cause (for example an expired CLI login with the command
+to sign in again, or a host that blocks bubblewrap's user namespaces), and the
+editor warns before scanning when the sandbox cannot start on this host. See
+[Troubleshooting AI discovery](../docs/AI-SYSTEM-ORCHESTRATION.md#troubleshooting-ai-discovery).
+Alternatively, load an existing relative `system.json`. Inspect the declared graph,
+capabilities and memory ownership, select a starting service or changed contract,
+and prepare a bounded context/impact plan. Review its sources before execution.
+The backend checks freshness again when queued work actually starts.
+
+Choose **Codex, Claude Code or Cursor Agent** in the reviewed plan. Each uses
+its configured CLI and default model. The provider is fixed after launch,
+including recovery. Browser requests cannot supply executables. Workers run
+sequentially through the same single Harness queue;
+read-only is the default. Native system/service Brain task records are written
+even in read-only mode. Edit mode uses each service's current checkout.
+**Service folder access** decides which selected service folders agents may use:
+**All selected services** (the browser default) lets every agent read all of
+them and, in edit mode, lets each service agent change files in any of them;
+**Own service only** keeps each service agent in its own folder. The system
+folder stays read-only. Claude receives the folders through `--add-dir`, Codex
+through writable roots; Cursor Agent supports only own-service access.
+
+The **Agents** panel follows a launched run live: one card per agent (contract,
+each service, verification) with state, time, granted folders, tool calls,
+tokens and changed files, and a timeline of what the selected agent says, plans,
+reads, runs and edits. Paths appear as `service · path`. It stores no file
+contents, diffs, command output or prompts, redacts detected secrets and is
+bounded per agent and launch; receipts stay authoritative. During **Fill with
+AI** the same panel follows the discovery agent and maps copied evidence back to
+original service paths.
+
+Saved runs show dispatch state, worker-reported checks, scoped changed files,
+native task references and the knowledge handoff. Cancel stops provider trees;
+recovery requires an explicit resume and an explicit dispatch retry after an
+ambiguous interruption. Inspect partial edits before accepting changed sources.
+Completed dispatches are skipped, and server restart never automatically resumes
+work. The folder picker registers external service roots; existing manifests
+can also use roots registered in **Projects & Setup**. The manifest
+cannot grant host filesystem access. See the [system orchestration guide](../docs/AI-SYSTEM-ORCHESTRATION.md#harness-ui).
+
 ## Infrastructure Creator in the browser
 
 Choose **Infrastructure Creator** (also available through Kit 1), a registered

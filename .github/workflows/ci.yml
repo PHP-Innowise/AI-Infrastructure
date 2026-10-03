@@ -6,6 +6,32 @@ on:
   pull_request:
 
 jobs:
+  system-orchestration:
+    name: "system orchestration (Python ${{ matrix.python }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.x"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Test universal system planning and execution
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y bubblewrap
+          # Ubuntu 24.04 runners block unprivileged user namespaces through AppArmor,
+          # which the AI discovery sandbox (bubblewrap) needs.
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --unshare-pid --ro-bind / / --proc /proc --dev /dev true
+          python3 -m unittest tests.test_ai_system tests.test_ai_system_providers tests.test_ai_system_execution tests.test_harness_system_orchestration tests.test_harness_system_editor tests.test_harness_system_discovery tests.test_harness_agent_activity
+      - name: Validate synthetic service catalog
+        run: python3 scripts/ai_system.py validate --system docs/examples/ai-system/system.json
+
   tests:
     name: "tests (${{ matrix.suite }})"
     runs-on: ubuntu-latest

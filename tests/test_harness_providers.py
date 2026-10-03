@@ -550,5 +550,116 @@ class EventTests(unittest.TestCase):
         self.assertEqual(result, [{"kind": "result", "ok": True, "text": ""}])
 
 
+
+class ActivityEventTests(unittest.TestCase):
+    """Agents panel activity: tool targets and reasoning, never contents or output."""
+
+    def activity(self, provider, events):
+        items = [item for event in events for item in providers.activity_events(provider, event)]
+        self.assertNotIn("PRIVATE", json.dumps(items))
+        return items
+
+    def test_claude_targets_reasoning_plan_and_pairing(self):
+        items = self.activity("claude", [
+            {"type": "system", "subtype": "init", "session_id": "s", "model": "claude-test", "apiKeySource": "PRIVATE"},
+            {"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "Check the consumer first."},
+                {"type": "text", "text": "Reading the contract."},
+                {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"file_path": "/repo/orders/spec.md"}},
+                {"type": "tool_use", "id": "toolu_2", "name": "Write", "input": {"file_path": "/repo/a.py", "content": "PRIVATE"}},
+                {"type": "tool_use", "id": "toolu_3", "name": "Bash", "input": {"command": "pytest -q\n  --maxfail 1", "description": "Run"}},
+                {"type": "tool_use", "id": "toolu_4", "name": "WebFetch", "input": {"url": "https://user:PRIVATE@example.com/doc?token=PRIVATE#x", "prompt": "PRIVATE"}},
+                {"type": "tool_use", "id": "toolu_5", "name": "TodoWrite", "input": {"todos": [
+                    {"content": "Read", "status": "completed"}, {"content": "Edit", "status": "in_progress"}, {"content": "Test", "status": "pending"}]}},
+                {"type": "tool_use", "id": "toolu_6", "name": "StructuredOutput", "input": {"summary": "PRIVATE"}},
+                {"type": "tool_use", "id": "toolu_7", "name": "Grep", "input": {"pattern": "order.cancelled", "path": "/repo/payments"}}]}},
+            {"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": "PRIVATE", "is_error": False},
+                {"type": "tool_result", "tool_use_id": "toolu_3", "content": "PRIVATE", "is_error": True}]}},
+            {"type": "result", "subtype": "success", "is_error": False, "result": "PRIVATE",
+             "total_cost_usd": 0.5, "usage": {"input_tokens": 3, "output_tokens": 2}},
+            {"type": "result", "subtype": "error_max_turns", "is_error": True, "errors": ["Turn limit"]}])
+        self.assertEqual({"type": "status", "text": "Session started · model claude-test"}, items[0])
+        self.assertEqual({"type": "thinking", "text": "Check the consumer first."}, items[1])
+        self.assertEqual({"type": "text", "text": "Reading the contract."}, items[2])
+        tools = [item for item in items if item["type"] == "tool"]
+        self.assertEqual({"type": "tool", "tool": "Read", "state": "started", "ok": True, "call": "toolu_1",
+                          "path": "/repo/orders/spec.md"}, tools[0])
+        self.assertEqual(("/repo/a.py", None), (tools[1]["path"], tools[1].get("detail")))
+        self.assertEqual("pytest -q --maxfail 1", tools[2]["detail"])
+        self.assertEqual("https://example.com/doc", tools[3]["detail"])
+        self.assertEqual("Final structured report", tools[4]["detail"])
+        self.assertEqual(("/repo/payments", '"order.cancelled"'), (tools[5]["path"], tools[5]["detail"]))
+        self.assertEqual([("toolu_1", True), ("toolu_3", False)],
+                         [(t["call"], t["ok"]) for t in tools if t["state"] == "completed"])
+        self.assertIn({"type": "plan", "text": "✓ Read\n→ Edit\n○ Test"}, items)
+        self.assertIn({"type": "usage", "kind": "usage", "input_tokens": 3, "output_tokens": 2, "cost_usd": 0.5}, items)
+        self.assertEqual({"type": "error", "text": "Turn limit"}, items[-1])
+
+    def test_codex_commands_changes_plans_and_failures(self):
+        command = "/bin/bash -lc 'rg -n cancel src'"
+        items = self.activity("codex", [
+            {"type": "thread.started", "thread_id": "t"},
+            {"type": "item.started", "item": {"id": "i1", "type": "command_execution", "command": command, "status": "in_progress"}},
+            {"type": "item.updated", "item": {"id": "i1", "type": "command_execution", "command": command, "status": "in_progress"}},
+            {"type": "item.completed", "item": {"id": "i1", "type": "command_execution", "command": command,
+             "aggregated_output": "PRIVATE", "exit_code": 2, "status": "failed"}},
+            {"type": "item.completed", "item": {"id": "i2", "type": "file_change", "status": "completed",
+             "changes": [{"path": "/repo/a.py", "kind": "update"}]}},
+            {"type": "item.completed", "item": {"id": "i3", "type": "reasoning", "text": "Consider idempotency."}},
+            {"type": "item.updated", "item": {"id": "i4", "type": "todo_list", "items": [
+                {"text": "Read", "completed": True}, {"text": "Fix", "completed": False}]}},
+            {"type": "item.completed", "item": {"id": "i5", "type": "mcp_tool_call", "server": "docs", "tool": "search",
+             "arguments": {"q": "PRIVATE"}, "result": "PRIVATE", "status": "completed"}},
+            {"type": "item.completed", "item": {"id": "i6", "type": "web_search", "query": "refund idempotency"}},
+            {"type": "item.completed", "item": {"id": "i7", "type": "command_execution", "command": "rm -rf build", "status": "declined"}},
+            {"type": "item.completed", "item": {"id": "i8", "type": "agent_message", "text": "Done."}},
+            {"type": "turn.completed", "usage": {"input_tokens": 10, "cached_input_tokens": 4, "output_tokens": 2}},
+            {"type": "turn.failed", "error": {"message": "Request failed"}}])
+        tools = [item for item in items if item["type"] == "tool"]
+        self.assertEqual([("Shell", "started", True, "rg -n cancel src"), ("Shell", "completed", False, "rg -n cancel src"),
+                          ("Edit", "completed", True, "update /repo/a.py"), ("MCP docs.search", "completed", True, None),
+                          ("Web search", "completed", True, "refund idempotency"), ("Shell", "completed", False, "rm -rf build")],
+                         [(t["tool"], t["state"], t["ok"], t.get("detail")) for t in tools])
+        self.assertEqual("/repo/a.py", tools[2]["path"])
+        self.assertIn({"type": "thinking", "text": "Consider idempotency."}, items)
+        self.assertIn({"type": "plan", "text": "✓ Read\n○ Fix"}, items)
+        self.assertIn({"type": "text", "text": "Done."}, items)
+        self.assertEqual(10, next(item for item in items if item["type"] == "usage")["input_tokens"])
+        self.assertEqual({"type": "error", "text": "Request failed"}, items[-1])
+
+    def test_cursor_tool_calls_todos_thinking_and_partials(self):
+        items = self.activity("cursor", [
+            {"type": "tool_call", "subtype": "started", "call_id": "c1", "tool_call": {"readToolCall": {"args": {"path": "src/a.ts"}}}},
+            {"type": "tool_call", "subtype": "completed", "call_id": "c1", "tool_call": {"readToolCall": {
+                "args": {"path": "src/a.ts"}, "result": {"success": {"content": "PRIVATE"}}}}},
+            {"type": "tool_call", "subtype": "started", "call_id": "c2", "tool_call": {"editToolCall": {
+                "args": {"path": "src/a.ts", "streamContent": "PRIVATE"}}}},
+            {"type": "tool_call", "subtype": "completed", "call_id": "c3", "tool_call": {"shellToolCall": {
+                "args": {"command": "npm test"}, "result": {"rejected": {"command": "npm test", "reason": "PRIVATE"}}}}},
+            {"type": "tool_call", "subtype": "started", "call_id": "c4", "tool_call": {"function": {
+                "name": "custom", "arguments": json.dumps({"path": "x.md", "body": "PRIVATE"})}}},
+            {"type": "tool_call", "subtype": "started", "call_id": "c5", "tool_call": {"mcpToolCall": {
+                "args": {"providerIdentifier": "docs", "toolName": "lookup", "args": {"q": "PRIVATE"}}}}},
+            {"type": "tool_call", "subtype": "started", "call_id": "c6", "tool_call": {"updateTodosToolCall": {"args": {"todos": [
+                {"content": "A", "status": "TODO_STATUS_COMPLETED"}, {"content": "B", "status": "TODO_STATUS_IN_PROGRESS"}]}}}},
+            {"type": "thinking", "subtype": "delta", "text": "Partial "},
+            {"type": "thinking", "subtype": "completed"},
+            {"type": "assistant", "timestamp_ms": 1, "message": {"role": "assistant", "content": [{"type": "text", "text": "partial"}]}}])
+        tools = [(t["tool"], t["state"], t["ok"], t.get("path"), t.get("detail")) for t in items if t["type"] == "tool"]
+        self.assertEqual([("Read", "started", True, "src/a.ts", None), ("Read", "completed", True, "src/a.ts", None),
+                          ("Edit", "started", True, "src/a.ts", None), ("Shell", "completed", False, None, "npm test"),
+                          ("Custom", "started", True, "x.md", None), ("MCP docs.lookup", "started", True, None, None)], tools)
+        self.assertIn({"type": "plan", "text": "✓ A\n→ B"}, items)
+        self.assertEqual([{"type": "thinking_delta", "text": "Partial "}, {"type": "thinking_end"}], items[-2:])
+
+    def test_malformed_events_and_unknown_providers(self):
+        for event in (None, [], {"type": 3}, {"type": "assistant", "message": "x"}, {"type": "tool_call", "tool_call": []}):
+            self.assertEqual([], providers.activity_events("claude", event))
+            self.assertEqual([], providers.activity_events("cursor", event))
+            self.assertEqual([], providers.activity_events("codex", event))
+        with self.assertRaises(ValueError):
+            providers.activity_events("command", {"type": "result"})
+
 if __name__ == "__main__":
     unittest.main()

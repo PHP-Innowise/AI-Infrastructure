@@ -20,6 +20,7 @@ import sqlite3
 import stat
 import subprocess
 from typing import Optional
+from urllib.parse import urlsplit
 
 PROVIDERS = {"claude": "Claude Code", "codex": "Codex", "cursor": "Cursor Agent"}
 PROBE_TIMEOUT = 3
@@ -699,4 +700,225 @@ def normalize_event(provider: str, event: dict) -> list[dict]:
         if isinstance(content, list):
             return [{"kind": "tool", "text": "Tool: completed", "ok": block.get("is_error") is not True}
                     for block in content if isinstance(block, dict) and block.get("type") == "tool_result"]
+    return []
+
+
+ACTIVITY_TEXT_LIMIT = 2000
+ACTIVITY_THINKING_LIMIT = 1200
+ACTIVITY_DETAIL_LIMIT = 300
+_ACTIVITY_CALL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
+_ACTIVITY_PATH_KEYS = ("file_path", "notebook_path", "path", "filePath", "targetFile", "target_file",
+                       "targetDirectory", "directory")
+_ACTIVITY_DETAIL_KEYS = ("command", "cmd", "pattern", "globPattern", "glob_pattern", "glob", "query",
+                         "url", "description", "skill")
+_ACTIVITY_QUOTED = {"pattern", "globPattern", "glob_pattern", "glob", "query"}
+_SHELL_WRAPPER = re.compile(r"""^(?:\S*/)?(?:ba|z)?sh -lc (['"])(.*)\1$""", re.DOTALL)
+
+
+def _bounded(value, limit, single_line=False):
+    if not isinstance(value, str):
+        return None
+    value = " ".join(value.split()) if single_line else value.strip()
+    if not value:
+        return None
+    return value if len(value) <= limit else value[:limit - 1] + "…"
+
+
+def _activity_url(value):
+    """Keep the location only: query strings and fragments often carry tokens."""
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return None
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return None
+    return parts.scheme + "://" + parts.hostname + parts.path
+
+
+def _activity_target(arguments):
+    """(path, detail) of a tool call; never file contents, diffs or command output."""
+    if not isinstance(arguments, dict):
+        return None, None
+    path = next((arguments[key] for key in _ACTIVITY_PATH_KEYS
+                 if isinstance(arguments.get(key), str) and arguments[key].strip()), None)
+    detail = None
+    for key in _ACTIVITY_DETAIL_KEYS:
+        value = arguments.get(key)
+        if isinstance(value, str) and value.strip():
+            # Quote search terms so they read apart from the path they search.
+            detail = _activity_url(value) if key == "url" else '"' + value + '"' if key in _ACTIVITY_QUOTED else value
+            break
+    return _bounded(path, 1024, True), _bounded(detail, ACTIVITY_DETAIL_LIMIT, True)
+
+
+def _activity_call(value):
+    return value if isinstance(value, str) and _ACTIVITY_CALL.fullmatch(value) else None
+
+
+def _activity_plan(entries, text_key, done):
+    lines = []
+    for entry in entries[:30] if isinstance(entries, list) else []:
+        if isinstance(entry, dict) and isinstance(entry.get(text_key), str):
+            mark = "✓" if done(entry) is True else "→" if done(entry) is None else "○"
+            lines.append(mark + " " + " ".join(entry[text_key].split())[:200])
+    return [{"type": "plan", "text": "\n".join(lines)}] if lines else []
+
+
+def _activity_tool(name, call, state, ok=True, arguments=None, path=None, detail=None):
+    if arguments is not None:
+        path, detail = _activity_target(arguments)
+    item = {"type": "tool", "tool": _bounded(name, 120, True) or "Tool", "state": state, "ok": ok}
+    for key, value in (("call", _activity_call(call)), ("path", path), ("detail", detail)):
+        if value:
+            item[key] = value
+    return item
+
+
+def _codex_activity(kind, event):
+    if kind == "error":
+        return [{"type": "error", "text": _error(event, "Provider error")}]
+    if kind == "turn.failed":
+        return [{"type": "error", "text": _error(event, "Provider run failed")}]
+    if kind == "turn.completed":
+        return [{**item, "type": "usage"} for item in _usage(event)]
+    item = event.get("item")
+    if kind not in ("item.started", "item.updated", "item.completed") or not isinstance(item, dict):
+        return []
+    item_type, call, state = item.get("type"), item.get("id"), kind.split(".")[1]
+    finished = kind == "item.completed"
+    if finished and item_type == "agent_message":
+        text = _bounded(item.get("text"), ACTIVITY_TEXT_LIMIT)
+        return [{"type": "text", "text": text}] if text else []
+    if finished and item_type == "reasoning":
+        text = _bounded(item.get("text"), ACTIVITY_THINKING_LIMIT)
+        return [{"type": "thinking", "text": text}] if text else []
+    if finished and item_type == "error":
+        text = _bounded(item.get("message"), ACTIVITY_TEXT_LIMIT)
+        return [{"type": "error", "text": text}] if text else []
+    if item_type == "todo_list":
+        return _activity_plan(item.get("items"), "text", lambda entry: entry.get("completed") is True)
+    if state == "updated":
+        return []
+    ok = item.get("status") not in ("failed", "declined")
+    if item_type == "command_execution":
+        command = item.get("command")
+        if isinstance(command, list):
+            command = " ".join(part for part in command if isinstance(part, str))
+        if isinstance(command, str):
+            unwrapped = _SHELL_WRAPPER.match(command.strip())
+            command = unwrapped.group(2) if unwrapped else command
+        return [_activity_tool("Shell", call, state, ok and item.get("exit_code") in (None, 0),
+                               detail=_bounded(command, ACTIVITY_DETAIL_LIMIT, True))]
+    if item_type == "file_change":
+        changes = [change for change in item.get("changes") or [] if isinstance(change, dict)
+                   and isinstance(change.get("path"), str)][:20] if isinstance(item.get("changes"), list) else []
+        detail = ", ".join(str(change.get("kind") or "change") + " " + change["path"] for change in changes)
+        return [_activity_tool("Edit", call, state, ok, path=changes[0]["path"] if len(changes) == 1 else None,
+                               detail=_bounded(detail, ACTIVITY_DETAIL_LIMIT, True))]
+    if item_type == "mcp_tool_call":
+        name = ".".join(part for part in (item.get("server"), item.get("tool")) if isinstance(part, str))
+        return [_activity_tool("MCP " + (name or "tool"), call, state, ok)]
+    if item_type == "web_search":
+        return [_activity_tool("Web search", call, state, ok,
+                               detail=_bounded(item.get("query"), ACTIVITY_DETAIL_LIMIT, True))]
+    if item_type in ("collab_tool_call", "sub_agent_activity"):
+        return [_activity_tool("Agent " + str(item.get("tool") or item.get("kind") or "activity"), call, state, ok)]
+    return []
+
+
+def activity_events(provider: str, event: dict) -> list[dict]:
+    """Display-only agent activity: messages, reasoning summaries and tool targets.
+
+    Unlike normalize_event, tool targets (paths, commands, search patterns and URL
+    locations) are returned so an operator can follow what an agent inspects. File
+    contents, diffs, tool results and command output are never returned. Callers
+    must still redact secrets, bound volume and keep the result private.
+    """
+    if provider not in PROVIDERS:
+        raise ValueError("unknown provider")
+    if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+        return []
+    kind = event["type"]
+    if provider == "codex":
+        return _codex_activity(kind, event)
+    if kind == "system" and event.get("subtype") == "init":
+        model = _bounded(event.get("model"), 120, True)
+        return [{"type": "status", "text": "Session started" + (" · model " + model if model else "")}]
+    if kind == "error":
+        return [{"type": "error", "text": _error(event, "Provider error")}]
+    if kind == "result":
+        failed = [] if event.get("subtype") == "success" and event.get("is_error") is False else [
+            {"type": "error", "text": _error(event, "Provider run failed")}]
+        return [{**item, "type": "usage"} for item in _usage(event)] + failed
+    if kind == "assistant":
+        if event.get("error"):
+            return [{"type": "error", "text": _error(event, "Assistant request failed")}]
+        if provider == "cursor" and "timestamp_ms" in event and "model_call_id" not in event:
+            return []
+        message = event.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        result = []
+        for block in content if isinstance(content, list) else []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                text = _bounded(block.get("text"), ACTIVITY_TEXT_LIMIT)
+                if text:
+                    result.append({"type": "text", "text": text})
+            elif block.get("type") == "thinking":
+                text = _bounded(block.get("thinking"), ACTIVITY_THINKING_LIMIT)
+                if text:
+                    result.append({"type": "thinking", "text": text})
+            elif block.get("type") == "tool_use":
+                name, inputs = _text(block.get("name")), block.get("input")
+                if name == "TodoWrite" and isinstance(inputs, dict):
+                    result.extend(_activity_plan(inputs.get("todos"), "content", lambda entry: {
+                        "completed": True, "in_progress": None}.get(entry.get("status"), False)))
+                elif name == "StructuredOutput":
+                    result.append(_activity_tool(name, block.get("id"), "started", detail="Final structured report"))
+                else:
+                    result.append(_activity_tool(name, block.get("id"), "started", arguments=inputs if isinstance(inputs, dict) else {}))
+        return result
+    if kind == "user" and provider == "claude":
+        message = event.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        return [_activity_tool("Tool", block.get("tool_use_id"), "completed", block.get("is_error") is not True)
+                for block in content if isinstance(block, dict) and block.get("type") == "tool_result"] if isinstance(content, list) else []
+    if kind == "tool_call" and provider == "cursor":
+        calls = event.get("tool_call")
+        state = "completed" if event.get("subtype") == "completed" else "started"
+        result = []
+        for name, call in calls.items() if isinstance(calls, dict) else []:
+            if not isinstance(call, dict):
+                continue
+            arguments = call.get("args")
+            if name == "function":
+                name, arguments = _text(call.get("name")) or "function", call.get("arguments")
+                try:
+                    arguments = json.loads(arguments) if isinstance(arguments, str) else arguments
+                except (ValueError, RecursionError):
+                    arguments = None
+            elif name.endswith("ToolCall"):
+                name = name[:-8]
+            if name in ("updateTodos", "todo") and isinstance(arguments, dict):
+                result.extend(_activity_plan(arguments.get("todos"), "content", lambda entry: {
+                    "completed": True, "in_progress": None}.get(str(entry.get("status", "")).lower().replace("todo_status_", ""), False)))
+                continue
+            # Completed events may omit args; callers pair them with the start by call ID.
+            outcome = call.get("result")
+            ok = not isinstance(outcome, dict) or not outcome or "success" in outcome
+            if name == "mcp" and isinstance(arguments, dict):
+                label = ".".join(part for part in (arguments.get("providerIdentifier"), arguments.get("toolName"))
+                                 if isinstance(part, str))
+                result.append(_activity_tool("MCP " + (label or "tool"), event.get("call_id"), state, ok))
+                continue
+            result.append(_activity_tool(name[:1].upper() + name[1:], event.get("call_id"), state, ok,
+                                         arguments=arguments if isinstance(arguments, dict) else {}))
+        return result
+    if kind == "thinking" and provider == "cursor":
+        # Deltas are joined by the caller and flushed on completion.
+        if event.get("subtype") == "delta" and isinstance(event.get("text"), str) and event["text"]:
+            return [{"type": "thinking_delta", "text": event["text"][:ACTIVITY_THINKING_LIMIT]}]
+        if event.get("subtype") == "completed":
+            return [{"type": "thinking_end"}]
     return []
