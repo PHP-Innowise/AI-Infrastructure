@@ -26,6 +26,15 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Add a dark theme to the Harness browser workspace: a System / Light / Dark
+  switch at the bottom of the sidebar, stored in the browser and applied before
+  first paint, so a dark page never flashes white; **System** follows the OS
+  setting live. The Kit 3 catalog follows the same choice inside the Harness and
+  the OS theme when served alone. Both stylesheets now take every color from
+  paired light/dark tokens, enforced by `tests.test_harness_web`; the Setup
+  preview's collision label uses the error color instead of an undefined
+  `--red`.
+
 - Run Harness Creator phases on macOS through the built-in `sandbox-exec`
   (Seatbelt) profile when bubblewrap is absent: writes are allowed only in the
   run workspace, a private temporary directory, the per-user temporary space and

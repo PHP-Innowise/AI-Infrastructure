@@ -263,6 +263,11 @@ executable does **not** prove that its account is logged in.
   Creation works offline without Node.js or a model call. It shares the
   Skills installer's collision checks and never overwrites an existing file.
   The form draft survives section changes until the page is reloaded.
+- **Theme:** the switch at the bottom of the sidebar chooses **System**,
+  **Light** or **Dark**. The choice is stored in this browser and applied before
+  the page paints; **System** follows the operating-system setting as it
+  changes. The Kit 3 catalog follows the same choice, including when opened in a
+  new tab from the Harness; served alone by `./kit3 serve`, it follows the system.
 
 Worktrees start from the selected project's current committed `HEAD`; uncommitted
 changes and untracked files stay in the original checkout. Git and at least one

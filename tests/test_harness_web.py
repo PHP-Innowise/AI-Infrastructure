@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -1460,6 +1461,92 @@ assert.equal(fields['brain-op-progress'].scrolled,true);
             self.assertEqual(spawn.call_args.kwargs["cwd"], web.ROOT)
         finally:
             os.chdir(previous)
+
+
+ROOT = Path(__file__).resolve().parents[1]
+# The harness serves the Kit 3 catalog in a same-origin frame, so both pages share one theme contract.
+THEMED_PAGES = (ROOT / "harness/web/index.html", ROOT / "install/open-source-kit/web/index.html")
+COLOR_LITERAL = re.compile(r"#[0-9a-fA-F]{3,8}\b|(?<![\w-])(?:white|black)(?![\w-])"
+                           r"|\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color-mix)\(")
+
+
+class HarnessThemeTests(unittest.TestCase):
+    def run_node(self, script):
+        result = subprocess.run([shutil.which("node"), "-e", script], capture_output=True, text=True)
+        if result.returncode:
+            self.fail(result.stderr)
+
+    def test_stylesheets_take_every_color_from_matching_light_and_dark_tokens(self):
+        for page in THEMED_PAGES:
+            with self.subTest(page=page.relative_to(ROOT).as_posix()):
+                html = page.read_text(encoding="utf-8")
+                css = html[html.index("<style>"):html.index("</style>")]
+                light = re.search(r"\n\s*:root \{([^}]*)\}", css).group(1)
+                dark = re.search(r'\n\s*:root\[data-theme="dark"\] \{([^}]*)\}', css).group(1)
+                tokens = set(re.findall(r"(--[\w-]+)\s*:", light))
+                self.assertEqual(tokens, set(re.findall(r"(--[\w-]+)\s*:", dark)),
+                                 "every token needs a light and a dark value")
+                self.assertEqual(COLOR_LITERAL.findall(css.replace(light, "").replace(dark, "")), [],
+                                 "add a token to both :root sets instead of a literal color")
+                runtime = set(re.findall(r"setProperty\('(--[\w-]+)'", html))
+                self.assertLessEqual(set(re.findall(r"var\((--[\w-]+)", css)) - runtime, tokens)
+        switch = re.findall(r'<input type="radio" name="theme" value="(\w+)">', THEMED_PAGES[0].read_text(encoding="utf-8"))
+        self.assertEqual(switch, ["system", "light", "dark"])
+
+    @unittest.skipUnless(shutil.which("node"), "Theme script check requires Node")
+    def test_saved_theme_applies_before_first_paint_in_the_harness_and_its_catalog(self):
+        heads = []
+        for page in THEMED_PAGES:
+            head = page.read_text(encoding="utf-8").split("<style>", 1)[0]
+            heads.append(head[head.index("<script>") + len("<script>"):head.index("</script>")])
+        self.run_node("const assert = require('node:assert/strict');\nconst heads = " + json.dumps(heads) + """;
+for (const saved of [null,'light','dark','sepia','denied']) for (const systemDark of [false,true]) {
+  const themes = heads.map(source => {
+    const root = {dataset:{}};
+    const localStorage = {getItem(key) { assert.equal(key,'harness.theme.v1'); if (saved === 'denied') throw new Error('denied'); return saved; }};
+    const window = {matchMedia: () => ({matches:systemDark, addEventListener() {}}), addEventListener() {}};
+    new Function('window','document','localStorage',source)(window,{documentElement:root},localStorage);
+    return root.dataset.theme;
+  });
+  const expected = saved === 'light' || saved === 'dark' ? saved : systemDark ? 'dark' : 'light';
+  assert.deepEqual(themes,[expected,expected],`saved ${saved}, system ${systemDark ? 'dark' : 'light'}`);
+}""")
+
+    @unittest.skipUnless(shutil.which("node"), "Theme script check requires Node")
+    def test_theme_switch_saves_the_choice_and_follows_the_system_and_other_tabs(self):
+        page = THEMED_PAGES[0].read_text(encoding="utf-8")
+        start = page.index("    const themeKey = ")
+        source = page[start:page.index("    applyTheme();\n", start) + len("    applyTheme();\n")]
+        self.run_node("const assert = require('node:assert/strict');\nconst source = " + json.dumps(source) + """;
+function boot({saved = null, dark = false, denied = false} = {}) {
+  const env = {stored:saved === null ? {} : {'harness.theme.v1':saved}, denied, listeners:{}, root:{dataset:{}}};
+  env.system = {matches:dark, addEventListener: (type,listener) => { env.listeners.system = listener; }};
+  env.radios = ['system','light','dark'].map(value => ({value, checked:false, addEventListener(type,listener) { this.change = listener; }}));
+  const localStorage = {
+    getItem: key => { if (env.denied) throw new Error('denied'); return key in env.stored ? env.stored[key] : null; },
+    setItem: (key,value) => { if (env.denied) throw new Error('denied'); env.stored[key] = String(value); },
+    removeItem: key => { if (env.denied) throw new Error('denied'); delete env.stored[key]; },
+  };
+  const window = {matchMedia: () => env.system, addEventListener: (type,listener) => { env.listeners[type] = listener; }};
+  new Function('window','document','localStorage',source)(window,{documentElement:env.root, querySelectorAll: () => env.radios},localStorage);
+  env.choose = value => { const radio = env.radios.find(r => r.value === value); radio.checked = true; radio.change(); };
+  env.checked = () => env.radios.filter(r => r.checked).map(r => r.value);
+  env.flip = matches => { env.system.matches = matches; env.listeners.system(); };
+  return env;
+}
+let env = boot();
+assert.equal(env.root.dataset.theme,'light'); assert.deepEqual(env.checked(),['system']);
+env.flip(true); assert.equal(env.root.dataset.theme,'dark');
+env.choose('light'); assert.equal(env.stored['harness.theme.v1'],'light'); assert.equal(env.root.dataset.theme,'light'); assert.deepEqual(env.checked(),['light']);
+env.flip(false); env.flip(true); assert.equal(env.root.dataset.theme,'light');
+env.stored['harness.theme.v1'] = 'dark'; env.listeners.storage({key:'harness.theme.v1'});
+assert.equal(env.root.dataset.theme,'dark'); assert.deepEqual(env.checked(),['dark']);
+env.choose('system'); assert.equal('harness.theme.v1' in env.stored,false); assert.equal(env.root.dataset.theme,'dark');
+env = boot({saved:'sepia', dark:true});
+assert.equal(env.root.dataset.theme,'dark'); assert.deepEqual(env.checked(),['system']);
+env = boot({saved:'light', dark:true, denied:true});
+assert.equal(env.root.dataset.theme,'dark'); assert.deepEqual(env.checked(),['system']);
+env.choose('light'); assert.equal(env.root.dataset.theme,'light'); assert.deepEqual(env.checked(),['light']);""")
 
 
 if __name__ == "__main__":
