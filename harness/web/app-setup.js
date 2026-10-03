@@ -6,8 +6,9 @@ function setProjectChoices(select,projects,previous,allowUnavailable = false) {
   if (previous && projects.some(project => project.id === previous)) select.value = previous;
 }
 const folderPicker = {path:null,parent:null,valid:false,controller:null,epoch:0,onSelect:null,opener:null};
-function chooseProjectFolder(folder,onSelect,opener,title='Choose a project folder') {
-  folderPicker.onSelect=onSelect; folderPicker.opener=opener; $('folder-picker-title').textContent=title;
+const folderPickerNote = $('folder-picker-description').textContent;
+function chooseProjectFolder(folder,onSelect,opener,title='Choose a project folder',note=folderPickerNote) {
+  folderPicker.onSelect=onSelect; folderPicker.opener=opener; $('folder-picker-title').textContent=title; $('folder-picker-description').textContent=note;
   $('folder-picker').showModal(); loadFolderPicker(folder || folderPicker.path || undefined);
 }
 async function loadFolderPicker(path,query = '') {
@@ -48,8 +49,9 @@ $('folder-picker-use').addEventListener('click',() => {
 function updateRegisteredProjects(projects,preferredSetupId = null) {
   if (!Array.isArray(projects) || projects.some(project => !project || typeof project.id !== 'string' || typeof project.name !== 'string')) throw new Error('The runner returned an incomplete project list.');
   state.bootstrap.projects = projects;
-  for (const id of ['project','context-project','memory-project','brain-project','skills-project','create-skill-project','accelerator-project']) setProjectChoices($(id),projects,$(id).value);
+  for (const id of ['project','context-project','memory-project','brain-project','skills-project','create-skill-project','accelerator-project','system-project']) setProjectChoices($(id),projects,$(id).value);
   setProjectChoices($('setup-project'),projects,preferredSetupId || $('setup-project').value || $('project').value,true);
+  setProjectChoices($('project-switcher'),projects,currentProject());
   renderHistory(); updateControls();
 }
 function setupSelection() { return {project_id:$('setup-project').value,edition:$('setup-edition').value,tools:[...setupState.tools].sort()}; }

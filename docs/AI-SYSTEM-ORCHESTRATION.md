@@ -485,22 +485,25 @@ remain integration prerequisites.
 ## Harness UI
 
 The AI fill flow populates editable service fields and produces a usable contract
-map after Save. These screenshots use synthetic service folders and deterministic
-native-format CLI fixtures. An authenticated Codex scan of the same two-service
-scenario was also completed and its output passed the final proposal validator.
-Claude/Cursor model calls and the macOS runtime were not exercised; native
-adapter envelopes and the generated Seatbelt profile have automated coverage.
+map after Save. The screenshots in this guide use the synthetic three-service
+example and deterministic native-format Claude fixtures (no model calls). An
+authenticated Codex scan of a two-service scenario was also completed and its
+output passed the final proposal validator. Claude/Cursor model calls and the
+macOS runtime were not exercised; native adapter envelopes and the generated
+Seatbelt profile have automated coverage.
 
 ![AI fills editable service passports](images/ai-system/discovery-filled.png)
 
-![Saved contract map from AI-filled service data](images/ai-system/discovery-map.png)
+Open **System Orchestration** in `./harness-server`. It works on the project
+chosen in the sidebar and has two tabs: **Services** (the system file, its map
+and the editor) and **Changes** (plans, launches, agents and receipts). To create
+a system entirely in the application:
 
-Open **System Orchestration** in `./harness-server`. To create a system entirely
-in the application:
-
-1. **Choose system folder** in the folder browser. Use an existing directory
-   where the shared system map will be stored.
-2. **Create / edit system**, enter the system name, then **Add service folder**
+1. On **Services**, choose **Choose system folder…** and pick an existing
+   directory where the shared system map will be stored; it joins your projects
+   and becomes the working project in every view. A folder that is already
+   registered can be chosen in the sidebar instead.
+2. **Create or edit system**, enter the system name, then **Add service folder**
    for each existing service repository or monorepo subdirectory. Choosing a
    folder registers it automatically; an existing passport is loaded into fields.
 3. Select an installed/authenticated **Codex, Claude Code or Cursor Agent** and
@@ -514,7 +517,8 @@ in the application:
    Source paths are relative to that service folder; shared source paths are
    relative to the system folder. Lists of paths/keywords accept one per line.
 4. **Save system** validates the whole declared graph, generates `system.json`
-   and `ai-service.json` files, and refreshes the map. No JSON input is needed.
+   and `ai-service.json` files, closes the editor and shows the updated map.
+   No JSON input is needed.
    Service folder references are generated relative to the system file, so a
    checkout can move when its directory layout is retained. Each Harness instance
    still registers its own external service folders before accessing them.
@@ -566,31 +570,36 @@ external metadata writers: POSIX replacement has a small check-to-rename window
 that optimistic fingerprints cannot protect against. Coordinator workspace locks
 serialize cooperating system workers, not arbitrary external editors.
 
-You can also choose a registered project and a relative manifest path
-(`system.json` by default), then **Load system**.
+You can also choose a registered project in the sidebar and a relative system
+file (`system.json` by default), then **Load system**.
 The graph represents declared contracts. Service cards show capability status
 and source paths; planned capabilities remain labelled planned. The memory
 ownership panel shows the system/service Brain and Memory Bank locations,
 without claiming those records already exist.
 
-Select starting services or supply changed contract IDs, describe the task, and
-**Prepare plan**. Contract consumers enter the impact scope automatically. The
+**Plan a change** on **Services** (or **New change** on **Changes**) opens the
+change form. Select starting services or supply changed contract IDs, describe
+the task, and **Prepare plan**. Contract consumers enter the impact scope
+automatically. A change then moves through **Plan**, **Review**, **Run** and
+**Receipts**. The
 plan includes context excerpts, omitted sources, warnings and fingerprints.
 Its service list denotes participants; the contract dispatch later establishes
 the actual implementation order. Task line breaks are normalized to spaces.
 
-After reviewing the scope/context, choose read-only investigation or service
-edits, **Codex / Claude Code / Cursor Agent**, the **Service folder access**
+After reviewing the scope/context, use the **Launch** card: choose read-only
+investigation or service edits, **Codex / Claude Code / Cursor Agent**, the
+**Service folder access**
 (**All selected services** by default in the browser, or **Own service only**;
-see [Service folder access](#service-folder-access)) and a timeout per worker,
-then **Execute reviewed plan**. Cursor Agent offers only own-service access. System dispatches
+see [Service folder access](#service-folder-access)) and a timeout per agent,
+confirm that you reviewed the scope and context, then **Execute reviewed plan**. Cursor Agent offers only own-service access. System dispatches
 share the existing Harness queue, runner lock, cancellation and watchdog. They
 use the selected CLI's default model. The provider is fixed after launch and
 recovery keeps it. Ordinary session model/agent controls do not apply. No arbitrary executable can be passed by API.
 Access to external roots comes exclusively from registered Harness projects.
 
 The run view polls persisted dispatches and displays receipts, reported checks,
-changed files, native task UUIDs and the handoff. A successful worker exit alone
+changed files and the handoff; native task UUIDs and the runner log sit behind
+toggles. A successful worker exit alone
 does not complete a run. Final verification needs at least one reported passed
 check and no missing/failed reported checks. Durable knowledge publication
 remains a separate review through the owning runtime. No commit, push, merge or
@@ -751,35 +760,39 @@ to delete. Harness leaves this notice out of failure messages.
 
 ### UI screenshots
 
-These are screenshots of the running localhost Harness using a synthetic
-three-service system and deterministic native-format provider fixtures.
-Reported checks are fixture assertions; no real model or customer system was used.
+These are screenshots of the running localhost Harness using the synthetic
+three-service example and deterministic native-format Claude fixtures; the scratch
+location is shown as `/workspace`. Reported checks are fixture assertions; no real
+model or customer system was used. Codex and Cursor Agent runs use the same views,
+and their native formats are covered by the fixture tests above.
 
-The form-authoring example starts with existing empty service folders, enters
-all metadata in the browser, checks an invalid contract without losing the draft,
-saves/reopens/edits the system, and completes a Cursor fixture run:
-
-![Choose service folders in the application](images/ai-system/editor-folders.jpg)
-
-![Enter service ownership and capabilities with forms](images/ai-system/editor-form.jpg)
-
-![Saved map generated from form fields](images/ai-system/editor-map.jpg)
-
-![Completed Cursor run for the form-authored system](images/ai-system/editor-run.jpg)
+**Services** shows the declared contract map with each service's capabilities,
+and the memory ownership panel lists every Brain and Memory Bank location:
 
 ![Declared service graph and capabilities](images/ai-system/map.jpg)
 
 ![System and service memory ownership](images/ai-system/memory.jpg)
 
+The editor keeps service passports in forms, and **Add service folder** browses
+existing folders:
+
+![Enter service ownership and capabilities with forms](images/ai-system/editor-form.jpg)
+
+![Choose service folders in the application](images/ai-system/editor-folders.jpg)
+
+On **Changes**, a prepared plan shows its participants, context budget and steps;
+the **Launch** card sets the provider, mode and folder access and asks for the
+review confirmation:
+
 ![Reviewable impact plan and context budget](images/ai-system/plan.jpg)
-
-![Persisted dispatch receipts and native tasks after explicit recovery](images/ai-system/results.jpg)
-
-Provider selection and completed Claude/Cursor runs use fixture CLIs, with
-actual queue dispatch, receipts and native Brain task lifecycle:
 
 ![Choose Codex, Claude Code or Cursor Agent](images/ai-system/providers.jpg)
 
 ![Completed Claude fixture dispatches](images/ai-system/claude.jpg)
 
-![Completed Cursor fixture dispatches](images/ai-system/cursor.jpg)
+A blocked dispatch offers explicit recovery with the provider that resumes; the
+receipts and native tasks below come from the same change after that resume:
+
+![Recover an unfinished run](images/ai-system/recovery.jpg)
+
+![Persisted dispatch receipts and native tasks after explicit recovery](images/ai-system/results.jpg)

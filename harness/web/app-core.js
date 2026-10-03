@@ -512,8 +512,8 @@ document.addEventListener('keydown',event => {
 document.querySelector('.skip').addEventListener('click',event => { event.preventDefault(); $('main').focus(); });
 // Six sections; each groups related views behind tabs. Every view has its own #/view address.
 const resultViews = ['changes','checks','usage'], isResultView = view => resultViews.includes(view);
-const viewGroups = {sessions:['sessions',...resultViews],systems:['systems'],knowledge:['brain','memory','context'],skills:['skills','create-skill'],accelerators:['accelerators','creator','kit3'],setup:['setup']};
-const viewLabels = {sessions:'Conversation',systems:'System Orchestration',changes:'Changes',checks:'Checks',usage:'Usage',brain:'Project Brain',memory:'Memory bank',context:'Context files',skills:'Library','create-skill':'Create skill',accelerators:'Overview',creator:'Infrastructure Creator',kit3:'Open Source Kit',setup:'Projects & Setup'};
+const viewGroups = {sessions:['sessions',...resultViews],systems:['systems','system-changes'],knowledge:['brain','memory','context'],skills:['skills','create-skill'],accelerators:['accelerators','creator','kit3'],setup:['setup']};
+const viewLabels = {sessions:'Conversation',systems:'Services','system-changes':'Changes',changes:'Changes',checks:'Checks',usage:'Usage',brain:'Project Brain',memory:'Memory bank',context:'Context files',skills:'Library','create-skill':'Create skill',accelerators:'Overview',creator:'Infrastructure Creator',kit3:'Open Source Kit',setup:'Projects & Setup'};
 const groupOf = view => Object.keys(viewGroups).find(group => viewGroups[group].includes(view));
 const lastViewInGroup = {};
 function viewFromHash() { let view = ''; try { view = decodeURIComponent(location.hash.replace(/^#\/?/,'')); } catch (_) { return null; } if (view === 'results') view = 'changes'; return groupOf(view) ? view : null; }
@@ -548,7 +548,7 @@ function setView(view, record = true) {
   if (state.view === 'memory' && view !== 'memory') { cancelMemoryRequests(); cancelKnowledgeRead('memory'); }
   if (state.view === 'brain' && view !== 'brain') { cancelBrainRequests(); cancelKnowledgeRead('brain'); }
   if (state.view === 'creator' && view !== 'creator') { clearTimeout(creatorUi.timer); ++creatorUi.epoch; }
-  if (state.view === 'systems' && view !== 'systems' && typeof systemUi !== 'undefined') { clearTimeout(systemUi.timer); ++systemUi.epoch; systemUi.controller?.abort(); }
+  if (groupOf(state.view) === 'systems' && groupOf(view) !== 'systems' && typeof systemUi !== 'undefined') { clearTimeout(systemUi.timer); ++systemUi.epoch; systemUi.controller?.abort(); }
   if(isResultView(state.view) && !isResultView(view)) { clearTimeout(resultUi.timer); ++resultUi.epoch; resultUi.pending=false; ++deliveryUi.epoch; deliveryUi.data=null; invalidateDeliveryPreview(); }
   state.view = view; lastViewInGroup[groupOf(view)] = view;
   const viewId = isResultView(view) ? 'results-view' : `${view}-view`; for (const node of document.querySelectorAll('#main > section.view')) node.hidden = node.id !== viewId;
@@ -557,7 +557,7 @@ function setView(view, record = true) {
   if (record && !restoringRoute && viewFromHash() !== view) { if (!location.hash) history.replaceState(null,'','#/'+previousView); history.pushState(null,'','#/'+view); }
   if (isResultView(view) && !isResultView(previousView)) loadResults();
   if (view === 'creator') openCreator();
-  if (view === 'systems' && typeof openSystems === 'function') openSystems();
+  if (groupOf(view) === 'systems' && groupOf(previousView) !== 'systems' && typeof openSystems === 'function') openSystems();
   if (view === 'setup') openSetup();
   if (view === 'context') loadContext();
   if (view === 'memory') loadMemory();
@@ -578,7 +578,7 @@ function setOptions(select, items, getLabel, getValue, previous) {
   else { const first = [...select.options].find(option => !option.disabled); if (first) select.value = first.value; }
   if (!items.length) { const option = el('option','','None available'); option.value = ''; select.append(option); }
 }
-const projectSelects = {sessions:'project',changes:'project',checks:'project',usage:'project',context:'context-project',brain:'brain-project',memory:'memory-project',skills:'skills-project','create-skill':'create-skill-project',setup:'setup-project',creator:'creator-project',accelerators:'accelerator-project',systems:'system-project'};
+const projectSelects = {sessions:'project',changes:'project',checks:'project',usage:'project',context:'context-project',brain:'brain-project',memory:'memory-project',skills:'skills-project','create-skill':'create-skill-project',setup:'setup-project',creator:'creator-project',accelerators:'accelerator-project',systems:'system-project','system-changes':'system-project'};
 const currentProject = () => groupOf(state.view) === 'sessions' ? state.selected?.project_id || $('project').value : projectSelects[state.view] ? $(projectSelects[state.view]).value : $('project-switcher').value;
 // Every view follows the sidebar project; views in the middle of an operation keep theirs until it ends.
 function switchProject(id) {
@@ -590,8 +590,9 @@ function switchProject(id) {
 }
 // Opening a session or Creator run of another project moves the other views along; only the visible view reloads.
 function syncProjectSelects(id, reloadVisible = false) {
-  const busy = {'memory-project':knowledgeState.pending,'brain-project':knowledgeState.pending,'skills-project':Boolean(skillsState.pending),'create-skill-project':Boolean(createSkillState.pending),'setup-project':Boolean(setupState.pending || setupState.registerPending),'creator-project':creatorUi.pending};
-  for (const select of ['context-project','memory-project','brain-project','skills-project','create-skill-project','setup-project','creator-project','accelerator-project']) if (!busy[select] && projectFor(id) && $(select).value !== id) $(select).value = id;
+  const busy = {'memory-project':knowledgeState.pending,'brain-project':knowledgeState.pending,'skills-project':Boolean(skillsState.pending),'create-skill-project':Boolean(createSkillState.pending),'setup-project':Boolean(setupState.pending || setupState.registerPending),'creator-project':creatorUi.pending,
+    'system-project':typeof systemDiscovery !== 'undefined' && Boolean(systemUi.pending || (inSystems() && systemUi.detail?.active) || systemEditor.pending || systemEditor.dirty || systemDiscovery.active)};
+  for (const select of ['context-project','memory-project','brain-project','skills-project','create-skill-project','setup-project','creator-project','accelerator-project','system-project']) if (!busy[select] && projectFor(id) && $(select).value !== id) $(select).value = id;
   // The draft's own handler may already have moved a select, so the visible view reloads regardless.
   const visible = projectSelects[state.view];
   if (reloadVisible && visible && visible !== 'project' && !busy[visible] && $(visible).value === id) $(visible).dispatchEvent(new Event('change'));
@@ -601,6 +602,7 @@ function populateSettings() {
   const boot = state.bootstrap;
   const draftModel = selectedModel(); const draftEffort = $('thinking-effort').value;
   for (const id of ['project','context-project','accelerator-project']) setProjectChoices($(id),boot.projects,$(id).value);
+  if (!(typeof systemUi !== 'undefined' && systemUi.pending)) setProjectChoices($('system-project'),boot.projects,$('system-project').value || $('project').value);
   setProjectChoices($('project-switcher'),boot.projects,currentProject());
   for (const scope of ['memory','brain']) if (!knowledgeState.pending) setProjectChoices($(`${scope}-project`),boot.projects,$(`${scope}-project`).value || $('project').value);
   if (!setupState.pending && !setupState.registerPending) setProjectChoices($('setup-project'),boot.projects,$('setup-project').value || $('project').value,true);
@@ -635,7 +637,7 @@ async function bootstrap() {
     if (!initialRouteApplied) { initialRouteApplied = true; if (initialView && initialView !== state.view) { setView(isResultView(initialView) && !state.selectedId ? 'sessions' : initialView,false); routed = true; } restoringRoute = false; if (viewFromHash() !== state.view) history.replaceState(null,'','#/'+state.view); }
     if (routed) return;
     if (state.view === 'creator') openCreator();
-    if (state.view === 'systems' && typeof openSystems === 'function') openSystems();
+    if (groupOf(state.view) === 'systems' && typeof openSystems === 'function') openSystems();
     if (state.view === 'setup') openSetup(true);
     if (state.view === 'context') loadContext();
     if (state.view === 'memory') loadMemory();
@@ -749,7 +751,7 @@ function updateHeader() {
   const session = state.selected;
   const sessionLine = session ? `${projectFor(session.project_id)?.name || 'Project'} · ${isFleetSession(session) ? 'Fleet review · ' : isClashSession(session) ? `Clash vs ${providerFor(session.clash?.challenger)?.name || session.clash?.challenger || 'challenger'} · ` : ''}${providerFor(session.provider)?.name || session.provider}` : '';
   $('page-title').textContent = groupOf(state.view) === 'sessions' ? session?.title || 'New session' : {systems:'System Orchestration',knowledge:'Knowledge',skills:'Skills',accelerators:'Accelerators',setup:'Projects & Setup'}[groupOf(state.view)];
-  $('page-subtitle').textContent = groupOf(state.view) === 'sessions' ? session ? sessionLine : [projectFor($('project').value)?.name,providerFor($('provider').value)?.name].filter(Boolean).join(' · ') : [state.view === 'kit3' ? '' : projectFor(currentProject())?.name,({brain:'Browsing runs no commands.',memory:'Browsing runs no commands.',context:'Files added to a session when Project context is on.'})[state.view]].filter(Boolean).join(' · ');
+  $('page-subtitle').textContent = groupOf(state.view) === 'sessions' ? session ? sessionLine : [projectFor($('project').value)?.name,providerFor($('provider').value)?.name].filter(Boolean).join(' · ') : [state.view === 'kit3' ? '' : projectFor(currentProject())?.name,groupOf(state.view) === 'systems' ? $('system-config').value.trim() : ({brain:'Browsing runs no commands.',memory:'Browsing runs no commands.',context:'Files added to a session when Project context is on.'})[state.view]].filter(Boolean).join(' · ');
   $('page-subtitle').hidden = !$('page-subtitle').textContent;
   $('open-kit3').hidden = state.view !== 'kit3';
   if ($('project-switcher').value !== currentProject() && projectFor(currentProject())) $('project-switcher').value = currentProject(); $('project-switcher').disabled = !state.bootstrap || Boolean(state.pending);
@@ -1047,6 +1049,8 @@ function updateControls() {
   renderModelHint(dryRun,ready,customModel);
   const terminalLinkedTask = linked && !existingFleet && ['completed','cancelled'].includes(linkedTask()?.status);
   const noResume = !awaitingContext && !existingFleet && hasSession && state.selected && !isActive && !state.selected.native_session_id && !state.loading;
+  // System changes and AI scans run here as transcripts; they continue under System Orchestration.
+  const systemOwned = state.selected?.system_run ? 'run' : state.selected?.system_discovery ? 'scan' : null;
   $('send').disabled = !routingValid || !sddValid || !clashValid || !budgetValid || budgetsDirty() || !ready || pending || state.loading || isActive || noResume || terminalLinkedTask || existingFleet || awaitingContext || !linkValid || !hasSession && projectFor($('project').value)?.available === false || !agentsValid || !agentModeValid || !modelValid || !workspaceValid || !fleetValid || !$('project').value || !provider || !dryRun && !provider.available || !$('prompt').value.trim();
   $('composer-area').hidden = existingFleet || awaitingContext; $('prompt').disabled = pending || state.loading || noResume || terminalLinkedTask || existingFleet; $('prompt').placeholder = clashMode && !hasSession ? ($('mode').value === 'edit' ? 'Describe the task; the implementer builds it and the challenger attacks the result…' : 'Describe the scope; both providers review it and dispute each other’s findings…') : fleet && !hasSession ? 'Describe the review scope, files, or Git changes to inspect…' : terminalLinkedTask ? 'Start a new session with an active or new task…' : noResume ? 'Start a new session to continue…' : hasSession ? 'Write a follow-up for this session…' : 'Describe a task for this project…';
   $('attach-files').disabled = !ready || pending || state.loading || isActive || noResume || terminalLinkedTask || existingFleet || awaitingContext;
@@ -1054,9 +1058,9 @@ function updateControls() {
   for (const button of $('attachment-list').querySelectorAll('button')) button.disabled = pending;
   $('prompt-label').textContent = fleet ? 'Review scope' : clashMode ? 'Task or follow-up for the next clash cycle' : 'Task or follow-up message';
   $('send-label').textContent = state.pending === 'create' ? $('brain-link-enabled').checked ? 'Preparing…' : 'Starting…' : state.pending === 'followup' ? 'Sending…' : !hasSession && $('workspace').value === 'worktree' && projectGitState.pending ? 'Checking Git…' : isActive ? 'Session active' : noResume || terminalLinkedTask ? 'New session needed' : hasSession ? linked ? 'Prepare follow-up' : clashMode ? 'Start next cycle' : 'Send follow-up' : $('brain-link-enabled').checked ? 'Prepare session' : fleet ? dryRun ? 'Start dry-run' : 'Start fleet review' : clashMode ? 'Start clash' : 'Start session';
-  $('composer-note').textContent = budgetsDirty() ? 'Save budget changes before launching.' : terminalLinkedTask ? 'Choose an active or new Brain task in a new session.' : noResume ? 'Use New session in the sidebar.' : isActive ? 'Wait for completion, or cancel the session.' : 'Ctrl / ⌘ + Enter to send';
+  $('composer-note').textContent = budgetsDirty() ? 'Save budget changes before launching.' : terminalLinkedTask ? 'Choose an active or new Brain task in a new session.' : noResume ? systemOwned ? 'Continue in System Orchestration.' : 'Use New session in the sidebar.' : isActive ? 'Wait for completion, or cancel the session.' : 'Ctrl / ⌘ + Enter to send';
   $('composer-note').classList.toggle('shortcut',$('composer-note').textContent === 'Ctrl / ⌘ + Enter to send');
-  const caption = terminalLinkedTask ? 'The linked Brain task is completed or cancelled. Start a new session with an active or new task to continue.' : (!hasSession && $('brain-link-enabled').checked || linked && !noResume) ? 'You review the prepared workspace and context before the agent runs.' : clashMode && !hasSession ? 'Both participants share the session budgets.' : clashMode && !noResume ? 'A follow-up starts the next cycle; both native sessions resume. Untick Clash for a normal follow-up.' : fleet && !hasSession ? 'Scope and reviewers are fixed once the review starts.' : noResume ? state.selected.status === 'cancelled' ? 'Cancelled before a resumable native session was created.' : 'No resumable native session was returned. Start a new session to continue.' : '';
+  const caption = terminalLinkedTask ? 'The linked Brain task is completed or cancelled. Start a new session with an active or new task to continue.' : (!hasSession && $('brain-link-enabled').checked || linked && !noResume) ? 'You review the prepared workspace and context before the agent runs.' : clashMode && !hasSession ? 'Both participants share the session budgets.' : clashMode && !noResume ? 'A follow-up starts the next cycle; both native sessions resume. Untick Clash for a normal follow-up.' : fleet && !hasSession ? 'Scope and reviewers are fixed once the review starts.' : noResume ? systemOwned === 'run' ? 'This launch belongs to a system change. Resume, cancel or review it under System Orchestration › Changes.' : systemOwned === 'scan' ? 'This is an AI scan of service folders. Start a new scan from the system editor.' : state.selected.status === 'cancelled' ? 'Cancelled before a resumable native session was created.' : 'No resumable native session was returned. Start a new session to continue.' : '';
   $('composer-caption').textContent = caption; $('composer-caption').hidden = !caption;
   const providerNote = dryRun ? 'Offline dry-run can use any provider selection; no native CLI is launched.' : ready && !provider?.available ? 'No provider is ready. Install and sign in with a native CLI, then restart the Harness server.' : provider?.id === 'cursor' ? 'Cursor can’t disable or cap helpers; helper settings are instructions only.' : '';
   if ($('provider-hint').textContent !== providerNote) $('provider-hint').textContent = providerNote; $('provider-hint').hidden = !providerNote;

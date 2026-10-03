@@ -18,7 +18,12 @@ into Memory Bank. A failed send retains the selected files for correction.
 ## System orchestration in the browser
 
 **System Orchestration** coordinates development changes across registered
-service repositories. Choose **Choose system folder**, then **Create / edit system**.
+service repositories. It has two tabs and works on the project chosen in the
+sidebar: **Services** holds the system file, its contract map and the editor;
+**Changes** holds plans, launches, agents and receipts. On **Services**, choose
+**Choose system folder…** to open another folder as the system project (it is
+added to your projects and becomes the working project in every view), then
+**Create or edit system**.
 Use **Add service folder** to browse existing folders; selected folders are
 registered automatically. Select **Codex, Claude Code or Cursor Agent**, then
 **Fill with AI** to discover the system name, service IDs, owners, responsibilities,
@@ -26,8 +31,9 @@ capabilities, contracts, dependencies and context sources from a bounded evidenc
 snapshot. The ordinary forms are populated automatically, with cited files and
 uncertainties available for review. Unknown owners stay `unknown`; complete
 dependency coverage stays unconfirmed. Review or adjust the result, then
-**Save system**. The application writes `system.json` and service passports;
-no JSON editing is required. Existing systems open in the same form.
+**Save system**. The application writes `system.json` and service passports,
+no JSON editing is required, and the editor gives way to the updated map.
+Existing systems open in the same form.
 AI scanning uses the single Harness queue, supports cancellation and restores
 its original draft after interruption/reload. It requires bubblewrap on Linux or
 `sandbox-exec` on macOS, plus an installed/authenticated native CLI. The agent
@@ -43,12 +49,16 @@ A failed scan names its cause (for example an expired CLI login with the command
 to sign in again, or a host that blocks bubblewrap's user namespaces), and the
 editor warns before scanning when the sandbox cannot start on this host. See
 [Troubleshooting AI discovery](../docs/AI-SYSTEM-ORCHESTRATION.md#troubleshooting-ai-discovery).
-Alternatively, load an existing relative `system.json`. Inspect the declared graph,
-capabilities and memory ownership, select a starting service or changed contract,
-and prepare a bounded context/impact plan. Review its sources before execution.
-The backend checks freshness again when queued work actually starts.
+Alternatively, **Load system** reads an existing relative system file
+(`system.json` by default). Inspect the declared graph, capabilities and memory
+ownership, then **Plan a change** (or **New change** on the **Changes** tab):
+describe the task, choose starting services or changed contracts, and prepare a
+bounded context/impact plan. Review its sources before execution. The backend
+checks freshness again when queued work actually starts.
 
-Choose **Codex, Claude Code or Cursor Agent** in the reviewed plan. Each uses
+A change moves through **Plan**, **Review**, **Run** and **Receipts**. In the
+**Launch** card of the reviewed plan, choose **Codex, Claude Code or Cursor
+Agent**. Each uses
 its configured CLI and default model. The provider is fixed after launch,
 including recovery. Browser requests cannot supply executables. Workers run
 sequentially through the same single Harness queue;
@@ -70,8 +80,9 @@ bounded per agent and launch; receipts stay authoritative. During **Fill with
 AI** the same panel follows the discovery agent and maps copied evidence back to
 original service paths.
 
-Saved runs show dispatch state, worker-reported checks, scoped changed files,
-native task references and the knowledge handoff. Cancel stops provider trees;
+Saved changes show dispatch state, worker-reported checks, scoped changed files,
+the knowledge handoff and, behind a toggle, native task references and the
+runner log. Cancel stops provider trees;
 recovery requires an explicit resume and an explicit dispatch retry after an
 ambiguous interruption. Inspect partial edits before accepting changed sources.
 Completed dispatches are skipped, and server restart never automatically resumes

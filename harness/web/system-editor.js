@@ -13,6 +13,7 @@ function closeSystemEditor() {
   if(systemEditor.pending) return;
   ++systemEditor.epoch; systemEditor.data=null; systemEditor.dirty=false; $('system-editor').hidden=true;
   if(typeof resetDiscovery==='function') resetDiscovery();
+  systemLayout();
 }
 function editorError(error) { $('system-editor-error').textContent=error.message; $('system-editor-error').hidden=false; }
 function editorChanged() { systemEditor.dirty=true; $('system-editor-status').textContent='Unsaved changes';systemControls(); }
@@ -21,13 +22,14 @@ function editorField(parent,label,value,update,{choices=null,multiline=false,req
   if(!choices && !multiline) input.type='text';
   if(choices) for(const choice of choices) { const option=el('option','',choice); option.value=choice; input.append(option); }
   input.value=value ?? ''; input.required=required; if(!choices) input.maxLength=limit; if(multiline) input.rows=2;
+  if(multiline) wrapper.classList.add('wide');
   input.addEventListener(choices?'change':'input',()=>{update(input.value);editorChanged();}); wrapper.append(input); parent.append(wrapper); return input;
 }
 function editorLines(parent,label,values,update) {
   return editorField(parent,label,(values || []).join('\n'),value=>update(value.split('\n').map(v=>v.trim()).filter(Boolean)),{multiline:true,limit:102400});
 }
-function editorButton(parent,label,action) {
-  const button=el('button','button',label); button.type='button'; button.addEventListener('click',action); parent.append(button); return button;
+function editorButton(parent,label,action,className='button') {
+  const button=el('button',className,label); button.type='button'; button.addEventListener('click',action); parent.append(button); return button;
 }
 function editorRows(parent,values,{title,addLabel,empty,draw}) {
   const render=()=>{
@@ -35,9 +37,9 @@ function editorRows(parent,values,{title,addLabel,empty,draw}) {
     const summary=parent.closest('details')?.querySelector('summary');
     if(summary?.dataset.editorTitle) summary.textContent=`${summary.dataset.editorTitle} (${values.length})`;
     values.forEach((value,index)=>{
-      const row=el('div','system-editor-row'), grid=el('div','knowledge-form-grid');
-      row.append(el('h4','',`${title} ${index+1}`),grid); draw(grid,value);
-      editorButton(row,`Remove ${title.toLowerCase()} ${index+1}`,()=>{values.splice(index,1);editorChanged();render();}); parent.append(row);
+      const row=el('div','system-editor-row'), head=el('div','system-editor-row-head'), grid=el('div','system-editor-grid');
+      head.append(el('h6','',`${title} ${index+1}`)); row.append(head,grid); draw(grid,value);
+      editorButton(head,'Remove',()=>{values.splice(index,1);editorChanged();render();},'button quiet').setAttribute('aria-label',`Remove ${title.toLowerCase()} ${index+1}`); parent.append(row);
     });
     editorButton(parent,addLabel,()=>{values.push(empty());editorChanged();render();});
   };render();
@@ -49,7 +51,7 @@ function editorSources(parent,values) {
   }});
 }
 function editorSection(card,title) {
-  const section=el('details','skills-preview'), rows=el('div'), summary=el('summary','',title);
+  const section=el('details','system-editor-section'), rows=el('div'), summary=el('summary','',title);
   summary.dataset.editorTitle=title.replace(/ \(\d+\)$/,'');section.append(summary,rows);card.append(section);return rows;
 }
 async function editorRegister(folder) {
@@ -75,18 +77,18 @@ function editorPickService(existing=null,opener=$('system-editor-add')) {
 function renderSystemEditor() {
   const data=systemEditor.data;
   const parent=data.config_path.split('/').slice(0,-1).join('/');
-  $('system-editor').hidden=false; $('system-editor-location').textContent=(projectFor(data.project_id)?.path || '')+(parent?'/'+parent:'');
+  $('system-editor').hidden=false; $('system-editor-location').textContent=(projectFor(data.project_id)?.path || '')+(parent?'/'+parent:'')+'/'+data.config_path.split('/').pop();
   $('system-editor-name').value=data.name; $('system-editor-services').replaceChildren();
   for(const service of data.services) {
-    const passport=service.passport, card=el('section','system-editor-service'), grid=el('div','knowledge-form-grid');
-    card.append(el('h3','',passport.id || 'New service'),el('p','system-note',service.path),grid);
+    const passport=service.passport, card=el('section','system-editor-service'), head=el('div','system-editor-service-head'), title=el('div'), actions=el('div','system-editor-service-actions'), grid=el('div','system-editor-grid');
+    title.append(el('h5','',passport.id || 'New service'),el('p','system-note',service.path)); head.append(title,actions); card.append(head,grid);
     editorField(grid,'Service ID',passport.id,value=>passport.id=value,{required:true,limit:80});
     editorField(grid,'Owning team',passport.owner,value=>passport.owner=value,{required:true,limit:200});
     editorField(grid,'Service description',passport.description,value=>passport.description=value,{multiline:true,required:true});
     const survey=el('label','checkbox'), checkbox=document.createElement('input'); checkbox.type='checkbox';checkbox.checked=passport.relationships_complete;
     checkbox.addEventListener('change',()=>{passport.relationships_complete=checkbox.checked;editorChanged();});survey.append(checkbox,document.createTextNode('I have described all known dependencies'));card.append(survey);
-    editorButton(card,'Choose another service folder',event=>editorPickService(service,event.currentTarget));
-    editorButton(card,'Remove service from system',()=>{data.services.splice(data.services.indexOf(service),1);editorChanged();renderSystemEditor();});
+    editorButton(actions,'Choose another folder',event=>editorPickService(service,event.currentTarget),'button quiet');
+    editorButton(actions,'Remove',()=>{data.services.splice(data.services.indexOf(service),1);editorChanged();renderSystemEditor();},'button quiet').setAttribute('aria-label',`Remove ${passport.id || 'this service'} from the system`);
     editorRows(editorSection(card,`Capabilities (${passport.capabilities.length})`),passport.capabilities,{
       title:'Capability',addLabel:'Add capability',empty:()=>({id:'',description:'',status:'unknown',sources:[],keywords:[]}),draw:(grid,value)=>{
         editorField(grid,'Capability ID',value.id,text=>value.id=text,{required:true,limit:80});
@@ -111,7 +113,7 @@ function renderSystemEditor() {
     editorSources(editorSection(card,`Sources of context (${passport.sources.length})`),passport.sources);
     $('system-editor-services').append(card);
   }
-  editorSources($('system-editor-shared'),data.shared_sources); editorControls();
+  editorSources($('system-editor-shared'),data.shared_sources); editorControls(); systemLayout();
 }
 async function openSystemEditor() {
   if(systemEditor.pending) return;
@@ -120,27 +122,33 @@ async function openSystemEditor() {
   try {
     const data=await api('/api/systems/editor',{method:'POST',body:{project_id:$('system-project').value,config_path:$('system-config').value}});
     if(epoch!==systemEditor.epoch) return;
-    systemEditor.data=data;systemEditor.dirty=false;renderSystemEditor();$('system-editor-status').textContent='Choose service folders and fill their details. Save updates the system map.';
+    systemEditor.data=data;systemEditor.dirty=false;renderSystemEditor();$('system-editor-status').textContent='';
     if(typeof restoreDiscovery==='function') await restoreDiscovery();
     $('system-editor').scrollIntoView({behavior:'smooth',block:'start'});
-  } catch(error) { $('system-editor').hidden=false; editorError(error); }
+  } catch(error) { $('system-editor').hidden=false; editorError(error); $('system-editor-status').textContent=''; systemLayout(); }
   finally {systemEditor.pending=typeof systemDiscovery!=='undefined' && systemDiscovery.active;systemControls();}
 }
 $('system-edit').addEventListener('click',()=>{
-  if(systemEditor.data && systemEditor.dirty) { $('system-editor').hidden=false; $('system-editor').scrollIntoView({block:'start'}); return; }
+  if(systemEditor.data && systemEditor.dirty) { $('system-editor').hidden=false; systemLayout(); $('system-editor').scrollIntoView({block:'start'}); return; }
   openSystemEditor();
 });
+// Choosing another system folder registers it and makes it the working project in every view.
 $('system-choose-project').addEventListener('click',event=>chooseProjectFolder(projectFor($('system-project').value)?.path,async folder=>{
   systemEditor.pending=true;systemControls();
-  try { const project=await editorRegister(folder); systemEditor.data=null;systemEditor.dirty=false;$('system-project').value=project.id;systemReset();await systemHistory(); }
+  try {
+    const project=await editorRegister(folder); systemEditor.data=null;systemEditor.dirty=false;
+    systemEditor.pending=false; switchProject(project.id);
+    if($('system-project').value!==project.id) { $('system-project').value=project.id;systemReset();systemUi.project=project.id;await systemHistory(); }
+  }
   catch(error) {systemFailure(error);}
   finally {systemEditor.pending=false;systemControls();}
   await openSystemEditor();
-},event.currentTarget,'Choose a system folder'));
+},event.currentTarget,'Choose a system folder','Browse folders on the computer running Harness. The folder you select joins your projects and becomes the working project in every view.'));
 $('system-editor-add').addEventListener('click',()=>editorPickService());
 $('system-editor-name').addEventListener('input',()=>{if(systemEditor.data) systemEditor.data.name=$('system-editor-name').value;editorChanged();});
-$('system-editor-close').addEventListener('click',()=>{ $('system-editor').hidden=true; });
-$('system-editor-discard').addEventListener('click',()=>{if(typeof discoveryRemember==='function') discoveryRemember(null);closeSystemEditor();systemControls();});
+// Close keeps the draft for this page; Edit system reopens it.
+$('system-editor-close').addEventListener('click',()=>{ $('system-editor').hidden=true; systemLayout(); $('system-edit').focus(); });
+$('system-editor-discard').addEventListener('click',()=>{if(typeof discoveryRemember==='function') discoveryRemember(null);closeSystemEditor();systemControls();$('system-edit').focus();});
 $('system-editor').addEventListener('submit',async event=>{
   event.preventDefault(); if(systemEditor.pending || !systemEditor.data) return;
   for(const input of $('system-editor').querySelectorAll(':invalid')) {
@@ -148,14 +156,17 @@ $('system-editor').addEventListener('submit',async event=>{
   }
   if(!$('system-editor').reportValidity()) return;
   systemEditor.pending=true;systemControls();$('system-editor-error').hidden=true;$('system-editor-status').textContent='Validating and saving…';
+  let saved=false;
   try {
     const data=systemEditor.data, services=data.services.map(({path,...service})=>service);
     const prepared=await api('/api/systems/preview',{method:'POST',body:{...data,services}});
-    const saved=await api('/api/systems/apply',{method:'POST',body:{preview_id:prepared.preview_id}});
-    systemEditor.data=saved.editor;systemEditor.dirty=false;renderSystemEditor();renderSystemCatalog(saved);
+    const result=await api('/api/systems/apply',{method:'POST',body:{preview_id:prepared.preview_id}});
+    systemEditor.data=result.editor;systemEditor.dirty=false;renderSystemCatalog(result);
     if(typeof discoveryRemember==='function') discoveryRemember(null);
-    $('system-editor-status').textContent='System saved. The service map is updated.';
+    saved=true;
   } catch(error) {editorError(error);$('system-editor-status').textContent='Save did not complete. Your form is retained; reload existing metadata before retrying if files changed.';}
   finally {systemEditor.pending=false;systemControls();}
+  // The saved system replaces the editor with its updated map.
+  if(saved) { closeSystemEditor(); $('system-message').textContent='System saved. The map shows the saved services.'; $('system-edit').focus(); }
 });
 systemControls();

@@ -26,6 +26,23 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Bring System Orchestration (PR #36) onto the Harness design. It is a sidebar
+  section with two tabs: **Services** (system file, contract map, service cards
+  and the editor with **Fill with AI**) and **Changes** (a change selector, the
+  new-change form with starting services as chips, and the selected change as
+  **Plan · Review · Run · Receipts** steps with its launch, recovery, agents and
+  receipts). It follows the sidebar **Project** instead of its own project
+  select; **Choose system folder…** adds a folder and makes it the working
+  project in every view. The map is drawn at its natural size in theme colors,
+  so it reads the same in the dark theme. Available services and completed
+  receipts carry no label; native task references and the runner log sit behind
+  toggles. Saving the system closes the editor onto the updated map. The launch
+  note names edit mode's writes in each service's current checkout, recovery
+  names the provider that resumes, starting services carry their dependency
+  warnings and the plan lists its warnings. Runner transcripts of system changes
+  and AI scans in **Sessions** point back to System Orchestration. The
+  screenshots in `docs/AI-SYSTEM-ORCHESTRATION.md` show the new layout.
+
 - Split the Harness page: markup stays in `harness/web/index.html`, styles move
   to `app.css` and the script to five classic files (`app-core.js`,
   `app-knowledge.js`, `app-setup.js`, `app-skills.js`, `app-creator.js`) that

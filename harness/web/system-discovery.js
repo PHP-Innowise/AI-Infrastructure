@@ -36,7 +36,7 @@ function discoveryReport(proposal) {
   panel.append(el('p','system-note','AI filled the forms below. Verify inferred behavior, ownership and dependencies before saving. Complete dependency coverage remains unconfirmed.'));
   for(const warning of proposal.warnings) panel.append(el('p','system-warning',warning));
   for(const report of proposal.reports) {
-    const details=el('details','skills-preview'),summary=el('summary','',`${report.id} · ${report.passport.capabilities.length} capabilities · ${report.passport.provides.length} provided · ${report.passport.consumes.length} consumed contracts`);
+    const details=el('details','system-details'),summary=el('summary','',`${report.id} · ${report.passport.capabilities.length} capabilities · ${report.passport.provides.length} provided · ${report.passport.consumes.length} consumed contracts`);
     details.append(summary);
     const paths=new Set([...report.description_sources,...report.owner_sources,...report.passport.sources.map(s=>s.path),...report.passport.capabilities.flatMap(c=>c.sources),...report.passport.provides.flatMap(c=>c.sources),...report.consumption_sources.flatMap(c=>c.sources)]);
     for(const path of paths) {const proof=proposal.inventory[report.id][path];details.append(el('p','system-note',`${path} · ${proof.kind} · SHA-256 ${proof.sha256.slice(0,12)}`));}
@@ -52,7 +52,7 @@ async function pollDiscovery(epoch) {
     if(epoch!==systemDiscovery.epoch) return;
     systemDiscovery.active=job.active;discoveryAgent(job);
     const last=job.events.filter(e=>['status','error','text'].includes(e.kind)).at(-1);
-    $('system-discovery-status').textContent=`AI scan · ${job.provider} · ${job.status}${job.active && last?.text?' · '+last.text:''}`;
+    $('system-discovery-status').textContent=`AI scan · ${providerFor(job.provider)?.name || job.provider} · ${humanLabel(job.status)}${job.active && last?.text?' · '+last.text:''}`;
     if(job.active) {systemDiscovery.timer=setTimeout(()=>pollDiscovery(epoch),1000);systemControls();return;}
     ++systemDiscovery.epoch;systemEditor.pending=false;
     if(job.proposal) {
@@ -97,7 +97,7 @@ async function restoreDiscovery() {
     if(job.active) {systemEditor.data=job.draft;systemEditor.dirty=true;systemEditor.pending=true;systemDiscovery.active=true;renderSystemEditor();}
     else if(job.proposal) {systemEditor.data=job.proposal.editor;systemEditor.dirty=true;renderSystemEditor();discoveryReport(job.proposal);}
     else if(job.draft.revision===systemEditor.data.revision) {systemEditor.data=job.draft;systemEditor.dirty=true;renderSystemEditor();}
-    $('system-discovery-status').textContent=job.error || `Previous AI scan · ${job.status}`;
+    $('system-discovery-status').textContent=job.error || `Previous AI scan · ${humanLabel(job.status)}`;
     if(job.active) pollDiscovery(systemDiscovery.epoch);
   } catch(error) {$('system-discovery-status').textContent='Previous AI scan unavailable: '+error.message;}
 }
