@@ -201,6 +201,8 @@ Memory bank and Context files tabs), **Skills** (Library and Create skill
 tabs), **Accelerators** (Overview, Infrastructure Creator and Open Source Kit
 tabs) and **Projects & Setup**. Every view has its own address, such as
 `#/brain` or `#/creator`, so a reload or the browser's Back button returns to it.
+The **Project** selector at the top of the sidebar applies to every view; choosing
+another project while a session is open starts a new session draft for it.
 
 - **Projects & Setup:** add an existing project, inspect its Git state and
   accelerator readiness, select an edition and target tools, then preview and
@@ -227,7 +229,8 @@ tabs) and **Projects & Setup**. Every view has its own address, such as
   reviewers run directly through the selected Claude/Codex/Cursor provider in
   plan mode, without nested helpers. The additional-agent limit bounds concurrent
   reviewers. Offline dry-run uses labelled synthetic findings and no model calls.
-- **Results & verification:** a tab of the open session. Inspect its changed files and Git diff, run an explicit
+- **Changes, Checks and Usage:** tabs of the open session next to Conversation. Changes shows the files and Git diff
+  (and Worktree delivery for worktree sessions), Checks runs an explicit
   test/lint command in its workspace, and inspect persisted output, exit code and
   check status separately from the agent outcome. Shows every recorded launch
   and total reported tokens, USD and run time; missing provider usage stays unknown.
@@ -252,7 +255,9 @@ tabs) and **Projects & Setup**. Every view has its own address, such as
   runtime. Numeric revisions protect updates and completion against stale edits.
 - **Accelerators:** the Overview tab presents the three kits. Kit 1 is the
   **Infrastructure Creator** tab for the full Scan → Review → Generate → Apply
-  workflow and manifest-aware updates. Kit 2 opens the **Projects & Setup**
+  workflow and manifest-aware updates. A selected run shows its phase as five
+  steps (Scan, Review profile, Generate, Review files, Apply); **New run** opens
+  the form for another one. Kit 2 opens the **Projects & Setup**
   installer for Laravel, Symfony, PHP Core or WordPress.
 - **Open Source Kit:** the Kit 3 catalog, filters, dossiers and copyable
   installation commands as a tab of Accelerators; inside the Harness the catalog
@@ -262,8 +267,10 @@ tabs) and **Projects & Setup**. Every view has its own address, such as
   installation** and **Install selected skills**. The preview lists every
   destination and any conflicts. Installation adds missing files, keeps
   identical files and refuses differing files or unsafe paths. The installed
-  list shows the project's existing skill folders; start a new agent session
-  to load newly installed skills. Tracked skills show their source and commit (or
+  list shows one row per skill with a chip for each tool that has a copy (path
+  and source in the chip's tooltip); start a new agent session to load newly
+  installed skills. While you browse the catalog, a bar at the bottom keeps the
+  selection and **Preview installation** in view. Tracked skills show their source and commit (or
   a content hash for local skills). Use **Check update** or **Preview removal**,
   review the file diffs, then apply the single-use preview. Local edits and extra
   files block updates/removal. **Refresh source** reloads the catalog snapshot

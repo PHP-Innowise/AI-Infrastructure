@@ -26,6 +26,16 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Finish the Harness redesign plan. One **Project** selector in the sidebar
+  drives every view (the per-view project selects are gone from the screen); an
+  open session of another project yields to a new draft. Results splits into
+  **Changes · Checks · Usage** tabs next to Conversation, with counts, and shows
+  Worktree delivery only for worktree sessions. The Creator shows a run's phase
+  as five steps and keeps the new-run form behind **New run**. Skills lists one
+  row per installed skill with tool chips (36 rows instead of 108 for the demo
+  project), compacts the catalog, and keeps the selection and **Preview
+  installation** in a bar at the bottom.
+
 - Regroup the Harness into five sections: Sessions, Knowledge (Project Brain,
   Memory bank, Context files), Skills (Library, Create skill), Accelerators
   (Overview, Infrastructure Creator, Open Source Kit) and Projects & Setup.

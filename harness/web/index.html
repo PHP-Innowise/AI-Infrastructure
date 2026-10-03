@@ -46,6 +46,9 @@
     .brand { display:flex; align-items:center; gap:12px; padding:0 8px 24px; }
     .brand-mark { display:grid; place-items:center; width:34px; height:34px; border:1px solid var(--field-line); background:var(--paper); border-radius:var(--radius-md); }
     .brand-name { font-size:var(--text-body); font-weight:var(--weight-strong); line-height:var(--leading-ui); }
+    .project-switcher { display:flex; flex-direction:column; gap:4px; margin:0 0 12px; color:var(--muted); font-size:var(--text-ui); }
+    .project-switcher select { width:100%; }
+    [data-project-field] { display:none !important; }
     .brand-subtitle { color:var(--muted); font-size:var(--text-meta); }
     .new-session { display:flex; align-items:center; justify-content:center; gap:8px; margin:0 0 16px; min-height:var(--control-height); border:1px solid var(--field-line); border-radius:var(--radius); background:var(--paper); color:var(--ink); font-size:var(--text-body); font-weight:var(--weight-strong); }
     .new-session:hover { border-color:var(--field-line-hover); }
@@ -95,8 +98,20 @@
     .banner p { margin:0; }
     .banner button:not(.button) { flex:none; background:transparent; border:0; color:inherit; text-decoration:underline; font-size:var(--text-ui); padding:4px; }
     #creator-view textarea { width:100%; }
-    #creator-detail { border-top:1px solid var(--line); margin-top:24px; padding-top:12px; }
     #creator-form { margin-bottom:16px; }
+    .creator-runs-bar { align-items:flex-end; }
+    #creator-detail { border-top:0; margin-top:8px; padding-top:0; }
+    .stepper { display:flex; flex-wrap:wrap; gap:8px 24px; margin:0 0 16px; padding:12px 16px; list-style:none; border:1px solid var(--line); border-radius:var(--radius-md); background:var(--soft); }
+    .step { display:flex; align-items:center; gap:8px; color:var(--muted); font-size:var(--text-ui); }
+    .step-mark { display:inline-grid; place-items:center; width:20px; height:20px; border:1px solid var(--field-line); border-radius:50%; font-size:var(--text-meta); font-weight:var(--weight-strong); }
+    .step[data-state="done"] { color:var(--ink-2); }
+    .step[data-state="done"] .step-mark { border-color:var(--purple-line); background:var(--purple-soft); color:var(--purple); }
+    .step:is([data-state="current"],[data-state="running"]) { color:var(--ink); font-weight:var(--weight-strong); }
+    .step:is([data-state="current"],[data-state="running"]) .step-mark { border-color:var(--purple); background:var(--purple); color:var(--paper); }
+    .step[data-state="running"] .step-mark { animation:pulse 1.5s ease-in-out infinite; }
+    .step[data-state="attention"] { color:var(--warning); font-weight:var(--weight-strong); }
+    .step[data-state="attention"] .step-mark { border-color:var(--warning-line); background:var(--warning-soft); color:var(--warning); }
+    .creator-status { margin:0 0 4px; font-size:var(--text-title); font-weight:var(--weight-strong); }
     #creator-form .page-toolbar { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); align-items:end; }
     #creator-form .page-toolbar .field { width:auto; max-width:none; }
     #creator-form .page-toolbar > .button { justify-self:start; }
@@ -282,7 +297,7 @@
     .scrim { display:none; }
     .connection-loading { padding:16px 32px; color:var(--muted); font-size:var(--text-ui); }
     .memory-page { display:flex; flex-direction:column; min-height:0; flex:1; padding:32px var(--page-x); }
-    .memory-toolbar { display:grid; grid-template-columns:minmax(150px,1fr) minmax(150px,1fr) auto; gap:12px; align-items:end; }
+    .memory-toolbar { display:grid; grid-template-columns:minmax(150px,1fr) auto; gap:12px; align-items:end; }
     .memory-filter { margin:16px 0 12px; }
     .memory-filter input { width:100%; }
     .memory-summary { display:flex; flex-wrap:wrap; justify-content:space-between; gap:8px 16px; margin:0 0 16px; color:var(--muted); font-size:var(--text-meta); }
@@ -310,6 +325,9 @@
     :is(.knowledge-note,.agent-hint,.fleet-note,.workspace-hint):empty:not([role]),.fleet-report-text:empty,.knowledge-result:empty,.knowledge-form-grid:empty { display:none; }
     .knowledge-note,.skills-note,.skills-source-detail { max-width:75ch; }
     #results-view .page-content > section { margin-top:32px; padding-top:24px; border-top:1px solid var(--line); }
+    #results-view [data-tab] { display:none; }
+    #results-view[data-tab="changes"] [data-tab="changes"],#results-view[data-tab="checks"] [data-tab="checks"],#results-view[data-tab="usage"] [data-tab="usage"] { display:block; }
+    #results-view[data-tab="checks"] .page-content > section[data-tab],#results-view[data-tab="usage"] .page-content > section[data-tab] { margin-top:16px; padding-top:0; border-top:0; }
     .option-panel .budget-scope { margin:0 0 12px; }
     .budget-editor .button { margin-top:12px; }
     .budget-split .knowledge-note { margin-bottom:12px; }
@@ -415,7 +433,7 @@
     .brain-metadata { margin:0 0 12px; }
     .brain-metadata summary { font-size:var(--text-ui); cursor:pointer; color:var(--muted); }
     @media (max-width:760px) { .knowledge-form-grid,.knowledge-search .knowledge-form-grid { grid-template-columns:1fr; } .knowledge-tools { padding:12px; } .brain-filter-row { grid-template-columns:1fr; } .knowledge-page .memory-files { max-height:235px; } .knowledge-actions .button { min-height:40px; } }
-    .skills-toolbar { display:grid; grid-template-columns:minmax(160px,1fr) minmax(160px,1fr) auto; align-items:end; gap:12px; }
+    .skills-toolbar { display:grid; grid-template-columns:minmax(160px,1fr) auto; align-items:end; gap:12px; }
     .skills-source-detail,.skills-note { color:var(--muted); font-size:var(--text-ui); line-height:var(--leading-body); margin:12px 0; overflow-wrap:anywhere; }
     .skills-source-detail a { margin-left:8px; white-space:nowrap; }
     .skills-tools { border:0; padding:0; margin:24px 0 16px; }
@@ -425,18 +443,25 @@
     .skills-selection { border-top:1px solid var(--line); margin-top:24px; padding-top:4px; }
     .skills-selection .memory-filter { display:block; }
     .skills-selection-header { display:flex; align-items:center; justify-content:space-between; gap:16px; margin:0 0 8px; color:var(--muted); font-size:var(--text-meta); }
-    .skills-list { max-height:360px; overflow:auto; border:1px solid var(--line); border-radius:var(--radius); }
+    .skills-list { border:1px solid var(--line); border-radius:var(--radius); }
     .skills-list .empty-note { margin:0; padding:24px 16px; }
-    .skill-choice { display:flex; align-items:flex-start; gap:12px; padding:16px 16px; border-bottom:1px solid var(--line); cursor:pointer; }
+    .skill-choice { display:flex; align-items:flex-start; gap:12px; padding:8px 12px; border-bottom:1px solid var(--line); cursor:pointer; }
     .skill-choice:last-child { border-bottom:0; }
     .skill-choice:hover { background:var(--soft); }
     .skill-choice:has(input:checked) { background:var(--purple-tint); }
-    .skill-choice input { flex:none; accent-color:var(--purple); margin:4px 0 0; width:15px; height:15px; }
+    .skill-choice input { flex:none; accent-color:var(--purple); margin:2px 0 0; width:15px; height:15px; }
     .skill-choice input:disabled { cursor:default; }
-    .skill-choice-copy { min-width:0; }
-    .skill-choice-name { display:block; font-size:var(--text-body); font-weight:var(--weight-strong); overflow-wrap:anywhere; }
-    .skill-choice-id,.skill-choice-description { display:block; color:var(--muted); font-size:var(--text-ui); line-height:var(--leading-body); margin-top:4px; overflow-wrap:anywhere; white-space:pre-wrap; }
+    .skill-choice-copy { min-width:0; display:flex; flex-wrap:wrap; align-items:baseline; column-gap:8px; }
+    .skill-choice-name { font-size:var(--text-body); font-weight:var(--weight-strong); overflow-wrap:anywhere; }
+    .skill-choice-id,.skill-choice-description { color:var(--muted); font-size:var(--text-ui); line-height:var(--leading-body); overflow-wrap:anywhere; }
     .skill-choice-id { font-family:var(--font-mono); font-size:var(--text-meta); }
+    .skill-choice-description { flex-basis:100%; display:-webkit-box; -webkit-line-clamp:1; -webkit-box-orient:vertical; overflow:hidden; }
+    /* Sticks to the scrollport edge, below the page's bottom padding. */
+    .skills-selection-bar { position:sticky; bottom:-32px; z-index:1; justify-content:space-between; margin-top:0; padding:12px 0; background:var(--paper); border-top:1px solid var(--line); }
+    .installed-skill { align-items:center; padding:8px 0; }
+    .installed-tools { display:inline-flex; flex-wrap:wrap; gap:4px; margin-left:8px; vertical-align:middle; }
+    .tool-chip { padding:0 8px; border:1px solid var(--line); border-radius:var(--radius-sm); color:var(--muted); font-size:var(--text-meta); font-weight:var(--weight-regular); }
+    .tool-chip.managed { border-color:var(--purple-line); color:var(--purple); }
     .skills-source-actions { display:flex; flex-wrap:wrap; gap:8px; }
     #skills-installed-list .skills-file > div { min-width:0; overflow-wrap:anywhere; }
     #skills-change-files pre,#skills-change-result { white-space:pre-wrap; overflow-wrap:anywhere; }
@@ -461,7 +486,7 @@
     .skills-installed-controls select { width:150px; }
     .skills-installed-name { margin:0; font-size:var(--text-ui); font-weight:var(--weight-strong); overflow-wrap:anywhere; }
     .skills-installed-path { color:var(--muted); font:var(--text-meta)/var(--leading-body) var(--font-mono); overflow-wrap:anywhere; margin-top:4px; }
-    .create-skill-grid { display:grid; grid-template-columns:minmax(170px,1fr) minmax(200px,1.4fr); gap:16px; }
+    .create-skill-grid { display:grid; grid-template-columns:minmax(0,480px); gap:16px; }
     .create-skill-editor { display:flex; flex-direction:column; gap:16px; }
     .create-skill-editor textarea { width:100%; font-size:var(--text-body); }
     .create-skill-editor textarea[aria-invalid="true"],.create-skill-editor input[aria-invalid="true"] { border-color:var(--error-line-strong); }
@@ -474,12 +499,12 @@
     .create-skill-preview-content { max-height:460px; overflow:auto; margin:16px 0 24px; padding:16px; border:1px solid var(--line); border-radius:var(--radius); background:var(--soft); white-space:pre-wrap; overflow-wrap:anywhere; font:var(--text-ui)/var(--leading-body) var(--font-mono); }
     .create-skill-preview-heading { margin:24px 0 0; font-size:var(--text-ui); font-weight:var(--weight-strong); }
     @media (max-width:760px) { .create-skill-grid { grid-template-columns:1fr; gap:16px; } .create-skill-editor #create-skill-instructions { min-height:230px; } .create-skill-preview-content { padding:12px; } }
-    @media (max-width:760px) { .skills-toolbar { grid-template-columns:1fr 1fr; gap:12px; } .skills-toolbar .button { grid-column:1 / -1; justify-self:start; } .skills-preview,.skills-result { padding:16px; } .skills-list { max-height:330px; } .skill-choice { padding:12px; } .skills-installed-toolbar { display:block; } .skills-installed-controls { margin-top:12px; } .skills-actions .button { min-height:40px; } }
+    @media (max-width:760px) { .skills-toolbar { grid-template-columns:minmax(0,1fr); gap:12px; } .skills-toolbar .button { grid-column:1 / -1; justify-self:start; } .skills-preview,.skills-result { padding:16px; } .skill-choice { padding:12px; } .skills-installed-toolbar { display:block; } .skills-installed-controls { margin-top:12px; } .skills-actions .button { min-height:40px; } }
     @media (max-width:1000px) { .memory-page { padding-block:24px; } .memory-layout { gap:16px; grid-template-columns:minmax(180px,.85fr) minmax(0,1.5fr); } .memory-body { padding:16px; } }
-    @media (max-width:760px) { .memory-page { padding-block:24px; overflow:auto; } .memory-files { border-bottom:1px solid var(--line); } .memory-toolbar { grid-template-columns:1fr 1fr; gap:12px; } .memory-toolbar .button { grid-column:1 / -1; justify-self:start; } .memory-layout { display:block; flex:none; } .memory-files { max-height:235px; } .memory-details { padding-top:24px; } .memory-body { min-height:240px; max-height:65vh; } }
+    @media (max-width:760px) { .memory-page { padding-block:24px; overflow:auto; } .memory-files { border-bottom:1px solid var(--line); } .memory-toolbar { grid-template-columns:minmax(0,1fr); gap:12px; } .memory-toolbar .button { grid-column:1 / -1; justify-self:start; } .memory-layout { display:block; flex:none; } .memory-files { max-height:235px; } .memory-details { padding-top:24px; } .memory-body { min-height:240px; max-height:65vh; } }
     @media (min-width:1650px) { .app { grid-template-columns:275px minmax(0,1fr); } :root { --page-x:48px; } }
     @media (max-width:1150px) { .app { grid-template-columns:222px minmax(0,1fr); } :root { --page-x:24px; } }
-    @media (max-width:760px) { .app { grid-template-columns:minmax(0,1fr); } .sidebar { position:fixed; z-index:20; inset:0 auto 0 0; width:265px; transform:translateX(-100%); transition:transform .18s ease; } .sidebar[data-open="true"] { transform:translateX(0); box-shadow:12px 0 40px var(--shadow); } .composer-note.shortcut { display:none; } .page-toolbar { flex-wrap:wrap; } .page-toolbar .field { flex:1 1 calc(50% - 6px); width:auto; max-width:none; } #check-form .page-toolbar .field:last-child,#delivery-preview-form .page-toolbar .field:last-child { flex:none; width:120px; } #creator-form .page-toolbar { grid-template-columns:repeat(2,minmax(0,1fr)); } .header-actions .status { font-size:0; gap:0; } .composer-actions { flex-wrap:wrap; } .composer-note { order:-1; flex-basis:100%; max-width:none; } .chip { white-space:normal; } .session-summary { flex-wrap:wrap; } .session-summary-text { white-space:normal; } .scrim[data-open="true"] { display:block; position:fixed; inset:0; background:var(--scrim); z-index:19; border:0; border-radius:0; } .menu-toggle { display:inline-flex; margin-left:-8px; } :root { --page-x:16px; } .topbar { min-height:56px; padding-block:8px; gap:12px; } .topbar-heading { display:flex; align-items:center; gap:12px; min-width:0; } .header-actions { gap:8px; } .header-actions .button { padding:0 8px; } .configuration { padding-block:12px; } .settings-grid { gap:8px; grid-template-columns:repeat(2,minmax(0,1fr)); } .conversation-inner { padding:24px 24px 8px; } .welcome { margin:32px auto; } .welcome-links { gap:8px; margin-top:24px; } .composer-area { padding-block:12px; } .composer { padding:12px; } .page-scroll { padding-block:24px; } .accelerator { grid-template-columns:minmax(0,1fr); gap:8px; } .kit-number { display:none; } .banner { margin-top:12px; gap:12px; padding:12px; } .file-row { grid-template-columns:minmax(0,1fr) 62px 50px; gap:8px; } }
+    @media (max-width:760px) { .app { grid-template-columns:minmax(0,1fr); } .sidebar { position:fixed; z-index:20; inset:0 auto 0 0; width:265px; transform:translateX(-100%); transition:transform .18s ease; } .sidebar[data-open="true"] { transform:translateX(0); box-shadow:12px 0 40px var(--shadow); } .composer-note.shortcut { display:none; } .skills-selection-bar { bottom:-24px; } .page-toolbar { flex-wrap:wrap; } .page-toolbar .field { flex:1 1 calc(50% - 6px); width:auto; max-width:none; } #check-form .page-toolbar .field:last-child,#delivery-preview-form .page-toolbar .field:last-child { flex:none; width:120px; } #creator-form .page-toolbar { grid-template-columns:repeat(2,minmax(0,1fr)); } .header-actions .status { font-size:0; gap:0; } .composer-actions { flex-wrap:wrap; } .composer-note { order:-1; flex-basis:100%; max-width:none; } .chip { white-space:normal; } .session-summary { flex-wrap:wrap; } .session-summary-text { white-space:normal; } .scrim[data-open="true"] { display:block; position:fixed; inset:0; background:var(--scrim); z-index:19; border:0; border-radius:0; } .menu-toggle { display:inline-flex; margin-left:-8px; } :root { --page-x:16px; } .topbar { min-height:56px; padding-block:8px; gap:12px; } .topbar-heading { display:flex; align-items:center; gap:12px; min-width:0; } .header-actions { gap:8px; } .header-actions .button { padding:0 8px; } .configuration { padding-block:12px; } .settings-grid { gap:8px; grid-template-columns:repeat(2,minmax(0,1fr)); } .conversation-inner { padding:24px 24px 8px; } .welcome { margin:32px auto; } .welcome-links { gap:8px; margin-top:24px; } .composer-area { padding-block:12px; } .composer { padding:12px; } .page-scroll { padding-block:24px; } .accelerator { grid-template-columns:minmax(0,1fr); gap:8px; } .kit-number { display:none; } .banner { margin-top:12px; gap:12px; padding:12px; } .file-row { grid-template-columns:minmax(0,1fr) 62px 50px; gap:8px; } }
     @media (max-width:400px) { .header-actions .status { max-width:65px; white-space:normal; line-height:var(--leading-tight); } .accelerator-actions { display:block; } .accelerator-actions .button { margin-top:12px; } }
     @media (forced-colors:active) { .chip[aria-expanded="true"],.view-tab[aria-current="page"],.nav-item[aria-current="page"] { outline:2px solid Highlight; } .chip[data-invalid="true"]::after,#session-settings-toggle[data-invalid="true"]::after,.view-tab[aria-current="page"]::after,.output-resizer::after { background:Highlight; forced-color-adjust:none; } }
     @media (prefers-reduced-motion:reduce) { * { scroll-behavior:auto !important; transition:none !important; animation:none !important; } }
@@ -491,6 +516,7 @@
     <button class="scrim" id="scrim" type="button" aria-label="Close navigation"></button>
     <aside class="sidebar" id="sidebar" aria-label="Workspace navigation">
       <div class="brand"><span class="brand-mark"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="m12 2 9 5v10l-9 5-9-5V7Z M3 7l9 5 9-5 M12 12v10"/></svg></span><div><div class="brand-name">AI Infrastructure</div><div class="brand-subtitle">Harness</div></div></div>
+      <div class="project-switcher"><label for="project-switcher">Project</label><select id="project-switcher"><option value="">Loading projects…</option></select></div>
       <button class="new-session" id="new-session" type="button"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 5v14 M5 12h14"/></svg>New session</button>
       <nav class="navigation" aria-label="Main navigation">
         <button class="nav-item" type="button" data-nav="sessions" aria-current="page"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h16v12H9l-5 4Z"/></svg>Sessions</button>
@@ -516,7 +542,7 @@
           <p class="provider-hint" id="provider-hint" role="status" hidden></p>
           <div class="session-settings" id="session-settings">
           <div class="settings-grid">
-            <label class="field">Project<select id="project" form="session-form" required><option value="">Loading projects…</option></select></label>
+            <label class="field" data-project-field>Project<select id="project" form="session-form" required><option value="">Loading projects…</option></select></label>
             <label class="field">Provider<select id="provider" form="session-form" required aria-describedby="provider-hint"><option value="">Loading providers…</option></select></label>
             <label class="field">Workflow<select id="workflow" form="session-form" required><option value="native">Native</option></select></label>
             <label class="field">Mode<select id="mode" form="session-form"><option value="plan">Plan</option><option value="edit">Edit</option></select></label>
@@ -604,8 +630,8 @@
         <div class="page-toolbar results-toolbar"><p class="results-workspace" id="results-workspace"></p><button type="button" class="button" id="results-refresh">Refresh results</button></div>
         <p class="error-text" id="results-error" role="alert" hidden></p>
         <p id="results-status" role="status"></p>
-        <details class="fleet-report" open><summary>Changed files &amp; diff</summary><p class="knowledge-note" id="results-base"></p><p class="knowledge-note" id="results-diff-note"></p><pre class="fleet-report-text" id="results-files" tabindex="0"></pre><pre class="fleet-report-text" id="results-diff" tabindex="0"></pre></details>
-        <section aria-labelledby="delivery-heading"><h3 id="delivery-heading">Worktree delivery</h3>
+        <details class="fleet-report" data-tab="changes" open><summary>Changed files &amp; diff</summary><p class="knowledge-note" id="results-base"></p><p class="knowledge-note" id="results-diff-note"></p><pre class="fleet-report-text" id="results-files" tabindex="0"></pre><pre class="fleet-report-text" id="results-diff" tabindex="0"></pre></details>
+        <section id="delivery-section" data-tab="changes" aria-labelledby="delivery-heading"><h3 id="delivery-heading">Worktree delivery</h3>
           <p class="knowledge-note" id="delivery-availability">Loading delivery options…</p><p class="error-text" id="delivery-error" role="alert" hidden></p><p id="delivery-status" role="status"></p>
           <div id="delivery-options" hidden>
             <p class="knowledge-note" id="delivery-workspace"></p>
@@ -623,15 +649,16 @@
             <div id="delivery-preview" hidden><h4>3. Review and apply</h4><p class="knowledge-note" id="delivery-preview-summary"></p><pre class="fleet-report-text" id="delivery-preview-files" tabindex="0"></pre><pre class="fleet-report-text" id="delivery-preview-diff" tabindex="0"></pre><p class="knowledge-note" id="delivery-preview-checks"></p><p class="knowledge-note" id="delivery-preview-note"></p><p class="knowledge-note" id="delivery-check-status" role="status"></p><pre class="fleet-report-text" id="delivery-check-output" tabindex="0"></pre><button type="button" class="button" id="delivery-run-check" disabled>Run target checks</button><button type="button" class="button" id="delivery-cancel-check" hidden>Cancel target check</button><button type="button" class="button primary" id="delivery-apply" disabled>Apply reviewed commit locally</button></div>
           </div>
         </section>
-        <section aria-label="Run verification"><h3>Run a project check</h3><p class="knowledge-note">Runs in this session's workspace and may change files. One trusted command, no shell operators, no model.</p>
+        <section data-tab="checks" aria-label="Run verification"><h3>Run a project check</h3><p class="knowledge-note">Runs in this session's workspace and may change files. One trusted command, no shell operators, no model.</p>
           <form id="check-form"><div class="page-toolbar"><label class="field" style="flex:1">Check command<input type="text" id="check-command" maxlength="4000" placeholder="e.g. python3 -m unittest tests.test_example" required></label><label class="field">Check timeout (seconds)<input type="number" id="check-timeout" min="1" max="3600" step="1" value="300" required></label></div><button class="button primary" type="submit" id="check-start" disabled>Run check</button></form>
           <p class="knowledge-note">Passed means exit code 0, not that the project is verified.</p><div id="results-checks"></div>
         </section>
-        <section aria-label="Launch usage history"><h3>Launch history &amp; total usage</h3><p class="knowledge-note" id="results-usage-note"></p><p id="results-totals" role="status"></p><div id="results-launches"></div></section>
+        <section data-tab="usage" aria-label="Launch usage history"><h3>Launch history &amp; total usage</h3><p class="knowledge-note" id="results-usage-note"></p><p id="results-totals" role="status"></p><div id="results-launches"></div></section>
       </div></div></section>
       <section class="view" id="creator-view" aria-label="Infrastructure Creator" hidden><div class="page-scroll"><div class="page-content">
+        <div class="page-toolbar creator-runs-bar"><label class="field">Creator run<select id="creator-runs"><option value="">No runs yet</option></select></label><button class="button" id="creator-new-run" type="button" aria-controls="creator-form" aria-expanded="false" hidden>New run</button></div>
         <form id="creator-form">
-          <div class="page-toolbar"><label class="field">Project<select id="creator-project"></select></label><label class="field">Operation<select id="creator-operation"><option value="generate">Create accelerator</option><option value="update">Update existing accelerator</option></select></label></div>
+          <div class="page-toolbar"><label class="field" data-project-field>Project<select id="creator-project"></select></label><label class="field">Operation<select id="creator-operation"><option value="generate">Create accelerator</option><option value="update">Update existing accelerator</option></select></label></div>
           <div class="page-toolbar"><label class="field">Provider<select id="creator-provider"></select></label><div class="field"><span class="field-label"><label for="creator-model">Model</label><button class="explain" type="button" aria-controls="creator-model-detail" aria-expanded="false" aria-label="About model choices">?</button></span><input id="creator-model" type="text" list="creator-models" placeholder="Provider default" maxlength="160"><datalist id="creator-models"></datalist></div><label class="field">Thinking effort<select id="creator-effort"></select></label></div>
           <p class="knowledge-note" id="creator-model-detail" hidden></p>
           <div class="page-toolbar"><label class="field">Workspace<select id="creator-workspace"><option value="project">Current project folder</option><option value="worktree">New Git worktree</option></select></label><label class="field" id="creator-branch-field" hidden>New branch<input type="text" id="creator-branch" maxlength="256" placeholder="Automatic branch name"></label><button type="button" class="button" id="creator-refresh">Refresh</button></div>
@@ -644,9 +671,9 @@
           <button type="submit" class="button primary" id="creator-start">Start scan</button>
         </form>
         <p class="error-text" id="creator-error" role="alert" hidden></p>
-        <div class="page-toolbar"><label class="field">Creator runs<select id="creator-runs"><option value="">No runs yet</option></select></label></div>
         <section id="creator-detail" hidden aria-label="Creator run">
-          <h3 id="creator-status" role="status"></h3><p class="knowledge-note" id="creator-target"></p><p id="creator-message"></p>
+          <ol class="stepper" id="creator-stepper" aria-label="Creator phases"></ol>
+          <p class="creator-status" id="creator-status" role="status"></p><p class="knowledge-note" id="creator-target"></p><p id="creator-message"></p>
           <div id="creator-run-budgets"></div>
           <div id="creator-reports"></div>
           <details class="fleet-report"><summary>Run events</summary><pre class="fleet-report-text" id="creator-events" tabindex="0"></pre></details>
@@ -658,15 +685,15 @@
       </div></div></section>
       <section class="view" id="setup-view" aria-label="Projects and Setup" hidden><div class="page-scroll"><div class="page-content">
         <form class="setup-register" id="setup-register-form"><h3>Add an existing project</h3><div class="setup-register-row"><label class="field">Absolute project path<input id="setup-project-path" type="text" placeholder="/home/you/projects/my-app" autocomplete="off" spellcheck="false" maxlength="1024" required></label><button class="button" id="setup-browse" type="button">Browse…</button><button class="button" id="setup-register" type="submit">Add project</button></div><p class="knowledge-note">Registers the folder only; nothing runs or installs.</p><p class="error-text" id="setup-register-error" role="alert" hidden></p><p class="knowledge-note" id="setup-register-status" role="status" hidden></p></form>
-        <div class="setup-toolbar"><label class="field">Registered project<select id="setup-project"></select></label><button class="button" id="setup-refresh-projects" type="button">Refresh</button></div><p class="knowledge-note" id="setup-project-location"></p><p class="error-text" id="setup-readiness-error" role="alert" hidden></p><p class="knowledge-note" id="setup-readiness-status" role="status"></p>
+        <div class="setup-toolbar"><label class="field" data-project-field>Registered project<select id="setup-project"></select></label><button class="button" id="setup-refresh-projects" type="button">Refresh</button></div><p class="knowledge-note" id="setup-project-location"></p><p class="error-text" id="setup-readiness-error" role="alert" hidden></p><p class="knowledge-note" id="setup-readiness-status" role="status"></p>
         <section class="setup-readiness" id="setup-readiness" aria-label="Project readiness" hidden><div class="setup-readiness-grid" id="setup-readiness-grid"></div><div class="setup-providers" id="setup-providers"></div><div id="setup-diagnostics"></div><button class="button" id="setup-start-session" type="button">Start session in this project</button></section>
         <section class="setup-install" aria-label="Accelerator installation"><h3>Install a ready-made accelerator</h3><label class="field">Edition<select id="setup-edition" disabled><option value="">Select a project first</option></select></label><p class="knowledge-note" id="setup-edition-detail"></p><fieldset class="skills-tools"><legend>Target tools</legend><div class="skills-tool-options" id="setup-tools"></div></fieldset><p class="knowledge-note">You review every file change before anything is written.</p><button class="button" id="setup-preview-button" type="button" disabled>Preview accelerator installation</button><p class="knowledge-note" id="setup-action-status" role="status" hidden></p><p class="error-text" id="setup-action-error" role="alert" hidden></p></section>
         <section class="setup-preview" id="setup-preview" aria-label="Accelerator installation preview" hidden><h3>Review the proposed files</h3><p class="knowledge-note" id="setup-preview-target"></p><p class="knowledge-note" id="setup-preview-summary"></p><p class="memory-notice" id="setup-collisions" hidden></p><div class="setup-preview-controls"><label class="field"><span class="sr-only">Filter preview actions</span><select id="setup-preview-actions"><option value="changed">Changed files</option><option value="all">All files</option><option value="collision">Collisions</option></select></label><label class="memory-filter"><span class="sr-only">Filter preview by path</span><input id="setup-preview-path" type="search" placeholder="Find a file path…" autocomplete="off"></label></div><p class="knowledge-note" id="setup-preview-count"></p><div class="setup-file-list" id="setup-preview-files"></div><p class="knowledge-note" id="setup-preview-note"></p><button class="button primary" id="setup-install-button" type="button" disabled>Install reviewed accelerator</button></section>
         <section class="setup-result" id="setup-result" aria-label="Accelerator installation result" hidden><h3 id="setup-result-title"></h3><p class="knowledge-note" id="setup-result-target"></p><p class="knowledge-note" id="setup-result-summary"></p><pre class="setup-result-paths" id="setup-result-paths" tabindex="0"></pre><p class="knowledge-note">A new session loads the installed instructions.</p><button class="button primary" id="setup-result-start" type="button">Start session in this project</button></section>
       </div></div></section>
-      <section class="view" id="context-view" aria-label="Project context" hidden><div class="page-scroll"><div class="page-content"><div class="page-toolbar"><label class="field">Project<select id="context-project"></select></label><button type="button" class="button" id="refresh-context">Refresh</button></div><p class="error-text" id="context-error" role="alert" hidden></p><div class="context-summary" id="context-summary" role="status"></div><div class="file-list" id="context-files"></div></div></div></section>
+      <section class="view" id="context-view" aria-label="Project context" hidden><div class="page-scroll"><div class="page-content"><div class="page-toolbar"><label class="field" data-project-field>Project<select id="context-project"></select></label><button type="button" class="button" id="refresh-context">Refresh</button></div><p class="error-text" id="context-error" role="alert" hidden></p><div class="context-summary" id="context-summary" role="status"></div><div class="file-list" id="context-files"></div></div></div></section>
       <section class="view" id="brain-view" aria-label="Project Brain" hidden><div class="memory-page knowledge-page">
-        <div class="memory-toolbar"><label class="field">Project<select id="brain-project"></select></label><label class="field">Project Brain<select id="brain-bank" disabled><option value="">Choose a project</option></select></label><button class="button" id="refresh-brain" type="button">Refresh</button></div>
+        <div class="memory-toolbar"><label class="field" data-project-field>Project<select id="brain-project"></select></label><label class="field">Project Brain<select id="brain-bank" disabled><option value="">Choose a project</option></select></label><button class="button" id="refresh-brain" type="button">Refresh</button></div>
         <div id="brain-tools"></div>
         <div class="brain-filter-row"><label class="field"><span class="sr-only">Project Brain category</span><select id="brain-category"><option value="">All categories</option></select></label><label class="memory-filter"><span class="sr-only">Filter Brain by title, path, ID, or status</span><input id="brain-filter" type="search" placeholder="Filter by title, path, ID, or status…" autocomplete="off"></label></div>
         <div class="memory-summary"><span id="brain-count" role="status"></span><span id="brain-root"></span></div><p class="error-text" id="brain-error" role="alert" hidden></p>
@@ -675,7 +702,7 @@
         </div>
       </div></section>
       <section class="view" id="memory-view" aria-label="Memory bank" hidden><div class="memory-page knowledge-page">
-        <div class="memory-toolbar"><label class="field">Project<select id="memory-project"></select></label><label class="field">Memory bank<select id="memory-bank" disabled><option value="">Choose a project</option></select></label><button class="button" id="refresh-memory" type="button">Refresh</button></div>
+        <div class="memory-toolbar"><label class="field" data-project-field>Project<select id="memory-project"></select></label><label class="field">Memory bank<select id="memory-bank" disabled><option value="">Choose a project</option></select></label><button class="button" id="refresh-memory" type="button">Refresh</button></div>
         <div id="memory-tools"></div>
         <label class="memory-filter"><span class="sr-only">Filter memory by title, path, or status</span><input id="memory-filter" type="search" placeholder="Filter by title, path, or status…" autocomplete="off" disabled></label>
         <div class="memory-summary"><span id="memory-count" role="status"></span><span id="memory-bank-path"></span></div>
@@ -685,13 +712,13 @@
         </div>
       </div></section>
       <section class="view" id="skills-view" aria-label="Skills" hidden><div class="page-scroll"><div class="page-content">
-        <div class="skills-toolbar"><label class="field">Project<select id="skills-project"></select></label><label class="field">Skill source<select id="skills-source" disabled><option value="">Loading sources…</option></select></label><div class="skills-source-actions"><button class="button" id="skills-discover" type="button" disabled>Load skills</button><button class="button" id="skills-source-refresh" type="button" disabled>Refresh source</button></div></div>
+        <div class="skills-toolbar"><label class="field" data-project-field>Project<select id="skills-project"></select></label><label class="field">Skill source<select id="skills-source" disabled><option value="">Loading sources…</option></select></label><div class="skills-source-actions"><button class="button" id="skills-discover" type="button" disabled>Load skills</button><button class="button" id="skills-source-refresh" type="button" disabled>Refresh source</button></div></div>
         <p class="skills-source-detail"><span id="skills-source-description"></span><a id="skills-source-link" target="_blank" rel="noopener noreferrer" hidden>View source ↗</a></p>
         <p class="skills-note" id="skills-availability" role="status">Loading the local skill installer…</p><p class="error-text" id="skills-catalog-error" role="alert" hidden></p>
         <fieldset class="skills-tools"><legend>Install for these tools</legend><div class="skills-tool-options" id="skills-agents"></div></fieldset>
         <p class="skills-note">Differing files are kept; conflicts block installation.</p>
         <div class="skills-selection"><label class="memory-filter"><span class="sr-only">Filter skills by name, ID, or description</span><input type="search" id="skills-filter" placeholder="Filter skills by name or description…" autocomplete="off" disabled></label><div class="skills-selection-header"><span id="skills-selection-count" role="status">No skills loaded</span><span id="skills-visible-count"></span></div><div class="skills-list" id="skills-list" aria-label="Available skills"><p class="empty-note">Choose a source and load its skills to make a selection.</p></div><p class="skills-note" id="skills-discovery-notice" hidden></p></div>
-        <div class="skills-actions"><button class="button" id="skills-preview-button" type="button" disabled>Preview installation</button><span class="skills-note">Select at least one skill and one tool.</span></div>
+        <div class="skills-actions skills-selection-bar" id="skills-selection-bar"><span class="skills-note" id="skills-selection-summary" role="status">Select at least one skill and one tool.</span><button class="button primary" id="skills-preview-button" type="button" disabled>Preview installation</button></div>
         <p class="skills-action-status" id="skills-action-status" role="status" hidden></p><p class="error-text" id="skills-action-error" role="alert" hidden></p>
         <section class="skills-preview" id="skills-preview" aria-label="Installation preview" hidden><h3>Files to install</h3><p class="skills-preview-context" id="skills-preview-context"></p><p id="skills-preview-summary"></p><div class="skills-file-list" id="skills-preview-files"></div><p class="skills-note" id="skills-preview-note"></p><button class="button primary" id="skills-install" type="button" disabled>Install selected skills</button></section>
         <section class="skills-result" id="skills-result" aria-label="Installation result" hidden><h3>Installation complete</h3><p class="skills-note">Start a new session to load the installed skills.</p><p class="skills-preview-context" id="skills-result-context"></p><p id="skills-result-summary"></p><div class="skills-file-list" id="skills-result-files"></div></section>
@@ -702,7 +729,7 @@
       </div></div></section>
       <section class="view" id="create-skill-view" aria-label="Create skill" hidden><div class="page-scroll"><div class="page-content">
         <form class="create-skill-editor" id="create-skill-form" novalidate>
-          <div class="create-skill-grid"><label class="field"><span>Project</span><select id="create-skill-project" required aria-describedby="create-skill-project-error"></select><span class="error-text" id="create-skill-project-error" role="alert" hidden></span></label><label class="field"><span>Skill name</span><input id="create-skill-name" type="text" required maxlength="64" pattern="[a-z0-9]+(-[a-z0-9]+)*" placeholder="review-database-migrations" autocomplete="off" spellcheck="false" aria-describedby="create-skill-name-hint create-skill-name-error"><span class="create-skill-helper" id="create-skill-name-hint">Use lowercase letters, numbers, and single hyphens. Up to 64 characters.</span><span class="error-text" id="create-skill-name-error" role="alert" hidden></span></label></div>
+          <div class="create-skill-grid"><label class="field" data-project-field><span>Project</span><select id="create-skill-project" required aria-describedby="create-skill-project-error"></select><span class="error-text" id="create-skill-project-error" role="alert" hidden></span></label><label class="field"><span>Skill name</span><input id="create-skill-name" type="text" required maxlength="64" pattern="[a-z0-9]+(-[a-z0-9]+)*" placeholder="review-database-migrations" autocomplete="off" spellcheck="false" aria-describedby="create-skill-name-hint create-skill-name-error"><span class="create-skill-helper" id="create-skill-name-hint">Use lowercase letters, numbers, and single hyphens. Up to 64 characters.</span><span class="error-text" id="create-skill-name-error" role="alert" hidden></span></label></div>
           <fieldset class="skills-tools" aria-describedby="create-skill-agents-error"><legend>Save for these tools</legend><div class="skills-tool-options" id="create-skill-agents"></div><p class="error-text" id="create-skill-agents-error" role="alert" hidden></p></fieldset>
           <p class="skills-note" id="create-skill-catalog-status" role="status">Loading supported tools…</p><p class="error-text" id="create-skill-catalog-error" role="alert" hidden></p>
           <label class="field"><span>Description — when to use this skill</span><textarea id="create-skill-description" required maxlength="1024" rows="3" placeholder="Explain the tasks or situations that should trigger this skill." aria-describedby="create-skill-description-hint create-skill-description-error"></textarea><span class="create-skill-helper" id="create-skill-description-hint">A clear trigger helps the agent choose your skill. Up to 1,024 characters.</span><span class="error-text" id="create-skill-description-error" role="alert" hidden></span></label>
@@ -714,7 +741,7 @@
         <section class="skills-preview" id="create-skill-preview" aria-label="Generated skill preview" hidden><h3>Review your skill</h3><p class="skills-preview-context" id="create-skill-preview-context"></p><p id="create-skill-preview-summary"></p><h4 class="create-skill-preview-heading">SKILL.md</h4><pre class="create-skill-preview-content" id="create-skill-content" tabindex="0" aria-label="Generated SKILL.md content"></pre><h4 class="create-skill-preview-heading">Target files</h4><div class="skills-file-list" id="create-skill-preview-files"></div><p class="skills-note" id="create-skill-preview-note"></p><button class="button primary" id="create-skill-save" type="button" disabled>Save skill</button></section>
         <section class="skills-result" id="create-skill-result" aria-label="Created skill result" hidden><h3>Skill saved</h3><p class="skills-preview-context" id="create-skill-result-context"></p><p id="create-skill-result-summary"></p><div class="skills-file-list" id="create-skill-result-files"></div><p class="skills-note">Start a new agent session to load your skill.</p><button class="button" id="create-skill-view-installed" type="button">View installed skills</button></section>
       </div></div></section>
-      <section class="view" id="accelerators-view" aria-label="Accelerators" hidden><div class="page-scroll"><div class="page-content"><div class="page-toolbar"><label class="field">Target project<select id="accelerator-project"></select></label></div><div id="accelerators"></div></div></div></section>
+      <section class="view" id="accelerators-view" aria-label="Accelerators" hidden><div class="page-scroll"><div class="page-content"><div class="page-toolbar" data-project-field><label class="field">Target project<select id="accelerator-project"></select></label></div><div id="accelerators"></div></div></div></section>
       <section class="view" id="kit3-view" aria-label="Open Source Kit" hidden><iframe id="kit3-frame" class="catalog-frame" title="Open Source Kit resource catalog"></iframe></section>
       <noscript><p class="connection-loading">This local Harness interface needs JavaScript to connect to the runner.</p></noscript>
     </main>
@@ -1071,9 +1098,9 @@
       const epoch=deliveryUi.epoch;
       try {
         const data=await api(`/api/sessions/${encodeURIComponent(sid)}/delivery`);
-        if(epoch!==deliveryUi.epoch || sid!==state.selectedId || state.view!=='results') return;
+        if(epoch!==deliveryUi.epoch || sid!==state.selectedId || !isResultView(state.view)) return;
         renderDelivery(data);
-      } catch(error) { if(epoch===deliveryUi.epoch && sid===state.selectedId && state.view==='results') { $('delivery-availability').textContent='Refresh results to reload delivery options.'; showError('delivery-error',textError(error)); } }
+      } catch(error) { if(epoch===deliveryUi.epoch && sid===state.selectedId && isResultView(state.view)) { $('delivery-availability').textContent='Refresh results to reload delivery options.'; showError('delivery-error',textError(error)); } }
     }
     function renderDeliveryPreview(preview) {
       deliveryUi.preview=preview; const commit=preview.kind==='commit', prefix=commit?'delivery-commit':'delivery-preview';
@@ -1095,7 +1122,7 @@
     async function deliveryAction(action,body) {
       const sid=state.selectedId, epoch=++deliveryUi.epoch, pending='delivery-'+action;
       const mutation=action==='commit' || action==='apply'; invalidateDeliveryPreview(); clearTimeout(resultUi.timer); state.pending=pending;
-      const current=()=>epoch===deliveryUi.epoch && sid===state.selectedId && state.view==='results';
+      const current=()=>epoch===deliveryUi.epoch && sid===state.selectedId && isResultView(state.view);
       showError('delivery-error',''); $('delivery-status').textContent=mutation ? action==='commit'?'Creating the reviewed local commit…':'Applying the reviewed commit locally…' : 'Preparing a preview…'; updateControls(); resultControls();
       try {
         const data=await api(`/api/sessions/${encodeURIComponent(sid)}/delivery`,{method:'POST',body:{action,...body}});
@@ -1126,7 +1153,7 @@
       state.pending='target-check'; resultControls(); updateHeader();
       try {
         const data=await api(`/api/sessions/${encodeURIComponent(sid)}/${cancel?'cancel':'delivery'}`,{method:'POST',body:cancel?{}:{action:'check',preview_id:preview.preview_id}});
-        if(sid!==state.selectedId || state.view!=='results') return;
+        if(sid!==state.selectedId || !isResultView(state.view)) return;
         upsert(data.session); await loadResults();
       } catch(error) { if(sid===state.selectedId) showError('delivery-error',textError(error)); }
       finally { if(state.pending==='target-check') state.pending=null; resultControls(); updateControls(); }
@@ -1141,9 +1168,9 @@
     }
     function renderResults(data) {
       const snapshot=data.snapshot;
-      $('results-workspace').textContent=data.workspace;
+      $('results-workspace').textContent=data.workspace; $('delivery-section').hidden=state.selected?.workspace!=='worktree';
       const checking=data.checks.some(check=>['queued','running'].includes(check.status));
-      $('results-status').textContent=checking ? 'Verification is queued or running; agent outcome stays separate.' : active(state.selected) ? 'Agent is active. Refresh the diff after this launch finishes.' : `Agent: ${sessionStatusLabel(state.selected)}. Verification results are listed below.`;
+      $('results-status').textContent=checking ? 'Verification is queued or running; agent outcome stays separate.' : active(state.selected) ? 'Agent is active. Refresh the diff after this launch finishes.' : `Agent: ${sessionStatusLabel(state.selected)}.`;
       $('results-base').textContent=snapshot?.available ? `Branch: ${snapshot.branch || 'detached HEAD'} · Base: ${snapshot.base}${snapshot.baseline_recorded?' (first launch)':' (current HEAD; original baseline unavailable)'}${snapshot.preexisting_changes ? ' · Workspace already had uncommitted changes at first launch.' : ''}` : '';
       $('results-diff-note').textContent=snapshot ? (snapshot.message || '')+(snapshot.available && !snapshot.complete?' Preview is truncated or omits file contents; verification freshness cannot be certified.':'') : 'Diff is unavailable while a launch is active.';
       $('results-files').textContent=snapshot?.files?.map(file=>`${file.status}  ${file.path}`).join('\n') || 'No changed files listed.';
@@ -1162,18 +1189,19 @@
       }
       if(!data.checks.length) holder.append(el('p','knowledge-note','No independent checks run yet.'));
       resultControls(); updateHeader();
+      renderViewTabs();
     }
     async function loadResults() {
-      clearTimeout(resultUi.timer); if(!state.selectedId || state.view!=='results') return;
+      clearTimeout(resultUi.timer); if(!state.selectedId || !isResultView(state.view)) return;
       const sid=state.selectedId, epoch=++resultUi.epoch; resultUi.pending=true; resetDeliveryRead(); resultControls();
       try {
         const current=await api(`/api/sessions/${sid}`);
-        if(epoch!==resultUi.epoch || state.view!=='results' || sid!==state.selectedId) return;
+        if(epoch!==resultUi.epoch || !isResultView(state.view) || sid!==state.selectedId) return;
         upsert(current.session); updateHeader();
         const data=await api(`/api/sessions/${sid}/results`);
-        if(epoch!==resultUi.epoch || state.view!=='results' || sid!==state.selectedId) return;
+        if(epoch!==resultUi.epoch || !isResultView(state.view) || sid!==state.selectedId) return;
         resultUi.data=data; renderResults(data); showError('results-error',''); await loadDelivery(sid);
-        if(epoch!==resultUi.epoch || state.view!=='results' || sid!==state.selectedId) return;
+        if(epoch!==resultUi.epoch || !isResultView(state.view) || sid!==state.selectedId) return;
         if(active(state.selected)) resultUi.timer=setTimeout(loadResults,1200);
       } catch(error) { if(epoch===resultUi.epoch) { $('delivery-availability').textContent='Refresh results to reload delivery options.'; showError('results-error',textError(error)); } }
       finally { if(epoch===resultUi.epoch) { resultUi.pending=false; resultControls(); } }
@@ -1240,40 +1268,50 @@
     });
     document.querySelector('.skip').addEventListener('click',event => { event.preventDefault(); $('main').focus(); });
     // Five sections; each groups related views behind tabs. Every view has its own #/view address.
-    const viewGroups = {sessions:['sessions','results'],knowledge:['brain','memory','context'],skills:['skills','create-skill'],accelerators:['accelerators','creator','kit3'],setup:['setup']};
-    const viewLabels = {sessions:'Conversation',results:'Results & verification',brain:'Project Brain',memory:'Memory bank',context:'Context files',skills:'Library','create-skill':'Create skill',accelerators:'Overview',creator:'Infrastructure Creator',kit3:'Open Source Kit',setup:'Projects & Setup'};
+    const resultViews = ['changes','checks','usage'], isResultView = view => resultViews.includes(view);
+    const viewGroups = {sessions:['sessions',...resultViews],knowledge:['brain','memory','context'],skills:['skills','create-skill'],accelerators:['accelerators','creator','kit3'],setup:['setup']};
+    const viewLabels = {sessions:'Conversation',changes:'Changes',checks:'Checks',usage:'Usage',brain:'Project Brain',memory:'Memory bank',context:'Context files',skills:'Library','create-skill':'Create skill',accelerators:'Overview',creator:'Infrastructure Creator',kit3:'Open Source Kit',setup:'Projects & Setup'};
     const groupOf = view => Object.keys(viewGroups).find(group => viewGroups[group].includes(view));
     const lastViewInGroup = {};
-    function viewFromHash() { let view = ''; try { view = decodeURIComponent(location.hash.replace(/^#\/?/,'')); } catch (_) { return null; } return groupOf(view) ? view : null; }
+    function viewFromHash() { let view = ''; try { view = decodeURIComponent(location.hash.replace(/^#\/?/,'')); } catch (_) { return null; } if (view === 'results') view = 'changes'; return groupOf(view) ? view : null; }
     // Restoring a saved session must not rewrite the address the page was opened with.
     const initialView = viewFromHash(); let initialRouteApplied = false, restoringRoute = true;
+    // Result tabs carry a count once results are loaded: changed files, passed checks, reported cost.
+    function tabLabel(view) {
+      const data = isResultView(state.view) ? resultUi.data : null;
+      if (view === 'changes' && Array.isArray(data?.snapshot?.files)) return `Changes · ${data.snapshot.files.length}`;
+      if (view === 'checks' && data?.checks?.length) return `Checks · ${data.checks.filter(check => check.status === 'passed').length}/${data.checks.length}`;
+      if (view === 'usage' && data?.totals?.cost_usd?.reported > 0) return `Usage · $${data.totals.cost_usd.reported.toFixed(2)}`;
+      return viewLabels[view];
+    }
     function renderViewTabs() {
-      const views = viewGroups[groupOf(state.view)].filter(view => view !== 'results' || state.selectedId), refocus = $('view-tabs').contains(document.activeElement);
+      const views = viewGroups[groupOf(state.view)].filter(view => !isResultView(view) || state.selectedId), refocus = $('view-tabs').contains(document.activeElement);
       $('view-tabs').hidden = views.length < 2; $('view-tabs').replaceChildren();
       for (const view of views) {
-        const tab = el('button','view-tab',viewLabels[view]); tab.type = 'button'; if (view === state.view) tab.setAttribute('aria-current','page');
+        const tab = el('button','view-tab',tabLabel(view)); tab.type = 'button'; if (view === state.view) tab.setAttribute('aria-current','page');
         tab.addEventListener('click',() => openView(view)); $('view-tabs').append(tab);
       }
       if (refocus) $('view-tabs').querySelector('[aria-current="page"]')?.focus();
     }
     function openView(view, record = true) {
       if (view === state.view) { setMenu(false); return; }
-      const fromResults = state.view === 'results'; if (view === 'results') resultUi.data = null;
+      const fromResults = isResultView(state.view); if (isResultView(view) && !fromResults) resultUi.data = null;
       setView(view,record); if (view === 'sessions' && fromResults) pollSession(state.epoch);
     }
     for (const button of document.querySelectorAll('.navigation [data-nav]')) button.addEventListener('click',() => { const group = button.dataset.nav; openView(group === 'sessions' ? 'sessions' : lastViewInGroup[group] || viewGroups[group][0]); });
-    window.addEventListener('popstate',() => { const view = viewFromHash() || 'sessions'; openView(view === 'results' && !state.selectedId ? 'sessions' : view,false); });
+    window.addEventListener('popstate',() => { const view = viewFromHash() || 'sessions'; openView(isResultView(view) && !state.selectedId ? 'sessions' : view,false); });
     function setView(view, record = true) {
       const previousView = state.view;
       if (state.view === 'memory' && view !== 'memory') { cancelMemoryRequests(); cancelKnowledgeRead('memory'); }
       if (state.view === 'brain' && view !== 'brain') { cancelBrainRequests(); cancelKnowledgeRead('brain'); }
       if (state.view === 'creator' && view !== 'creator') { clearTimeout(creatorUi.timer); ++creatorUi.epoch; }
-      if(state.view==='results' && view!=='results') { clearTimeout(resultUi.timer); ++resultUi.epoch; resultUi.pending=false; ++deliveryUi.epoch; deliveryUi.data=null; invalidateDeliveryPreview(); }
+      if(isResultView(state.view) && !isResultView(view)) { clearTimeout(resultUi.timer); ++resultUi.epoch; resultUi.pending=false; ++deliveryUi.epoch; deliveryUi.data=null; invalidateDeliveryPreview(); }
       state.view = view; lastViewInGroup[groupOf(view)] = view;
-      for (const name of Object.values(viewGroups).flat()) $(`${name}-view`).hidden = name !== view;
+      const viewId = isResultView(view) ? 'results-view' : `${view}-view`; for (const node of document.querySelectorAll('#main > section.view')) node.hidden = node.id !== viewId;
+      if (isResultView(view)) $('results-view').dataset.tab = view;
       for (const button of document.querySelectorAll('.navigation [data-nav]')) { if (button.dataset.nav === groupOf(view)) button.setAttribute('aria-current','page'); else button.removeAttribute('aria-current'); }
       if (record && !restoringRoute && viewFromHash() !== view) { if (!location.hash) history.replaceState(null,'','#/'+previousView); history.pushState(null,'','#/'+view); }
-      if (view === 'results') loadResults();
+      if (isResultView(view) && !isResultView(previousView)) loadResults();
       if (view === 'creator') openCreator();
       if (view === 'setup') openSetup();
       if (view === 'context') loadContext();
@@ -1295,10 +1333,30 @@
       else { const first = [...select.options].find(option => !option.disabled); if (first) select.value = first.value; }
       if (!items.length) { const option = el('option','','None available'); option.value = ''; select.append(option); }
     }
+    const projectSelects = {sessions:'project',changes:'project',checks:'project',usage:'project',context:'context-project',brain:'brain-project',memory:'memory-project',skills:'skills-project','create-skill':'create-skill-project',setup:'setup-project',creator:'creator-project',accelerators:'accelerator-project'};
+    const currentProject = () => groupOf(state.view) === 'sessions' ? state.selected?.project_id || $('project').value : projectSelects[state.view] ? $(projectSelects[state.view]).value : $('project-switcher').value;
+    // Every view follows the sidebar project; views in the middle of an operation keep theirs until it ends.
+    function switchProject(id) {
+      if (!projectFor(id) || state.pending) { $('project-switcher').value = currentProject(); return; }
+      if (state.selectedId && state.selected?.project_id !== id) newSession('',id,groupOf(state.view) === 'sessions');
+      else if ($('project').value !== id) { $('project').value = id; $('project').dispatchEvent(new Event('change')); }
+      syncProjectSelects(id,true); if (state.view === 'accelerators') renderAccelerators();
+      updateHeader();
+    }
+    // Opening a session or Creator run of another project moves the other views along; only the visible view reloads.
+    function syncProjectSelects(id, reloadVisible = false) {
+      const busy = {'memory-project':knowledgeState.pending,'brain-project':knowledgeState.pending,'skills-project':Boolean(skillsState.pending),'create-skill-project':Boolean(createSkillState.pending),'setup-project':Boolean(setupState.pending || setupState.registerPending),'creator-project':creatorUi.pending};
+      for (const select of ['context-project','memory-project','brain-project','skills-project','create-skill-project','setup-project','creator-project','accelerator-project']) if (!busy[select] && projectFor(id) && $(select).value !== id) $(select).value = id;
+      // The draft's own handler may already have moved a select, so the visible view reloads regardless.
+      const visible = projectSelects[state.view];
+      if (reloadVisible && visible && visible !== 'project' && !busy[visible] && $(visible).value === id) $(visible).dispatchEvent(new Event('change'));
+    }
+    $('project-switcher').addEventListener('change',() => switchProject($('project-switcher').value));
     function populateSettings() {
       const boot = state.bootstrap;
       const draftModel = selectedModel(); const draftEffort = $('thinking-effort').value;
       for (const id of ['project','context-project','accelerator-project']) setProjectChoices($(id),boot.projects,$(id).value);
+      setProjectChoices($('project-switcher'),boot.projects,currentProject());
       for (const scope of ['memory','brain']) if (!knowledgeState.pending) setProjectChoices($(`${scope}-project`),boot.projects,$(`${scope}-project`).value || $('project').value);
       if (!setupState.pending && !setupState.registerPending) setProjectChoices($('setup-project'),boot.projects,$('setup-project').value || $('project').value,true);
       setOptions($('provider'),boot.providers,item => `${item.name}${item.available ? '' : ' · unavailable'}`,item => item.id,$('provider').value);
@@ -1329,7 +1387,7 @@
         if (!sessionPreferencesReady) await restoreSessionPreferences();
         else if (state.selectedId) { stopPolling(); await pollSession(state.epoch); }
         let routed = false;
-        if (!initialRouteApplied) { initialRouteApplied = true; if (initialView && initialView !== state.view) { setView(initialView === 'results' && !state.selectedId ? 'sessions' : initialView,false); routed = true; } restoringRoute = false; if (viewFromHash() !== state.view) history.replaceState(null,'','#/'+state.view); }
+        if (!initialRouteApplied) { initialRouteApplied = true; if (initialView && initialView !== state.view) { setView(isResultView(initialView) && !state.selectedId ? 'sessions' : initialView,false); routed = true; } restoringRoute = false; if (viewFromHash() !== state.view) history.replaceState(null,'','#/'+state.view); }
         if (routed) return;
         if (state.view === 'creator') openCreator();
         if (state.view === 'setup') openSetup(true);
@@ -1419,6 +1477,7 @@
     function dateLabel(value) { const date = new Date(typeof value === 'number' && value < 1e12 ? value * 1000 : value); return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString(undefined,{month:'short',day:'numeric'}); }
     function openHistorySession(id) {
       const session = state.sessions.find(item => item.id === id); if (!session) return;
+      syncProjectSelects(session.project_id);
       if (session.creator) { setView('creator'); $('creator-project').value = session.project_id; loadCreator(session.creator.run_id); } else selectSession(session.id);
     }
     function renderHistory() {
@@ -1443,14 +1502,15 @@
     function updateHeader() {
       const session = state.selected;
       const sessionLine = session ? `${projectFor(session.project_id)?.name || 'Project'} · ${isFleetSession(session) ? 'Fleet review · ' : isClashSession(session) ? `Clash vs ${providerFor(session.clash?.challenger)?.name || session.clash?.challenger || 'challenger'} · ` : ''}${providerFor(session.provider)?.name || session.provider}` : '';
-      $('page-title').textContent = ['sessions','results'].includes(state.view) ? session?.title || 'New session' : {knowledge:'Knowledge',skills:'Skills',accelerators:'Accelerators',setup:'Projects & Setup'}[groupOf(state.view)];
-      $('page-subtitle').textContent = ['sessions','results'].includes(state.view) ? session ? sessionLine : [projectFor($('project').value)?.name,providerFor($('provider').value)?.name].filter(Boolean).join(' · ') : ({brain:'Browsing runs no commands.',memory:'Browsing runs no commands.',context:'Files added to a session when Project context is on.'})[state.view] || '';
+      $('page-title').textContent = groupOf(state.view) === 'sessions' ? session?.title || 'New session' : {knowledge:'Knowledge',skills:'Skills',accelerators:'Accelerators',setup:'Projects & Setup'}[groupOf(state.view)];
+      $('page-subtitle').textContent = groupOf(state.view) === 'sessions' ? session ? sessionLine : [projectFor($('project').value)?.name,providerFor($('provider').value)?.name].filter(Boolean).join(' · ') : [state.view === 'kit3' ? '' : projectFor(currentProject())?.name,({brain:'Browsing runs no commands.',memory:'Browsing runs no commands.',context:'Files added to a session when Project context is on.'})[state.view]].filter(Boolean).join(' · ');
       $('page-subtitle').hidden = !$('page-subtitle').textContent;
       $('open-kit3').hidden = state.view !== 'kit3';
-      $('session-status').hidden = !['sessions','results'].includes(state.view) || !session;
+      if ($('project-switcher').value !== currentProject() && projectFor(currentProject())) $('project-switcher').value = currentProject(); $('project-switcher').disabled = !state.bootstrap || Boolean(state.pending);
+      $('session-status').hidden = groupOf(state.view) !== 'sessions' || !session;
       const statusKey = session ? `${session.status}|${sessionStatusLabel(session)}` : ''; if ($('session-status').dataset.key !== statusKey) { $('session-status').dataset.key = statusKey; $('session-status').replaceChildren(); if (session) $('session-status').append(el('span',`status-dot ${session.status}`),document.createTextNode(sessionStatusLabel(session))); }
-      $('cancel-session').hidden = !['sessions','results'].includes(state.view) || !active(session);
-      $('cancel-session').disabled = Boolean(state.pending); $('cancel-session').textContent = state.pending === 'cancel' ? 'Cancelling…' : state.view==='results' && resultUi.data?.checks.some(check=>['queued','running'].includes(check.status)) ? 'Cancel check' : 'Cancel session';
+      $('cancel-session').hidden = groupOf(state.view) !== 'sessions' || !active(session);
+      $('cancel-session').disabled = Boolean(state.pending); $('cancel-session').textContent = state.pending === 'cancel' ? 'Cancelling…' : isResultView(state.view) && resultUi.data?.checks.some(check=>['queued','running'].includes(check.status)) ? 'Cancel check' : 'Cancel session';
       const viewName = state.view === 'sessions' ? '' : viewLabels[state.view]; $('view-heading').textContent = viewLabels[state.view];
       document.title = `${viewName && viewName !== $('page-title').textContent ? `${viewName} · ` : ''}${state.view === 'sessions' && session ? session.title : $('page-title').textContent} — AI Infrastructure Harness`;
     }
@@ -1774,7 +1834,7 @@
     $('agent-count').addEventListener('input',updateControls);
     $('prompt').addEventListener('keydown',event => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); if (!$('send').disabled) $('session-form').requestSubmit(); } });
     function stopPolling() { clearTimeout(state.pollTimer); state.pollTimer = null; state.pollController?.abort(); state.pollController = null; }
-    function newSession(prompt = '', projectId = $('project').value) {
+    function newSession(prompt = '', projectId = $('project').value, show = true) {
       saveSessionPreferences();
       clearAttachments();
       stopPolling(); state.epoch++; state.selectedId = null; state.selected = null; state.loading = false; state.eventIds.clear(); state.assistantTexts.clear(); $('events').replaceChildren(); $('prompt').value = prompt;
@@ -1784,7 +1844,7 @@
       restoreFleetSettings(null); restoreBudgets('session-budgets',null,'new:'+state.epoch); resetFleetProgress();
       $('workspace').value = 'project'; $('worktree-branch').value = ''; loadProjectGit(true);
       refreshModelChoices(null,null);
-      showError('events-error',''); showError('composer-error',''); renderHistory(); setView('sessions'); updateControls(); $('prompt').focus();
+      showError('events-error',''); showError('composer-error',''); renderHistory(); if (show) setView('sessions'); updateControls(); if (show) $('prompt').focus();
       $('project').value = projectId; restoreProjectPreferences(projectId);
     }
     $('new-session').addEventListener('click',() => { if (!state.pending) newSession(); });
@@ -2512,12 +2572,12 @@
     }
     function clearDiscoveredSkills() { $('skills-availability').hidden = false; skillsState.discoveredSourceId = null; skillsState.skills = []; skillsState.selectedSkills.clear(); $('skills-filter').value = ''; $('skills-discovery-notice').hidden = true; invalidateSkillsPreview(); renderSkillChoices(); }
     function visibleSkills() { const query = $('skills-filter').value.trim().toLowerCase(); return skillsState.skills.filter(skill => [skill.id,skill.name,skill.description].join(' ').toLowerCase().includes(query)); }
-    function renderSkillCounts() { $('skills-selection-count').textContent = skillsState.discoveredSourceId ? `${skillsState.selectedSkills.size} of ${skillsState.skills.length} selected` : 'No skills loaded'; $('skills-visible-count').textContent = $('skills-filter').value.trim() ? `${visibleSkills().length} matching` : ''; }
+    function renderSkillCounts() { const count = skillsState.selectedSkills.size, tools = [...skillsState.selectedAgents].map(skillAgentName); $('skills-selection-summary').textContent = count && tools.length ? `${count} ${count === 1 ? 'skill' : 'skills'} for ${tools.join(', ')}` : 'Select at least one skill and one tool.'; $('skills-selection-count').textContent = skillsState.discoveredSourceId ? `${skillsState.selectedSkills.size} of ${skillsState.skills.length} selected` : 'No skills loaded'; $('skills-visible-count').textContent = $('skills-filter').value.trim() ? `${visibleSkills().length} matching` : ''; }
     function renderSkillChoices() {
       const list = $('skills-list'); list.replaceChildren(); const visible = visibleSkills();
       for (const [index,skill] of visible.entries()) {
         const label = el('label','skill-choice'); const input = el('input'); input.type = 'checkbox'; input.value = skill.id; input.checked = skillsState.selectedSkills.has(skill.id); input.id = `skill-choice-${index}`;
-        const copy = el('span','skill-choice-copy'); copy.append(el('span','skill-choice-name',skill.name || skill.id)); if (skill.name && skill.name !== skill.id) copy.append(el('span','skill-choice-id',skill.id)); if (skill.description) copy.append(el('span','skill-choice-description',skill.description)); label.append(input,copy); list.append(label);
+        const copy = el('span','skill-choice-copy'); copy.append(el('span','skill-choice-name',skill.name || skill.id)); if (skill.name && skill.name !== skill.id) copy.append(el('span','skill-choice-id',skill.id)); if (skill.description) { const description = el('span','skill-choice-description',skill.description); description.title = skill.description; copy.append(description); } label.append(input,copy); list.append(label);
         input.addEventListener('change',() => { if (input.checked) skillsState.selectedSkills.add(skill.id); else skillsState.selectedSkills.delete(skill.id); invalidateSkillsPreview(); renderSkillCounts(); });
       }
       if (!visible.length) list.append(el('p','empty-note',!skillsState.discoveredSourceId ? 'Choose a source and load its skills to make a selection.' : skillsState.skills.length ? 'No matching skills. Try another name or description.' : 'This source returned no installable skills.'));
@@ -2525,7 +2585,7 @@
     }
     function renderSkillAgents() {
       const holder = $('skills-agents'); holder.replaceChildren();
-      for (const agent of skillsState.catalog?.agents || []) { const label = el('label','checkbox'); const input = el('input'); input.type = 'checkbox'; input.value = agent.id; input.checked = skillsState.selectedAgents.has(agent.id); label.append(input,document.createTextNode(agent.name)); holder.append(label); input.addEventListener('change',() => { if (input.checked) skillsState.selectedAgents.add(agent.id); else skillsState.selectedAgents.delete(agent.id); invalidateSkillsPreview(); }); }
+      for (const agent of skillsState.catalog?.agents || []) { const label = el('label','checkbox'); const input = el('input'); input.type = 'checkbox'; input.value = agent.id; input.checked = skillsState.selectedAgents.has(agent.id); label.append(input,document.createTextNode(agent.name)); holder.append(label); input.addEventListener('change',() => { if (input.checked) skillsState.selectedAgents.add(agent.id); else skillsState.selectedAgents.delete(agent.id); invalidateSkillsPreview(); renderSkillCounts(); }); }
       if (!holder.children.length) holder.append(el('span','skills-note','No installation tools were reported.'));
       const previous = $('skills-installed-agent').value; const all = el('option','','All tools'); all.value = ''; $('skills-installed-agent').replaceChildren(all);
       for (const agent of skillsState.catalog?.agents || []) { const option = el('option','',agent.name); option.value = agent.id; $('skills-installed-agent').append(option); }
@@ -2657,18 +2717,25 @@
     function renderInstalledSkills() {
       const holder = $('skills-installed-list'); holder.replaceChildren(); const agent = $('skills-installed-agent').value;
       const visible = skillsState.installed.filter(skill => !agent || skill.agent === agent);
-      for (const skill of visible) {
-        const row = el('div','skills-file'); const copy = el('div'); copy.append(el('p','skills-installed-name',`${skill.name} · ${skillAgentName(skill.agent)}`),el('div','skills-installed-path',skill.path)); if (skill.managed) copy.append(el('p','skills-note',`${skill.source} · ${skill.revision} · ${humanLabel(skill.state)}`));
+      const groups = new Map(); for (const skill of visible) { if (!groups.has(skill.name)) groups.set(skill.name,[]); groups.get(skill.name).push(skill); }
+      for (const [name,copies] of groups) {
+        const row = el('div','skills-file installed-skill'), copy = el('div'), heading = el('p','skills-installed-name',name), tools = el('span','installed-tools');
+        for (const skill of copies) {
+          const detail = `${skill.path}${skill.managed ? ` · ${skill.source} · ${skill.revision} · ${humanLabel(skill.state)}` : ' · untracked'}`;
+          const chip = el('span',`tool-chip${skill.managed ? ' managed' : ''}`,skillAgentName(skill.agent)); chip.title = detail; chip.append(el('span','sr-only',` (${detail})`)); tools.append(chip);
+        }
+        heading.append(tools); copy.append(heading);
         const actions = el('div','skills-actions');
-        if (skill.managed) {
-          if (skill.source_id !== 'local') { const update = el('button','button','Check update'); update.type = 'button'; update.setAttribute('aria-label',`Check update for ${skill.name} in ${skillAgentName(skill.agent)}`); update.addEventListener('click',() => previewSkillChange(skill,'update')); actions.append(update); }
-          const remove = el('button','button','Preview removal'); remove.type = 'button'; remove.setAttribute('aria-label',`Preview removal of ${skill.name} in ${skillAgentName(skill.agent)}`); remove.addEventListener('click',() => previewSkillChange(skill,'remove')); actions.append(remove);
+        for (const skill of copies.filter(item => item.managed)) {
+          copy.append(el('p','skills-note',`${skillAgentName(skill.agent)}: ${skill.source} · ${skill.revision} · ${humanLabel(skill.state)}`));
+          if (skill.source_id !== 'local') { const update = el('button','button compact',`Check update · ${skillAgentName(skill.agent)}`); update.type = 'button'; update.setAttribute('aria-label',`Check update for ${skill.name} in ${skillAgentName(skill.agent)}`); update.addEventListener('click',() => previewSkillChange(skill,'update')); actions.append(update); }
+          const remove = el('button','button compact',`Preview removal · ${skillAgentName(skill.agent)}`); remove.type = 'button'; remove.setAttribute('aria-label',`Preview removal of ${skill.name} in ${skillAgentName(skill.agent)}`); remove.addEventListener('click',() => previewSkillChange(skill,'remove')); actions.append(remove);
         }
         row.append(copy,actions); holder.append(row);
       }
       if (skillsState.installedPending || skillsState.installedError) return;
       const managed = visible.filter(skill => skill.managed).length, untracked = visible.length - managed;
-      $('skills-installed-status').textContent = !skillsState.installedProjectId ? 'Choose a project to see its installed skills.' : `${visible.length} installed${agent ? ` for ${skillAgentName(agent)}` : ''}${!visible.length ? '' : !managed ? ' · all untracked' : untracked ? ` · ${managed} managed · ${untracked} untracked` : ' · all managed'}`;
+      $('skills-installed-status').textContent = !skillsState.installedProjectId ? 'Choose a project to see its installed skills.' : !visible.length ? `0 installed${agent ? ` for ${skillAgentName(agent)}` : ''}` : `${groups.size} ${groups.size === 1 ? 'skill' : 'skills'} · ${visible.length} ${visible.length === 1 ? 'copy' : 'copies'}${agent ? ` for ${skillAgentName(agent)}` : ''} · ${!managed ? 'all untracked' : untracked ? `${managed} managed, ${untracked} untracked` : 'all managed'}`;
       $('skills-untracked-help').hidden = !untracked;
       if (!visible.length && skillsState.installedProjectId) holder.append(el('p','empty-note',agent ? 'No installed skills were found for this tool.' : 'No installed skills were found in this project.'));
     }
@@ -2802,8 +2869,25 @@
       }
       if (!kits.length) holder.append(el('p','empty-note','No accelerators were reported by this runner.'));
     }
-    const creatorUi = {initialized:false,epoch:0,pending:false,detail:null,timer:null,available:false};
+    const creatorUi = {initialized:false,epoch:0,pending:false,detail:null,timer:null,available:false,formOpen:false};
     const creatorBusy = run => ['scanning','generating','applying','rolling_back'].includes(run?.status);
+    // Scan → Review profile → Generate → Review files → Apply; a stopped phase marks its own step.
+    const creatorSteps = ['Scan','Review profile','Generate','Review files','Apply'];
+    function renderCreatorStepper(run) {
+      const attention = ['needs_input','failed','cancelled','interrupted','rolled_back'].includes(run.status);
+      const current = attention ? {scan:0,generate:2,apply:4,rollback:4}[run.phase] ?? 0 : {new:0,scanning:0,review:1,generating:2,preview:3,applying:4,rolling_back:4,complete:5}[run.status] ?? 0;
+      $('creator-stepper').replaceChildren(...creatorSteps.map((label,index) => {
+        const stepState = index < current ? 'done' : index > current ? 'upcoming' : attention ? 'attention' : creatorBusy(run) || run.status === 'new' ? 'running' : 'current';
+        const item = el('li','step'); item.dataset.state = stepState; if (index === current) item.setAttribute('aria-current','step');
+        item.append(el('span','step-mark',stepState === 'done' ? '✓' : String(index + 1)),el('span','step-label',label)); return item;
+      }));
+    }
+    // Once runs exist, the selected run leads and the form for a new run opens on request.
+    function renderCreatorLayout() {
+      const hasRun = Boolean(creatorUi.detail); $('creator-new-run').hidden = !hasRun;
+      $('creator-form').hidden = hasRun && !creatorUi.formOpen; $('creator-new-run').setAttribute('aria-expanded',String(!$('creator-form').hidden));
+    }
+
     function creatorModels() {
       const metadata = providerFor($('creator-provider').value)?.model_options || {};
       const models = metadata.models || []; $('creator-models').replaceChildren();
@@ -2851,6 +2935,7 @@
         setOptions($('creator-runs'),data.runs,r=>`${r.created_at} · ${r.operation} · ${r.status}`,r=>r.id,selected);
         if (data.runs.length) await readCreator($('creator-runs').value,epoch);
         else { creatorUi.detail=null; $('creator-detail').hidden=true; }
+        renderCreatorLayout();
       } catch(error) { if(epoch===creatorUi.epoch) showError('creator-error',textError(error)); }
       finally { if(epoch===creatorUi.epoch) creatorControls(); }
     }
@@ -2873,7 +2958,7 @@
       const data=creatorUi.detail; if(!data) return; const run=data.run;
       if(data.session) upsert(data.session);
       const selectedRun=[...$('creator-runs').options].find(o=>o.value===run.id); if(selectedRun) selectedRun.textContent=`${run.created_at} · ${run.operation} · ${run.status}`;
-      $('creator-detail').hidden=false; $('creator-status').textContent=humanLabel(run.status);
+      $('creator-detail').hidden=false; $('creator-status').textContent=humanLabel(run.status); renderCreatorStepper(run); renderCreatorLayout();
       $('creator-target').textContent=`${run.target} · ${run.workspace} · branch: ${run.branch || 'none'} · ${run.provider} / ${run.model || 'default model'} / ${run.thinking_effort || 'default effort'} · ${run.agents_enabled?`${run.agent_count} required helpers`:'helpers off'}`;
       $('creator-message').textContent=run.message || 'The phase is queued or running. Artifacts appear as they are written.';
       restoreBudgets('creator-run-budgets',run.budgets,run.id+':'+run.revision);
@@ -2900,8 +2985,8 @@
       if(!creatorBusy(run) && !run.recovery_available && run.status!=='complete') button('rescan','Scan again for review');
       if(['scanning','generating'].includes(run.status)) button('cancel','Cancel phase');
       updateCreatorBudgetControls();
-      if(data.session) { const result=el('button','button','View results & run usage'); result.type='button'; result.addEventListener('click',async()=>{await selectSession(data.session.id); setView('results');}); actions.append(result); }
-      if(run.status==='complete') { const update=el('button','button','Prepare next update'); update.type='button'; update.addEventListener('click',()=>{$('creator-operation').value='update'; $('creator-goal').focus(); $('creator-form').scrollIntoView({behavior:'smooth'});}); actions.append(update); }
+      if(data.session) { const result=el('button','button','View results & run usage'); result.type='button'; result.addEventListener('click',async()=>{await selectSession(data.session.id); setView('changes');}); actions.append(result); }
+      if(run.status==='complete') { const update=el('button','button','Prepare next update'); update.type='button'; update.addEventListener('click',()=>{creatorUi.formOpen=true; renderCreatorLayout(); $('creator-operation').value='update'; $('creator-goal').focus(); $('creator-form').scrollIntoView({behavior:'smooth'});}); actions.append(update); }
     }
     function creatorBudgetsDirty() { return Boolean(creatorUi.detail && JSON.stringify(readBudgets('creator-run-budgets'))!==JSON.stringify(creatorUi.detail.run.budgets)); }
     function updateCreatorBudgetControls() {
@@ -2930,7 +3015,7 @@
       event.preventDefault(); if(creatorUi.pending) return; clearTimeout(creatorUi.timer); const epoch=++creatorUi.epoch;
       const body={budgets:readBudgets('creator-budgets'),project_id:$('creator-project').value,provider:$('creator-provider').value,model:$('creator-model').value.trim() || null,thinking_effort:$('creator-effort').value || null,operation:$('creator-operation').value,workspace:$('creator-workspace').value,worktree_branch:$('creator-workspace').value==='worktree'?$('creator-branch').value.trim():'',agents_enabled:$('creator-agents').checked,agent_count:$('creator-count').valueAsNumber,goal:$('creator-goal').value,tools:[...document.querySelectorAll('[name="creator-tool"]:checked')].map(i=>i.value)};
       creatorUi.pending=true; creatorControls(); showError('creator-error','');
-      try { const data=await api('/api/creator',{method:'POST',body}); if(epoch===creatorUi.epoch) { creatorUi.detail=data; renderCreator(); await loadCreator(data.run.id); $('creator-detail').scrollIntoView({behavior:'smooth',block:'start'}); refreshSessions(); } }
+      try { const data=await api('/api/creator',{method:'POST',body}); if(epoch===creatorUi.epoch) { creatorUi.detail=data; creatorUi.formOpen=false; renderCreator(); await loadCreator(data.run.id); $('creator-detail').scrollIntoView({behavior:'smooth',block:'start'}); refreshSessions(); } }
       catch(error) { if(epoch===creatorUi.epoch) showError('creator-error',textError(error)); }
       finally { creatorUi.pending=false; creatorControls(); if(creatorUi.detail) renderCreator(); }
     });
@@ -2939,7 +3024,8 @@
     $('creator-count').addEventListener('input',creatorControls);
     $('creator-agents').addEventListener('change',creatorControls); $('creator-workspace').addEventListener('change',creatorControls);
     $('creator-project').addEventListener('change',()=>{creatorUi.detail=null;$('creator-detail').hidden=true;$('creator-runs').replaceChildren();loadCreator();});
-    $('creator-runs').addEventListener('change',()=>readCreator($('creator-runs').value)); $('creator-refresh').addEventListener('click',()=>loadCreator());
+    $('creator-runs').addEventListener('change',()=>readCreator($('creator-runs').value));
+    $('creator-new-run').addEventListener('click',()=>{ creatorUi.formOpen=!creatorUi.formOpen; renderCreatorLayout(); if(creatorUi.formOpen) $('creator-project').focus(); }); $('creator-refresh').addEventListener('click',()=>loadCreator());
     bootstrap();
   </script>
 </body>

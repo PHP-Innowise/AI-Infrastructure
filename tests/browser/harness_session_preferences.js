@@ -26,7 +26,7 @@ async (page) => {
   const snapshot = () => tab.evaluate(() => Object.fromEntries(['project','provider','workflow','mode','model','thinking-effort','agent-count','workspace','worktree-branch','session-budgets-usd','session-budgets-tokens','session-budgets-seconds'].map(id => [id,document.getElementById(id).value]).concat([['agents-enabled',document.getElementById('agents-enabled').checked]])));
   try {
     await tab.goto('http://127.0.0.1:8766/'); await ready();
-    await tab.locator('#project').selectOption('b');
+    await tab.locator('#project-switcher').selectOption('b');
     await tab.locator('#provider').selectOption('claude');
     await tab.locator('#mode').selectOption('edit');
     await tab.locator('#model-choice').selectOption('--custom--');
@@ -40,10 +40,10 @@ async (page) => {
     const expected = await snapshot();
     await tab.reload(); await ready();
     check(JSON.stringify(await snapshot()) === JSON.stringify(expected),'Reload must preserve the selected project and all launch settings');
-    await tab.locator('#project').selectOption('a');
+    await tab.locator('#project-switcher').selectOption('a');
     check(await tab.locator('#session-budgets-tokens').inputValue() === '','A new project must not inherit another project budget');
     await tab.locator('#provider').selectOption('codex');
-    await tab.locator('#project').selectOption('b');
+    await tab.locator('#project-switcher').selectOption('b');
     check(JSON.stringify(await snapshot()) === JSON.stringify(expected),'Switching projects must restore their own settings');
     await tab.getByRole('button',{name:/Saved session/}).click();
     await tab.locator('#events .message').waitFor();
@@ -53,7 +53,7 @@ async (page) => {
     check(await tab.locator('#session-budgets-tokens').inputValue() === '777','Session budgets must come from the server');
     await tab.getByRole('button',{name:'New session',exact:true}).click();
     check(JSON.stringify(await snapshot()) === JSON.stringify(expected),'New session must restore the project draft');
-    await tab.locator('#project').selectOption('a');
+    await tab.locator('#project-switcher').selectOption('a');
     await tab.locator('#workflow').selectOption('sdd'); await tab.locator('#sdd-feature').fill('saved-feature');
     await tab.locator('#option-models').click(); await tab.locator('#model-routing-enabled').check();
     for (const role of ['plan','edit']) {
