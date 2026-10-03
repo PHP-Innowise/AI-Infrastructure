@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "id": "payments",
+  "description": "Owns payment and refund state",
+  "owner": "payments-team",
+  "relationships_complete": true,
+  "capabilities": [{"id": "refund-payment", "description": "Issue a refund", "keywords": ["refund-payment"], "status": "planned", "sources": ["specs/refund.md"]}],
+  "provides": [{"id": "refund.completed", "kind": "event", "version": "1", "sources": ["contracts/refund-completed.json"]}],
+  "consumes": [{"service": "orders", "contract": "order.cancelled", "version": "1"}],
+  "sources": [{"path": "specs/refund.md", "kind": "spec"}]
+}

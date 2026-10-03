@@ -26,6 +26,7 @@
       <button class="new-session" id="new-session" type="button"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 5v14 M5 12h14"/></svg>New session</button>
       <nav class="navigation" aria-label="Main navigation">
         <button class="nav-item" type="button" data-nav="sessions" aria-current="page"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h16v12H9l-5 4Z"/></svg>Sessions</button>
+        <button class="nav-item" type="button" data-nav="systems"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 4.5h6v5h-6Z M14.5 4.5h6v5h-6Z M9 14.5h6v5H9Z M9.5 7h5 M6.5 9.5v7.5H9 M17.5 9.5v7.5H15"/></svg>System Orchestration</button>
         <button class="nav-item" type="button" data-nav="knowledge"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h6a4 4 0 0 1 4 4v13a5 5 0 0 0-4-2H4Z M14 8a4 4 0 0 1 4-4h3v15h-3a5 5 0 0 0-4 2"/></svg>Knowledge</button>
         <button class="nav-item" type="button" data-nav="skills"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="m8 5-6 7 6 7 M16 5l6 7-6 7 M14 3l-4 18"/></svg>Skills</button>
         <button class="nav-item" type="button" data-nav="accelerators"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="m13 2-9 12h7l-1 8 10-12h-8Z"/></svg>Accelerators</button>
@@ -161,6 +162,63 @@
         </section>
         <section data-tab="usage" aria-label="Launch usage history"><h3>Launch history &amp; total usage</h3><p class="knowledge-note" id="results-usage-note"></p><p id="results-totals" role="status"></p><div id="results-launches"></div></section>
       </div></div></section>
+      <section class="view" id="systems-view" aria-label="System Orchestration" hidden><div class="page-scroll"><div class="page-content">
+        <div class="page-heading"><h2>System Orchestration</h2><p>Coordinate a change across services, contracts and their own project memory.</p></div>
+        <div class="system-toolbar">
+          <label class="field">System project<select id="system-project"></select></label>
+          <label class="field">System manifest<input id="system-config" value="system.json" maxlength="1024" placeholder="Relative path to system.json"></label>
+          <button class="button" type="button" id="system-load">Load system</button>
+          <button class="button" type="button" id="system-edit">Create / edit system</button>
+          <button class="button" type="button" id="system-choose-project">Choose system folder</button>
+        </div>
+          <p class="system-note">Choose a system folder, then create or edit your system. Select service folders and use Fill with AI or edit their details; selected folders are registered automatically.</p>
+        <p class="error-text" id="system-error" role="alert" hidden></p><p class="skills-action-status" id="system-message" role="status"></p>
+        <form id="system-editor" class="skills-preview" hidden aria-label="System editor" novalidate>
+          <h3>Create / edit system</h3><p class="system-note" id="system-editor-location"></p>
+          <label class="field">System name<input id="system-editor-name" type="text" required maxlength="200"></label>
+          <section class="skills-preview" aria-label="AI service discovery">
+            <h3>Fill service details with AI</h3>
+            <p class="system-note">Choose service folders, then let AI inspect their code, interfaces, policies, tests and eligible memory. Review the filled forms before saving. Source folders stay read-only during the scan.</p>
+            <p class="system-warning" id="system-discovery-sandbox" role="alert" hidden></p>
+            <div class="knowledge-form-grid"><label class="field">AI discovery provider<select id="system-discovery-provider"></select></label><label class="field">Scan timeout (seconds)<input id="system-discovery-timeout" type="number" value="900" min="1" max="86400"></label></div>
+            <div class="skills-actions"><button class="button primary" type="button" id="system-discovery-start">Fill with AI</button><button class="button" type="button" id="system-discovery-cancel" hidden>Cancel AI scan</button></div>
+            <p id="system-discovery-status" role="status"></p>
+            <section class="agents-section" id="system-discovery-agents" aria-label="AI scan agent" hidden><div class="agents-toolbar"><h3>Agent</h3><span class="agents-live" id="system-discovery-live" hidden>Live</span></div><p class="system-note">What the discovery agent reads in the captured evidence. Paths are shown as original service paths.</p><div id="system-discovery-agent"></div></section>
+            <div id="system-discovery-report" hidden></div>
+          </section>
+          <div id="system-editor-services"></div>
+          <div class="skills-actions"><button class="button" type="button" id="system-editor-add">Add service folder</button></div>
+          <details class="skills-preview"><summary>Shared sources of context</summary><p class="system-note">Paths are relative to the system folder. Add shared policies, specifications or memory used across services.</p><div id="system-editor-shared"></div></details>
+          <p class="error-text" id="system-editor-error" role="alert" hidden></p><p class="skills-action-status" id="system-editor-status" role="status"></p>
+          <div class="skills-actions"><button class="button primary" type="submit" id="system-editor-save">Save system</button><button class="button" type="button" id="system-editor-close">Close editor</button><button class="button" type="button" id="system-editor-discard">Discard changes</button></div>
+        </form>
+        <div id="system-catalog" hidden>
+          <h3 id="system-name"></h3><p class="system-note" id="system-catalog-summary"></p>
+          <div class="system-map" id="system-map"></div><div class="system-cards" id="system-services"></div>
+          <details class="skills-preview"><summary>Declared contracts and memory ownership</summary><div id="system-relationships"></div><p class="system-note">System Brain coordinates the change. Each service owns its tasks and Memory Bank. Local SQLite indexes are disposable. Receipts become durable knowledge only through the owning runtime’s review and promotion workflow.</p><div id="system-banks" class="system-cards"></div></details>
+          <form id="system-plan-form" class="skills-preview"><h3>Prepare a change</h3><p class="system-note">Select a starting service above, or leave the selection empty for capability routing. Contract consumers are added to the impact plan.</p><div class="knowledge-form-grid">
+            <label class="field wide">Task<textarea id="system-task" required maxlength="2000" rows="3" placeholder="Describe the change and the expected result"></textarea></label>
+            <label class="field">Change ID<input id="system-change-id" required maxlength="80" value="change-001" pattern="[a-z0-9][a-z0-9._-]*"></label>
+            <label class="field">Changed contracts (optional)<input id="system-contracts" maxlength="2000" placeholder="Comma-separated declared contract IDs"></label>
+            <label class="field">Context budget (characters)<input id="system-budget" type="number" min="128" max="64000" value="8000" required></label>
+          </div><div class="skills-actions"><button class="button primary" id="system-prepare" type="submit">Prepare plan</button></div></form>
+        </div>
+        <div class="system-history"><label class="field">Saved plans &amp; runs<select id="system-runs"><option value="">No saved plans</option></select></label><button type="button" class="button" id="system-refresh">Refresh</button></div>
+        <section id="system-run" class="skills-preview" hidden><h3 id="system-run-title"></h3><p id="system-run-status" class="skills-action-status" role="status"></p><p id="system-plan-summary" class="system-note"></p><div id="system-flow" class="system-flow"></div>
+          <details><summary>Review context, impact, warnings and source fingerprints</summary><pre id="system-plan-json" class="system-json"></pre></details>
+          <div id="system-launch" class="skills-actions"><label class="field">Worker provider<select id="system-provider"></select></label><label class="field">Worker mode<select id="system-mode"><option value="read-only">Read-only investigation</option><option value="edit">Edit each selected service</option></select></label><label class="field">Service folder access<select id="system-access"><option value="all">All selected services</option><option value="service">Own service only</option></select></label><label class="field">Timeout per worker (seconds)<input id="system-timeout" type="number" min="1" max="86400" value="900"></label><label class="checkbox"><input id="system-reviewed" type="checkbox">I reviewed the scope and context</label><button type="button" class="button primary" id="system-execute">Execute reviewed plan</button></div>
+          <p class="system-note" id="system-provider-note">Execution uses the selected CLI with its default model, sequential workers and native tasks. Read-only runs still create Brain task records. Edit mode writes in each service’s current checkout.</p>
+          <div id="system-recovery" class="skills-preview" hidden><h3>Recover an unfinished run</h3><p class="system-note">Inspect the saved receipts and workspace before retrying. Completed dispatches are skipped. An interrupted dispatch may have made partial edits.</p><label class="field">Dispatch to retry<select id="system-retry"></select></label><label class="checkbox"><input id="system-accept-changes" type="checkbox">I inspected and accept partial source changes</label><button type="button" class="button" id="system-resume">Resume saved run</button></div>
+          <div class="skills-actions"><button type="button" class="button danger" id="system-cancel" hidden>Cancel run</button><button type="button" class="button" id="system-open-session" hidden>Open runner session</button></div>
+          <section class="agents-section" id="system-agents-section" aria-label="Agents" hidden>
+            <div class="agents-toolbar"><h3>Agents</h3><span class="agents-live" id="system-agents-live" hidden>Live</span><label class="field agents-launch" id="system-agents-launch-field" hidden>Launch<select id="system-agents-launch"></select></label></div>
+            <p class="system-note" id="system-agents-note">Each card is one agent of this run. Select a card to follow what it reads, runs, edits and reports. Activity is display-only; receipts below remain authoritative.</p>
+            <div id="system-agents"></div>
+          </section>
+          <section id="system-results" hidden><h3 style="margin-top:24px">Dispatch receipts</h3><p class="system-note">Checks and completion below are worker-reported. Inspect evidence before delivery. Execution creates no commit, merge or deployment.</p><div id="system-receipts" class="system-cards"></div><h3 style="margin-top:24px">Native task references</h3><div id="system-native-tasks" class="system-cards"></div><p id="system-handoff" class="system-note"></p></section>
+          <pre id="system-events" class="system-json" hidden></pre>
+        </section>
+      </div></div></section>
       <section class="view" id="creator-view" aria-label="Infrastructure Creator" hidden><div class="page-scroll"><div class="page-content">
         <div class="page-toolbar creator-runs-bar"><label class="field">Creator run<select id="creator-runs"><option value="">No runs yet</option></select></label><button class="button" id="creator-new-run" type="button" aria-controls="creator-form" aria-expanded="false" hidden>New run</button></div>
         <form id="creator-form">
@@ -267,5 +325,9 @@
   <script src="/app-setup.js"></script>
   <script src="/app-skills.js"></script>
   <script src="/app-creator.js"></script>
+  <script src="/agent-activity.js"></script>
+  <script src="/system.js"></script>
+  <script src="/system-editor.js"></script>
+  <script src="/system-discovery.js"></script>
 </body>
 </html>

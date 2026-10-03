@@ -5,11 +5,16 @@ function setProjectChoices(select,projects,previous,allowUnavailable = false) {
   setOptions(select,projects.map(project => ({...project,...(allowUnavailable ? {available:true} : {})})),item => `${item.name}${projects.find(project => project.id === item.id)?.available === false ? ' · unavailable' : ''}`,item => item.id,previous);
   if (previous && projects.some(project => project.id === previous)) select.value = previous;
 }
-const folderPicker = {path:null,parent:null,valid:false,controller:null,epoch:0};
+const folderPicker = {path:null,parent:null,valid:false,controller:null,epoch:0,onSelect:null,opener:null};
+function chooseProjectFolder(folder,onSelect,opener,title='Choose a project folder') {
+  folderPicker.onSelect=onSelect; folderPicker.opener=opener; $('folder-picker-title').textContent=title;
+  $('folder-picker').showModal(); loadFolderPicker(folder || folderPicker.path || undefined);
+}
 async function loadFolderPicker(path,query = '') {
   if (!state.bootstrap || state.authFailed) return;
   folderPicker.controller?.abort(); const controller = new AbortController(); folderPicker.controller = controller; const epoch = ++folderPicker.epoch;
   folderPicker.valid = false; $('folder-picker-use').disabled = true; $('folder-picker-parent').disabled = true; $('folder-picker-search').disabled = true;
+  $('folder-picker-location').disabled = true; $('folder-picker-location-form').querySelector('button').disabled = true;
   $('folder-picker-query').value = query; $('folder-picker-list').replaceChildren(); $('folder-picker-list').setAttribute('aria-busy','true'); $('folder-picker-current').textContent = ''; $('folder-picker-status').textContent = query ? 'Searching folders…' : 'Loading folders…'; showError('folder-picker-error','');
   try {
     const data = await api('/api/projects/browse',{method:'POST',body:{...(path ? {path} : {}),query,hidden:$('folder-picker-hidden').checked},signal:controller.signal});
@@ -24,12 +29,12 @@ async function loadFolderPicker(path,query = '') {
   } catch (error) {
     if (error.name !== 'AbortError' && epoch === folderPicker.epoch) { $('folder-picker-status').textContent = 'Could not browse this folder. Enter another path or choose Home.'; showError('folder-picker-error',textError(error)); }
   } finally {
-    if (epoch === folderPicker.epoch) { folderPicker.controller = null; $('folder-picker-list').setAttribute('aria-busy','false'); $('folder-picker-use').disabled = !folderPicker.valid; $('folder-picker-search').disabled = !folderPicker.valid; $('folder-picker-parent').disabled = !folderPicker.valid || !folderPicker.parent; }
+    if (epoch === folderPicker.epoch) { folderPicker.controller = null; $('folder-picker-location').disabled = false; $('folder-picker-location-form').querySelector('button').disabled = false; $('folder-picker-list').setAttribute('aria-busy','false'); $('folder-picker-use').disabled = !folderPicker.valid; $('folder-picker-search').disabled = !folderPicker.valid; $('folder-picker-parent').disabled = !folderPicker.valid || !folderPicker.parent; }
   }
 }
-$('setup-browse').addEventListener('click',() => { if ($('setup-browse').disabled) return; $('folder-picker').showModal(); loadFolderPicker($('setup-project-path').value.trim() || folderPicker.path || undefined); });
+$('setup-browse').addEventListener('click',() => { if ($('setup-browse').disabled) return; chooseProjectFolder($('setup-project-path').value.trim(),folder=>{ $('setup-project-path').value=folder; showError('setup-register-error',''); $('setup-register-status').hidden=true; $('setup-register').focus(); },$('setup-browse')); });
 $('folder-picker-close').addEventListener('click',() => $('folder-picker').close());
-$('folder-picker').addEventListener('close',() => { folderPicker.controller?.abort(); folderPicker.epoch++; $('setup-browse').focus(); });
+$('folder-picker').addEventListener('close',() => { folderPicker.controller?.abort(); folderPicker.epoch++; folderPicker.opener?.focus(); });
 $('folder-picker-location-form').addEventListener('submit',event => { event.preventDefault(); loadFolderPicker($('folder-picker-location').value.trim()); });
 $('folder-picker-search-form').addEventListener('submit',event => { event.preventDefault(); if (folderPicker.valid) loadFolderPicker(folderPicker.path,$('folder-picker-query').value.trim()); });
 $('folder-picker-home').addEventListener('click',() => loadFolderPicker());
@@ -37,8 +42,8 @@ $('folder-picker-parent').addEventListener('click',() => { if (folderPicker.vali
 $('folder-picker-clear').addEventListener('click',() => loadFolderPicker(folderPicker.path || undefined));
 $('folder-picker-hidden').addEventListener('change',() => loadFolderPicker(folderPicker.path || undefined,$('folder-picker-query').value.trim()));
 $('folder-picker-use').addEventListener('click',() => {
-  if (!folderPicker.valid || $('setup-register').disabled) return;
-  $('setup-project-path').value = folderPicker.path; showError('setup-register-error',''); $('setup-register-status').hidden = true; $('folder-picker').close(); $('setup-register').focus();
+  if (!folderPicker.valid || !folderPicker.onSelect) return;
+  const selected=folderPicker.path, callback=folderPicker.onSelect; $('folder-picker').close(); callback(selected);
 });
 function updateRegisteredProjects(projects,preferredSetupId = null) {
   if (!Array.isArray(projects) || projects.some(project => !project || typeof project.id !== 'string' || typeof project.name !== 'string')) throw new Error('The runner returned an incomplete project list.');

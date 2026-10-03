@@ -510,10 +510,10 @@ document.addEventListener('keydown',event => {
   if (sessionOptions.open && ($('panel-'+sessionOptions.open).contains(document.activeElement) || document.activeElement === $('option-'+sessionOptions.open))) { const chip = $('option-'+sessionOptions.open); sessionOptions.open = null; renderSessionOptions(); chip.focus(); }
 });
 document.querySelector('.skip').addEventListener('click',event => { event.preventDefault(); $('main').focus(); });
-// Five sections; each groups related views behind tabs. Every view has its own #/view address.
+// Six sections; each groups related views behind tabs. Every view has its own #/view address.
 const resultViews = ['changes','checks','usage'], isResultView = view => resultViews.includes(view);
-const viewGroups = {sessions:['sessions',...resultViews],knowledge:['brain','memory','context'],skills:['skills','create-skill'],accelerators:['accelerators','creator','kit3'],setup:['setup']};
-const viewLabels = {sessions:'Conversation',changes:'Changes',checks:'Checks',usage:'Usage',brain:'Project Brain',memory:'Memory bank',context:'Context files',skills:'Library','create-skill':'Create skill',accelerators:'Overview',creator:'Infrastructure Creator',kit3:'Open Source Kit',setup:'Projects & Setup'};
+const viewGroups = {sessions:['sessions',...resultViews],systems:['systems'],knowledge:['brain','memory','context'],skills:['skills','create-skill'],accelerators:['accelerators','creator','kit3'],setup:['setup']};
+const viewLabels = {sessions:'Conversation',systems:'System Orchestration',changes:'Changes',checks:'Checks',usage:'Usage',brain:'Project Brain',memory:'Memory bank',context:'Context files',skills:'Library','create-skill':'Create skill',accelerators:'Overview',creator:'Infrastructure Creator',kit3:'Open Source Kit',setup:'Projects & Setup'};
 const groupOf = view => Object.keys(viewGroups).find(group => viewGroups[group].includes(view));
 const lastViewInGroup = {};
 function viewFromHash() { let view = ''; try { view = decodeURIComponent(location.hash.replace(/^#\/?/,'')); } catch (_) { return null; } if (view === 'results') view = 'changes'; return groupOf(view) ? view : null; }
@@ -548,6 +548,7 @@ function setView(view, record = true) {
   if (state.view === 'memory' && view !== 'memory') { cancelMemoryRequests(); cancelKnowledgeRead('memory'); }
   if (state.view === 'brain' && view !== 'brain') { cancelBrainRequests(); cancelKnowledgeRead('brain'); }
   if (state.view === 'creator' && view !== 'creator') { clearTimeout(creatorUi.timer); ++creatorUi.epoch; }
+  if (state.view === 'systems' && view !== 'systems' && typeof systemUi !== 'undefined') { clearTimeout(systemUi.timer); ++systemUi.epoch; systemUi.controller?.abort(); }
   if(isResultView(state.view) && !isResultView(view)) { clearTimeout(resultUi.timer); ++resultUi.epoch; resultUi.pending=false; ++deliveryUi.epoch; deliveryUi.data=null; invalidateDeliveryPreview(); }
   state.view = view; lastViewInGroup[groupOf(view)] = view;
   const viewId = isResultView(view) ? 'results-view' : `${view}-view`; for (const node of document.querySelectorAll('#main > section.view')) node.hidden = node.id !== viewId;
@@ -556,6 +557,7 @@ function setView(view, record = true) {
   if (record && !restoringRoute && viewFromHash() !== view) { if (!location.hash) history.replaceState(null,'','#/'+previousView); history.pushState(null,'','#/'+view); }
   if (isResultView(view) && !isResultView(previousView)) loadResults();
   if (view === 'creator') openCreator();
+  if (view === 'systems' && typeof openSystems === 'function') openSystems();
   if (view === 'setup') openSetup();
   if (view === 'context') loadContext();
   if (view === 'memory') loadMemory();
@@ -576,7 +578,7 @@ function setOptions(select, items, getLabel, getValue, previous) {
   else { const first = [...select.options].find(option => !option.disabled); if (first) select.value = first.value; }
   if (!items.length) { const option = el('option','','None available'); option.value = ''; select.append(option); }
 }
-const projectSelects = {sessions:'project',changes:'project',checks:'project',usage:'project',context:'context-project',brain:'brain-project',memory:'memory-project',skills:'skills-project','create-skill':'create-skill-project',setup:'setup-project',creator:'creator-project',accelerators:'accelerator-project'};
+const projectSelects = {sessions:'project',changes:'project',checks:'project',usage:'project',context:'context-project',brain:'brain-project',memory:'memory-project',skills:'skills-project','create-skill':'create-skill-project',setup:'setup-project',creator:'creator-project',accelerators:'accelerator-project',systems:'system-project'};
 const currentProject = () => groupOf(state.view) === 'sessions' ? state.selected?.project_id || $('project').value : projectSelects[state.view] ? $(projectSelects[state.view]).value : $('project-switcher').value;
 // Every view follows the sidebar project; views in the middle of an operation keep theirs until it ends.
 function switchProject(id) {
@@ -633,6 +635,7 @@ async function bootstrap() {
     if (!initialRouteApplied) { initialRouteApplied = true; if (initialView && initialView !== state.view) { setView(isResultView(initialView) && !state.selectedId ? 'sessions' : initialView,false); routed = true; } restoringRoute = false; if (viewFromHash() !== state.view) history.replaceState(null,'','#/'+state.view); }
     if (routed) return;
     if (state.view === 'creator') openCreator();
+    if (state.view === 'systems' && typeof openSystems === 'function') openSystems();
     if (state.view === 'setup') openSetup(true);
     if (state.view === 'context') loadContext();
     if (state.view === 'memory') loadMemory();
@@ -745,7 +748,7 @@ $('refresh-sessions').addEventListener('click',refreshSessions);
 function updateHeader() {
   const session = state.selected;
   const sessionLine = session ? `${projectFor(session.project_id)?.name || 'Project'} · ${isFleetSession(session) ? 'Fleet review · ' : isClashSession(session) ? `Clash vs ${providerFor(session.clash?.challenger)?.name || session.clash?.challenger || 'challenger'} · ` : ''}${providerFor(session.provider)?.name || session.provider}` : '';
-  $('page-title').textContent = groupOf(state.view) === 'sessions' ? session?.title || 'New session' : {knowledge:'Knowledge',skills:'Skills',accelerators:'Accelerators',setup:'Projects & Setup'}[groupOf(state.view)];
+  $('page-title').textContent = groupOf(state.view) === 'sessions' ? session?.title || 'New session' : {systems:'System Orchestration',knowledge:'Knowledge',skills:'Skills',accelerators:'Accelerators',setup:'Projects & Setup'}[groupOf(state.view)];
   $('page-subtitle').textContent = groupOf(state.view) === 'sessions' ? session ? sessionLine : [projectFor($('project').value)?.name,providerFor($('provider').value)?.name].filter(Boolean).join(' · ') : [state.view === 'kit3' ? '' : projectFor(currentProject())?.name,({brain:'Browsing runs no commands.',memory:'Browsing runs no commands.',context:'Files added to a session when Project context is on.'})[state.view]].filter(Boolean).join(' · ');
   $('page-subtitle').hidden = !$('page-subtitle').textContent;
   $('open-kit3').hidden = state.view !== 'kit3';
@@ -1172,6 +1175,9 @@ function appendEvent(event) {
     const block = el('div','memory-notice'); block.setAttribute('role','status'); block.append(el('strong','',Number.isInteger(event.required_count) ? event.status === 'confirmed' ? 'Required helper count confirmed. ' : 'Required helper count not confirmed. ' : event.status === 'confirmed' ? 'Helper launch confirmed. ' : 'Helper launch not confirmed. '),document.createTextNode(text)); $('events').append(block);
   } else if (kind === 'clash_turn') {
     const block = el('div','clash-turn'); block.setAttribute('role','status'); block.textContent = text; $('events').append(block);
+  } else if (kind === 'agent') {
+    // System Orchestration shows these per agent; the runner transcript keeps a compact trail.
+    const block = el('div','clash-turn'); block.setAttribute('role','status'); block.textContent = [text,typeof event.summary === 'string' ? event.summary : ''].filter(Boolean).join('\n'); $('events').append(block);
   } else if (['user','text','assistant','error','result'].includes(kind)) {
     const normalized = text.trim();
     if (kind === 'result' && state.assistantTexts.has(normalized)) return;
@@ -1192,10 +1198,10 @@ function appendEvent(event) {
       block.append(files);
     }
     if (kind === 'error') block.setAttribute('role','alert'); $('events').append(block);
-  } else if (['tool','status','usage','session','fleet_stage','fleet_reviewer'].includes(kind)) {
-    const block = el('details','activity'); const label = kind === 'tool' ? `Tool activity${typeof event.provider === 'string' && event.provider ? ` · ${providerFor(event.provider)?.name || event.provider}` : ''}${typeof event.name === 'string' ? ` · ${event.name}` : ''}` : kind === 'fleet_reviewer' ? `Reviewer · ${fleetLensName(event.lens)}` : ({status:'Runner status',usage:'Usage',session:'Native session',fleet_stage:'Fleet stage'})[kind]; block.append(el('summary','',label),el('pre','',text));
+  } else if (['tool','status','usage','session','fleet_stage','fleet_reviewer','agent_activity'].includes(kind)) {
+    const block = el('details','activity'); const label = kind === 'tool' ? `Tool activity${typeof event.provider === 'string' && event.provider ? ` · ${providerFor(event.provider)?.name || event.provider}` : ''}${typeof event.name === 'string' ? ` · ${event.name}` : ''}` : kind === 'fleet_reviewer' ? `Reviewer · ${fleetLensName(event.lens)}` : kind === 'agent_activity' ? `Agent activity${typeof event.agent === 'string' ? ` · ${event.agent}` : ''}${typeof event.type === 'string' ? ` · ${humanLabel(event.type)}` : ''}` : ({status:'Runner status',usage:'Usage',session:'Native session',fleet_stage:'Fleet stage'})[kind]; block.append(el('summary','',label),el('pre','',text));
     // Consecutive steps share one collapsed row, so a long run reads as a few lines instead of dozens.
-    block.dataset.step = kind === 'tool' ? typeof event.name === 'string' && event.name ? event.name : 'Tool' : kind === 'fleet_reviewer' ? 'Reviewer' : ({status:'Status',usage:'Usage',session:'Session',fleet_stage:'Stage'})[kind];
+    block.dataset.step = kind === 'tool' ? typeof event.name === 'string' && event.name ? event.name : 'Tool' : kind === 'fleet_reviewer' ? 'Reviewer' : kind === 'agent_activity' ? typeof event.agent === 'string' && event.agent ? event.agent : 'Agent' : ({status:'Status',usage:'Usage',session:'Session',fleet_stage:'Stage'})[kind];
     if (kind === 'status') { $('events').append(block); return; }
     let group = $('events').lastElementChild;
     if (!group?.classList.contains('activity-group')) { group = el('details','activity-group'); group.setAttribute('aria-live','off'); group.append(el('summary'),el('div','activity-steps')); $('events').append(group); }

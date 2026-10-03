@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "id": "service-name",
+  "description": "Replace with this service's bounded responsibility",
+  "owner": "owning-team",
+  "relationships_complete": false,
+  "capabilities": [
+    {
+      "id": "business-capability",
+      "description": "Replace with a specific business capability",
+      "keywords": ["domain-term"],
+      "status": "unknown",
+      "sources": []
+    }
+  ],
+  "provides": [],
+  "consumes": [],
+  "sources": []
+}
