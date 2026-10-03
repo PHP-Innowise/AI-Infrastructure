@@ -19,6 +19,9 @@ from urllib.parse import parse_qs, urlsplit, quote
 from urllib.request import Request, build_opener, ProxyHandler
 
 ROOT = Path(__file__).resolve().parents[3]
+# The page's styles and scripts: an explicit list, read with the page so a running server serves one version.
+ASSETS = {name: 'text/css; charset=utf-8' if name.endswith('.css') else 'text/javascript; charset=utf-8'
+          for name in ('app.css', 'app-core.js', 'app-knowledge.js', 'app-setup.js', 'app-skills.js', 'app-creator.js')}
 sys.path.insert(0, str(ROOT / 'harness/src'))
 sys.path.insert(0, str(ROOT / 'scripts'))
 from harness.sessions import Sessions, SessionError, WORKFLOWS, MAX_AGENTS, DEFAULT_AGENT_COUNT, fleet_runtime
@@ -51,6 +54,7 @@ class HarnessServer(ThreadingHTTPServer):
             self.catalog_dir = tempfile.TemporaryDirectory(prefix='harness-catalog-')
             self.catalog = build_site(Path(self.catalog_dir.name)).read_bytes()
             self.page = (ROOT / 'harness/web/index.html').read_bytes()
+            self.assets = {'/' + name: ((ROOT / 'harness/web' / name).read_bytes(), content_type) for name, content_type in ASSETS.items()}
         except Exception:
             if hasattr(self, 'setup_manager'):
                 self.setup_manager.close()
@@ -149,6 +153,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(200, self.server.page, 'text/html; charset=utf-8')
             elif path in ('/kit3/', '/kit3/index.html'):
                 self.reply(200, self.server.catalog, 'text/html; charset=utf-8')
+            elif path in self.server.assets:
+                self.reply(200, *self.server.assets[path])
             elif path == '/api/health':
                 self.reply(200, {'ok': True, 'instance': self.server.instance})
             elif path == '/api/bootstrap':

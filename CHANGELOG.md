@@ -26,6 +26,13 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Split the Harness page: markup stays in `harness/web/index.html`, styles move
+  to `app.css` and the script to five classic files (`app-core.js`,
+  `app-knowledge.js`, `app-setup.js`, `app-skills.js`, `app-creator.js`) that
+  load in order with no build step. The code moved unchanged apart from
+  indentation. The server serves only the files named in `ASSETS`, read at
+  start with the page; a test checks that the page and the list agree.
+
 - Finish the Harness redesign plan. One **Project** selector in the sidebar
   drives every view (the per-view project selects are gone from the screen); an
   open session of another project yields to a new draft. Results splits into

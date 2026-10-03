@@ -595,6 +595,19 @@ Keep the browser workspace quiet as it grows:
 - Errors appear after the user acts, not on arrival.
 - Never shorten away what will run, write or spend at the moment of decision.
 
+#### Page files
+
+The page has no build step. `harness/web/index.html` holds the markup and the
+theme script that runs before the first paint, `app.css` holds the styles, and
+five classic scripts share their top-level names in load order: `app-core.js`
+(shell, theme, routing, sessions), `app-knowledge.js`, `app-setup.js`,
+`app-skills.js` and `app-creator.js`. The server reads the page and the files
+named in `ASSETS` (`harness/src/harness/web.py`) at start and serves nothing
+else from the folder: add a new file to that list, and restart the server to
+see an edit. `tests/test_harness_web.py` checks that the page and the list
+name the same files and keeps the stylesheet on its color, type and spacing
+tokens.
+
 ### Connect and prepare a project
 
 Open **Projects & Setup** and choose **Browse…** to navigate local folders, or

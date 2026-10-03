@@ -21,6 +21,22 @@ from urllib.parse import urlencode
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "harness/src"))
 from harness import providers, web
 
+WEB = Path(__file__).resolve().parents[1] / "harness/web"
+
+
+def ui_script():
+    """The page's scripts in load order as one text; the Node checks slice functions out of it."""
+    page = (WEB / "index.html").read_text(encoding="utf-8")
+    return "\n".join((WEB / name).read_text(encoding="utf-8") for name in re.findall(r'<script src="/([\w.-]+\.js)"></script>', page))
+
+
+def stylesheet(page):
+    """A page's styles: inline, or the files its <link> elements name next to it."""
+    html = page.read_text(encoding="utf-8")
+    if "<style>" in html:
+        return html[html.index("<style>"):html.index("</style>")]
+    return "\n".join((page.parent / name).read_text(encoding="utf-8") for name in re.findall(r'<link rel="stylesheet" href="/([\w.-]+\.css)">', html))
+
 
 class HarnessWebTests(unittest.TestCase):
     def setUp(self):
@@ -203,8 +219,8 @@ class HarnessWebTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which('node'), 'Browser calculator check requires Node')
     def test_selecting_brain_record_focuses_editable_progress_without_erasing_draft(self):
-        page = (Path(__file__).resolve().parents[1] / 'harness/web/index.html').read_text()
-        source = page[page.index('    function fillKnowledgeSelection('):page.index('    function submitKnowledgeForm(')]
+        page = ui_script()
+        source = page[page.index('\nfunction fillKnowledgeSelection('):page.index('\nfunction submitKnowledgeForm(')]
         script = """const assert = require('node:assert/strict');
 const fields = {
   'brain-knowledge-action': {value:'brain-update'},
@@ -228,8 +244,8 @@ assert.equal(fields['brain-op-progress'].scrolled,true);
 
     @unittest.skipUnless(shutil.which('node'), 'Browser calculator check requires Node')
     def test_browser_budget_calculator_forms_shared_limits_with_parallel_deadlines(self):
-        page=(Path(__file__).resolve().parents[1]/'harness/web/index.html').read_text()
-        source=page[page.index('    function perAgentTotals('):page.index('    function agentBudgetControls(')]
+        page=ui_script()
+        source=page[page.index('\nfunction perAgentTotals('):page.index('\nfunction agentBudgetControls(')]
         scenarios=[
             ({'usd':2,'tokens':10000,'seconds':120},{'count':4,'waves':1,'fleet':False},{'usd':8,'tokens':40000,'seconds':120}),
             ({'usd':1,'tokens':1000,'seconds':100},{'count':5,'waves':3,'fleet':True},{'usd':5,'tokens':5000,'seconds':300}),
@@ -532,6 +548,17 @@ assert.equal(fields['brain-op-progress'].scrolled,true);
         self.assertEqual(headers["Cache-Control"], "no-store")
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
         self.assertIn("frame-ancestors 'self'", headers["Content-Security-Policy"])
+        page_html = (WEB / "index.html").read_text(encoding="utf-8")
+        self.assertEqual(set(re.findall(r'(?:src|href)="/([^"/]+)"', page_html)), set(web.ASSETS))
+        for name, content_type in web.ASSETS.items():
+            with self.subTest(asset=name):
+                status, body, asset_headers = self.request("/" + name)
+                self.assertEqual((status, body), (200, (WEB / name).read_bytes()))
+                self.assertEqual(asset_headers["Content-Type"], content_type)
+                self.assertEqual(asset_headers["X-Content-Type-Options"], "nosniff")
+                self.assertEqual(asset_headers["Cache-Control"], "no-store")
+                head_status, head, head_headers = self.request("/" + name, "HEAD")
+                self.assertEqual((head_status, head, int(head_headers["Content-Length"])), (200, b"", len(body)))
         for path, marker in (("/", b"AI Infrastructure Harness"),
                              ("/kit3/", b"Open Source Kit"),
                              ("/kit3/index.html", b"Open Source Kit")):
@@ -543,7 +570,8 @@ assert.equal(fields['brain-op-progress'].scrolled,true);
                 self.assertEqual(head_status, 200)
                 self.assertEqual(head, b"")
                 self.assertEqual(int(head_headers["Content-Length"]), len(page))
-        for path in ("/index.html", "/kit3", "/api/bootstrap/", "/harness/web/index.html",
+        for path in ("/index.html", "/kit3", "/api/bootstrap/", "/harness/web/index.html", "/harness/web/app.css",
+                     "/app-unknown.js", "/app.css/", "/APP.CSS",
                      "/scripts/install_accelerator.py", "/../state/sessions.sqlite3", "/%2e%2e/secret"):
             with self.subTest(path=path):
                 self.assertEqual(self.request(path)[0], 404)
@@ -1480,7 +1508,7 @@ class HarnessThemeTests(unittest.TestCase):
         for page in THEMED_PAGES:
             with self.subTest(page=page.relative_to(ROOT).as_posix()):
                 html = page.read_text(encoding="utf-8")
-                css = html[html.index("<style>"):html.index("</style>")]
+                css = stylesheet(page)
                 light = re.search(r"\n\s*:root \{([^}]*)\}", css).group(1)
                 dark = re.search(r'\n\s*:root\[data-theme="dark"\] \{([^}]*)\}', css).group(1)
                 tokens = set(re.findall(r"(--[\w-]+)\s*:", light))
@@ -1489,7 +1517,7 @@ class HarnessThemeTests(unittest.TestCase):
                 self.assertEqual(COLOR_LITERAL.findall(css.replace(light, "").replace(dark, "")), [],
                                  "add a token to both :root sets instead of a literal color")
                 defined = set(re.findall(r"(--[\w-]+)\s*:", " ".join(re.findall(r":root[^{]*\{([^}]*)\}", css))))
-                runtime = set(re.findall(r"setProperty\('(--[\w-]+)'", html))
+                runtime = set(re.findall(r"setProperty\('(--[\w-]+)'", html + ui_script()))
                 self.assertLessEqual(set(re.findall(r"var\((--[\w-]+)", css)) - runtime, defined)
         switch = re.findall(r'<input type="radio" name="theme" value="(\w+)">', THEMED_PAGES[0].read_text(encoding="utf-8"))
         self.assertEqual(switch, ["system", "light", "dark"])
@@ -1497,8 +1525,7 @@ class HarnessThemeTests(unittest.TestCase):
     def test_stylesheets_take_type_and_shape_from_the_scale_and_space_from_the_grid(self):
         for page in THEMED_PAGES:
             with self.subTest(page=page.relative_to(ROOT).as_posix()):
-                html = page.read_text(encoding="utf-8")
-                rules = re.sub(r":root[^{]*\{[^}]*\}", "", html[html.index("<style>"):html.index("</style>")])
+                rules = re.sub(r":root[^{]*\{[^}]*\}", "", stylesheet(page))
                 for prop in ("font-size", "line-height", "font-weight", "border-radius", "font"):
                     literal = [value for value in re.findall(rf"(?<![\w-]){prop}:\s*([^;}}]+)", rules)
                                if any(unit != "%" and float(number) for number, unit in
@@ -1513,7 +1540,7 @@ class HarnessThemeTests(unittest.TestCase):
     def test_saved_theme_applies_before_first_paint_in_the_harness_and_its_catalog(self):
         heads = []
         for page in THEMED_PAGES:
-            head = page.read_text(encoding="utf-8").split("<style>", 1)[0]
+            head = page.read_text(encoding="utf-8").split("</head>", 1)[0]
             heads.append(head[head.index("<script>") + len("<script>"):head.index("</script>")])
         self.run_node("const assert = require('node:assert/strict');\nconst heads = " + json.dumps(heads) + """;
 for (const saved of [null,'light','dark','sepia','denied']) for (const systemDark of [false,true]) {
@@ -1530,9 +1557,9 @@ for (const saved of [null,'light','dark','sepia','denied']) for (const systemDar
 
     @unittest.skipUnless(shutil.which("node"), "Theme script check requires Node")
     def test_theme_switch_saves_the_choice_and_follows_the_system_and_other_tabs(self):
-        page = THEMED_PAGES[0].read_text(encoding="utf-8")
-        start = page.index("    const themeKey = ")
-        source = page[start:page.index("    applyTheme();\n", start) + len("    applyTheme();\n")]
+        page = ui_script()
+        start = page.index("\nconst themeKey = ") + 1
+        source = page[start:page.index("\napplyTheme();\n", start) + len("\napplyTheme();\n")]
         self.run_node("const assert = require('node:assert/strict');\nconst source = " + json.dumps(source) + """;
 function boot({saved = null, dark = false, denied = false} = {}) {
   const env = {stored:saved === null ? {} : {'harness.theme.v1':saved}, denied, listeners:{}, root:{dataset:{}}};
