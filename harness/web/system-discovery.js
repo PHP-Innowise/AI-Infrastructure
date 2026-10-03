@@ -1,5 +1,13 @@
 /* AI proposals populate ordinary forms; Save is the sole metadata writer. */
-const systemDiscovery={id:null,timer:null,epoch:0,active:false,providerKey:''};
+const systemDiscovery={id:null,timer:null,epoch:0,active:false,providerKey:'',
+  panel:createAgentPanel($('system-discovery-agent'),{emptyText:'The discovery agent has not started yet.'})};
+const DISCOVERY_OUTCOME={completed:'completed',stale:'completed',failed:'blocked',cancelled:'interrupted',interrupted:'interrupted'};
+function discoveryAgent(job) {
+  $('system-discovery-agents').hidden=false; $('system-discovery-live').hidden=!job.active;
+  systemDiscovery.panel.setPlan([{id:'discovery',service:'__system__',mode:'read-only',label:'Discovery agent',
+    goal:'Reads the captured evidence and fills the service forms.',journal:job.active?null:DISCOVERY_OUTCOME[job.status] || null}],job.active);
+  systemDiscovery.panel.load(job.id);
+}
 function discoveryKey() {const d=systemEditor.data;return d?`harness-discovery:${d.project_id}:${d.config_path}`:null;}
 function discoveryRemember(id) {try {const key=discoveryKey();if(key) id?localStorage.setItem(key,id):localStorage.removeItem(key);} catch(_) {}}
 function discoveryControls() {
@@ -18,6 +26,7 @@ function discoveryControls() {
 function resetDiscovery() {
   clearTimeout(systemDiscovery.timer);++systemDiscovery.epoch;systemDiscovery.active=false;systemDiscovery.id=null;
   $('system-discovery-status').textContent='';$('system-discovery-report').hidden=true;
+  $('system-discovery-agents').hidden=true;systemDiscovery.panel.reset();
 }
 function discoveryReport(proposal) {
   const panel=$('system-discovery-report');panel.replaceChildren();panel.hidden=false;
@@ -38,7 +47,7 @@ async function pollDiscovery(epoch) {
   try {
     const job=await api('/api/system-discoveries/'+systemDiscovery.id);
     if(epoch!==systemDiscovery.epoch) return;
-    systemDiscovery.active=job.active;
+    systemDiscovery.active=job.active;discoveryAgent(job);
     const last=job.events.filter(e=>['status','error','text'].includes(e.kind)).at(-1);
     $('system-discovery-status').textContent=`AI scan · ${job.provider} · ${job.status}${job.active && last?.text?' · '+last.text:''}`;
     if(job.active) {systemDiscovery.timer=setTimeout(()=>pollDiscovery(epoch),1000);systemControls();return;}
@@ -81,7 +90,7 @@ async function restoreDiscovery() {
   try {
     const job=await api('/api/system-discoveries/'+id);
     if(!systemEditor.data || discoveryKey()!==key) return;
-    systemDiscovery.id=id;
+    systemDiscovery.id=id;discoveryAgent(job);
     if(job.active) {systemEditor.data=job.draft;systemEditor.dirty=true;systemEditor.pending=true;systemDiscovery.active=true;renderSystemEditor();}
     else if(job.proposal) {systemEditor.data=job.proposal.editor;systemEditor.dirty=true;renderSystemEditor();discoveryReport(job.proposal);}
     else if(job.draft.revision===systemEditor.data.revision) {systemEditor.data=job.draft;systemEditor.dirty=true;renderSystemEditor();}

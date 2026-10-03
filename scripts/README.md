@@ -34,7 +34,9 @@ python3 scripts/ai_system.py plan --system docs/examples/ai-system/system.json \
   Native adapters share stdlib Harness command/permission builders.
 - Writes: `init` creates a new system workspace; `plan --output` creates only a
   new requested file. `execute`/`resume` write private journals and native tasks;
-  `--mode edit` enables scoped worker edits. Declaration/query commands are read-only.
+  `--mode edit` enables scoped worker edits, and `execute --access all` lets every
+  worker read, and in edit mode change, all selected service folders (default
+  `service`: own service only). Declaration/query commands are read-only.
 - Access: external service roots require repeatable caller `--allow-root`;
   passport metadata cannot authorize arbitrary filesystem access.
 - Tests: `python3 -m unittest tests.test_ai_system tests.test_ai_system_providers tests.test_ai_system_execution`, also in the dedicated CI job.

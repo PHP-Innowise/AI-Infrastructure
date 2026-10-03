@@ -89,6 +89,9 @@ def parser():
             command.add_argument("--executable", help="explicit trusted CLI/adapter executable")
             command.add_argument("--mode", choices=("read-only", "edit"), default="read-only")
             command.add_argument("--timeout", type=int, default=900, help="seconds per worker")
+            command.add_argument("--access", choices=("service", "all"), default="service",
+                                 help="service folders each worker may use: its own (default) or every "
+                                      "selected service (read; write in edit mode)")
         if name == "resume":
             command.add_argument("--retry-step", help="explicitly authorize repeating a failed/ambiguous step")
             command.add_argument("--accept-source-changes", action="store_true",
@@ -123,7 +126,7 @@ def main(argv=None):
                     path = absolute(args.plan)
                     plan = parse_json(read_file(path.parent, path.name))
                     value = create_run(system, plan, args.run_dir, args.provider,
-                                       args.executable, args.mode, args.timeout)
+                                       args.executable, args.mode, args.timeout, args.access)
                     value = drive_run(system, args.run_dir, value)
                 else:
                     value = validate_state(system, args.run_dir, for_execution=args.command != "run-status")

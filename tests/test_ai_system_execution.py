@@ -35,22 +35,48 @@ if (root / "interrupt-worker").exists():
 if (root / "invalid-worker").exists():
     print('{"garbage": true}')
     sys.exit(0)
+access = value.get("access", {"scope": "service", "readable": [], "writable": []})
+shared = access["scope"] == "all"
+changed = []
 if value["mode"] == "edit":
     (root / "spec.md").write_text("Scoped edit for " + value["service"])
+    changed.append(value["service"] + "/spec.md" if shared else "spec.md")
+    for marker, report_it in (("cross-write", True), ("unreported-cross-write", False)):
+        if (root / marker).exists():
+            for sid in access["writable"]:
+                if sid != value["service"]:
+                    (pathlib.Path(value["roots"][sid]) / "spec.md").write_text("Cross edit by " + value["service"])
+                    if report_it:
+                        changed.append(sid + "/spec.md")
+    if (root / "unprefixed-report").exists():
+        changed = ["spec.md"]
 phase = value["phase"]
 checks = [{"name": "Fixture check", "status": "passed", "detail": "Synthetic adapter check passed"}]
 if (root / "skip-verification").exists() and phase == "verify":
     checks[0]["status"] = "not_run"
 report = {"status": "completed", "summary": "Completed " + phase, "checks": checks,
-          "changed_files": ["spec.md"] if value["mode"] == "edit" else [],
+          "changed_files": changed,
           "service_order": list(reversed(value["context"]["services"])) if phase == "contracts" else []}
 if "--json" in sys.argv:
     print(json.dumps({"type": "thread.started", "thread_id": "fixture"}))
+    print(json.dumps({"type": "item.started", "item": {"id": "item_1", "type": "command_execution",
+                      "command": "bash -lc 'ls -la'", "status": "in_progress"}}))
+    print(json.dumps({"type": "item.completed", "item": {"id": "item_1", "type": "command_execution",
+                      "command": "bash -lc 'ls -la'", "aggregated_output": "PRIVATE OUTPUT", "exit_code": 0,
+                      "status": "completed"}}))
     print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps(report)}}))
-    print(json.dumps({"type": "turn.completed"}))
+    print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 20, "cached_input_tokens": 5,
+                      "output_tokens": 4}}))
 elif "--json-schema" in sys.argv:
-    print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
-                      "result": "", "structured_output": report}))
+    assert "--verbose" in sys.argv and sys.argv[sys.argv.index("--output-format") + 1] == "stream-json"
+    print(json.dumps({"type": "system", "subtype": "init", "session_id": "fixture", "model": "fixture-model"}))
+    print(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "text", "text": "Inspecting " + phase},
+        {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"file_path": str(root / "spec.md")}}]}}))
+    print(json.dumps({"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "toolu_1", "content": "PRIVATE FILE CONTENT", "is_error": False}]}}))
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "total_cost_usd": 0.01,
+                      "usage": {"input_tokens": 10, "output_tokens": 5}, "result": "", "structured_output": report}))
 elif "--workspace" in sys.argv:
     print(json.dumps({"type": "assistant", "model_call_id": "fixture", "message":
         {"role": "assistant", "content": [{"type": "text", "text": "Interim analysis"}]}}))
@@ -144,10 +170,10 @@ class ExecutionTests(unittest.TestCase):
                 with self.subTest(provider=provider, mode=mode):
                     self.run_dir = self.root / ('run-' + provider + '-' + mode)
                     calls = []
-                    def spy(command, cwd, stdin, timeout):
+                    def spy(command, cwd, stdin, timeout, **options):
                         if command[0] == str(self.adapter):
                             calls.append((command, cwd, stdin))
-                        return original(command, cwd, stdin, timeout)
+                        return original(command, cwd, stdin, timeout, **options)
                     with mock.patch.object(execution, 'run_process', side_effect=spy):
                         state = self.run_all(provider=provider, mode=mode)
                     self.assertEqual('completed', state['status'])
@@ -158,7 +184,13 @@ class ExecutionTests(unittest.TestCase):
                         service_mode = mode if index in (1, 2) else 'read-only'
                         self.assertEqual(Path(state['roots'][state['steps'][index]['service']]), cwd)
                         if provider == 'claude':
-                            self.assertEqual('json', command[command.index('--output-format') + 1])
+                            self.assertEqual('stream-json', command[command.index('--output-format') + 1])
+                            self.assertIn('--verbose', command)
+                            # Coordination reads every selected service; own-scope service workers read their own.
+                            granted = (command[command.index('--add-dir') + 1:command.index('--json-schema')]
+                                       if '--add-dir' in command else [])
+                            self.assertEqual([state['roots'][sid] for sid in state['selected']] if index in (0, 3) else [],
+                                             granted)
                             self.assertEqual('acceptEdits' if service_mode == 'edit' else 'plan',
                                              command[command.index('--permission-mode') + 1])
                             self.assertIn('--json-schema', command)
@@ -171,15 +203,16 @@ class ExecutionTests(unittest.TestCase):
                             self.assertEqual('enabled', command[command.index('--sandbox') + 1])
                             self.assertEqual(service_mode == 'read-only', '--mode' in command)
                             self.assertNotIn('--force', command)
+                            self.assertNotIn('--add-dir', command)
                             self.assertIn('Dispatch input:', command[-1])
 
     def test_codex_adapter_argv_and_jsonl(self):
         original = execution.run_process
         worker_commands = []
-        def spy(command, cwd, stdin, timeout):
+        def spy(command, cwd, stdin, timeout, **options):
             if command[0] == str(self.adapter):
                 worker_commands.append(command)
-            return original(command, cwd, stdin, timeout)
+            return original(command, cwd, stdin, timeout, **options)
         with mock.patch.object(execution, "run_process", side_effect=spy):
             state = self.run_all(provider="codex")
         self.assertEqual("completed", state["status"])
@@ -346,8 +379,8 @@ class ExecutionTests(unittest.TestCase):
 
     def test_unreported_changes_during_worker_are_not_adopted(self):
         original = execution.run_process
-        def external_edit(command, cwd, stdin, timeout):
-            result = original(command, cwd, stdin, timeout)
+        def external_edit(command, cwd, stdin, timeout, **options):
+            result = original(command, cwd, stdin, timeout, **options)
             if command[0] == str(self.adapter) and cwd.name == "payments":
                 (cwd / "AGENTS.md").write_text("Externally changed policy")
             return result
@@ -452,6 +485,139 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(0, status.returncode, status.stderr)
         self.assertEqual("completed", json.loads(status.stdout)["status"])
 
+
+    def spy_commands(self):
+        original, commands = execution.run_process, []
+        def spy(command, cwd, stdin, timeout, **options):
+            if command[0] == str(self.adapter):
+                commands.append((command, cwd, stdin))
+            return original(command, cwd, stdin, timeout, **options)
+        return mock.patch.object(execution, "run_process", side_effect=spy), commands
+
+    def test_shared_access_grants_every_service_and_adopts_reported_cross_service_edits(self):
+        (self.root / "payments/cross-write").touch()
+        system = self.system()
+        plan = system.plan("Implement cancellation", "chg-shared", ["orders", "payments"])
+        state = execution.create_run(system, plan, self.run_dir, "claude", self.adapter, "edit", 10, "all")
+        patcher, commands = self.spy_commands()
+        with patcher:
+            state = execution.drive_run(system, self.run_dir, state)
+        self.assertEqual("completed", state["status"], state["error"])
+        self.assertEqual("all", execution.validate_state(self.system(), self.run_dir)["access"])
+        roots = state["roots"]
+        for (command, cwd, stdin), step in zip(commands, state["steps"]):
+            granted = command[command.index("--add-dir") + 1:command.index("--json-schema")] if "--add-dir" in command else []
+            expected = [roots[sid] for sid in state["selected"] if roots[sid] != str(cwd)]
+            self.assertEqual(expected, granted, step["id"])
+            value = json.loads(stdin.split("Dispatch input:\n", 1)[1])
+            writable = list(state["selected"]) if step["service"] != "__system__" else []
+            self.assertEqual({"scope": "all", "readable": list(state["selected"]), "writable": writable}, value["access"])
+            self.assertIn("<service-id>/<path relative to that service root>", stdin)
+        receipt = execution.load(self.run_dir, "service-payments-a1.json")
+        self.assertEqual(["payments/spec.md", "orders/spec.md"], receipt["report"]["changed_files"])
+        self.assertEqual("Scoped edit for orders", (self.root / "orders/spec.md").read_text())
+        self.assertTrue(self.system().verify(execution.load(self.run_dir, "checkpoint.json"))["fresh"])
+
+    def test_shared_access_refuses_unreported_or_unprefixed_changes(self):
+        for marker, expected in (("unreported-cross-write", "outside the current worker scope"),
+                                 ("unprefixed-report", "invalid_or_sensitive_worker_result")):
+            with self.subTest(marker=marker):
+                self.run_dir = self.root / ("run-" + marker)
+                (self.root / "payments" / marker).touch()
+                system = self.system()
+                plan = system.plan("Implement cancellation", "chg-" + marker, ["orders", "payments"])
+                state = execution.create_run(system, plan, self.run_dir, "command", self.adapter, "edit", 10, "all")
+                try:
+                    state = execution.drive_run(system, self.run_dir, state)
+                except SystemError as error:
+                    self.assertIn(expected, str(error))
+                else:
+                    self.assertEqual(expected, state["error"])
+                saved = execution.load(self.run_dir, "run.json")
+                self.assertEqual("blocked", saved["status"])
+                self.assertEqual(0, next(s for s in saved["steps"] if s["id"] == "service-orders")["attempt"])
+                (self.root / "payments" / marker).unlink()
+                for sid in ("orders", "payments"):
+                    (self.root / sid / "spec.md").write_text("Original " + sid)
+
+    def test_codex_shared_edit_scope_adds_only_writable_roots(self):
+        system = self.system()
+        plan = system.plan("Implement cancellation", "chg-codex-shared", ["orders", "payments"])
+        state = execution.create_run(system, plan, self.run_dir, "codex", self.adapter, "edit", 10, "all")
+        patcher, commands = self.spy_commands()
+        with patcher:
+            state = execution.drive_run(system, self.run_dir, state)
+        self.assertEqual("completed", state["status"], state["error"])
+        for (command, cwd, _), step in zip(commands, state["steps"]):
+            granted = [command[i + 1] for i, part in enumerate(command) if part == "--add-dir"]
+            expected = [] if step["service"] == "__system__" else [
+                state["roots"][sid] for sid in state["selected"] if sid != step["service"]]
+            self.assertEqual(expected, granted, step["id"])
+            self.assertEqual("-", command[-1])
+
+    def test_cursor_cannot_be_granted_other_service_folders(self):
+        system = self.system()
+        plan = system.plan("Implement cancellation", "chg-cursor", ["orders", "payments"])
+        with self.assertRaisesRegex(SystemError, "cannot be granted"):
+            execution.create_run(system, plan, self.run_dir, "cursor", self.adapter, "edit", 10, "all")
+        with self.assertRaisesRegex(SystemError, "access scope"):
+            execution.create_run(system, plan, self.run_dir, "codex", self.adapter, "edit", 10, "everything")
+        self.assertFalse(self.run_dir.exists())
+        self.assertFalse((self.workspace / "project-brain").exists())
+
+    def test_observer_sees_each_dispatch_and_its_output_but_cannot_change_receipts(self):
+        system = self.system()
+        plan = system.plan("Implement cancellation", "chg-observer", ["orders", "payments"])
+        state = execution.create_run(system, plan, self.run_dir, "claude", self.adapter, "read-only", 10)
+        events = []
+        def observer(event):
+            events.append(event)
+            raise RuntimeError("Display failures never change the run")
+        state = execution.drive_run(system, self.run_dir, state, observer=observer)
+        self.assertEqual("completed", state["status"])
+        started = [e for e in events if e["type"] == "dispatch_started"]
+        finished = [e for e in events if e["type"] == "dispatch_finished"]
+        self.assertEqual([s["id"] for s in state["steps"]], [e["phase"] for e in started])
+        self.assertEqual([s["id"] for s in state["steps"]], [e["phase"] for e in finished])
+        self.assertTrue(all(e["ok"] and e["report"]["status"] == "completed" for e in finished))
+        self.assertEqual(list(state["selected"]), started[0]["readable"])
+        self.assertEqual([], started[0]["writable"])
+        for phase in [s["id"] for s in state["steps"]]:
+            kinds = [e["type"] for e in events if e["phase"] == phase]
+            self.assertEqual("dispatch_started", kinds[0])
+            self.assertEqual("dispatch_finished", kinds[-1])
+            lines = [json.loads(e["line"]) for e in events if e["phase"] == phase and e["type"] == "output"]
+            self.assertEqual(["system", "assistant", "user", "result"], [line["type"] for line in lines])
+        self.assertEqual([1, 1, 1, 1], [s["attempt"] for s in state["steps"]])
+
+    def test_journals_without_access_scope_remain_own_service_runs(self):
+        system, state = self.prepare(mode="read-only", provider="command")
+        saved = execution.load(self.run_dir, "run.json")
+        self.assertEqual("service", saved.pop("access"))
+        execution.save(self.run_dir, "run.json", saved)
+        legacy = execution.validate_state(system, self.run_dir)
+        self.assertEqual("service", execution.access_scope(legacy))
+        self.assertEqual("service", execution.run_summary(legacy, self.run_dir)["access"])
+        finished = execution.drive_run(system, self.run_dir, legacy)
+        self.assertEqual("completed", finished["status"])
+        saved = execution.load(self.run_dir, "run.json")
+        saved["access"] = "everything"
+        execution.save(self.run_dir, "run.json", saved)
+        with self.assertRaises(SystemError):
+            execution.validate_state(self.system(), self.run_dir)
+
+    def test_process_lines_reach_the_observer_without_changing_the_result(self):
+        script = self.root / "lines"
+        script.write_text("#!/usr/bin/env python3\nimport sys\nsys.stdout.write('one\\ntwo\\nthree')\n")
+        script.chmod(0o700)
+        lines = []
+        result = execution.run_process([str(script)], self.root, "", 10, on_line=lines.append)
+        self.assertEqual([b"one", b"two", b"three"], lines)
+        self.assertEqual(b"one\ntwo\nthree", result["stdout"])
+        def broken(line):
+            raise RuntimeError("display failure")
+        result = execution.run_process([str(script)], self.root, "", 10, on_line=broken)
+        self.assertEqual((0, None, b"one\ntwo\nthree"), (result["returncode"], result["error"], result["stdout"]))
 
 if __name__ == "__main__":
     unittest.main()

@@ -335,6 +335,56 @@ if (root / "hold-worker").exists():
                 owner.kill()
             owner.wait(timeout=5)
 
+    def session_events(self, sid):
+        events, after = [], 0
+        while True:
+            status, page, _ = self.request(f'/api/sessions/{sid}?after={after}')
+            self.assertEqual(200, status, page)
+            events += page['events']
+            if len(page['events']) < 250:
+                return events
+            after = page['events'][-1]['id']
+
+    def test_agents_panel_events_launch_history_and_shared_folder_access(self):
+        run = self.prepare(change_id='change-agents')
+        self.assertEqual(400, self.act(run, 'execute', provider='cursor', mode='edit', access='all')[0])
+        self.assertEqual(400, self.act(run, 'execute', provider='claude', access='everything')[0])
+        marker = self.project / 'services/orders/fail-worker'
+        marker.write_text('fixture failure')
+        status, run, _ = self.act(run, 'execute', provider='claude', mode='edit', access='all')
+        self.assertEqual(200, status, run)
+        run = self.wait_run(run)
+        self.assertEqual(('blocked', 'all'), (run['status'], run['access']))
+        marker.unlink()
+        status, run, _ = self.act(run, 'resume', retry_step='service-orders')
+        self.assertEqual(200, status, run)
+        run = self.wait_run(run)
+        self.assertEqual(('completed', 'all'), (run['status'], run['access']))
+        self.assertEqual(2, len(run['launches']))
+        self.assertEqual(run['session_id'], run['launches'][-1]['session_id'])
+        # Runner progress stays readable; agent activity is read per launch session.
+        self.assertTrue(run['events'] and all(e['kind'] in ('status', 'text', 'error', 'result') for e in run['events']))
+        self.assertEqual('Run completed. Process completion is not an independent verification of the task.',
+                         run['events'][-1]['text'])
+        first, second = (self.session_events(launch['session_id']) for launch in run['launches'])
+        self.assertIn(('service-orders', 'blocked'), [(e['agent'], e['status']) for e in first if e['kind'] == 'agent'])
+        lifecycle = [(e['agent'], e['status']) for e in second if e['kind'] == 'agent']
+        # Every dispatch of the resumed launch starts and then completes, retrying orders first.
+        self.assertEqual(['running', 'completed'] * (len(lifecycle) // 2), [status for _, status in lifecycle])
+        self.assertEqual([agent for agent, _ in lifecycle][::2], [agent for agent, _ in lifecycle][1::2])
+        self.assertEqual('service-orders', lifecycle[0][0])
+        self.assertEqual('verify', lifecycle[-1][0])
+        started = next(e for e in second if e['kind'] == 'agent' and e['agent'] == 'service-orders')
+        selected = run['execution']['steps']
+        services = sorted(s['service'] for s in selected if s['service'] != '__system__')
+        self.assertEqual((services, services), (sorted(started['readable']), sorted(started['writable'])))
+        reads = [e for e in second if e['kind'] == 'agent_activity' and e.get('tool') == 'Read' and e['agent'] == 'service-orders']
+        self.assertEqual([('orders', 'spec.md')], [(e['service'], e['path']) for e in reads])
+        self.assertTrue(all(e['attempt'] == 2 for e in second if e.get('agent') == 'service-orders'))
+        self.assertNotIn('PRIVATE FILE CONTENT', json.dumps(first + second))
+        usage = self.server.sessions.get(run['session_id'])['budget_usage']
+        self.assertEqual(15 * len(lifecycle) // 2, usage['tokens'])
+
     @staticmethod
     def alive(pid):
         try:

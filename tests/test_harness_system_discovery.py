@@ -58,6 +58,9 @@ if '--json' in sys.argv:
     print(json.dumps({'type': 'item.completed', 'item': {'type': 'agent_message', 'text': json.dumps(report)}}))
     print(json.dumps({'type': 'turn.completed'}))
 elif '--json-schema' in sys.argv:
+    copy = inventory['orders']['README.md']['copy']
+    print(json.dumps({'type': 'assistant', 'message': {'role': 'assistant', 'content': [
+        {'type': 'tool_use', 'id': 'toolu_1', 'name': 'Read', 'input': {'file_path': copy}}]}}))
     print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', 'structured_output': report}))
 else:
     print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': json.dumps(report)}))
@@ -144,6 +147,15 @@ class DiscoveryTests(unittest.TestCase):
         status, saved, _ = self.post('/api/systems/apply', {'preview_id': preview['preview_id']})
         self.assertEqual(200, status, saved)
         self.assertEqual(1, len(saved['catalog']['relationships']))
+
+    def test_discovery_agent_activity_names_original_service_paths(self):
+        job = self.wait_job(self.start(provider='claude'))
+        self.assertEqual('completed', job['status'], job)
+        events = self.server.sessions.events(job['id'])
+        self.assertEqual(['running', 'completed'], [e['status'] for e in events if e['kind'] == 'agent'])
+        reads = [e for e in events if e['kind'] == 'agent_activity' and e.get('tool') == 'Read']
+        self.assertEqual([('discovery', 'orders', 'README.md')], [(e['agent'], e['service'], e['path']) for e in reads])
+        self.assertTrue(all(e['kind'] in ('status', 'text', 'error', 'result') for e in job['events']))
 
     def test_invalid_ai_output_is_not_exposed_as_a_partial_proposal(self):
         for marker in ('BAD_PATH', 'MISSING_SERVICE', 'BAD_DEPENDENCY', 'FAIL_DISCOVERY'):

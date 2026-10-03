@@ -293,8 +293,9 @@ operations stop the worker. Install/authenticate the CLI independently.
 
 Use `--provider claude` for Claude Code or `--provider cursor` for Cursor Agent.
 All native CLIs use the same trusted permission/delegation flags as Harness.
-Claude receives stdin and a `--json-schema` result envelope; only a successful
-terminal `structured_output` object is accepted. Cursor receives the prompt as
+Claude receives stdin, `--json-schema` and `stream-json` output; only the
+`structured_output` object of a successful terminal result event is accepted, and
+interim events are display-only. Cursor receives the prompt as
 one argv item and must return a successful terminal `result` containing the
 report JSON. Interim assistant text is insufficient. Read-only dispatches use
 Claude plan permissions or Cursor plan mode; edit dispatches use Claude
@@ -304,6 +305,33 @@ helper prohibition is an instruction because its CLI has no verified native
 helper-disable switch. Install/authenticate each CLI independently. Optional
 `--executable /trusted/cli` overrides discovery. The chosen provider, executable
 and executable digest are pinned in the journal; resume cannot switch providers.
+
+### Service folder access
+
+`--access` sets which registered service folders each worker may use:
+
+| Scope | Contract and verification workers | Service workers |
+| --- | --- | --- |
+| `service` (CLI default) | Granted every selected service, read-only. | Granted their own service root; they write only there, only in edit mode. |
+| `all` | Granted every selected service, read-only. | Granted every selected service; in edit mode they may write in any of them. |
+
+The system folder is never writable by a worker, and read-only dispatches never
+write. Grants add folders a CLI would otherwise lack; they do not remove access a
+CLI already has (Codex reads the whole disk in both sandboxes). Claude gets
+`--add-dir` for each other selected root (plan mode keeps them read-only,
+`acceptEdits` makes them writable). Codex needs only writable roots, so edit
+dispatches in the `all` scope get `--add-dir` for the other services. Cursor
+Agent has no verified CLI option to grant other folders, so the `all` scope is
+refused for it (its changelog mentions `--add-dir`; this adapter does not rely on
+unverified sandbox semantics). The command adapter receives the `access` object
+in its dispatch input and must enforce it itself.
+
+In the `all` scope every `changed_files` entry starts with the owning service ID,
+for example `payments/src/refunds.ts`. A registered source changed in another
+selected service is adopted into the checkpoint only when the worker reported it;
+unreported changes, system-folder sources, passports and commits still block the
+run. The access scope is pinned in the journal; resume keeps it. Journals written
+before scopes existed resume with the `service` scope.
 
 For another AI provider, use `--provider command --executable /trusted/adapter`.
 The explicit executable receives one complete prompt on stdin, runs in the
@@ -354,13 +382,16 @@ Every worker returns the same strict schema (also saved as `result-schema.json`)
 ```
 
 `status` is `completed` or `blocked`; check status is `passed`, `failed` or
-`not_run`. Paths are relative to the current service root. Read-only workers
+`not_run`. Paths are relative to the current service root (in the `all` access
+scope, prefixed with the owning service ID). Read-only workers
 must report no writes. Only the contract phase returns a nonempty
 `service_order`. Empty required arrays remain present. Summary/check text must
 be bounded, single-line and free of detected secrets. Unknown fields and
 malformed results block the run. Raw stdout/stderr is never copied into the
 journal or Memory Bank; validated reports may contain proprietary information,
-so keep the private run directory under your normal access controls.
+so keep the private run directory under your normal access controls. Harness
+additionally parses native output line by line for its [agents panel](#agents-panel);
+the journal and receipts do not change.
 
 ### Brain and Memory ownership
 
@@ -549,8 +580,10 @@ Its service list denotes participants; the contract dispatch later establishes
 the actual implementation order. Task line breaks are normalized to spaces.
 
 After reviewing the scope/context, choose read-only investigation or service
-edits, **Codex / Claude Code / Cursor Agent**, and a timeout per worker, then
-**Execute reviewed plan**. System dispatches
+edits, **Codex / Claude Code / Cursor Agent**, the **Service folder access**
+(**All selected services** by default in the browser, or **Own service only**;
+see [Service folder access](#service-folder-access)) and a timeout per worker,
+then **Execute reviewed plan**. Cursor Agent offers only own-service access. System dispatches
 share the existing Harness queue, runner lock, cancellation and watchdog. They
 use the selected CLI's default model. The provider is fixed after launch and
 recovery keeps it. Ordinary session model/agent controls do not apply. No arbitrary executable can be passed by API.
@@ -593,16 +626,59 @@ Local API surface (existing Host/Origin/CSRF boundaries apply):
   persisted plans and current/historical run details.
 - `POST /api/system-runs/<id>`: `action`, current integer `revision`; execute
   accepts optional `provider` (`codex`, `claude`, `cursor`; default `codex`),
-  `mode`/`timeout`; resume accepts `retry_step`/`accept_source_changes`,
-  and cancel has no extra options. Unknown fields are rejected.
+  `mode`/`timeout` and `access` (`service` or `all`; default `service`; `all`
+  is refused for `cursor`); resume accepts `retry_step`/`accept_source_changes`
+  and keeps the saved access, and cancel has no extra options. Unknown fields
+  are rejected. Run details include `access`, `launches` (one session per
+  execute/resume) and the latest runner-level `events`.
+- `GET /api/sessions/<session_id>?after=<event id>`: agent lifecycle (`agent`),
+  activity (`agent_activity`) and per-agent `usage` events of one launch or AI
+  scan, 250 per page.
 
 Run the HTTP/queue/native-runtime regression suite with:
 
 ```bash
-python3 -m unittest tests.test_harness_system_orchestration tests.test_harness_system_editor
+python3 -m unittest tests.test_harness_system_orchestration tests.test_harness_system_editor \
+  tests.test_harness_system_discovery tests.test_harness_agent_activity
 ```
 
 These tests use deterministic Codex, Claude and Cursor format fixtures, without paid model calls.
+
+### Agents panel
+
+The run view shows an **Agents** panel once a plan is launched: one card per
+agent (contract agent, one per service, verification agent) with its state,
+elapsed time, granted folders, current action, tool calls, messages, reported
+tokens/cost and changed files. Select a card to follow its timeline: what it
+says, its reasoning summaries and plans, and each tool call with its target — the
+file path (shown as `service · path`), command, search pattern or URL location —
+and whether it finished or failed. **Follow the active agent** keeps the running
+agent selected. A resumed run lists each launch separately; the newest launch
+uses the journal as the authority for step state. The AI scan in the editor shows
+the same panel for its discovery agent, with copied evidence files mapped back
+to their original service paths.
+
+Activity is display-only and never decides an outcome; receipts, checkpoints and
+native tasks remain authoritative. It is stored with the launch's Harness
+session in the private state directory (the runner transcript in **Sessions**
+shows the same trail). File contents, diffs, tool results, command output and
+prompts are never stored; URL queries are dropped and detected secrets are
+replaced with `[redacted]`, which is pattern-based rather than a guarantee. Volume
+is bounded: 400 activity events per agent attempt, activity up to 3,000 events or
+2.5 MB per launch, and every display event (including agent start/finish and
+usage) up to 4,500 events or 3.6 MB, below the session store's own limits so a
+long run is never failed by its display. Long folder and file lists are trimmed
+with a total count, and a note marks anything not shown.
+
+These screenshots use the synthetic three-service example, deterministic
+native-format Claude fixtures (no model calls) and **All selected services**
+access; the scratch location is shown as `/workspace`.
+
+![Live agents of an edit run with access to all selected services](images/ai-system/agents-running.jpg)
+
+![Timeline of one service agent after the run completed](images/ai-system/agents-timeline.jpg)
+
+![Discovery agent reading copied evidence, shown with original service paths](images/ai-system/discovery-agent.jpg)
 
 ### UI screenshots
 

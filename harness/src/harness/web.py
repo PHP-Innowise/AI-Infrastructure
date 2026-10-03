@@ -154,7 +154,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(200, self.server.page, 'text/html; charset=utf-8')
             elif path in ('/kit3/', '/kit3/index.html'):
                 self.reply(200, self.server.catalog, 'text/html; charset=utf-8')
-            elif path in ('/system.js', '/system-editor.js', '/system-discovery.js'):
+            elif path in ('/agent-activity.js', '/system.js', '/system-editor.js', '/system-discovery.js'):
                 self.reply(200, (ROOT / 'harness/web' / path[1:]).read_bytes(), 'text/javascript; charset=utf-8')
             elif path == '/api/health':
                 self.reply(200, {'ok': True, 'instance': self.server.instance})

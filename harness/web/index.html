@@ -429,7 +429,52 @@
     .system-history { display:flex; gap:8px; align-items:end; margin-top:20px; }
     .system-history .field { flex:1; }
     .system-note { font-size:12px; line-height:1.8; color:var(--muted); }
-    @media (max-width:760px) { .system-toolbar { grid-template-columns:1fr; } .system-cards { grid-template-columns:1fr; } }
+    .agents-section { margin:22px 0; }
+    .agents-toolbar { display:flex; align-items:end; flex-wrap:wrap; gap:10px 14px; }
+    .agents-toolbar h3 { margin:0; }
+    .agents-live { display:inline-flex; align-items:center; gap:6px; font-size:11px; font-weight:600; color:var(--purple); }
+    .agents-live::before { content:''; width:7px; height:7px; border-radius:50%; background:var(--purple); animation:agent-pulse 1.4s ease-in-out infinite; }
+    @keyframes agent-pulse { 50% { opacity:.25; } }
+    .agents-launch { margin-left:auto; min-width:min(220px,100%); }
+    .agent-follow { margin:10px 0; font-size:11px; }
+    .agent-cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:10px; }
+    .agent-card { text-align:left; border:1px solid var(--line); border-radius:9px; padding:12px 13px; background:white; cursor:pointer; min-width:0; font:inherit; color:inherit; }
+    .agent-card:hover { border-color:#c9bde0; }
+    .agent-card[aria-pressed="true"] { box-shadow:0 0 0 2px var(--purple) inset; }
+    .agent-card.running { border-color:var(--purple); background:#f8f4fe; }
+    .agent-card.completed { border-color:#afcfb8; background:#f6fbf7; }
+    .agent-card.blocked,.agent-card.interrupted { border-color:#e6c49f; background:#fffaf2; }
+    .agent-card-top { display:flex; align-items:center; gap:8px; }
+    .agent-card-top strong { flex:1; min-width:0; font-size:12px; overflow-wrap:anywhere; }
+    .agent-dot { width:8px; height:8px; border-radius:50%; background:#c9c6d1; flex:none; }
+    .agent-card.running .agent-dot { background:var(--purple); animation:agent-pulse 1.4s ease-in-out infinite; }
+    .agent-card.completed .agent-dot { background:#4f9a65; }
+    .agent-card.blocked .agent-dot,.agent-card.interrupted .agent-dot { background:#c98a3c; }
+    .agent-card-status { font-size:10px; color:var(--muted); white-space:nowrap; }
+    .agent-card p { margin:6px 0 0; font-size:11px; line-height:1.6; color:var(--muted); overflow-wrap:anywhere; }
+    .agent-card .agent-card-now { color:var(--ink); font:10.5px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+    .agent-card .agent-card-summary { color:var(--ink); display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+    .agent-card.blocked .agent-card-summary,.agent-card.interrupted .agent-card-summary { color:#8a5a1f; }
+    .agent-timeline { margin-top:12px; border:1px solid var(--line); border-radius:9px; background:var(--soft); min-width:0; }
+    .agent-timeline-heading { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 12px; padding:10px 14px; border-bottom:1px solid var(--line); font-size:12px; }
+    .agent-timeline-heading span { color:var(--muted); font-size:11px; overflow-wrap:anywhere; }
+    .agent-events { list-style:none; margin:0; padding:6px 0; max-height:420px; overflow:auto; }
+    .agent-event { display:grid; grid-template-columns:62px 110px minmax(0,1fr) auto; gap:10px; padding:5px 14px; font-size:11px; line-height:1.6; align-items:start; }
+    .agent-event-time { color:var(--muted); font-variant-numeric:tabular-nums; }
+    .agent-event-kind { font-weight:600; color:#4e4560; overflow-wrap:anywhere; }
+    .agent-event-body { margin:0; min-width:0; font:inherit; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .agent-event.tool .agent-event-body { font:10.5px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace; }
+    .agent-event.thinking .agent-event-body { color:var(--muted); font-style:italic; }
+    .agent-event.plan .agent-event-body { color:#4e4560; }
+    .agent-event.error,.agent-event.failed { background:#fff5f5; }
+    .agent-event.error .agent-event-kind,.agent-event.failed .agent-event-state { color:var(--error); }
+    .agent-event-state { font-size:10px; color:var(--muted); white-space:nowrap; }
+    .agent-placeholder,.agent-outcome { padding:7px 14px; font-size:11px; line-height:1.7; color:var(--muted); white-space:pre-wrap; overflow-wrap:anywhere; }
+    .agent-outcome { margin:6px 10px 4px; border-radius:7px; }
+    .agent-outcome.ok { background:#f0f8f2; color:#2f6b43; }
+    .agent-outcome.failed { background:#fff5f5; color:var(--error); }
+    .agent-error { color:var(--error); font-size:11px; }
+    @media (max-width:760px) { .system-toolbar { grid-template-columns:1fr; } .system-cards { grid-template-columns:1fr; } .agent-cards { grid-template-columns:1fr; } .agent-event { grid-template-columns:56px minmax(0,1fr) auto; } .agent-event-body { grid-column:1 / -1; } }
   </style>
 </head>
 <body>
@@ -577,7 +622,9 @@
             <p class="system-note">Choose service folders, then let AI inspect their code, interfaces, policies, tests and eligible memory. Review the filled forms before saving. Source folders stay read-only during the scan.</p>
             <div class="knowledge-form-grid"><label class="field">AI discovery provider<select id="system-discovery-provider"></select></label><label class="field">Scan timeout (seconds)<input id="system-discovery-timeout" type="number" value="900" min="1" max="86400"></label></div>
             <div class="skills-actions"><button class="button primary" type="button" id="system-discovery-start">Fill with AI</button><button class="button" type="button" id="system-discovery-cancel" hidden>Cancel AI scan</button></div>
-            <p id="system-discovery-status" role="status"></p><div id="system-discovery-report" hidden></div>
+            <p id="system-discovery-status" role="status"></p>
+            <section class="agents-section" id="system-discovery-agents" aria-label="AI scan agent" hidden><div class="agents-toolbar"><h3>Agent</h3><span class="agents-live" id="system-discovery-live" hidden>Live</span></div><p class="system-note">What the discovery agent reads in the captured evidence. Paths are shown as original service paths.</p><div id="system-discovery-agent"></div></section>
+            <div id="system-discovery-report" hidden></div>
           </section>
           <div id="system-editor-services"></div>
           <div class="skills-actions"><button class="button" type="button" id="system-editor-add">Add service folder</button></div>
@@ -599,10 +646,15 @@
         <div class="system-history"><label class="field">Saved plans &amp; runs<select id="system-runs"><option value="">No saved plans</option></select></label><button type="button" class="button" id="system-refresh">Refresh</button></div>
         <section id="system-run" class="skills-preview" hidden><h3 id="system-run-title"></h3><p id="system-run-status" class="skills-action-status" role="status"></p><p id="system-plan-summary" class="system-note"></p><div id="system-flow" class="system-flow"></div>
           <details><summary>Review context, impact, warnings and source fingerprints</summary><pre id="system-plan-json" class="system-json"></pre></details>
-          <div id="system-launch" class="skills-actions"><label class="field">Worker provider<select id="system-provider"></select></label><label class="field">Worker mode<select id="system-mode"><option value="read-only">Read-only investigation</option><option value="edit">Edit each selected service</option></select></label><label class="field">Timeout per worker (seconds)<input id="system-timeout" type="number" min="1" max="86400" value="900"></label><label class="checkbox"><input id="system-reviewed" type="checkbox">I reviewed the scope and context</label><button type="button" class="button primary" id="system-execute">Execute reviewed plan</button></div>
+          <div id="system-launch" class="skills-actions"><label class="field">Worker provider<select id="system-provider"></select></label><label class="field">Worker mode<select id="system-mode"><option value="read-only">Read-only investigation</option><option value="edit">Edit each selected service</option></select></label><label class="field">Service folder access<select id="system-access"><option value="all">All selected services</option><option value="service">Own service only</option></select></label><label class="field">Timeout per worker (seconds)<input id="system-timeout" type="number" min="1" max="86400" value="900"></label><label class="checkbox"><input id="system-reviewed" type="checkbox">I reviewed the scope and context</label><button type="button" class="button primary" id="system-execute">Execute reviewed plan</button></div>
           <p class="system-note" id="system-provider-note">Execution uses the selected CLI with its default model, sequential workers and native tasks. Read-only runs still create Brain task records. Edit mode writes in each service’s current checkout.</p>
           <div id="system-recovery" class="skills-preview" hidden><h3>Recover an unfinished run</h3><p class="system-note">Inspect the saved receipts and workspace before retrying. Completed dispatches are skipped. An interrupted dispatch may have made partial edits.</p><label class="field">Dispatch to retry<select id="system-retry"></select></label><label class="checkbox"><input id="system-accept-changes" type="checkbox">I inspected and accept partial source changes</label><button type="button" class="button" id="system-resume">Resume saved run</button></div>
           <div class="skills-actions"><button type="button" class="button danger" id="system-cancel" hidden>Cancel run</button><button type="button" class="button" id="system-open-session" hidden>Open runner session</button></div>
+          <section class="agents-section" id="system-agents-section" aria-label="Agents" hidden>
+            <div class="agents-toolbar"><h3>Agents</h3><span class="agents-live" id="system-agents-live" hidden>Live</span><label class="field agents-launch" id="system-agents-launch-field" hidden>Launch<select id="system-agents-launch"></select></label></div>
+            <p class="system-note" id="system-agents-note">Each card is one agent of this run. Select a card to follow what it reads, runs, edits and reports. Activity is display-only; receipts below remain authoritative.</p>
+            <div id="system-agents"></div>
+          </section>
           <section id="system-results" hidden><h3 style="margin-top:24px">Dispatch receipts</h3><p class="system-note">Checks and completion below are worker-reported. Inspect evidence before delivery. Execution creates no commit, merge or deployment.</p><div id="system-receipts" class="system-cards"></div><h3 style="margin-top:24px">Native task references</h3><div id="system-native-tasks" class="system-cards"></div><p id="system-handoff" class="system-note"></p></section>
           <pre id="system-events" class="system-json" hidden></pre>
         </section>
@@ -1692,6 +1744,11 @@
         const block = el('div','memory-notice'); block.setAttribute('role','status'); block.append(el('strong','',Number.isInteger(event.required_count) ? event.status === 'confirmed' ? 'Required helper count confirmed. ' : 'Required helper count not confirmed. ' : event.status === 'confirmed' ? 'Helper launch confirmed. ' : 'Helper launch not confirmed. '),document.createTextNode(text)); $('events').append(block);
       } else if (kind === 'clash_turn') {
         const block = el('div','clash-turn'); block.setAttribute('role','status'); block.textContent = text; $('events').append(block);
+      } else if (kind === 'agent') {
+        // System Orchestration shows these per agent; the runner transcript keeps a compact trail.
+        const block = el('div','clash-turn'); block.setAttribute('role','status'); block.textContent = [text,typeof event.summary === 'string' ? event.summary : ''].filter(Boolean).join('\n'); $('events').append(block);
+      } else if (kind === 'agent_activity') {
+        const block = el('details','activity'); block.append(el('summary','',`Agent activity${typeof event.agent === 'string' ? ` · ${event.agent}` : ''}${typeof event.type === 'string' ? ` · ${humanLabel(event.type)}` : ''}`),el('pre','',text)); $('events').append(block);
       } else if (['user','text','assistant','error','result'].includes(kind)) {
         const normalized = text.trim();
         if (kind === 'result' && state.assistantTexts.has(normalized)) return;
@@ -2751,6 +2808,7 @@
     $('creator-runs').addEventListener('change',()=>readCreator($('creator-runs').value)); $('creator-refresh').addEventListener('click',()=>loadCreator());
     bootstrap();
   </script>
+  <script src="/agent-activity.js"></script>
   <script src="/system.js"></script>
   <script src="/system-editor.js"></script>
   <script src="/system-discovery.js"></script>

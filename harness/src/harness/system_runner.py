@@ -9,12 +9,45 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / 'scripts'))
+sys.path.insert(0, str(ROOT / 'harness/src'))
 import ai_system_execution as execution
 from ai_system_lib import System, SystemError
+from harness.agent_activity import ActivityStream
+
+LABELS = {'contracts': 'Contract agent', 'verify': 'Verification agent'}
 
 
 def emit(kind, text, **extra):
     print(json.dumps({'kind': kind, 'text': text[:4000], **extra}), flush=True)
+
+
+def send(event):
+    print(json.dumps(event, ensure_ascii=False), flush=True)
+
+
+def observer_for(state):
+    """Forward each dispatch's lifecycle and live native activity to the session."""
+    stream = ActivityStream(send, state['provider'], state['roots'])
+
+    def observe(event):
+        kind = event['type']
+        if kind == 'output':
+            stream.line(event['line'])
+        elif kind == 'dispatch_started':
+            phase = event['phase']
+            stream.start(phase, event['attempt'], event['root'], service=event['service'],
+                         label=LABELS.get(phase, event['service'] + ' agent'), mode=event['mode'],
+                         provider=event['provider'], root=event['root'], dispatch=event['dispatch_id'],
+                         readable=event['readable'], writable=event['writable'])
+        elif kind == 'dispatch_finished':
+            report = event.get('report') or {}
+            checks = report.get('checks') or []
+            status = 'interrupted' if event.get('interrupted') else 'completed' if event['ok'] else 'blocked'
+            stream.finish(status, ok=event['ok'], error=event['error'],
+                          duration_seconds=event.get('duration_seconds'), summary=report.get('summary'),
+                          changed_files=(report.get('changed_files') or [])[:100],
+                          checks={name: sum(c['status'] == name for c in checks) for name in ('passed', 'failed', 'not_run')})
+    return observe
 
 
 def interrupted(*_):
@@ -46,9 +79,10 @@ def main():
         else:
             plan = execution.load(directory, 'approved-plan.json')
             state = execution.create_run(system, plan, journal, provider, request['executable'],
-                                         request['mode'], request['timeout'])
+                                         request['mode'], request['timeout'], request.get('access', 'service'))
         emit('status', 'Sequential system dispatch started. Progress and receipts are saved after each dispatch.')
-        state = execution.drive_run(system, journal, state, request['retry_step'], request['accept_source_changes'])
+        state = execution.drive_run(system, journal, state, request['retry_step'], request['accept_source_changes'],
+                                    observer=observer_for(state))
         ok = state['status'] == 'completed'
         emit('text', state['error'] or 'Worker-reported checks completed; native tasks closed and handoff saved.')
         emit('result', 'System run ' + state['status'], ok=ok)

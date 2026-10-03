@@ -26,6 +26,26 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Show a live **Agents** panel for System Orchestration runs and AI scans: one
+  card per contract, service, verification or discovery agent with state, time,
+  granted folders, tool calls, tokens and changed files, plus a timeline of its
+  messages, reasoning summaries, plans and tool targets. Workers stream native
+  output line by line; Claude workers now use `stream-json` with the same
+  `--json-schema` terminal `structured_output`. Activity is display-only,
+  redacted, bounded per agent and launch, and never stores file contents, diffs,
+  command output or prompts. Run details list each launch; runner status no
+  longer disappears behind the first page of events.
+- Add `--access all` (browser default: **All selected services**) so every
+  system worker can read all selected service folders and, in edit mode, change
+  files in any of them; the system folder stays read-only. Claude receives the
+  folders through `--add-dir`, Codex through writable roots; Cursor is limited to
+  the own-service scope. Cross-service changes are reported as
+  `<service-id>/<path>` and adopted only when reported. Contract and verification
+  workers now read every selected service under Claude in both scopes. The scope
+  is pinned in the journal; older journals resume with the own-service scope.
+- Fix intermittent HTTP 400 responses while polling a live system run: a journal
+  file being published by link-then-unlink is read on the next poll instead.
+
 - Automatically fill Harness system/service forms through Codex, Claude or
   Cursor from bounded, filtered evidence snapshots. Show sources/uncertainties,
   validate every service and contract, retain unknown ownership and incomplete

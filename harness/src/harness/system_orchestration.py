@@ -34,6 +34,10 @@ def options(data, required, optional=()):
         raise SessionError('Invalid system orchestration options.')
 
 
+# Runner-level progress; agent lifecycle/activity and usage belong to the agents panel.
+RUNNER_EVENTS = ('status', 'text', 'error', 'result')
+
+
 def run_id(value):
     if not isinstance(value, str) or not re.fullmatch('[a-f0-9]{32}', value):
         raise SessionError('Invalid system run ID.')
@@ -86,7 +90,8 @@ class SystemManager:
             for session in self.sessions.db.execute('SELECT id,system_run FROM sessions WHERE system_run IS NOT NULL').fetchall():
                 metadata = json.loads(session[1])
                 if metadata == {'run_id': rid, 'nonce': nonce}:
-                    record['session_id'] = session[0]
+                    launches = record.get('launches') or ([record['session_id']] if record['session_id'] else [])
+                    record.update(session_id=session[0], launches=launches + [session[0]])
                     break
             record['pending_nonce'] = None
             self._save(record)
@@ -155,9 +160,21 @@ class SystemManager:
         directory = self.root / record['id']
         journal = directory / 'execution'
         result['status'] = session['status'] if session else 'needs_review'
-        if (journal / 'run.json').exists():
-            state = execution.load(journal, 'run.json')
+        result['access'] = record.get('access') or 'service'
+
+        def journal_file(name):
+            # A live runner publishes new journal files by link-then-unlink. During
+            # that instant the safe reader refuses the second link; the next poll reads it.
+            try:
+                return execution.load(journal, name)
+            except SystemError:
+                if result['active']:
+                    return None
+                raise
+        state = journal_file('run.json') if (journal / 'run.json').exists() else None
+        if state is not None:
             result['status'] = state['status']
+            result['access'] = execution.access_scope(state)
             if result['active']:
                 result['status'] = session['status']
             elif result['status'] in ('prepared', 'running'):
@@ -167,7 +184,9 @@ class SystemManager:
                 receipts = []
                 for step in state['steps']:
                     if step['attempt'] and (journal / execution.receipt_name(step)).exists():
-                        receipt = execution.load(journal, execution.receipt_name(step))
+                        receipt = journal_file(execution.receipt_name(step))
+                        if receipt is None:
+                            continue
                         receipts.append({'phase': step['id'], 'service': step['service'],
                                          'attempt': step['attempt'], 'ok': receipt['ok'],
                                          'error': receipt['error'], 'report': receipt['report']})
@@ -178,7 +197,10 @@ class SystemManager:
             result['status'] = 'interrupted'
         if detail:
             result['plan'] = execution.load(directory, 'approved-plan.json')
-            result['events'] = self.sessions.events(record['session_id'])[-30:] if session else []
+            # Agent activity is read incrementally from each launch session by the agents panel.
+            result['events'] = self.sessions.recent_events(record['session_id'], RUNNER_EVENTS) if session else []
+            launches = record.get('launches') or ([record['session_id']] if record['session_id'] else [])
+            result['launches'] = [{'session_id': sid, 'status': self.sessions.get(sid)['status']} for sid in launches]
             result['providers'] = [{'id': pid, 'name': self.sessions.providers.get(pid, {}).get('name', pid),
                                     'available': bool(self.sessions.providers.get(pid, {}).get('available'))}
                                    for pid in execution.NATIVE_PROVIDERS]
@@ -192,13 +214,13 @@ class SystemManager:
 
     @boundary
     def act(self, rid, data):
-        options(data, ('action', 'revision'), ('mode', 'timeout', 'provider', 'retry_step', 'accept_source_changes'))
+        options(data, ('action', 'revision'), ('mode', 'timeout', 'provider', 'access', 'retry_step', 'accept_source_changes'))
         with self.sessions.lock:
             record = self._record(rid)
             if type(data['revision']) is not int or data['revision'] != record['revision']:
                 raise SessionError('Run changed in another view. Refresh before acting.')
             action = data['action']
-            allowed = {'execute': {'action', 'revision', 'mode', 'timeout', 'provider'},
+            allowed = {'execute': {'action', 'revision', 'mode', 'timeout', 'provider', 'access'},
                        'resume': {'action', 'revision', 'retry_step', 'accept_source_changes'},
                        'cancel': {'action', 'revision'}}
             if action not in allowed or set(data) - allowed[action]:
@@ -225,11 +247,16 @@ class SystemManager:
                 mode, timeout = data.get('mode', 'read-only'), data.get('timeout', 900)
                 if mode not in ('read-only', 'edit') or type(timeout) is not int or not 1 <= timeout <= 86400:
                     raise SessionError('Choose read-only/edit and a worker timeout of 1..86400 seconds.')
+                access = data.get('access', 'service')
+                if access not in execution.ACCESS_SCOPES:
+                    raise SessionError('Choose service folder access: own service or all selected services.')
+                if access == 'all' and provider_id not in execution.EXTRA_DIRECTORIES:
+                    raise SessionError('Cursor Agent cannot be granted other service folders. Choose Codex or Claude, or own-service access.')
             else:
                 if record['session_id'] is None or view['status'] == 'completed':
                     raise SessionError('Only unfinished launches can be resumed.')
                 provider_id = view['provider'] or 'codex'
-                mode, timeout = record['mode'], record['timeout']
+                mode, timeout, access = record['mode'], record['timeout'], view['access']
                 if type(data.get('accept_source_changes', False)) is not bool:
                     raise SessionError('Source change acknowledgement must be a boolean.')
                 retry = data.get('retry_step')
@@ -249,15 +276,18 @@ class SystemManager:
             nonce = uuid.uuid4().hex
             request = {'directory': str(directory), 'system_file': str(system.config), 'allowed_roots': roots,
                        'provider': provider_id, 'executable': provider['executable'], 'mode': mode, 'timeout': timeout,
-                       'retry_step': data.get('retry_step'), 'accept_source_changes': data.get('accept_source_changes', False)}
+                       'access': access, 'retry_step': data.get('retry_step'),
+                       'accept_source_changes': data.get('accept_source_changes', False)}
             execution.save(directory, 'request-' + nonce + '.json', request, new=True)
-            record.update(pending_nonce=nonce, provider=provider_id, mode=mode, timeout=timeout, revision=record['revision'] + 1)
+            record.update(pending_nonce=nonce, provider=provider_id, mode=mode, timeout=timeout, access=access,
+                          revision=record['revision'] + 1)
             self._save(record)
             session = self.sessions.create({'project_id': record['project_id'], 'provider': provider_id,
                        'workflow': 'native', 'mode': 'edit' if mode == 'edit' else 'plan',
                        'prompt': 'System orchestration: ' + plan['context']['task'], 'project_context': False,
                        'agents_enabled': False, 'budgets': {'seconds': None, 'tokens': None, 'usd': None}},
                        _system_run={'run_id': rid, 'nonce': nonce})
-            record.update(session_id=session['id'], pending_nonce=None)
+            launches = record.get('launches') or ([record['session_id']] if record['session_id'] else [])
+            record.update(session_id=session['id'], pending_nonce=None, launches=launches + [session['id']])
             self._save(record)
             return self._view(record)

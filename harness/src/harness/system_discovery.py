@@ -411,7 +411,7 @@ class DiscoveryManager:
         result = {'id': sid, 'status': session['status'], 'active': session['status'] in ACTIVE,
                   'provider': session['provider'], 'proposal': None,
                   'draft': draft,
-                  'events': self.sessions.events(sid)[-30:]}
+                  'events': self.sessions.recent_events(sid, ('status', 'text', 'error', 'result'))}
         if session['status'] == 'completed':
             try:
                 check_fresh(request)

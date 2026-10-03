@@ -1,7 +1,8 @@
 /* System/service forms; the backend generates and validates file formats. */
 const systemEditor = {data:null,pending:false,epoch:0,dirty:false};
 function editorControls() {
-  for(const input of $('system-editor').querySelectorAll('input,select,textarea,button')) input.disabled=systemEditor.pending;
+  // The AI scan's agent panel stays usable while the scan locks the form.
+  for(const input of $('system-editor').querySelectorAll('input,select,textarea,button')) if(!input.closest('#system-discovery-agents')) input.disabled=systemEditor.pending;
   for(const id of ['system-choose-project','system-project','system-config','system-load']) $(id).disabled=systemEditor.pending || systemEditor.dirty || systemUi.pending || !state.bootstrap;
   $('system-edit').disabled=systemEditor.pending || systemUi.pending || !state.bootstrap;
   $('system-editor-add').disabled=$('system-editor-save').disabled=systemEditor.pending || !systemEditor.data;

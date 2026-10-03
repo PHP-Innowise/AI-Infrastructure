@@ -9,7 +9,7 @@ jobs:
   system-orchestration:
     name: "system orchestration (Python ${{ matrix.python }})"
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     strategy:
       matrix:
         python: ["3.9", "3.x"]
@@ -21,7 +21,7 @@ jobs:
       - name: Test universal system planning and execution
         run: |
           sudo apt-get update -qq && sudo apt-get install -y bubblewrap
-          python3 -m unittest tests.test_ai_system tests.test_ai_system_providers tests.test_ai_system_execution tests.test_harness_system_orchestration tests.test_harness_system_editor tests.test_harness_system_discovery
+          python3 -m unittest tests.test_ai_system tests.test_ai_system_providers tests.test_ai_system_execution tests.test_harness_system_orchestration tests.test_harness_system_editor tests.test_harness_system_discovery tests.test_harness_agent_activity
       - name: Validate synthetic service catalog
         run: python3 scripts/ai_system.py validate --system docs/examples/ai-system/system.json
 

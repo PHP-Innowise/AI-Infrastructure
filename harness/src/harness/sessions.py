@@ -467,6 +467,21 @@ class Sessions:
             rows = self.db.execute("SELECT id,data FROM events WHERE session_id=? AND id>? ORDER BY id LIMIT 250", (sid, after)).fetchall()
         return [{**json.loads(row['data']), "id": row['id']} for row in rows]
 
+    def recent_events(self, sid, kinds, limit=30):
+        """Latest events of the given kinds, oldest first, even after agent activity."""
+        self.get(sid)
+        with self.lock:
+            # A launch stores at most 5000 events, so this bounded scan sees all of them.
+            rows = self.db.execute("SELECT id,data FROM events WHERE session_id=? ORDER BY id DESC LIMIT 6000", (sid,)).fetchall()
+        result = []
+        for row in rows:
+            event = json.loads(row['data'])
+            if event.get('kind') in kinds:
+                result.append({**event, "id": row['id']})
+                if len(result) == limit:
+                    break
+        return result[::-1]
+
     def project(self, key):
         with self.lock:
             if not isinstance(key, str) or key not in self.projects:
@@ -1242,7 +1257,10 @@ class Sessions:
                     if clash_settings:
                         clean_events = [event] if event.get('kind') in ('clash_turn', 'clash_state', 'session', 'result', 'error', 'status', 'text', 'usage', 'tool') else []
                     else:
-                        clean_events = ([event] if event.get('kind') in ('fleet_stage', 'fleet_reviewer', 'fleet_state', 'result', 'error', 'status', 'text', 'usage', 'delegation', 'tool') else []) if fleet or creator or system_run or discovery else providers.normalize_event(provider, event)
+                        runner_kinds = ('fleet_stage', 'fleet_reviewer', 'fleet_state', 'result', 'error', 'status', 'text', 'usage', 'delegation', 'tool')
+                        if system_run or discovery:
+                            runner_kinds += ('agent', 'agent_activity')  # Display-only agents panel events.
+                        clean_events = ([event] if event.get('kind') in runner_kinds else []) if fleet or creator or system_run or discovery else providers.normalize_event(provider, event)
                     for clean in clean_events:
                         text = clean.get('text')
                         if isinstance(text, str):

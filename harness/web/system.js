@@ -1,14 +1,17 @@
 /* System coordinator UI. All source and worker content is rendered as text. */
-const systemUi = {epoch:0, pending:false, controller:null, timer:null, catalog:null, detail:null};
+const systemUi = {epoch:0, pending:false, controller:null, timer:null, catalog:null, detail:null, launch:null, launchCount:0,
+  agents:createAgentPanel($('system-agents'),{emptyText:'Select an agent card to follow its work.'})};
+const SYSTEM_AGENTS = {contracts:['Contract agent','Agree contracts, invariants and the service order.'],
+  verify:['Verification agent','Check producer/consumer compatibility and the end-to-end scenario.']};
 function systemFailure(error) {
   if (error.name !== 'AbortError') { $('system-error').textContent=error.message; $('system-error').hidden=false; }
 }
 function systemControls() {
   const run=systemUi.detail, busy=systemUi.pending || !state.bootstrap || (typeof systemEditor!=='undefined' && systemEditor.pending), live=Boolean(run?.active);
   const editing=typeof systemEditor!=='undefined' && (systemEditor.pending || systemEditor.dirty);
-  for (const id of ['system-project','system-config','system-load','system-edit','system-choose-project','system-prepare','system-runs','system-refresh','system-provider','system-mode','system-timeout','system-reviewed','system-retry','system-accept-changes']) {
+  for (const id of ['system-project','system-config','system-load','system-edit','system-choose-project','system-prepare','system-runs','system-refresh','system-provider','system-mode','system-access','system-timeout','system-reviewed','system-retry','system-accept-changes']) {
     const editorLocked=editing && ['system-project','system-config','system-load','system-choose-project','system-prepare'].includes(id);
-    $(id).disabled=busy || editorLocked || (['system-provider','system-mode','system-timeout','system-reviewed'].includes(id) && Boolean(run?.session_id));
+    $(id).disabled=busy || editorLocked || (['system-provider','system-mode','system-access','system-timeout','system-reviewed'].includes(id) && Boolean(run?.session_id));
   }
   $('system-execute').disabled=busy || editing || !run || live || Boolean(run.session_id) || run.plan.status!=='needs_review' || !run.providers?.some(p=>p.id===$('system-provider').value && p.available) || !$('system-reviewed').checked;
   $('system-resume').disabled=busy || editing || live || !run?.providers?.some(p=>p.id===run.provider && p.available);
@@ -17,7 +20,7 @@ function systemControls() {
 }
 function systemReset() {
   clearTimeout(systemUi.timer); systemUi.controller?.abort(); ++systemUi.epoch;
-  systemUi.catalog=null; systemUi.detail=null;
+  systemUi.catalog=null; systemUi.detail=null; systemUi.launch=null; systemUi.launchCount=0; systemUi.agents.reset(); $('system-agents-section').hidden=true;
   if(typeof closeSystemEditor==='function') closeSystemEditor();
   $('system-catalog').hidden=true; $('system-run').hidden=true; $('system-error').hidden=true;
   $('system-message').textContent=''; $('system-reviewed').checked=false;
@@ -49,7 +52,7 @@ async function systemRead(id) {
     if(state.view!=='systems' || epoch!==systemUi.epoch || run.project_id!==$('system-project').value) return;
     const changed=systemUi.detail?.id!==run.id;
     systemUi.detail=run;
-    if(changed) { $('system-reviewed').checked=false; $('system-accept-changes').checked=false; $('system-provider').replaceChildren(); }
+    if(changed) { $('system-reviewed').checked=false; $('system-accept-changes').checked=false; $('system-provider').replaceChildren(); systemUi.launch=null; systemUi.launchCount=0; }
     renderSystemRun();
     if(run.active) systemUi.timer=setTimeout(()=>systemRead(id),1100);
   } catch(error) { if(epoch===systemUi.epoch) systemFailure(error); }
@@ -130,22 +133,47 @@ function renderSystemCatalog(data) {
     $('system-banks').append(card);
   }
 }
+function systemAccessLabel(access) {
+  return access==='all' ? 'every selected service folder (read; write in edit mode)' : 'own service folder only';
+}
+function renderSystemAgents(run) {
+  const launches=run.launches || [];
+  $('system-agents-section').hidden=!launches.length; $('system-agents-live').hidden=!run.active;
+  if(!launches.length) { systemUi.agents.reset(); return; }
+  const latest=launches.at(-1).session_id;
+  // A new execute/resume launch is followed; an older launch chosen by hand stays until then.
+  if(launches.length!==systemUi.launchCount || !launches.some(l=>l.session_id===systemUi.launch)) systemUi.launch=latest;
+  systemUi.launchCount=launches.length;
+  $('system-agents-launch-field').hidden=launches.length<2;
+  setOptions($('system-agents-launch'),launches.map((l,i)=>({id:l.session_id,label:`Launch ${i+1} · ${l.status}`})),l=>l.label,l=>l.id,systemUi.launch);
+  // The journal is authoritative for the newest launch; older launches show their own recorded outcome.
+  const current=systemUi.launch===latest, mode=run.mode || $('system-mode').value;
+  const steps=run.execution?.steps || [{id:'contracts',service:'__system__',mode:'read-only'},...run.plan.context.services.map(sid=>({id:'service-'+sid,service:sid,mode})),{id:'verify',service:'__system__',mode:'read-only'}];
+  systemUi.agents.setPlan(steps.map(step=>{
+    const [label,goal]=SYSTEM_AGENTS[step.id] || [`${step.service} agent`,`Works on ${step.service}; folder access: ${systemAccessLabel(run.access)}.`];
+    return {id:step.id,service:step.service,mode:step.mode,label,goal,
+      journal:current && step.status ? (step.status==='running' && !run.active ? 'interrupted' : step.status) : null};
+  }),current && run.active);
+  systemUi.agents.load(systemUi.launch);
+}
 function renderSystemRun() {
   const run=systemUi.detail,plan=run.plan,execution=run.execution;
   $('system-run').hidden=false; $('system-run-title').textContent=`${run.change_id} · ${run.system}`;
   $('system-run-status').textContent=`${run.status}${execution?.error?' · '+execution.error:''}`;
-  $('system-plan-summary').textContent=`Participants: ${plan.context.services.join(', ') || 'none selected'} · ${plan.context_chars.toLocaleString()} / ${plan.context_budget_chars.toLocaleString()} context characters · ${plan.context.sources.length} sources · ${plan.omitted_sources.length} omitted\n${run.config_path} · ${run.mode || 'Execution not started'}`;
-  $('system-flow').replaceChildren();
+  $('system-plan-summary').textContent=`Participants: ${plan.context.services.join(', ') || 'none selected'} · ${plan.context_chars.toLocaleString()} / ${plan.context_budget_chars.toLocaleString()} context characters · ${plan.context.sources.length} sources · ${plan.omitted_sources.length} omitted\n${run.config_path} · ${run.mode ? `${run.mode} · folder access: ${systemAccessLabel(run.access)}` : 'Execution not started'}`;
+  $('system-flow').replaceChildren(); $('system-flow').hidden=Boolean(run.launches?.length);
   for(const step of execution?.steps || plan.steps) {
     const card=el('div',`system-stage ${step.status || ''}`);
     card.append(el('strong','',step.id),el('span','',step.status ? `${step.status} · attempt ${step.attempt}` : step.goal)); $('system-flow').append(card);
   }
+  renderSystemAgents(run);
   $('system-plan-json').textContent=JSON.stringify(plan,null,2);
   $('system-launch').hidden=Boolean(run.session_id);
   $('system-recovery').hidden=!run.session_id || run.active || run.status==='completed';
   const selected=run.provider || $('system-provider').value || 'codex';
   setOptions($('system-provider'),run.providers || [],p=>`${p.name}${p.available?'':' · unavailable'}`,p=>p.id,selected);
   for(const option of $('system-provider').options) option.disabled=!run.providers?.find(p=>p.id===option.value)?.available;
+  if(run.session_id) $('system-access').value=run.access;
   systemProviderNote();
   const previous=$('system-retry').value;
   setOptions($('system-retry'),[{id:'',label:'Reconcile saved receipt / continue pending dispatch'},...(execution?.steps || []).filter(s=>['running','interrupted','blocked'].includes(s.status)).map(s=>({id:s.id,label:`Retry ${s.id} · ${s.status}`}))],s=>s.label,s=>s.id,previous);
@@ -185,11 +213,20 @@ async function systemAction(action,extra={}) {
 }
 function systemProviderNote() {
   const run=systemUi.detail, provider=(run?.providers || []).find(p=>p.id===(run.provider || $('system-provider').value));
-  $('system-provider-note').textContent=provider?.available?`${provider.name} uses its configured CLI and default model. The provider is fixed after launch. Read-only runs create native Brain task records. Edit mode writes in each service’s current checkout.`:'Selected provider CLI is unavailable. Planning and catalog browsing remain available.';
+  // Cursor's CLI has no verified option to grant other folders.
+  const shared=[...$('system-access').options].find(option=>option.value==='all');
+  shared.disabled=provider?.id==='cursor';
+  if(shared.disabled && $('system-access').value==='all' && !run?.session_id) $('system-access').value='service';
+  const access=$('system-access').value==='all'
+    ? 'Every agent can read all selected service folders; in edit mode each service agent may also change files in any of them. The system folder stays read-only.'
+    : 'Each service agent reads and writes only its own folder; contract and verification agents read all selected services.';
+  $('system-provider-note').textContent=provider?.available?`${provider.name} uses its configured CLI and default model. The provider and folder access are fixed after launch. ${access} Read-only runs create native Brain task records.${shared.disabled?' Cursor Agent cannot be granted other service folders.':''}`:'Selected provider CLI is unavailable. Planning and catalog browsing remain available.';
 }
 $('system-provider').addEventListener('change',()=>{systemProviderNote();systemControls();});
+$('system-access').addEventListener('change',systemProviderNote);
+$('system-agents-launch').addEventListener('change',()=>{systemUi.launch=$('system-agents-launch').value; if(systemUi.detail) renderSystemAgents(systemUi.detail);});
 $('system-reviewed').addEventListener('change',systemControls);
-$('system-execute').addEventListener('click',()=>{if($('system-reviewed').checked) systemAction('execute',{provider:$('system-provider').value,mode:$('system-mode').value,timeout:Number($('system-timeout').value)});});
+$('system-execute').addEventListener('click',()=>{if($('system-reviewed').checked) systemAction('execute',{provider:$('system-provider').value,mode:$('system-mode').value,access:$('system-access').value,timeout:Number($('system-timeout').value)});});
 $('system-cancel').addEventListener('click',()=>systemAction('cancel'));
 $('system-resume').addEventListener('click',()=>systemAction('resume',{...($('system-retry').value?{retry_step:$('system-retry').value}:{}),accept_source_changes:$('system-accept-changes').checked}));
 $('system-refresh').addEventListener('click',systemHistory);
