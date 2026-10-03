@@ -16,13 +16,13 @@
   </script>
   <style>
     /* Colors live only in these two token sets: a rule that needs a new color adds it to both. */
-    :root { color-scheme:light; --paper:#fff; --soft:#f8f8fa; --hover:#ededf2; --ink:#202023; --ink-hover:#343139; --ink-2:#4f4e57; --muted:#65646d; --faint:#88848f; --line:#e7e7eb; --field-line:#dcdbe3; --field-line-hover:#bfbacb; --dot:#aaa9b0; --purple:#6841c6; --purple-soft:#f0ebfa; --purple-tint:#f8f5fd; --purple-faint:#fdfbff; --purple-line:#ddd2f1; --focus:#7c55d9; --focus-line:#a599bd; --focus-glow:#6841c608; --error:#a93535; --error-soft:#fff0f0; --error-surface:#fffafa; --error-line:#e8cfcf; --error-line-strong:#cf9191; --error-dot:#b84f4f; --warning:#85602a; --warning-soft:#fcf7e9; --warning-surface:#fffaf3; --warning-line:#e8d6c0; --warning-dot:#ba882d; --success:#2f7a3d; --success-soft:#eef7f0; --rejected-dot:#91785f; --shadow:#17112214; --shadow-strong:#17112230; --composer-shadow:#29243b05; --scrim:#18132140; --backdrop:#18132165; font-family:var(--font-sans); color:var(--ink); background:var(--paper); }
-    :root[data-theme="dark"] { color-scheme:dark; --paper:#16151a; --soft:#1e1d23; --hover:#2a2930; --ink:#ececf1; --ink-hover:#cfced8; --ink-2:#c0bfc9; --muted:#9e9da8; --faint:#7f7d89; --line:#2c2b33; --field-line:#3b3a44; --field-line-hover:#5a5766; --dot:#6d6c76; --purple:#a68cf5; --purple-soft:#2b2443; --purple-tint:#221d33; --purple-faint:#1c1a24; --purple-line:#45396b; --focus:#8f72e8; --focus-line:#7a68ad; --focus-glow:#a68cf51f; --error:#f19595; --error-soft:#3b2023; --error-surface:#241a1d; --error-line:#5a3237; --error-line-strong:#a35a5e; --error-dot:#e06a6a; --warning:#e2b56a; --warning-soft:#34291a; --warning-surface:#221d15; --warning-line:#57452a; --warning-dot:#d8a23f; --success:#86d29a; --success-soft:#1b3123; --rejected-dot:#a8917a; --shadow:#00000059; --shadow-strong:#00000099; --composer-shadow:#0000001f; --scrim:#00000080; --backdrop:#000000a6; }
+    :root { color-scheme:light; --paper:#fff; --soft:#f8f8fa; --hover:#ededf2; --ink:#202023; --ink-hover:#343139; --ink-2:#4f4e57; --muted:#65646d; --faint:#74707a; --line:#e7e7eb; --field-line:#dcdbe3; --field-line-hover:#bfbacb; --dot:#aaa9b0; --purple:#6841c6; --purple-soft:#f0ebfa; --purple-tint:#f8f5fd; --purple-faint:#fdfbff; --purple-line:#ddd2f1; --focus:#7c55d9; --focus-line:#a599bd; --focus-glow:#6841c608; --error:#a93535; --error-soft:#fff0f0; --error-surface:#fffafa; --error-line:#e8cfcf; --error-line-strong:#cf9191; --error-dot:#b84f4f; --warning:#85602a; --warning-soft:#fcf7e9; --warning-surface:#fffaf3; --warning-line:#e8d6c0; --warning-dot:#ba882d; --success:#2f7a3d; --success-soft:#eef7f0; --rejected-dot:#91785f; --shadow:#17112214; --shadow-strong:#17112230; --composer-shadow:#29243b05; --scrim:#18132140; --backdrop:#18132165; font-family:var(--font-sans); color:var(--ink); background:var(--paper); }
+    :root[data-theme="dark"] { color-scheme:dark; --paper:#16151a; --soft:#1e1d23; --hover:#2a2930; --ink:#ececf1; --ink-hover:#cfced8; --ink-2:#c0bfc9; --muted:#9e9da8; --faint:#878491; --line:#2c2b33; --field-line:#3b3a44; --field-line-hover:#5a5766; --dot:#6d6c76; --purple:#a68cf5; --purple-soft:#2b2443; --purple-tint:#221d33; --purple-faint:#1c1a24; --purple-line:#45396b; --focus:#8f72e8; --focus-line:#7a68ad; --focus-glow:#a68cf51f; --error:#f19595; --error-soft:#3b2023; --error-surface:#241a1d; --error-line:#5a3237; --error-line-strong:#a35a5e; --error-dot:#e06a6a; --warning:#e2b56a; --warning-soft:#34291a; --warning-surface:#221d15; --warning-line:#57452a; --warning-dot:#d8a23f; --success:#86d29a; --success-soft:#1b3123; --rejected-dot:#a8917a; --shadow:#00000059; --shadow-strong:#00000099; --composer-shadow:#0000001f; --scrim:#00000080; --backdrop:#000000a6; }
     /* Type, shape and control scale shared by both themes. Spacing uses a 4px grid: 2, 4, 8, 12, 16, 24, 32, 48. */
-    :root { --font-sans:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; --font-mono:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace; --text-meta:11px; --text-ui:12px; --text-body:13px; --text-title:15px; --text-display:20px; --weight-regular:400; --weight-strong:600; --leading-tight:1.25; --leading-ui:1.45; --leading-body:1.6; --radius-sm:4px; --radius:6px; --radius-md:8px; --radius-lg:12px; --control-height:36px; --control-height-sm:28px; }
+    :root { --font-sans:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; --font-mono:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace; --text-meta:11px; --text-ui:12px; --text-body:13px; --text-title:15px; --text-display:20px; --weight-regular:400; --weight-strong:600; --leading-tight:1.25; --leading-ui:1.45; --leading-body:1.6; --radius-sm:4px; --radius:6px; --radius-md:8px; --radius-lg:12px; --control-height:36px; --control-height-sm:28px; --page-x:32px; }
     * { box-sizing:border-box; }
     body { margin:0; height:100vh; height:100dvh; overflow:hidden; font-size:var(--text-body); line-height:var(--leading-body); }
-    button,input,select,textarea { font:inherit; }
+    :where(button,input,select,textarea) { font:inherit; }
     button { cursor:pointer; }
     button:disabled { cursor:default; opacity:.5; }
     a { color:var(--purple); text-decoration:none; }
@@ -32,7 +32,8 @@
     [hidden] { display:none !important; }
     :where(input[type="text"],input[type="search"],input[type="number"],input:not([type]),select,textarea) { min-width:0; min-height:var(--control-height); padding:0 12px; border:1px solid var(--field-line); border-radius:var(--radius); background:var(--paper); color:var(--ink); font-size:var(--text-ui); line-height:var(--leading-ui); }
     :where(textarea) { padding:8px 12px; line-height:var(--leading-body); resize:vertical; }
-    :where(input,select,textarea):disabled { color:var(--muted); background:var(--soft); opacity:1; }
+    :where(select) { appearance:none; padding-right:32px; background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%); background-position:calc(100% - 17px) 50%,calc(100% - 12px) 50%; background-size:5px 5px; background-repeat:no-repeat; }
+    :where(input,select,textarea):disabled { color:var(--muted); background-color:var(--soft); opacity:1; }
     :where(.view) :where(h2,h3) { margin:0 0 8px; font-size:var(--text-title); font-weight:var(--weight-strong); line-height:var(--leading-tight); }
     :where(.view) h4 { margin:0 0 8px; font-size:var(--text-body); font-weight:var(--weight-strong); line-height:var(--leading-tight); }
     svg { flex:none; }
@@ -78,8 +79,8 @@
     .theme-switch input { position:absolute; inset:0; margin:0; opacity:0; cursor:pointer; }
     .theme-switch .icon { width:15px; height:15px; }
     .main { min-width:0; display:flex; flex-direction:column; min-height:0; }
-    .topbar { min-height:64px; border-bottom:1px solid var(--line); padding:12px 32px; display:flex; align-items:center; justify-content:space-between; gap:24px; }
-    .topbar-title { min-width:0; }
+    .topbar { min-height:64px; border-bottom:1px solid var(--line); padding:12px var(--page-x); display:flex; align-items:center; justify-content:space-between; gap:24px; }
+    .topbar-title { min-width:0; min-height:44px; }
     .topbar h1 { margin:0; font-size:var(--text-title); font-weight:var(--weight-strong); line-height:var(--leading-ui); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .topbar p { margin:4px 0 0; color:var(--muted); font-size:var(--text-ui); }
     .header-actions { display:flex; align-items:center; gap:12px; flex:none; }
@@ -90,20 +91,23 @@
     .button.primary:hover:not(:disabled) { background:var(--ink-hover); }
     .button.danger { color:var(--error); border-color:var(--error-line); }
     .menu-toggle { display:none; }
-    .banner { display:flex; justify-content:space-between; gap:16px; align-items:center; margin:16px 32px 0; padding:12px 16px; border:1px solid var(--warning-line); border-radius:var(--radius); color:var(--warning); background:var(--warning-surface); font-size:var(--text-ui); }
+    .banner { display:flex; justify-content:space-between; gap:16px; align-items:center; margin:16px var(--page-x) 0; padding:12px 16px; border:1px solid var(--warning-line); border-radius:var(--radius); color:var(--warning); background:var(--warning-surface); font-size:var(--text-ui); }
     .banner p { margin:0; }
-    .banner button { flex:none; background:transparent; border:0; color:inherit; text-decoration:underline; font-size:var(--text-ui); padding:4px; }
+    .banner button:not(.button) { flex:none; background:transparent; border:0; color:inherit; text-decoration:underline; font-size:var(--text-ui); padding:4px; }
     #creator-view textarea { width:100%; }
     #creator-detail { border-top:1px solid var(--line); margin-top:24px; padding-top:12px; }
     #creator-form { margin-bottom:16px; }
+    #creator-form .page-toolbar { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); align-items:end; }
+    #creator-form .page-toolbar .field { width:auto; max-width:none; }
+    #creator-form .page-toolbar > .button { justify-self:start; }
     .view { min-height:0; flex:1; display:flex; flex-direction:column; }
-    .configuration { padding:16px 32px; border-bottom:1px solid var(--line); }
+    .configuration { padding:16px var(--page-x); border-bottom:1px solid var(--line); }
     .configuration:has(> .session-summary:not([hidden])) { padding-block:8px; }
-    .session-summary { display:flex; align-items:center; gap:8px; max-width:1160px; margin:0 auto; }
+    .session-summary { display:flex; align-items:center; gap:8px; max-width:1160px; margin:0 0; }
     .session-summary-text { flex:1; min-width:0; margin:0; color:var(--ink-2); font-size:var(--text-ui); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .session-summary:not([hidden]) + .session-settings:not([hidden]) { margin-top:12px; padding-top:12px; border-top:1px solid var(--line); }
     .button.compact { min-height:var(--control-height-sm); padding:0 8px; }
-    .option-bar { display:flex; flex-wrap:wrap; align-items:center; gap:8px; max-width:1160px; margin:12px auto 0; }
+    .option-bar { display:flex; flex-wrap:wrap; align-items:center; gap:8px; max-width:1160px; margin:12px 0 0; }
     .chip { display:inline-flex; align-items:center; gap:4px; min-height:var(--control-height-sm); padding:0 8px; border:1px solid var(--field-line); border-radius:var(--radius); background:var(--paper); color:var(--ink); font-size:var(--text-ui); white-space:nowrap; }
     .chip:hover { border-color:var(--field-line-hover); }
     .chip .chip-value { color:var(--muted); }
@@ -112,27 +116,28 @@
     .chip[aria-expanded="true"] .chip-value { color:var(--purple); }
     .chip[data-on="true"]:not([aria-expanded="true"]) { border-color:var(--purple-line); }
     .chip[data-on="true"] .chip-value { color:var(--ink); }
-    .chip[data-invalid="true"]::after { content:""; width:6px; height:6px; border-radius:50%; background:var(--error-dot); }
+    .chip[data-invalid="true"]::after,#session-settings-toggle[data-invalid="true"]::after { content:""; width:6px; height:6px; border-radius:50%; background:var(--error-dot); }
     .chip-toggle { cursor:pointer; }
     .chip-toggle input { margin:0; accent-color:var(--purple); }
     .chip-toggle:has(input:disabled) { color:var(--muted); cursor:default; }
-    .option-panel { max-width:1160px; margin:8px auto 0; padding:12px 16px; border:1px solid var(--line); border-radius:var(--radius-md); background:var(--soft); }
+    .option-panel { max-width:1160px; margin:8px 0 0; padding:12px 16px; border:1px solid var(--line); border-radius:var(--radius-md); background:var(--soft); }
     .option-panel .knowledge-form-grid { margin:8px 0; }
     .option-panel .knowledge-note { margin:8px 0 0; }
     .option-panel #session-budgets > details > summary { display:none; }
     .option-panel #session-budgets .knowledge-note:first-of-type { margin-top:0; }
-    .settings-grid { display:flex; flex-wrap:wrap; gap:12px; max-width:1160px; margin:0 auto; }
-    .settings-grid > .field { flex:1 1 128px; }
-    .settings-grid > .model-field { flex:1.6 1 200px; }
+    .settings-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:12px; max-width:1160px; margin:0; }
+    .settings-grid > .model-field { grid-column:span 2; }
     .field-label { display:flex; align-items:center; gap:4px; }
-    .explain { display:inline-grid; place-items:center; width:16px; height:16px; padding:0; border:1px solid var(--field-line); border-radius:50%; background:transparent; color:var(--muted); font-size:var(--text-meta); line-height:var(--leading-tight); }
-    .explain:hover,.explain[aria-expanded="true"] { color:var(--purple); border-color:var(--purple-line); }
-    label.field { display:flex; flex-direction:column; gap:4px; color:var(--muted); font-size:var(--text-meta); min-width:0; }
+    .explain { position:relative; display:inline-grid; place-items:center; width:24px; height:24px; margin:-4px 0; padding:0; border:0; background:transparent; color:var(--muted); font-size:var(--text-meta); line-height:var(--leading-tight); }
+    .explain::before { content:""; position:absolute; inset:4px; border:1px solid var(--field-line); border-radius:50%; }
+    .explain:hover,.explain[aria-expanded="true"] { color:var(--purple); }
+    .explain:hover::before,.explain[aria-expanded="true"]::before { border-color:var(--purple-line); }
+    :is(label,div).field { display:flex; flex-direction:column; gap:4px; color:var(--muted); font-size:var(--text-ui); min-width:0; }
     input[type="text"],.field input[type="number"],select { width:100%; }
     .checkbox { display:flex; align-items:center; gap:8px; font-size:var(--text-ui); white-space:nowrap; color:var(--ink-2); }
     .checkbox input { accent-color:var(--purple); width:14px; height:14px; margin:0; }
-    .provider-hint { max-width:1160px; margin:8px auto 0; font-size:var(--text-ui); color:var(--warning); overflow-wrap:anywhere; }
-    .model-details { display:flex; align-items:center; flex-wrap:wrap; gap:8px 16px; max-width:1160px; margin:0 auto; }
+    .provider-hint { max-width:1160px; margin:8px 0 0; font-size:var(--text-ui); color:var(--warning); overflow-wrap:anywhere; }
+    .model-details { display:flex; align-items:center; flex-wrap:wrap; gap:8px 16px; max-width:1160px; margin:0 0; }
     .model-details:has(> :not([hidden])) { margin-top:8px; }
     .model-details .field { width:240px; max-width:100%; }
     .model-hint { flex:1; min-width:min(250px,100%); margin:0; color:var(--muted); font-size:var(--text-ui); line-height:var(--leading-body); overflow-wrap:anywhere; }
@@ -148,14 +153,14 @@
     .workspace-git { flex:1; min-width:min(230px,100%); color:var(--muted); font-size:var(--text-ui); }
     .workspace-git-header { display:flex; align-items:center; gap:12px; }
     .workspace-git-header > span { overflow-wrap:anywhere; }
-    .workspace-git-header .button { flex:none; padding:4px 8px; font-size:var(--text-ui); }
+    .workspace-git-header .button { flex:none; min-height:var(--control-height-sm); padding:0 8px; font-size:var(--text-ui); }
     .workspace-hint { margin:4px 0 0; line-height:var(--leading-body); overflow-wrap:anywhere; }
     .workspace-helper { font-size:var(--text-ui); color:var(--muted); line-height:var(--leading-body); }
     .workspace-error { width:100%; margin:0; font-size:var(--text-ui); color:var(--error); white-space:pre-wrap; overflow-wrap:anywhere; }
     .workspace-session-info { width:100%; color:var(--muted); font-size:var(--text-ui); margin:0; overflow-wrap:anywhere; }
     .workspace-session-info span { display:block; }
     .workspace-session-path { font-family:var(--font-mono); margin-top:4px; }
-    .fleet-settings { max-width:1160px; margin:12px auto 0; }
+    .fleet-settings { max-width:1160px; margin:12px 0 0; }
     .fleet-settings fieldset { border:0; padding:0; margin:0 0 12px; }
     .fleet-settings legend { padding:0; margin-bottom:8px; color:var(--muted); font-size:var(--text-meta); }
     .fleet-lenses { display:flex; flex-wrap:wrap; gap:12px 24px; }
@@ -199,10 +204,10 @@
     .clash-state.fixed,.clash-state.defended,.clash-state.proposed,.clash-state.deferred { color:var(--warning); background:var(--warning-soft); }
     @media (max-width:760px) { .fleet-settings-row { gap:12px; } .fleet-settings-row .field { width:calc(50% - 6px); } .fleet-settings-row > .checkbox { flex-basis:100%; } .fleet-progress { padding:16px; } .fleet-findings { gap:12px; } .fleet-finding { padding:12px; } .fleet-actions .button { min-height:40px; } }
     @media (max-width:760px) { .workspace-options { gap:8px 12px; margin-top:12px; } .workspace-options > .field { width:calc(50% - 7px); } .workspace-git { flex-basis:100%; } }
-    #sessions-view .configuration { flex:0 1 auto; max-height:min(60%,560px); overflow:auto; }
+    #sessions-view .configuration { flex:0 1 auto; max-height:min(60%,560px); overflow:auto; background:linear-gradient(var(--paper) 30%,transparent) center top / 100% 24px no-repeat local,linear-gradient(transparent,var(--paper) 70%) center bottom / 100% 24px no-repeat local,linear-gradient(var(--shadow),transparent) center top / 100% 8px no-repeat scroll,linear-gradient(transparent,var(--shadow)) center bottom / 100% 8px no-repeat scroll; background-color:var(--paper); }
     .conversation { overflow:auto; min-height:120px; flex:1 1 160px; scroll-behavior:smooth; }
-    .output-resizer { flex:none; height:12px; display:grid; place-items:center; cursor:row-resize; touch-action:none; user-select:none; background:transparent; }
-    .output-resizer::after { content:""; width:40px; height:4px; border-radius:var(--radius-sm); background:var(--line); }
+    .output-resizer { flex:none; height:16px; display:grid; place-items:center; cursor:row-resize; touch-action:none; user-select:none; background:transparent; }
+    .output-resizer::after { content:""; width:40px; height:4px; border-radius:var(--radius-sm); background:var(--field-line-hover); }
     .output-resizer:hover::after,.output-resizer:focus-visible::after { background:var(--purple); }
     #sessions-view.output-resized .configuration { flex:0 1 var(--configuration-height); min-height:0; max-height:none; overflow:auto; }
     #sessions-view.output-resized .conversation { flex:1 0 100px; }
@@ -230,10 +235,10 @@
     .waiting { display:flex; align-items:center; gap:8px; color:var(--muted); font-size:var(--text-ui); padding:8px 0 24px; }
     .waiting .status-dot { width:7px; height:7px; animation:pulse 1.5s ease-in-out infinite; }
     @keyframes pulse { 50% { opacity:.35; } }
-    .composer-area { padding:12px 32px 16px; background:var(--paper); flex:none; }
-    .composer-wrap { max-width:792px; margin:auto; }
+    .composer-area { padding:12px var(--page-x) 16px; background:var(--paper); flex:none; }
+    .composer-wrap { max-width:796px; margin:auto; }
     .composer { border:1px solid var(--field-line); border-radius:var(--radius-lg); padding:16px; box-shadow:0 2px 8px var(--composer-shadow); }
-    .composer:focus-within { border-color:var(--focus-line); box-shadow:0 0 0 2px var(--focus-glow); }
+    .composer:focus-within { border-color:var(--focus); box-shadow:0 0 0 2px var(--focus-glow); }
     .composer textarea { display:block; width:100%; resize:vertical; min-height:64px; max-height:210px; border:0; outline:0; background:transparent; color:var(--ink); padding:0 2px; font-size:var(--text-body); line-height:var(--leading-body); }
     .composer textarea::placeholder { color:var(--faint); }
     .composer-actions { display:flex; align-items:center; justify-content:space-between; gap:12px; padding-top:12px; }
@@ -244,13 +249,14 @@
     .composer-note { color:var(--muted); font-size:var(--text-ui); }
     .composer-caption { margin:8px 0 0; color:var(--faint); text-align:center; font-size:var(--text-ui); }
     .error-text { color:var(--error); font-size:var(--text-ui); margin:0 0 12px; white-space:pre-wrap; overflow-wrap:anywhere; }
-    .page-scroll { overflow:auto; padding:32px 48px; min-height:0; flex:1; }
-    .page-content { max-width:1000px; margin:auto; }
-    .view-tabs { display:flex; gap:4px; padding:0 24px; border-bottom:1px solid var(--line); overflow-x:auto; flex:none; }
+    .page-scroll { overflow:auto; padding:32px var(--page-x); min-height:0; flex:1; }
+    .page-content { max-width:1000px; margin:0; }
+    .view-tabs { display:flex; gap:4px; padding:0 calc(var(--page-x) - 8px); box-shadow:inset 0 -1px var(--line); overflow-x:auto; overflow-y:hidden; flex:none; }
     .view-tab { position:relative; padding:8px 8px 12px; border:0; background:transparent; color:var(--muted); font-size:var(--text-ui); white-space:nowrap; }
     .view-tab:hover { color:var(--ink); }
+    .view-tab:focus-visible { outline-offset:-3px; }
     .view-tab[aria-current="page"] { color:var(--ink); font-weight:var(--weight-strong); }
-    .view-tab[aria-current="page"]::after { content:""; position:absolute; left:8px; right:8px; bottom:-1px; height:2px; border-radius:var(--radius-sm); background:var(--purple); }
+    .view-tab[aria-current="page"]::after { content:""; position:absolute; left:8px; right:8px; bottom:0; height:2px; border-radius:var(--radius-sm); background:var(--purple); }
     .topbar:has(+ .view-tabs:not([hidden])) { border-bottom:0; }
     .results-toolbar { align-items:center; }
     .results-workspace { flex:1; min-width:0; margin:0; color:var(--muted); font-size:var(--text-ui); overflow-wrap:anywhere; white-space:pre-line; }
@@ -263,8 +269,8 @@
     .file-status,.file-size { color:var(--muted); font-size:var(--text-meta); }
     .file-size { text-align:right; }
     .empty-note { color:var(--muted); padding:32px 0; font-size:var(--text-body); }
-    .accelerator { display:grid; grid-template-columns:58px minmax(0,1fr); gap:24px; padding:32px 0; border-top:1px solid var(--line); }
-    .kit-number { font-family:var(--font-mono); font-size:var(--text-ui); color:var(--purple); padding-top:8px; }
+    .accelerator { display:grid; grid-template-columns:58px minmax(0,1fr); gap:24px; align-items:baseline; padding:32px 0; border-top:1px solid var(--line); }
+    .kit-number { font-family:var(--font-mono); font-size:var(--text-ui); color:var(--purple); padding-top:0; }
     .accelerator h3 { margin:0 0 8px; font-size:var(--text-title); font-weight:var(--weight-strong); }
     .accelerator p { color:var(--muted); font-size:var(--text-body); line-height:var(--leading-body); margin:0 0 16px; }
     .accelerator-actions { display:flex; align-items:flex-end; flex-wrap:wrap; gap:12px; }
@@ -275,7 +281,7 @@
     .catalog-frame { width:100%; border:0; min-height:0; flex:1; background:var(--paper); }
     .scrim { display:none; }
     .connection-loading { padding:16px 32px; color:var(--muted); font-size:var(--text-ui); }
-    .memory-page { display:flex; flex-direction:column; min-height:0; flex:1; padding:32px 32px; }
+    .memory-page { display:flex; flex-direction:column; min-height:0; flex:1; padding:32px var(--page-x); }
     .memory-toolbar { display:grid; grid-template-columns:minmax(150px,1fr) minmax(150px,1fr) auto; gap:12px; align-items:end; }
     .memory-filter { margin:16px 0 12px; }
     .memory-filter input { width:100%; }
@@ -297,10 +303,23 @@
     .memory-detail-meta { color:var(--muted); font-size:var(--text-meta); margin:8px 0 16px; }
     .memory-body { flex:1; min-height:0; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; margin:0; padding:24px; border:1px solid var(--line); border-radius:var(--radius); background:var(--soft); font:var(--text-ui)/var(--leading-body) var(--font-mono); }
     .memory-message { margin:0; padding:32px 12px; color:var(--muted); font-size:var(--text-body); }
-    .brain-link-config { max-width:1160px; margin:12px auto 0; }
+    .brain-link-config { max-width:1160px; margin:12px 0 0; }
+    #sdd-settings,#fleet-settings { padding:12px 16px; border:1px solid var(--line); border-radius:var(--radius-md); background:var(--soft); }
     .brain-link-config .knowledge-form-grid { margin:8px 0; gap:12px; }
     .brain-link-config .knowledge-note { margin:8px 0; }
-    .knowledge-note:empty,.agent-hint:empty,.fleet-note:empty,.workspace-hint:empty { display:none; }
+    :is(.knowledge-note,.agent-hint,.fleet-note,.workspace-hint):empty:not([role]),.fleet-report-text:empty,.knowledge-result:empty,.knowledge-form-grid:empty { display:none; }
+    .knowledge-note,.skills-note,.skills-source-detail { max-width:75ch; }
+    #results-view .page-content > section { margin-top:32px; padding-top:24px; border-top:1px solid var(--line); }
+    .option-panel .budget-scope { margin:0 0 12px; }
+    .budget-editor .button { margin-top:12px; }
+    .budget-split .knowledge-note { margin-bottom:12px; }
+    .setup-register .knowledge-note { margin-bottom:0; }
+    .folder-picker-actions { justify-content:flex-start; }
+    .folder-picker-actions > .checkbox { margin-left:auto; }
+    .file-status.missing { color:var(--warning); }
+    .chip-caret { width:6px; height:6px; margin:0 0 4px 4px; border-right:1.5px solid currentColor; border-bottom:1.5px solid currentColor; transform:rotate(45deg); opacity:.6; }
+    .chip[aria-expanded="true"] .chip-caret { margin:4px 0 0 4px; transform:rotate(225deg); }
+    [role="status"]:empty { margin:0; }
     .budget-editor .page-toolbar { flex-wrap:wrap; margin-bottom:8px; }
     .budget-editor .page-toolbar .field { width:200px; }
     .budget-split { margin-top:16px; }
@@ -368,7 +387,7 @@
     .setup-file-action.collision { color:var(--error); }
     .setup-result { margin:24px 0; padding:16px; border:1px solid var(--line); border-radius:var(--radius-md); background:var(--soft); }
     .setup-result-paths { max-height:260px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; font:var(--text-ui)/var(--leading-body) var(--font-mono); }
-    @media (max-width:760px) { .setup-register-row { grid-template-columns:1fr; } .setup-register-row .button { justify-self:start; } .setup-readiness-grid { grid-template-columns:1fr; } .setup-preview-controls { grid-template-columns:1fr; } .setup-provider { display:block; } .setup-provider span { display:block; } .setup-file summary { gap:8px; } }
+    @media (max-width:760px) { .setup-register-row { grid-template-columns:auto auto; justify-content:start; } .setup-register-row .field { grid-column:1 / -1; } .setup-readiness-grid { grid-template-columns:1fr; } .setup-preview-controls { grid-template-columns:1fr; } .setup-provider { display:block; } .setup-provider span { display:block; } .setup-file summary { gap:8px; } }
     .knowledge-page { overflow:auto; }
     .knowledge-page .memory-layout { flex:none; min-height:350px; }
     .knowledge-page .memory-files { max-height:530px; }
@@ -391,7 +410,7 @@
     .knowledge-search-result { padding:12px 0; border-top:1px solid var(--line); }
     .knowledge-search-result h4 { margin:0 0 8px; font-size:var(--text-ui); overflow-wrap:anywhere; }
     .knowledge-search-result p { white-space:pre-wrap; overflow-wrap:anywhere; font-size:var(--text-ui); line-height:var(--leading-body); margin:8px 0; }
-    .brain-filter-row { display:grid; grid-template-columns:160px minmax(0,1fr); gap:12px; align-items:center; margin-top:16px; }
+    .brain-filter-row { display:grid; grid-template-columns:160px minmax(0,1fr); gap:12px; align-items:center; margin:16px 0 12px; }
     .brain-filter-row .memory-filter { margin:0; }
     .brain-metadata { margin:0 0 12px; }
     .brain-metadata summary { font-size:var(--text-ui); cursor:pointer; color:var(--muted); }
@@ -450,19 +469,19 @@
     .create-skill-editor .skills-tools { margin:0; }
     .create-skill-editor .skills-note { margin:0; }
     .create-skill-editor .error-text { margin:0; font-size:var(--text-ui); }
-    .create-skill-editor .field > span:first-child { color:var(--ink-2); font-size:var(--text-ui); }
     .create-skill-helper { color:var(--muted); font-size:var(--text-ui); line-height:var(--leading-body); }
     .create-skill-footer { display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; }
     .create-skill-preview-content { max-height:460px; overflow:auto; margin:16px 0 24px; padding:16px; border:1px solid var(--line); border-radius:var(--radius); background:var(--soft); white-space:pre-wrap; overflow-wrap:anywhere; font:var(--text-ui)/var(--leading-body) var(--font-mono); }
     .create-skill-preview-heading { margin:24px 0 0; font-size:var(--text-ui); font-weight:var(--weight-strong); }
     @media (max-width:760px) { .create-skill-grid { grid-template-columns:1fr; gap:16px; } .create-skill-editor #create-skill-instructions { min-height:230px; } .create-skill-preview-content { padding:12px; } }
     @media (max-width:760px) { .skills-toolbar { grid-template-columns:1fr 1fr; gap:12px; } .skills-toolbar .button { grid-column:1 / -1; justify-self:start; } .skills-preview,.skills-result { padding:16px; } .skills-list { max-height:330px; } .skill-choice { padding:12px; } .skills-installed-toolbar { display:block; } .skills-installed-controls { margin-top:12px; } .skills-actions .button { min-height:40px; } }
-    @media (max-width:1000px) { .memory-page { padding:24px; } .memory-layout { gap:16px; grid-template-columns:minmax(180px,.85fr) minmax(0,1.5fr); } .memory-body { padding:16px; } }
-    @media (max-width:760px) { .memory-page { padding:24px 24px; overflow:auto; } .memory-toolbar { grid-template-columns:1fr 1fr; gap:12px; } .memory-toolbar .button { grid-column:1 / -1; justify-self:start; } .memory-layout { display:block; flex:none; } .memory-files { max-height:235px; } .memory-details { padding-top:24px; } .memory-body { min-height:240px; max-height:65vh; } }
-    @media (min-width:1650px) { .app { grid-template-columns:275px minmax(0,1fr); } .topbar { padding-inline:48px; } }
-    @media (max-width:1150px) { .app { grid-template-columns:222px minmax(0,1fr); } .topbar,.configuration { padding-inline:24px; } .composer-area { padding-inline:24px; } .page-scroll { padding:32px; } }
-    @media (max-width:760px) { .app { grid-template-columns:minmax(0,1fr); } .sidebar { position:fixed; z-index:20; inset:0 auto 0 0; width:265px; transform:translateX(-100%); transition:transform .18s ease; } .sidebar[data-open="true"] { transform:translateX(0); box-shadow:12px 0 40px var(--shadow); } .composer-note.shortcut { display:none; } .scrim[data-open="true"] { display:block; position:fixed; inset:0; background:var(--scrim); z-index:19; border:0; border-radius:0; } .menu-toggle { display:inline-flex; margin-left:-8px; } .topbar { min-height:56px; padding:8px 16px; gap:12px; } .view-tabs { padding:0 8px; } .topbar-heading { display:flex; align-items:center; gap:12px; min-width:0; } .header-actions { gap:8px; } .header-actions .button { padding:0 8px; } .configuration { padding:12px 16px; } .settings-grid { gap:8px; } .settings-grid > .field { flex-basis:calc(50% - 4px); } .conversation-inner { padding:24px 24px 8px; } .welcome { margin:32px auto; } .welcome-links { gap:8px; margin-top:24px; } .composer-area { padding:12px 16px 12px; } .composer { padding:12px; } .page-scroll { padding:24px 24px; } .accelerator { grid-template-columns:43px minmax(0,1fr); gap:16px; } .banner { margin:12px 16px 0; gap:12px; padding:12px; } .file-row { grid-template-columns:minmax(0,1fr) 62px 50px; gap:8px; } }
-    @media (max-width:400px) { .header-actions .status { max-width:65px; white-space:normal; line-height:var(--leading-tight); } .topbar h1 { max-width:150px; } .composer-note { max-width:135px; } .accelerator-actions { display:block; } .accelerator-actions .button { margin-top:12px; } }
+    @media (max-width:1000px) { .memory-page { padding-block:24px; } .memory-layout { gap:16px; grid-template-columns:minmax(180px,.85fr) minmax(0,1.5fr); } .memory-body { padding:16px; } }
+    @media (max-width:760px) { .memory-page { padding-block:24px; overflow:auto; } .memory-files { border-bottom:1px solid var(--line); } .memory-toolbar { grid-template-columns:1fr 1fr; gap:12px; } .memory-toolbar .button { grid-column:1 / -1; justify-self:start; } .memory-layout { display:block; flex:none; } .memory-files { max-height:235px; } .memory-details { padding-top:24px; } .memory-body { min-height:240px; max-height:65vh; } }
+    @media (min-width:1650px) { .app { grid-template-columns:275px minmax(0,1fr); } :root { --page-x:48px; } }
+    @media (max-width:1150px) { .app { grid-template-columns:222px minmax(0,1fr); } :root { --page-x:24px; } }
+    @media (max-width:760px) { .app { grid-template-columns:minmax(0,1fr); } .sidebar { position:fixed; z-index:20; inset:0 auto 0 0; width:265px; transform:translateX(-100%); transition:transform .18s ease; } .sidebar[data-open="true"] { transform:translateX(0); box-shadow:12px 0 40px var(--shadow); } .composer-note.shortcut { display:none; } .page-toolbar { flex-wrap:wrap; } .page-toolbar .field { flex:1 1 calc(50% - 6px); width:auto; max-width:none; } #check-form .page-toolbar .field:last-child,#delivery-preview-form .page-toolbar .field:last-child { flex:none; width:120px; } #creator-form .page-toolbar { grid-template-columns:repeat(2,minmax(0,1fr)); } .header-actions .status { font-size:0; gap:0; } .composer-actions { flex-wrap:wrap; } .composer-note { order:-1; flex-basis:100%; max-width:none; } .chip { white-space:normal; } .session-summary { flex-wrap:wrap; } .session-summary-text { white-space:normal; } .scrim[data-open="true"] { display:block; position:fixed; inset:0; background:var(--scrim); z-index:19; border:0; border-radius:0; } .menu-toggle { display:inline-flex; margin-left:-8px; } :root { --page-x:16px; } .topbar { min-height:56px; padding-block:8px; gap:12px; } .topbar-heading { display:flex; align-items:center; gap:12px; min-width:0; } .header-actions { gap:8px; } .header-actions .button { padding:0 8px; } .configuration { padding-block:12px; } .settings-grid { gap:8px; grid-template-columns:repeat(2,minmax(0,1fr)); } .conversation-inner { padding:24px 24px 8px; } .welcome { margin:32px auto; } .welcome-links { gap:8px; margin-top:24px; } .composer-area { padding-block:12px; } .composer { padding:12px; } .page-scroll { padding-block:24px; } .accelerator { grid-template-columns:minmax(0,1fr); gap:8px; } .kit-number { display:none; } .banner { margin-top:12px; gap:12px; padding:12px; } .file-row { grid-template-columns:minmax(0,1fr) 62px 50px; gap:8px; } }
+    @media (max-width:400px) { .header-actions .status { max-width:65px; white-space:normal; line-height:var(--leading-tight); } .accelerator-actions { display:block; } .accelerator-actions .button { margin-top:12px; } }
+    @media (forced-colors:active) { .chip[aria-expanded="true"],.view-tab[aria-current="page"],.nav-item[aria-current="page"] { outline:2px solid Highlight; } .chip[data-invalid="true"]::after,#session-settings-toggle[data-invalid="true"]::after,.view-tab[aria-current="page"]::after,.output-resizer::after { background:Highlight; forced-color-adjust:none; } }
     @media (prefers-reduced-motion:reduce) { * { scroll-behavior:auto !important; transition:none !important; animation:none !important; } }
   </style>
 </head>
@@ -486,31 +505,32 @@
         <div class="theme-control"><span id="theme-label">Theme</span><div class="theme-switch" role="radiogroup" aria-labelledby="theme-label"><label title="Match the system theme"><input type="radio" name="theme" value="system"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h18v12H3Z M8 20h8 M12 16v4"/></svg><span class="sr-only">System</span></label><label title="Light theme"><input type="radio" name="theme" value="light"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2.5 M12 19.5V22 M2 12h2.5 M19.5 12H22 M4.9 4.9l1.8 1.8 M17.3 17.3l1.8 1.8 M4.9 19.1l1.8-1.8 M17.3 6.7l1.8-1.8"/></svg><span class="sr-only">Light</span></label><label title="Dark theme"><input type="radio" name="theme" value="dark"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z"/></svg><span class="sr-only">Dark</span></label></div></div></div>
     </aside>
     <main class="main" id="main" tabindex="-1">
-      <header class="topbar"><div class="topbar-heading"><button class="icon-button menu-toggle" id="menu-toggle" type="button" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 6h16 M4 12h16 M4 18h16"/></svg></button><div class="topbar-title"><h1 id="page-title">AI Infrastructure Harness</h1><p id="page-subtitle">Your local workspace for agent sessions</p></div></div><div class="header-actions"><a class="button" id="open-kit3" href="/kit3/" target="_blank" rel="noopener noreferrer" hidden>Open in new tab ↗</a><span class="status" id="session-status" role="status" hidden></span><button type="button" class="button danger" id="cancel-session" hidden>Cancel session</button></div></header>
+      <header class="topbar"><div class="topbar-heading"><button class="icon-button menu-toggle" id="menu-toggle" type="button" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 6h16 M4 12h16 M4 18h16"/></svg></button><div class="topbar-title"><h1 id="page-title">AI Infrastructure Harness</h1><p id="page-subtitle">Your local workspace for agent sessions</p></div></div><div class="header-actions"><a class="button" id="open-kit3" href="/kit3/" target="_blank" rel="noopener noreferrer" hidden>Open catalog in new tab ↗</a><span class="status" id="session-status" role="status" hidden></span><button type="button" class="button danger" id="cancel-session" hidden>Cancel session</button></div></header>
       <nav class="view-tabs" id="view-tabs" aria-label="Section views" hidden></nav>
-      <div class="banner" id="connection-banner" role="alert" hidden><p id="connection-message"></p><button type="button" id="reconnect">Reconnect</button></div>
+      <h2 class="sr-only" id="view-heading" tabindex="-1"></h2>
+      <div class="banner" id="connection-banner" role="alert" hidden><p id="connection-message"></p><button type="button" class="button compact" id="reconnect">Reconnect</button></div>
       <div class="connection-loading" id="connecting" role="status">Loading projects and native providers…</div>
       <section class="view" id="sessions-view" aria-label="Agent sessions">
         <div class="configuration">
           <div class="session-summary" id="session-summary" hidden><p class="session-summary-text" id="session-summary-text"></p><button class="button compact" id="session-settings-toggle" type="button" aria-expanded="false" aria-controls="session-settings">Next-turn settings</button></div>
+          <p class="provider-hint" id="provider-hint" role="status" hidden></p>
           <div class="session-settings" id="session-settings">
           <div class="settings-grid">
             <label class="field">Project<select id="project" form="session-form" required><option value="">Loading projects…</option></select></label>
             <label class="field">Provider<select id="provider" form="session-form" required aria-describedby="provider-hint"><option value="">Loading providers…</option></select></label>
             <label class="field">Workflow<select id="workflow" form="session-form" required><option value="native">Native</option></select></label>
             <label class="field">Mode<select id="mode" form="session-form"><option value="plan">Plan</option><option value="edit">Edit</option></select></label>
-            <label class="field model-field"><span class="field-label">Model<button class="explain" type="button" aria-controls="model-hint" aria-expanded="false" aria-label="About model choices">?</button></span><select id="model-choice" form="session-form" aria-describedby="model-hint"><option value="">Provider default</option></select></label>
+            <div class="field model-field"><span class="field-label"><label for="model-choice">Model</label><button class="explain" type="button" aria-controls="model-hint" aria-expanded="false" aria-label="About model choices">?</button></span><select id="model-choice" form="session-form" aria-describedby="model-hint"><option value="">Provider default</option></select></div>
             <label class="field">Thinking effort<select id="thinking-effort" form="session-form" aria-describedby="model-hint agent-mode-error"><option value="">Provider default</option></select></label>
           </div>
           <div class="model-details"><label class="field" id="custom-model-field" hidden>Custom model ID<input id="model" form="session-form" type="text" placeholder="Exact native model ID" autocomplete="off" maxlength="120" aria-describedby="model-hint model-error" disabled></label><p class="model-hint" id="model-hint"></p><p class="model-error" id="model-error" role="alert" hidden></p><p class="model-error" id="agent-mode-error" role="alert" hidden></p></div>
-          <p class="provider-hint" id="provider-hint" role="status" hidden></p>
           <section class="brain-link-config" id="sdd-settings" aria-label="Spec-Driven Development" hidden>
             <div class="knowledge-form-grid">
               <label class="field">Feature slug<input id="sdd-feature" form="session-form" maxlength="80" pattern="[a-z0-9]+(-[a-z0-9]+)*" placeholder="user-authentication" aria-describedby="sdd-slug-hint sdd-hint sdd-error" disabled>
               <span class="workspace-helper" id="sdd-slug-hint">Lowercase letters, digits and single hyphens; not “memory”.</span></label><label class="field">SDD phase<select id="sdd-phase" form="session-form" aria-describedby="sdd-hint" disabled></select></label>
             </div>
             <p class="knowledge-note" id="sdd-hint" role="status"></p>
-            <p class="knowledge-note">Phases never advance on their own. Writing phases edit files; Review only reads.</p>
+            <p class="knowledge-note">Phases never advance on their own. Writing phases have full edit access, and only instructions keep them to their documents; Review only reads.</p>
             <p class="error-text" id="sdd-error" role="alert" hidden></p>
             <button class="button" type="button" id="sdd-refresh" disabled>Read SDD documents</button>
             <div id="sdd-documents"></div>
@@ -518,12 +538,12 @@
           <div class="fleet-settings" id="fleet-settings" hidden><fieldset aria-describedby="fleet-config-error"><legend>Reviewers</legend><div class="fleet-lenses" id="fleet-lenses"></div></fieldset><div class="fleet-settings-row"><label class="checkbox"><input id="fleet-dry-run" form="session-form" type="checkbox" aria-describedby="fleet-runtime-detail">Offline dry-run</label><label class="field">Budget USD (optional)<input id="fleet-budget" form="session-form" type="number" min="0.01" max="1000" step="any" placeholder="No budget" aria-describedby="fleet-budget-hint fleet-config-error"></label><label class="field">Reviewer timeout (seconds)<input id="fleet-worker-timeout" form="session-form" type="number" min="1" max="3600" step="1" value="300" required aria-describedby="fleet-config-error"></label></div><p class="fleet-note" id="fleet-budget-hint"></p><p class="fleet-note" id="fleet-runtime-detail"></p><p class="fleet-error" id="fleet-config-error" role="alert" hidden></p></div>
           <div class="option-bar" role="group" aria-label="Session options">
             <label class="chip chip-toggle"><input id="project-context" form="session-form" type="checkbox" checked>Project context</label>
-            <button class="chip" type="button" id="option-helpers" aria-expanded="false" aria-controls="panel-helpers"><span id="option-helpers-label">Helpers</span><span class="chip-value" id="option-helpers-value"></span></button>
-            <button class="chip" type="button" id="option-clash" aria-expanded="false" aria-controls="panel-clash">Clash<span class="chip-value" id="option-clash-value"></span></button>
-            <button class="chip" type="button" id="option-workspace" aria-expanded="false" aria-controls="panel-workspace">Run in<span class="chip-value" id="option-workspace-value"></span></button>
-            <button class="chip" type="button" id="option-brain" aria-expanded="false" aria-controls="panel-brain">Brain task<span class="chip-value" id="brain-link-summary"></span></button>
-            <button class="chip" type="button" id="option-budgets" aria-expanded="false" aria-controls="panel-budgets">Budgets<span class="chip-value" id="option-budgets-value"></span></button>
-            <button class="chip" type="button" id="option-models" aria-expanded="false" aria-controls="panel-models">Models<span class="chip-value" id="model-routing-summary"></span></button>
+            <button class="chip" type="button" id="option-helpers" aria-expanded="false" aria-controls="panel-helpers"><span id="option-helpers-label">Helpers</span><span class="chip-value" id="option-helpers-value"></span><span class="chip-caret" aria-hidden="true"></span></button>
+            <button class="chip" type="button" id="option-clash" aria-expanded="false" aria-controls="panel-clash">Clash<span class="chip-value" id="option-clash-value"></span><span class="chip-caret" aria-hidden="true"></span></button>
+            <button class="chip" type="button" id="option-workspace" aria-expanded="false" aria-controls="panel-workspace">Run in<span class="chip-value" id="option-workspace-value"></span><span class="chip-caret" aria-hidden="true"></span></button>
+            <button class="chip" type="button" id="option-brain" aria-expanded="false" aria-controls="panel-brain">Brain task<span class="chip-value" id="brain-link-summary"></span><span class="chip-caret" aria-hidden="true"></span></button>
+            <button class="chip" type="button" id="option-budgets" aria-expanded="false" aria-controls="panel-budgets">Budgets<span class="chip-value" id="option-budgets-value"></span><span class="chip-caret" aria-hidden="true"></span></button>
+            <button class="chip" type="button" id="option-models" aria-expanded="false" aria-controls="panel-models">Models<span class="chip-value" id="model-routing-summary"></span><span class="chip-caret" aria-hidden="true"></span></button>
           </div>
           <div class="option-panel" id="panel-helpers" role="region" aria-labelledby="option-helpers" hidden>
           <div class="agent-options"><label class="checkbox"><input id="agents-enabled" form="session-form" type="checkbox" aria-describedby="agent-hint agent-mode-error">Use additional agents</label><label class="agent-count-field" for="agent-count"><span id="agent-count-label">Required helpers</span><input id="agent-count" form="session-form" type="number" min="1" max="40" step="1" value="3" required disabled aria-describedby="agent-hint agent-count-error"></label><p class="agent-hint" id="agent-hint"></p><p class="agent-error" id="agent-count-error" role="alert" hidden></p></div>
@@ -570,7 +590,7 @@
         <div class="conversation" id="conversation"><div class="conversation-inner">
           <div class="welcome" id="welcome"><svg class="welcome-mark" viewBox="0 0 40 40" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true"><path d="m20 3 15 8v18l-15 8-15-8V11Z M5 11l15 9 15-9 M20 20v17"/></svg><h2>What are we working on?</h2><div class="welcome-links"><button class="button" type="button" data-view="context">Explore project context</button><button class="button" type="button" data-view="accelerators">Choose an accelerator</button></div></div>
           <section class="linked-context" id="linked-context" aria-label="Linked task and retrieved context" hidden><div class="linked-toolbar"><h2 id="linked-context-title">Linked Brain task</h2><span id="linked-context-state" class="knowledge-note" role="status"></span></div><p class="linked-task-meta" id="linked-context-target"></p><p class="knowledge-note" id="linked-context-note"></p><details id="linked-capsule-details"><summary>Retrieved context capsule</summary><pre class="knowledge-result" id="linked-capsule" tabindex="0"></pre></details><form id="linked-context-form"><div class="knowledge-form-grid"><label class="field wide">Context query<textarea id="linked-context-query" maxlength="4000" rows="2" required></textarea></label></div><div class="knowledge-actions"><button class="button" id="linked-context-refresh" type="submit">Refresh context</button><button class="button primary" id="linked-context-run" type="button" hidden>Run with this context</button></div></form><p class="error-text" id="linked-context-error" role="alert" hidden></p></section>
-          <section class="fleet-progress" id="fleet-progress" aria-label="Fleet review progress" hidden><div class="fleet-progress-header"><h2>Fleet review</h2><span class="fleet-stage" id="fleet-stage" role="status"></span></div><p class="fleet-note" id="fleet-run-detail"></p><p class="fleet-note" id="fleet-brain-note" hidden></p><div class="fleet-reviewers" id="fleet-reviewers" aria-label="Reviewer progress"></div><div class="fleet-actions" id="fleet-resume-actions" hidden><button class="button" id="fleet-resume" type="button">Resume review</button><span class="fleet-note">Continue from the saved checkpoint.</span></div><p class="fleet-error" id="fleet-action-error" role="alert" hidden></p></section>
+          <section class="fleet-progress" id="fleet-progress" aria-label="Fleet review progress" hidden><div class="fleet-progress-header"><h2>Fleet review</h2><span class="fleet-stage" id="fleet-stage" role="status"></span></div><p class="fleet-note" id="fleet-run-detail"></p><p class="fleet-note" id="fleet-brain-note" hidden></p><div class="fleet-reviewers" id="fleet-reviewers" aria-label="Reviewer progress"></div><div class="fleet-actions" id="fleet-resume-actions" hidden><button class="button" id="fleet-resume" type="button">Resume review</button><span class="fleet-note">Continue from the saved checkpoint. Save budget changes first; earlier spending still counts.</span></div><p class="fleet-error" id="fleet-action-error" role="alert" hidden></p></section>
           <div id="events" role="log" aria-label="Session messages" aria-live="polite" aria-relevant="additions"></div>
           <section class="fleet-outcome" id="clash-outcome" aria-label="Clash ledger and outcome" hidden><h3 id="clash-outcome-title">Clash ledger</h3><p class="fleet-note" id="clash-outcome-summary" role="status"></p><p class="fleet-note" id="clash-verdict-note" hidden></p><div class="fleet-findings" id="clash-items"></div><details class="fleet-report" id="clash-turns"><summary>Turns</summary><div id="clash-turn-list"></div></details><details class="fleet-report" id="clash-report" hidden><summary>Ledger report</summary><pre class="fleet-report-text" id="clash-report-text" tabindex="0"></pre></details></section>
           <section class="fleet-outcome" id="fleet-outcome" aria-label="Fleet review findings and report" hidden><h3 id="fleet-outcome-title">Review findings</h3><p class="fleet-note" id="fleet-result-summary" role="status"></p><p class="fleet-note" id="fleet-skipped" hidden></p><div class="fleet-findings" id="fleet-findings"></div><details class="fleet-report" id="fleet-report" hidden><summary>Report preview</summary><pre class="fleet-report-text" id="fleet-report-text" tabindex="0"></pre></details><p class="fleet-note" id="fleet-decision-hint"></p><div class="fleet-actions"><div class="fleet-actions" id="fleet-decision-actions" hidden><button class="button primary" id="fleet-approve" type="button">Approve report</button><button class="button" id="fleet-reject" type="button">Reject report</button></div><a class="button" id="fleet-download" download hidden>Download report</a></div></section>
@@ -578,7 +598,7 @@
           <div class="waiting" id="waiting" role="status" hidden><span class="status-dot running"></span><span id="waiting-text">Session running…</span></div>
           <p class="error-text" id="events-error" role="alert" hidden></p>
         </div></div>
-        <div class="composer-area" id="composer-area"><div class="composer-wrap"><p class="error-text" id="composer-error" role="alert" hidden></p><form class="composer" id="session-form"><label class="sr-only" id="prompt-label" for="prompt">Task or follow-up message</label><textarea id="prompt" placeholder="Describe a task for this project…" required rows="3"></textarea><input id="attachment-input" type="file" multiple hidden><div class="attachment-list" id="attachment-list" aria-label="Files to attach" hidden></div><p class="error-text" id="attachment-error" role="alert" hidden></p><div class="composer-actions"><button class="button attach-button" id="attach-files" type="button" aria-describedby="attachment-hint">Attach files</button><span class="composer-note" id="composer-note">Ctrl / ⌘ + Enter to send</span><button class="button primary" id="send" type="submit" disabled><span id="send-label">Start session</span><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 19V5 M6 11l6-6 6 6"/></svg></button></div><p class="composer-note" id="attachment-hint" hidden>Up to 5 files · 4 MiB each · 8 MiB total. Files are sent with your message.</p></form><p class="composer-caption" id="composer-caption" hidden></p></div></div>
+        <div class="composer-area" id="composer-area"><div class="composer-wrap"><p class="error-text" id="composer-error" role="alert" hidden></p><form class="composer" id="session-form" novalidate><label class="sr-only" id="prompt-label" for="prompt">Task or follow-up message</label><textarea id="prompt" placeholder="Describe a task for this project…" required rows="3"></textarea><input id="attachment-input" type="file" multiple hidden><div class="attachment-list" id="attachment-list" aria-label="Files to attach" hidden></div><p class="error-text" id="attachment-error" role="alert" hidden></p><div class="composer-actions"><button class="button attach-button" id="attach-files" type="button" aria-describedby="attachment-hint">Attach files</button><span class="composer-note" id="composer-note">Ctrl / ⌘ + Enter to send</span><button class="button primary" id="send" type="submit" disabled><span id="send-label">Start session</span><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 19V5 M6 11l6-6 6 6"/></svg></button></div><p class="composer-note" id="attachment-hint" hidden>Up to 5 files · 4 MiB each · 8 MiB total. Files are sent with your message.</p></form><p class="composer-caption" id="composer-caption" hidden></p></div></div>
       </section>
       <section class="view" id="results-view" aria-label="Results and verification" hidden><div class="page-scroll"><div class="page-content">
         <div class="page-toolbar results-toolbar"><p class="results-workspace" id="results-workspace"></p><button type="button" class="button" id="results-refresh">Refresh results</button></div>
@@ -612,14 +632,14 @@
       <section class="view" id="creator-view" aria-label="Infrastructure Creator" hidden><div class="page-scroll"><div class="page-content">
         <form id="creator-form">
           <div class="page-toolbar"><label class="field">Project<select id="creator-project"></select></label><label class="field">Operation<select id="creator-operation"><option value="generate">Create accelerator</option><option value="update">Update existing accelerator</option></select></label></div>
-          <div class="page-toolbar"><label class="field">Provider<select id="creator-provider"></select></label><label class="field"><span class="field-label">Model<button class="explain" type="button" aria-controls="creator-model-detail" aria-expanded="false" aria-label="About model choices">?</button></span><input id="creator-model" type="text" list="creator-models" placeholder="Provider default" maxlength="160"><datalist id="creator-models"></datalist></label><label class="field">Thinking effort<select id="creator-effort"></select></label></div>
+          <div class="page-toolbar"><label class="field">Provider<select id="creator-provider"></select></label><div class="field"><span class="field-label"><label for="creator-model">Model</label><button class="explain" type="button" aria-controls="creator-model-detail" aria-expanded="false" aria-label="About model choices">?</button></span><input id="creator-model" type="text" list="creator-models" placeholder="Provider default" maxlength="160"><datalist id="creator-models"></datalist></div><label class="field">Thinking effort<select id="creator-effort"></select></label></div>
           <p class="knowledge-note" id="creator-model-detail" hidden></p>
           <div class="page-toolbar"><label class="field">Workspace<select id="creator-workspace"><option value="project">Current project folder</option><option value="worktree">New Git worktree</option></select></label><label class="field" id="creator-branch-field" hidden>New branch<input type="text" id="creator-branch" maxlength="256" placeholder="Automatic branch name"></label><button type="button" class="button" id="creator-refresh">Refresh</button></div>
           <p class="knowledge-note" id="creator-git" role="status"></p>
           <div class="agent-options"><label class="checkbox"><input id="creator-agents" type="checkbox">Use additional agents</label><label class="agent-count-field">Required helpers<input id="creator-count" type="number" min="1" max="40" value="3" disabled></label></div><p class="knowledge-note" id="creator-agent-hint"></p>
           <fieldset class="skills-tools"><legend>Generate integrations for</legend><div class="skills-tool-options"><label class="checkbox"><input type="checkbox" name="creator-tool" value="claude" checked>Claude Code</label><label class="checkbox"><input type="checkbox" name="creator-tool" value="codex" checked>Codex</label><label class="checkbox"><input type="checkbox" name="creator-tool" value="cursor" checked>Cursor</label></div></fieldset>
           <label class="field">Requirements (optional)<textarea id="creator-goal" rows="3" maxlength="8000" placeholder="Project constraints and the accelerator you need"></textarea></label>
-          <p class="knowledge-note">PHP projects only. Scans run sandboxed with your project read-only; applying files is a separate review.<span id="creator-worktree-note" hidden> Worktrees start from committed HEAD.</span></p>
+          <p class="knowledge-note">PHP projects only. Scan and generate run sandboxed with your project read-only; applying files is a separate review.<span id="creator-worktree-note" hidden> Worktrees start from committed HEAD.</span></p>
           <div id="creator-budgets"></div>
           <button type="submit" class="button primary" id="creator-start">Start scan</button>
         </form>
@@ -675,7 +695,7 @@
         <p class="skills-action-status" id="skills-action-status" role="status" hidden></p><p class="error-text" id="skills-action-error" role="alert" hidden></p>
         <section class="skills-preview" id="skills-preview" aria-label="Installation preview" hidden><h3>Files to install</h3><p class="skills-preview-context" id="skills-preview-context"></p><p id="skills-preview-summary"></p><div class="skills-file-list" id="skills-preview-files"></div><p class="skills-note" id="skills-preview-note"></p><button class="button primary" id="skills-install" type="button" disabled>Install selected skills</button></section>
         <section class="skills-result" id="skills-result" aria-label="Installation result" hidden><h3>Installation complete</h3><p class="skills-note">Start a new session to load the installed skills.</p><p class="skills-preview-context" id="skills-result-context"></p><p id="skills-result-summary"></p><div class="skills-file-list" id="skills-result-files"></div></section>
-        <section class="skills-installed" aria-label="Installed skills"><div class="skills-installed-toolbar"><h3>Installed in this project</h3><div class="skills-installed-controls"><label class="sr-only" for="skills-installed-agent">Filter installed skills by tool</label><select id="skills-installed-agent"><option value="">All tools</option></select><button class="button" id="skills-installed-refresh" type="button">Refresh</button></div></div><p class="skills-note" id="skills-installed-status" role="status"></p><details class="skills-untracked-help" id="skills-untracked-help" hidden><summary>Why untracked?</summary><p class="skills-note">Installed outside Harness: no saved source or file hashes. To track one, preview it from its source; your files are kept.</p></details><p class="error-text" id="skills-installed-error" role="alert" hidden></p><div id="skills-installed-list"></div></section>
+        <section class="skills-installed" aria-label="Installed skills"><div class="skills-installed-toolbar"><h3>Installed in this project</h3><div class="skills-installed-controls"><label class="sr-only" for="skills-installed-agent">Filter installed skills by tool</label><select id="skills-installed-agent"><option value="">All tools</option></select><button class="button" id="skills-installed-refresh" type="button">Refresh</button></div></div><p class="skills-note" id="skills-installed-status" role="status"></p><details class="skills-untracked-help" id="skills-untracked-help" hidden><summary>Why untracked?</summary><p class="skills-note">No saved source or file hashes, for example after Setup or Creator installed them. To track one, preview it from its source; your files are kept.</p></details><p class="error-text" id="skills-installed-error" role="alert" hidden></p><div id="skills-installed-list"></div></section>
         <p class="error-text" id="skills-change-error" role="alert" hidden></p>
         <section class="skills-preview" id="skills-change" aria-label="Skill change preview" hidden><h3 id="skills-change-title">Review skill change</h3><p id="skills-change-context" class="skills-note"></p><p id="skills-change-version" class="skills-installed-path"></p><p id="skills-change-summary" role="status"></p><div id="skills-change-files"></div><p class="skills-note" id="skills-change-note"></p><button class="button" id="skills-change-apply" type="button" disabled>Apply reviewed update</button></section>
         <pre class="skills-result" id="skills-change-result" role="status" hidden></pre>
@@ -894,8 +914,8 @@
       details.append(el('p','knowledge-note budget-scope')); details.lastChild.id=id+'-scope';
       const fields=el('div','page-toolbar');
       for(const [key,label,min,max,step,placeholder] of [['usd','Money (USD)',.01,1000,'any','No cap'],['tokens','Total tokens',1,1000000000,1,'No cap'],['seconds','Time (seconds)',1,86400,1,'No time limit']]) {
-        const field=el('label','field'), name=el('span','field-label',label); field.append(name); const input=el('input'); input.id=id+'-'+key;
-        if(key==='tokens') { const explain=el('button','explain','?'); explain.type='button'; explain.setAttribute('aria-label','About total tokens'); explain.setAttribute('aria-expanded','false'); explain.setAttribute('aria-controls',id+'-tokens-explain'); name.append(explain); } input.type='number'; input.min=min; input.max=max; input.step=step; input.placeholder=placeholder; input.setAttribute('aria-describedby',id+'-hint '+id+'-error'); field.append(input); fields.append(field);
+        const field=el(key==='tokens'?'div':'label','field'), name=el('span','field-label',key==='tokens'?undefined:label); field.append(name); const input=el('input'); input.id=id+'-'+key;
+        if(key==='tokens') { const text=el('label','',label); text.htmlFor=input.id; const explain=el('button','explain','?'); explain.type='button'; explain.setAttribute('aria-label','About total tokens'); explain.setAttribute('aria-expanded','false'); explain.setAttribute('aria-controls',id+'-tokens-explain'); name.append(text,explain); } input.type='number'; input.min=min; input.max=max; input.step=step; input.placeholder=placeholder; input.setAttribute('aria-describedby',id+'-hint '+id+'-error'); field.append(input); fields.append(field);
       }
       const tokensExplain=el('p','knowledge-note','Tokens include input, output and cached input.'); tokensExplain.id=id+'-tokens-explain'; tokensExplain.hidden=true;
       details.append(fields,tokensExplain);
@@ -937,13 +957,13 @@
     }
     function agentBudgetControls(id,provider,locked) {
       const population=agentBudgetPopulation(id), {fleet,count,concurrent,waves}=population;
-      $(id+'-split').hidden=!fleet && count===1;
+      $(id+'-split').hidden=!fleet && count===1; if($(id+'-split').hidden) for(const key of ['usd','tokens','seconds']) $(id+'-agent-'+key).value='';
       const supported=fleet ? fleetBudgetSupported() : provider==='claude';
       for(const key of ['usd','tokens','seconds']) $(id+'-agent-'+key).disabled=locked || key==='usd' && !supported;
       $(id+'-agent-seconds').max=fleet?maxFleetTimeout():86400;
       const totals=id==='session-budgets'?sessionBudgets():readBudgets(id), seconds=totals.seconds;
       const money=totals.usd===null?'uncapped':`~$${Math.floor(totals.usd*1000000/count)/1000000}`;
-      const tokens=totals.tokens===null?'uncapped':`${Math.floor(totals.tokens/count)} (${totals.tokens%count} tokens unallocated)`;
+      const tokens=totals.tokens===null?'uncapped':`${Math.floor(totals.tokens/count).toLocaleString()} tokens${totals.tokens%count ? ` (${totals.tokens%count} unallocated)` : ''}`;
       const time = seconds===null ? (fleet ? `up to ${fleetSettings().worker_timeout}s per reviewer, no shared time limit` : 'no time limit') : `up to ${fleet?Math.min(seconds,fleetSettings().worker_timeout):seconds}s within ${seconds}s shared time`;
       const entered=[totals.usd,totals.tokens,totals.seconds].some(value=>value!==null) || ['usd','tokens','seconds'].some(key=>$(id+'-agent-'+key).value);
       $(id+'-agent-summary').textContent=!count || !concurrent ? 'Select reviewers and a valid concurrency limit.' : entered ? `Per ${fleet?'reviewer':'agent'} (${count} ${fleet?(count===1?'reviewer':'reviewers'):count===1?'agent':'agents'}, ${concurrent} at once): ${money}, ${tokens}, ${time}.` : '';
@@ -1216,7 +1236,7 @@
     document.addEventListener('keydown',event => {
       if (event.key !== 'Escape') return;
       setMenu(false);
-      if (sessionOptions.open && $('sessions-view').contains(document.activeElement)) { const chip = $('option-'+sessionOptions.open); sessionOptions.open = null; renderSessionOptions(); chip.focus(); }
+      if (sessionOptions.open && ($('panel-'+sessionOptions.open).contains(document.activeElement) || document.activeElement === $('option-'+sessionOptions.open))) { const chip = $('option-'+sessionOptions.open); sessionOptions.open = null; renderSessionOptions(); chip.focus(); }
     });
     document.querySelector('.skip').addEventListener('click',event => { event.preventDefault(); $('main').focus(); });
     // Five sections; each groups related views behind tabs. Every view has its own #/view address.
@@ -1224,24 +1244,27 @@
     const viewLabels = {sessions:'Conversation',results:'Results & verification',brain:'Project Brain',memory:'Memory bank',context:'Context files',skills:'Library','create-skill':'Create skill',accelerators:'Overview',creator:'Infrastructure Creator',kit3:'Open Source Kit',setup:'Projects & Setup'};
     const groupOf = view => Object.keys(viewGroups).find(group => viewGroups[group].includes(view));
     const lastViewInGroup = {};
-    function viewFromHash() { const view = decodeURIComponent(location.hash.replace(/^#\/?/,'')); return groupOf(view) ? view : null; }
-    const initialView = viewFromHash(); let initialRouteApplied = false;
+    function viewFromHash() { let view = ''; try { view = decodeURIComponent(location.hash.replace(/^#\/?/,'')); } catch (_) { return null; } return groupOf(view) ? view : null; }
+    // Restoring a saved session must not rewrite the address the page was opened with.
+    const initialView = viewFromHash(); let initialRouteApplied = false, restoringRoute = true;
     function renderViewTabs() {
-      const views = viewGroups[groupOf(state.view)].filter(view => view !== 'results' || state.selectedId);
+      const views = viewGroups[groupOf(state.view)].filter(view => view !== 'results' || state.selectedId), refocus = $('view-tabs').contains(document.activeElement);
       $('view-tabs').hidden = views.length < 2; $('view-tabs').replaceChildren();
       for (const view of views) {
         const tab = el('button','view-tab',viewLabels[view]); tab.type = 'button'; if (view === state.view) tab.setAttribute('aria-current','page');
         tab.addEventListener('click',() => openView(view)); $('view-tabs').append(tab);
       }
+      if (refocus) $('view-tabs').querySelector('[aria-current="page"]')?.focus();
     }
-    function openView(view) {
-      if (view === state.view) return;
+    function openView(view, record = true) {
+      if (view === state.view) { setMenu(false); return; }
       const fromResults = state.view === 'results'; if (view === 'results') resultUi.data = null;
-      setView(view); if (view === 'sessions' && fromResults) pollSession(state.epoch);
+      setView(view,record); if (view === 'sessions' && fromResults) pollSession(state.epoch);
     }
     for (const button of document.querySelectorAll('.navigation [data-nav]')) button.addEventListener('click',() => { const group = button.dataset.nav; openView(group === 'sessions' ? 'sessions' : lastViewInGroup[group] || viewGroups[group][0]); });
-    window.addEventListener('popstate',() => { const view = viewFromHash() || 'sessions'; if (view !== state.view) setView(view === 'results' && !state.selectedId ? 'sessions' : view,false); });
+    window.addEventListener('popstate',() => { const view = viewFromHash() || 'sessions'; openView(view === 'results' && !state.selectedId ? 'sessions' : view,false); });
     function setView(view, record = true) {
+      const previousView = state.view;
       if (state.view === 'memory' && view !== 'memory') { cancelMemoryRequests(); cancelKnowledgeRead('memory'); }
       if (state.view === 'brain' && view !== 'brain') { cancelBrainRequests(); cancelKnowledgeRead('brain'); }
       if (state.view === 'creator' && view !== 'creator') { clearTimeout(creatorUi.timer); ++creatorUi.epoch; }
@@ -1249,7 +1272,7 @@
       state.view = view; lastViewInGroup[groupOf(view)] = view;
       for (const name of Object.values(viewGroups).flat()) $(`${name}-view`).hidden = name !== view;
       for (const button of document.querySelectorAll('.navigation [data-nav]')) { if (button.dataset.nav === groupOf(view)) button.setAttribute('aria-current','page'); else button.removeAttribute('aria-current'); }
-      if (record && viewFromHash() !== view) history[location.hash ? 'pushState' : 'replaceState'](null,'','#/'+view);
+      if (record && !restoringRoute && viewFromHash() !== view) { if (!location.hash) history.replaceState(null,'','#/'+previousView); history.pushState(null,'','#/'+view); }
       if (view === 'results') loadResults();
       if (view === 'creator') openCreator();
       if (view === 'setup') openSetup();
@@ -1261,6 +1284,8 @@
       if (view === 'sessions') loadProjectGit();
       if (view === 'kit3' && !$('kit3-frame').getAttribute('src')) $('kit3-frame').src = '/kit3/';
       renderViewTabs(); updateHeader(); setMenu(false);
+      // A control that hid its own view must not leave focus on the page body.
+      if (document.activeElement === document.body || document.activeElement?.closest('.view[hidden]')) $('view-heading').focus();
     }
     for (const button of document.querySelectorAll('[data-view]')) button.addEventListener('click',() => setView(button.dataset.view));
     function setOptions(select, items, getLabel, getValue, previous) {
@@ -1303,7 +1328,9 @@
         $('connection-banner').hidden = true; populateSettings(); renderHistory();
         if (!sessionPreferencesReady) await restoreSessionPreferences();
         else if (state.selectedId) { stopPolling(); await pollSession(state.epoch); }
-        if (initialView && !initialRouteApplied) { initialRouteApplied = true; if (initialView !== state.view) setView(initialView === 'results' && !state.selectedId ? 'sessions' : initialView,false); }
+        let routed = false;
+        if (!initialRouteApplied) { initialRouteApplied = true; if (initialView && initialView !== state.view) { setView(initialView === 'results' && !state.selectedId ? 'sessions' : initialView,false); routed = true; } restoringRoute = false; if (viewFromHash() !== state.view) history.replaceState(null,'','#/'+state.view); }
+        if (routed) return;
         if (state.view === 'creator') openCreator();
         if (state.view === 'setup') openSetup(true);
         if (state.view === 'context') loadContext();
@@ -1421,10 +1448,11 @@
       $('page-subtitle').hidden = !$('page-subtitle').textContent;
       $('open-kit3').hidden = state.view !== 'kit3';
       $('session-status').hidden = !['sessions','results'].includes(state.view) || !session;
-      $('session-status').replaceChildren(); if (session) $('session-status').append(el('span',`status-dot ${session.status}`),document.createTextNode(sessionStatusLabel(session)));
+      const statusKey = session ? `${session.status}|${sessionStatusLabel(session)}` : ''; if ($('session-status').dataset.key !== statusKey) { $('session-status').dataset.key = statusKey; $('session-status').replaceChildren(); if (session) $('session-status').append(el('span',`status-dot ${session.status}`),document.createTextNode(sessionStatusLabel(session))); }
       $('cancel-session').hidden = !['sessions','results'].includes(state.view) || !active(session);
       $('cancel-session').disabled = Boolean(state.pending); $('cancel-session').textContent = state.pending === 'cancel' ? 'Cancelling…' : state.view==='results' && resultUi.data?.checks.some(check=>['queued','running'].includes(check.status)) ? 'Cancel check' : 'Cancel session';
-      document.title = `${state.view === 'sessions' && session ? session.title : $('page-title').textContent} — AI Infrastructure Harness`;
+      const viewName = state.view === 'sessions' ? '' : viewLabels[state.view]; $('view-heading').textContent = viewLabels[state.view];
+      document.title = `${viewName && viewName !== $('page-title').textContent ? `${viewName} · ` : ''}${state.view === 'sessions' && session ? session.title : $('page-title').textContent} — AI Infrastructure Harness`;
     }
     function updateWorkspaceControls() {
       const projectId = $('project').value; const hasSession = Boolean(state.selectedId); const ready = Boolean(state.bootstrap) && !state.authFailed;
@@ -1476,7 +1504,7 @@
       $('sdd-phase').disabled = !selected || locked;
       if (selected) $('mode').value = settings.phase === 'review' ? 'plan' : 'edit';
       const valid = /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(settings.feature) && settings.feature.length <= 80 && settings.feature !== 'memory' && (state.bootstrap?.sdd_phases || []).some(phase => phase.id === settings.phase);
-      showError('sdd-error',selected && !valid && (settings.feature || sddSlugTouched) ? 'Enter a feature slug using lowercase letters, digits and single hyphens; memory is reserved.' : '');
+      showError('sdd-error',selected && !valid && (settings.feature || sddSlugTouched || $('prompt').value.trim()) ? 'Enter a feature slug using lowercase letters, digits and single hyphens; memory is reserved.' : '');
       $('sdd-hint').textContent = `${(state.bootstrap?.sdd_phases || []).find(phase => phase.id === settings.phase)?.description || ''} Documents: specs/${settings.feature || '<feature>'}/. Feature stays fixed; phase can change between turns.`;
       $('sdd-refresh').disabled = !selected || !state.selected?.sdd || locked;
       if (sddDocumentSession !== state.selectedId) { $('sdd-documents').replaceChildren(); sddDocumentSession = state.selectedId; }
@@ -1602,7 +1630,7 @@
       const detail = provider?.agent_control_detail || '';
       if (!$('agents-enabled').checked) return provider?.id === 'cursor' ? detail : '';
       if (provider?.id === 'cursor') return `Asks Cursor for ${helpers} each turn. ${detail}`;
-      return `${ultracode ? `Ultracode needs exactly ${helpers}` : `Exactly ${helpers} ${count === 1 ? 'joins' : 'join'} the main agent`} every turn, in batches if concurrency is lower. ${detail}`.trim();
+      return `${ultracode ? 'Ultracode asks' : 'Asks'} for exactly ${helpers} each turn, in batches if concurrency is lower; the result confirms how many ran. ${detail}`.trim();
     }
     function budgetSummary(budgets) {
       const parts = [Number.isFinite(budgets?.usd) ? `$${budgets.usd}` : '',Number.isFinite(budgets?.tokens) ? `${budgets.tokens.toLocaleString()} tokens` : '',Number.isFinite(budgets?.seconds) ? `${budgets.seconds}s` : ''].filter(Boolean);
@@ -1613,36 +1641,55 @@
     function renderSessionOptions() {
       const hasSession = Boolean(state.selectedId), session = state.selected, fleet = fleetSelected(), clashMode = clashSelected();
       for (const id of ['project','provider','workflow','project-context']) $(id).closest('label').hidden = hasSession;
-      const shown = {helpers:!clashMode && !session?.creator, clash:clashAvailable() && !fleet && (!hasSession || isClashSession(session)), workspace:!hasSession, brain:!hasSession, budgets:!session?.creator, models:!fleet && !clashMode && !fleetDryRun()};
-      const invalid = {helpers:!$('agent-count-error').hidden, clash:!$('clash-error').hidden, workspace:!$('workspace-error').hidden, brain:!$('brain-link-error').hidden, budgets:!$('session-budgets-error').hidden || !$('session-budgets-agent-error').hidden, models:!$('model-routing-error').hidden};
+      const shown = {helpers:!clashMode && !session?.creator, clash:clashAvailable() && !fleet && !isFleetSession(session) && !session?.creator, workspace:!hasSession, brain:!hasSession, budgets:!session?.creator, models:!fleet && !clashMode && !fleetDryRun()};
+      const valid = sessionOptions.validity || {}, invalid = {helpers:valid.helpers === false, clash:valid.clash === false, workspace:valid.workspace === false, brain:valid.brain === false, budgets:valid.budgets === false || !$('session-budgets-agent-error').hidden, models:valid.models === false};
       const on = {helpers:fleet || $('agents-enabled').checked, clash:clashMode, workspace:$('workspace').value === 'worktree', brain:$('brain-link-enabled').checked, budgets:budgetSummary(sessionBudgets()) !== 'No limits', models:Boolean(modelRouting())};
       const count = $('agent-count').valueAsNumber, git = projectGitState.projectId === $('project').value ? projectGitState.data : null, branch = $('worktree-branch').value.trim();
       $('option-helpers-label').textContent = fleet ? 'Reviewers at once' : 'Helpers';
-      $('option-helpers-value').textContent = on.helpers ? (Number.isInteger(count) ? String(count) : '') : 'Off';
+      $('option-helpers-value').textContent = on.helpers ? (Number.isInteger(count) ? String(count) : '') : $('provider').value === 'cursor' ? 'Off · not enforced' : 'Off';
       $('option-clash-value').textContent = clashMode ? `${providerFor($('clash-challenger').value)?.name || 'challenger'} · ${$('clash-rounds').value} ${$('clash-rounds').value === '1' ? 'round' : 'rounds'}` : 'Off';
-      $('option-workspace-value').textContent = on.workspace ? `New worktree${branch ? ` · ${branch}` : ''}` : `Project folder${git?.branch ? ` · ${git.branch}` : ''}`;
+      $('option-workspace-value').textContent = on.workspace ? `New worktree${branch ? ` · ${branch}` : ''}` : `Project folder${git?.branch ? ` · ${git.branch}` : ''}${git?.dirty ? ' · uncommitted changes' : ''}`;
       $('option-budgets-value').textContent = budgetSummary(sessionBudgets());
       if (sessionOptions.open && !shown[sessionOptions.open]) sessionOptions.open = null;
+      sessionOptions.blocked = Object.keys(shown).find(name => shown[name] && invalid[name]) || null;
       for (const name of Object.keys(shown)) {
         const chip = $('option-'+name), open = sessionOptions.open === name;
         chip.hidden = !shown[name]; chip.setAttribute('aria-expanded',String(open)); chip.dataset.on = String(on[name]); chip.dataset.invalid = String(invalid[name]);
+        let alert = chip.querySelector('.chip-alert'); if (!alert) { alert = el('span','sr-only chip-alert',', needs attention'); chip.append(alert); } alert.hidden = !invalid[name];
         $('panel-'+name).hidden = !open;
       }
     }
-    for (const chip of document.querySelectorAll('.option-bar button.chip')) chip.addEventListener('click',() => { const name = chip.id.slice('option-'.length); sessionOptions.open = sessionOptions.open === name ? null : name; renderSessionOptions(); });
+    for (const chip of document.querySelectorAll('.option-bar button.chip')) chip.addEventListener('click',() => { const name = chip.id.slice('option-'.length); sessionOptions.open = sessionOptions.open === name ? null : name; renderSessionOptions(); if (sessionOptions.open) { $('panel-'+name).tabIndex = -1; $('panel-'+name).focus(); } });
     // An open session shows one summary line; its next-turn settings expand on request.
     function renderSessionSummary() {
       const session = state.selected, toggle = $('session-settings-toggle');
       $('session-summary').hidden = !session;
-      if (!session) { toggle.setAttribute('aria-expanded','false'); $('session-settings').hidden = false; return; }
+      if (!session) { toggle.setAttribute('aria-expanded','false'); $('session-settings').hidden = false; renderSendBlock(false); return; }
       const expanded = toggle.getAttribute('aria-expanded') === 'true';
       $('session-settings').hidden = !expanded;
-      toggle.textContent = expanded ? 'Hide settings' : isFleetSession(session) ? 'Budgets' : 'Next-turn settings';
-      const workflow = (state.bootstrap?.workflows || []).find(item => item.id === session.workflow)?.name || session.workflow;
-      const helpers = Number.isInteger(session.agent_count) ? `${session.agent_count} helper${session.agent_count === 1 ? '' : 's'}` : 'helpers';
-      const budgets = budgetSummary(session.budgets);
-      $('session-summary-text').textContent = [workflow,isFleetSession(session) || ['plan','review','sdd'].includes(session.workflow) ? '' : session.mode === 'edit' ? 'Edit' : 'Plan',providerFor(session.provider)?.name || session.provider,session.model || 'default model',session.thinking_effort ? humanLabel(session.thinking_effort) : '',
-        `${session.workspace === 'worktree' ? 'Worktree' : 'Project folder'}${session.branch ? ` · ${session.branch}` : ''}`,isClashSession(session) ? `Clash vs ${providerFor(session.clash?.challenger)?.name || 'challenger'}` : !isFleetSession(session) && session.agents_enabled ? helpers : '',session.brain?.task_id ? `Task ${session.brain.task_id}` : '',budgets === 'No limits' ? '' : budgets].filter(Boolean).join(' · ');
+      toggle.textContent = isFleetSession(session) ? 'Settings' : 'Next-turn settings';
+      // Fixed launch facts come from the session; what the next turn will use comes from the form.
+      const phase = (state.bootstrap?.sdd_phases || []).find(item => item.id === $('sdd-phase').value)?.name;
+      const workflow = session.workflow === 'sdd' ? `SDD${phase ? ` · ${phase}` : ''}` : (state.bootstrap?.workflows || []).find(item => item.id === session.workflow)?.name || session.workflow;
+      const count = $('agent-count').valueAsNumber, budgets = budgetSummary(sessionBudgets());
+      $('session-summary-text').textContent = [workflow,session.workflow === 'native' ? $('mode').value === 'edit' ? 'Edit' : 'Plan' : '',providerFor(session.provider)?.name || session.provider,
+        isFleetSession(session) ? '' : selectedModel() || 'default model',!isFleetSession(session) && $('thinking-effort').value ? humanLabel($('thinking-effort').value) : '',
+        `${session.workspace === 'worktree' ? 'Worktree' : 'Project folder'}${session.branch ? ` · ${session.branch}` : ''}`,
+        clashSelected() ? `Clash vs ${providerFor($('clash-challenger').value)?.name || 'challenger'}` : !isFleetSession(session) && $('agents-enabled').checked && Number.isInteger(count) ? `${count} ${count === 1 ? 'helper' : 'helpers'}` : '',
+        session.brain?.task_id ? `Task ${session.brain.task_id}` : '',budgets === 'No limits' ? '' : budgets].filter(Boolean).join(' · ');
+      renderSendBlock(!expanded);
+    }
+    // When Send is disabled by a setting the user cannot see, the note under the prompt says where to look.
+    function renderSendBlock(collapsed) {
+      const hidden = sessionOptions.blocked && sessionOptions.open !== sessionOptions.blocked ? sessionOptions.blocked : null;
+      const settingsError = collapsed && (Boolean(hidden) || [...$('session-settings').querySelectorAll('.model-error,.agent-error,.workspace-error,.fleet-error,.error-text')].some(node => !node.hidden));
+      $('session-settings-toggle').dataset.invalid = String(Boolean(settingsError));
+      if (!$('send').disabled || state.pending || !$('prompt').value.trim() || !$('composer-note').classList.contains('shortcut')) return;
+      const label = hidden === 'helpers' ? $('option-helpers-label').textContent : {clash:'Clash',workspace:'Run in',brain:'Brain task',budgets:'Budgets',models:'Models'}[hidden];
+      if (settingsError) $('composer-note').textContent = 'Open Next-turn settings: a setting needs attention.';
+      else if (label) $('composer-note').textContent = `Check ${label} to send.`;
+      else return;
+      $('composer-note').classList.remove('shortcut');
     }
     $('session-settings-toggle').addEventListener('click',() => { const toggle = $('session-settings-toggle'); toggle.setAttribute('aria-expanded',String(toggle.getAttribute('aria-expanded') !== 'true')); renderSessionSummary(); });
     // "?" buttons reveal reference text next to a control; the model hint redraws through updateControls.
@@ -1654,8 +1701,8 @@
     function updateControls() {
       const hasSession = Boolean(state.selectedId); const pending = Boolean(state.pending); const ready = Boolean(state.bootstrap) && !state.authFailed;
       const fleet = fleetSelected(); const dryRun = fleetDryRun(); const existingFleet = isFleetSession(state.selected);
-      if (fleet && !hasSession && !dryRun && !$('agents-enabled').disabled && fleetUi.autoHelpers !== $('workflow').value) { $('agents-enabled').checked = true; fleetUi.autoHelpers = $('workflow').value; }
-      if (!fleet) fleetUi.autoHelpers = null; const awaitingContext = state.selected?.status === 'awaiting_context'; const linked = Boolean(state.selected?.brain); const linkValid = updateBrainLinkControls();
+      if (fleet && !hasSession && !dryRun && !$('agents-enabled').disabled && fleetUi.autoHelpers !== $('workflow').value) { fleetUi.autoTicked = !$('agents-enabled').checked; $('agents-enabled').checked = true; fleetUi.autoHelpers = $('workflow').value; }
+      if (!fleet && fleetUi.autoHelpers) { if (fleetUi.autoTicked && !hasSession) $('agents-enabled').checked = false; fleetUi.autoHelpers = null; fleetUi.autoTicked = false; } const awaitingContext = state.selected?.status === 'awaiting_context'; const linked = Boolean(state.selected?.brain); const linkValid = updateBrainLinkControls();
       for (const option of $('provider').options) option.disabled = !dryRun && providerFor(option.value)?.available === false;
       if (dryRun && !$('provider').value && state.bootstrap?.providers.length) { $('provider').value = state.bootstrap.providers[0].id; refreshModelChoices(null,null); }
       const workspaceValid = updateWorkspaceControls();
@@ -1703,13 +1750,13 @@
       $('send-label').textContent = state.pending === 'create' ? $('brain-link-enabled').checked ? 'Preparing…' : 'Starting…' : state.pending === 'followup' ? 'Sending…' : !hasSession && $('workspace').value === 'worktree' && projectGitState.pending ? 'Checking Git…' : isActive ? 'Session active' : noResume || terminalLinkedTask ? 'New session needed' : hasSession ? linked ? 'Prepare follow-up' : clashMode ? 'Start next cycle' : 'Send follow-up' : $('brain-link-enabled').checked ? 'Prepare session' : fleet ? dryRun ? 'Start dry-run' : 'Start fleet review' : clashMode ? 'Start clash' : 'Start session';
       $('composer-note').textContent = budgetsDirty() ? 'Save budget changes before launching.' : terminalLinkedTask ? 'Choose an active or new Brain task in a new session.' : noResume ? 'Use New session in the sidebar.' : isActive ? 'Wait for completion, or cancel the session.' : 'Ctrl / ⌘ + Enter to send';
       $('composer-note').classList.toggle('shortcut',$('composer-note').textContent === 'Ctrl / ⌘ + Enter to send');
-      const caption = terminalLinkedTask ? 'The linked Brain task is completed or cancelled. Start a new session with an active or new task to continue.' : (!hasSession && $('brain-link-enabled').checked || linked && !noResume) ? 'You review the prepared workspace and context before the agent runs.' : clashMode && !hasSession ? 'Both participants share the session budgets.' : clashMode && !noResume ? 'A follow-up starts the next cycle; both native sessions resume. Untick Clash for a normal follow-up.' : fleet && hasSession ? 'Scope and reviewers stay fixed. Save new budgets before resuming; previous spending remains counted.' : noResume ? state.selected.status === 'cancelled' ? 'Cancelled before a resumable native session was created.' : 'No resumable native session was returned. Start a new session to continue.' : '';
+      const caption = terminalLinkedTask ? 'The linked Brain task is completed or cancelled. Start a new session with an active or new task to continue.' : (!hasSession && $('brain-link-enabled').checked || linked && !noResume) ? 'You review the prepared workspace and context before the agent runs.' : clashMode && !hasSession ? 'Both participants share the session budgets.' : clashMode && !noResume ? 'A follow-up starts the next cycle; both native sessions resume. Untick Clash for a normal follow-up.' : fleet && !hasSession ? 'Scope and reviewers are fixed once the review starts.' : noResume ? state.selected.status === 'cancelled' ? 'Cancelled before a resumable native session was created.' : 'No resumable native session was returned. Start a new session to continue.' : '';
       $('composer-caption').textContent = caption; $('composer-caption').hidden = !caption;
-      const providerNote = dryRun ? 'Offline dry-run can use any provider selection; no native CLI is launched.' : ready && !provider?.available ? 'No provider is ready. Install and sign in with a native CLI, then restart the Harness server.' : '';
-      $('provider-hint').textContent = providerNote; $('provider-hint').hidden = !providerNote;
+      const providerNote = dryRun ? 'Offline dry-run can use any provider selection; no native CLI is launched.' : ready && !provider?.available ? 'No provider is ready. Install and sign in with a native CLI, then restart the Harness server.' : provider?.id === 'cursor' ? 'Cursor can’t disable or cap helpers; helper settings are instructions only.' : '';
+      if ($('provider-hint').textContent !== providerNote) $('provider-hint').textContent = providerNote; $('provider-hint').hidden = !providerNote;
       $('agent-hint').textContent = helperHint(fleet,clashMode,ultracode,provider);
-      $('waiting').hidden = !isActive; $('waiting-text').textContent = linked && !state.selected.brain.context_id ? 'Preparing workspace and context. The provider has not started this turn.' : state.selected?.status === 'queued' ? 'Queued — waiting for an available runner.' : existingFleet ? 'Fleet review is running. Stage and reviewer updates appear above.' : isClashSession(state.selected) ? `${providerFor(state.selected.provider)?.name || state.selected.provider} and ${providerFor(state.selected.clash?.challenger)?.name || 'the challenger'} are clashing. Turn events appear above.` : `${providerFor(state.selected?.provider)?.name || 'Agent'} is running. New events will appear here.`;
-      $('welcome').hidden = hasSession || fleet; renderSessionOptions(); renderSessionSummary(); updateHeader(); updateSkillsControls(); updateKnowledgeControls(); updateSetupControls(); renderFleetSession(); renderClashSession(); renderLinkedSession(); resultControls();
+      $('waiting').hidden = !isActive; const waitingText = linked && !state.selected.brain.context_id ? 'Preparing workspace and context. The provider has not started this turn.' : state.selected?.status === 'queued' ? 'Queued — waiting for an available runner.' : existingFleet ? 'Fleet review is running. Stage and reviewer updates appear above.' : isClashSession(state.selected) ? `${providerFor(state.selected.provider)?.name || state.selected.provider} and ${providerFor(state.selected.clash?.challenger)?.name || 'the challenger'} are clashing. Turn events appear above.` : `${providerFor(state.selected?.provider)?.name || 'Agent'} is running. New events will appear here.`; if ($('waiting-text').textContent !== waitingText) $('waiting-text').textContent = waitingText;
+      $('welcome').hidden = hasSession; sessionOptions.validity = {helpers:agentsValid && agentModeValid,clash:clashValid,workspace:workspaceValid,brain:linkValid,budgets:budgetValid,models:routingValid}; renderSessionOptions(); renderSessionSummary(); updateHeader(); updateSkillsControls(); updateKnowledgeControls(); updateSetupControls(); renderFleetSession(); renderClashSession(); renderLinkedSession(); resultControls();
     }
     function applySessionSettings(session, restoreModel = true) { $('sdd-feature').value = session.sdd?.feature || ''; $('sdd-phase').value = session.sdd?.phase || 'specify'; for (const id of ['project','provider','workflow','mode']) $(id).value = session[id === 'project' ? 'project_id' : id] || (id === 'mode' ? 'plan' : id === 'workflow' ? 'native' : ''); $('project-context').checked = Boolean(session.project_context); if (restoreModel || active(session) || isFleetSession(session)) { $('agents-enabled').checked = session.agents_enabled === true; $('agent-count').value = Number.isInteger(session.agent_count) ? session.agent_count : defaultAgentCount(); } $('workspace').value = session.workspace === 'worktree' ? 'worktree' : 'project'; $('worktree-branch').value = session.workspace === 'worktree' ? session.branch || '' : ''; restoreBudgets('session-budgets',session.budgets,session.id+':'+session.budget_revision); restoreModelRouting(session.model_routing); restoreClashSettings(session.clash || null); if (isFleetSession(session)) restoreFleetSettings(session.fleet); if (restoreModel || isFleetSession(session)) refreshModelChoices(session.model || null,session.thinking_effort || null); loadProjectGit(); }
     for (const id of ['workflow','mode','thinking-effort']) $(id).addEventListener('change',updateControls);
@@ -1731,7 +1778,7 @@
       saveSessionPreferences();
       clearAttachments();
       stopPolling(); state.epoch++; state.selectedId = null; state.selected = null; state.loading = false; state.eventIds.clear(); state.assistantTexts.clear(); $('events').replaceChildren(); $('prompt').value = prompt;
-      sessionOptions.open = null; $('session-settings-toggle').setAttribute('aria-expanded','false'); sddSlugTouched = false;
+      sessionOptions.open = null; $('session-settings-toggle').setAttribute('aria-expanded','false'); sddSlugTouched = false; $('sessions-view').classList.remove('output-resized'); $('sessions-view').style.removeProperty('--configuration-height');
       resetBrainLink(); restoreModelRouting(null); $('sdd-feature').value = ''; $('sdd-phase').value = 'specify'; restoreClashSettings(null);
       $('agents-enabled').checked = false; $('agent-count').value = defaultAgentCount();
       restoreFleetSettings(null); restoreBudgets('session-budgets',null,'new:'+state.epoch); resetFleetProgress();
@@ -1827,8 +1874,8 @@
         if (kind === 'result' && state.assistantTexts.has(normalized)) return;
         if (['text','assistant','result'].includes(kind)) state.assistantTexts.add(normalized);
         const previous = $('events').lastElementChild;
-        if (kind === 'error' && previous?.classList.contains('error') && previous.classList.contains('message')) { previous.append(el('pre','message-body',text)); return; }
-        const type = kind === 'text' ? 'assistant' : kind; const block = el('article',`message ${type}`); const heading = el('div','message-label');
+        if (kind === 'error' && previous?.classList.contains('error') && previous.classList.contains('message') && previous.dataset.provider === String(event.provider || '')) { previous.setAttribute('aria-atomic','false'); previous.append(el('pre','message-body',text)); return; }
+        const type = kind === 'text' ? 'assistant' : kind; const block = el('article',`message ${type}`); block.dataset.provider = String(event.provider || ''); const heading = el('div','message-label');
         const tagged = typeof event.provider === 'string' && event.provider ? `${providerFor(event.provider)?.name || event.provider}${typeof event.role === 'string' && event.role ? ` · ${humanLabel(event.role)}` : ''}${Number.isInteger(event.round) && event.round > 0 ? ` · round ${event.round}` : ''}` : '';
         const label = kind === 'user' ? 'You' : kind === 'error' ? `Session error${tagged ? ` · ${tagged}` : ''}` : kind === 'result' ? 'Result' : tagged || providerFor(state.selected?.provider)?.name || 'Assistant';
         heading.append(el('span','avatar',kind === 'user' ? 'Y' : kind === 'error' ? '!' : 'AI'),document.createTextNode(label)); block.append(heading,el('pre','message-body',text));
@@ -1846,8 +1893,9 @@
         const block = el('details','activity'); const label = kind === 'tool' ? `Tool activity${typeof event.provider === 'string' && event.provider ? ` · ${providerFor(event.provider)?.name || event.provider}` : ''}${typeof event.name === 'string' ? ` · ${event.name}` : ''}` : kind === 'fleet_reviewer' ? `Reviewer · ${fleetLensName(event.lens)}` : ({status:'Runner status',usage:'Usage',session:'Native session',fleet_stage:'Fleet stage'})[kind]; block.append(el('summary','',label),el('pre','',text));
         // Consecutive steps share one collapsed row, so a long run reads as a few lines instead of dozens.
         block.dataset.step = kind === 'tool' ? typeof event.name === 'string' && event.name ? event.name : 'Tool' : kind === 'fleet_reviewer' ? 'Reviewer' : ({status:'Status',usage:'Usage',session:'Session',fleet_stage:'Stage'})[kind];
+        if (kind === 'status') { $('events').append(block); return; }
         let group = $('events').lastElementChild;
-        if (!group?.classList.contains('activity-group')) { group = el('details','activity-group'); group.append(el('summary'),el('div','activity-steps')); $('events').append(group); }
+        if (!group?.classList.contains('activity-group')) { group = el('details','activity-group'); group.setAttribute('aria-live','off'); group.append(el('summary'),el('div','activity-steps')); $('events').append(group); }
         group.lastElementChild.append(block);
         const counts = {}; for (const step of group.lastElementChild.children) counts[step.dataset.step] = (counts[step.dataset.step] || 0) + 1;
         const total = group.lastElementChild.children.length;
@@ -1877,7 +1925,7 @@
     }
     async function selectSession(id) {
       if (state.pending) return;
-      if (id !== state.selectedId) { sessionOptions.open = null; $('session-settings-toggle').setAttribute('aria-expanded','false'); }
+      if (id !== state.selectedId) { sessionOptions.open = null; $('session-settings-toggle').setAttribute('aria-expanded','false'); $('sessions-view').classList.remove('output-resized'); $('sessions-view').style.removeProperty('--configuration-height'); }
       clearAttachments();
       saveSessionPreferences(); ++preferenceEpoch; restoringSessionPreferences = false;
       stopPolling(); const epoch = ++state.epoch; state.selectedId = id; state.selected = state.sessions.find(item => item.id === id) || null; state.eventIds.clear(); state.assistantTexts.clear(); state.loading = true;
@@ -1907,14 +1955,14 @@
       catch (error) { showError(errorId,textError(error)); }
       finally { state.pending = null; updateControls(); }
     });
-    function bytesLabel(bytes) { if (!Number.isFinite(bytes)) return '—'; return bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`; }
+    function bytesLabel(bytes) { if (!Number.isFinite(bytes)) return '—'; return bytes < 1024 ? `${bytes}\u00a0B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)}\u00a0KB` : `${(bytes / (1024 * 1024)).toFixed(1)}\u00a0MB`; }
     async function loadContext() {
       const id = $('context-project').value; if (!id || !state.bootstrap) return; const epoch = ++state.contextEpoch; $('refresh-context').disabled = true; $('context-summary').textContent = 'Reading project context…'; $('context-files').replaceChildren(); showError('context-error','');
       try {
         const data = await api(`/api/projects/${encodeURIComponent(id)}/context`); if (epoch !== state.contextEpoch) return;
         const files = data.files || []; $('context-summary').replaceChildren(el('span','',data.context_available ? `${files.filter(file => file.exists).length} of ${files.length} files present` : 'No project context files were found.'));
         if (!files.length) $('context-files').append(el('p','empty-note','No context files were reported for this project.'));
-        for (const file of files) { const row = el('div','file-row'); row.append(el('span','file-path',file.path),el('span','file-status',file.exists ? 'Present' : 'Missing'),el('span','file-size',file.exists ? bytesLabel(file.bytes) : '—')); $('context-files').append(row); }
+        for (const file of files) { const row = el('div','file-row'); row.append(el('span','file-path',file.path),el('span',file.exists ? 'file-status' : 'file-status missing',file.exists ? 'Present' : 'Missing'),el('span','file-size',file.exists ? bytesLabel(file.bytes) : '—')); $('context-files').append(row); }
       } catch (error) { if (epoch === state.contextEpoch) { $('context-summary').textContent = ''; showError('context-error',textError(error)); } }
       finally { if (epoch === state.contextEpoch) $('refresh-context').disabled = false; }
     }
@@ -2126,7 +2174,7 @@
       const entries = brainState.entries.filter(entry => (!category || brainCategory(entry) === category) && [entry.title,entry.path,entry.id,entry.external_id,entry.status,entry.owner,entry.type].join(' ').toLowerCase().includes(query)); $('brain-files').replaceChildren();
       for (const entry of entries) { const button = el('button','memory-entry'); button.type = 'button'; if (entry.path === brainState.path) button.setAttribute('aria-current','true'); button.append(el('span','memory-entry-title',entry.title || entry.path),el('span','memory-entry-path',entry.path),el('span','memory-entry-meta',[entry.type,entry.status,entry.phase,Number.isInteger(entry.revision) ? `rev ${entry.revision}` : '',bytesLabel(entry.bytes)].filter(Boolean).join(' · '))); button.addEventListener('click',() => selectBrainEntry(entry.path,true)); $('brain-files').append(button); }
       $('brain-count').textContent = `${entries.length}${query || category ? ` of ${brainState.entries.length}` : ''} records${brainState.truncated ? ' · listing limited' : ''}`;
-      if (!entries.length) $('brain-files').append(el('p','empty-note',query || category ? 'No records match this category and filter.' : brainState.bankId ? 'No records yet. Start a task from Record tools & maintenance.' : 'No Project Brain found in this project.'));
+      if (!entries.length) $('brain-files').append(el('p','empty-note',query || category ? 'No records match this category and filter.' : brainState.bankId ? 'No readable records yet. Start a task from Record tools & maintenance.' : 'No Project Brain found in this project.'));
     }
     async function loadBrain({bank = brainState.bankId,preserve = true} = {}) {
       const projectId = $('brain-project').value; const projectChanged = projectId !== brainState.projectId; if (projectChanged) { bank = null; preserve = false; $('brain-filter').value = ''; $('brain-category').value = ''; }
@@ -2170,9 +2218,9 @@
       for (const id of ['brain-link-bank','brain-link-kind','brain-link-task','brain-link-task-id','brain-link-goal','brain-link-query','brain-link-refresh']) $(id).disabled = locked || !enabled || unavailable || brainLinkDraft.loading;
       $('brain-link-bank').disabled ||= !brainLinkDraft.banks.length; $('brain-link-task').disabled ||= creating || !brainLinkDraft.tasks.length;
       $('brain-link-existing-field').hidden = creating; $('brain-link-id-field').hidden = !creating; $('brain-link-goal-field').hidden = !creating;
-      $('brain-link-availability').textContent = brainLinkDraft.loading ? 'Reading knowledge roots and tasks…' : brainLinkDraft.error || (!brainLinkDraft.meta?.runtime_available ? 'The selected root has no context runtime. You can start an unlinked session.' : brainLinkDraft.meta.mode !== 'governed' ? 'Linking a task requires governed mode.' : !creating && !brainLinkDraft.tasks.length ? 'No active tasks were found. Choose Create a task; completed and cancelled tasks remain visible in Project Brain.' : '');
+      $('brain-link-availability').textContent = brainLinkDraft.loading ? 'Reading knowledge roots and tasks…' : brainLinkDraft.error || (!brainLinkDraft.meta?.runtime_available ? 'The selected root has no context runtime. You can start an unlinked session.' : brainLinkDraft.meta.mode !== 'governed' ? 'Linking a task requires governed mode.' : !creating && !brainLinkDraft.tasks.length ? 'No active tasks were found. Choose Create a task; completed and cancelled tasks remain visible in Project Brain.' : 'Prepare writes the task, and any new worktree, before you review the context.');
       const config = brainLinkConfig(); let error = '';
-      if (enabled && !hasSession) { if (unavailable) error = 'Offline Fleet dry-run cannot link a Brain task. Disable task linking or turn off dry-run.'; else if (brainLinkDraft.error) error = brainLinkDraft.error; }
+      if (enabled && !hasSession) { if (unavailable) error = 'Offline Fleet dry-run cannot link a Brain task. Disable task linking or turn off dry-run.'; else if (brainLinkDraft.error) error = brainLinkDraft.error; else if (!brainLinkDraft.loading && brainLinkDraft.meta?.runtime_available && brainLinkDraft.meta.mode === 'governed' && !(config.bank && config.task_id && config.query && (!creating || config.goal))) $('brain-link-availability').textContent = creating ? 'Enter a task ID, its goal and a context query.' : 'Choose a task and write a context query.'; }
       showError('brain-link-error',error);
       return !enabled || hasSession || !unavailable && !brainLinkDraft.loading && brainLinkDraft.projectId === $('project').value && brainLinkDraft.meta?.runtime_available === true && brainLinkDraft.meta.mode === 'governed' && Boolean(config.bank && config.task_id && config.query && (!creating || config.goal));
     }
@@ -2372,11 +2420,11 @@
     }
     async function loadSetup({preservePreview = false} = {}) {
       if (!state.bootstrap || setupState.pending) return; const projectId = $('setup-project').value; const changed = projectId !== setupState.projectId; if (changed || !preservePreview) invalidateSetupPreview(); setupState.controller?.abort(); const controller = new AbortController(); setupState.controller = controller; const epoch = ++setupState.epoch;
-      if (changed) { setupState.preferredEdition ||= $('setup-edition').value || null; setOptions($('setup-edition'),[],item => item.name,item => item.id); $('setup-tools').replaceChildren(); }
+      if (changed) { $('setup-result').hidden = true; setupState.preferredEdition ||= $('setup-edition').value || null; setOptions($('setup-edition'),[],item => item.name,item => item.id); $('setup-tools').replaceChildren(); }
       setupState.projectId = projectId; setupState.loading = true; setupState.data = null; $('setup-readiness-status').textContent = projectId ? 'Inspecting the selected project…' : 'Add an existing local project to get started.'; $('setup-project-location').textContent = projectFor(projectId)?.path || ''; showError('setup-readiness-error',''); renderSetupReadiness(); updateSetupControls();
       if (!projectId) { setupState.loading = false; setupState.controller = null; updateSetupControls(); return; }
       try { const data = await api(`/api/projects/${encodeURIComponent(projectId)}/setup`,{signal:controller.signal}); if (epoch !== setupState.epoch || projectId !== $('setup-project').value) return;
-        if (data.project_id !== projectId || !Array.isArray(data.editions) || !Array.isArray(data.tools)) throw new Error('The runner returned incomplete project setup information. Refresh readiness to try again.');
+        if (data.project_id !== projectId || !Array.isArray(data.editions) || !Array.isArray(data.tools)) throw new Error('The runner returned incomplete project setup information. Refresh to try again.');
         setupState.data = data; if (typeof data.available === 'boolean' && projectFor(projectId)) projectFor(projectId).available = data.available; $('setup-project-location').textContent = data.path || projectFor(projectId)?.path || ''; $('setup-readiness-status').textContent = projectFor(projectId)?.available === false ? 'This registered project is currently unavailable. Its path is kept in the project list.' : '';
         const preferred = setupState.preferredEdition || $('setup-edition').value || data.installed_edition; setOptions($('setup-edition'),[{id:'',name:'Choose an edition…'},...data.editions],item => item.name,item => item.id,preferred || ''); setupState.preferredEdition = null; renderSetupReadiness(); renderSetupTools();
       } catch (error) { if (error.name !== 'AbortError' && epoch === setupState.epoch) { $('setup-readiness-status').textContent = projectFor(projectId)?.available === false ? 'The registered folder is unavailable. Restore its path or add an existing folder.' : 'Project inspection could not finish.'; showError('setup-readiness-error',textError(error)); } }
@@ -2417,15 +2465,15 @@
     async function installSetup() {
       if ($('setup-install-button').disabled || !setupState.preview) return; const selection = setupSelection(); const previewId = setupState.preview.preview_id; const label = setupTargetLabel(selection); setupState.preview = null; clearTimeout(setupState.expiryTimer); setupState.expiryTimer = null; setupState.pending = 'install'; const epoch = ++setupState.previewEpoch; let confirmed = false; $('setup-preview-note').textContent = 'This preview cannot be reused. Generate a new preview before another installation.'; $('setup-action-status').textContent = 'Installing the reviewed files… You can visit another section; installation will continue.'; $('setup-action-status').hidden = false; showError('setup-action-error',''); $('setup-result').hidden = true; updateSetupControls();
       try { const data = await api('/api/accelerators/install',{method:'POST',body:{preview_id:previewId}}); if (epoch !== setupState.previewEpoch) return;
-        if (typeof data.ok !== 'boolean' || !Array.isArray(data.installed) || !Array.isArray(data.merged) || !Array.isArray(data.unchanged)) throw new Error('The runner returned an incomplete installation result. Some files may have been written. Refresh readiness and prepare a new preview before retrying.');
-        confirmed = data.ok; $('setup-result-title').textContent = data.ok ? 'Accelerator installation complete' : 'Installation did not complete'; $('setup-result-target').textContent = label; $('setup-result-summary').textContent = data.summary || (data.ok ? 'Reviewed files were installed.' : 'Check the reported file results before preparing another preview.'); $('setup-result-paths').textContent = [...data.installed.map(path => `Installed  ${path}`),...data.merged.map(path => `Merged     ${path}`),...data.unchanged.map(path => `Unchanged  ${path}`)].join('\n'); $('setup-result').hidden = false; showError('setup-action-error',data.ok ? '' : data.error || 'Installation may be partial. Review the reported files and prepare a new preview.'); $('setup-action-status').textContent = data.ok ? 'Installation complete. Refreshing project readiness…' : 'Installation did not complete. Refresh readiness and prepare a new preview.';
-      } catch (error) { if (epoch === setupState.previewEpoch) { $('setup-action-status').textContent = 'Installation was not confirmed.'; showError('setup-action-error',`${textError(error)} The preview is consumed. Refresh readiness and generate a new preview before retrying.${error.status === 0 ? ' The connection was lost; some files may have been installed.' : ''}`); } }
-      finally { if (epoch === setupState.previewEpoch) { setupState.pending = null; $('setup-preview').hidden = true; $('setup-preview-files').replaceChildren(); updateSetupControls(); if ($('setup-project').value === selection.project_id) await loadSetup({preservePreview:true}); if (confirmed) $('setup-action-status').textContent = setupState.data ? 'Installation complete. Project readiness refreshed.' : 'Installation complete. Refresh readiness to inspect the project.'; } }
+        if (typeof data.ok !== 'boolean' || !Array.isArray(data.installed) || !Array.isArray(data.merged) || !Array.isArray(data.unchanged)) throw new Error('The runner returned an incomplete installation result. Some files may have been written. Refresh and prepare a new preview before retrying.');
+        confirmed = data.ok; setupState.resultProjectId = selection.project_id; $('setup-result-title').textContent = data.ok ? 'Accelerator installation complete' : 'Installation did not complete'; $('setup-result-target').textContent = label; $('setup-result-summary').textContent = data.summary || (data.ok ? 'Reviewed files were installed.' : 'Check the reported file results before preparing another preview.'); $('setup-result-paths').textContent = [...data.installed.map(path => `Installed  ${path}`),...data.merged.map(path => `Merged     ${path}`),...data.unchanged.map(path => `Unchanged  ${path}`)].join('\n'); $('setup-result').hidden = false; showError('setup-action-error',data.ok ? '' : data.error || 'Installation may be partial. Review the reported files and prepare a new preview.'); $('setup-action-status').textContent = data.ok ? 'Installation complete. Refreshing project readiness…' : 'Installation did not complete. Refresh and prepare a new preview.';
+      } catch (error) { if (epoch === setupState.previewEpoch) { $('setup-action-status').textContent = 'Installation was not confirmed.'; showError('setup-action-error',`${textError(error)} The preview is consumed. Refresh and generate a new preview before retrying.${error.status === 0 ? ' The connection was lost; some files may have been installed.' : ''}`); } }
+      finally { if (epoch === setupState.previewEpoch) { setupState.pending = null; $('setup-preview').hidden = true; $('setup-preview-files').replaceChildren(); updateSetupControls(); if ($('setup-project').value === selection.project_id) await loadSetup({preservePreview:true}); if (confirmed) $('setup-action-status').textContent = setupState.data ? 'Installation complete. Project readiness refreshed.' : 'Installation complete. Refresh to inspect the project.'; } }
     }
     $('setup-register-form').addEventListener('submit',registerProject); $('setup-refresh-projects').addEventListener('click',refreshProjects); $('setup-project').addEventListener('change',() => loadSetup()); $('setup-edition').addEventListener('change',() => invalidateSetupPreview('Edition changed. Prepare a new preview.'));
     $('setup-preview-button').addEventListener('click',previewSetup); $('setup-install-button').addEventListener('click',installSetup); $('setup-preview-actions').addEventListener('change',renderSetupPreviewFiles); $('setup-preview-path').addEventListener('input',renderSetupPreviewFiles);
     $('setup-start-session').addEventListener('click',() => { if (!$('setup-start-session').disabled) newSession('',$('setup-project').value); });
-    $('setup-result-start').addEventListener('click',() => { if (!$('setup-start-session').disabled) newSession('',$('setup-project').value); });
+    $('setup-result-start').addEventListener('click',() => { const projectId = setupState.resultProjectId; if (projectId && projectFor(projectId) && !state.pending) newSession('',projectId); });
     function skillsSelection() { return {project_id:$('skills-project').value,source_id:$('skills-source').value,skills:[...skillsState.selectedSkills].sort(),agents:[...skillsState.selectedAgents].sort()}; }
     function skillsSelectionKey() { return JSON.stringify(skillsSelection()); }
     function skillAgentName(id) { return skillsState.catalog?.agents.find(agent => agent.id === id)?.name || id; }
@@ -2770,7 +2818,7 @@
       $('creator-runs').disabled=creatorUi.pending;
       $('creator-count').max=String(maxAgentCount()); $('creator-count').disabled=!$('creator-agents').checked || creatorUi.pending;
       $('creator-branch-field').hidden=$('creator-workspace').value!=='worktree'; $('creator-worktree-note').hidden=$('creator-workspace').value!=='worktree';
-      const helpers=$('creator-count').valueAsNumber; $('creator-agent-hint').textContent=$('creator-agents').checked && Number.isInteger(helpers) ? `Each scan and generate phase launches exactly ${helpers} ${helpers===1?'helper':'helpers'}, in batches if needed.` : '';
+      const helpers=$('creator-count').valueAsNumber; $('creator-agent-hint').textContent=$('creator-agents').checked && Number.isInteger(helpers) ? `Each scan and generate phase asks for exactly ${helpers} ${helpers===1?'helper':'helpers'}; the log shows how many ran.` : '';
       $('creator-start').disabled=creatorUi.pending || !creatorUi.available || !providerFor($('creator-provider').value)?.available;
       for (const input of $('creator-form').querySelectorAll('input,textarea,select,button')) if (input.id!=='creator-start' && input.id!=='creator-count') input.disabled=creatorUi.pending;
       creatorBudgetControls();

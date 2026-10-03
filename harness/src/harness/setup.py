@@ -506,7 +506,7 @@ class SetupManager:
             'payload_verified': False, 'git': {'is_git': False},
             'providers': [{key: value for key, value in provider.items() if key in ('id', 'name', 'available', 'detail')}
                           for provider in self.sessions.providers.values()],
-            'scope': ['CLI found; authentication is not checked.'], 'diagnostics': []}
+            'scope': ['A found CLI may not be signed in; authentication is not checked.'], 'diagnostics': []}
         source_fd = None
         try:
             source_fd = _root_fd(self.source_root)
