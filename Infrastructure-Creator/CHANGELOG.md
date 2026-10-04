@@ -4,6 +4,16 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Changed
+
+- **`hook-forge` read hook stands down when the host delivered the capsule.**
+  A generated `working-memory-read.sh` exits silently when
+  `CONTEXT_CAPSULE_DELIVERED` is `1`, as the editions' hooks now do: the
+  Harness puts each turn's capsule into the prompt itself, retrieved for the
+  message alone, and a second one distilled from that whole prompt would spend
+  the turn's memory budget twice. The `.claude`/`.cursor` mirrors and the
+  policy lock are regenerated.
+
 ### Fixed
 
 - **`memory-seed` asset carries the memory-core fixes.** Every generated project

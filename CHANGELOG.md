@@ -26,6 +26,12 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- The Claude and Codex read hooks (`working-memory-read.sh`) stand down when
+  `CONTEXT_CAPSULE_DELIVERED=1`. The Harness sets it when it has already put
+  the turn's capsule into the prompt, retrieved for the message alone; the hook
+  would otherwise distill a second capsule from that whole prompt and spend the
+  turn's memory budget twice. The Stop hook still checkpoints the task.
+
 - Harness: **Save to memory** after a linked run. Agents left to policy almost
   never record what a run established — 0 memory commands in ~1,850 prompts on
   four real installations — so a linked launch's prompt now asks the agent to

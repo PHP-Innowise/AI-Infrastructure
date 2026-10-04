@@ -41,6 +41,10 @@ Both names are listed in the Codex configuration reference (see above), which
 is what makes the wiring safe: an unverified event name silently produces a
 hook that never runs.
 
+The read hook exits without a capsule when `CONTEXT_CAPSULE_DELIVERED=1`: a
+host that already put this turn's capsule into the prompt sets it (the Harness
+does), and the Stop hook still checkpoints the task.
+
 The read hook carries `additionalContextLimit: 4000`. A Task Capsule is capped
 at 8,000 Unicode characters, which exceeds the 2,500-token default and would
 otherwise be truncated mid-capsule. Lower it if your Codex version accounts

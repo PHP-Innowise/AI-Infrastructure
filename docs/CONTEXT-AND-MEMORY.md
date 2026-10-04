@@ -1181,6 +1181,10 @@ than silently narrowing the result. When the hook also has a task — from
 `CONTEXT_TASK_ID` or the current branch — the same process assembles a bounded
 capsule with `--ephemeral`, avoiding the second index pass a separate
 `retrieve` would run. A capsule failure is a warning; the layer refresh stands.
+A host that has already put the turn's capsule into the prompt sets
+`CONTEXT_CAPSULE_DELIVERED=1`, and the hook then stays silent: the Harness
+retrieves for the message alone, and a second capsule distilled from the whole
+prompt it assembled would cost the turn twice.
 
 The hook passes the prompt as-is; `refresh` distills it into the retrieval
 query itself. The whole prompt is tokenized, terms neither indexed documents

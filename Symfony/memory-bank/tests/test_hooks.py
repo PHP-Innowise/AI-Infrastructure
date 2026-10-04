@@ -609,6 +609,52 @@ class WorkingMemoryRuleTest(unittest.TestCase):
                     self.assertNotIn("--json", line)
 
 
+class HostDeliveredCapsuleTest(unittest.TestCase):
+    """A host that put the turn's capsule into the prompt silences the read hook.
+
+    The Harness retrieves for the message alone and sets
+    CONTEXT_CAPSULE_DELIVERED=1. A second capsule, distilled from the whole
+    prompt the host assembled, would spend the turn's memory budget twice.
+    """
+
+    def test_read_hook_stands_down_only_when_the_host_delivered_the_capsule(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hook-tests-") as directory:
+            for tool in ("claude", "codex"):
+                with self.subTest(tool=tool):
+                    root = Path(directory) / tool
+                    hooks = root / MIRRORS[tool][0]
+                    hooks.mkdir(parents=True)
+                    shutil.copy(hook_path(tool, "working-memory-read.sh"), hooks)
+                    marker = root / "cli-ran"
+                    cli = root / "memory-bank/scripts/context.py"
+                    cli.parent.mkdir(parents=True)
+                    cli.write_text(
+                        "import pathlib\n"
+                        f"pathlib.Path({str(marker)!r}).write_text('ran')\n"
+                        "print('working: TASK-HOST')\n",
+                        encoding="utf-8",
+                    )
+
+                    def run(delivered: str):
+                        return subprocess.run(
+                            [BASH, str(hooks / "working-memory-read.sh")],
+                            input=json.dumps({"prompt": "cobalt allocation"}),
+                            capture_output=True,
+                            text=True,
+                            env={**os.environ, "CONTEXT_TASK_ID": "TASK-HOST",
+                                 "CONTEXT_CAPSULE_DELIVERED": delivered},
+                            timeout=HOOK_TIMEOUT,
+                        )
+
+                    stood_down = run("1")
+                    self.assertEqual((0, ""), (stood_down.returncode, stood_down.stdout))
+                    self.assertFalse(marker.exists())
+                    ordinary = run("0")
+                    self.assertEqual(0, ordinary.returncode)
+                    self.assertIn("working: TASK-HOST", ordinary.stdout)
+                    self.assertTrue(marker.exists())
+
+
 class CursorCapsuleRenderTest(unittest.TestCase):
     """Functional render tests against a throwaway edition tree.
 

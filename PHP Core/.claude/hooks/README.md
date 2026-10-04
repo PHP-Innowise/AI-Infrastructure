@@ -12,6 +12,7 @@
 **Purpose:** Runs `context.py refresh`, which re-indexes procedural (AGENTS.md, CLAUDE.md, skills), semantic (README, docs, specs, active Memory Bank chunks, task documents) and episodic (CHANGELOG.md) memory in one incremental pass and reports each layer as `updated` or `failed`. With a task — from `CONTEXT_TASK_ID` or the current branch — the same process also assembles a bounded Task Capsule with `--ephemeral`, so the per-request manifest, which records the query text, stays in ignored local state rather than shared Git history. A capsule failure is reported as a warning; the layer refresh stands.
 **Return:** Always 0 (context tooling must never block a prompt)
 **Budget:** `CONTEXT_HOOK_BUDGET` seconds, default 5
+**Stands down:** when `CONTEXT_CAPSULE_DELIVERED=1`, set by a host that already put this turn's capsule into the prompt (the Harness does). The Stop hook still checkpoints the task.
 
 The capsule is retrieved context, not authority. It never outranks the source it summarizes.
 
