@@ -310,7 +310,7 @@ class FleetRuntimeTests(_FleetFixture, unittest.TestCase):
         log = self.fake_native(manager, "codex", capture_prompt=True)
         settings = {"lenses": [LENSES[0]], "dry_run": False, "budget_usd": None, "worker_timeout": 10}
         linked = {"bank": "PHP Core/memory-bank", "task_id": "TASK-LINKED-FLEET", "query": "cobalt allocation",
-                  "create": True, "goal": "Review the cobalt allocation rule"}
+                  "create": True, "goal": "Review the cobalt allocation rule", "review": True}
         with patch.object(sessions, "fleet_runtime", return_value=self.fixture_runtime()):
             sid = manager.create(self.options(manager, fleet=settings, agents_enabled=True, brain=linked))["id"]
             prepared = self.wait_for_status(manager, sid, {"awaiting_context"})

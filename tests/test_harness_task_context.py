@@ -22,9 +22,27 @@ FAKE_NATIVE = r'''
 import json, os, pathlib, sys
 receipt = pathlib.Path(sys.argv[1])
 receipt.write_text(json.dumps({"cwd": os.getcwd(), "prompt": sys.stdin.read(),
-                              "task_id": os.environ.get("CONTEXT_TASK_ID")}))
+                              "task_id": os.environ.get("CONTEXT_TASK_ID"),
+                              "delivered": os.environ.get("CONTEXT_CAPSULE_DELIVERED")}))
 print(json.dumps({"type": "thread.started", "thread_id": "native-context-fixture"}), flush=True)
 print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "RAW ASSISTANT FIXTURE OUTPUT"}}), flush=True)
+print(json.dumps({"type": "turn.completed"}), flush=True)
+'''
+
+
+FAKE_DRAFT = r'''
+import json, os, pathlib, sys
+receipt = pathlib.Path(sys.argv[1])
+receipt.write_text(json.dumps({"cwd": os.getcwd(), "prompt": sys.stdin.read(),
+                              "task_id": os.environ.get("CONTEXT_TASK_ID"),
+                              "delivered": os.environ.get("CONTEXT_CAPSULE_DELIVERED")}))
+draft = {"progress": "The cobalt rule is checked at allocation.", "next_steps": ["Cover the release path."],
+         "learnings": [{"type": "finding", "title": "Cobalt allocation needs one owner",
+                        "consequence": "Every cobalt allocation names exactly one owner.",
+                        "sources": ["specs/authority.md"]}]}
+text = "Checked the rule.\n\n```memory-draft\n" + json.dumps(draft) + "\n```"
+print(json.dumps({"type": "thread.started", "thread_id": "native-context-fixture"}), flush=True)
+print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": text}}), flush=True)
 print(json.dumps({"type": "turn.completed"}), flush=True)
 '''
 
@@ -79,7 +97,7 @@ class TaskContextTests(unittest.TestCase):
         return {"project_id": next(iter(store.projects)), "provider": "codex", "mode": "plan",
                 "prompt": "Check the cobalt allocation rule", "project_context": False,
                 "brain": {"bank": "memory-bank", "task_id": "TASK-CONTEXT", "query": "cobalt allocation",
-                          "create": True, "goal": "Verify the cobalt allocation rule"}, **changes}
+                          "create": True, "goal": "Verify the cobalt allocation rule", "review": True}, **changes}
 
     def wait_status(self, store, sid, status, timeout=15):
         deadline = time.monotonic() + timeout
@@ -115,6 +133,205 @@ class TaskContextTests(unittest.TestCase):
             self.wait_status(store, sid, "completed")
         receipt = json.loads(self.calls[-1]["receipt"].read_text())
         self.assertEqual("TASK-CONTEXT", receipt["task_id"])
+
+    def linked_run(self, store):
+        sid = store.create(self.options(store))["id"]
+        waiting = self.wait_status(store, sid, "awaiting_context")
+        store.run_context(sid, waiting["brain"]["context_id"])
+        self.wait_status(store, sid, "completed")
+        return sid
+
+    def test_linked_runs_ask_for_a_memory_draft_and_unlinked_runs_do_not(self):
+        from harness import memory_draft
+        store = self.manager()
+        self.linked_run(store)
+        self.assertIn(memory_draft.instruction(True), self.calls[-1]["prompt"])
+        unlinked = {key: value for key, value in self.options(store).items() if key != "brain"}
+        sid = store.create(unlinked)["id"]
+        self.wait_status(store, sid, "completed")
+        self.assertNotIn("memory-draft", self.calls[-1]["prompt"])
+
+    def test_the_draft_a_run_leaves_reads_back_and_saves_through_the_runtime(self):
+        self.fake.write_text(FAKE_DRAFT)
+        store = self.manager()
+        sid = self.linked_run(store)
+        before = store.brain_info(sid)
+        self.assertEqual("drafted", before["memory_draft"]["state"])
+        draft = before["memory_draft"]["draft"]
+        self.assertEqual("The cobalt rule is checked at allocation.", draft["progress"])
+
+        result = store.save_memory(sid, {**draft, "verified": True})
+
+        self.assertTrue(result["ok"], result)
+        saved = result["saved"]
+        self.assertGreater(saved["task"]["revision"], before["task"]["revision"])
+        self.assertEqual([("finding", "resolved")], [(item["type"], item["status"]) for item in saved["records"]])
+        task = store.brain_info(sid)["task"]
+        self.assertEqual("The cobalt rule is checked at allocation.", task["progress"])
+        # The draft is the current plan, so it replaced the steps rather than appending.
+        self.assertEqual(["Cover the release path."], task["next_steps"])
+        finding = next(record for record in store.brain_info(sid)["records"] if record["id"] == saved["records"][0]["id"])
+        self.assertEqual(("verified", "Every cobalt allocation names exactly one owner."),
+                         (finding["authority"], finding["progress"]))
+        promotion = saved["promotion"]
+        self.assertTrue(promotion["enabled"], promotion)
+        self.assertEqual(1, len(promotion["promoted"]), promotion)
+        chunk = next((self.project / "memory-bank/chunks").glob(promotion["promoted"][0]["memory_id"] + "-*.md"))
+        self.assertIn("auto-promoted", chunk.read_text(encoding="utf-8"))
+
+    def test_saving_refuses_unconfirmed_or_unsourced_learnings_and_a_finished_task(self):
+        store = self.manager()
+        sid = self.linked_run(store)
+        learning = {"type": "decision", "title": "Owners are explicit", "consequence": "Name the owner.",
+                    "sources": ["specs/authority.md"]}
+        for data, message in (({"learnings": [learning]}, "Confirm that you checked"),
+                              ({"learnings": [{**learning, "sources": ["specs/missing.md"]}], "verified": True},
+                               "Source not found"),
+                              ({}, "Nothing to save")):
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(sessions.SessionError, message):
+                    store.save_memory(sid, data)
+        self.assertEqual([], [record for record in store.brain_info(sid)["records"] if record["type"] == "decision"])
+        task = store.brain_info(sid)["task"]
+        completed = store.brain_action(sid, {"action": "complete", "revision": task["revision"],
+                                             "outcome": "Verified", "verification": ["Fixture"]})
+        self.assertTrue(completed["ok"], completed)
+        with self.assertRaisesRegex(sessions.SessionError, "linked task is finished"):
+            store.save_memory(sid, {"progress": "More"})
+
+    def automatic(self, store, **changes):
+        """A session with the composer's default: project memory on, nothing to review."""
+        return {**self.options(store, **changes), "brain": {"bank": "memory-bank", "auto": True}}
+
+    def memory_events(self, store, sid):
+        return [event for event in store.events(sid) if event["kind"] == "memory"]
+
+    def test_unattended_memory_reaches_the_launch_without_a_step_from_a_person(self):
+        from harness import memory_draft
+        store = self.manager()
+        governed = self.project / "project-brain/control/retrieval-manifests"
+        before = sorted(governed.glob("*.json"))
+        sid = store.create(self.automatic(store))["id"]
+        session = self.wait_status(store, sid, "completed")
+        brain = session["brain"]
+        # The first message names the task and is the first query.
+        self.assertFalse(brain["review"])
+        self.assertRegex(brain["task_id"], r"^harness/check-the-cobalt-allocation-rule-[0-9a-f]{6}$")
+        self.assertEqual(("Check the cobalt allocation rule", "Check the cobalt allocation rule"),
+                         (brain["goal"], brain["query"]))
+        self.assertEqual((False, brain["task"]["id"]), (brain["create"], brain["record_id"]))
+        self.assertNotIn("Context prepared", json.dumps(store.events(sid)))
+        received = json.loads(self.calls[0]["receipt"].read_text())
+        self.assertIn(sessions.BRAIN_CONTEXT_HEADER + json.dumps(brain["capsule"], ensure_ascii=False) + "\n\n",
+                      received["prompt"])
+        self.assertIn("requires one owner.", received["prompt"])
+        self.assertIn(memory_draft.instruction(False), received["prompt"])
+        # The project's own read hook stands down for a turn whose capsule is already in the prompt.
+        self.assertEqual((brain["task_id"], "1"), (received["task_id"], received["delivered"]))
+        # A turn's own retrieval stays in ignored local state, out of the project's history.
+        self.assertRegex(brain["capsule"]["manifest"], r"^memory-bank/local/retrieval-manifests/")
+        self.assertEqual(before, sorted(governed.glob("*.json")))
+        memory = self.memory_events(store, sid)
+        self.assertEqual([True, False], [event["ok"] for event in memory])
+        self.assertIn(f"Project memory for this turn: task {brain['task_id']}, ", memory[0]["text"])
+        self.assertEqual(memory_draft.summary("missing"), memory[1]["text"])
+        with self.assertRaisesRegex(sessions.SessionError, "for each message by itself"):
+            store.prepare_context(sid, "cobalt allocation")
+
+    def test_an_unattended_run_saves_its_draft_and_each_follow_up_retrieves_for_its_message(self):
+        from harness import memory_draft
+        self.fake.write_text(FAKE_DRAFT)
+        store = self.manager()
+        sid = store.create(self.automatic(store))["id"]
+        self.wait_status(store, sid, "completed")
+        info = store.brain_info(sid)
+        self.assertEqual(("The cobalt rule is checked at allocation.", ["Cover the release path."]),
+                         (info["task"]["progress"], info["task"]["next_steps"]))
+        findings = [record for record in info["records"] if record["type"] == "finding"]
+        self.assertEqual([("Cobalt allocation needs one owner", "resolved", "verified")],
+                         [(record["title"], record["status"], record["authority"]) for record in findings])
+        # The ledger says the attestation was the agent's, not a person's.
+        self.assertEqual([("observed", "verified"), ("open", "resolved")],
+                         [(item["from"], item["to"]) for item in findings[0]["transitions"]][-2:])
+        self.assertEqual({memory_draft.AUTOMATIC_REASON},
+                         {item["reason"] for item in findings[0]["transitions"][-2:]})
+        saved = self.memory_events(store, sid)[-1]
+        self.assertTrue(saved["ok"], saved)
+        self.assertIn("Saved to project memory: the task's progress and next steps; "
+                      "finding “Cobalt allocation needs one owner”.", saved["text"])
+        self.assertRegex(saved["text"], r"Promoted to the Memory Bank as MEM-")
+        chunk = next((self.project / "memory-bank/chunks").glob("MEM-*-*.md"), None)
+        self.assertIsNotNone(chunk)
+        self.assertIn("auto-promoted", chunk.read_text(encoding="utf-8"))
+
+        store.send(sid, "Now check who owns the release path")
+        self.wait_status(store, sid, "completed")
+        brain = store.get(sid)["brain"]
+        self.assertEqual("Now check who owns the release path", brain["query"])
+        self.assertEqual(2, len(self.calls))
+        self.assertEqual("native-context-fixture", self.calls[1]["session_id"])
+        self.assertIn(json.dumps(brain["capsule"], ensure_ascii=False), self.calls[1]["prompt"])
+        # The agent restated its learning; this session already saved it.
+        again = self.memory_events(store, sid)[-1]
+        self.assertTrue(again["ok"], again)
+        self.assertIn("1 learning(s) were already saved from this session.", again["text"])
+        self.assertEqual(1, len([record for record in store.brain_info(sid)["records"] if record["type"] == "finding"]))
+
+    def test_memory_that_cannot_be_retrieved_costs_the_turn_its_memory_never_the_turn(self):
+        store = self.manager()
+
+        def unavailable(context, *arguments):
+            raise sessions.SessionError("Capsule unavailable: fixture outage")
+
+        with patch.object(TaskContext, "_retrieve", unavailable):
+            sid = store.create(self.automatic(store))["id"]
+            session = self.wait_status(store, sid, "completed")
+        received = json.loads(self.calls[0]["receipt"].read_text())
+        self.assertNotIn(sessions.BRAIN_CONTEXT_HEADER, received["prompt"])
+        # Without a capsule of its own the turn leaves the project's hook to deliver one.
+        self.assertEqual((session["brain"]["task_id"], None), (received["task_id"], received["delivered"]))
+        self.assertIsNone(session["brain"]["capsule"])
+        notice = self.memory_events(store, sid)[0]
+        self.assertEqual((False, "Project memory was not retrieved for this turn: Capsule unavailable: fixture outage"),
+                         (notice["ok"], notice["text"]))
+
+    def test_memory_waits_for_another_knowledge_operation_instead_of_skipping_the_turn(self):
+        store = self.manager()
+        knowledge = self.knowledge(store)
+        store.knowledge = knowledge
+        knowledge.lock.acquire()
+        try:
+            sid = store.create(self.automatic(store))["id"]
+            time.sleep(.5)
+            self.assertEqual([], self.calls)
+        finally:
+            knowledge.lock.release()
+        self.wait_status(store, sid, "completed")
+        self.assertTrue(self.memory_events(store, sid)[0]["ok"])
+
+    def test_options_name_an_automatic_task_from_the_first_message(self):
+        validate = TaskContext.validate_options
+        options = validate({"bank": "memory-bank", "auto": True}, " \n Fix the\tlogin   redirect\nmore detail")
+        self.assertEqual(("Fix the login redirect", " \n Fix the\tlogin   redirect\nmore detail".strip(), True, False),
+                         (options["goal"], options["query"], options["create"], options["review"]))
+        self.assertRegex(options["task_id"], r"^harness/fix-the-login-redirect-[0-9a-f]{6}$")
+        self.assertNotEqual(options["task_id"], validate({"bank": "memory-bank", "auto": True}, "Fix the login redirect")["task_id"])
+        self.assertTrue(validate({"bank": "memory-bank", "auto": True}, "Пофиксить вход")["task_id"].startswith("harness/task-"))
+        self.assertEqual(200, len(validate({"bank": "memory-bank", "auto": True}, "x" * 500)["goal"]))
+        for data, prompt in (({"bank": "memory-bank", "auto": True, "task_id": "T-1"}, "Go"),
+                             ({"bank": "memory-bank", "auto": True, "create": True}, "Go"),
+                             ({"bank": "memory-bank", "auto": True}, None),
+                             ({"bank": "memory-bank", "auto": "yes"}, "Go"),
+                             ({"bank": "memory-bank", "auto": True, "review": True}, "Go")):
+            with self.subTest(data=data), self.assertRaises(sessions.SessionError):
+                validate(data, prompt)
+        # Review keeps its explicit query; an unattended session asks with each message.
+        self.assertEqual("cobalt", validate({"bank": "memory-bank", "task_id": "T-1", "query": "cobalt", "review": True},
+                                            "Check everything")["query"])
+        self.assertEqual("Check everything", validate({"bank": "memory-bank", "task_id": "T-1"}, "Check everything")["query"])
+        # Sessions linked before memory ran unattended were linked for review.
+        self.assertTrue(sessions.reviewed({"task_id": "T-1"}))
+        self.assertFalse(sessions.reviewed({"task_id": "T-1", "review": False}))
 
     def test_capsule_meter_measures_the_stored_capsule_and_the_inserted_prompt(self):
         store = self.manager()

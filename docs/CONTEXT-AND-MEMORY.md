@@ -781,6 +781,17 @@ index under one lock, validates the bank, and restores every touched file if
 anything fails. Doing it by hand leaves the bank invalid between the first
 edit and the last.
 
+Every bank write — promotion, compaction, `bank-reverify`, `bank-retire` — is
+refused for what it introduces, judged against the bank as it stood before
+the write, and for any problem in the chunk it produces or attests. It is not
+refused for a problem the bank already had. Validating the whole bank and
+rolling back on any error made time alone a write lock: one chunk passing its
+review date failed every promotion and compaction in the repository, and two
+overdue chunks each blocked the `bank-reverify` that would have repaired the
+other, leaving hand-editing as the only way out. A lapsed chunk is reported
+where lapses belong instead — `validate.py`, `bank-audit`, the `overdue-review`
+retrieval exclusion, and a `memory review:` line in every `refresh`.
+
 An active chunk may not sit past its `valid_to`, the same rule `review_after`
 already applies. Closing a period therefore removes the chunk from retrieval
 without deleting it: automatically written memory earns a boundary rather than
@@ -903,6 +914,14 @@ unattended on the same boundary as the working-memory flush:
 propose -> apply
 ```
 
+`context.py promote-auto` runs the same pass on demand. The boundary waits for
+`--flush-after` turns, and knowledge recorded deliberately — what a Harness run
+drafted, saved when the run completes or after a person confirmed each
+learning — has no reason to wait for a counter. A learning the Harness saved
+unattended is written as observed and raised to verified with the reason
+"agent-attested, not reviewed by a person", so its own ledger says who
+attested it before promotion tags the chunk `auto-promoted`.
+
 There is no reviewer in the automatic mode, and the runtime refuses to pretend
 otherwise. `reviewer` stays null, `review_mode` is `automatic`, the outcome is
 recorded as `approved-without-review`, and the resulting chunk carries an
@@ -953,8 +972,9 @@ reviewed promotion and `approved-without-review` for automatic promotion.
 
 Application mints a conflict-free Memory Bank ID (`MEM-YYYYMMDD-xxxxxxxx`,
 the promotion date plus eight hex characters of the source record's UUID),
-writes a chunk, regenerates the index from chunk frontmatter, validates the
-bank, and updates the proposal. These writes are snapshotted and rolled back
+writes a chunk, regenerates the index from chunk frontmatter, validates what
+the write changed — the new chunk in full, and the bank for anything newly
+broken — and updates the proposal. These writes are snapshotted and rolled back
 together on failure. No shared counter is involved: the legacy
 `.memory-counter` file is neither read nor written, so concurrent promotions
 on different machines or branches cannot collide, and `context.py
@@ -982,6 +1002,13 @@ Compaction validates the repository, then moves terminal or explicitly
 superseded dynamic records and associated handoffs into `project-brain/archive/`.
 It rebuilds deterministic indexes, validates the result, and restores all
 moves/indexes on failure.
+
+Both validations leave out source freshness. A record whose cited file changed
+after it was written is stale, which retrieval and promotion act on, but moving
+terminal records can neither cause nor cure it. With freshness in, the first
+edit to any file a record cited — the living spec behind an accepted decision,
+the code a finding was about — refused every later compaction, manual or
+automatic.
 
 Compaction is archival, not deletion. Archived records remain subject to the
 same strict schema and relationship checks and can serve as promotion sources.
@@ -1157,6 +1184,10 @@ than silently narrowing the result. When the hook also has a task — from
 `CONTEXT_TASK_ID` or the current branch — the same process assembles a bounded
 capsule with `--ephemeral`, avoiding the second index pass a separate
 `retrieve` would run. A capsule failure is a warning; the layer refresh stands.
+A host that has already put the turn's capsule into the prompt sets
+`CONTEXT_CAPSULE_DELIVERED=1`, and the hook then stays silent: the Harness
+retrieves for the message alone, and a second capsule distilled from the whole
+prompt it assembled would cost the turn twice.
 
 The hook passes the prompt as-is; `refresh` distills it into the retrieval
 query itself. The whole prompt is tokenized, terms neither indexed documents
@@ -1166,6 +1197,17 @@ request whose actual subject arrives at the end no longer retrieves on its
 preamble. The refresh report also carries per-phase wall-clock
 durations (`stat`, `index`, `retrieval`) so an operator can see which side of
 the work is approaching the hook budget.
+
+The rendered capsule leads with the task itself: after `working: <task> —
+<goal>` come bounded `phase:`, `progress:`, `next:`, `recent files:` and
+`task record:` lines. Until they existed the plain capsule — the only form the
+hooks hand to a model — printed the goal alone, so a request to continue
+retrieved skill pointers and never the place the work stopped. The same turn
+spends no slot on what the model already has: the task's own record and
+handoff are excluded as `working-task`, and the instruction files the host
+loads by itself as `host-loaded` — `CLAUDE.md` and its `@path` imports for
+Claude Code, `AGENTS.md` for Codex. On two real installations `CLAUDE.md` had
+held a procedural slot on most Claude Code turns.
 
 The capsule is retrieved context, not authority: the ordinary hierarchy still
 applies, and a capsule entry never outranks the source it summarizes.
@@ -1180,6 +1222,17 @@ directory path rather than thousands of files. Turns accumulate in ignored
 local state and flush together, so continuity costs one governed revision per
 `--flush-after` turns instead of one per turn. A flush contributes at most
 `--max-files` paths, and reports the remainder rather than dropping it silently.
+
+Paths say where work happened, not what it was, and agents almost never write
+progress themselves: on four real installations 23 of 24 tasks held nothing
+but the automatic checkpoint. So the checkpoint also carries the branch's
+newest commit subjects, counted from the merge base with the default branch.
+A subject is already shared history and already a person's one-line summary
+of a change, so it costs no model and exposes nothing Git did not. Merges and
+any subject a secret or privacy gate would refuse are left out. A turn that
+ends in a commit leaves a clean tree, so a moved HEAD counts as work too —
+otherwise committed work, the most finished there is, never reached the
+buffer at all.
 
 The first flush provisions the task if it does not exist. Automated continuity
 is worthless if it buffers into a task nobody created, and requiring an

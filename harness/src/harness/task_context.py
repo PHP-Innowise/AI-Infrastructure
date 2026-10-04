@@ -1,41 +1,107 @@
-"""Bind a browser session to native Brain state and an approved context snapshot."""
+"""Bind a browser session to native Brain state, and run its memory.
+
+By default memory works unattended: each message is the retrieval query, the
+context goes straight into the launch, and what the run established is saved
+when it finishes. `review` restores the approved-snapshot flow, where a person
+reviews each capsule and saves memory by hand.
+"""
 from __future__ import annotations
 
 import json
 from pathlib import Path
 import re
+import time
 import uuid
 
-from .knowledge import _path, _text
+from . import memory_draft
+from .knowledge import KnowledgeBusy, _path, _text
 from .sessions import CAPSULE_LIMIT, SessionError, read_context
 
 UUID4 = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}')
 TASK_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._/-]{0,199}')
-FIELDS = ('bank', 'task_id', 'query', 'create', 'goal', 'record_id')
+FIELDS = ('bank', 'task_id', 'query', 'create', 'goal', 'record_id', 'review', 'auto')
 SCOPED_ACTIONS = {'brain-update', 'rebind', 'complete', 'brain-create',
                   'promote-propose', 'promote-review', 'promote-apply'}
+# The Harness's own bookkeeping beside the options, which preparing a turn keeps.
+KEPT = ('remembered',)
+QUERY_BYTES = 4000
+GOAL_CHARACTERS = 200
+
+
+def _plain(text):
+    """Text without the control characters every Brain field refuses."""
+    return ''.join(char if char in '\n\t' or 31 < ord(char) != 127 else ' ' for char in text)
+
+
+def message_query(prompt):
+    """A message as a retrieval query. The runtime distills it; this only bounds it."""
+    return _plain(prompt).strip().encode('utf-8')[:QUERY_BYTES].decode('utf-8', 'ignore').strip()
+
+
+def automatic_goal(prompt):
+    """The first line of the first message: what the session was started to do."""
+    line = next((line for line in _plain(prompt).splitlines() if line.strip()), '')
+    line = ' '.join(line.split())
+    return line if len(line) <= GOAL_CHARACTERS else line[:GOAL_CHARACTERS - 1].rstrip() + '…'
+
+
+def automatic_task_id(goal):
+    """A readable task ID for a session that named none, unique per session."""
+    slug = '-'.join(re.findall(r'[a-z0-9]+', goal.lower())[:5])[:40].strip('-')
+    return f'harness/{slug or "task"}-{uuid.uuid4().hex[:6]}'
 
 
 class TaskContext:
-    def __init__(self, knowledge):
+    def __init__(self, knowledge, *, wait=0):
+        """`wait` is how long, in seconds, an operation outlasts another one holding the
+        knowledge lock. A person's request is refused at once and can be repeated; the run
+        worker's memory has nobody to repeat it, so the worker waits instead."""
         self.knowledge = knowledge
         self.sessions = knowledge.sessions
+        self.wait = wait
+
+    def _knowledge(self, operation, *arguments, **options):
+        deadline = time.monotonic() + self.wait
+        while True:
+            try:
+                return getattr(self.knowledge, operation)(*arguments, **options)
+            except KnowledgeBusy:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(.2)
 
     @staticmethod
-    def validate_options(data):
+    def validate_options(data, prompt=None):
+        """Validate a session's memory options; `prompt` is the message that opens the session.
+
+        `auto` names no task: one is created from the first message. Without `review`
+        each message is the retrieval query, so a query is only required for review.
+        """
         if not isinstance(data, dict) or set(data) - set(FIELDS):
             raise SessionError('Invalid task context options.')
+        review, auto = data.get('review', False), data.get('auto', False)
+        if type(review) is not bool or type(auto) is not bool:
+            raise SessionError('Memory options must be booleans.')
+        if auto:
+            if set(data) & {'task_id', 'goal', 'record_id', 'create'}:
+                raise SessionError('An automatic task takes its ID and goal from the first message.')
+            if not isinstance(prompt, str) or not prompt.strip():
+                raise SessionError('An automatic task needs the first message.')
+            goal = automatic_goal(prompt)
+            data = {**data, 'task_id': automatic_task_id(goal), 'goal': goal, 'create': True}
+        if 'query' not in data and not review and isinstance(prompt, str):
+            data = {**data, 'query': message_query(prompt)}
         bank = _path(data.get('bank'))
         if bank != 'memory-bank' and not bank.endswith('/memory-bank'):
             raise SessionError('Select a project Memory Bank.')
         task_id = _text(data.get('task_id'), 'task ID', 200).strip()
         if not TASK_ID.fullmatch(task_id) or '..' in task_id.split('/'):
             raise SessionError('Enter a valid Brain task ID.')
-        query = _text(data.get('query'), 'context query', 4000)
+        query = _text(data.get('query'), 'context query', QUERY_BYTES)
         create = data.get('create', False)
         if type(create) is not bool:
             raise SessionError('The create-task option must be a boolean.')
-        result = {'bank': bank, 'task_id': task_id, 'query': query, 'create': create}
+        result = {'bank': bank, 'task_id': task_id, 'query': query, 'create': create, 'review': review}
         if create or 'goal' in data:
             result['goal'] = _text(data.get('goal'), 'task goal', 16000)
         if 'record_id' in data:
@@ -49,7 +115,8 @@ class TaskContext:
         brain = session.get('brain')
         if not isinstance(brain, dict):
             raise SessionError('This session has no linked Brain task.')
-        options = self.validate_options({key: brain[key] for key in FIELDS if key in brain})
+        # Every session linked before memory ran unattended was linked for review.
+        options = self.validate_options({'review': True, **{key: brain[key] for key in FIELDS if key in brain}})
         workspace = self.sessions._workspace(session)
         info = self.knowledge.info(session['project_id'], options['bank'], _root=workspace)
         if not info['runtime_available'] or info['mode'] != 'governed':
@@ -57,8 +124,8 @@ class TaskContext:
         return brain, options, workspace, info
 
     def _call(self, session, options, workspace, action, **fields):
-        result = self.knowledge.run(session['project_id'], {'bank': options['bank'], 'action': action, **fields},
-                                    _root=workspace)
+        result = self._knowledge('run', session['project_id'], {'bank': options['bank'], 'action': action, **fields},
+                                 _root=workspace)
         if not result.get('ok') or not isinstance(result.get('result'), dict):
             raise SessionError(result.get('error') or 'The Brain runtime did not complete this operation.')
         return result['result']
@@ -139,21 +206,33 @@ class TaskContext:
         return hashes
 
     def _retrieve(self, session, options, workspace, task, info, ephemeral):
-        # The user explicitly requests a preview. Bypass only the repeat-skip
-        # heuristic; native privacy, lifecycle and source-freshness filters stay.
-        response = self.knowledge.run(session['project_id'], {
-            'action': 'retrieve', 'bank': options['bank'],
+        # Every retrieval here is one a person or the session asked for. Bypass only
+        # the repeat-skip heuristic; native privacy, lifecycle and freshness filters stay.
+        # Unattended memory retrieves through `refresh`, which distills the whole
+        # message rather than its first words and leaves out the instruction files
+        # the provider loads by itself.
+        automatic = not options.get('review')
+        response = self._knowledge('run', session['project_id'], {
+            'action': 'refresh' if automatic else 'retrieve', 'bank': options['bank'],
             'task_id': options['task_id'], 'query': options['query'],
-        }, _root=workspace, _ephemeral=ephemeral, _gate='off')
+        }, _root=workspace, _ephemeral=ephemeral, _gate='off',
+            _host=session.get('provider') if automatic else None)
         if not response.get('ok'):
             raise SessionError(response.get('error') or 'Task context could not be retrieved.')
         capsule = response.get('result')
+        if automatic:
+            result = capsule if isinstance(capsule, dict) else {}
+            capsule = result.get('capsule')
+            if not isinstance(capsule, dict):
+                warnings = [item for item in result.get('warnings') or [] if isinstance(item, str)]
+                raise SessionError('; '.join(warnings)[:500] or 'Task context could not be retrieved.')
         self._validate_capsule(capsule, task)
         hashes = self._source_hashes(Path(workspace) / info['root'], capsule)
         return capsule, hashes
 
     def prepare(self, session):
-        _, options, workspace, info = self._bound(session)
+        brain, options, workspace, info = self._bound(session)
+        kept = {key: brain[key] for key in KEPT if key in brain}
         if options['create']:
             task = self._call(session, options, workspace, 'start', task_id=options['task_id'], goal=options['goal'])
         else:
@@ -167,7 +246,7 @@ class TaskContext:
         options.update(create=False, record_id=record_id)
         # Persist the native identity before retrieval can fail. Retrying must
         # rebind this task rather than attempt to create another task.
-        pending = {**options, 'approved': False, 'context_id': None, 'capsule': None}
+        pending = {**options, **kept, 'approved': False, 'context_id': None, 'capsule': None}
         if hasattr(self.sessions, '_save_brain'):
             with self.sessions.lock:
                 # Cancellation can queue a new query while native start is
@@ -176,10 +255,12 @@ class TaskContext:
                 current = self.sessions.get(session['id'])['brain']
                 pending['query'] = current['query']
                 self.sessions._save_brain(session['id'], pending)
-        task = self.knowledge.inspect(session['project_id'], options['bank'], _root=workspace,
-                                      task_id=record_id, task_only=True)['task']
-        capsule, hashes = self._retrieve(session, options, workspace, task, info, False)
-        return {**options, 'context_id': str(uuid.uuid4()), 'capsule': capsule,
+        task = self._knowledge('inspect', session['project_id'], options['bank'], _root=workspace,
+                               task_id=record_id, task_only=True)['task']
+        # An approved snapshot is shared provenance; a turn's own retrieval is not, and
+        # one Git-tracked manifest per message would flood the project's history.
+        capsule, hashes = self._retrieve(session, options, workspace, task, info, not options.get('review'))
+        return {**options, **kept, 'context_id': str(uuid.uuid4()), 'capsule': capsule,
                 'task': task, 'source_hashes': hashes, 'approved': False}
 
     def ensure_fresh(self, session):
@@ -188,8 +269,8 @@ class TaskContext:
         if (not isinstance(saved_task, dict) or not isinstance(saved_capsule, dict)
                 or not isinstance(brain.get('context_id'), str) or not UUID4.fullmatch(brain['context_id'])):
             raise SessionError('Prepare the linked task context before running this session.')
-        task = self.knowledge.inspect(session['project_id'], options['bank'], _root=workspace,
-                                      task_id=options.get('record_id') or options['task_id'], task_only=True)['task']
+        task = self._knowledge('inspect', session['project_id'], options['bank'], _root=workspace,
+                               task_id=options.get('record_id') or options['task_id'], task_only=True)['task']
         if (task.get('id') != saved_task.get('id') or task.get('revision') != saved_task.get('revision')
                 or task.get('external_id') != options['task_id'] or task.get('status') in ('completed', 'cancelled')):
             raise SessionError('The linked task changed. Prepare and approve its context again.')
@@ -200,9 +281,76 @@ class TaskContext:
 
     def info(self, session):
         brain, options, workspace, _ = self._bound(session)
-        result = self.knowledge.inspect(session['project_id'], options['bank'], _root=workspace,
-                                       task_id=options.get('record_id') or options['task_id'])
-        return {**result, 'context_id': brain.get('context_id'), 'approved': brain.get('approved') is True}
+        result = self._knowledge('inspect', session['project_id'], options['bank'], _root=workspace,
+                                 task_id=options.get('record_id') or options['task_id'])
+        return {**result, 'context_id': brain.get('context_id'), 'approved': brain.get('approved') is True,
+                'memory_draft': memory_draft.latest(self.sessions, session['id'])}
+
+    def save_memory(self, session, data, *, automatic=False, known=()):
+        """Record a memory draft through the runtime's own commands.
+
+        The task's progress and next steps are updated first; each kept learning
+        becomes a verified finding or decision, resolved or accepted with its
+        consequence as the content promotion carries; then automatic promotion
+        runs once, under the runtime's own rules. Each command is atomic, the
+        chain is not: a failure reports what was already saved.
+
+        `automatic` is the unattended save at the end of a run: the agent's draft
+        as written, with any learning whose sources are not in the workspace, or
+        that this session already saved (`known`), left out rather than failing
+        the rest. Its learnings are written as observed and raised to verified
+        with a reason saying the agent attested them and no person reviewed them,
+        so the record's own ledger tells the two apart. Promotion still follows
+        the project's `automatic_promotion` setting.
+        """
+        _, options, workspace, info = self._bound(session)
+        root = Path(workspace) / info['root']
+        skipped = []
+        if automatic:
+            data, skipped = memory_draft.usable(root, data, known)
+            if not (data['progress'] or data['next_steps'] or data['learnings']):
+                return {'ok': True, 'saved': {'task': None, 'records': [], 'promotion': None},
+                        'skipped': skipped, 'error': None}
+        draft = memory_draft.submission(data)
+        memory_draft.check_sources(root, draft)
+        task = self._knowledge('inspect', session['project_id'], options['bank'], _root=workspace,
+                               task_id=options.get('record_id') or options['task_id'], task_only=True)['task']
+        if task.get('status') in ('completed', 'cancelled'):
+            raise SessionError('The linked task is finished. Link an active task to save more.')
+        saved = {'task': None, 'records': [], 'promotion': None}
+        reason = (memory_draft.AUTOMATIC_REASON if automatic else 'Saved from a reviewed Harness session')
+        try:
+            if draft['progress'] or draft['next_steps']:
+                fields = {'record_id': task['id'], 'revision': task['revision'], 'reason': reason}
+                if draft['progress']:
+                    fields['progress'] = draft['progress']
+                if draft['next_steps']:
+                    # The draft is the current plan, so it replaces the list rather
+                    # than appending to steps the run may have finished.
+                    fields.update(next_steps=draft['next_steps'], replace_next_steps=True)
+                updated = self._call(session, options, workspace, 'brain-update', **fields)
+                saved['task'] = {'id': updated.get('id'), 'revision': updated.get('revision')}
+            for learning in draft['learnings']:
+                created = self._call(session, options, workspace, 'brain-create',
+                                     record_type=learning['type'],
+                                     external_id=memory_draft.external_id(options['task_id'], learning['type']),
+                                     title=learning['title'], goal=learning['consequence'],
+                                     sources=learning['sources'], authority='observed' if automatic else 'verified')
+                closed = self._call(session, options, workspace, 'brain-update', record_id=created['id'],
+                                    revision=created['revision'], progress=learning['consequence'],
+                                    transition='resolved' if learning['type'] == 'finding' else 'accepted',
+                                    reason=reason, **({'authority': 'verified'} if automatic else {}))
+                saved['records'].append({'id': closed.get('id'), 'type': closed.get('type'),
+                                         'title': closed.get('title'), 'status': closed.get('status')})
+            if saved['records']:
+                promotion = self._knowledge('run', session['project_id'], {'bank': options['bank'], 'action': 'promote-auto'},
+                                            _root=workspace)
+                saved['promotion'] = (promotion['result'] if promotion.get('ok') and isinstance(promotion.get('result'), dict)
+                                      else {'error': promotion.get('error') or 'Automatic promotion did not run.'})
+        except (SessionError, KeyError, TypeError) as error:
+            message = str(error) if isinstance(error, SessionError) else 'The runtime returned an unexpected record.'
+            return {'ok': False, 'saved': saved, 'skipped': skipped, 'error': message}
+        return {'ok': True, 'saved': saved, 'skipped': skipped, 'error': None}
 
     def run(self, session, data):
         _, options, workspace, _ = self._bound(session)
@@ -225,7 +373,7 @@ class TaskContext:
                 raise SessionError('The linked task record cannot change.')
             if options.get('record_id'):
                 fields['record_id'] = options['record_id']
-        response = self.knowledge.run(session['project_id'], {'bank': options['bank'], **fields}, _root=workspace)
+        response = self._knowledge('run', session['project_id'], {'bank': options['bank'], **fields}, _root=workspace)
         if action == 'rebind' and response.get('ok'):
             result = response.get('result')
             record_id = result.get('task_uuid') if isinstance(result, dict) else None

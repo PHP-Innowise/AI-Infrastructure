@@ -442,6 +442,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.reply(200, {'session': store.run_context(sid, data['context_id'])})
                 elif action == 'brain':
                     self.reply(200, store.brain_action(sid, data))
+                elif action == 'memory':
+                    self.reply(200, store.save_memory(sid, data))
                 else:
                     raise SessionError('Invalid session action.')
             elif path == '/api/accelerators/preview':

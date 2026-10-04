@@ -43,6 +43,7 @@ OPEN_STATES = {'task': {'active', 'blocked', 'verifying'}, 'finding': {'open', '
 RESOLVED_STATES = {'finding': 'resolved', 'bug': 'resolved', 'incident': 'closed', 'decision': 'accepted'}
 CHUNK_ID = re.compile(r'MEM-(?:\d{8}-[0-9a-f]{8}|\d{4,})')
 ROUTES = {'claude': 'Claude hook', 'codex': 'Codex hook', 'cursor': 'Cursor hook', 'cli': 'CLI hook'}
+PROVIDER_HOSTS = ('claude', 'codex', 'cursor')
 
 _digests = OrderedDict()
 _runtime_checks = {}
@@ -318,14 +319,18 @@ def _retrievals(project, prefix, chunk_paths, harness_tasks):
         selected = [item for item in manifest['selected'] if isinstance(item, dict)]
         key = (manifest.get('task_id'), manifest.get('task_revision'),
                frozenset((item.get('path'), item.get('source_hash')) for item in selected))
-        # The Harness retrieves through the CLI with the repeat gate forced off; a person's
-        # retrieval runs under the configured gate. Older manifests record no gate at all.
+        # The Harness retrieves with the repeat gate forced off: reviewed context through
+        # `retrieve` as the CLI, unattended memory through `refresh` as the provider it is
+        # for. A person's retrieval and the provider hooks run under the configured gate.
+        # Older manifests record no gate at all.
         gate = manifest.get('gate')
-        harness_shape = (manifest.get('host') == 'cli' and manifest.get('entry_point') == 'retrieve'
-                         and (not isinstance(gate, dict) or gate.get('mode') == 'off'))
-        # The Harness checks freshness by retrieving again into the local store. That
-        # second manifest repeats the prepared selection; it is not another retrieval.
-        if store == 'local' and harness_shape and key in prepared:
+        host, entry = manifest.get('host'), manifest.get('entry_point')
+        ungated = not isinstance(gate, dict) or gate.get('mode') == 'off'
+        reviewed_shape = ungated and (host, entry) == ('cli', 'retrieve')
+        harness_shape = reviewed_shape or ungated and host in PROVIDER_HOSTS and entry == 'refresh'
+        # Reviewed context is checked for freshness by retrieving again into the local store.
+        # That second manifest repeats the prepared selection; it is not another retrieval.
+        if store == 'local' and reviewed_shape and key in prepared:
             prepared[key]['merged'] += 1
             merged += 1
             continue
@@ -345,19 +350,21 @@ def _retrievals(project, prefix, chunk_paths, harness_tasks):
             identity = _chunk_identity(item.get('path'), chunk_paths) if isinstance(item, dict) else None
             if identity and isinstance(item.get('reason'), str):
                 cuts.append([identity, item['reason'][:40]])
-        host, entry = manifest.get('host'), manifest.get('entry_point')
         if host not in ROUTES:
             route = 'not recorded'
         elif entry == 'hook-context':
             route = ROUTES[host]
         elif harness_shape and manifest.get('task_id') in harness_tasks:
             route = 'Harness'
+        elif host in PROVIDER_HOSTS and entry == 'refresh':
+            # The Claude and Codex read hooks call `refresh` with their own host.
+            route = ROUTES[host]
         else:
             route = 'CLI'
         task = tasks.setdefault(manifest.get('task_id'), len(tasks))
         row = {'key': source, 'at': at, 'version': manifest.get('schema_version') if type(manifest.get('schema_version')) is int else None,
                'route': route, 'task': task, **counts, 'chunks': chunks, 'cuts': cuts, 'merged': 0}
-        if store == 'governed' and harness_shape:
+        if store == 'governed' and reviewed_shape:
             prepared[key] = row
         rows.append(row)
     return rows, merged

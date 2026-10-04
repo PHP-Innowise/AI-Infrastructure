@@ -1767,6 +1767,62 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
         )
         self.assertEqual([], brain.validate_repository(self.repository))
 
+    def test_a_stale_citation_does_not_stop_compaction(self) -> None:
+        # Records cite living files, so every repository soon holds one whose
+        # source moved on. Compaction refused all of it from that moment.
+        active = brain.create_record(
+            self.repository, "decision", "DEC-LIVE", "Cobalt stays canonical",
+            [], ["specs/authority.md"], owner="alice",
+        )
+        resolved = brain.create_record(
+            self.repository, "finding", "FIND-DONE", "Cobalt guard fixed",
+            [], ["specs/authority.md"], owner="alice",
+        )
+        resolved = brain.update_record(
+            self.repository, resolved["id"], expected_revision=resolved["revision"],
+            progress="Guard added.", next_steps=[], files=[], sources=[],
+            actor="alice", transition_to="investigating", reason="Investigating",
+        )
+        brain.update_record(
+            self.repository, resolved["id"], expected_revision=resolved["revision"],
+            progress=None, next_steps=[], files=[], sources=[],
+            actor="alice", transition_to="resolved", reason="Resolved",
+        )
+        self.repository.joinpath("specs/authority.md").write_text(
+            "# Authority\n\nThe cobalt authority rule now covers writes.\n",
+            encoding="utf-8",
+        )
+        stale = [
+            error for error in brain.validate_repository(self.repository)
+            if "source fingerprint is stale" in error
+        ]
+        self.assertEqual(2, len(stale), stale)
+
+        self.assertEqual({"moved": 1}, brain.compact(self.repository))
+
+        # The terminal record is history now; the live one stays where it was.
+        self.assertTrue(
+            self.repository.joinpath(
+                "project-brain/archive/finding", f"{resolved['id']}.md"
+            ).is_file()
+        )
+        self.assertTrue(
+            self.repository.joinpath(
+                "project-brain/dynamic/decisions", f"{active['id']}.md"
+            ).is_file()
+        )
+        # Staleness is still reported, and still keeps the record out of reach.
+        self.assertEqual(
+            2,
+            sum(
+                "source fingerprint is stale" in error
+                for error in brain.validate_repository(self.repository)
+            ),
+        )
+        self.assertEqual(
+            [], brain.validate_repository(self.repository, check_freshness=False)
+        )
+
     def test_compaction_rolls_back_all_moves_and_indexes_on_failure(self) -> None:
         first = brain.create_task(
             self.repository, "TASK-COMPACT-1", "Archive one.", [], [], owner="alice"
@@ -2354,8 +2410,10 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
             "project-brain/control/promotions", f"{proposal['id']}.json"
         )
         before = promotion_path.read_bytes()
+        # Clean before the write and failing after it: a write is refused for
+        # what it introduced, not for what the bank already carried.
         with mock.patch.object(
-            brain, "validate_bank", return_value=["injected validation failure"]
+            brain, "validate_bank", side_effect=[[], ["injected validation failure"]]
         ):
             with self.assertRaisesRegex(brain.BrainError, "failed validation"):
                 brain.apply_promotion(self.repository, proposal["id"])
@@ -4294,6 +4352,227 @@ class ChunkSourceDigestTest(BankFixture):
         )
 
 
+class OverdueBankWriteTest(BankFixture):
+    """A chunk past its review date leaves retrieval; it must not lock the bank."""
+
+    def age(self, memory_id: str, slug: str, body: str) -> Path:
+        today = datetime.now(timezone.utc).date()
+        verified = (today - timedelta(days=400)).isoformat()
+        return self.write_chunk(
+            memory_id, slug, body,
+            created=verified, last_verified=verified,
+            review_after=(today - timedelta(days=35)).isoformat(),
+        )
+
+    def two_overdue(self) -> None:
+        self.age("MEM-20260101-aaaaaaaa", "old-rule", "The cerulean rollout is current.")
+        self.age("MEM-20260102-bbbbbbbb", "older-rule", "The vermilion rollout is current.")
+        self.assertEqual(0, self.run_cli("reindex-bank").returncode)
+        self.assertEqual(
+            2, sum("overdue for review" in error for error in self.bank_errors())
+        )
+
+    def test_two_overdue_chunks_can_each_be_reverified(self) -> None:
+        # Each re-attestation validated the whole bank and failed on the other
+        # chunk's review date, so neither could be repaired through the CLI.
+        self.two_overdue()
+        for memory_id in ("MEM-20260101-aaaaaaaa", "MEM-20260102-bbbbbbbb"):
+            result = self.run_cli("bank-reverify", "--id", memory_id)
+            self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual([], self.bank_errors())
+
+    def test_an_overdue_chunk_does_not_block_retiring_another(self) -> None:
+        self.two_overdue()
+        yesterday = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
+        result = self.run_cli(
+            "bank-retire", "--id", "MEM-20260101-aaaaaaaa", "--valid-to", yesterday
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        # Still reported where it always was.
+        self.assertEqual(
+            1, sum("overdue for review" in error for error in self.bank_errors())
+        )
+        audit = json.loads(self.run_cli("bank-audit", "--json").stdout)
+        self.assertEqual(
+            ["MEM-20260102-bbbbbbbb"],
+            [item["id"] for item in audit["overdue_review"]],
+            audit,
+        )
+
+    def test_reverify_still_holds_the_attested_chunk_to_the_contract(self) -> None:
+        # A write no longer pays for other chunks' problems; the chunk it
+        # attests still answers for its own.
+        self.repository.joinpath("specs/authority.md").unlink()
+        result = self.run_cli("bank-reverify", "--id", "MEM-20260101-aaaaaaaa")
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("source path does not exist", result.stderr)
+
+    def test_bank_messages_do_not_carry_the_machine_path(self) -> None:
+        self.two_overdue()
+        for error in self.bank_errors():
+            self.assertTrue(error.startswith("memory-bank/chunks/"), error)
+            self.assertNotIn(str(self.repository), error)
+
+    def test_refresh_names_the_chunks_it_stopped_serving(self) -> None:
+        # Writes no longer fail on a review date, which was the only place the
+        # lapse was ever said out loud; the chunk still leaves retrieval.
+        self.two_overdue()
+        rendered = self.run_cli("refresh")
+        self.assertIn(
+            "memory review: 2 chunk(s) overdue, not served until re-verified",
+            rendered.stdout,
+        )
+        self.assertEqual(
+            2, json.loads(self.run_cli("refresh", "--json").stdout)["overdue_review"]
+        )
+        self.run_cli("bank-reverify", "--id", "MEM-20260101-aaaaaaaa")
+        self.run_cli("bank-reverify", "--id", "MEM-20260102-bbbbbbbb")
+        self.assertNotIn("memory review:", self.run_cli("refresh").stdout)
+
+
+class WorkingStateCapsuleTest(RuntimeHarness):
+    """What the rendered capsule says about the task, and what it stops repeating."""
+
+    def started(self) -> str:
+        task = self.start("TASK-STATE")
+        update = self.run_cli(
+            "update", "--task-id", "TASK-STATE", "--revision", "auto",
+            "--progress", "Cobalt guard wired into the request path.",
+            "--next-step", "Cover the read path.",
+            "--next-step", "Cover the write path.",
+            "--file", "src/Guard.php", "--file", "src/Request.php", "--json",
+        )
+        self.assertEqual(0, update.returncode, update.stderr)
+        return str(task["task_uuid"])
+
+    def test_the_rendered_capsule_says_where_the_work_stopped(self) -> None:
+        # The JSON capsule carried this all along; the rendered one - the only
+        # form Claude Code, Codex and Cursor read - printed the goal alone.
+        uuid = self.started()
+        rendered = self.run_cli(
+            "retrieve", "continue where we left off",
+            "--task-id", "TASK-STATE", "--ephemeral",
+        )
+        self.assertEqual(0, rendered.returncode, rendered.stderr)
+        lines = rendered.stdout.splitlines()
+        # The Cursor hooks accept a capsule only if it opens with "working:".
+        self.assertTrue(lines[0].startswith("working: TASK-STATE"), rendered.stdout)
+        self.assertIn("progress: Cobalt guard wired into the request path.", lines)
+        self.assertIn("next: Cover the read path.", lines)
+        self.assertIn("next: Cover the write path.", lines)
+        self.assertIn("recent files: src/Guard.php, src/Request.php", lines)
+        self.assertIn(f"task record: project-brain/dynamic/tasks/{uuid}.md", lines)
+
+    def test_the_rendered_progress_is_bounded(self) -> None:
+        self.start("TASK-LONG")
+        update = self.run_cli(
+            "update", "--task-id", "TASK-LONG", "--revision", "auto",
+            "--progress", "cobalt " * 400, "--json",
+        )
+        self.assertEqual(0, update.returncode, update.stderr)
+        rendered = self.run_cli(
+            "retrieve", "cobalt", "--task-id", "TASK-LONG", "--ephemeral"
+        )
+        line = next(
+            line for line in rendered.stdout.splitlines()
+            if line.startswith("progress: ")
+        )
+        self.assertLessEqual(
+            len(line), len("progress: ") + context_cli.RENDERED_PROGRESS_LIMIT
+        )
+        self.assertGreater(len(line), context_cli.RENDERED_PROGRESS_LIMIT // 2)
+        self.assertTrue(line.endswith("…"), line)
+
+    def test_the_task_does_not_point_at_its_own_record(self) -> None:
+        # It matched every prompt that shared a word with its own goal and took
+        # a semantic slot to point at the state the capsule already leads with.
+        uuid = self.started()
+        own = f"project-brain/dynamic/tasks/{uuid}.md"
+        payload = json.loads(
+            self.run_cli(
+                "retrieve", "apply the cobalt authority rule",
+                "--task-id", "TASK-STATE", "--ephemeral", "--json",
+            ).stdout
+        )
+        self.assertNotIn(own, [item["path"] for item in payload["selected"]])
+        self.assertEqual(own, payload["task_record"])
+        manifest = json.loads(
+            (self.repository / payload["manifest"]).read_text(encoding="utf-8")
+        )
+        self.assertIn({"path": own, "reason": "working-task"}, manifest["excluded"])
+
+    def test_host_loaded_instructions_leave_the_capsule(self) -> None:
+        self.start("TASK-HOST")
+        self.repository.joinpath("CLAUDE.md").write_text(
+            "# Notes\n\nThe vermilion lattice convention. Policy: @AGENTS.md\n",
+            encoding="utf-8",
+        )
+        self.repository.joinpath("AGENTS.md").write_text(
+            "# Policy\n\nThe vermilion lattice rule applies.\n", encoding="utf-8"
+        )
+
+        def procedural(host: str) -> tuple[set, list]:
+            payload = json.loads(
+                self.run_cli(
+                    "retrieve", "vermilion lattice", "--task-id", "TASK-HOST",
+                    "--ephemeral", "--gate", "off", "--host", host, "--json",
+                ).stdout
+            )
+            manifest = json.loads(
+                (self.repository / payload["manifest"]).read_text(encoding="utf-8")
+            )
+            return {item["path"] for item in payload["procedural"]}, manifest["excluded"]
+
+        paths, _ = procedural("cli")
+        self.assertEqual({"AGENTS.md", "CLAUDE.md"}, paths)
+        paths, excluded = procedural("claude")
+        self.assertEqual(set(), paths)
+        self.assertIn({"path": "CLAUDE.md", "reason": "host-loaded"}, excluded)
+        # Claude Code also loads what CLAUDE.md imports.
+        self.assertIn({"path": "AGENTS.md", "reason": "host-loaded"}, excluded)
+        paths, excluded = procedural("codex")
+        self.assertEqual({"CLAUDE.md"}, paths)
+        self.assertIn({"path": "AGENTS.md", "reason": "host-loaded"}, excluded)
+
+    def test_claude_imports_skip_code_and_paths_outside_the_repository(self) -> None:
+        docs = self.repository / "docs"
+        docs.mkdir()
+        docs.joinpath("a.md").write_text("# A\n", encoding="utf-8")
+        docs.joinpath("b.md").write_text("# B\n\nSee @c.md for details.\n", encoding="utf-8")
+        docs.joinpath("c.md").write_text("# C\n", encoding="utf-8")
+        self.repository.joinpath("AGENTS.md").write_text("# Policy\n", encoding="utf-8")
+        self.repository.joinpath("CLAUDE.md").write_text(
+            "# Notes\n\n"
+            "Inline `@AGENTS.md` is code, not an import.\n"
+            "```\n@docs/a.md\n```\n"
+            "Real import: @docs/b.md.\n"
+            "Outside: @../outside.md, and mail someone@example.com.\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            {"docs/b.md", "docs/c.md"}, retrieval._claude_imports(self.repository)
+        )
+
+    def test_done_next_steps_can_leave_the_task(self) -> None:
+        uuid = self.started()
+        replaced = self.run_cli(
+            "update", "--task-id", "TASK-STATE", "--revision", "auto",
+            "--replace-next-steps", "--next-step", "Open the pull request.",
+            "--file", "src/Guard.php", "--json",
+        )
+        self.assertEqual(0, replaced.returncode, replaced.stderr)
+        task = json.loads(replaced.stdout)
+        self.assertEqual(["Open the pull request."], task["next_steps"])
+        # Touched again, so newest again.
+        self.assertEqual(["src/Request.php", "src/Guard.php"], task["files"])
+        cleared = self.run_cli(
+            "brain-update", "--record-id", uuid, "--revision", "auto",
+            "--replace-next-steps", "--json",
+        )
+        self.assertEqual(0, cleared.returncode, cleared.stderr)
+        self.assertEqual([], json.loads(cleared.stdout)["next_steps"])
+
+
 class AutomaticWorkingMemoryTest(RuntimeHarness):
     """Cover the automated read and write paths the memory hooks depend on."""
 
@@ -5158,6 +5437,96 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         self.git("commit", "-qm", "init")
         self.git("branch", "-M", "main")
 
+    def commit(self, name: str, subject: str) -> None:
+        self.repository.joinpath(name).write_text(f"{subject}\n", encoding="utf-8")
+        self.git("add", "-A")
+        self.git("commit", "-qm", subject)
+
+    def checkpoint_of(self, task_id: str) -> str:
+        return json.loads(
+            self.run_cli("get", "--task-id", task_id, "--json").stdout
+        )["auto_checkpoint"]
+
+    def test_a_checkpoint_names_the_branch_commits(self) -> None:
+        # Paths said where the work happened; nothing said what it was, though
+        # every commit already carried a person's one-line summary of it.
+        self.commit_main()
+        self.git("checkout", "-q", "-b", "feature/export")
+        self.commit("exporter.txt", "Add the invoice exporter")
+        self.commit("controller.txt", "Wire the export controller")
+        self.git("checkout", "-q", "main")
+        self.commit("main.txt", "Main moved on")
+        self.git("checkout", "-q", "feature/export")
+        self.git("merge", "-q", "--no-ff", "main", "-m", "Merge main into the branch")
+        self.repository.joinpath("pending.txt").write_text("x\n", encoding="utf-8")
+
+        result = self.run_cli("turn", "--task-id", "feature/export", "--flush", "--json")
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        checkpoint = self.checkpoint_of("feature/export")
+        self.assertTrue(checkpoint.startswith("Auto-checkpoint: 1 turn(s)"), checkpoint)
+        self.assertIn(
+            "Branch commits, newest first: Wire the export controller; "
+            "Add the invoice exporter.",
+            checkpoint,
+        )
+        # The branch's own story: no merges, nothing the default branch did.
+        self.assertNotIn("Merge main", checkpoint)
+        self.assertNotIn("Main moved on", checkpoint)
+
+    def test_a_turn_that_ends_in_a_commit_still_counts(self) -> None:
+        # A clean tree used to read as a turn with nothing in it, so the most
+        # finished work - committed work - never reached the checkpoint.
+        self.repository.joinpath(".gitignore").write_text(
+            "memory-bank/local/\n", encoding="utf-8"
+        )
+        self.commit_main()
+        self.git("checkout", "-q", "-b", "feature/clean")
+        visit = json.loads(
+            self.run_cli("turn", "--task-id", "feature/clean", "--json").stdout
+        )
+        # Visiting a branch still mints nothing.
+        self.assertIsNone(visit["delta_id"])
+        self.commit("work.txt", "Finish the clean-tree change")
+
+        result = json.loads(
+            self.run_cli("turn", "--task-id", "feature/clean", "--flush", "--json").stdout
+        )
+
+        self.assertTrue(result["flushed"], result)
+        self.assertEqual(0, result["files"])
+        self.assertIn("Finish the clean-tree change", self.checkpoint_of("feature/clean"))
+        # An unchanged HEAD on a clean tree is still nothing.
+        again = json.loads(
+            self.run_cli("turn", "--task-id", "feature/clean", "--json").stdout
+        )
+        self.assertIsNone(again["delta_id"])
+
+    def test_a_checkpoint_leaves_out_subjects_a_privacy_gate_refuses(self) -> None:
+        self.commit_main()
+        self.git("checkout", "-q", "-b", "feature/gated")
+        self.commit("one.txt", "Add the ledger")
+        self.commit("two.txt", "Ping alice@example.com about totals")
+        self.commit("three.txt", "Set password=hunter2hunter2 for staging")
+        self.repository.joinpath("pending.txt").write_text("x\n", encoding="utf-8")
+
+        result = self.run_cli("turn", "--task-id", "feature/gated", "--flush", "--json")
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        checkpoint = self.checkpoint_of("feature/gated")
+        self.assertIn("Branch commits, newest first: Add the ledger (+2 more).", checkpoint)
+        self.assertNotIn("example.com", checkpoint)
+        self.assertNotIn("hunter2", checkpoint)
+
+    def test_work_on_the_default_branch_lists_no_branch_commits(self) -> None:
+        self.commit_main()
+        self.commit("main.txt", "Direct work on main")
+        self.repository.joinpath("pending.txt").write_text("x\n", encoding="utf-8")
+
+        self.run_cli("turn", "--task-id", "main", "--flush", "--json")
+
+        self.assertNotIn("Branch commits", self.checkpoint_of("main"))
+
     def test_turn_reports_merge_candidate_without_completing_task(self) -> None:
         self.enable_automation(automatic_completion=True)
         self.commit_main()
@@ -5448,6 +5817,25 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
             "--transition", "accepted", "--reason", "Accepted", "--json",
         )
         return str(record["id"])
+
+    def test_promote_auto_runs_automatic_promotion_without_a_turn(self) -> None:
+        # Knowledge recorded deliberately, as a reviewed Harness session does,
+        # should not wait for the turn counter to reach its boundary.
+        record_id = self.accepted_decision()
+        off = self.run_cli("promote-auto", "--json")
+        self.assertEqual(0, off.returncode, off.stderr)
+        self.assertEqual((False, []), (json.loads(off.stdout)["enabled"], json.loads(off.stdout)["promoted"]))
+
+        self.enable_automatic_promotion()
+        result = json.loads(self.run_cli("promote-auto", "--json").stdout)
+
+        self.assertEqual([record_id], [item["record_id"] for item in result["promoted"]])
+        chunk = next((self.repository / "memory-bank/chunks").glob(
+            f"{result['promoted'][0]['memory_id']}-*.md"
+        ))
+        self.assertIn("auto-promoted", chunk.read_text(encoding="utf-8"))
+        # Once is enough: the record is bound to its promotion now.
+        self.assertEqual([], json.loads(self.run_cli("promote-auto", "--json").stdout)["promoted"])
 
     def test_turn_promotes_resolved_verified_knowledge_without_review(self) -> None:
         self.enable_automatic_promotion()
@@ -6154,6 +6542,90 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         )
         self.assertEqual(2, len(task["files"]))
         self.assertIn("beyond the per-flush limit", task["auto_checkpoint"])
+
+    def test_a_stale_citation_does_not_stop_automatic_compaction(self) -> None:
+        # The hook path: from the first edit to a file any live record cited,
+        # every turn reported "compaction failed" and nothing was archived.
+        self.enable_automation(automatic_compaction=True, compaction_threshold=1)
+        live = self.run_cli(
+            "brain-create", "decision", "--external-id", "DEC-LIVE",
+            "--title", "Cobalt stays canonical", "--source", "specs/authority.md",
+            "--json",
+        )
+        self.assertEqual(0, live.returncode, live.stderr)
+        self.resolved_finding(0)
+        self.repository.joinpath("specs/authority.md").write_text(
+            "# Authority\n\nThe cobalt authority rule now covers writes.\n",
+            encoding="utf-8",
+        )
+        self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
+
+        result = json.loads(
+            self.run_cli("turn", "--task-id", "feature/x", "--flush", "--json").stdout
+        )
+
+        self.assertEqual((1, 0), (result["archived"], result["archivable_pending"]))
+        report = json.loads(
+            (self.repository / "memory-bank/local/last-turn-report.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual([], report["compaction_errors"])
+
+    def age_chunk(self, chunk: Path) -> None:
+        """Move a chunk's review date into the past, as a year of use would."""
+        _, frontmatter, body = chunk.read_text(encoding="utf-8").split("---\n", 2)
+        metadata = json.loads(frontmatter)
+        today = datetime.now(timezone.utc).date()
+        verified = (today - timedelta(days=400)).isoformat()
+        metadata.update(
+            created=verified, last_verified=verified,
+            review_after=(today - timedelta(days=35)).isoformat(),
+        )
+        chunk.write_text(
+            "---\n" + json.dumps(metadata, indent=2) + "\n---\n" + body,
+            encoding="utf-8",
+        )
+        self.assertEqual(0, self.run_cli("reindex-bank").returncode)
+
+    def test_an_overdue_chunk_does_not_stop_automatic_promotion(self) -> None:
+        # One chunk reaching its review date failed every later promotion in
+        # the repository - a year after automatic promotion wrote the first.
+        self.enable_automatic_promotion()
+        self.resolved_finding(0)
+        self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
+        self.run_cli("turn", "--task-id", "feature/x", "--flush", "--json")
+        self.age_chunk(next((self.repository / "memory-bank/chunks").glob("MEM-*.md")))
+
+        record_id = self.resolved_finding(1)
+        self.repository.joinpath("more.txt").write_text("more\n", encoding="utf-8")
+        result = json.loads(
+            self.run_cli("turn", "--task-id", "feature/x", "--flush", "--json").stdout
+        )
+        self.assertEqual([], result["promotion_failed"])
+        self.assertEqual([record_id], [item["record_id"] for item in result["promoted"]])
+
+    def test_an_overdue_promoted_chunk_does_not_stop_compaction(self) -> None:
+        # Compaction repoints the citation of a chunk promoted from a record it
+        # archives. The rewrite is mechanical, and the chunk's review date is
+        # not its business.
+        self.enable_automatic_promotion()
+        self.resolved_finding(0)
+        self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
+        self.run_cli("turn", "--task-id", "feature/x", "--flush", "--json")
+        chunk = next((self.repository / "memory-bank/chunks").glob("MEM-*.md"))
+        self.age_chunk(chunk)
+
+        result = self.run_cli("compact")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("project-brain/archive/finding/", chunk.read_text(encoding="utf-8"))
+        self.assertEqual(
+            1,
+            sum(
+                "overdue for review" in error
+                for error in brain.validate_bank(self.repository / "memory-bank")
+            ),
+        )
 
 
 class LastTurnReportTest(RuntimeHarness):

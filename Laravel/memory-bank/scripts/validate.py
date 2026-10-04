@@ -82,6 +82,20 @@ class ValidationError(Exception):
     """A memory-bank contract violation."""
 
 
+def display_path(path: Path, bank_root: Path) -> str:
+    """A bank path as a message reader should see it: from the bank's parent.
+
+    Validation messages travel further than the terminal that ran them - a
+    refused promotion's reason lands in the next Task Capsule - and an
+    absolute path carries the machine's home directory into a prompt while
+    saying nothing `memory-bank/chunks/...` does not.
+    """
+    try:
+        return path.relative_to(bank_root.parent).as_posix()
+    except ValueError:
+        return str(path)
+
+
 def parse_frontmatter(path: Path) -> dict:
     text = path.read_text(encoding="utf-8")
     if not text.startswith("---\n"):
@@ -135,13 +149,15 @@ def validate_metadata(
     metadata: dict,
     repository_root: Path,
     warnings: Optional[list[str]] = None,
+    label: Optional[str] = None,
 ) -> None:
     """Raise on anything that makes a chunk unusable.
 
     ``warnings`` opts a caller into the non-fatal class: a terminal chunk
     whose cited source has since been deleted is reported there instead of
     raised. Without a sink the behaviour is unchanged, which is what keeps
-    the retrieval gate in `active_memory` strict.
+    the retrieval gate in `active_memory` strict. ``label`` names the chunk
+    in such a warning; it defaults to ``path``.
     """
     missing = REQUIRED_KEYS - metadata.keys()
     extra = metadata.keys() - REQUIRED_KEYS - OPTIONAL_KEYS
@@ -249,7 +265,7 @@ def validate_metadata(
             # boundary guarantee, not a freshness one.
             if warnings is not None and terminal_chunk(metadata, valid_to):
                 warnings.append(
-                    f"{path}: cited source no longer exists: {source_path} "
+                    f"{label or path}: cited source no longer exists: {source_path} "
                     f"(chunk is {metadata['status']} and no longer retrievable)"
                 )
                 continue
@@ -339,19 +355,24 @@ def validate_bank_report(
     repository_root = (source_root or bank_root.parent).resolve()
     index_path = bank_root / "INDEX.md"
     chunks_dir = bank_root / "chunks"
+
+    def shown(path: Path) -> str:
+        return display_path(path, bank_root)
+
+    index_label = shown(index_path)
     # `.memory-counter` is intentionally absent from the required files and
     # from every check below: identifiers are date+UUID based now, so the
     # counter is a retired legacy artifact that may or may not exist on disk.
     for required in (bank_root / "README.md", index_path):
         if not required.is_file():
-            errors.append(f"{required}: required file is missing")
+            errors.append(f"{shown(required)}: required file is missing")
     if errors:
         return errors, warnings
 
     try:
         index = parse_index(index_path)
     except ValidationError as error:
-        errors.append(f"{index_path}: {error}")
+        errors.append(f"{index_label}: {error}")
         index = {}
 
     chunk_paths: list[Path] = []
@@ -359,7 +380,7 @@ def validate_bank_report(
         for entry in sorted(chunks_dir.iterdir()):
             if entry.is_symlink() or not entry.is_file() or FILENAME_PATTERN.fullmatch(entry.name) is None:
                 errors.append(
-                    f"{entry}: unexpected chunk entry; expected a direct MEM-0001-short-slug.md file"
+                    f"{shown(entry)}: unexpected chunk entry; expected a direct MEM-0001-short-slug.md file"
                 )
                 continue
             chunk_paths.append(entry)
@@ -376,7 +397,9 @@ def validate_bank_report(
             on_disk.add(filename_match.group(1))
         try:
             metadata = parse_frontmatter(path)
-            validate_metadata(path, metadata, repository_root, warnings)
+            validate_metadata(
+                path, metadata, repository_root, warnings, label=shown(path)
+            )
             validate_secret_patterns(path)
             memory_id = metadata["id"]
             on_disk.add(memory_id)
@@ -384,16 +407,16 @@ def validate_bank_report(
                 raise ValidationError(f"duplicate chunk ID: {memory_id}")
             chunks[memory_id] = (path, metadata)
         except (OSError, ValidationError) as error:
-            errors.append(f"{path}: {error}")
+            errors.append(f"{shown(path)}: {error}")
 
     for memory_id, (path, metadata) in chunks.items():
         row = index.get(memory_id)
         if row is None:
-            errors.append(f"{path}: chunk is missing from INDEX.md")
+            errors.append(f"{shown(path)}: chunk is missing from INDEX.md")
             continue
         expected_file = str(path.relative_to(bank_root))
         if row["file"] != expected_file:
-            errors.append(f"{index_path}: {memory_id} file must be {expected_file}")
+            errors.append(f"{index_label}: {memory_id} file must be {expected_file}")
         for index_key, metadata_key in (
             ("title", "title"),
             ("type", "type"),
@@ -401,11 +424,11 @@ def validate_bank_report(
             ("last_verified", "last_verified"),
         ):
             if row[index_key] != str(metadata[metadata_key]):
-                errors.append(f"{index_path}: {memory_id} {index_key} differs from chunk metadata")
+                errors.append(f"{index_label}: {memory_id} {index_key} differs from chunk metadata")
         for index_key, metadata_key in (("scope", "scope"), ("tags", "tags")):
             expected = ", ".join(metadata[metadata_key])
             if row[index_key] != expected:
-                errors.append(f"{index_path}: {memory_id} {index_key} differs from chunk metadata")
+                errors.append(f"{index_label}: {memory_id} {index_key} differs from chunk metadata")
 
     for memory_id, row in index.items():
         if memory_id in chunks:
@@ -415,12 +438,12 @@ def validate_bank_report(
             # Saying it is missing sends the reader looking for a deleted file
             # that is sitting right there.
             warnings.append(
-                f"{index_path}: {memory_id} index row retained for invalid chunk "
+                f"{index_label}: {memory_id} index row retained for invalid chunk "
                 f"({row['file']})"
             )
         else:
             errors.append(
-                f"{index_path}: {memory_id} points to a missing chunk ({row['file']})"
+                f"{index_label}: {memory_id} points to a missing chunk ({row['file']})"
             )
 
     for memory_id, (_, metadata) in chunks.items():

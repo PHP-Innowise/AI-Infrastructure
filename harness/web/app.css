@@ -297,6 +297,9 @@ input[type="text"],.field input[type="number"],select { width:100%; }
 .memory-entry-path { display:block; margin-top:4px; font:var(--text-meta)/var(--leading-body) var(--font-mono); color:var(--muted); overflow-wrap:anywhere; }
 .memory-entry-meta { display:block; margin-top:8px; color:var(--muted); font-size:var(--text-meta); }
 .memory-notice { margin:12px 0; color:var(--warning); font-size:var(--text-ui); line-height:var(--leading-body); }
+/* What project memory did for a turn: a quiet line in the conversation, warning-coloured only when it did nothing. */
+.memory-event { margin:8px 0; padding:4px 0 4px 12px; border-left:2px solid var(--mem-bank); color:var(--muted); font-size:var(--text-meta); line-height:var(--leading-body); overflow-wrap:anywhere; }
+.memory-event[data-ok="false"] { border-left-color:var(--warning-dot); color:var(--warning); }
 .memory-details { display:flex; flex-direction:column; min-width:0; min-height:0; padding-top:24px; }
 .memory-details h3 { margin:0 0 8px; font-size:var(--text-title); line-height:var(--leading-ui); overflow-wrap:anywhere; }
 .memory-detail-path { margin:0; color:var(--muted); font:var(--text-meta)/var(--leading-body) var(--font-mono); overflow-wrap:anywhere; }
@@ -306,6 +309,7 @@ input[type="text"],.field input[type="number"],select { width:100%; }
 .brain-link-config { max-width:1160px; margin:12px 0 0; }
 #sdd-settings,#fleet-settings { padding:12px 16px; border:1px solid var(--line); border-radius:var(--radius-md); background:var(--soft); }
 .brain-link-config .knowledge-form-grid { margin:8px 0; gap:12px; }
+.option-panel .brain-link-review { margin:12px 0; }
 .brain-link-config .knowledge-note { margin:8px 0; }
 :is(.knowledge-note,.agent-hint,.fleet-note,.workspace-hint):empty:not([role]),.fleet-report-text:empty,.knowledge-result:empty,.knowledge-form-grid:empty { display:none; }
 .knowledge-note,.skills-note,.skills-source-detail { max-width:75ch; }
@@ -362,6 +366,16 @@ input[type="text"],.field input[type="number"],select { width:100%; }
 .linked-source input { margin-top:4px; }
 .linked-source span { font-size:var(--text-ui); line-height:var(--leading-body); overflow-wrap:anywhere; }
 .linked-source small { display:block; color:var(--muted); font-size:var(--text-meta); margin-top:4px; }
+.memory-save { margin:16px 0; padding:12px 16px; border:1px solid var(--line); border-radius:var(--radius-md); }
+.memory-save h3 { font-size:var(--text-body); font-weight:var(--weight-strong); margin:0 0 4px; }
+.memory-save .knowledge-form-grid { margin:12px 0; }
+.memory-save-learnings { border:0; padding:0; margin:0 0 12px; min-width:0; }
+.memory-save-learnings legend { padding:0; font-size:var(--text-ui); font-weight:var(--weight-strong); color:var(--ink); }
+#memory-save-learnings { display:grid; gap:12px; margin:8px 0 12px; }
+.memory-learning { display:grid; grid-template-columns:minmax(0,1fr); gap:8px; padding:12px; border:1px solid var(--line); border-radius:var(--radius); }
+.memory-learning-head { display:flex; flex-wrap:wrap; align-items:end; gap:12px; }
+.memory-learning .field { display:grid; gap:4px; min-width:0; }
+.memory-learning textarea { width:100%; }
 .linked-result .knowledge-tools { margin-top:16px; }
 .linked-result .knowledge-tools:last-child { margin-bottom:0; }
 @media (max-width:760px) { .linked-context,.linked-result { padding:16px; } }

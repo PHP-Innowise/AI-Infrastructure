@@ -4,7 +4,28 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Changed
+
+- **`hook-forge` read hook stands down when the host delivered the capsule.**
+  A generated `working-memory-read.sh` exits silently when
+  `CONTEXT_CAPSULE_DELIVERED` is `1`, as the editions' hooks now do: the
+  Harness puts each turn's capsule into the prompt itself, retrieved for the
+  message alone, and a second one distilled from that whole prompt would spend
+  the turn's memory budget twice. The `.claude`/`.cursor` mirrors and the
+  policy lock are regenerated.
+
 ### Fixed
+
+- **`memory-seed` asset carries the memory-core fixes.** Every generated project
+  gets the same core as the editions (see the root `CHANGELOG.md`): a Memory
+  Bank write is refused only for what it introduces, so a chunk past its review
+  date no longer stops promotions, compaction, re-attestation and retirement;
+  a stale source fingerprint on a Brain record no longer refuses compaction;
+  the automatic checkpoint lists the branch's commit subjects and counts a
+  turn that ended in a commit; `promote-auto` runs automatic promotion on
+  demand; the rendered capsule carries the task's working state; and the task's own
+  record and host-loaded instruction files no longer take capsule slots. The
+  `.claude`/`.cursor` mirrors and the policy lock are regenerated.
 
 - Reject Windows ADS, device names and ambiguous paths in publication/manifest
   plans. Validate shell hook syntax through Bash on Windows, where NTFS lacks

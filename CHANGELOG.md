@@ -26,6 +26,102 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Harness: project memory runs by itself. A new session uses it by default and
+  nothing waits for a person: the first message names a new Brain task, every
+  message is the retrieval query for its own turn (`context.py refresh` with
+  the provider as host, manifest in the ignored local store), the capsule goes
+  straight into the launch, and when a run completes its `memory-draft` is
+  saved — progress, next steps, and each learning written as observed and
+  raised to verified with the reason "agent-attested, not reviewed by a
+  person", then `promote-auto` once. Learnings citing no file in the workspace
+  or already saved from the session are left out; a retrieval or save failure
+  costs the turn its memory, never the turn, and the conversation shows a line
+  for what each turn carried and saved. Review by hand (prepare, approve, Save
+  to memory) is an opt-in, and sessions linked before this keep it. A project
+  without a governed runtime starts its sessions without memory instead of
+  refusing them. Memory use names these retrievals Harness, and the Claude and
+  Codex read hooks, which call `refresh`, by their host instead of CLI.
+
+- The Claude and Codex read hooks (`working-memory-read.sh`) stand down when
+  `CONTEXT_CAPSULE_DELIVERED=1`. The Harness sets it when it has already put
+  the turn's capsule into the prompt, retrieved for the message alone; the hook
+  would otherwise distill a second capsule from that whole prompt and spend the
+  turn's memory budget twice. The Stop hook still checkpoints the task.
+
+- Harness: **Save to memory** after a linked run. Agents left to policy almost
+  never record what a run established — 0 memory commands in ~1,850 prompts on
+  four real installations — so a linked launch's prompt now asks the agent to
+  close its final reply with a `memory-draft` block (progress, up to three next
+  steps, up to three learnings with source files). Nothing is written from it:
+  the session page shows the draft as an editable form, and only on Save, with
+  the person confirming each kept learning against its sources, does the
+  Harness run the runtime's own commands — `brain-update` on the task (next
+  steps replaced), `brain-create` + `brain-update` for each learning as a
+  verified, resolved finding or accepted decision, then `promote-auto` once.
+  Sources must be regular files in the session workspace; a failed command
+  reports what was already saved. `harness/src/harness/memory_draft.py`,
+  `POST /api/sessions/<id>/memory`; `brain_info` carries `memory_draft`.
+
+- `context.py promote-auto` runs automatic promotion now, under the same rules
+  as a turn boundary, and does nothing unless `automatic_promotion` is enabled.
+  Knowledge recorded deliberately no longer waits for `--flush-after` turns.
+
+- The automatic checkpoint says what the work was. It listed only how many
+  turns and files a flush covered, and agents almost never write progress
+  themselves — on four real installations 23 of 24 tasks held nothing else. A
+  flush now appends the branch's newest commit subjects, newest first (at most
+  five, 80 characters each, `(+N more)`), counted from the merge base with the
+  default branch; merges and any subject a secret or privacy gate would refuse
+  are left out, never failing the flush. A turn whose HEAD moved also counts
+  as work even with a clean tree: a turn that ended in a commit used to read as
+  a turn with nothing in it, so committed work never reached the buffer. The
+  HEAD each task last saw is kept in local state (`turn-heads`, bounded).
+
+- A Memory Bank write is refused only for what it introduces. Promotion,
+  compaction, `bank-reverify` and `bank-retire` validated the whole bank
+  afterwards and rolled back on any error, so one chunk passing its review
+  date failed every later write in the repository, and two overdue chunks each
+  blocked the one command that would repair the other — reproduced: neither
+  could be re-verified and only hand-editing got out. Writes now compare the
+  bank with itself before the write (`brain_runtime.bank_write_errors`) and
+  still hold the chunk they produce or attest to the full contract, so a
+  re-verify of a chunk whose source is gone is refused as before. An overdue
+  chunk still leaves retrieval and `validate.py` still reports it; `refresh`
+  now says so on every turn (`memory review: N chunk(s) overdue…`,
+  `overdue_review` in `--json`). Validator messages name paths from the
+  bank's parent instead of the machine's absolute path, which had reached the
+  Task Capsule through a refused promotion's reason. The Harness memory demo
+  no longer stalls its two late automatic promotions.
+
+- Compaction no longer waits for every cited file to stand still. It validated
+  the Brain with source freshness included, so one record whose cited file
+  changed — an accepted decision citing a living spec, a finding citing the
+  code it was about — refused every later compaction, manual and automatic,
+  with `Compaction refused because active records are invalid`. Freshness is
+  now left out of both of compaction's validations
+  (`validate_repository(..., check_freshness=False)`): moving terminal records
+  can neither cause nor cure it, and the documented contract was already that
+  compaction skips stale records. `validate` still reports them, retrieval and
+  promotion still skip them, and the refusal now says how many problems it
+  found.
+
+- The rendered capsule says where the work stopped. Claude Code, Codex and
+  Cursor read the plain capsule, which printed only `working: <task> — <goal>`:
+  progress and next steps never reached the model, and "continue where we left
+  off" retrieved skill pointers instead. It now adds bounded `phase:`,
+  `progress:`, `next:`, `recent files:` and `task record:` lines. The capsule
+  keeps the three newest next steps and the newest eight files (it kept the
+  oldest eight), a file touched again moves to the end of the task's list,
+  and `update`/`brain-update --replace-next-steps` lets a finished step leave
+  the list — it was append-only.
+
+- Capsule slots no longer point at what the model already has. The task's own
+  record and handoff leave as `working-task`; with `--host claude` or
+  `--host codex` the instruction files that host loads itself leave as
+  `host-loaded` (`CLAUDE.md` and its `@path` imports, `AGENTS.md`). On real
+  installations `CLAUDE.md` held a procedural slot on 88 of 114 and 150 of 158
+  Claude Code turns, and the task's own record a semantic slot on 13–20%.
+
 - Run System Orchestration on native Windows:
   - System files, run journals and editor saves go through the portable
     filesystem layer, whose rooted handles refuse junctions. Windows refuses to

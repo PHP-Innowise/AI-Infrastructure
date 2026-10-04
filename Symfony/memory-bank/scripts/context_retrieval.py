@@ -18,7 +18,8 @@ from brain_runtime import (
     LIFECYCLES,
     atomic_json,
     brain_root,
-    get_task,
+    find_task,
+    handoff_path,
     iter_records,
     load_config,
     mutation_lock,
@@ -558,6 +559,21 @@ MANIFEST_SCHEMA_VERSION = 3
 QUERY_SOURCES = ("prompt", "task", "task-id", "explicit")
 RETRIEVAL_HOSTS = ("cli", "claude", "codex", "cursor")
 RETRIEVAL_ENTRY_POINTS = ("context", "retrieve", "refresh", "hook-context")
+# Instruction files a host loads into the model's context by itself, before
+# any hook runs. A capsule slot pointing at one asks the agent to read what it
+# already has: on two real installations CLAUDE.md took a procedural slot on
+# 88 of 114 and 150 of 158 Claude Code turns. Cursor is absent on purpose -
+# what it loads unprompted is its own `.cursor/rules`, which is not indexed.
+HOST_LOADED_INSTRUCTIONS = {
+    "claude": ("CLAUDE.md",),
+    "codex": ("AGENTS.md",),
+}
+# Claude Code also loads what CLAUDE.md imports with `@path`, recursively and
+# at most five hops deep; an import inside a code span or block is not one.
+CLAUDE_IMPORT_DEPTH = 5
+CLAUDE_IMPORT_PATTERN = re.compile(r"(?<![\w@])@((?:\.{1,2}/)?[\w-][\w./-]*)")
+CODE_FENCE_PATTERN = re.compile(r"^\s*(```|~~~)")
+CODE_SPAN_PATTERN = re.compile(r"`+[^`]*`+")
 # Whether a turn retrieves at all. `off` never decides; `shadow` decides and
 # records the decision but always retrieves; `enforce` acts on it. The default
 # is `shadow` on purpose: the project rejected an embedding similarity floor on
@@ -2383,6 +2399,53 @@ _PUBLIC_ITEM_KEYS = (
 )
 
 
+def _claude_imports(repository: Path) -> set[str]:
+    """Repository files CLAUDE.md pulls into Claude Code's context with `@path`.
+
+    Followed the way Claude Code follows them: relative to the importing file,
+    recursively up to CLAUDE_IMPORT_DEPTH hops, and never inside a fenced
+    block or a code span, where `@` is only a character. A target outside the
+    repository cannot be an indexed document, so it cannot take a slot either.
+    """
+    root = repository.resolve()
+    loaded: set[str] = set()
+    pending = [(root / "CLAUDE.md", 0)]
+    while pending:
+        path, depth = pending.pop()
+        if depth >= CLAUDE_IMPORT_DEPTH:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        fenced = False
+        for line in text.splitlines():
+            if CODE_FENCE_PATTERN.match(line):
+                fenced = not fenced
+                continue
+            if fenced:
+                continue
+            for match in CLAUDE_IMPORT_PATTERN.finditer(CODE_SPAN_PATTERN.sub("", line)):
+                target = (path.parent / match.group(1).rstrip(".,;:")).resolve()
+                try:
+                    relative = target.relative_to(root).as_posix()
+                except ValueError:
+                    continue
+                if relative in loaded or not target.is_file():
+                    continue
+                loaded.add(relative)
+                pending.append((target, depth + 1))
+    return loaded
+
+
+def host_loaded_paths(repository: Path, host: str) -> set[str]:
+    """Repository paths the host has already put in front of the model."""
+    loaded = set(HOST_LOADED_INSTRUCTIONS.get(host, ()))
+    if host == "claude":
+        loaded |= _claude_imports(repository)
+    return loaded
+
+
 def _public_item(item: dict[str, Any]) -> dict[str, Any]:
     public = {key: item[key] for key in _PUBLIC_ITEM_KEYS}
     if item.get("match") not in (None, "covered"):
@@ -2444,7 +2507,8 @@ def retrieve(
             "Retrieval entry point must be one of "
             f"{', '.join(RETRIEVAL_ENTRY_POINTS)}"
         )
-    task = get_task(repository, task_identifier)
+    task_path, task, _ = find_task(repository, task_identifier)
+    validate_record(task)
     config = load_config(repository)
     local_episodes = list(local_episodes or [])
     candidates, diagnostics = _candidates(connection, query, max(20, limit * 10))
@@ -2520,6 +2584,23 @@ def retrieve(
             for conflict_id in item["conflicts"]
             if conflict_id not in known_ids
         }
+    # The task's own record and handoff are the working state the capsule
+    # already leads with, and a host-loaded instruction file is already in the
+    # model's context: a slot spent pointing at either is taken from memory.
+    # On real installations the task's own record held a semantic slot on
+    # 13-20% of turns. They leave as named exclusions, after `no_match`, which
+    # stays a claim about what the query matched rather than what survived.
+    own_handoff = handoff_path(repository, task["id"]).relative_to(repository).as_posix()
+    loaded = host_loaded_paths(repository, host)
+    kept = []
+    for item in filtered:
+        if item.get("record_id") == task["id"] or item["path"] == own_handoff:
+            filter_excluded.append({"path": item["path"], "reason": "working-task"})
+        elif item["path"] in loaded:
+            filter_excluded.append({"path": item["path"], "reason": "host-loaded"})
+        else:
+            kept.append(item)
+    filtered = kept
     selected, budget_excluded, usage, escalation_reason = _apply_budgets(filtered)
     procedural_ranked = [
         item for item in selected if item["category"] == "policy"
@@ -2715,6 +2796,10 @@ def retrieve(
         "task_id": task["external_id"],
         "task_uuid": task["id"],
         "task_revision": task["revision"],
+        # Where the full working state lives. The capsule carries a bounded
+        # projection of it, and the record no longer competes for a semantic
+        # slot, so this is how an agent that needs the rest finds it.
+        "task_record": task_path.relative_to(repository).as_posix(),
         "working": {
             "task_id": task["external_id"], "goal": task["goal"],
             "phase": task.get("phase"),
