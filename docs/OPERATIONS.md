@@ -944,8 +944,8 @@ eligible verified records are proposed and applied without review, at most
 five per run, each chunk tagged `auto-promoted`. It does nothing unless
 `automatic_promotion` is enabled in `project-brain/config/runtime.json`, and
 says so (`enabled: false`). The turn boundary waits for `--flush-after`
-turns; this is for knowledge recorded deliberately, such as the Harness's
-Save to memory, which should not wait for a counter. The result lists what
+turns; this is for knowledge recorded deliberately, such as what a Harness
+run saves when it completes, which should not wait for a counter. The result lists what
 was promoted, blocked with its reason, failed, and deferred.
 
 ### `retrieval-report`

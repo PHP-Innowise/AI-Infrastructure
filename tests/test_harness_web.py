@@ -335,6 +335,76 @@ assert.equal(stopped.at(-1).textContent,'Stopped: Stale revision. What is listed
 """
         subprocess.run([shutil.which('node'), '-e', script], check=True, capture_output=True, text=True)
 
+    @unittest.skipUnless(shutil.which('node'), 'Project memory composer check requires Node')
+    def test_project_memory_is_on_by_default_and_never_blocks_a_project_without_it(self):
+        page = ui_script()
+        source = page[page.index('\nfunction brainLinkConfig('):page.index('\nasync function loadBrainLinkTasks(')]
+        script = """const assert = require('node:assert/strict');
+const control = value => ({value, checked:false, disabled:false, hidden:false, textContent:''});
+const fields = {}; for (const id of ['brain-link-enabled','brain-link-review','brain-link-kind','brain-link-bank','brain-link-task','brain-link-task-id',
+  'brain-link-goal','brain-link-query','brain-link-refresh','brain-link-config','brain-link-fields','brain-link-summary','brain-link-mode-note',
+  'brain-link-existing-field','brain-link-id-field','brain-link-goal-field','brain-link-query-field','brain-link-availability','project']) fields[id] = control('');
+const $ = id => fields[id]; const errors = []; const showError = (id, text) => { if (text) errors.push(text); };
+const state = {bootstrap:{}, authFailed:false, selectedId:null, pending:null}; let dryRun = false; const fleetDryRun = () => dryRun;
+const brainLinkDraft = {epoch:0, projectId:null, bankId:null, banks:[], tasks:[], meta:null, loading:false, error:'', controller:null};
+""" + source + """
+fields.project.value = 'p1'; resetBrainLink();
+assert.equal(fields['brain-link-enabled'].checked,true);
+assert.deepEqual(brainLinkConfig(),{bank:'',review:false,auto:true});
+// Until the project's memory is read, a new session waits rather than starting without it; nothing is flagged.
+Object.assign(brainLinkDraft,{projectId:'p1', loading:true});
+assert.equal(updateBrainLinkControls(),true); assert.equal(brainLinkPending(),true);
+// A project without a governed runtime starts its sessions without memory; nothing blocks them.
+Object.assign(brainLinkDraft,{loading:false, meta:{runtime_available:false}});
+assert.equal(updateBrainLinkControls(),true); assert.equal(brainLinkActive(),false); assert.equal(brainLinkPending(),false);
+assert.equal(fields['brain-link-summary'].textContent,'Unavailable'); assert.match(fields['brain-link-availability'].textContent,/start without project memory/);
+brainLinkDraft.error = 'Read failed.'; assert.equal(updateBrainLinkControls(),true); assert.deepEqual(errors,[]); brainLinkDraft.error = '';
+// With a governed runtime the default needs nothing from a person: no task, no query, no review.
+Object.assign(brainLinkDraft,{meta:{runtime_available:true, mode:'governed'}, banks:[{id:'memory-bank'}]}); fields['brain-link-bank'].value = 'memory-bank';
+assert.equal(updateBrainLinkControls(),true); assert.equal(brainLinkActive(),true);
+assert.equal(fields['brain-link-summary'].textContent,'Automatic'); assert.equal(fields['brain-link-query-field'].hidden,true);
+assert.deepEqual(brainLinkConfig(),{bank:'memory-bank',review:false,auto:true});
+dryRun = true; assert.equal(updateBrainLinkControls(),true); assert.equal(brainLinkActive(),false); dryRun = false;
+// Review is the explicit choice: it asks for a query and holds the session to it.
+fields['brain-link-review'].checked = true; assert.equal(updateBrainLinkControls(),false); assert.equal(fields['brain-link-query-field'].hidden,false);
+fields['brain-link-query'].value = 'cobalt'; assert.equal(updateBrainLinkControls(),true);
+assert.deepEqual(brainLinkConfig(),{bank:'memory-bank',review:true,query:'cobalt',auto:true});
+fields['brain-link-kind'].value = 'create'; fields['brain-link-review'].checked = false; assert.equal(updateBrainLinkControls(),false);
+fields['brain-link-task-id'].value = 'TASK-9'; fields['brain-link-goal'].value = 'Ship it'; assert.equal(updateBrainLinkControls(),true);
+assert.deepEqual(brainLinkConfig(),{bank:'memory-bank',review:false,task_id:'TASK-9',create:true,goal:'Ship it'});
+// A named task is a choice that has to hold: a project without a runtime refuses it instead of dropping it.
+brainLinkDraft.meta = {runtime_available:false}; assert.equal(updateBrainLinkControls(),false); assert.equal(brainLinkActive(),true);
+fields['brain-link-enabled'].checked = false; assert.equal(updateBrainLinkControls(),true); assert.equal(brainLinkActive(),false);
+assert.equal(fields['brain-link-summary'].textContent,'Off');
+// Sessions linked before memory ran by itself were linked for review.
+assert.equal(brainReviewed({task_id:'T'}),true); assert.equal(brainReviewed({review:false}),false);
+"""
+        subprocess.run([shutil.which('node'), '-e', script], check=True, capture_output=True, text=True)
+
+    @unittest.skipUnless(shutil.which('node'), 'Conversation check requires Node')
+    def test_the_conversation_shows_what_project_memory_did_for_each_turn(self):
+        page = ui_script()
+        shown = page[page.index('\nconst MEMORY_DRAFT_BLOCK'):page.index('\nfunction appendEvent(')]
+        append = page[page.index('\nfunction appendEvent('):]
+        append = append[:append.index('\n}\n') + 3]
+        script = """const assert = require('node:assert/strict');
+const nodes = []; const events = {append(node){ nodes.push(node); }, get lastElementChild(){ return nodes.at(-1); }};
+const $ = id => id === 'events' ? events : null;
+const el = (tag, className, text) => ({tag, className, textContent:text, dataset:{}, attributes:{}, children:[],
+  setAttribute(name, value){ this.attributes[name] = value; }, append(...items){ this.children.push(...items); }, classList:{contains(){ return false; }}});
+const state = {eventIds:new Set(), assistantTexts:new Set(), selected:{provider:'codex', brain:{review:false}}};
+const brainReviewed = brain => brain?.review !== false; const providerFor = () => ({name:'Codex'}); const humanLabel = value => value;
+const document = {createTextNode: text => ({textContent:text})};
+""" + shown + append + """
+appendEvent({id:1, kind:'memory', ok:true, text:'Project memory for this turn: task harness/x-1, 1 Memory Bank chunk (812 characters).'});
+appendEvent({id:2, kind:'memory', ok:false, text:'Project memory was not retrieved for this turn: Capsule unavailable.'});
+assert.deepEqual(nodes.map(node => [node.className, node.dataset.ok, node.attributes.role]), [['memory-event','true','status'],['memory-event','false','status']]);
+assert.match(nodes[0].textContent,/task harness\\/x-1/);
+appendEvent({id:3, kind:'text', text:'Done.\\n\\n```memory-draft\\n{"progress": "P"}\\n```\\n'});
+assert.equal(nodes.at(-1).children.at(-1).textContent,'Done.\\n\\n[Memory draft: saved to project memory when the run completes.]');
+"""
+        subprocess.run([shutil.which('node'), '-e', script], check=True, capture_output=True, text=True)
+
     @unittest.skipUnless(shutil.which('node'), 'Browser calculator check requires Node')
     def test_browser_budget_calculator_forms_shared_limits_with_parallel_deadlines(self):
         page=ui_script()
@@ -1509,7 +1579,7 @@ assert.equal(stopped.at(-1).textContent,'Stopped: Stale revision. What is listed
         install_knowledge_fixture(self.project)
         data = {"project_id": self.project_id, "provider": "claude", "prompt": "Verify the cobalt rule",
                 "brain": {"bank": "memory-bank", "task_id": "TASK-SESSION-HTTP", "query": "cobalt allocation",
-                          "create": True, "goal": "Verify the cobalt allocation rule"}}
+                          "create": True, "goal": "Verify the cobalt allocation rule", "review": True}}
         for extra in ({"capsule": {}}, {"approved": True}, {"context_id": "injected"}):
             with self.subTest(extra=extra):
                 self.assertEqual(self.post("/api/sessions", {**data, "brain": {**data["brain"], **extra}})[0], 400)

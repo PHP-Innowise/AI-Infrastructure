@@ -324,7 +324,7 @@ another project while a session is open starts a new session draft for it.
   Shows the selected project's Git branch and changes, with a refresh control.
   Choose the project directory or a new Git worktree with an optional new branch name.
   The launch fields sit in one row; optional settings are chips (Helpers, Clash,
-  Run in, Brain task, Budgets, Models) that show their current value and open one
+  Run in, Memory, Budgets, Models) that show their current value and open one
   panel at a time. An open session collapses to one summary line; **Next-turn
   settings** expands what a follow-up can change. Native messages appear as they
   arrive, and consecutive tool and status steps fold into one row. Cancel stops the
@@ -917,21 +917,57 @@ demo; its history goes through the copied runtime's own API:
 python3 tests/harness_memory_demo.py /tmp/shop-api
 ```
 
-### Link a session to a task
+### Project memory
 
-Open **Brain task & retrieved context** when creating a session, enable linking, select a bank and an
-existing task or enter a new task ID and goal. **Prepare session** creates the
-workspace first, binds the task there and retrieves a bounded context capsule.
-Inspect the capsule before choosing **Run with this context**. A bar above it shows
-how much of the 8,000-character cap the capsule uses, split into Project Brain,
-Memory bank and Rules & docs, and names the items the runtime dropped to fit and the
-characters repeated across the capsule's views. These counts are exact, measured
-on the server the way the runtime measures the cap. The note beside the button
-estimates what the capsule adds to the turn at 3.6 characters per token. The
-provider receives that saved capsule; the server checks the task revision and
-source contents again before launching it. Changed context requires a fresh preview. Each chat follow-up
-also prepares a new capsule. These explicit retrievals disable the runtime's
-repeat-query heuristic while retaining its privacy and source eligibility rules.
+A new session uses project memory by default; the **Memory** chip shows
+**Automatic**. Nothing waits for a person. The first message names a new Brain task
+(`harness/<first words>-<6 hex>`, its goal the message's first line). Every message,
+the first and each follow-up, is the retrieval query for its own turn: the server
+runs the project's `context.py refresh` with the provider as host, so instruction
+files the provider loads by itself (`CLAUDE.md`, `AGENTS.md`) stay out of the
+capsule, and puts the capsule into the launch. The retrieval manifest stays in the
+ignored `memory-bank/local/`, as the project's own hooks keep theirs. The launch
+sets `CONTEXT_TASK_ID` to the task and `CONTEXT_CAPSULE_DELIVERED=1`, so the
+project's read hook does not build a second capsule from the whole prompt; its
+Stop hook still checkpoints the task. A line in the conversation says what each
+turn carried: the task, the items by kind and the characters. If memory cannot be
+retrieved, the line says why and the turn runs without it.
+
+The prompt asks the agent to close its final reply with a `memory-draft` block
+(825 characters of instruction per launch): where the task stands, up to three
+next steps, and up to three learnings, each a finding or decision with the project
+files that prove it. When a run completes, the server saves it: the task's
+progress, its next steps (replacing the old ones), and each learning as a finding
+(resolved) or decision (accepted). A learning is written as observed and raised to
+verified with the reason "agent-attested, not reviewed by a person", so the
+record's own ledger shows who attested it. Learnings citing no file in the
+workspace, or already saved from this session, are left out. Then the project's
+automatic promotion runs once (`context.py promote-auto`), under the runtime's own
+rules and its `automatic_promotion` setting; promoted chunks are tagged
+`auto-promoted`. A second line in the conversation says what was saved, promoted
+or held back. A run that fails or is cancelled saves nothing.
+
+Choose an existing task, or a new task with your own ID and goal, under **Memory**;
+memory still runs by itself for it. In a project without a governed context
+runtime, sessions start without memory unless a task was chosen explicitly. Turn
+**Use project memory** off to start without it.
+
+#### Review by hand
+
+Tick **Review context and memory by hand** to restore the reviewed flow. It needs a
+context query. **Prepare session** creates the workspace first, binds the task there
+and retrieves a bounded context capsule. Inspect the capsule before choosing **Run
+with this context**. A bar above it shows how much of the 8,000-character cap the
+capsule uses, split into Project Brain, Memory bank and Rules & docs, and names the
+items the runtime dropped to fit and the characters repeated across the capsule's
+views. These counts are exact, measured on the server the way the runtime measures
+the cap. The note beside the button estimates what the capsule adds to the turn at
+3.6 characters per token. The provider receives that saved capsule; the server
+checks the task revision and source contents again before launching it. Changed
+context requires a fresh preview. Each chat follow-up also prepares a new capsule.
+These explicit retrievals disable the runtime's repeat-query heuristic while
+retaining its privacy and source eligibility rules. Sessions linked before memory
+ran by itself keep this flow.
 
 Task actions stay in the session's original workspace and bank, including when a
 worktree is used. A committed task can be rebound to a rebuilt local index without
@@ -939,30 +975,26 @@ creating a second task. The reviewed capsule survives server restarts in session
 history; canonical task and knowledge records remain owned by the project runtime.
 Offline Fleet demonstrations cannot link a real task.
 
-**Save to memory.** A linked run's prompt asks the agent to close its final reply
-with a `memory-draft` block (762 characters of instruction per linked launch):
-where the task stands, up to three next steps, and up to three learnings, each a
-finding or decision with the project files that prove it. Nothing is written from
-it. When the run finishes, **Save to memory** under **Record result & durable
-memory** shows the draft as a form. Edit it, uncheck what should not be kept, and
-confirm that you checked each kept learning against its sources. Saving updates the
-linked task's progress and replaces its next steps, records each kept learning as a
-verified finding (resolved) or decision (accepted) with its rule as content, then
-runs the project's automatic promotion once (`context.py promote-auto`). That
-promotes them under the runtime's own rules, or reports that automatic promotion is
-off, in which case propose them under **Durable memory** below. The commands run in
-turn; if one fails, the result lists what was already saved. A run that left no
-draft, or one that could not be read, leaves the form empty to fill by hand.
+**Save to memory.** A reviewed run's draft is not saved by itself (762 characters
+of instruction per launch). When the run finishes, **Save to memory** under
+**Record result & durable memory** shows the draft as a form. Edit it, uncheck what
+should not be kept, and confirm that you checked each kept learning against its
+sources. Saving does what the automatic save does, with the learnings recorded as
+verified by you; if automatic promotion is off, propose them under **Durable
+memory** below. The commands run in turn; if one fails, the result lists what was
+already saved. A run that left no draft, or one that could not be read, leaves the
+form empty to fill by hand.
 
 After a successful run, explicitly enter the task outcome and verification to
 complete it at its current revision. Process success never completes the task
-automatically. To retain reusable knowledge, create and verify a separate finding
-or decision, resolve or accept it, then propose its content for Memory Bank review.
-Only eligible verified records with fresh sources and allowed privacy can be
+automatically. To retain reusable knowledge by hand, create and verify a separate
+finding or decision, resolve or accept it, then propose its content for Memory Bank
+review. Only eligible verified records with fresh sources and allowed privacy can be
 proposed or applied. Task records cannot be promoted. Manual proposals require an
 independent reviewer and retain the runtime's source revision checks. The project's
-automatic promotion setting is displayed and remains unchanged. Prompts, transcripts
-and assistant output are never automatically copied into durable memory.
+automatic promotion setting is displayed and remains unchanged. Prompts,
+transcripts and free assistant output never reach durable memory; only the fields
+of a memory draft do.
 
 ### Fleet review setup and use
 

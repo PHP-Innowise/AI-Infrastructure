@@ -132,5 +132,62 @@ class SubmissionTests(unittest.TestCase):
         self.assertLessEqual(len(memory_draft.external_id("t" * 300, "decision")), 128)
 
 
+
+class UnattendedSaveTests(unittest.TestCase):
+    """What a run's draft keeps when nobody reviews it, and what the conversation says."""
+
+    def test_the_instruction_tells_the_agent_who_reads_its_draft_next(self):
+        self.assertTrue(memory_draft.instruction(True).endswith("A person reviews the draft before anything is saved."))
+        self.assertIn("with no review, so leave out anything you did not verify", memory_draft.instruction(False))
+        self.assertTrue(memory_draft.instruction(False).startswith(memory_draft.REQUEST))
+
+    def test_a_learning_the_workspace_cannot_back_is_left_out_rather_than_failing_the_save(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "specs").mkdir()
+            (root / "specs/authority.md").write_text("# Authority\n", encoding="utf-8")
+            draft = {"progress": "Checked\x01 at\nallocation.", "next_steps": ["Ship\x7f it", " ", "b", "c", "d"],
+                     "learnings": [{**LEARNING, "sources": ["specs/authority.md#L1", "specs/missing.md", "../escape.md",
+                                                            "specs/authority.md#L1"]},
+                                   {**LEARNING, "title": "Unsourced", "sources": ["specs/missing.md"]},
+                                   {**LEARNING, "title": "cobalt  ALLOCATION needs one owner"},
+                                   {**LEARNING, "type": "decision", "title": "Owners are explicit"}]}
+            kept, skipped = memory_draft.usable(root, draft, known=[["decision", "owners are explicit"]])
+            self.assertEqual(("Checked at allocation.", ["Ship it", "b", "c"]), (kept["progress"], kept["next_steps"]))
+            self.assertEqual([["specs/authority.md#L1"]], [learning["sources"] for learning in kept["learnings"]])
+            self.assertTrue(kept["verified"])
+            self.assertEqual([("Unsourced", "unsourced"), ("cobalt ALLOCATION needs one owner", "repeated"),
+                              ("Owners are explicit", "repeated")],
+                             [(item["title"], item["reason"]) for item in skipped])
+            # The kept draft passes the same checks as a reviewed one.
+            memory_draft.check_sources(root, memory_draft.submission(kept))
+            nothing, _ = memory_draft.usable(root, {"progress": "", "next_steps": [], "learnings": []})
+            self.assertEqual((False, []), (nothing["verified"], nothing["learnings"]))
+
+    def test_the_conversation_line_says_what_was_saved_promoted_and_left_out(self):
+        self.assertIn("no memory draft", memory_draft.summary("missing"))
+        self.assertIn("could not be read", memory_draft.summary("unreadable"))
+        result = {"ok": True, "error": None,
+                  "saved": {"task": {"id": "t", "revision": 3},
+                            "records": [{"type": "finding", "title": "One owner", "status": "resolved"}],
+                            "promotion": {"enabled": True, "promoted": [{"memory_id": "MEM-20261004-aaaaaaaa"}],
+                                          "blocked": [{"reason": "near-duplicate"}], "failed": []}},
+                  "skipped": [{"title": "x", "reason": "unsourced"}, {"title": "y", "reason": "repeated"}]}
+        self.assertEqual("Saved to project memory: the task's progress and next steps; finding \u201cOne owner\u201d. "
+                         "1 learning(s) were already saved from this session. "
+                         "Left out 1 learning(s) citing no file in the workspace. "
+                         "Promoted to the Memory Bank as MEM-20261004-aaaaaaaa. "
+                         "1 held back from the Memory Bank; see Durable memory.",
+                         memory_draft.summary("drafted", result))
+        self.assertEqual("Nothing new to save to project memory from this run. "
+                         "Automatic promotion is off for this project, so it stays in Project Brain.",
+                         memory_draft.summary("drafted", {"ok": True, "saved": {"task": None, "records": [],
+                                                          "promotion": {"enabled": False}}, "skipped": []}))
+        stopped = memory_draft.summary("drafted", {"ok": False, "error": "The runtime refused content matching its "
+                                                   "secret-protection rules.", "saved": {"task": {"id": "t"}, "records": []}})
+        self.assertTrue(stopped.endswith("Stopped: The runtime refused content matching its secret-protection rules. "
+                                         "What is listed was saved."), stopped)
+
+
 if __name__ == "__main__":
     unittest.main()

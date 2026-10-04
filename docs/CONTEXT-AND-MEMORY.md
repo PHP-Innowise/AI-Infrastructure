@@ -915,9 +915,12 @@ propose -> apply
 ```
 
 `context.py promote-auto` runs the same pass on demand. The boundary waits for
-`--flush-after` turns, and knowledge someone recorded deliberately — the
-Harness's Save to memory, after a person confirmed each learning — has no
-reason to wait for a counter.
+`--flush-after` turns, and knowledge recorded deliberately — what a Harness run
+drafted, saved when the run completes or after a person confirmed each
+learning — has no reason to wait for a counter. A learning the Harness saved
+unattended is written as observed and raised to verified with the reason
+"agent-attested, not reviewed by a person", so its own ledger says who
+attested it before promotion tags the chunk `auto-promoted`.
 
 There is no reviewer in the automatic mode, and the runtime refuses to pretend
 otherwise. `reviewer` stays null, `review_mode` is `automatic`, the outcome is

@@ -37,7 +37,11 @@ WORKFLOWS = [
 CONTEXT_FILES = ("AGENTS.md", "CLAUDE.md", "README.md", "project-brain/README.md", "specs/MANIFEST.md")
 # Project context sends at most this many bytes of each file above.
 CONTEXT_EXCERPT_BYTES = 3000
-BRAIN_CONTEXT_HEADER = 'Reviewed Project Brain context (reference data; verify sources against the project):\n'
+BRAIN_CONTEXT_HEADER = 'Project memory retrieved for this request (reference data; verify sources against the project):\n'
+# How long the run worker's memory waits for another knowledge operation to finish.
+MEMORY_WAIT = 30
+# Learnings an unattended session remembers having saved, so a later turn does not save them again.
+REMEMBERED = 30
 # The runtime caps a task capsule at this many characters of compact JSON (CAPSULE_CHARACTER_LIMIT in context.py).
 CAPSULE_LIMIT = 8000
 # Retrieved capsule items by category: policy and evidence are rules and docs, durable is the Memory bank.
@@ -338,6 +342,24 @@ def capsule_parts(capsule):
     characters, _, _ = _capsule_kinds(capsule, lambda value: len(json.dumps(value, ensure_ascii=False)))
     inserted = len(BRAIN_CONTEXT_HEADER) + len(json.dumps(capsule, ensure_ascii=False)) + 2
     return {'brain': inserted - characters['rules'] - characters['bank'], **characters}
+
+
+def reviewed(brain):
+    """Whether a linked session's memory waits for a person. Sessions linked before memory
+    ran unattended were all linked for review, so a missing flag keeps that."""
+    return brain.get('review', True) is not False
+
+
+def memory_notice(brain):
+    """One line for the conversation: the project memory this turn's prompt carries."""
+    meter = capsule_meter(brain['capsule'])
+    items = meter['items']
+    parts = [f'{count} {label}{"" if count == 1 else "s"}' for count, label in (
+        (items['rules'], 'rule or doc excerpt'), (items['bank'], 'Memory Bank chunk'),
+        (items['brain'], 'Project Brain item')) if count]
+    return (f"Project memory for this turn: task {brain['task_id']}, "
+            + (', '.join(parts) if parts else 'its working state only')
+            + f" ({meter['prompt_characters']:,} characters).")
 
 
 def capsule_meter(capsule):
@@ -850,7 +872,7 @@ class Sessions:
             raise SessionError('Fleet settings require the Fleet review workflow.')
         if dry_run and (model is not None or effort is not None):
             raise SessionError('Offline dry-run does not use a model or thinking effort.')
-        brain = self._task_context().validate_options(data['brain']) if 'brain' in data else None
+        brain = self._task_context().validate_options(data['brain'], prompt) if 'brain' in data else None
         if dry_run and brain:
             raise SessionError('Offline dry-run cannot link or change a Project Brain task.')
         # An omitted budget object uses the API default; explicit null values mean no cap.
@@ -974,20 +996,24 @@ class Sessions:
             self.db.commit()
             self.cancelled.discard(sid)
             if session['brain']:
-                self._save_brain(sid, {**session['brain'], 'approved': False, 'context_id': None})
+                brain = {**session['brain'], 'approved': False, 'context_id': None}
+                if not reviewed(brain):
+                    from .task_context import message_query
+                    brain['query'] = message_query(prompt)
+                self._save_brain(sid, brain)
             self._event(sid, {"kind": "user", "text": prompt, **({'attachments': attached} if attached else {})})
             self._status(sid, 'queued')
             generation = self.generations[sid] = uuid.uuid4().hex
             self.jobs.put_nowait((sid, prompt, generation))
         return self.get(sid)
 
-    def _task_context(self):
+    def _task_context(self, wait=0):
         from .knowledge import KnowledgeManager
         from .task_context import TaskContext
         with self.lock:
             if self.knowledge is None:
                 self.knowledge = KnowledgeManager(self)
-        return TaskContext(self.knowledge)
+        return TaskContext(self.knowledge, wait=wait)
 
     def _save_brain(self, sid, brain):
         with self.lock:
@@ -1007,6 +1033,8 @@ class Sessions:
     def prepare_context(self, sid, query):
         with self.lock:
             session = self.get(sid)
+            if session['brain'] and not reviewed(session['brain']):
+                raise SessionError('This session retrieves project memory for each message by itself.')
             if not session['brain'] or session['status'] in ACTIVE or session['status'] in ('completed', 'rejected', 'awaiting_approval'):
                 raise SessionError('This session is not ready to prepare context.')
             self._workspace(session)
@@ -1171,8 +1199,8 @@ class Sessions:
         if session.get('brain') and prompt:
             # Only a run with a message of its own: Fleet and Clash build their context
             # from an empty prompt, and their reviewers do not own the linked task.
-            from .memory_draft import INSTRUCTION
-            prompt += '\n\n' + INSTRUCTION
+            from .memory_draft import instruction
+            prompt += '\n\n' + instruction(reviewed(session['brain']))
         text = prefix + prompt + '\n\nHarness session delegation requirement:\n' + delegation
         if ledger is not None:
             counted = ((parts['capsule'] or {}).get('inserted', 0) + sum(item['characters'] for item in parts['excerpts'] or [])
@@ -1203,6 +1231,55 @@ class Sessions:
                 self.launch_ids.pop(sid,None)
                 self.jobs.task_done()
 
+    def _recall(self, sid, session, generation, context):
+        """Retrieve unattended memory for this turn's message and return the session to launch.
+
+        Retrieval failing costs the turn its memory, never the turn: the run goes ahead
+        without a capsule and the conversation says why. None means the run was cancelled.
+        """
+        try:
+            prepared, problem = context.prepare(session), None
+        except Exception as error:
+            prepared = None
+            problem = str(error) if isinstance(error, SessionError) else f'the runtime call failed ({type(error).__name__}).'
+        with self.lock:
+            if sid in self.cancelled or self.stopping.is_set() or self.generations.get(sid) != generation:
+                return None
+            if prepared:
+                self._save_brain(sid, prepared)
+                self._event(sid, {'kind': 'memory', 'ok': True, 'text': memory_notice(prepared)})
+            else:
+                brain = self.get(sid)['brain']
+                self._save_brain(sid, {**brain, 'context_id': None, 'capsule': None, 'source_hashes': {}})
+                self._event(sid, {'kind': 'memory', 'ok': False,
+                                  'text': 'Project memory was not retrieved for this turn: ' + problem})
+            return self.get(sid)
+
+    def _remember(self, sid):
+        """Save what a completed unattended run drafted, and say in the conversation what was saved."""
+        from . import memory_draft
+        latest = memory_draft.latest(self, sid)
+        if latest['state'] == 'none':
+            return
+        if latest['state'] != 'drafted':
+            self._event(sid, {'kind': 'memory', 'ok': False, 'text': memory_draft.summary(latest['state'])})
+            return
+        session = self.get(sid)
+        try:
+            result = self._task_context(wait=MEMORY_WAIT).save_memory(
+                session, latest['draft'], automatic=True, known=session['brain'].get('remembered') or [])
+        except Exception as error:
+            result = {'ok': False, 'saved': {}, 'skipped': [],
+                      'error': str(error) if isinstance(error, SessionError) else f'the runtime call failed ({type(error).__name__}).'}
+        saved = [memory_draft.remembered(record) for record in result['saved'].get('records') or []
+                 if record.get('type') in memory_draft.KINDS and isinstance(record.get('title'), str)]
+        with self.lock:
+            if saved:
+                # Later turns restate what they found; the next save skips what this one recorded.
+                brain = self.get(sid)['brain']
+                self._save_brain(sid, {**brain, 'remembered': ((brain.get('remembered') or []) + saved)[-REMEMBERED:]})
+            self._event(sid, {'kind': 'memory', 'ok': result['ok'], 'text': memory_draft.summary('drafted', result)})
+
     def _run(self, sid, prompt, generation):
         session = self.get(sid)
         project = self._workspace(session)
@@ -1232,33 +1309,38 @@ class Sessions:
                 if sid in self.cancelled or self.stopping.is_set() or self.generations.get(sid) != generation:
                     return
                 self._status(sid, 'running')
-            try:
-                context = self._task_context()
-                if not session['brain'].get('approved'):
-                    prepared = context.prepare(session)
-                    with self.lock:
-                        if sid in self.cancelled or self.stopping.is_set() or self.generations.get(sid) != generation:
-                            return
-                        self._save_brain(sid, prepared)
-                        self._status(sid, 'awaiting_context')
-                        self._event(sid, {'kind': 'status', 'text': 'Context prepared. Review it before starting the provider.'})
+            context = self._task_context(wait=MEMORY_WAIT)
+            if not reviewed(session['brain']):
+                session = self._recall(sid, session, generation, context)
+                if session is None:
                     return
-                if context.ensure_fresh(session) is False:
-                    raise SessionError('The prepared context changed. Refresh and review it before running.')
-            except SessionError as error:
-                with self.lock:
-                    if self.generations.get(sid) != generation:
+            else:
+                try:
+                    if not session['brain'].get('approved'):
+                        prepared = context.prepare(session)
+                        with self.lock:
+                            if sid in self.cancelled or self.stopping.is_set() or self.generations.get(sid) != generation:
+                                return
+                            self._save_brain(sid, prepared)
+                            self._status(sid, 'awaiting_context')
+                            self._event(sid, {'kind': 'status', 'text': 'Context prepared. Review it before starting the provider.'})
                         return
-                    brain = self.get(sid)['brain']
-                    self._save_brain(sid, {**brain, 'approved': False, 'context_id': None})
-                    if sid not in self.cancelled and not self.stopping.is_set():
-                        self._status(sid, 'awaiting_context')
-                        self._event(sid, {'kind': 'error', 'text': str(error)})
-                return
-            with self.lock:
-                if sid in self.cancelled or self.stopping.is_set() or self.generations.get(sid) != generation:
+                    if context.ensure_fresh(session) is False:
+                        raise SessionError('The prepared context changed. Refresh and review it before running.')
+                except SessionError as error:
+                    with self.lock:
+                        if self.generations.get(sid) != generation:
+                            return
+                        brain = self.get(sid)['brain']
+                        self._save_brain(sid, {**brain, 'approved': False, 'context_id': None})
+                        if sid not in self.cancelled and not self.stopping.is_set():
+                            self._status(sid, 'awaiting_context')
+                            self._event(sid, {'kind': 'error', 'text': str(error)})
                     return
-                self._save_brain(sid, {**session['brain'], 'approved': False})
+                with self.lock:
+                    if sid in self.cancelled or self.stopping.is_set() or self.generations.get(sid) != generation:
+                        return
+                    self._save_brain(sid, {**session['brain'], 'approved': False})
         # Integers for Usage › Context: what this launch's prompt carries, and to how many agents.
         ledger, agents = None, 1
         if fleet:
@@ -1320,8 +1402,14 @@ class Sessions:
             # The window belongs to the model: an earlier turn on the same one knows it before this turn's result does.
             tracker.window = self.results.last_window(sid, session['model'])
         environment = {**os.environ, **providers.agent_environment(provider, session['agents_enabled'], session['agent_count'])}
+        # Only this launch can say its capsule is in the prompt; never inherit the claim.
+        environment.pop('CONTEXT_CAPSULE_DELIVERED', None)
         if session['brain']:
             environment['CONTEXT_TASK_ID'] = session['brain']['task_id']
+            if session['brain'].get('capsule'):
+                # The project's own read hook would build a second capsule from this whole
+                # prompt; the write hook still checkpoints the task on Stop.
+                environment['CONTEXT_CAPSULE_DELIVERED'] = '1'
         if fleet:
             environment.update(LANGCHAIN_TRACING_V2='false', LANGSMITH_TRACING='false', LANGSMITH_OTEL_ENABLED='false')
         with self.lock:
@@ -1548,6 +1636,8 @@ class Sessions:
             if provider == 'codex':
                 tracker.update(context_usage.codex_fill(providers.codex_rollout_tail(native_id, project), launch_started_at, time.time()))
             save_context()
+        if outcome == 'completed' and native_launch and session['brain'] and not reviewed(session['brain']):
+            self._remember(sid)
         # Record the closing event before the terminal status: readers that wait for
         # the status to settle must see the complete event history.
         self._event(sid, {"kind": "status", "text": f"Run {outcome}. Process completion is not an independent verification of the task."})

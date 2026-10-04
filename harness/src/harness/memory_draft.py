@@ -4,8 +4,11 @@ A session linked to a Brain task asks its agent to close each run with a
 `memory-draft` block. The agent is the one party that knows what the run
 established, and agents left to policy alone almost never record it: on four
 real installations 23 of 24 tasks held nothing but the automatic checkpoint.
-The draft is only a proposal. The page shows it, a person edits and confirms
-it, and only then does the Harness run the runtime's own commands.
+
+By default the Harness saves the draft itself when the run completes, keeping
+what the workspace can back and saying in every record that no person reviewed
+it. A session opened for review shows the draft instead, and a person edits and
+confirms it before the Harness runs the runtime's own commands.
 """
 from __future__ import annotations
 
@@ -27,7 +30,7 @@ LEARNING_COUNT, SOURCE_COUNT = 3, 10
 # A reply longer than this is not one a draft can sit at the end of.
 TEXT_LIMIT = 200_000
 
-INSTRUCTION = (
+REQUEST = (
     "Project Brain memory draft: this session is linked to a Brain task. End your final "
     "reply with one fenced block whose info string is memory-draft, holding JSON: "
     '{"progress": "where the task stands now, one or two sentences", '
@@ -38,8 +41,18 @@ INSTRUCTION = (
     "Use at most 3 next steps and at most 3 learnings. A learning is durable, reusable "
     "knowledge you verified in a project file during this run, not progress and not a "
     "guess; use [] when there is none. Never include secrets, personal data, logs or "
-    "transcripts. A person reviews the draft before anything is saved."
+    "transcripts. "
 )
+REVIEWED = "A person reviews the draft before anything is saved."
+AUTOMATIC = ("The Harness saves the draft to project memory as written, with no review, "
+             "so leave out anything you did not verify.")
+# Every record an unattended save writes says so, next to the runtime's own audit trail.
+AUTOMATIC_REASON = "Saved automatically when a Harness run completed; agent-attested, not reviewed by a person"
+
+
+def instruction(review):
+    """What a linked run's agent is asked to end with, and who reads it next."""
+    return REQUEST + (REVIEWED if review else AUTOMATIC)
 
 
 def _clip(value, limit):
@@ -156,6 +169,21 @@ def submission(data):
     return {"progress": progress, "next_steps": steps, "learnings": kept}
 
 
+def _unusable(root, source):
+    """Why the session workspace cannot back a cited source, or None when it can."""
+    head = source.split("#", 1)[0]
+    try:
+        descriptor = open_project_path(root, head)
+    except OSError:
+        return f"Source not found in the session workspace: {head}"
+    try:
+        if not stat.S_ISREG(fs.fstat(descriptor).st_mode):
+            return f"Source is not a regular file: {head}"
+    finally:
+        fs.close(descriptor)
+    return None
+
+
 def check_sources(root, draft):
     """Refuse a learning citing a file the session workspace does not have.
 
@@ -164,16 +192,89 @@ def check_sources(root, draft):
     """
     for learning in draft["learnings"]:
         for source in learning["sources"]:
-            head = source.split("#", 1)[0]
+            problem = _unusable(root, source)
+            if problem:
+                raise SessionError(problem)
+
+
+def remembered(learning):
+    """What makes two learnings the same one: their kind and their title, ignoring case."""
+    return [learning["type"], " ".join(learning["title"].split()).casefold()]
+
+
+def usable(root, draft, known=()):
+    """What an unattended save keeps of a parsed draft, and the learnings it leaves out.
+
+    Nobody is there to correct a field, so a source the workspace cannot back is
+    dropped, a learning left with none is skipped rather than failing the whole
+    save, and stray control characters become spaces. A learning already saved
+    from this session (`known`, as `remembered` names them) is skipped too: an
+    agent restates what it found in later turns. The kept draft still goes
+    through `submission`, under the same limits as a reviewed one.
+    """
+    def plain(value, limit):
+        if not isinstance(value, str):
+            return ""
+        return " ".join("".join(char if 31 < ord(char) != 127 else " " for char in value).split())[:limit]
+
+    known = [list(item) for item in known]
+    kept, skipped = [], []
+    for item in draft.get("learnings") or []:
+        sources = []
+        for source in item.get("sources") or []:
             try:
-                descriptor = open_project_path(root, head)
-            except OSError as error:
-                raise SessionError(f"Source not found in the session workspace: {head}") from error
-            try:
-                if not stat.S_ISREG(fs.fstat(descriptor).st_mode):
-                    raise SessionError(f"Source is not a regular file: {head}")
-            finally:
-                fs.close(descriptor)
+                source = _source(source)
+            except SessionError:
+                continue
+            if _unusable(root, source) is None and source not in sources:
+                sources.append(source)
+        learning = {"type": item.get("type"), "title": plain(item.get("title"), TITLE_LIMIT),
+                    "consequence": plain(item.get("consequence"), CONSEQUENCE_LIMIT), "sources": sources}
+        if not (learning["type"] in KINDS and learning["title"] and learning["consequence"] and sources):
+            skipped.append({"title": learning["title"] or "an untitled learning", "reason": "unsourced"})
+        elif remembered(learning) in known + [remembered(other) for other in kept]:
+            skipped.append({"title": learning["title"], "reason": "repeated"})
+        else:
+            kept.append(learning)
+    steps = [step for step in (plain(step, STEP_LIMIT) for step in draft.get("next_steps") or []) if step]
+    # The agent attests its own learnings here; the records' ledger says no person did.
+    return {"progress": plain(draft.get("progress"), PROGRESS_LIMIT), "next_steps": steps[:STEP_COUNT],
+            "learnings": kept[:LEARNING_COUNT], "verified": bool(kept)}, skipped
+
+
+def summary(state, result=None):
+    """One line for the conversation: what an unattended save recorded, or why it did not."""
+    if state == "missing":
+        return "This run left no memory draft, so nothing was saved to project memory."
+    if state == "unreadable":
+        return "This run's memory draft could not be read, so nothing was saved to project memory."
+    saved = result.get("saved") or {}
+    parts = (["the task's progress and next steps"] if saved.get("task") else []) + [
+        f"{record.get('type')} \u201c{record.get('title')}\u201d" for record in saved.get("records") or []]
+    text = ("Saved to project memory: " + "; ".join(parts) + "." if parts
+            else "Nothing new to save to project memory from this run.")
+    skipped = [item.get("reason") for item in result.get("skipped") or [] if isinstance(item, dict)]
+    if skipped.count("repeated"):
+        text += f" {skipped.count('repeated')} learning(s) were already saved from this session."
+    if skipped.count("unsourced"):
+        text += f" Left out {skipped.count('unsourced')} learning(s) citing no file in the workspace."
+    promotion = saved.get("promotion")
+    if isinstance(promotion, dict):
+        promoted = [item.get("memory_id") for item in promotion.get("promoted") or [] if isinstance(item, dict)]
+        held = len(promotion.get("blocked") or []) + len(promotion.get("failed") or [])
+        if promotion.get("error"):
+            text += " Not promoted yet: " + promotion["error"]
+        elif promotion.get("enabled") is False:
+            text += " Automatic promotion is off for this project, so it stays in Project Brain."
+        if promoted:
+            text += " Promoted to the Memory Bank as " + ", ".join(promoted) + "."
+        if held:
+            text += f" {held} held back from the Memory Bank; see Durable memory."
+    if not result.get("ok"):
+        text += " Stopped: " + (result.get("error") or "the runtime did not finish.")
+        if parts:
+            text += " What is listed was saved."
+    return text
 
 
 def external_id(task_id, kind):

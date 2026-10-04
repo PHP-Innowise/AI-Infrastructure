@@ -26,6 +26,22 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Harness: project memory runs by itself. A new session uses it by default and
+  nothing waits for a person: the first message names a new Brain task, every
+  message is the retrieval query for its own turn (`context.py refresh` with
+  the provider as host, manifest in the ignored local store), the capsule goes
+  straight into the launch, and when a run completes its `memory-draft` is
+  saved — progress, next steps, and each learning written as observed and
+  raised to verified with the reason "agent-attested, not reviewed by a
+  person", then `promote-auto` once. Learnings citing no file in the workspace
+  or already saved from the session are left out; a retrieval or save failure
+  costs the turn its memory, never the turn, and the conversation shows a line
+  for what each turn carried and saved. Review by hand (prepare, approve, Save
+  to memory) is an opt-in, and sessions linked before this keep it. A project
+  without a governed runtime starts its sessions without memory instead of
+  refusing them. Memory use names these retrievals Harness, and the Claude and
+  Codex read hooks, which call `refresh`, by their host instead of CLI.
+
 - The Claude and Codex read hooks (`working-memory-read.sh`) stand down when
   `CONTEXT_CAPSULE_DELIVERED=1`. The Harness sets it when it has already put
   the turn's capsule into the prompt, retrieved for the message alone; the hook

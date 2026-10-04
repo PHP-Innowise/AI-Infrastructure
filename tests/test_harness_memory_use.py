@@ -191,6 +191,26 @@ class MemoryUseTests(unittest.TestCase):
         self.assertNotEqual(prepared["task"], hook["task"])
         self.assertEqual(hook["task"], manual["task"])
 
+    def test_unattended_harness_memory_and_provider_hooks_name_their_routes(self):
+        policy = {"path": "AGENTS.md", "category": "policy", "estimated_tokens": 40, "source_hash": "p"}
+        off = {"decision": "retrieve", "mode": "off", "reason": "gate-off"}
+        shadow = {"decision": "retrieve", "mode": "shadow", "reason": "new-selection"}
+        # Unattended Harness memory retrieves through `refresh` as the provider, gate off, each turn in
+        # the local store; two turns with the same selection are two retrievals, not a freshness check.
+        self.manifest("governed", "reviewed", "2026-09-29T09:00:00+00:00", [policy], host="cli", entry_point="retrieve", gate=off)
+        self.manifest("local", "turn-1", "2026-09-29T10:00:00+00:00", [policy], host="codex", entry_point="refresh", gate=off)
+        self.manifest("local", "turn-2", "2026-09-29T10:05:00+00:00", [policy], host="codex", entry_point="refresh", gate=off)
+        # The Claude read hook calls `refresh` with its own host under the configured gate.
+        self.manifest("local", "hook", "2026-09-30T08:00:00+00:00", [policy], host="claude", entry_point="refresh",
+                      gate=shadow, task_id=OTHER_TASK)
+        # Ungated provider refreshes for a task the Harness never linked are a hook, not the Harness.
+        self.manifest("local", "foreign", "2026-09-30T09:00:00+00:00", [policy], host="cursor", entry_point="refresh",
+                      gate=off, task_id=OTHER_TASK)
+        retrievals = self.read(frozenset({TASK}))["retrievals"]
+        self.assertEqual((5, 0), (retrievals["found"], retrievals["merged"]))
+        self.assertEqual(["Harness", "Harness", "Harness", "Claude hook", "Cursor hook"],
+                         [row["route"] for row in retrievals["items"]])
+
     def test_caps_keep_the_newest_and_say_so(self):
         for number in range(3):
             self.chunk(f"MEM-2026090{number + 1}-0000000{number}", "capped")

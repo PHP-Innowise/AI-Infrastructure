@@ -725,7 +725,7 @@ async function bootstrap() {
 }
 $('reconnect').addEventListener('click',bootstrap);
 const sessionPreferencesKey = 'harness.sessions.preferences.v1';
-const sessionPreferenceFields = ['provider','workflow','mode','project-context','agents-enabled','agent-count','workspace','worktree-branch','sdd-feature','sdd-phase','clash-enabled','clash-challenger','clash-rounds','fleet-dry-run','fleet-budget','fleet-worker-timeout','brain-link-enabled','brain-link-kind','brain-link-task-id','brain-link-goal','brain-link-query',...['usd','tokens','seconds'].flatMap(key => ['session-budgets-'+key,'session-budgets-agent-'+key])];
+const sessionPreferenceFields = ['provider','workflow','mode','project-context','agents-enabled','agent-count','workspace','worktree-branch','sdd-feature','sdd-phase','clash-enabled','clash-challenger','clash-rounds','fleet-dry-run','fleet-budget','fleet-worker-timeout','brain-link-enabled','brain-link-kind','brain-link-review','brain-link-task-id','brain-link-goal','brain-link-query',...['usd','tokens','seconds'].flatMap(key => ['session-budgets-'+key,'session-budgets-agent-'+key])];
 let sessionPreferencesReady = false, sessionDraftProject = null, defaultSessionPreferences = null, restoringSessionPreferences = false, preferenceEpoch = 0;
 function readSessionPreferences() {
   try {
@@ -736,11 +736,14 @@ function readSessionPreferences() {
   } catch (_) { return {}; }
 }
 function captureSessionPreferences() {
-  return {fields:Object.fromEntries(sessionPreferenceFields.map(id => [id,$(id).type === 'checkbox' ? $(id).checked : $(id).value])),model:selectedModel(),effort:$('thinking-effort').value,routing:modelRouting(),lenses:[...fleetUi.lenses],bank:$('brain-link-bank').value,task:$('brain-link-task').value};
+  // Until the knowledge roots load, their selects are empty: keep the root and task this project last saved.
+  const settled = brainLinkLoaded() && !brainLinkDraft.error, kept = settled ? null : readSessionPreferences().drafts?.[sessionDraftProject || $('project').value];
+  return {fields:Object.fromEntries(sessionPreferenceFields.map(id => [id,$(id).type === 'checkbox' ? $(id).checked : $(id).value])),model:selectedModel(),effort:$('thinking-effort').value,routing:modelRouting(),lenses:[...fleetUi.lenses],
+    bank:settled ? $('brain-link-bank').value : typeof kept?.bank === 'string' ? kept.bank : '',task:settled ? $('brain-link-task').value : typeof kept?.task === 'string' ? kept.task : ''};
 }
 function saveSessionPreferences(projectId = sessionDraftProject || $('project').value) {
   if (!sessionPreferencesReady || restoringSessionPreferences || !state.bootstrap) return;
-  if (!state.selectedId && $('brain-link-enabled').checked && (brainLinkDraft.loading || brainLinkDraft.error)) return;
+  if (!state.selectedId && $('brain-link-enabled').checked && brainLinkStrict() && (brainLinkDraft.loading || brainLinkDraft.error)) return;
   if (state.selectedId) projectId = $('project').value;
   if (!projectFor(projectId)) return;
   const saved = readSessionPreferences();
@@ -756,7 +759,10 @@ async function restoreProjectPreferences(projectId) {
   try {
     resetBrainLink();
     for (const draft of [defaultSessionPreferences,saved]) {
+      // A draft saved before project memory ran by itself says "not linked" for nearly everyone; it keeps the new default.
+      const before = draft?.fields && !('brain-link-review' in draft.fields);
       for (const id of sessionPreferenceFields) {
+        if (before && ['brain-link-enabled','brain-link-kind'].includes(id)) continue;
         const input = $(id), value = draft?.fields?.[id];
         if (input.type === 'checkbox') { if (typeof value === 'boolean') input.checked = value; }
         else if (typeof value === 'string' && value.length <= (input.maxLength > 0 ? input.maxLength : 4000)) {
@@ -1028,7 +1034,7 @@ function renderSessionOptions() {
   for (const id of ['project','provider','workflow','project-context']) $(id).closest('label').hidden = hasSession;
   const shown = {helpers:!clashMode && !session?.creator, clash:clashAvailable() && !fleet && !isFleetSession(session) && !session?.creator, workspace:!hasSession, brain:!hasSession, budgets:!session?.creator, models:!fleet && !clashMode && !fleetDryRun()};
   const valid = sessionOptions.validity || {}, invalid = {helpers:valid.helpers === false, clash:valid.clash === false, workspace:valid.workspace === false, brain:valid.brain === false, budgets:valid.budgets === false || !$('session-budgets-agent-error').hidden, models:valid.models === false};
-  const on = {helpers:fleet || $('agents-enabled').checked, clash:clashMode, workspace:$('workspace').value === 'worktree', brain:$('brain-link-enabled').checked, budgets:budgetSummary(sessionBudgets()) !== 'No limits', models:Boolean(modelRouting())};
+  const on = {helpers:fleet || $('agents-enabled').checked, clash:clashMode, workspace:$('workspace').value === 'worktree', brain:brainLinkActive(), budgets:budgetSummary(sessionBudgets()) !== 'No limits', models:Boolean(modelRouting())};
   const count = $('agent-count').valueAsNumber, git = projectGitState.projectId === $('project').value ? projectGitState.data : null, branch = $('worktree-branch').value.trim();
   $('option-helpers-label').textContent = fleet ? 'Reviewers at once' : 'Helpers';
   $('option-helpers-value').textContent = on.helpers ? (Number.isInteger(count) ? String(count) : '') : $('provider').value === 'cursor' ? 'Off · not enforced' : 'Off';
@@ -1070,7 +1076,7 @@ function renderSendBlock(collapsed) {
   const settingsError = collapsed && (Boolean(hidden) || [...$('session-settings').querySelectorAll('.model-error,.agent-error,.workspace-error,.fleet-error,.error-text')].some(node => !node.hidden));
   $('session-settings-toggle').dataset.invalid = String(Boolean(settingsError));
   if (!$('send').disabled || state.pending || !$('prompt').value.trim() || !$('composer-note').classList.contains('shortcut')) return;
-  const label = hidden === 'helpers' ? $('option-helpers-label').textContent : {clash:'Clash',workspace:'Run in',brain:'Brain task',budgets:'Budgets',models:'Models'}[hidden];
+  const label = hidden === 'helpers' ? $('option-helpers-label').textContent : {clash:'Clash',workspace:'Run in',brain:'Memory',budgets:'Budgets',models:'Models'}[hidden];
   if (settingsError) $('composer-note').textContent = 'Open Next-turn settings: a setting needs attention.';
   else if (label) $('composer-note').textContent = `Check ${label} to send.`;
   else return;
@@ -1128,21 +1134,24 @@ function updateControls() {
   const noResume = !awaitingContext && !existingFleet && hasSession && state.selected && !isActive && !state.selected.native_session_id && !state.loading;
   // System changes and AI scans run here as transcripts; they continue under System Orchestration.
   const systemOwned = state.selected?.system_run ? 'run' : state.selected?.system_discovery ? 'scan' : null;
-  $('send').disabled = !routingValid || !sddValid || !clashValid || !budgetValid || budgetsDirty() || !ready || pending || state.loading || isActive || noResume || terminalLinkedTask || existingFleet || awaitingContext || !linkValid || !hasSession && projectFor($('project').value)?.available === false || !agentsValid || !agentModeValid || !modelValid || !workspaceValid || !fleetValid || !$('project').value || !provider || !dryRun && !provider.available || !$('prompt').value.trim();
+  $('send').disabled = !routingValid || !sddValid || !clashValid || !budgetValid || budgetsDirty() || !ready || pending || state.loading || isActive || noResume || terminalLinkedTask || existingFleet || awaitingContext || !linkValid || brainLinkPending() || !hasSession && projectFor($('project').value)?.available === false || !agentsValid || !agentModeValid || !modelValid || !workspaceValid || !fleetValid || !$('project').value || !provider || !dryRun && !provider.available || !$('prompt').value.trim();
   $('composer-area').hidden = existingFleet || awaitingContext; $('prompt').disabled = pending || state.loading || noResume || terminalLinkedTask || existingFleet; $('prompt').placeholder = clashMode && !hasSession ? ($('mode').value === 'edit' ? 'Describe the task; the implementer builds it and the challenger attacks the result…' : 'Describe the scope; both providers review it and dispute each other’s findings…') : fleet && !hasSession ? 'Describe the review scope, files, or Git changes to inspect…' : terminalLinkedTask ? 'Start a new session with an active or new task…' : noResume ? 'Start a new session to continue…' : hasSession ? 'Write a follow-up for this session…' : 'Describe a task for this project…';
   $('attach-files').disabled = !ready || pending || state.loading || isActive || noResume || terminalLinkedTask || existingFleet || awaitingContext;
   $('attachment-input').disabled = $('attach-files').disabled;
   for (const button of $('attachment-list').querySelectorAll('button')) button.disabled = pending;
   $('prompt-label').textContent = fleet ? 'Review scope' : clashMode ? 'Task or follow-up for the next clash cycle' : 'Task or follow-up message';
-  $('send-label').textContent = state.pending === 'create' ? $('brain-link-enabled').checked ? 'Preparing…' : 'Starting…' : state.pending === 'followup' ? 'Sending…' : !hasSession && $('workspace').value === 'worktree' && projectGitState.pending ? 'Checking Git…' : isActive ? 'Session active' : noResume || terminalLinkedTask ? 'New session needed' : hasSession ? linked ? 'Prepare follow-up' : clashMode ? 'Start next cycle' : 'Send follow-up' : $('brain-link-enabled').checked ? 'Prepare session' : fleet ? dryRun ? 'Start dry-run' : 'Start fleet review' : clashMode ? 'Start clash' : 'Start session';
+  // Reviewed memory stops before each turn for a person; unattended memory needs nothing and changes no label.
+  const reviewing = hasSession ? linked && brainReviewed(state.selected.brain) : brainLinkActive() && $('brain-link-review').checked;
+  const remembering = hasSession ? linked && !brainReviewed(state.selected.brain) : brainLinkActive() && !$('brain-link-review').checked;
+  $('send-label').textContent = state.pending === 'create' ? reviewing ? 'Preparing…' : 'Starting…' : state.pending === 'followup' ? 'Sending…' : !hasSession && $('workspace').value === 'worktree' && projectGitState.pending ? 'Checking Git…' : isActive ? 'Session active' : noResume || terminalLinkedTask ? 'New session needed' : hasSession ? reviewing ? 'Prepare follow-up' : clashMode ? 'Start next cycle' : 'Send follow-up' : reviewing ? 'Prepare session' : fleet ? dryRun ? 'Start dry-run' : 'Start fleet review' : clashMode ? 'Start clash' : 'Start session';
   $('composer-note').textContent = budgetsDirty() ? 'Save budget changes before launching.' : terminalLinkedTask ? 'Choose an active or new Brain task in a new session.' : noResume ? systemOwned ? 'Continue in System Orchestration.' : 'Use New session in the sidebar.' : isActive ? 'Wait for completion, or cancel the session.' : 'Ctrl / ⌘ + Enter to send';
   $('composer-note').classList.toggle('shortcut',$('composer-note').textContent === 'Ctrl / ⌘ + Enter to send');
-  const caption = terminalLinkedTask ? 'The linked Brain task is completed or cancelled. Start a new session with an active or new task to continue.' : (!hasSession && $('brain-link-enabled').checked || linked && !noResume) ? 'You review the prepared workspace and context before the agent runs.' : clashMode && !hasSession ? 'Both participants share the session budgets.' : clashMode && !noResume ? 'A follow-up starts the next cycle; both native sessions resume. Untick Clash for a normal follow-up.' : fleet && !hasSession ? 'Scope and reviewers are fixed once the review starts.' : noResume ? systemOwned === 'run' ? 'This launch belongs to a system change. Resume, cancel or review it under System Orchestration › Changes.' : systemOwned === 'scan' ? 'This is an AI scan of service folders. Start a new scan from the system editor.' : state.selected.status === 'cancelled' ? 'Cancelled before a resumable native session was created.' : 'No resumable native session was returned. Start a new session to continue.' : '';
+  const caption = terminalLinkedTask ? 'The linked Brain task is completed or cancelled. Start a new session with an active or new task to continue.' : reviewing && !noResume ? 'You review the prepared workspace and context before the agent runs.' : remembering && !noResume && !clashMode && !fleet ? 'Project memory is retrieved for each message and saved when the run completes.' : clashMode && !hasSession ? 'Both participants share the session budgets.' : clashMode && !noResume ? 'A follow-up starts the next cycle; both native sessions resume. Untick Clash for a normal follow-up.' : fleet && !hasSession ? 'Scope and reviewers are fixed once the review starts.' : noResume ? systemOwned === 'run' ? 'This launch belongs to a system change. Resume, cancel or review it under System Orchestration › Changes.' : systemOwned === 'scan' ? 'This is an AI scan of service folders. Start a new scan from the system editor.' : state.selected.status === 'cancelled' ? 'Cancelled before a resumable native session was created.' : 'No resumable native session was returned. Start a new session to continue.' : '';
   $('composer-caption').textContent = caption; $('composer-caption').hidden = !caption;
   const providerNote = dryRun ? 'Offline dry-run can use any provider selection; no native CLI is launched.' : ready && !provider?.available ? 'No provider is ready. Install and sign in with a native CLI, then restart the Harness server.' : provider?.id === 'cursor' ? 'Cursor can’t disable or cap helpers; helper settings are instructions only.' : '';
   if ($('provider-hint').textContent !== providerNote) $('provider-hint').textContent = providerNote; $('provider-hint').hidden = !providerNote;
   $('agent-hint').textContent = helperHint(fleet,clashMode,ultracode,provider);
-  $('waiting').hidden = !isActive; const waitingText = linked && !state.selected.brain.context_id ? 'Preparing workspace and context. The provider has not started this turn.' : state.selected?.status === 'queued' ? 'Queued — waiting for an available runner.' : existingFleet ? 'Fleet review is running. Stage and reviewer updates appear above.' : isClashSession(state.selected) ? `${providerFor(state.selected.provider)?.name || state.selected.provider} and ${providerFor(state.selected.clash?.challenger)?.name || 'the challenger'} are clashing. Turn events appear above.` : `${providerFor(state.selected?.provider)?.name || 'Agent'} is running. New events will appear here.`; if ($('waiting-text').textContent !== waitingText) $('waiting-text').textContent = waitingText;
+  $('waiting').hidden = !isActive; const waitingText = linked && brainReviewed(state.selected.brain) && !state.selected.brain.context_id ? 'Preparing workspace and context. The provider has not started this turn.' : state.selected?.status === 'queued' ? 'Queued — waiting for an available runner.' : existingFleet ? 'Fleet review is running. Stage and reviewer updates appear above.' : isClashSession(state.selected) ? `${providerFor(state.selected.provider)?.name || state.selected.provider} and ${providerFor(state.selected.clash?.challenger)?.name || 'the challenger'} are clashing. Turn events appear above.` : `${providerFor(state.selected?.provider)?.name || 'Agent'} is running. New events will appear here.`; if ($('waiting-text').textContent !== waitingText) $('waiting-text').textContent = waitingText;
   $('welcome').hidden = hasSession; sessionOptions.validity = {helpers:agentsValid && agentModeValid,clash:clashValid,workspace:workspaceValid,brain:linkValid,budgets:budgetValid,models:routingValid}; renderSessionOptions(); renderSessionSummary(); updateHeader(); updateSkillsControls(); updateKnowledgeControls(); updateSetupControls(); renderFleetSession(); renderClashSession(); renderLinkedSession(); renderContextValue(); if (typeof renderContextMeter === 'function') renderContextMeter(); resultControls();
 }
 function applySessionSettings(session, restoreModel = true) { $('sdd-feature').value = session.sdd?.feature || ''; $('sdd-phase').value = session.sdd?.phase || 'specify'; for (const id of ['project','provider','workflow','mode']) $(id).value = session[id === 'project' ? 'project_id' : id] || (id === 'mode' ? 'plan' : id === 'workflow' ? 'native' : ''); $('project-context').checked = Boolean(session.project_context); if (restoreModel || active(session) || isFleetSession(session)) { $('agents-enabled').checked = session.agents_enabled === true; $('agent-count').value = Number.isInteger(session.agent_count) ? session.agent_count : defaultAgentCount(); } $('workspace').value = session.workspace === 'worktree' ? 'worktree' : 'project'; $('worktree-branch').value = session.workspace === 'worktree' ? session.branch || '' : ''; restoreBudgets('session-budgets',session.budgets,session.id+':'+session.budget_revision); restoreModelRouting(session.model_routing); restoreClashSettings(session.clash || null); if (isFleetSession(session)) restoreFleetSettings(session.fleet); if (restoreModel || isFleetSession(session)) refreshModelChoices(session.model || null,session.thinking_effort || null); loadProjectGit(); }
@@ -1237,9 +1246,10 @@ async function fleetAction(action) {
   finally { if (state.pending === pending) { state.pending = null; updateControls(); } }
 }
 $('fleet-approve').addEventListener('click',() => fleetAction('approve')); $('fleet-reject').addEventListener('click',() => fleetAction('reject')); $('fleet-resume').addEventListener('click',() => fleetAction('resume'));
-// A linked run's memory draft is reviewed in Save to memory; the reply says where instead of showing its JSON twice.
 const MEMORY_DRAFT_BLOCK = /```memory-draft[^\S\n]*\n[\s\S]*?\n[^\S\n]*```/g;
-function withoutMemoryDraft(text) { return text.replace(MEMORY_DRAFT_BLOCK,'[Memory draft: review it under Save to memory below.]').trim(); }
+// The reply points at where the draft went instead of repeating its JSON: the Save to memory form when a person
+// reviews it, or the project memory line the run adds once it has saved the draft itself.
+function withoutMemoryDraft(text,reviewed = true) { return text.replace(MEMORY_DRAFT_BLOCK,reviewed ? '[Memory draft: review it under Save to memory below.]' : '[Memory draft: saved to project memory when the run completes.]').trim(); }
 function appendEvent(event) {
   if (event.id === undefined || event.id === null || state.eventIds.has(String(event.id))) return;
   state.eventIds.add(String(event.id)); let text = typeof event.text === 'string' ? event.text : '';
@@ -1256,7 +1266,9 @@ function appendEvent(event) {
     text = `Native session: ${event.native_session_id}`;
   }
   if (!text.trim()) return;
-  if (kind === 'delegation') {
+  if (kind === 'memory') {
+    const block = el('p','memory-event'); block.dataset.ok = String(event.ok !== false); block.setAttribute('role','status'); block.textContent = text; $('events').append(block);
+  } else if (kind === 'delegation') {
     const block = el('div','memory-notice'); block.setAttribute('role','status'); block.append(el('strong','',Number.isInteger(event.required_count) ? event.status === 'confirmed' ? 'Required helper count confirmed. ' : 'Required helper count not confirmed. ' : event.status === 'confirmed' ? 'Helper launch confirmed. ' : 'Helper launch not confirmed. '),document.createTextNode(text)); $('events').append(block);
   } else if (kind === 'clash_turn') {
     const block = el('div','clash-turn'); block.setAttribute('role','status'); block.textContent = text; $('events').append(block);
@@ -1272,7 +1284,7 @@ function appendEvent(event) {
     const type = kind === 'text' ? 'assistant' : kind; const block = el('article',`message ${type}`); block.dataset.provider = String(event.provider || ''); const heading = el('div','message-label');
     const tagged = typeof event.provider === 'string' && event.provider ? `${providerFor(event.provider)?.name || event.provider}${typeof event.role === 'string' && event.role ? ` · ${humanLabel(event.role)}` : ''}${Number.isInteger(event.round) && event.round > 0 ? ` · round ${event.round}` : ''}` : '';
     const label = kind === 'user' ? 'You' : kind === 'error' ? `Session error${tagged ? ` · ${tagged}` : ''}` : kind === 'result' ? 'Result' : tagged || providerFor(state.selected?.provider)?.name || 'Assistant';
-    heading.append(el('span','avatar',kind === 'user' ? 'Y' : kind === 'error' ? '!' : 'AI'),document.createTextNode(label)); block.append(heading,el('pre','message-body',['text','assistant','result'].includes(kind) ? withoutMemoryDraft(text) : text));
+    heading.append(el('span','avatar',kind === 'user' ? 'Y' : kind === 'error' ? '!' : 'AI'),document.createTextNode(label)); block.append(heading,el('pre','message-body',['text','assistant','result'].includes(kind) ? withoutMemoryDraft(text,!state.selected?.brain || brainReviewed(state.selected.brain)) : text));
     if (kind === 'user' && Array.isArray(event.attachments)) {
       const files = el('div','attachment-list');
       for (const file of event.attachments) {
@@ -1338,7 +1350,7 @@ $('session-form').addEventListener('submit',async event => {
   event.preventDefault(); if ($('send').disabled || state.pending || isFleetSession(state.selected)) return;
   const prompt = $('prompt').value.trim(); const followup = Boolean(state.selectedId); state.pending = followup ? 'followup' : 'create'; showError('composer-error',''); updateControls();
   const turn = {prompt,agents_enabled:$('agents-enabled').checked,agent_count:$('agent-count').valueAsNumber,model_routing:modelRouting(),...(followup && $('workflow').value === 'native' && modelRouting() ? {mode:$('mode').value} : {}),...($('workflow').value === 'sdd' ? {sdd:sddSettings()} : {}),...(clashSelected() ? {clash:clashSettings()} : followup ? {clash:null} : {}),model:fleetDryRun() ? null : selectedModel(),thinking_effort:fleetDryRun() ? null : $('thinking-effort').value || null};
-  const body = followup ? turn : {...turn,budgets:sessionBudgets(),project_id:$('project').value,provider:$('provider').value,mode:$('mode').value,workflow:$('workflow').value,project_context:$('project-context').checked,workspace:$('workspace').value,...($('workspace').value === 'worktree' && $('worktree-branch').value.trim() ? {worktree_branch:$('worktree-branch').value.trim()} : {}),...(fleetSelected() ? {fleet:fleetSettings()} : {}),...($('brain-link-enabled').checked ? {brain:brainLinkConfig()} : {})};
+  const body = followup ? turn : {...turn,budgets:sessionBudgets(),project_id:$('project').value,provider:$('provider').value,mode:$('mode').value,workflow:$('workflow').value,project_context:$('project-context').checked,workspace:$('workspace').value,...($('workspace').value === 'worktree' && $('worktree-branch').value.trim() ? {worktree_branch:$('worktree-branch').value.trim()} : {}),...(fleetSelected() ? {fleet:fleetSettings()} : {}),...(brainLinkActive() ? {brain:brainLinkConfig()} : {})};
   try {
     if (attachedFiles.length) body.attachments = await Promise.all(attachedFiles.map(encodeAttachment));
     const data = await api(followup ? `/api/sessions/${encodeURIComponent(state.selectedId)}/messages` : '/api/sessions',{method:'POST',body});

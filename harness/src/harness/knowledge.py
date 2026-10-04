@@ -524,7 +524,7 @@ class KnowledgeManager:
                 raise SessionError('The installed runtime could not check eligibility. Check record validity and source paths.')
             return {**info, **result}
 
-    def run(self, project_id, data, *, _root=None, _ephemeral=False, _gate=None):
+    def run(self, project_id, data, *, _root=None, _ephemeral=False, _gate=None, _host=None):
         if not isinstance(data, dict) or not isinstance(data.get('action'), str) or data['action'] not in ACTION_FIELDS:
             raise SessionError('Select a supported knowledge operation.')
         action = data['action']
@@ -551,6 +551,12 @@ class KnowledgeManager:
                     if _gate not in ('off', 'shadow', 'enforce'):
                         raise SessionError('Invalid internal retrieval gate.')
                     options.append('--gate=' + _gate)
+                if _host is not None:
+                    # The provider the capsule is for: recorded in the manifest, and
+                    # it decides which instruction files the runtime leaves out.
+                    if _host not in ('claude', 'codex', 'cursor', 'cli'):
+                        raise SessionError('Invalid internal retrieval host.')
+                    options.append('--host=' + _host)
                 arguments[1:1] = options
             export_id, destination = None, None
             if action == 'export':
