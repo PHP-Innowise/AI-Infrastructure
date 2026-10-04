@@ -26,6 +26,19 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Count each Harness launch's own Claude spend. From Claude Code 2.1.277 a
+  resumed session's result reports the session's whole spend in
+  `total_cost_usd`, and the Harness added those totals launch by launch: a
+  resumed Claude session's Usage totals, its "Usage · $" label and the launch
+  USD cap counted earlier launches again, and Clash turns did the same.
+  `providers.RunCost` now keeps each launch's and each Clash turn's growth over
+  the native session's last reported total (`sessions.cost_totals`), read per
+  run from the CLI version in the init event; older CLIs keep their per-run
+  cost. When the share cannot be told the cost stays unknown, never 0, and the
+  launch records the raw report as `cost_usd_reported`. Launches recorded before
+  this change keep their totals. The agents panel no longer turns an unreported
+  token count or cost into 0.
+
 - Bring System Orchestration (PR #36) onto the Harness design. It is a sidebar
   section with two tabs: **Services** (system file, contract map, service cards
   and the editor with **Fill with AI**) and **Changes** (a change selector, the

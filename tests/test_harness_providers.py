@@ -23,6 +23,23 @@ class BudgetTests(unittest.TestCase):
         self.assertIsNone(providers.total_tokens({'input_tokens':10}))
         self.assertIsNone(providers.total_tokens({'input_tokens':True,'output_tokens':2}))
 
+    def test_resumed_claude_cost_is_the_growth_of_the_session_total(self):
+        init = lambda version=None: {'type': 'system', 'subtype': 'init', 'session_id': 'native-1',
+                                     **({'claude_code_version': version} if version else {})}
+        fresh = providers.RunCost('claude'); fresh.observe(init('2.1.278'))
+        self.assertEqual((fresh.own(.5), fresh.total(.5), fresh.session), (.5, .5, 'native-1'))
+        resumed = providers.RunCost('claude', 'native-1', .5); resumed.observe(init('2.1.278 (Claude Code)'))
+        self.assertEqual((resumed.own(.8), resumed.total(.8)), (.3, .8))
+        # A crash result can carry zeroed totals; the CLI then keeps the last saved total.
+        self.assertEqual((resumed.own(0), resumed.total(0)), (None, .5))
+        unknown = providers.RunCost('claude', 'native-1', None); unknown.observe(init('2.1.300'))
+        self.assertEqual((unknown.own(.8), unknown.total(.8)), (None, .8))
+        for version in ('2.1.276', None, 'unreleased'):
+            older = providers.RunCost('claude', 'native-1', .5); older.observe(init(version))
+            self.assertEqual((older.own(.3), older.total(.3)), (.3, None), version)
+        codex = providers.RunCost('codex', 'thread-1', .5); codex.observe(init('9.9.9'))
+        self.assertEqual((codex.own(.2), codex.total(.2)), (.2, .2))
+
 
 class DiscoveryTests(unittest.TestCase):
     def test_discovery_checks_identity_and_never_starts_agents(self):

@@ -35,7 +35,7 @@ function createAgentPanel(root, {emptyText='No agent has started yet.', labels={
     if(event.kind==='agent') {
       // Lifecycle lists are trimmed by the runner; *_count carries the full size.
       if(event.status==='running') Object.assign(agent,{status:'running',started:event.at,service:event.service,mode:event.mode,provider:event.provider,root:event.root,readable:event.readable||[],writable:event.writable||[],readableCount:event.readable_count,writableCount:event.writable_count});
-      else Object.assign(agent,{status:event.status,finished:event.at,ok:event.ok,error:event.error,duration:event.duration_seconds,summary:event.summary,changed:event.changed_files||[],changedCount:event.changed_files_count,checks:event.checks,reason:event.reason,tokens:Number.isFinite(event.tokens)?event.tokens:agent.tokens,cost:event.cost_usd});
+      else Object.assign(agent,{status:event.status,finished:event.at,ok:event.ok,error:event.error,duration:event.duration_seconds,summary:event.summary,changed:event.changed_files||[],changedCount:event.changed_files_count,checks:event.checks,reason:event.reason,tokens:Number.isFinite(event.tokens)?event.tokens:event.tokens===null?null:agent.tokens,cost:event.cost_usd});
     } else if(event.kind==='usage') {
       const tokens=['input_tokens','output_tokens','cache_read_input_tokens','cache_creation_input_tokens'].reduce((sum,name)=>sum+(Number.isFinite(event[name])?event[name]:0),0);
       if(!agent.finished) agent.tokens+=tokens;

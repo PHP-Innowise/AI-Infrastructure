@@ -590,6 +590,60 @@ def total_tokens(usage):
                if type(usage.get(k,0)) is int and usage.get(k,0) >= 0)
 
 
+# From Claude Code 2.1.277 a resumed session's result restores the session's
+# earlier spend into total_cost_usd, so adding results double-counts it
+# (https://code.claude.com/docs/en/agent-sdk/cost-tracking). Older CLIs, and
+# results without a version, report the run alone.
+CUMULATIVE_COST_SINCE = (2, 1, 277)
+
+
+class RunCost:
+    """One run's own spend from what the provider reports.
+
+    `resumed` is the native session the run continues and `previous` the last
+    total reported for it. A resumed Claude run on a CLI that restores earlier
+    spend reports the session total; its own spend is the growth over
+    `previous`. When that cannot be told the spend is unknown (None), never 0.
+    """
+
+    def __init__(self, provider, resumed=None, previous=None):
+        self.provider, self.resumed, self.previous = provider, resumed, previous
+        self.restores = False
+        self.session = resumed
+
+    def observe(self, event):
+        """Read the CLI version and session from a raw Claude init event."""
+        if self.provider != 'claude' or not isinstance(event, dict) or event.get('type') != 'system' or event.get('subtype') != 'init':
+            return
+        version = event.get('claude_code_version')
+        match = re.match(r'(\d+)\.(\d+)\.(\d+)', version) if isinstance(version, str) else None
+        self.restores = bool(match) and tuple(int(part) for part in match.groups()) >= CUMULATIVE_COST_SINCE
+        if isinstance(event.get('session_id'), str) and event['session_id']:
+            self.session = event['session_id']
+
+    def own(self, reported):
+        """This run's spend for a reported total, or None when it is unknown."""
+        if not (self.provider == 'claude' and self.resumed and self.restores):
+            return reported
+        if self.previous is None or reported < self.previous:
+            return None
+        return round(reported - self.previous, 9)
+
+    def total(self, reported):
+        """The session total to remember for the next resumed run, or None when unknown.
+
+        A lower total than the last one (a crash result with zeroed fields) keeps
+        the last one: the CLI saves its totals only when it exits normally.
+        """
+        if self.provider != 'claude' or not self.resumed:
+            return reported
+        if not self.restores:
+            return None
+        if self.previous is not None and reported < self.previous:
+            return self.previous
+        return reported
+
+
 def _error(event: dict, fallback: str) -> str:
     error = event.get("error")
     if isinstance(error, dict):

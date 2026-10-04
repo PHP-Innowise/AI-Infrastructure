@@ -338,6 +338,34 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(any('token limit' in event.get('text','') for event in manager.events(sid)))
         self.assert_process_gone(self.calls[0])
 
+    def test_resumed_claude_launch_counts_only_its_own_spend(self):
+        # From Claude Code 2.1.277 a resumed result reports the session's whole spend; "total <usd> <version>" drives the fixture.
+        self.fake.write_text(FAKE_CLI.replace(
+            '    print(json.dumps({"type": "system", "subtype": "init", "session_id": "native-original"}), flush=True)',
+            '    words = behavior.split()\n'
+            '    init = {"type": "system", "subtype": "init", "session_id": "native-original"}\n'
+            '    if len(words) == 3: init["claude_code_version"] = words[2]\n'
+            '    print(json.dumps(init), flush=True)').replace(
+            '"session_id": "native-original", "result": "Fixture answer"}',
+            '"session_id": "native-original", "result": "Fixture answer", **({"total_cost_usd": float(words[1])} if words[0] == "total" else {})}'))
+        manager = self.manager()
+        for version, totals, own in (('2.1.278', ('0.5', '0.8', '0', '0.95'), [.5, .3, None, .15]),
+                                     ('2.1.276', ('0.5', '0.3'), [.5, .3])):
+            sid = manager.create({'project_id': next(iter(manager.projects)), 'provider': 'claude', 'project_context': False,
+                                  'prompt': f'total {totals[0]} {version}', 'budgets': {'usd': .6, 'tokens': None, 'seconds': 5}})['id']
+            self.settled(manager, sid)
+            for total in totals[1:]:
+                manager.send(sid, f'total {total} {version}'); self.settled(manager, sid)
+            history = manager.results.history(sid)
+            self.assertEqual([launch['usage']['cost_usd'] for launch in history['launches']], own, version)
+            self.assertEqual(history['totals']['cost_usd']['reported'], sum(cost for cost in own if cost is not None), version)
+            self.assertEqual(history['totals']['cost_usd']['unknown_launches'], own.count(None), version)
+            # The USD cap applies to the launch's own spend, not to spend restored from earlier launches.
+            self.assertTrue(all(launch['usage']['limit_reached'] is None for launch in history['launches']), version)
+            self.assertTrue(all(isinstance(launch['usage']['cost_usd_reported'], float) for launch in history['launches']), version)
+        resumed = [call for call in self.calls if call.get('session_id') == 'native-original']
+        self.assertEqual(len(resumed), 4)
+
     def test_explicit_time_budget_terminates_process_and_can_be_increased(self):
         manager=self.manager(timeout=10); sid=self.create(manager,prompt='sleep',project_context=False,budgets={'seconds':1})
         result=self.settled(manager,sid)

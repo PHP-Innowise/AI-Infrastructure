@@ -53,6 +53,19 @@ class ActivityStreamTests(unittest.TestCase):
         self.assertEqual(('completed', 120, 0.25, 'Done for orders'),
                          (finished['status'], finished['tokens'], finished['cost_usd'], finished['summary']))
 
+    def test_unreported_usage_stays_unknown_rather_than_zero(self):
+        stream = self.stream('codex')
+        stream.start('service-orders', 1, '/work/system/services/orders')
+        # Codex reports tokens but never a cost; a usage event without token counts leaves tokens unknown.
+        stream.line(line({'type': 'turn.completed', 'usage': {'input_tokens': 100, 'output_tokens': 20}}))
+        stream.finish('completed', ok=True, error=None)
+        self.assertEqual((120, None), (self.events[-1]['tokens'], self.events[-1]['cost_usd']))
+        stream.start('service-payments', 1, '/work/payments')
+        stream.line(line({'type': 'turn.completed', 'usage': {'input_tokens': 100, 'output_tokens': 20}}))
+        stream.line(line({'type': 'turn.completed', 'usage': {'input_tokens': 5}}))
+        stream.finish('completed', ok=True, error=None)
+        self.assertEqual((None, None), (self.events[-1]['tokens'], self.events[-1]['cost_usd']))
+
     def test_secrets_are_redacted_from_activity_and_summaries(self):
         stream = self.stream()
         stream.start('contracts', 1, '/work/system')

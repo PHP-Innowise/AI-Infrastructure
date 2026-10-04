@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -105,7 +106,7 @@ class ActivityStream:
             event['reason'] = self.reasons[self.agent['agent']] = explain(self.provider, self.last_error)
         if self.usage['reported']:
             event['tokens'] = self.usage['tokens']
-            event['cost_usd'] = round(self.usage['cost_usd'], 6)
+            event['cost_usd'] = None if self.usage['cost_usd'] is None else round(self.usage['cost_usd'], 6)
         self._send(event)
         self.agent = None
 
@@ -141,10 +142,12 @@ class ActivityStream:
             self.last_error = redact(' '.join(item['text'].split()))[:300]
         if item['type'] == 'usage':
             fields = {key: value for key, value in item.items() if key != 'type'}
-            self.usage['reported'] = True
-            self.usage['tokens'] += total_tokens(fields) or 0
-            if isinstance(fields.get('cost_usd'), (int, float)):
-                self.usage['cost_usd'] += fields['cost_usd']
+            usage, tokens, cost = self.usage, total_tokens(fields), fields.get('cost_usd')
+            usage['reported'] = True
+            # A report without a number makes the agent's total unknown, not smaller.
+            usage['tokens'] = None if tokens is None or usage['tokens'] is None else usage['tokens'] + tokens
+            known = type(cost) in (int, float) and math.isfinite(cost) and cost >= 0
+            usage['cost_usd'] = None if not known or usage['cost_usd'] is None else usage['cost_usd'] + cost
             # Usage also feeds the session's launch totals.
             self._send({'kind': 'usage', **fields, **self.agent})
             return

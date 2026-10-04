@@ -403,7 +403,7 @@ class Sessions:
                                  ('branch', 'TEXT'), ('git_common_dir', 'TEXT'),
                                  ('fleet', 'TEXT'), ('fleet_result', 'TEXT'), ('fleet_action', 'TEXT'), ('brain', 'TEXT'), ('creator', 'TEXT'), ('system_run', 'TEXT'), ('system_discovery', 'TEXT'), ('budgets', 'TEXT'), ('budget_usage', 'TEXT'),
                                  ('budget_revision', 'INTEGER NOT NULL DEFAULT 0'), ('result_base','TEXT'), ('sdd','TEXT'), ('model_routing','TEXT'),
-                                 ('clash', 'TEXT'), ('clash_result', 'TEXT')):
+                                 ('clash', 'TEXT'), ('clash_result', 'TEXT'), ('cost_totals', 'TEXT')):
             if name not in columns:
                 self.db.execute(f'ALTER TABLE sessions ADD COLUMN {name} {definition}')
         self.db.commit()
@@ -449,7 +449,7 @@ class Sessions:
         result = dict(row)
         result["project_context"] = bool(result["project_context"])
         result["agents_enabled"] = bool(result["agents_enabled"])
-        for field in ('fleet', 'fleet_result', 'brain', 'creator', 'system_run', 'system_discovery', 'budgets', 'budget_usage', 'result_base', 'sdd', 'model_routing', 'clash', 'clash_result'):
+        for field in ('fleet', 'fleet_result', 'brain', 'creator', 'system_run', 'system_discovery', 'budgets', 'budget_usage', 'result_base', 'sdd', 'model_routing', 'clash', 'clash_result', 'cost_totals'):
             result[field] = json.loads(result[field]) if result[field] else None
         result['budgets'] = result['budgets'] or {**DEFAULT_BUDGETS, 'seconds':self.timeout, 'usd': result['fleet']['budget_usd'] if result['fleet'] else None}
         result['agent_budget_plan']=agent_budget_plan(result)
@@ -1124,7 +1124,7 @@ class Sessions:
             base = self.get(sid).get('result_base') or {}
             challenger = clash_settings['challenger']
             settings = {key: session[key] for key in ('id', 'project_path', 'provider', 'model', 'thinking_effort',
-                                                      'native_session_id', 'clash', 'clash_result', 'budgets')}
+                                                      'native_session_id', 'clash', 'clash_result', 'budgets', 'cost_totals')}
             # The clash prompts define both roles; the workflow's own prefix would contradict them.
             prompt = json.dumps({'session': settings, 'prompt': prompt, 'stage': clash.stage_for(session['mode']),
                                  'action': 'continue' if session['clash_result'] else 'start',
@@ -1200,8 +1200,17 @@ class Sessions:
         count, output_bytes = 0, 0
         outcome, terminal, saw_error, fleet_outcome = None, False, False, None
         native_id = session['native_session_id']
+        # A resumed Claude launch may report its session's whole spend; the launch keeps only its own.
+        run_cost = None if fleet or clash_settings or creator or system_run or discovery else providers.RunCost(
+            provider, native_id, (session['cost_totals'] or {}).get(native_id))
         delegation = providers.DelegationTracker(provider, session['agent_count']) if session['agents_enabled'] and not fleet and not creator and not system_run and not discovery else None
         budget_usage = {'tokens':None,'cost_usd':None,'seconds':0,'limit_reached':None}
+        def remember_total(native, total):
+            with self.lock:
+                row = self.db.execute('SELECT cost_totals FROM sessions WHERE id=?', (sid,)).fetchone()
+                totals = json.loads(row['cost_totals']) if row and row['cost_totals'] else {}
+                totals[native] = total
+                self.db.execute('UPDATE sessions SET cost_totals=? WHERE id=?', (json.dumps(totals), sid)); self.db.commit()
         def save_usage():
             budget_usage['seconds'] = round(time.monotonic()-started,3)
             with self.lock:
@@ -1254,6 +1263,8 @@ class Sessions:
                         continue
                     if delegation:
                         delegation.observe(event)
+                    if run_cost:
+                        run_cost.observe(event)
                     if clash_settings:
                         clean_events = [event] if event.get('kind') in ('clash_turn', 'clash_state', 'session', 'result', 'error', 'status', 'text', 'usage', 'tool') else []
                     else:
@@ -1289,7 +1300,18 @@ class Sessions:
                             tokens = providers.total_tokens(clean)
                             if tokens is not None: budget_usage['tokens'] = (budget_usage['tokens'] or 0) + tokens
                             cost = clean.get('cost_usd')
-                            if type(cost) in (int,float) and math.isfinite(cost) and cost >= 0:
+                            valid_cost = type(cost) in (int,float) and math.isfinite(cost) and cost >= 0
+                            if run_cost and valid_cost:
+                                cost, budget_usage['cost_usd_reported'] = run_cost.own(cost), cost
+                                session_total = run_cost.total(budget_usage['cost_usd_reported'])
+                                if run_cost.session: remember_total(run_cost.session, session_total)
+                                clean = {key: value for key, value in clean.items() if key != 'cost_usd'}
+                                if cost is not None: clean['cost_usd'] = cost
+                            reported = clean.pop('cost_total', None)
+                            if clash_settings and isinstance(reported, dict) and isinstance(reported.get('session'), str):
+                                total = reported.get('total')
+                                remember_total(reported['session'], total if type(total) in (int,float) and math.isfinite(total) and total >= 0 else None)
+                            if cost is not None and type(cost) in (int,float) and math.isfinite(cost) and cost >= 0:
                                 budget_usage['cost_usd'] = (budget_usage['cost_usd'] or 0) + cost
                             if budgets['tokens'] is not None and budget_usage['tokens'] is not None and budget_usage['tokens'] >= budgets['tokens']:
                                 budget_usage['limit_reached'] = 'token'

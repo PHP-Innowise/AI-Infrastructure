@@ -633,7 +633,11 @@ Overspending remains recorded, blocks successful review completion, and counts
 against later Fleet allocations; it is never rounded down or retried automatically.
 Codex and Cursor
 have no verified monetary cap here. Native-session caps apply per turn; Creator
-caps apply per scan/generate phase. Fleet's USD cap remains shared across
+caps apply per scan/generate phase. From Claude Code 2.1.277 a resumed session
+reports its whole spend, so each turn (and each Clash turn) counts only its growth
+over the session's previous report, read from the CLI version the turn announces;
+totals and caps never count an earlier turn twice. When that share cannot be told,
+the turn's cost stays unknown. Fleet's USD cap remains shared across
 reviewers and retries, with prior costs/reservations retained when edited.
 If an earlier uncapped call has unknown cost, a new capped Fleet is required.
 Fleet token/time thresholds apply per graph invocation; reviewer timeouts remain
