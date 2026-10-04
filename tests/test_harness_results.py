@@ -105,6 +105,23 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':12,'output_tok
         self.store.close();self.store=sessions.Sessions(self.root/'state',[self.project])
         self.assertEqual(self.store.results.history(self.sid)['launches'],history['launches'])
 
+    def test_a_running_check_is_not_a_running_launch_and_names_mode_drops_the_diff(self):
+        launch=self.store.get(self.sid)['launch']
+        self.assertEqual(('native','completed'),(launch['kind'],launch['status']))
+        self.assertEqual({'steps':0,'opened':0,'limited':False},{k:self.store.results.history(self.sid)['launches'][0]['receipt'][k] for k in ('steps','opened','limited')})
+        snapshot=self.store.results.snapshot(self.sid)
+        self.store.results.start_check(self.sid,{'command':shlex.join([sys.executable,'-c','import time;time.sleep(20)']),'timeout':30,'snapshot_id':snapshot['id']})
+        deadline=time.monotonic()+5
+        while self.store.get(self.sid)['status']!='running' and time.monotonic()<deadline: time.sleep(.02)
+        session=self.store.get(self.sid)
+        self.assertEqual(('running','completed'),(session['status'],session['launch']['status']))
+        self.store.cancel(self.sid);self.wait()
+        (self.project/'value.txt').write_text('changed\n')
+        names=self.store.results.get(self.sid,include_diff='names')['snapshot']
+        self.assertNotIn('diff',names)
+        self.assertEqual(([{'status':'M','path':'value.txt'}],True),(names['files'],names['complete']))
+        self.assertIn('+changed',self.store.results.get(self.sid)['snapshot']['diff'])
+
     def test_queued_check_rejects_workspace_changes_before_execution(self):
         import threading
         gate=threading.Event(); entered=threading.Event(); original=self.store.results.run_check

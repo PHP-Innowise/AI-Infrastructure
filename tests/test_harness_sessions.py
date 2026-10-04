@@ -627,6 +627,12 @@ class SessionTests(unittest.TestCase):
                 self.assertTrue(any(event.get("text") == "Fixture answer" for event in events))
                 self.assertEqual(manager.events(sid, events[0]["id"]), events[1:])
                 self.assert_process_gone(self.calls[-1])
+                # Every event says when it was stored; the closing one names the outcome.
+                self.assertTrue(all(event["at"].endswith("+00:00") and len(event["at"]) == 29 for event in events))
+                self.assertEqual(("status", expected), (events[-1]["kind"], events[-1]["outcome"]))
+                launch = self.wait_for(lambda: (manager.get(sid)["launch"] or {}).get("status") != "running" and manager.get(sid)["launch"])
+                self.assertEqual(("native", expected), (launch["kind"], launch["status"]))
+                self.assertEqual(0, manager.results.history(sid)["launches"][-1]["receipt"]["steps"])
 
     def test_cancel_and_timeout_terminate_even_when_child_does_not_read_stdin(self):
         for behavior, cancel in (("sleep", True), ("no_stdin", False)):
@@ -643,6 +649,9 @@ class SessionTests(unittest.TestCase):
                     manager.cancel(sid)
                 self.assertEqual(self.settled(manager, sid)["status"], "cancelled" if cancel else "failed")
                 self.assert_process_gone(call)
+                # The receipt is written however the launch ends.
+                self.wait_for(lambda: manager.get(sid)["launch"]["status"] != "running")
+                self.assertIsNotNone(manager.results.history(sid)["launches"][-1]["receipt"])
                 if not cancel:
                     self.assertTrue(any("time limit" in event.get("text", "")
                                         for event in manager.events(sid)))
@@ -892,6 +901,8 @@ class SessionTests(unittest.TestCase):
         sid = self.create(manager, "oversize")
         self.assertEqual(self.settled(manager, sid)["status"], "failed")
         self.assert_process_gone(self.calls[-1])
+        self.wait_for(lambda: manager.get(sid)["launch"]["status"] == "failed")
+        self.assertEqual(0, manager.results.history(sid)["launches"][-1]["receipt"]["steps"])
         next_sid = self.create(manager)
         self.assertEqual(self.settled(manager, next_sid)["status"], "completed")
 

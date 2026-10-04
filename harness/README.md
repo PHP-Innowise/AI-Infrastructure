@@ -327,7 +327,7 @@ another project while a session is open starts a new session draft for it.
   Run in, Memory, Budgets, Models) that show their current value and open one
   panel at a time. An open session collapses to one summary line; **Next-turn
   settings** expands what a follow-up can change. Native messages appear as they
-  arrive, and consecutive tool and status steps fold into one row. Cancel stops the
+  arrive, and consecutive tool steps fold into one row (see [Watching a run](#watching-a-run)). Cancel stops the
   process group; follow-ups resume the same native session and workspace directory.
 - **Clash with a challenger:** a checkbox on Workspace and Review sessions that
   pits the selected provider against a different challenger provider on the
@@ -742,7 +742,8 @@ Keep the browser workspace quiet as it grows:
 The page has no build step. `harness/web/index.html` holds the markup and the
 theme script that runs before the first paint, `app.css` holds the styles, and
 classic scripts share their top-level names in load order: `app-core.js`
-(shell, theme, routing, sessions), `app-knowledge.js`, `app-setup.js`,
+(shell, theme, routing, sessions), `run-model.js` and `run-view.js` (the run view's
+event model and its strip, tabs and receipt), `app-knowledge.js`, `app-setup.js`,
 `app-skills.js`, `app-creator.js`, then System Orchestration's
 `agent-activity.js` (the agents panel), `system.js`, `system-editor.js` and
 `system-discovery.js`. The server reads the page and the files
@@ -825,6 +826,62 @@ Explicit operation buttons invoke that selected runtime with fixed arguments:
 The Harness adds no second knowledge database and does not directly edit records
 to bypass runtime validation. Raw file editing and import are not exposed by these
 controls. Export downloads are temporary server artifacts.
+
+### Watching a run
+
+While a Workspace, Plan, Review or SDD turn runs, a strip above the composer says
+what the agent is doing now: the tool, its target and how long that call has been
+open (`● Reading app/Models/Order.php · 0:03`), or *Model's turn* between calls.
+Below it are the counts: files opened and changed, the agent's plan (*Plan 3 of 5*),
+the last check runs (`Checks ✗ ✗ ✓`), failed steps and the time, with a warning from
+80% of the time budget. After 30 seconds without events it says so instead of
+guessing why. A Harness check reads *A Harness check is running*; Fleet, Clash,
+Creator and System runs keep their own progress and show only their waiting line.
+
+**Calm** is the default; **Detailed** (remembered in this browser) opens three tabs:
+
+- **Files:** every file a tool named, as a chip with its name in folder blocks, in the
+  order it was first touched. An outline is opened, a fill is an edit the tool
+  reported as ok, `+` created, `!` a tool error, a struck name deleted, `×N` opened
+  again, a dot a helper agent's file and a ring the call that is open now. Hover or
+  focus a chip for its path and steps, **Show in conversation**, **Add path to
+  message** or **Copy path**. **List** shows the same set as a tree. Untouched files
+  are not shown, and Codex reads through shell commands, so its reads are not listed.
+- **Plan:** the agent's own todo list with what was added or dropped. The agent
+  ticks it; Harness does not verify it. After the run, **Continue with N unchecked
+  items** fills the message box and sends nothing.
+- **Commands:** PHP checks (PHPUnit, Pest, `artisan test`, PHPStan, Psalm, PHPCS, linters,
+  Composer, Symfony and WordPress checks) as runs per target, other commands, and
+  fixers such as Pint marked *changed files · not a check*. A pipe, `|| true`, a later
+  `;` command or `&` makes the result *unknown*. After the run, **Run in Harness**
+  fills the Checks form with the bare command and names what was removed; nothing
+  runs until you press **Run check**.
+
+Steps in the conversation name their target (`Bash · php artisan test --filter=OrderTest · failed`),
+and each group sums them up (*Looked for "rules(" · opened 4 files · edited 1*). A
+compaction leaves a divider. When the turn ends, a **run receipt** follows the
+result: outcome and duration, files opened and edited by tools, searches, commands
+and checks, the plan, tokens and cost as the provider reported them, moments to jump
+to, the workspace diff (with files changed outside edit tools) and whether a Harness
+check ran after the turn. *Process complete* is not a verification of the task.
+Earlier turns fold into one line.
+
+When the tab is in the background, its title and icon carry the state (`● Running`,
+`✓ Finished`, `⚑ Needs approval`). **Notify me when it finishes** asks the browser for
+permission on that click only; the notification says how long the run took and what
+it cost, never the session title, a path or agent text, and makes no sound. Coming
+back after two minutes or more shows *While you were away* with what changed and a
+*New since* line in the conversation.
+
+For native launches the runner stores each tool's target with its event in the local
+`sessions.sqlite3`, beside the conversation it already keeps: the tool, a
+project-relative path (only the name of a file outside the project), the command or
+search pattern with secrets redacted, the outcome and Codex's exit code. A command keeps
+its first line and stops at a heredoc, so a script or patch body is not stored; an MCP
+tool shows only its name, never its arguments. File contents, diffs, tool results and
+command output are never stored. Past about 4,000
+targets in one launch the map stops (counts then read `≥`) and the receipt keeps the
+full totals. Runs recorded before this show tool names only.
 
 ### Context window
 

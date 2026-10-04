@@ -26,6 +26,44 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Harness: **Run view**. While a Workspace, Plan, Review or SDD turn runs, a
+  strip above the composer shows what the agent is doing now: the tool, its
+  target and how long the call has been open, or *Model's turn*. It also shows
+  counts of files, plan items, checks and failed steps. A Harness check no
+  longer reads as "Claude is running". **Calm** is the default. **Detailed**
+  opens three tabs:
+  - **Files:** a map of the files named in tool calls.
+  - **Plan:** the agent's own todo list, with what was added or dropped.
+  - **Commands:** PHP checks as runs per target, a result marked unknown when a
+    pipe or a later command hides it, fixers, and **Run in Harness**.
+
+  Each step in the conversation names its target. A run receipt follows each
+  turn, a compaction leaves a divider, and the tab title and icon carry the
+  state. Notifications are opt-in and private.
+
+  For native launches `providers.normalize_event(..., targets=True)` attaches
+  each tool's canonical name, call ID, state, project-relative path (a file
+  outside the project keeps only its name), redacted detail (a command's first
+  line without a heredoc body; an MCP tool's name, never its arguments), `not_run`
+  outcome, Codex exit code and file changes, and Claude helper parent. These
+  targets live in `harness/src/harness/run_activity.py` (`Enricher`,
+  `RunLedger`, `redact_command`), along with plan events, compaction dividers
+  and one limited notice. They sit outside the launch's 5000-event / 4 MiB
+  failure limit and under caps of their own, so recording them never changes
+  whether a launch fails.
+
+  Other server changes:
+  - Every stored event gets a millisecond `at`.
+  - The closing status carries `outcome`.
+  - `GET /api/sessions/<id>` returns the newest `launch` of any kind.
+  - `launches.receipt` is also saved when a launch hits its output limit, is
+    cancelled or cannot start.
+  - `/results?diff=names` lists changed files without the diff.
+  - System runs' agent panels use the same relative paths and redaction.
+
+  File contents, diffs, tool output and reasoning are never stored.
+  `tests.test_harness_run_activity` joins the CI Harness job.
+
 - Harness: project memory runs by itself. A new session uses it by default and
   nothing waits for a person: the first message names a new Brain task, every
   message is the retrieval query for its own turn (`context.py refresh` with

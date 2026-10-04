@@ -24,7 +24,7 @@ import uuid
 from .filesystem import fs
 from .filesystem import existing_directory, same_path, secure_private_dir
 from . import process_runtime
-from . import clash, context_usage, providers, sdd
+from . import clash, context_usage, providers, run_activity, sdd
 from .config import DEFAULT_LENSES
 
 WORKFLOWS = [
@@ -519,6 +519,8 @@ class Sessions:
         with self.lock:
             launch = getattr(self,'launch_ids',{}).get(session_id)
             if launch: event = {**event,'launch_id':launch}
+            # When it was stored, to the millisecond; like launch_id, outside the launch's output limit.
+            if 'at' not in event: event = {**event,'at':datetime.now(timezone.utc).isoformat(timespec='milliseconds')}
             self.db.execute("INSERT INTO events(session_id,data) VALUES (?,?)", (session_id, json.dumps(event, ensure_ascii=False)))
             self.db.commit()
 
@@ -541,8 +543,19 @@ class Sessions:
         result['agent_budget_plan']=agent_budget_plan(result)
         result['capsule_meter'] = capsule_meter(result['brain']['capsule']) if isinstance(result['brain'], dict) and isinstance(result['brain'].get('capsule'), dict) else None
         result['context_last'] = self._context_last(sid)
+        result['launch'] = self._launch_last(sid)
         result.pop('fleet_action', None)
         return result
+
+    def _launch_last(self, sid):
+        """The newest launch of any kind; a running session with a finished launch is running a Harness check."""
+        try:
+            with self.lock:
+                row = self.db.execute("SELECT id,kind,status,started_at,finished_at FROM launches WHERE session_id=? "
+                                      "ORDER BY started_at DESC,rowid DESC LIMIT 1", (sid,)).fetchone()
+        except sqlite3.OperationalError:
+            return None
+        return dict(row) if row else None
 
     def _context_last(self, sid):
         """The newest native turn's fill for the composer meter; None when its provider reported none."""
@@ -589,7 +602,10 @@ class Sessions:
         """Latest events of the given kinds, oldest first, even after agent activity."""
         self.get(sid)
         with self.lock:
-            # A launch stores at most 5000 events, so this bounded scan sees all of them.
+            # A launch stores at most 5000 counted events. Outside that count come its few status lines
+            # (about 6), delegation receipts (at most 41), the memory notice and the run view's extras:
+            # plans (at most 100), compaction dividers (at most 20) and one limited notice, which
+            # run_activity caps at 121 events and 256 KB. So this bounded scan sees the whole launch.
             rows = self.db.execute("SELECT id,data FROM events WHERE session_id=? ORDER BY id DESC LIMIT 6000", (sid,)).fetchall()
         result = []
         for row in rows:
@@ -1401,6 +1417,16 @@ class Sessions:
         if tracker:
             # The window belongs to the model: an earlier turn on the same one knows it before this turn's result does.
             tracker.window = self.results.last_window(sid, session['model'])
+        # Tool targets for the run view and the launch's receipt: native launches only (Workspace, SDD, Plan, Review).
+        # Paths are relative to the launch cwd; a worktree's source checkout is also removed from commands and plans,
+        # while its files stay outside the worktree.
+        enricher = run_activity.Enricher(
+            provider, project, session['project_path'], strip=(self.project(session['project_id'])['path'],),
+            home=run_activity.user_home()) if native_launch else None
+        def save_receipt():
+            # Also when the launch hit its output limit, was cancelled or never started: the counts cover it until then.
+            if enricher:
+                self.results.save_receipt(generation, enricher.ledger.receipt())
         environment = {**os.environ, **providers.agent_environment(provider, session['agents_enabled'], session['agent_count'])}
         # Only this launch can say its capsule is in the prompt; never inherit the claim.
         environment.pop('CONTEXT_CAPSULE_DELIVERED', None)
@@ -1440,6 +1466,7 @@ class Sessions:
                     cwd=project, env=environment, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             except Exception:
                 fs.close(watchdog_write)
+                save_receipt()  # The launch row exists; its receipt says nothing ran.
                 raise
             finally:
                 fs.close(watchdog_read)
@@ -1472,6 +1499,10 @@ class Sessions:
             with self.lock:
                 self.db.execute('UPDATE sessions SET budget_usage=? WHERE id=?',(json.dumps(budget_usage),sid))
                 self.db.execute('UPDATE launches SET usage=? WHERE id=?',(json.dumps(budget_usage),generation)); self.db.commit()
+        def note_compactions():
+            # Each compaction the tracker finds becomes one divider in the conversation.
+            for notice in enricher.compaction(tracker.compactions) if enricher else ():
+                self._event(sid, notice)
         try:
             def write_input():
                 try:
@@ -1497,6 +1528,7 @@ class Sessions:
                     if live.poll(native_id):
                         tracker.update(live.fill.snapshot())
                         save_context()
+                        note_compactions()
                 if budget_usage['limit_reached'] or run_timeout is not None and time.monotonic() - started > run_timeout:
                     budget_usage['limit_reached'] = budget_usage['limit_reached'] or 'time'
                     outcome = 'failed'
@@ -1528,17 +1560,27 @@ class Sessions:
                         run_cost.observe(event)
                     if tracker and tracker.observe(event) and tracker.due():
                         save_context()
+                    if tracker:
+                        note_compactions()
                     if clash_settings:
                         clean_events = [event] if event.get('kind') in ('clash_turn', 'clash_state', 'session', 'result', 'error', 'status', 'text', 'usage', 'tool') else []
                     else:
                         runner_kinds = ('fleet_stage', 'fleet_reviewer', 'fleet_state', 'result', 'error', 'status', 'text', 'usage', 'delegation', 'tool')
                         if system_run or discovery:
                             runner_kinds += ('agent', 'agent_activity')  # Display-only agents panel events.
-                        clean_events = ([event] if event.get('kind') in runner_kinds else []) if fleet or creator or system_run or discovery else providers.normalize_event(provider, event)
+                        clean_events = ([event] if event.get('kind') in runner_kinds else []) if fleet or creator or system_run or discovery else providers.normalize_event(provider, event, targets=enricher is not None)
                     for clean in clean_events:
+                        if clean.get('kind') == 'plan':
+                            # Outside the count below, within the enricher's own cap (see recent_events).
+                            plan = enricher.plan(clean) if enricher else None
+                            if plan:
+                                self._event(sid, plan)
+                            continue
                         text = clean.get('text')
                         if isinstance(text, str):
                             clean['text'] = text[:32000]
+                        # The limit counts the plain label, as before targets existed; they are added after it.
+                        display = enricher.take(clean, count, output_bytes) if enricher and clean.get('kind') == 'tool' else None
                         output_bytes += len(json.dumps(clean))
                         count += 1
                         if output_bytes > 4 * 1024 * 1024 or count > 5000:
@@ -1592,6 +1634,10 @@ class Sessions:
                         if clean.get('kind') == 'result':
                             terminal = True
                             saw_error = saw_error or clean.get('ok') is not True
+                        if display:
+                            clean.update(display)
+                        elif enricher and clean.get('kind') == 'tool' and (limited := enricher.notice()):
+                            self._event(sid, limited)
                         self._event(sid, clean)
                 if eof:
                     break
@@ -1627,6 +1673,7 @@ class Sessions:
                 if reaped:
                     self.active.pop(sid, None)
             save_usage()
+            save_receipt()
         if delegation:
             for receipt in delegation.reconcile(native_id, project, launch_started_at, time.time()):
                 self._event(sid, receipt)
@@ -1634,13 +1681,25 @@ class Sessions:
         if tracker:
             # The whole rollout tail, read once the launch has ended, settles what the live reads saw.
             if provider == 'codex':
+                # Dividers come only from the live reader, whose list grows in rollout order: its last reads catch what
+                # the rollout gained since the last poll. The tail is the last 4 MiB and may begin inside a long launch,
+                # so its list can start later and would hide or repeat dividers counted by position.
+                if live:
+                    for _ in range(8):  # Each read takes at most 4 MiB.
+                        offset = live.offset
+                        if live.poll(native_id):
+                            tracker.update(live.fill.snapshot())
+                            note_compactions()
+                        if live.offset == offset:
+                            break
                 tracker.update(context_usage.codex_fill(providers.codex_rollout_tail(native_id, project), launch_started_at, time.time()))
             save_context()
         if outcome == 'completed' and native_launch and session['brain'] and not reviewed(session['brain']):
             self._remember(sid)
         # Record the closing event before the terminal status: readers that wait for
         # the status to settle must see the complete event history.
-        self._event(sid, {"kind": "status", "text": f"Run {outcome}. Process completion is not an independent verification of the task."})
+        self._event(sid, {"kind": "status", "outcome": outcome,
+                          "text": f"Run {outcome}. Process completion is not an independent verification of the task."})
         self._status(sid, outcome or 'failed')
         # A project keeps only its newest retrieval manifests; fold this launch's into the daily history now.
         if self.knowledge is not None and not (creator or system_run or discovery):

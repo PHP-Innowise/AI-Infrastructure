@@ -4,12 +4,18 @@
 const $ = id => document.getElementById(id);
 const outputResizer = $('output-resizer');
 const sessionConfiguration = document.querySelector('#sessions-view .configuration');
-function resizeOutput(configurationHeight) {
-  const available = $('sessions-view').clientHeight - $('composer-area').offsetHeight - outputResizer.offsetHeight;
+// The height the person asked for; the shown height is that, clamped to what the composer and the Run strip leave.
+let outputHeightRequest = null;
+function resizeOutput(configurationHeight, requested = true) {
+  if (requested) outputHeightRequest = configurationHeight;
+  const available = $('sessions-view').clientHeight - $('composer-area').offsetHeight - $('run-view').offsetHeight - outputResizer.offsetHeight;
   const height = Math.max(80,Math.min(available - 100,configurationHeight));
   $('sessions-view').style.setProperty('--configuration-height',`${height}px`);
   $('sessions-view').classList.add('output-resized');
 }
+// When the space around it changes (the Run strip or its panel opens or closes), a resized output is clamped again from
+// the person's request, so it shrinks while the strip needs room and grows back afterwards.
+function refitOutput() { if ($('sessions-view').classList.contains('output-resized') && outputHeightRequest !== null) resizeOutput(outputHeightRequest,false); }
 outputResizer.addEventListener('pointerdown',event => {
   if (!event.isPrimary || event.button !== 0) return;
   event.preventDefault(); outputResizer.focus(); outputResizer.setPointerCapture(event.pointerId);
@@ -100,7 +106,7 @@ function keyedRender(container, items, keyOf, build, signatureOf = item => JSON.
   });
   for (const node of previous.values()) node.remove();
 }
-const state = { bootstrap:null, sessions:[], selected:null, selectedId:null, view:'sessions', pending:null, loading:false, pollTimer:null, pollController:null, epoch:0, eventIds:new Set(), assistantTexts:new Set(), contextEpoch:0, authFailed:false };
+const state = { bootstrap:null, sessions:[], selected:null, selectedId:null, view:'sessions', pending:null, loading:false, pollTimer:null, pollController:null, epoch:0, eventIds:new Set(), assistantTexts:new Set(), stepCalls:new Map(), contextEpoch:0, authFailed:false };
 let attachedFiles = [];
 function renderAttachments() {
   $('attachment-list').replaceChildren(); $('attachment-list').hidden = !attachedFiles.length;
@@ -843,7 +849,9 @@ function updateHeader() {
   $('cancel-session').hidden = groupOf(state.view) !== 'sessions' || !active(session);
   $('cancel-session').disabled = Boolean(state.pending); $('cancel-session').textContent = state.pending === 'cancel' ? 'Cancelling…' : isResultView(state.view) && resultUi.data?.checks.some(check=>['queued','running'].includes(check.status)) ? 'Cancel check' : 'Cancel session';
   const viewName = state.view === 'sessions' ? '' : viewLabels[state.view]; $('view-heading').textContent = viewLabels[state.view];
-  document.title = `${viewName && viewName !== $('page-title').textContent ? `${viewName} · ` : ''}${state.view === 'sessions' && session ? session.title : $('page-title').textContent} — AI Infrastructure Harness`;
+  // The tab says what the selected session's run is doing, so a person in another window can tell without looking.
+  document.title = `${runView.titlePrefix(state.selected)}${viewName && viewName !== $('page-title').textContent ? `${viewName} · ` : ''}${state.view === 'sessions' && session ? session.title : $('page-title').textContent} — AI Infrastructure Harness`;
+  runView.icon(state.selected);
 }
 function updateWorkspaceControls() {
   const projectId = $('project').value; const hasSession = Boolean(state.selectedId); const ready = Boolean(state.bootstrap) && !state.authFailed;
@@ -1151,7 +1159,9 @@ function updateControls() {
   const providerNote = dryRun ? 'Offline dry-run can use any provider selection; no native CLI is launched.' : ready && !provider?.available ? 'No provider is ready. Install and sign in with a native CLI, then restart the Harness server.' : provider?.id === 'cursor' ? 'Cursor can’t disable or cap helpers; helper settings are instructions only.' : '';
   if ($('provider-hint').textContent !== providerNote) $('provider-hint').textContent = providerNote; $('provider-hint').hidden = !providerNote;
   $('agent-hint').textContent = helperHint(fleet,clashMode,ultracode,provider);
-  $('waiting').hidden = !isActive; const waitingText = linked && brainReviewed(state.selected.brain) && !state.selected.brain.context_id ? 'Preparing workspace and context. The provider has not started this turn.' : state.selected?.status === 'queued' ? 'Queued — waiting for an available runner.' : existingFleet ? 'Fleet review is running. Stage and reviewer updates appear above.' : isClashSession(state.selected) ? `${providerFor(state.selected.provider)?.name || state.selected.provider} and ${providerFor(state.selected.clash?.challenger)?.name || 'the challenger'} are clashing. Turn events appear above.` : `${providerFor(state.selected?.provider)?.name || 'Agent'} is running. New events will appear here.`; if ($('waiting-text').textContent !== waitingText) $('waiting-text').textContent = waitingText;
+  // A Harness check sets the session running without a launch; the Run strip follows the newest launch instead.
+  const waitingText = runView.phase(state.selected) === 'check' ? 'A Harness check is running. Its result appears in Checks.' : linked && brainReviewed(state.selected.brain) && !state.selected.brain.context_id ? 'Preparing workspace and context. The provider has not started this turn.' : state.selected?.status === 'queued' ? 'Queued — waiting for an available runner.' : existingFleet ? 'Fleet review is running. Stage and reviewer updates appear above.' : isClashSession(state.selected) ? `${providerFor(state.selected.provider)?.name || state.selected.provider} and ${providerFor(state.selected.clash?.challenger)?.name || 'the challenger'} are clashing. Turn events appear above.` : `${providerFor(state.selected?.provider)?.name || 'Agent'} is running. New events will appear here.`;
+  runView.sync(waitingText);
   $('welcome').hidden = hasSession; sessionOptions.validity = {helpers:agentsValid && agentModeValid,clash:clashValid,workspace:workspaceValid,brain:linkValid,budgets:budgetValid,models:routingValid}; renderSessionOptions(); renderSessionSummary(); updateHeader(); updateSkillsControls(); updateKnowledgeControls(); updateSetupControls(); renderFleetSession(); renderClashSession(); renderLinkedSession(); renderContextValue(); if (typeof renderContextMeter === 'function') renderContextMeter(); resultControls();
 }
 function applySessionSettings(session, restoreModel = true) { $('sdd-feature').value = session.sdd?.feature || ''; $('sdd-phase').value = session.sdd?.phase || 'specify'; for (const id of ['project','provider','workflow','mode']) $(id).value = session[id === 'project' ? 'project_id' : id] || (id === 'mode' ? 'plan' : id === 'workflow' ? 'native' : ''); $('project-context').checked = Boolean(session.project_context); if (restoreModel || active(session) || isFleetSession(session)) { $('agents-enabled').checked = session.agents_enabled === true; $('agent-count').value = Number.isInteger(session.agent_count) ? session.agent_count : defaultAgentCount(); } $('workspace').value = session.workspace === 'worktree' ? 'worktree' : 'project'; $('worktree-branch').value = session.workspace === 'worktree' ? session.branch || '' : ''; restoreBudgets('session-budgets',session.budgets,session.id+':'+session.budget_revision); restoreModelRouting(session.model_routing); restoreClashSettings(session.clash || null); if (isFleetSession(session)) restoreFleetSettings(session.fleet); if (restoreModel || isFleetSession(session)) refreshModelChoices(session.model || null,session.thinking_effort || null); loadProjectGit(); }
@@ -1173,7 +1183,7 @@ function stopPolling() { clearTimeout(state.pollTimer); state.pollTimer = null; 
 function newSession(prompt = '', projectId = $('project').value, show = true) {
   saveSessionPreferences();
   clearAttachments();
-  stopPolling(); state.epoch++; state.selectedId = null; state.selected = null; state.loading = false; state.eventIds.clear(); state.assistantTexts.clear(); $('events').replaceChildren(); $('prompt').value = prompt;
+  stopPolling(); state.epoch++; state.selectedId = null; state.selected = null; state.loading = false; state.eventIds.clear(); state.assistantTexts.clear(); state.stepCalls.clear(); runView.reset(); $('events').replaceChildren(); $('prompt').value = prompt;
   sessionOptions.open = null; $('session-settings-toggle').setAttribute('aria-expanded','false'); sddSlugTouched = false; $('sessions-view').classList.remove('output-resized'); $('sessions-view').style.removeProperty('--configuration-height');
   resetBrainLink(); restoreModelRouting(null); $('sdd-feature').value = ''; $('sdd-phase').value = 'specify'; restoreClashSettings(null);
   $('agents-enabled').checked = false; $('agent-count').value = defaultAgentCount();
@@ -1250,9 +1260,50 @@ const MEMORY_DRAFT_BLOCK = /```memory-draft[^\S\n]*\n[\s\S]*?\n[^\S\n]*```/g;
 // The reply points at where the draft went instead of repeating its JSON: the Save to memory form when a person
 // reviews it, or the project memory line the run adds once it has saved the draft itself.
 function withoutMemoryDraft(text,reviewed = true) { return text.replace(MEMORY_DRAFT_BLOCK,reviewed ? '[Memory draft: review it under Save to memory below.]' : '[Memory draft: saved to project memory when the run completes.]').trim(); }
+// Consecutive steps share one collapsed row. Its summary counts are kept as steps arrive, never recounted from the rows.
+function stepGroup() {
+  let group = $('events').lastElementChild;
+  if (!group?.classList.contains('activity-group')) {
+    group = el('details','activity-group'); group.setAttribute('aria-live','off'); group.append(el('summary'),el('div','activity-steps'));
+    group.steps = {steps:0,tools:new Map(),patterns:[],opened:new Set(),edited:new Set()}; $('events').append(group);
+  }
+  return group;
+}
+function countStep(group, name) { group.steps.steps++; group.steps.tools.set(name,(group.steps.tools.get(name) || 0) + 1); group.firstElementChild.textContent = RunModel.groupSummary(group.steps); }
+const stepWord = event => event.outcome === 'not_run' ? ['notrun','not run'] : Number.isInteger(event.exit_code) ? [event.ok === false ? 'failed' : 'done',`exit ${event.exit_code}`] : event.ok === false ? ['failed','failed'] : ['done','done'];
+// A step row names the tool, its target and its state. A completion that carries its call updates the start row in place;
+// a label-only completion stays a row of its own and is not counted as a step.
+// Calls pair within their launch: Codex numbers its items item_0, item_1… again in every resumed turn.
+const stepKey = (event, call) => `${typeof event.launch_id === 'string' ? event.launch_id : ''}|${call}`;
+function appendStep(event) {
+  const step = RunModel.describe(event), known = step.call ? state.stepCalls.get(stepKey(event,step.call)) : null;
+  // Codex repeats an open helper operation's label while it runs; the row of its start already stands for it.
+  if (step.progress && [...state.stepCalls.values()].some(entry => entry.launch === event.launch_id && entry.op === step.progress && entry.row.dataset.state === 'running')) return;
+  if (!step.start && known) {
+    const [mark,word] = stepWord(event); known.row.dataset.state = mark; known.row.lastChild.textContent = word;
+    if (event.ok !== false && event.outcome !== 'not_run' && known.edit) { for (const path of known.paths) known.group.steps.edited.add(path); known.group.firstElementChild.textContent = RunModel.groupSummary(known.group.steps); }
+    return;
+  }
+  const group = stepGroup(), row = el('div','step-row'), counted = step.start || Boolean(step.call && typeof event.tool === 'string'), [mark,word] = step.start ? [step.call ? 'running' : 'started',step.call ? 'running' : 'started'] : stepWord(event);
+  const by = typeof event.provider === 'string' && event.provider ? `${providerFor(event.provider)?.name || event.provider} · ` : '';
+  row.dataset.eventId = event.id; row.dataset.state = mark; if (step.call) row.dataset.call = step.call;
+  row.append(el('span','step-name',`${by}${step.helper ? 'Helper · ' : ''}${step.tool}`));
+  if (step.target) { const target = el('bdi','step-target',step.target); target.dir = 'ltr'; row.append(target); }
+  row.append(el('span','step-state',word)); group.lastElementChild.append(row);
+  if (step.call && step.start) state.stepCalls.set(stepKey(event,step.call),{row,group,launch:event.launch_id,edit:step.edit,paths:step.paths,op:step.op});
+  if (!counted) return;
+  if (step.pattern) group.steps.patterns.push(step.pattern);
+  if (step.read) for (const path of step.paths) group.steps.opened.add(path);
+  if (!step.start && step.edit && event.ok !== false && event.outcome !== 'not_run') for (const path of step.paths) group.steps.edited.add(path);
+  countStep(group,step.tool);
+}
+// The end of a launch: calls it never answered show that instead of "running".
+function closeSteps(launch) { if (typeof launch === 'string') for (const entry of state.stepCalls.values()) if (entry.launch === launch && entry.row.dataset.state === 'running') { entry.row.dataset.state = 'unfinished'; entry.row.lastChild.textContent = 'no result'; } }
+// A launch that raised ends on the worker's error line instead of a closing status; its receipt follows that line.
+function closeAborted(event) { if (!RunModel.aborted(event)) return; closeSteps(event.launch_id); const node = runView.statusNode(event); if (node) $('events').append(node); }
 function appendEvent(event) {
   if (event.id === undefined || event.id === null || state.eventIds.has(String(event.id))) return;
-  state.eventIds.add(String(event.id)); let text = typeof event.text === 'string' ? event.text : '';
+  state.eventIds.add(String(event.id)); runView.observe(event); let text = typeof event.text === 'string' ? event.text : '';
   const kind = event.kind === 'result' && event.ok === false ? 'error' : event.kind;
   if (kind === 'fleet_stage') {
     observeFleetEvent(event); text = [fleetStageName(event.stage),humanLabel(event.status)].filter(Boolean).join(' · ');
@@ -1267,21 +1318,21 @@ function appendEvent(event) {
   }
   if (!text.trim()) return;
   if (kind === 'memory') {
-    const block = el('p','memory-event'); block.dataset.ok = String(event.ok !== false); block.setAttribute('role','status'); block.textContent = text; $('events').append(block);
+    const block = el('p','memory-event'); block.dataset.ok = String(event.ok !== false); block.dataset.eventId = event.id; block.setAttribute('role','status'); block.textContent = text; $('events').append(block);
   } else if (kind === 'delegation') {
-    const block = el('div','memory-notice'); block.setAttribute('role','status'); block.append(el('strong','',Number.isInteger(event.required_count) ? event.status === 'confirmed' ? 'Required helper count confirmed. ' : 'Required helper count not confirmed. ' : event.status === 'confirmed' ? 'Helper launch confirmed. ' : 'Helper launch not confirmed. '),document.createTextNode(text)); $('events').append(block);
+    const block = el('div','memory-notice'); block.dataset.eventId = event.id; block.setAttribute('role','status'); block.append(el('strong','',Number.isInteger(event.required_count) ? event.status === 'confirmed' ? 'Required helper count confirmed. ' : 'Required helper count not confirmed. ' : event.status === 'confirmed' ? 'Helper launch confirmed. ' : 'Helper launch not confirmed. '),document.createTextNode(text)); $('events').append(block);
   } else if (kind === 'clash_turn') {
-    const block = el('div','clash-turn'); block.setAttribute('role','status'); block.textContent = text; $('events').append(block);
+    const block = el('div','clash-turn'); block.dataset.eventId = event.id; block.setAttribute('role','status'); block.textContent = text; $('events').append(block);
   } else if (kind === 'agent') {
     // System Orchestration shows these per agent; the runner transcript keeps a compact trail.
-    const block = el('div','clash-turn'); block.setAttribute('role','status'); block.textContent = [text,typeof event.summary === 'string' ? event.summary : ''].filter(Boolean).join('\n'); $('events').append(block);
+    const block = el('div','clash-turn'); block.dataset.eventId = event.id; block.setAttribute('role','status'); block.textContent = [text,typeof event.summary === 'string' ? event.summary : ''].filter(Boolean).join('\n'); $('events').append(block);
   } else if (['user','text','assistant','error','result'].includes(kind)) {
     const normalized = text.trim();
     if (kind === 'result' && state.assistantTexts.has(normalized)) return;
     if (['text','assistant','result'].includes(kind)) state.assistantTexts.add(normalized);
     const previous = $('events').lastElementChild;
-    if (kind === 'error' && previous?.classList.contains('error') && previous.classList.contains('message') && previous.dataset.provider === String(event.provider || '')) { previous.setAttribute('aria-atomic','false'); previous.append(el('pre','message-body',text)); return; }
-    const type = kind === 'text' ? 'assistant' : kind; const block = el('article',`message ${type}`); block.dataset.provider = String(event.provider || ''); const heading = el('div','message-label');
+    if (kind === 'error' && previous?.classList.contains('error') && previous.classList.contains('message') && previous.dataset.provider === String(event.provider || '')) { previous.setAttribute('aria-atomic','false'); previous.append(el('pre','message-body',text)); closeAborted(event); return; }
+    const type = kind === 'text' ? 'assistant' : kind; const block = el('article',`message ${type}`); block.dataset.provider = String(event.provider || ''); block.dataset.eventId = event.id; const heading = el('div','message-label');
     const tagged = typeof event.provider === 'string' && event.provider ? `${providerFor(event.provider)?.name || event.provider}${typeof event.role === 'string' && event.role ? ` · ${humanLabel(event.role)}` : ''}${Number.isInteger(event.round) && event.round > 0 ? ` · round ${event.round}` : ''}` : '';
     const label = kind === 'user' ? 'You' : kind === 'error' ? `Session error${tagged ? ` · ${tagged}` : ''}` : kind === 'result' ? 'Result' : tagged || providerFor(state.selected?.provider)?.name || 'Assistant';
     heading.append(el('span','avatar',kind === 'user' ? 'Y' : kind === 'error' ? '!' : 'AI'),document.createTextNode(label)); block.append(heading,el('pre','message-body',['text','assistant','result'].includes(kind) ? withoutMemoryDraft(text,!state.selected?.brain || brainReviewed(state.selected.brain)) : text));
@@ -1294,18 +1345,18 @@ function appendEvent(event) {
       }
       block.append(files);
     }
-    if (kind === 'error') block.setAttribute('role','alert'); $('events').append(block);
-  } else if (['tool','status','usage','session','fleet_stage','fleet_reviewer','agent_activity'].includes(kind)) {
-    const block = el('details','activity'); const label = kind === 'tool' ? `Tool activity${typeof event.provider === 'string' && event.provider ? ` · ${providerFor(event.provider)?.name || event.provider}` : ''}${typeof event.name === 'string' ? ` · ${event.name}` : ''}` : kind === 'fleet_reviewer' ? `Reviewer · ${fleetLensName(event.lens)}` : kind === 'agent_activity' ? `Agent activity${typeof event.agent === 'string' ? ` · ${event.agent}` : ''}${typeof event.type === 'string' ? ` · ${humanLabel(event.type)}` : ''}` : ({status:'Runner status',usage:'Usage',session:'Native session',fleet_stage:'Fleet stage'})[kind]; block.append(el('summary','',label),el('pre','',text));
-    // Consecutive steps share one collapsed row, so a long run reads as a few lines instead of dozens.
-    block.dataset.step = kind === 'tool' ? typeof event.name === 'string' && event.name ? event.name : 'Tool' : kind === 'fleet_reviewer' ? 'Reviewer' : kind === 'agent_activity' ? typeof event.agent === 'string' && event.agent ? event.agent : 'Agent' : ({status:'Status',usage:'Usage',session:'Session',fleet_stage:'Stage'})[kind];
-    if (kind === 'status') { $('events').append(block); return; }
-    let group = $('events').lastElementChild;
-    if (!group?.classList.contains('activity-group')) { group = el('details','activity-group'); group.setAttribute('aria-live','off'); group.append(el('summary'),el('div','activity-steps')); $('events').append(group); }
-    group.lastElementChild.append(block);
-    const counts = {}; for (const step of group.lastElementChild.children) counts[step.dataset.step] = (counts[step.dataset.step] || 0) + 1;
-    const total = group.lastElementChild.children.length;
-    group.firstElementChild.textContent = `${total} ${total === 1 ? 'step' : 'steps'} · ${Object.entries(counts).map(([name,count]) => count > 1 ? `${name} ×${count}` : name).join(', ')}`;
+    if (kind === 'error') block.setAttribute('role','alert'); $('events').append(block); if (kind === 'error') closeAborted(event);
+  } else if (kind === 'tool') {
+    appendStep(event);
+  } else if (kind === 'status') {
+    if (event.outcome || /^Run \w+\. Process completion is not/.test(text)) closeSteps(event.launch_id);
+    let block = runView.statusNode(event);
+    if (!block) { block = el('details','activity'); block.append(el('summary','','Runner status'),el('pre','',text)); }
+    block.dataset.eventId = event.id; $('events').append(block);
+  } else if (['usage','session','fleet_stage','fleet_reviewer','agent_activity'].includes(kind)) {
+    const block = el('details','activity'); const label = kind === 'fleet_reviewer' ? `Reviewer · ${fleetLensName(event.lens)}` : kind === 'agent_activity' ? `Agent activity${typeof event.agent === 'string' ? ` · ${event.agent}` : ''}${typeof event.type === 'string' ? ` · ${humanLabel(event.type)}` : ''}` : ({usage:'Usage',session:'Native session',fleet_stage:'Fleet stage'})[kind]; block.append(el('summary','',label),el('pre','',text));
+    block.dataset.eventId = event.id; const group = stepGroup(); group.lastElementChild.append(block);
+    countStep(group,kind === 'fleet_reviewer' ? 'Reviewer' : kind === 'agent_activity' ? typeof event.agent === 'string' && event.agent ? event.agent : 'Agent' : ({usage:'Usage',session:'Session',fleet_stage:'Stage'})[kind]);
   }
 }
 async function pollSession(epoch) {
@@ -1321,15 +1372,17 @@ async function pollSession(epoch) {
       upsert(data.session); if (restore) applySessionSettings(data.session);
       if (ended) memoryUseSessionEnded(data.session.project_id);
     }
-    for (const event of data.events || []) appendEvent(event);
-    showError('events-error',''); state.loading = false; updateControls();
+    // One page is folded into the run model event by event, then drawn once; history pages are drawn without motion.
+    const events = data.events || []; runView.begin(events.length);
+    for (const event of events) appendEvent(event);
+    runView.end(events.length); runView.connection(true); showError('events-error',''); state.loading = false; updateControls();
     if (atBottom) conversation.scrollTop = conversation.scrollHeight;
     // A completed run may still have more than one page of recorded events.
     if ((data.events || []).length === 250) state.pollTimer = setTimeout(() => pollSession(epoch),0);
     else if (active(state.selected)) state.pollTimer = setTimeout(() => pollSession(epoch),1000);
   } catch (error) {
     if (error.name === 'AbortError' || epoch !== state.epoch) return;
-    state.loading = false; showError('events-error',textError(error)); updateControls();
+    state.loading = false; showError('events-error',textError(error)); if (error.status === 0) runView.connection(false); updateControls();
     if (active(state.selected) && ![401,403,404].includes(error.status)) state.pollTimer = setTimeout(() => pollSession(epoch),2500);
   } finally { if (state.pollController === controller) state.pollController = null; }
 }
@@ -1340,7 +1393,8 @@ async function selectSession(id) {
   saveSessionPreferences(); ++preferenceEpoch; restoringSessionPreferences = false;
   // The list holds summaries; a session's settings come from its full record, which the first poll brings.
   const listed = state.sessions.find(item => item.id === id);
-  stopPolling(); const epoch = ++state.epoch; state.selectedId = id; state.selected = listed && !listed.summary ? listed : null; state.eventIds.clear(); state.assistantTexts.clear(); state.loading = true;
+  stopPolling(); const epoch = ++state.epoch; state.selectedId = id; state.selected = listed && !listed.summary ? listed : null; state.eventIds.clear(); state.assistantTexts.clear(); state.stepCalls.clear(); state.loading = true;
+  runView.reset(id);
   resetFleetProgress();
   $('events').replaceChildren(); $('prompt').value = ''; showError('composer-error',''); showError('events-error','');
   if (state.selected) applySessionSettings(state.selected);
