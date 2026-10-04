@@ -188,6 +188,45 @@ class PortableSystemTests(unittest.TestCase):
         self.assertEqual(0, catalog.returncode, catalog.stderr)
         self.assertEqual("Система заказов", json.loads(catalog.stdout.decode("utf-8"))["system"])
 
+    def test_discovery_probe_opens_without_reading_and_refuses_exposure(self):
+        probe = ROOT / "harness/src/harness/discovery_probe.py"
+        workspace = self.root / "agent"
+        evidence = workspace / "evidence"
+        (workspace / ".harness-tmp").mkdir(parents=True)
+        evidence.mkdir()
+        (evidence / "000000.txt").write_text("evidence", encoding="utf-8")
+        visible = self.root / "visible.txt"
+        visible.write_text("visible", encoding="utf-8")
+        listing = self.root / "paths.txt"
+
+        def run(*denied):
+            listing.write_text("\n".join([*denied, "--readable", str(evidence / "000000.txt")]) + "\n",
+                               encoding="utf-8")
+            return subprocess.run([sys.executable, "-B", str(probe), str(listing), str(workspace), str(evidence)],
+                                  capture_output=True, text=True, timeout=60, check=False)
+        exposed = run(str(visible), str(self.root), str(self.root / "missing"))
+        self.assertEqual(1, exposed.returncode, exposed.stdout + exposed.stderr)
+        self.assertIn("could read 2 of 3", exposed.stdout)
+        # Outside a sandbox the evidence is writable, so the last check refuses and cleans up.
+        writable = run(str(self.root / "missing"), str(self.root / "missing-folder" / "file.txt"))
+        self.assertEqual(1, writable.returncode, writable.stdout + writable.stderr)
+        self.assertIn("could change the captured evidence", writable.stdout)
+        self.assertEqual(["000000.txt"], [path.name for path in evidence.iterdir()])
+        self.assertEqual([], list((workspace / ".harness-tmp").iterdir()))
+
+    def test_discovery_lists_original_links_without_following_them(self):
+        from harness import discovery_sandbox
+        service = self.root / "service"
+        (service / "src").mkdir(parents=True)
+        (service / "src" / "order.py").write_text("source", encoding="utf-8")
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "secret.txt").write_text("outside", encoding="utf-8")
+        self.link_directory(service / "linked", outside)
+        paths = discovery_sandbox.original_paths([service])
+        self.assertEqual({str(service), str(service / "src"), str(service / "src" / "order.py"),
+                          str(service / "linked")}, set(paths))
+
     def test_run_closes_native_tasks_for_a_task_written_in_russian(self):
         codex = self.npm_codex()
         config = self.services()

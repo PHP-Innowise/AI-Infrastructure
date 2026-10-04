@@ -114,12 +114,6 @@ def validation_copy(target, workspace):
 def command(executable, workspace, target, argv, homes=(), common=None, source=None, protected_roots=()):
     workspace, target = existing_directory(workspace), existing_directory(target)
     control = existing_directory(workspace.parent)
-    private_tmp = workspace / '.harness-tmp'
-    private_tmp.mkdir(mode=0o700, exist_ok=True)
-    existing_directory(private_tmp)
-    # A random name prevents ambient user/project profile tables from merging
-    # extra writable roots or an `extends` setting into the enforced profile.
-    name = 'harnesscreator' + uuid.uuid4().hex
     entries = {':root': 'read', str(workspace): 'write', str(control): 'read', str(target): 'read'}
     for home in homes:
         home = existing_directory(home)
@@ -136,15 +130,30 @@ def command(executable, workspace, target, argv, homes=(), common=None, source=N
     for protected in (target, control, source, common, *protected_roots):
         if protected:
             entries[str(existing_directory(protected))] = 'read'
+    return sandbox_argv(executable, workspace, entries, argv)
+
+
+def sandbox_argv(executable, workspace, entries, argv, launcher=None, label='harnesscreator', interpreter=None):
+    """argv under an enforced Codex permission profile whose filesystem table is entries.
+
+    The workspace is the working directory and the workspace root; the child's
+    temporary directory is a private folder inside it. interpreter runs the trampoline.
+    """
+    private_tmp = workspace / '.harness-tmp'
+    private_tmp.mkdir(mode=0o700, exist_ok=True)
+    existing_directory(private_tmp)
+    # A random name prevents ambient user/project profile tables from merging
+    # extra writable roots or an `extends` setting into the enforced profile.
+    name = label + uuid.uuid4().hex
     profile = {'filesystem': entries, 'network': {'enabled': True},
                'workspace_roots': {str(workspace): True}}
     outer = command_argv([executable], 'codex')
     child = command_argv(list(argv))
     # A trusted Python trampoline changes only the child's private temporary
     # directory. argv remains a list all the way to CreateProcess.
-    launcher = Path(__file__).with_name('windows_creator_child.py')
+    launcher = launcher or Path(__file__).with_name('windows_creator_child.py')
     import sys
     return [*outer, 'sandbox', '-c', 'windows.sandbox="elevated"',
             '-c', 'permissions=' + _toml({name: profile}),
             '-P', name, '-C', str(workspace), '--include-managed-config', '--',
-            sys.executable, '-B', str(launcher), str(private_tmp), *child]
+            interpreter or sys.executable, '-B', str(launcher), str(private_tmp), *child]

@@ -9,8 +9,7 @@ on Linux, macOS or native Windows is required; Git is
 optional and contributes commit provenance when available. On Windows, a worker
 CLI installed by npm starts through Node.js directly, never through its `.cmd`
 launcher, and each worker's process tree is ended with its Windows job. AI
-discovery in the Harness is the exception: native Windows has no sandbox for it
-yet (see [AI discovery](#troubleshooting-ai-discovery)).
+discovery in the Harness runs there in Codex's elevated sandbox.
 
 The planning workflow is:
 
@@ -541,10 +540,9 @@ Choosing another empty service folder retains that card's entered metadata;
 choosing a folder with a passport loads its existing metadata.
 
 AI discovery runs through the same serialized queue as other Harness work. It
-requires bubblewrap on Linux or `sandbox-exec` on macOS. Native Windows has no
-sandbox that keeps the original service folders out of the agent's reach, so
-**Fill with AI** is off there and the editor says why; fill in the forms by hand,
-or scan on Linux or macOS. The filesystem read
+requires bubblewrap on Linux, `sandbox-exec` on macOS, or on Windows the Codex
+CLI with permission profiles and its elevated sandbox, as for Creator phases. A
+Windows scan needs Codex even when Claude or Cursor does the scanning. The filesystem read
 allow-list exposes copied evidence, disposable scratch space, standard OS/CLI
 runtime and the selected provider's account state needed for native login/session
 operation; it never mounts original service folders. Native account state can
@@ -553,6 +551,22 @@ to the CLI. Projects overlapping those account/runtime roots are refused.
 No project code or hooks are executed by the discovery collector. Copied file
 contents are untrusted evidence, never instructions. A native model may use tools
 within its sandbox; review is still required for semantic accuracy.
+
+On Windows the scan runs under a Codex permission profile: the platform minimum
+(`:minimal`), the CLI runtime, Python, the run folder and the provider's account
+state are readable; the workspace and account state are writable; the evidence
+is read-only; and every selected service folder and the system folder are
+denied outright. The scan agent runs as Codex's sandbox account, so other
+folders follow their Windows permissions for that account; your user profile is
+normally closed to it. Codex denies a folder with an inherited
+Windows permission entry, which a file with its own allow entry or a protected
+ACL escapes. So before every scan a probe runs inside the same sandbox, opens
+every original file and folder, and checks a file in your temporary folder; the
+scan starts only if none of them is readable, the evidence is, and the evidence
+cannot be changed. The probe covers up to 100,000 files and folders, as
+Creator's own check does; larger selections are refused. Codex keeps the deny
+entries on the selected folders after the scan, for its sandbox accounts only,
+until a later Codex sandbox run replaces them; your own access is unchanged.
 
 The collector skips links/hard links, known credential paths, secret patterns,
 binaries, generated/dependency directories and private Brain/local-memory data.
@@ -713,7 +727,10 @@ journal keeps its generic code (for example `worker_exit_failure`).
 | --- | --- | --- |
 | `… is not signed in or its login expired` | The native CLI cannot authenticate. A stored login can expire even while a status command still lists it. | Sign in again in a terminal with `claude auth login`, `codex login` or `cursor-agent login`, then retry. |
 | `The AI discovery sandbox cannot start` / `could not start` | The host does not allow the unprivileged user namespaces that bubblewrap needs. | See [Allow bubblewrap](#allow-bubblewrap-on-ubuntu-2310-and-later). |
-| `AI discovery needs bubblewrap on Linux or sandbox-exec on macOS` | The Harness runs on native Windows, which has no discovery sandbox yet. | Fill in the service forms by hand, or scan on Linux or macOS. |
+| `AI discovery on Windows needs the Codex CLI` | Codex is missing, too old for permission profiles, or its elevated sandbox is not set up. | Install Codex, complete its elevated sandbox setup once in native Codex, then reload the page. |
+| `The Codex sandbox could not start the check` | Codex's elevated sandbox did not start, usually because its setup is incomplete. | Complete the elevated sandbox setup once in native Codex; the message shows Codex's own error. |
+| `The Codex sandbox did not keep the original folders unreadable` | The probe before the scan could read an original file or folder, usually one with its own Windows permission entry. | Remove the file's own allow entry (for example `icacls FILE /reset`), or move it out of the service folder. The message names one such path. |
+| `The selected folders hold more than 100,000 files and folders` | The Windows probe opens every original file before a scan. | Scan fewer service folders, or folders without large dependency trees. |
 | `… could not start inside the AI discovery sandbox` | The CLI executable is not reachable inside the sandbox, for example a wrapper script. | Start Harness with the standalone executable: `--claude-bin`, `--codex-bin` or `--cursor-bin`. |
 | `… reached the scan timeout` | The scan ran longer than **Scan timeout**. | Increase the timeout or scan fewer service folders. |
 | `… reported a usage or rate limit` | Provider quota or rate limit. | Retry later or choose another provider. |

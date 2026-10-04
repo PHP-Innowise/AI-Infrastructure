@@ -38,8 +38,6 @@ from harness.setup import SetupManager
 from harness.creator import CreatorManager
 from harness.system_orchestration import SystemManager
 from harness.system_discovery import DiscoveryManager
-from harness import discovery_sandbox
-from harness.discovery_sandbox import sandbox_problem
 from harness.project_browser import browse_projects
 from build_kit3_catalog import build_site
 from install_accelerator import EDITIONS
@@ -108,9 +106,7 @@ class HarnessServer(ThreadingHTTPServer):
             ],
             # Probed per page load so a host fix is visible after a reload.
             'runtime': {'timeout_seconds': self.sessions.timeout, 'max_active': 1,
-                        'discovery_sandbox': sandbox_problem(),
-                        # Native Windows has no discovery sandbox; the page disables the scan there.
-                        'discovery_supported': not discovery_sandbox.NATIVE_WINDOWS,
+                        'discovery_sandbox': self.discovery.problem(),
                         'max_agents': MAX_AGENTS, 'default_agent_count': DEFAULT_AGENT_COUNT,
                         'context_excerpt_bytes': CONTEXT_EXCERPT_BYTES,
                         'fleet': {key: value for key, value in fleet_runtime().items() if key != 'executable'}},

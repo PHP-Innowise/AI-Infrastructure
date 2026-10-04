@@ -38,10 +38,21 @@ edition's own files remain in that edition's changelog.
     gets an ACL that admits only the current user and SYSTEM.
   - Brain calls, the System runner and `scripts/ai_system.py` exchange UTF-8,
     so a task written in Russian also works on Windows.
-  - AI discovery stays off on Windows: no sandbox there keeps the original
-    service folders out of the agent's reach. The editor says why.
+  - AI discovery (**Fill with AI**) runs in Codex's elevated sandbox, as Creator
+    phases do. Its permission profile is an allow-list: the platform minimum,
+    the CLI runtime, Python, the run folder and the provider's account state,
+    with every selected service folder denied outright. Codex denies a folder
+    with an inherited Windows ACE, which a file with its own allow entry
+    escapes. So before every scan a probe inside the same sandbox opens each
+    original file and folder, up to 100,000, and the scan starts only if none
+    is readable. A Codex agent inside drops its own nested sandbox, as Creator's
+    does.
   - The new `tests.test_ai_system_portable` runs on Linux and in the
     `windows-harness` job, including a run with an npm-installed Codex fixture.
+    `tests.test_harness_system_discovery` checks the scan profile, and with a
+    local Codex CLI enforces it through Codex's Linux sandbox. The new
+    `tests.test_windows_discovery` runs it in the real elevated sandbox, in the
+    manual Windows sandbox workflow.
 - Join the native Windows Harness (PR #35) with the redesigned page and System
   Orchestration (PR #36):
   - The redesigned page keeps its split scripts. Creator names the missing

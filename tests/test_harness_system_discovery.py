@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -14,6 +15,7 @@ from unittest.mock import patch
 
 from tests import test_harness_web as http_helpers
 from harness import providers, web
+from harness.sessions import SessionError
 from harness.system_discovery import collect, validate_proposal
 from ai_system_execution import load
 from ai_system_lib import SystemError
@@ -180,6 +182,20 @@ class DiscoveryTests(unittest.TestCase):
             self.assertIn('Troubleshooting AI discovery', message)
         self.assertFalse(self.server.sessions.list())
         self.assertIsNone(self.request('/api/bootstrap')[1]['runtime']['discovery_sandbox'])
+
+    def test_windows_scan_records_the_codex_cli_that_sandboxes_it(self):
+        from harness import discovery_sandbox, system_discovery
+        def backend(executable=None):
+            return ('windows-codex', executable) if executable else None
+        with patch.object(discovery_sandbox, 'NATIVE_WINDOWS', True), \
+                patch.object(discovery_sandbox, 'isolation_backend', side_effect=backend), \
+                patch.object(system_discovery, 'isolation_backend', side_effect=backend):
+            self.assertIsNone(self.request('/api/bootstrap')[1]['runtime']['discovery_sandbox'])
+            job = self.start(provider='claude')
+        request, _ = self.private_request(job)
+        codex = self.server.sessions.providers['codex']['executable']
+        self.assertEqual(str(Path(codex).resolve()), request['sandbox_executable'])
+        self.assertEqual('completed', self.wait_job(job)['status'])
 
     def test_expired_cli_login_is_reported_with_its_fix(self):
         (self.project / 'orders/README.md').write_text('AUTH_FAILURE')
@@ -365,6 +381,152 @@ class DiscoveryTests(unittest.TestCase):
         for source_root in (Path('/'), Path('/etc')):
             with self.assertRaises(SessionError):
                 sandbox_command(workspace, ['/usr/bin/true'], 'codex', [source_root])
+
+
+
+def codex_profiles():
+    """A local Codex CLI whose sandbox enforces permission profiles, or None."""
+    import subprocess
+    executable = shutil.which('codex')
+    if not executable:
+        return None
+    try:
+        usage = subprocess.run([executable, 'sandbox', '--help'], capture_output=True, text=True, timeout=30)
+        trial = subprocess.run([executable, 'sandbox', '-c', 'permissions={trial={filesystem={":root"="read"}}}',
+                                '-P', 'trial', '--', 'true'], capture_output=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if '--permission-profile' not in usage.stdout or trial.returncode != 0:
+        return None
+    return executable
+
+
+class CodexProfileTests(unittest.TestCase):
+    """The Windows scan sandbox: a Codex permission profile around the scan. Runs with or without Codex."""
+    codex = '/opt/fixture/codex'
+
+    def setUp(self):
+        from harness import discovery_runner, discovery_sandbox
+        self.sandbox = discovery_sandbox
+        self.root = Path(tempfile.mkdtemp(prefix='discovery-codex-')).resolve()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.directory = self.root / 'state/system-discovery/run'
+        self.workspace = self.directory / 'agent'
+        (self.workspace / 'evidence').mkdir(parents=True)
+        (self.workspace / 'evidence/000000.txt').write_text('safe evidence')
+        self.source = self.root / 'services/orders'
+        (self.source / 'src').mkdir(parents=True)
+        (self.source / 'src/order.py').write_text('ORIGINAL SOURCE')
+        (self.source / '.env').write_text('SECRET=1')
+        self.other = self.root / 'unselected/.env'
+        self.other.parent.mkdir()
+        self.other.write_text('UNSELECTED PROJECT')
+        self.launcher, self.probe = discovery_runner.helpers(self.directory)
+        backend = patch.object(discovery_sandbox, 'isolation_backend', return_value=('windows-codex', self.codex))
+        backend.start()
+        self.addCleanup(backend.stop)
+
+    def command(self, inner=None):
+        return self.sandbox.sandbox_command(self.workspace, [sys.executable, '-c', 'pass'], 'codex',
+                                            [self.source], self.codex, inner, self.launcher)
+
+    def test_profile_is_an_allow_list_that_denies_every_source_folder(self):
+        command = self.command()
+        profile = next(item for item in command if item.startswith('permissions='))
+        self.assertIn('":minimal"="read"', profile)
+        self.assertNotIn(':root', profile)
+        for path, access in ((self.source, 'deny'), (self.workspace, 'write'),
+                             (self.workspace / 'evidence', 'read'), (self.directory, 'read')):
+            self.assertIn(json.dumps(str(path)) + '="' + access + '"', profile)
+        self.assertEqual(str(self.launcher), command[command.index('-B') + 1])
+
+    def test_original_paths_lists_links_without_following_them(self):
+        outside = self.root / 'outside'
+        outside.mkdir()
+        (outside / 'secret.txt').write_text('outside')
+        (self.source / 'linked').symlink_to(outside, target_is_directory=True)
+        paths = self.sandbox.original_paths([self.source])
+        self.assertIn(str(self.source / 'linked'), paths)
+        self.assertIn(str(self.source / '.env'), paths)
+        self.assertNotIn(str(self.source / 'linked/secret.txt'), paths)
+        # A service folder inside the system folder is listed once.
+        nested = self.sandbox.original_paths([self.source.parent, self.source])
+        self.assertEqual(len(nested), len(set(nested)))
+        self.assertIn(str(self.source / '.env'), nested)
+        with patch.object(self.sandbox, 'PROBE_LIMIT', 2), self.assertRaisesRegex(SessionError, 'more than 100,000'):
+            self.sandbox.original_paths([self.source])
+
+    def test_a_sandbox_that_cannot_start_is_named_as_such(self):
+        def run(command, cwd, stdin, timeout, stderr_tail=False):
+            self.assertTrue((self.directory / 'boundary-paths.txt').exists())
+            return {'error': None, 'returncode': 1, 'stdout': b'',
+                    'stderr_tail': b'Error: the Windows sandbox is not set up\n'}
+        with self.assertRaisesRegex(SessionError, 'could not start the check .*Windows sandbox is not set up'):
+            self.sandbox.verify_boundary(self.directory, self.workspace, [sys.executable, '-c', 'pass'], 'codex',
+                                         [self.source], self.codex, self.launcher, self.probe, run)
+        self.assertFalse((self.directory / 'boundary-paths.txt').exists())
+
+
+@unittest.skipUnless(codex_profiles(), 'needs a local Codex CLI whose sandbox enforces permission profiles')
+class CodexProfileSandboxTests(CodexProfileTests):
+    """The same profile, enforced here by Codex's Linux sandbox."""
+    codex = codex_profiles()
+
+    def test_windows_runner_scans_inside_the_profile_after_the_probe(self):
+        from harness import discovery_runner
+        from ai_system_execution import run_process
+        from ai_system_providers import invocation
+        agent = self.root / 'agent-cli'
+        agent.write_text('#!/usr/bin/env python3\nimport sys\nfrom pathlib import Path\nsys.stdin.read()\n'
+                         'assert Path("evidence/000000.txt").read_text() == "safe evidence"\n'
+                         'try: Path(' + repr(str(self.source / 'src/order.py')) + ').read_text()\n'
+                         'except (FileNotFoundError, PermissionError): print("agent ok")\n'
+                         'else: print("agent read the original")\n')
+        agent.chmod(0o700)
+        system = self.root / 'system'
+        system.mkdir()
+        command, stdin = invocation('codex', str(agent), self.workspace, 'Discover services', {'type': 'object'},
+                                    self.directory / 'schema.json', 'read-only')
+        request = {'provider': 'codex', 'sandbox_executable': self.codex,
+                   'roots': {'orders': {'path': str(self.source)}, '__system__': {'path': str(system)}}}
+        with patch.object(discovery_runner, 'emit'):
+            scan = discovery_runner.windows_command(self.directory, self.workspace, command, request)
+        self.assertIn('default_permissions=":danger-full-access"', scan)
+        self.assertNotIn('read-only', scan[scan.index(str(agent)):])
+        result = run_process(scan, self.workspace, stdin, 120, stderr_tail=True)
+        self.assertEqual((0, b'agent ok'), (result['returncode'], result['stdout'].strip()), result)
+
+    def test_probe_passes_and_the_scan_reads_only_its_evidence(self):
+        from ai_system_execution import run_process
+        self.sandbox.verify_boundary(self.directory, self.workspace, [sys.executable, '-c', 'pass'], 'codex',
+                                     [self.source], self.codex, self.launcher, self.probe, run_process)
+        self.assertFalse((self.directory / 'boundary-paths.txt').exists())
+        check = self.root / 'check.py'
+        check.write_text('from pathlib import Path\n'
+                         'assert Path("evidence/000000.txt").read_text() == "safe evidence"\n'
+                         'for name in ' + repr([str(self.source / 'src/order.py'), str(self.source / '.env'),
+                                                str(self.other)]) + ':\n'
+                         '    try: Path(name).read_text()\n'
+                         '    except (FileNotFoundError, PermissionError): pass\n'
+                         '    else: raise AssertionError("readable: " + name)\n'
+                         'try: Path("evidence/000000.txt").write_text("changed")\n'
+                         'except OSError: pass\n'
+                         'else: raise AssertionError("evidence is writable")\n'
+                         'Path("scratch.txt").write_text("allowed")\n')
+        (self.directory / 'check.py').write_bytes(check.read_bytes())
+        result = run_process(self.command([self.sandbox.python(), str(self.directory / 'check.py')]), self.workspace,
+                             '', 120, stderr_tail=True)
+        self.assertEqual(0, result['returncode'], result)
+        self.assertEqual('allowed', (self.workspace / 'scratch.txt').read_text())
+
+    def test_probe_refuses_when_an_original_file_stays_readable(self):
+        from ai_system_execution import run_process
+        readable = self.directory / 'readable.txt'
+        readable.write_text('visible to the sandbox')
+        with patch.object(self.sandbox, 'original_paths', return_value=[str(readable)]):
+            with self.assertRaisesRegex(SessionError, 'could read 1 of'):
+                self.sandbox.verify_boundary(self.directory, self.workspace, [sys.executable, '-c', 'pass'], 'codex',
+                                             [self.source], self.codex, self.launcher, self.probe, run_process)
 
 
 if __name__ == '__main__':

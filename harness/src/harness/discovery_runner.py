@@ -15,7 +15,7 @@ import ai_system_execution as execution
 from ai_system_lib import SystemError, encoded
 from ai_system_providers import invocation, worker_result
 from harness.agent_activity import CLI, ActivityStream, explain, redact
-from harness.discovery_sandbox import GUIDE, namespace_hint, sandbox_command
+from harness.discovery_sandbox import GUIDE, NATIVE_WINDOWS, namespace_hint, sandbox_command, verify_boundary
 from harness.sessions import SessionError
 from harness.system_discovery import check_fresh, result_schema, validate_proposal
 
@@ -53,6 +53,32 @@ def failure(provider, process, reported, timeout):
     detail = next((redact(line)[:300] for line in reversed(lines) if not NOISE.search(line)), None)
     return (f'{name} exited with code {process["returncode"]}' + (f' ({detail})' if detail else '') +
             '. Run it once in a terminal to check its installation and login. ' + GUIDE)
+
+
+def helpers(directory):
+    """Trusted copies of the sandbox trampoline and probe in the run folder, which the sandbox
+    account reads; it never reads the Harness checkout, which may sit in a source folder."""
+    copies = []
+    for name in ('windows_creator_child.py', 'discovery_probe.py'):
+        copy = directory / name
+        copy.write_bytes(Path(__file__).with_name(name).read_bytes())
+        copies.append(copy)
+    return copies
+
+
+def windows_command(directory, workspace, command, request):
+    """The scan in Codex's elevated sandbox, once a probe in that same sandbox found no original file readable."""
+    roots = [Path(r['path']) for r in request['roots'].values()]
+    launcher, probe = helpers(directory)
+    if request['provider'] == 'codex':
+        # The outer elevated sandbox confines the scan; a nested one cannot start from its account.
+        index = command.index('--sandbox')
+        command[index:index + 2] = ['-c', 'default_permissions=":danger-full-access"']
+    emit('status', text='Checking that the sandbox keeps the original service folders unreadable.')
+    verify_boundary(directory, workspace, command, request['provider'], roots, request['sandbox_executable'],
+                    launcher, probe, execution.run_process)
+    return sandbox_command(workspace, command, request['provider'], roots, request['sandbox_executable'],
+                           launcher=launcher)
 
 
 def main():
@@ -96,8 +122,11 @@ Discovery input:
 ''' + encoded({'services': ids, 'name': request['editor']['name'], 'scan_warnings': request['warnings']})
         command, stdin = invocation(request['provider'], request['executable'], workspace, prompt,
                                     schema, directory / 'schema.json', 'read-only')
-        command = sandbox_command(workspace, command, request['provider'],
-                                  [Path(r['path']) for r in request['roots'].values()])
+        if NATIVE_WINDOWS:
+            command = windows_command(directory, workspace, command, request)
+        else:
+            command = sandbox_command(workspace, command, request['provider'],
+                                      [Path(r['path']) for r in request['roots'].values()])
         # The agent reads numbered evidence copies; show their original service paths.
         aliases = {workspace / entry['copy']: (sid, name)
                    for sid, files in request['inventory'].items() for name, entry in files.items()}

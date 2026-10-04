@@ -12,6 +12,6 @@ jobs:
       HARNESS_WINDOWS_CREATOR_SANDBOX: '1'
     steps:
       - uses: actions/checkout@v4
-      - name: Verify real elevated sandbox boundaries and lifecycle
+      - name: Verify real elevated sandbox boundaries for Creator and AI discovery
         shell: pwsh
-        run: python -m unittest tests.test_windows_creator -v
+        run: python -m unittest tests.test_windows_creator tests.test_windows_discovery -v

@@ -248,8 +248,9 @@ roots are refused at protected filesystem boundaries. npm-installed Codex and
 Claude launch through Node.js directly; arbitrary `.cmd`/`.bat` check scripts
 are refused. Use a native executable or Node/Python script for checks.
 System Orchestration runs on Windows too. Its AI discovery (**Fill with AI**)
-needs a sandbox that native Windows lacks, so the button is off there and the
-editor says why.
+runs in Codex's elevated sandbox, like Creator phases, and needs Codex for that
+even when Claude or Cursor scans. Before each scan a probe checks inside the same
+sandbox that no original file is readable.
 
 Infrastructure Creator on Windows also needs Codex CLI, even when the selected
 provider is Claude or Cursor. Complete elevated sandbox setup in native Codex

@@ -416,7 +416,7 @@ if (root / "hold-worker").exists():
 
 
 class NativeWindowsSystemTests(unittest.TestCase):
-    """On native Windows, System runs work and only AI discovery is refused, with its reason."""
+    """On native Windows, System runs work and AI discovery needs Codex's elevated sandbox."""
     request = http_helpers.HarnessWebTests.request
     post = http_helpers.HarnessWebTests.post
     close_server = http_helpers.HarnessWebTests.close_server
@@ -428,9 +428,8 @@ class NativeWindowsSystemTests(unittest.TestCase):
                                    capture_output=True, text=True, timeout=60)
         self.assertEqual(0, completed.returncode, completed.stderr)
 
-    def test_systems_work_and_ai_discovery_names_the_missing_sandbox(self):
+    def test_systems_work_and_ai_discovery_needs_the_codex_sandbox(self):
         from harness import discovery_sandbox
-        from harness.sessions import SessionError
         self.root = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.root)
         project = self.root / 'project'
         shutil.copytree(ROOT / 'docs/examples/ai-system', project)
@@ -446,18 +445,14 @@ class NativeWindowsSystemTests(unittest.TestCase):
         project_id = next(iter(self.server.sessions.projects))
         status, bootstrap, _ = self.request('/api/bootstrap')
         self.assertEqual(200, status, bootstrap)
-        self.assertIs(False, bootstrap['runtime']['discovery_supported'])
-        self.assertEqual(discovery_sandbox.WINDOWS_REASON, bootstrap['runtime']['discovery_sandbox'])
+        # Without an available Codex CLI there is no Windows scan sandbox, and the editor says so.
+        self.assertEqual(discovery_sandbox.WINDOWS_REQUIRED, bootstrap['runtime']['discovery_sandbox'])
         body = {'project_id': project_id, 'config_path': 'system.json'}
         status, catalog, _ = self.post('/api/systems/catalog', body)
         self.assertEqual(200, status, catalog)
         self.assertEqual(200, self.request('/api/system-runs?project_id=' + project_id)[0])
         status, refused, _ = self.post('/api/system-discoveries', {'editor': {}, 'provider': 'codex'})
-        self.assertEqual((400, discovery_sandbox.WINDOWS_REASON), (status, refused.get('error')))
-        # The Windows Creator sandbox reads the whole disk, so discovery never borrows it.
-        with patch.object(discovery_sandbox, 'isolation_backend', return_value=('windows-codex', 'codex.exe')):
-            with self.assertRaises(SessionError):
-                discovery_sandbox.sandbox_command(self.root / 'agent', ['codex'], 'codex', [project])
+        self.assertEqual((400, discovery_sandbox.WINDOWS_REQUIRED), (status, refused.get('error')))
 
 
 if __name__ == '__main__':
