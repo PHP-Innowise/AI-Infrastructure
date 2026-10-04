@@ -9,7 +9,10 @@ from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
 from functools import wraps
-import fcntl
+try:
+    import fcntl
+except ImportError:  # native Windows: the Harness imports this module but refuses System Orchestration there
+    fcntl = None
 import json
 import os
 from pathlib import Path

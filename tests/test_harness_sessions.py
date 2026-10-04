@@ -13,7 +13,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "harness" / "src"))
 from harness import sessions
@@ -1159,6 +1159,22 @@ class SessionTests(unittest.TestCase):
         with self.assertRaises(sessions.SessionError):
             self.manager(state=other_state)
         self.assertEqual(outside.read_text(), "OUTSIDE SECRET")
+
+
+
+class GitCleanupTests(unittest.TestCase):
+    def test_unconfirmed_worktree_process_cleanup_stops_new_admission(self):
+        process = Mock(returncode=0)
+        process.communicate.return_value = ('', '')
+        process.wait.side_effect = subprocess.TimeoutExpired('git fixture', 3)
+        owner = Mock(stopping=threading.Event())
+        with patch.object(sessions.process_runtime, 'launch_guarded', return_value=process), \
+                patch.object(sessions.process_runtime, 'signal_tree'):
+            with self.assertRaisesRegex(sessions.SessionError, 'cleanup could not be confirmed'):
+                sessions.run_git(Path.cwd(), 'worktree', 'add', 'fixture', guard_lock=99, guard_owner=owner)
+        self.assertTrue(owner.stopping.is_set())
+        process.stdout.close.assert_called_once()
+        process.stderr.close.assert_called_once()
 
 
 if __name__ == "__main__":

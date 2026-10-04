@@ -18,7 +18,7 @@ into Memory Bank. A failed send retains the selected files for correction.
 ## System orchestration in the browser
 
 **System Orchestration** coordinates development changes across registered
-service repositories. It has two tabs and works on the project chosen in the
+service repositories on Linux and macOS. It has two tabs and works on the project chosen in the
 sidebar: **Services** holds the system file, its contract map and the editor;
 **Changes** holds plans, launches, agents and receipts. On **Services**, choose
 **Choose system folder…** to open another folder as the system project (it is
@@ -101,10 +101,10 @@ files are not copied. Targets must be outside the Harness source/state trees.
 The server copies the existing generator into a private task workspace and runs
 its native workflow in the shared session queue. Filesystem isolation is
 required: **bubblewrap** (`bwrap`) on Linux, or the built-in **sandbox-exec**
-(Seatbelt) on macOS. Agent writes are confined to the workspace, a private
+(Seatbelt) on macOS, or native **Codex elevated sandbox** with permission-profile support on Windows. Agent writes are confined to the workspace, a private
 temporary directory and native provider account-state directories; the project
 and Creator control files stay read-only (bind mounts on Linux, write denial on
-macOS). Native authentication remains with each provider. Network
+macOS, elevated capability/ACL policy on Windows). Native authentication remains with each provider. Network
 access and native integrations remain available; this is filesystem isolation,
 not a general-purpose sandbox for hostile plugins. Apple marks `sandbox-exec`
 as deprecated but still ships it; a provider CLI that must write outside its
@@ -234,10 +234,42 @@ session/workspace; it does not transfer conversations between providers.
 
 ### Starting the server
 
-Requires Linux or macOS, Python 3.9+ and at least one authenticated native
+Supports Linux, macOS and native Windows 10/11 through Git Bash, with Python 3.10+ and at least one authenticated native
 agent CLI. The web server uses only Python's standard library; no venv,
 Node frontend build or API-key form is required.
 Fleet review additionally uses the optional LangGraph runtime described below.
+
+On Windows, install Python, Git for Windows and the native agent CLI, then run
+these commands in Git Bash. The launcher tries a working Python 3 interpreter
+named `python3`, then `python`; a Microsoft Store alias is skipped. State defaults
+to `%LOCALAPPDATA%/ai-infrastructure-harness` (Linux/macOS retain XDG state).
+Projects and state must use local drive paths; junctions, symlinks and UNC/network
+roots are refused at protected filesystem boundaries. npm-installed Codex and
+Claude launch through Node.js directly; arbitrary `.cmd`/`.bat` check scripts
+are refused. Use a native executable or Node/Python script for checks.
+System Orchestration needs Linux or macOS. On native Windows both of its tabs
+say so, and the server refuses its requests.
+
+Infrastructure Creator on Windows also needs Codex CLI, even when the selected
+provider is Claude or Cursor. Complete elevated sandbox setup in native Codex
+(the setup may request UAC). Harness supplies a random per-launch permission
+profile; target, Git common directory, source and control state remain read-only.
+A native boundary probe runs before each phase; failure stops the phase without
+falling back to unelevated execution. Provider state must not overlap protected
+project or Harness directories. Installed runtime checks use a disposable copy
+so the target SQLite cache is unchanged. Git Bash must provide `bash` for hook
+syntax checks; NTFS does not provide Unix executable permission bits.
+The probe scans protected trees with a 100,000-entry limit; large trees add
+startup time and trees beyond that limit are refused. Validation copies are
+limited to 50,000 files, 256 MiB total and 4 MiB per file.
+Native providers run under the sandbox account. File-based credentials remain
+in their existing account directory; Windows user-keyring credentials may need
+provider-specific setup and are not copied or exported by Harness.
+The `windows-harness` CI job covers portable/native runtime unit tests. The
+manual `Windows Creator sandbox` workflow requires a self-hosted Windows runner
+with elevated Codex already configured; it runs actual write-denial and owner
+death tests without model credentials. Native sandbox checks cannot run on a
+Linux workstation.
 
 From the repository root:
 
@@ -667,7 +699,8 @@ only when the next process starts. Time limits terminate the owned process group
 
 History is stored in a private SQLite database under
 `$XDG_STATE_HOME/ai-infrastructure-harness` (default
-`~/.local/state/ai-infrastructure-harness`); `--state-dir` selects a separate
+`~/.local/state/ai-infrastructure-harness`) on Linux/macOS, or
+`%LOCALAPPDATA%/ai-infrastructure-harness` on Windows; `--state-dir` selects a separate
 instance. State and logs are local and are not installed into projects.
 Keep that directory private: prompts and agent answers are retained there.
 
@@ -922,6 +955,13 @@ python3 -m venv harness/.venv
 harness/.venv/bin/python -m pip install -e harness
 ```
 
+For native Windows/Git Bash:
+
+```bash
+python -m venv harness/.venv
+harness/.venv/Scripts/python.exe -m pip install -e harness
+```
+
 Restart the browser server after installation. A different prepared Python can
 be selected with `HARNESS_FLEET_PYTHON=/absolute/path/to/python`. Ordinary sessions
 remain available when this optional runtime is missing.
@@ -939,7 +979,7 @@ remain available when this optional runtime is missing.
    and download Markdown, or **Reject report** to finish without publishing it.
    The preview is visible before approval. Reports stay in local server storage.
 
-Checkpoints live under `state/fleet/<session-id>/`. A waiting review survives
+Checkpoints live under `<state-dir>/fleet/<session-id>/`. A waiting review survives
 server restarts. **Resume** on an interrupted/failed/cancelled run continues from
 its checkpoint; successful reviewer nodes are retained. Provider failures stop
 the graph and are not reported as code findings. Session settings stay fixed;

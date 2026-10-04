@@ -415,5 +415,53 @@ if (root / "hold-worker").exists():
             return False
 
 
+class NativeWindowsSystemTests(unittest.TestCase):
+    """The native Windows Harness starts and names System Orchestration as unavailable."""
+    request = http_helpers.HarnessWebTests.request
+    post = http_helpers.HarnessWebTests.post
+    close_server = http_helpers.HarnessWebTests.close_server
+    REASON = 'System Orchestration needs Linux or macOS. It is not available on native Windows yet.'
+
+    def test_server_imports_without_posix_only_modules(self):
+        code = ("import sys\nfor name in ('fcntl', 'pwd', 'grp', 'resource', 'termios'):\n    sys.modules[name] = None\n"
+                "sys.path[:0] = [sys.argv[1]]\nimport harness.web")
+        completed = subprocess.run([sys.executable, '-c', code, str(ROOT / 'harness/src')],
+                                   capture_output=True, text=True, timeout=60)
+        self.assertEqual(0, completed.returncode, completed.stderr)
+
+    def test_every_entry_point_refuses_and_the_server_still_starts(self):
+        from harness import system_discovery, system_orchestration
+        self.root = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.root)
+        project = self.root / 'project'
+        shutil.copytree(ROOT / 'docs/examples/ai-system', project)
+        for target in (patch.object(system_orchestration, 'UNAVAILABLE', self.REASON),
+                       patch.object(system_discovery, 'UNAVAILABLE', self.REASON),
+                       patch.object(web, 'SYSTEM_UNAVAILABLE', self.REASON),
+                       patch.object(providers, 'discover_providers', return_value=[]),
+                       patch.object(providers, 'model_options', return_value={'models': [], 'efforts': [], 'detail': 'Fixture'})):
+            target.start(); self.addCleanup(target.stop)
+        self.server = web.HarnessServer(('127.0.0.1', 0), self.root / 'state', [project])
+        self.closed = False
+        self.thread = threading.Thread(target=self.server.serve_forever, kwargs={'poll_interval': .01}, daemon=True)
+        self.thread.start(); self.addCleanup(self.close_server)
+        self.token = self.server.token
+        project_id = next(iter(self.server.sessions.projects))
+        self.assertFalse((self.root / 'state/ai-system').exists())
+        status, bootstrap, _ = self.request('/api/bootstrap')
+        self.assertEqual(200, status, bootstrap)
+        self.assertEqual(self.REASON, bootstrap['runtime']['system_unavailable'])
+        self.assertEqual(self.REASON, bootstrap['runtime']['discovery_sandbox'])
+        # Reads keep the generic answer; the page names the reason from the bootstrap instead.
+        for path in ('/api/system-runs?project_id=' + project_id, '/api/system-runs/' + 'a' * 32,
+                     '/api/system-discoveries/' + 'a' * 32):
+            self.assertEqual(400, self.request(path)[0])
+        body = {'project_id': project_id, 'config_path': 'system.json'}
+        for status, result, _ in (self.post('/api/systems/catalog', body),
+                                  self.post('/api/systems/editor', body),
+                                  self.post('/api/system-runs', {**body, 'task': 'Check', 'change_id': 'change-001'}),
+                                  self.post('/api/system-discoveries', {'editor': {}, 'provider': 'codex'})):
+            self.assertEqual((400, self.REASON), (status, result.get('error')))
+
+
 if __name__ == '__main__':
     unittest.main()

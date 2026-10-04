@@ -14,6 +14,8 @@ import os
 import stat
 import time
 
+from .filesystem import fs
+
 # Live fill reaches the database at most this often, unless it moved by the share below.
 WRITE_SECONDS = 2.0
 WRITE_SHARE = .005
@@ -232,11 +234,12 @@ class CodexLive:
             with stream:
                 self.offset = stream.tell()
         try:
-            stream = os.fdopen(os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb')
+            stream = os.fdopen(fs.open(self.path, os.O_RDONLY | fs.O_NOFOLLOW | fs.O_NONBLOCK), 'rb')
         except OSError:
             return False
         with stream:
-            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode) or os.fstat(stream.fileno()).st_size < self.offset:
+            info = fs.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size < self.offset:
                 return False
             stream.seek(self.offset)
             data = stream.read(self.LIMIT)

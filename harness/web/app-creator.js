@@ -114,7 +114,7 @@ async function loadCreator(rid=null) {
     if (epoch!==creatorUi.epoch || state.view!=='creator') return;
     creatorUi.available=data.available;
     $('creator-git').textContent=git.is_git ? `Current branch: ${git.branch || 'detached HEAD'}${git.dirty?' · uncommitted changes':''}` : 'No Git repository. Use the current project folder.';
-    if (!data.available) showError('creator-error','Creator needs filesystem isolation: install bubblewrap on Linux, or run the server on macOS where sandbox-exec is built in.');
+    if (!data.available) showError('creator-error',data.isolation_required || 'Creator requires filesystem isolation.');
     const selected=rid || $('creator-runs').value;
     setOptions($('creator-runs'),data.runs,r=>`${r.created_at} · ${r.operation} · ${r.status}`,r=>r.id,selected);
     if (data.runs.length) await readCreator($('creator-runs').value,epoch);

@@ -16,6 +16,7 @@ import re
 import stat
 import threading
 
+from .filesystem import fs
 from .sessions import SessionError, open_project_path, read_context
 
 CHUNK_LIMIT = 500
@@ -99,18 +100,18 @@ def _files(project, relative, suffix, limit):
         return None
     found = []
     try:
-        with os.scandir(descriptor) as names:
+        with fs.scandir(descriptor) as names:
             for item in names:
                 if item.name.startswith('.') or not item.name.endswith(suffix):
                     continue
                 try:
-                    info = os.stat(item.name, dir_fd=descriptor, follow_symlinks=False)
+                    info = fs.stat(item.name, dir_fd=descriptor, follow_symlinks=False)
                 except OSError:
                     continue
                 if stat.S_ISREG(info.st_mode):
                     found.append((info.st_mtime_ns, item.name))
     finally:
-        os.close(descriptor)
+        fs.close(descriptor)
     found.sort(reverse=True)
     return [name for _, name in found[:limit]], len(found) > limit
 
@@ -120,12 +121,21 @@ def _directories(project, relative):
         descriptor = open_project_path(project, relative, directory=True)
     except OSError:
         return []
+    found = []
     try:
-        with os.scandir(descriptor) as names:
-            return sorted(item.name for item in names if not item.name.startswith('.')
-                          and item.is_dir(follow_symlinks=False))
+        with fs.scandir(descriptor) as names:
+            for item in names:
+                if item.name.startswith('.'):
+                    continue
+                try:
+                    # Windows reports a link or junction as an error, POSIX as not a directory.
+                    if stat.S_ISDIR(fs.stat(item.name, dir_fd=descriptor, follow_symlinks=False).st_mode):
+                        found.append(item.name)
+                except OSError:
+                    continue
     finally:
-        os.close(descriptor)
+        fs.close(descriptor)
+    return sorted(found)
 
 
 def _sha256(project, relative):
@@ -135,7 +145,7 @@ def _sha256(project, relative):
     except OSError:
         return False
     try:
-        info = os.fstat(descriptor)
+        info = fs.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode):
             return False
         if info.st_size > SOURCE_BYTES:
@@ -160,7 +170,7 @@ def _sha256(project, relative):
     except OSError:
         return None
     finally:
-        os.close(descriptor)
+        fs.close(descriptor)
 
 
 def _sources_changed(project, prefix, metadata):
@@ -463,7 +473,7 @@ def _runtime_check_available(project, prefix):
         except OSError:
             return False
         try:
-            info = os.fstat(descriptor)
+            info = fs.fstat(descriptor)
             key = (str(project), prefix + relative, info.st_ino, info.st_mtime_ns, info.st_size)
             with _cache_lock:
                 cached = _runtime_checks.get(key)
@@ -476,7 +486,7 @@ def _runtime_check_available(project, prefix):
                     _runtime_checks[key] = cached
             found = found and cached
         finally:
-            os.close(descriptor)
+            fs.close(descriptor)
     return found
 
 

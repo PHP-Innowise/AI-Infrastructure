@@ -26,6 +26,16 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Join the native Windows Harness (PR #35) with the redesigned page and System
+  Orchestration (PR #36):
+  - The redesigned page keeps its split scripts. Creator names the missing
+    isolation as the server reports it.
+  - Memory use and the live Codex fill read files through the portable
+    filesystem layer.
+  - System Orchestration still needs Linux or macOS. On native Windows the
+    server now starts: `scripts/ai_system_execution.py` imports without `fcntl`.
+    Every System and AI scan request is refused with that reason, and both
+    System tabs show it.
 - Let the browser keep the Harness page files. The page names each style and
   script by its content hash, so a repeat visit loads none of them again (83 KB
   instead of 651 KB here). That address is served `immutable`; any other request
@@ -263,6 +273,19 @@ edition's own files remain in that edition's changelog.
   receipts, source checkpoints and crash-safe reconciliation. Require explicit
   retries for ambiguous writes; complete tasks only after reported cross-service
   verification and preserve knowledge handoff without promoting raw context.
+
+- Fix native Windows Harness guard shutdown and private-state ownership on
+  elevated runners. Reject non-UTF-8 Creator plans with a controlled error and
+  make pipe and plan fixtures independent of Windows newline/encoding defaults.
+
+- Add native Windows/Git Bash Harness runtime support: working Python fallback,
+  Job Object process cleanup, threaded bounded pipe reads, retained admission
+  locks, rooted no-reparse filesystem operations and private state ACLs.
+  Launch supported npm CLI shims directly through Node.js, support Windows
+  Fleet venv paths and Project Brain process locks, and add a native Windows
+  acceptance CI job. Creator also supports native Windows through Codex elevated
+  permission profiles, with read-only project/control roots, per-phase boundary
+  probes and disposable installed-runtime validation copies.
 
 - Run Harness Creator phases on macOS through the built-in `sandbox-exec`
   (Seatbelt) profile when bubblewrap is absent: writes are allowed only in the

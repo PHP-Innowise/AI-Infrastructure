@@ -4,12 +4,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
 from functools import lru_cache
-import fcntl
 import hashlib
 import json
 import math
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import queue
 import re
 import selectors
@@ -22,6 +21,9 @@ import threading
 import time
 import uuid
 
+from .filesystem import fs
+from .filesystem import existing_directory, same_path, secure_private_dir
+from . import process_runtime
 from . import clash, context_usage, providers, sdd
 from .config import DEFAULT_LENSES
 
@@ -111,7 +113,8 @@ def agent_settings(options, previous=None):
 
 @lru_cache(maxsize=1)
 def fleet_runtime():
-    executable = os.environ.get('HARNESS_FLEET_PYTHON') or str(Path(__file__).resolve().parents[2] / '.venv/bin/python')
+    runtime = Path(__file__).resolve().parents[2] / '.venv'
+    executable = os.environ.get('HARNESS_FLEET_PYTHON') or str(runtime / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python'))
     available = False
     try:
         probe = subprocess.run([executable, '-c', 'from langgraph.checkpoint.sqlite import SqliteSaver; from harness.graphs.fleet_review import build_graph'],
@@ -151,11 +154,11 @@ def validate_fleet(data, provider, agents_enabled, effort):
     return {'lenses': lenses, 'dry_run': dry_run, 'budget_usd': budget, 'worker_timeout': timeout}
 
 
-def run_git(root, *args, guard_lock=None, timeout=30):
+def run_git(root, *args, guard_lock=None, guard_owner=None, timeout=30):
     # Do not let an inherited GIT_DIR/GIT_WORK_TREE redirect a selected project.
     environment = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
     environment['GIT_TERMINAL_PROMPT'] = '0'
-    command = ['git', '--no-optional-locks', '-c', 'core.hooksPath=/dev/null',
+    command = ['git', '--no-optional-locks', '-c', 'core.hooksPath=' + os.devnull,
                '-c', 'core.fsmonitor=false', '-C', str(root), *args]
     try:
         if guard_lock is None:
@@ -167,41 +170,40 @@ def run_git(root, *args, guard_lock=None, timeout=30):
         process = None
         try:
             try:
-                process = subprocess.Popen(
-                    [sys.executable, str(Path(__file__).with_name('process_guard.py')), str(read_fd), '--', *command],
+                process = process_runtime.launch_guarded(command, read_fd, lock_fd=guard_lock,
                     env=environment, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    text=True, errors='replace', start_new_session=True, pass_fds=(read_fd, guard_lock))
+                    text=True, errors='replace')
             finally:
-                os.close(read_fd)
+                fs.close(read_fd)
             stdout, stderr = process.communicate(timeout=timeout)
             return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
         finally:
-            os.close(write_fd)
+            fs.close(write_fd)
             if process is not None:
                 try:
                     process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
                     pass
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                process.wait()
+                reaped = process_runtime.reap_tree(process, owner=guard_owner)
                 process.stdout.close()
                 process.stderr.close()
+                if not reaped:
+                    raise SessionError("Git process cleanup could not be confirmed. Check native processes before restarting.")
     except (OSError, subprocess.TimeoutExpired) as error:
         raise SessionError('Git is unavailable or the Git operation timed out.') from error
 
 
 def git_details(root, include_status=True):
     root = Path(root)
-    if not root.is_dir() or root.resolve() != root:
+    if not root.is_dir() or (os.name != 'nt' and root.resolve() != root):
         raise SessionError('Original project is unavailable.')
+    if os.name == 'nt':
+        root = existing_directory(root)
     result = run_git(root, 'rev-parse', '--show-toplevel')
     if result.returncode:
         return {'is_git': False, 'branch': None, 'head': None, 'dirty': False if include_status else None,
                 'worktree_available': False, 'reason': 'Select a Git working directory to use a worktree.'}
-    top = Path(result.stdout.strip()).resolve()
+    top = existing_directory(result.stdout.strip()) if os.name == 'nt' else Path(result.stdout.strip()).resolve()
     branch = run_git(root, 'symbolic-ref', '--quiet', '--short', 'HEAD')
     head = run_git(root, 'rev-parse', '--verify', 'HEAD')
     common = run_git(root, 'rev-parse', '--git-common-dir')
@@ -211,7 +213,9 @@ def git_details(root, include_status=True):
     if common.returncode or (status is not None and status.returncode) or branch.returncode not in (0, 1):
         raise SessionError('Could not read the project Git state.')
     reason = None if head.returncode == 0 else 'Create the first commit before starting a worktree.'
-    prefix = root.relative_to(top)
+    prefix = Path(os.path.relpath(root, top)) if os.name == 'nt' else root.relative_to(top)
+    if prefix.is_absolute() or '..' in prefix.parts:
+        raise SessionError('Git project root changed.')
     if reason is None and prefix != Path('.'):
         tree = run_git(root, 'cat-file', '-t', head.stdout.strip() + ':' + prefix.as_posix())
         if tree.returncode or tree.stdout.strip() != 'tree':
@@ -220,7 +224,8 @@ def git_details(root, include_status=True):
             'head': head.stdout.strip() if head.returncode == 0 else None,
             'dirty': bool(status.stdout) if status is not None else None, 'worktree_available': reason is None,
             'reason': reason,
-            'root': str(top), 'common_dir': str((root / common.stdout.strip()).resolve())}
+            'root': str(top), 'common_dir': str(existing_directory(root / common.stdout.strip())
+                if os.name == 'nt' else (root / common.stdout.strip()).resolve())}
 
 
 def validate_prompt(prompt):
@@ -281,30 +286,28 @@ def routed_model_settings(provider, options, workflow, mode, sdd_settings=None, 
 def open_project_path(root, name, directory=False):
     """Open a canonical relative path, rejecting symlinks at every component."""
     if (not isinstance(name, str) or not name or len(name) > 1024
-            or '\\' in name or Path(name).is_absolute() or str(Path(name)) != name
-            or '..' in Path(name).parts or any(ord(c) < 32 or ord(c) == 127 for c in name)):
+            or '\\' in name or PurePosixPath(name).is_absolute() or str(PurePosixPath(name)) != name
+            or '..' in PurePosixPath(name).parts
+            or (os.name == 'nt' and any(':' in part or part.endswith((' ', '.')) for part in PurePosixPath(name).parts))
+            or any(ord(c) < 32 or ord(c) == 127 for c in name)):
         raise OSError('Invalid project path')
     root = Path(root)
     if not root.is_absolute() or '..' in root.parts:
         raise OSError('Invalid project root')
-    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    descriptor = os.open(root.anchor, directory_flags)
+    directory_flags = os.O_RDONLY | fs.O_DIRECTORY | fs.O_NOFOLLOW
+    descriptor = fs.open_target_directory(root)
     try:
-        for part in root.parts[1:]:
-            child = os.open(part, directory_flags, dir_fd=descriptor)
-            os.close(descriptor)
-            descriptor = child
-        parts = Path(name).parts
+        parts = PurePosixPath(name).parts
         for index, part in enumerate(parts):
-            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+            flags = os.O_RDONLY | fs.O_NOFOLLOW | fs.O_NONBLOCK
             if directory or index < len(parts) - 1:
-                flags |= os.O_DIRECTORY
-            child = os.open(part, flags, dir_fd=descriptor)
-            os.close(descriptor)
+                flags |= fs.O_DIRECTORY
+            child = fs.open(part, flags, dir_fd=descriptor)
+            fs.close(descriptor)
             descriptor = child
         return descriptor
     except BaseException:
-        os.close(descriptor)
+        fs.close(descriptor)
         raise
 
 
@@ -363,7 +366,7 @@ def read_context(root, name, limit=0):
     descriptor = None
     try:
         descriptor = open_project_path(root, name)
-        metadata = os.fstat(descriptor)
+        metadata = fs.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             return None
         return metadata.st_size, os.read(descriptor, limit).decode('utf-8', errors='replace')
@@ -371,7 +374,7 @@ def read_context(root, name, limit=0):
         return None
     finally:
         if descriptor is not None:
-            os.close(descriptor)
+            fs.close(descriptor)
 
 
 def memory_entry(path, size, text):
@@ -399,16 +402,18 @@ def memory_entry(path, size, text):
 class Sessions:
     def __init__(self, state_dir: Path, projects, overrides=None, timeout=900):
         self.state_dir = state_dir
+        if os.name == 'nt':
+            self.state_dir = secure_private_dir(state_dir, migrate=False)
         self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         if self.state_dir.is_symlink():
             raise SessionError("State directory must not be a symbolic link.")
         os.chmod(self.state_dir, 0o700)
         self.projects = {}
         for candidate in projects:
-            path = Path(candidate).expanduser().resolve(strict=True)
+            path = existing_directory(candidate)
             if not path.is_dir():
                 raise SessionError("Each project must be an existing directory.")
-            key = hashlib.sha256(str(path).encode()).hexdigest()[:16]
+            key = hashlib.sha256(os.path.normcase(str(path)).encode()).hexdigest()[:16]
             self.projects[key] = {"id": key, "name": path.name, "path": str(path)}
         if not self.projects:
             raise SessionError("Register at least one project when starting the server.")
@@ -436,15 +441,16 @@ class Sessions:
                 id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE);
         ''')
         # Inherited by the guard, so a restart waits for a crashed owner's run.
-        self.runner_lock = os.open(self.state_dir / 'runner.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         lock_deadline = time.monotonic() + 5
         while True:
             try:
-                fcntl.flock(self.runner_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.runner_lock = fs.open_lock(self.state_dir / 'runner.lock')
                 break
-            except BlockingIOError:
+            except OSError as error:
+                if not isinstance(error, BlockingIOError) and getattr(error, 'winerror', None) != 32:
+                    self.db.close()
+                    raise
                 if time.monotonic() >= lock_deadline:
-                    os.close(self.runner_lock)
                     self.db.close()
                     raise SessionError('Another runner still owns this state directory.')
                 time.sleep(.05)
@@ -588,7 +594,7 @@ class Sessions:
             if not path.is_absolute() or '..' in path.parts:
                 raise SessionError('Enter an absolute project path without parent traversal.')
             descriptor = open_project_path(path, '.', directory=True)
-            os.close(descriptor)
+            fs.close(descriptor)
             return path
         except (OSError, ValueError, RuntimeError):
             raise SessionError('The project directory is missing, inaccessible, or contains a symbolic link.') from None
@@ -608,11 +614,14 @@ class Sessions:
         if not isinstance(data, dict) or set(data) != {'path'}:
             raise SessionError('A project registration accepts only its path.')
         path = self._project_folder(data['path'])
-        key = hashlib.sha256(str(path).encode()).hexdigest()[:16]
+        key = hashlib.sha256(os.path.normcase(str(path)).encode()).hexdigest()[:16]
         project = {'id': key, 'name': path.name or str(path), 'path': str(path)}
         with self.lock:
             if self.stopping.is_set():
                 raise SessionError('The server is stopping.')
+            existing = next((value for value in self.projects.values() if same_path(value['path'], path)), None)
+            if existing:
+                return {**existing, 'available': True}
             if key not in self.projects and len(self.projects) >= 100:
                 raise SessionError('This server supports up to 100 registered projects.')
             self.db.execute('INSERT OR IGNORE INTO registered_projects(id,path) VALUES (?,?)', (key, str(path)))
@@ -626,10 +635,12 @@ class Sessions:
     def _workspace(self, session):
         source = Path(self.project(session['project_id'])['path'])
         project = Path(session['project_path'])
-        if not project.is_dir() or project.resolve() != project:
+        if not project.is_dir() or (os.name != 'nt' and project.resolve() != project):
             raise SessionError('The original workspace is unavailable. Start a new session.')
+        if os.name == 'nt':
+            existing_directory(project)
         if session.get('creator'):
-            if project != self.state_dir / 'creator' / session['creator']['run_id'] / 'agent':
+            if not same_path(project, self.state_dir / 'creator' / session['creator']['run_id'] / 'agent'):
                 raise SessionError('Creator workspace changed.')
             return project
         if session.get('system_discovery'):
@@ -637,19 +648,24 @@ class Sessions:
                 raise SessionError('AI discovery workspace changed.')
             return project
         if session['workspace'] == 'project':
-            if project != source:
+            if not same_path(project, source):
                 raise SessionError('The original project is no longer registered.')
         else:
             original, current = git_details(source), git_details(project)
             root = self.state_dir / 'worktrees' / session['id']
+            if not original['is_git'] or not current['is_git']:
+                raise SessionError('The original worktree no longer belongs to this project.')
+            prefix = Path(os.path.relpath(source, original['root'])) if os.name == 'nt' else source.relative_to(Path(original['root']))
+            if prefix.is_absolute() or '..' in prefix.parts:
+                raise SessionError('Git project root changed.')
             if (not original['is_git'] or not current['is_git']
-                    or original['common_dir'] != session['git_common_dir']
-                    or current['common_dir'] != session['git_common_dir']
-                    or current['root'] != str(root)
-                    or project != root / source.relative_to(Path(original['root']))):
+                    or not same_path(original['common_dir'], session['git_common_dir'])
+                    or not same_path(current['common_dir'], session['git_common_dir'])
+                    or not same_path(current['root'], root)
+                    or not same_path(project, root / prefix)):
                 raise SessionError('The original worktree no longer belongs to this project.')
             listing = run_git(source, 'worktree', 'list', '--porcelain', '-z')
-            if listing.returncode or 'worktree ' + str(root) not in listing.stdout.split('\0'):
+            if listing.returncode or not any(same_path(value[9:], root) for value in listing.stdout.split('\0') if value.startswith('worktree ')):
                 raise SessionError('The original worktree is no longer registered in Git.')
         return project
 
@@ -678,14 +694,19 @@ class Sessions:
             raise SessionError('This Git branch already exists. Choose a new branch name.')
         folder = self.state_dir / 'worktrees'
         folder.mkdir(mode=0o700, exist_ok=True)
-        if folder.is_symlink() or folder.resolve() != folder:
+        if folder.is_symlink() or (os.name != 'nt' and folder.resolve() != folder):
             raise SessionError('The worktree storage directory is unsafe.')
+        if os.name == 'nt':
+            existing_directory(folder)
         root = folder / sid
         result = run_git(source, 'worktree', 'add', '-b', branch, '--', str(root), details['head'],
-                         guard_lock=self.runner_lock)
+                         guard_lock=self.runner_lock, guard_owner=self)
         if result.returncode:
             raise SessionError('Git could not create the worktree. Check disk space and the new branch name.')
-        cwd = root / source.relative_to(Path(details['root']))
+        prefix = Path(os.path.relpath(source, details['root'])) if os.name == 'nt' else source.relative_to(Path(details['root']))
+        if prefix.is_absolute() or '..' in prefix.parts:
+            raise SessionError('Git project root changed.')
+        cwd = root / prefix
         if not cwd.is_dir():
             raise SessionError('The selected project directory is absent from HEAD. The new worktree was kept for inspection.')
         return cwd, workspace, branch, details['common_dir']
@@ -722,7 +743,7 @@ class Sessions:
                 descriptor = open_project_path(root, candidate, directory=True)
             except OSError:
                 continue
-            os.close(descriptor)
+            fs.close(descriptor)
             banks.append({'id': candidate, 'path': candidate, 'name': label})
         if bank is None and path is None:
             bank = banks[0]['id'] if banks else None
@@ -748,7 +769,7 @@ class Sessions:
                 except OSError:
                     continue
                 try:
-                    with os.scandir(descriptor) as names:
+                    with fs.scandir(descriptor) as names:
                         for item in names:
                             scanned += 1
                             if scanned > 5000:
@@ -765,7 +786,7 @@ class Sessions:
                                 break
                             entries.append(memory_entry(relative, *content))
                 finally:
-                    os.close(descriptor)
+                    fs.close(descriptor)
                 if truncated:
                     break
         entries.sort(key=lambda item: (item['kind'] != 'chunk', item['path'].casefold()))
@@ -1085,10 +1106,7 @@ class Sessions:
 
     @staticmethod
     def _signal(process, sig):
-        try:
-            os.killpg(process.pid, sig)
-        except ProcessLookupError:
-            pass
+        process_runtime.signal_tree(process, force=sig != signal.SIGTERM)
 
     def _prompt(self, session, prompt, ledger=None):
         """The launch prompt. `ledger`, when given, receives its parts as integers for Usage › Context:
@@ -1314,20 +1332,17 @@ class Sessions:
                 agent_status += ' Ultracode uses native workflow availability and concurrency limits.'
             self._event(sid, {"kind": "status", "text": agent_status + ' ' + self.providers[provider].get('agent_control_detail', '')})
             watchdog_read, watchdog_write = os.pipe()
-            guarded = [sys.executable, str(Path(__file__).with_name('process_guard.py')), str(watchdog_read)]
-            if fleet:
-                guarded.extend(['--lock-fd', str(self.runner_lock)])
-            guarded.extend(['--', *command])
             launch_started_at = time.time()
             try:
-                process = subprocess.Popen(guarded, cwd=project, env=environment, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True, pass_fds=(watchdog_read, self.runner_lock))
+                process = process_runtime.launch_guarded(command, watchdog_read, lock_fd=self.runner_lock,
+                    cwd=project, env=environment, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             except Exception:
-                os.close(watchdog_write)
+                fs.close(watchdog_write)
                 raise
             finally:
-                os.close(watchdog_read)
+                fs.close(watchdog_read)
             self.active[sid] = process
-        selector = selectors.DefaultSelector()
+        selector = process_runtime.PipeSelector()
         selector.register(process.stdout, selectors.EVENT_READ)
         started = time.monotonic()
         # Codex streams no per-call fill; its rollout grows with each call and is read as it does.
@@ -1386,10 +1401,10 @@ class Sessions:
                     break
                 ready = selector.select(.2)
                 if not ready:
-                    if process.poll() is not None:
+                    if process.poll() is not None and not process_runtime.WINDOWS:
                         break
                     continue
-                chunk = os.read(process.stdout.fileno(), 65536)
+                chunk = selector.read(process.stdout, 65536)
                 eof = not chunk
                 if eof and not buffer:
                     break
@@ -1497,21 +1512,18 @@ class Sessions:
                 if outcome == 'failed':
                     self._event(sid, {"kind": "error", "text": "Provider did not complete successfully. Check CLI authentication, permissions and the reported events."})
         finally:
-            os.close(watchdog_write)
-            if process.poll() is None:
-                self._signal(process, signal.SIGTERM)
-                try:
-                    process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    self._signal(process, signal.SIGKILL)
-                    process.wait(timeout=2)
-            # A child can outlive the CLI parent; terminate any remaining process group.
-            self._signal(process, signal.SIGKILL)
+            fs.close(watchdog_write)
+            reaped = process_runtime.reap_tree(process)
+            if not reaped:
+                self.stopping.set()
+                outcome = 'failed'
+                self._event(sid, {'kind': 'error', 'text': 'Process cleanup could not be confirmed. The runner is stopping; check native processes before restarting.'})
             selector.close()
             process.stdout.close()
             writer.join(timeout=1)
             with self.lock:
-                self.active.pop(sid, None)
+                if reaped:
+                    self.active.pop(sid, None)
             save_usage()
         if delegation:
             for receipt in delegation.reconcile(native_id, project, launch_started_at, time.time()):
@@ -1547,4 +1559,4 @@ class Sessions:
             self.db.commit()
             if not self.worker.is_alive():
                 self.db.close()
-                os.close(self.runner_lock)
+                fs.close(self.runner_lock)

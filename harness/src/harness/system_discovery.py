@@ -17,6 +17,7 @@ from .creator import isolation_backend
 from .discovery_sandbox import sandbox_problem
 from .sessions import ACTIVE, SessionError
 from .system_editor import snapshot
+from .system_orchestration import UNAVAILABLE
 
 MAX_FILES = 120
 MAX_FILE = 64 * 1024
@@ -275,6 +276,8 @@ class DiscoveryManager:
         self.sessions, self.editor = sessions, editor
 
     def start(self, data):
+        if UNAVAILABLE:
+            raise SessionError(UNAVAILABLE)
         # Probe the sandbox outside the server lock: it starts a short process. A host
         # that blocks bubblewrap gets the actual reason instead of a failed scan later.
         problem = isolation_backend() and sandbox_problem()
@@ -399,6 +402,8 @@ class DiscoveryManager:
             return self.get(session['id'])
 
     def get(self, sid):
+        if UNAVAILABLE:
+            raise SessionError(UNAVAILABLE)
         try:
             return self._get(sid)
         except (SystemError, OSError, ValueError, TypeError, KeyError) as error:

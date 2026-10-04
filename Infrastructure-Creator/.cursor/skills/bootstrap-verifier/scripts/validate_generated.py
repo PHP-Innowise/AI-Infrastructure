@@ -68,6 +68,7 @@ from infra_ownership import (  # noqa: E402
     resolve_target,
     sha256_file,
     validate_decisions,
+    normalize_relative_path,
 )
 from validate_skill_quality import (  # noqa: E402
     DEFAULT_REGISTRY,
@@ -483,7 +484,7 @@ def validate_hooks(target: Path, editions: list, files: dict, errors: list) -> N
             if result.returncode != 0:
                 errors.append(f"{sh}: bash -n failed: {result.stderr.strip()}")
             mode = sh.stat().st_mode
-            if not (mode & 0o111):
+            if os.name != 'nt' and not (mode & 0o111):
                 errors.append(f"{sh}: not executable (chmod +x needed)")
 
 
@@ -541,7 +542,7 @@ def validate_hook_wiring(
                     errors.append(
                         f"{wiring_path}: wired hook does not exist: {script_token}"
                     )
-                elif not (script_path.stat().st_mode & 0o111):
+                elif os.name != 'nt' and not (script_path.stat().st_mode & 0o111):
                     errors.append(
                         f"{wiring_path}: wired hook not executable: {script_token}"
                     )
@@ -810,7 +811,11 @@ def validate_manifest(target: Path, errors: list) -> dict:
         errors.append(f"{MANIFEST_NAME}: {error}")
 
     for rel, expected_sha in files.items():
-        if not isinstance(rel, str) or not rel or Path(rel).is_absolute() or ".." in Path(rel).parts:
+        try:
+            if not isinstance(rel, str):
+                raise OwnershipError('File path must be a string.')
+            normalize_relative_path(rel)
+        except OwnershipError:
             errors.append(f"{MANIFEST_NAME}: invalid target-relative file path: {rel!r}")
             continue
         if rel == MANIFEST_NAME:

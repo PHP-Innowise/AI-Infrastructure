@@ -22,6 +22,9 @@ import subprocess
 from typing import Optional
 from urllib.parse import urlsplit
 
+from .filesystem import fs
+from .windows_commands import command_argv
+
 PROVIDERS = {"claude": "Claude Code", "codex": "Codex", "cursor": "Cursor Agent"}
 PROBE_TIMEOUT = 3
 AGENT_CONTROL_DETAILS = {
@@ -47,7 +50,10 @@ def _value(value: str, label: str) -> str:
 def _probe(executable: str, provider: str) -> bool:
     output = []
     for flag in ("--version", "--help"):
-        command = [executable]
+        try:
+            command = command_argv([executable], provider)
+        except ValueError:
+            return False
         if provider == "cursor":
             # Even help/version can update Cursor's shared `agent` launcher.
             command.append("--disable-auto-update")
@@ -155,8 +161,8 @@ def _catalog_rows(data) -> list[dict]:
 def _read_model_cache(path: Path) -> list[dict]:
     descriptor = None
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        metadata = os.fstat(descriptor)
+        descriptor = fs.open(path, os.O_RDONLY | fs.O_NOFOLLOW | fs.O_NONBLOCK)
+        metadata = fs.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MODEL_CATALOG_LIMIT:
             return []
         payload = os.read(descriptor, MODEL_CATALOG_LIMIT + 1)
@@ -165,7 +171,7 @@ def _read_model_cache(path: Path) -> list[dict]:
         return []
     finally:
         if descriptor is not None:
-            os.close(descriptor)
+            fs.close(descriptor)
 
 
 @lru_cache(maxsize=3)
@@ -202,7 +208,7 @@ def _model_options(provider: str) -> dict:
             try:
                 # This documented offline branch returns bundled data before
                 # Codex constructs configuration or an authentication manager.
-                completed = subprocess.run([executable, "debug", "models", "--bundled"],
+                completed = subprocess.run(command_argv([executable, "debug", "models", "--bundled"], "codex"),
                                            stdin=subprocess.DEVNULL, capture_output=True,
                                            timeout=PROBE_TIMEOUT, check=False)
                 if completed.returncode == 0 and len(completed.stdout) <= MODEL_CATALOG_LIMIT:
@@ -342,9 +348,9 @@ def codex_rollout(native_id, project):
             return None
         if not any(root in path.parents for root in (home / 'sessions', home / 'archived_sessions')):
             return None
-        stream = os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb')
+        stream = os.fdopen(fs.open(path, os.O_RDONLY | fs.O_NOFOLLOW | fs.O_NONBLOCK), 'rb')
         try:
-            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            if not stat.S_ISREG(fs.fstat(stream.fileno()).st_mode):
                 raise ValueError('not a regular file')
             first = json.loads(stream.readline(65536))
             meta = first.get('payload', {})
@@ -368,7 +374,7 @@ def codex_rollout_tail(native_id, project):
     try:
         with stream:
             # ponytail: inspect only the last 4 MiB; absent/older metadata stays unconfirmed.
-            offset = max(stream.tell(), os.fstat(stream.fileno()).st_size - 4 * 1024 * 1024)
+            offset = max(stream.tell(), fs.fstat(stream.fileno()).st_size - 4 * 1024 * 1024)
             if offset > stream.tell():
                 stream.seek(offset); stream.readline(4 * 1024 * 1024)
             return stream.read(4 * 1024 * 1024)
@@ -530,8 +536,9 @@ def build_command(provider: str, executable: str, project: Path, prompt: str,
             raise ValueError("invalid native session ID")
     if budget_usd is not None and (provider != 'claude' or type(budget_usd) not in (int,float) or not .01 <= budget_usd <= 1000 or not math.isfinite(budget_usd)):
         raise ValueError('A USD cap of $0.01–$1000 is supported only for Claude.')
+    launch = command_argv([executable], provider)
     if provider == "claude":
-        command = [executable, "--print", "--output-format", "stream-json", "--verbose",
+        command = [*launch, "--print", "--output-format", "stream-json", "--verbose",
                    "--permission-mode", "plan" if mode == "plan" else "acceptEdits"]
         ultracode = thinking_effort == "ultracode"
         if ultracode:
@@ -558,7 +565,7 @@ def build_command(provider: str, executable: str, project: Path, prompt: str,
             command.append("--include-hook-events")
     elif provider == "codex":
         # Resume does not accept --sandbox/--cd: global flags precede `exec`.
-        command = [executable, "--ask-for-approval", "never", "--sandbox",
+        command = [*launch, "--ask-for-approval", "never", "--sandbox",
                    "read-only" if mode == "plan" else "workspace-write", "--cd", str(project)]
         if agents_enabled:
             # Codex 0.153.2: V1 counts helpers; V2 counts the main thread too.
@@ -579,7 +586,7 @@ def build_command(provider: str, executable: str, project: Path, prompt: str,
             command.append("resume")
         command.append("--json")
     else:
-        command = [executable, "--disable-auto-update", "--print", "--output-format", "stream-json",
+        command = [*launch, "--disable-auto-update", "--print", "--output-format", "stream-json",
                    "--workspace", str(project), "--sandbox", "enabled"]
         if mode == "plan":
             command.extend(["--mode", "plan"])

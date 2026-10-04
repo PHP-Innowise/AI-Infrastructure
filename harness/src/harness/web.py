@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -26,6 +25,8 @@ ASSETS = {name: 'text/css; charset=utf-8' if name.endswith('.css') else 'text/ja
                        'agent-activity.js', 'system.js', 'system-editor.js', 'system-discovery.js')}
 sys.path.insert(0, str(ROOT / 'harness/src'))
 sys.path.insert(0, str(ROOT / 'scripts'))
+from harness.filesystem import fs, secure_private_dir, default_state_dir, existing_directory
+from harness import process_runtime
 from harness.sessions import Sessions, SessionError, WORKFLOWS, MAX_AGENTS, DEFAULT_AGENT_COUNT, CONTEXT_EXCERPT_BYTES, fleet_runtime
 from harness import clash, sdd
 from harness.attachments import MAX_JSON_BYTES
@@ -35,7 +36,7 @@ from harness import memory_use
 from harness.startup_context import startup_context
 from harness.setup import SetupManager
 from harness.creator import CreatorManager
-from harness.system_orchestration import SystemManager
+from harness.system_orchestration import SystemManager, UNAVAILABLE as SYSTEM_UNAVAILABLE
 from harness.system_discovery import DiscoveryManager
 from harness.discovery_sandbox import sandbox_problem
 from harness.project_browser import browse_projects
@@ -106,7 +107,8 @@ class HarnessServer(ThreadingHTTPServer):
             ],
             # Probed per page load so a host fix is visible after a reload.
             'runtime': {'timeout_seconds': self.sessions.timeout, 'max_active': 1,
-                        'discovery_sandbox': sandbox_problem(),
+                        'discovery_sandbox': SYSTEM_UNAVAILABLE or sandbox_problem(),
+                        'system_unavailable': SYSTEM_UNAVAILABLE,
                         'max_agents': MAX_AGENTS, 'default_agent_count': DEFAULT_AGENT_COUNT,
                         'context_excerpt_bytes': CONTEXT_EXCERPT_BYTES,
                         'fleet': {key: value for key, value in fleet_runtime().items() if key != 'executable'}},
@@ -469,19 +471,17 @@ class Handler(BaseHTTPRequestHandler):
             self.error(500, 'The server could not complete this request.')
 
 
-def private_dir(path):
-    path = Path(path).expanduser().absolute()
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if path.is_symlink():
-        raise SessionError('State directory must not be a symbolic link.')
-    os.chmod(path, 0o700)
-    return path
+def private_dir(path, *, migrate=False):
+    try:
+        return secure_private_dir(path, migrate=migrate)
+    except OSError as error:
+        raise SessionError(str(error)) from error
 
 
 def metadata(state):
     path = state / 'server.json'
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        descriptor = fs.open(path, os.O_RDONLY | fs.O_NOFOLLOW)
         with os.fdopen(descriptor) as handle:
             data = json.load(handle)
         if (type(data.get('port')) is int and 0 < data['port'] < 65536
@@ -512,21 +512,24 @@ def running(state):
 
 
 def serve(args, state):
-    lock_fd = os.open(state / 'server.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        os.close(lock_fd)
-        raise SessionError('A server already owns this state directory.')
+        lock_fd = fs.open_lock(state / 'server.lock')
+    except OSError as error:
+        if isinstance(error, BlockingIOError) or getattr(error, 'winerror', None) == 32:
+            raise SessionError('A server already owns this state directory.') from error
+        raise
+    state_fd = None
     server = None
     try:
+        state_fd = fs.open_target_directory(state)
         overrides = {name: getattr(args, name + '_bin') for name in ('claude', 'codex', 'cursor') if getattr(args, name + '_bin')}
         server = HarnessServer(('127.0.0.1', args.port), state, args.project or [Path.cwd()], overrides, args.timeout)
         info = {'pid': os.getpid(), 'port': server.server_port, 'instance': server.instance, 'token': server.token}
-        descriptor, temporary = tempfile.mkstemp(prefix='server-', dir=state)
+        temporary = 'server-' + secrets.token_hex(16)
+        descriptor = fs.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | fs.O_NOFOLLOW, 0o600, dir_fd=state_fd)
         with os.fdopen(descriptor, 'w') as handle:
             json.dump(info, handle)
-        os.replace(temporary, state / 'server.json')
+        fs.replace(temporary, 'server.json', src_dir_fd=state_fd, dst_dir_fd=state_fd)
         def stop_signal(*_):
             threading.Thread(target=server.shutdown, daemon=True).start()
         signal.signal(signal.SIGTERM, stop_signal)
@@ -543,8 +546,13 @@ def serve(args, state):
             server.server_close()
             current = metadata(state)
             if current and current['instance'] == server.instance:
-                (state / 'server.json').unlink(missing_ok=True)
-        os.close(lock_fd)
+                try:
+                    fs.unlink('server.json', dir_fd=state_fd)
+                except FileNotFoundError:
+                    pass
+        if state_fd is not None:
+            fs.close(state_fd)
+        fs.close(lock_fd)
 
 
 def main():
@@ -552,7 +560,7 @@ def main():
     parser.add_argument('command', choices=('start', 'serve', 'status', 'stop'), nargs='?', default='start')
     parser.add_argument('--project', action='append', type=Path, help='Register an existing project; repeat for multiple projects (default: current directory).')
     parser.add_argument('--port', type=int, default=8766)
-    parser.add_argument('--state-dir', type=Path, default=Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local/state')) / 'ai-infrastructure-harness')
+    parser.add_argument('--state-dir', type=Path, default=default_state_dir())
     parser.add_argument('--timeout', type=int, default=900, help='Initial time budget for API requests without a budgets object (default: 900). Explicit null means no time limit.')
     for name in ('claude', 'codex', 'cursor'):
         parser.add_argument('--' + name + '-bin', help='Explicit native CLI executable path.')
@@ -560,11 +568,11 @@ def main():
     try:
         for name in ('claude', 'codex', 'cursor'):
             executable = getattr(args, name + '_bin')
-            if executable and ('/' in executable or executable.startswith('~')):
+            if executable and ('/' in executable or '\\' in executable or executable.startswith('~')):
                 setattr(args, name + '_bin', str(Path(executable).expanduser().resolve()))
         if not 0 <= args.port < 65536 or not 1 <= args.timeout <= 86400:
             raise SessionError('Invalid port or timeout (1–86400 seconds).')
-        state = private_dir(args.state_dir)
+        state = private_dir(args.state_dir, migrate=args.command == 'serve')
         if args.command == 'serve':
             serve(args, state)
             return 0
@@ -588,13 +596,13 @@ def main():
             return 0
         command = [sys.executable, str(Path(__file__).resolve()), 'serve', '--state-dir', str(state), '--port', str(args.port), '--timeout', str(args.timeout)]
         for project in args.project or [Path.cwd()]:
-            command.extend(['--project', str(project.expanduser().resolve(strict=True))])
+            command.extend(['--project', str(existing_directory(project))])
         for name in ('claude', 'codex', 'cursor'):
             if getattr(args, name + '_bin'):
                 command.extend(['--' + name + '-bin', getattr(args, name + '_bin')])
-        log_fd = os.open(state / 'server.log', os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        log_fd = fs.open(state / 'server.log', os.O_WRONLY | os.O_APPEND | os.O_CREAT | fs.O_NOFOLLOW, 0o600)
         with os.fdopen(log_fd, 'ab') as log:
-            process = subprocess.Popen(command, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+            process = subprocess.Popen(command, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=log, stderr=log, **process_runtime.daemon_kwargs())
         for _ in range(175):
             info = running(state)
             if info:

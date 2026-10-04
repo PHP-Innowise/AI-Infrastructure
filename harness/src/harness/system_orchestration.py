@@ -10,6 +10,9 @@ import sys
 import uuid
 
 ROOT = Path(__file__).resolve().parents[3]
+# Descriptor-relative writes, flock and process groups have no native Windows port yet.
+UNAVAILABLE = ('System Orchestration needs Linux or macOS. It is not available on native Windows yet.'
+               if os.name == 'nt' else None)
 sys.path.insert(0, str(ROOT / 'scripts'))
 from ai_system_lib import System, SystemError, open_directory
 import ai_system_execution as execution
@@ -20,6 +23,8 @@ from .system_editor import SystemEditor
 def boundary(function):
     @wraps(function)
     def checked(*args, **kwargs):
+        if UNAVAILABLE:
+            raise SessionError(UNAVAILABLE)
         try:
             return function(*args, **kwargs)
         except SystemError as error:
@@ -49,6 +54,8 @@ class SystemManager:
         self.sessions = sessions
         self.editor = SystemEditor(sessions)
         self.root = sessions.state_dir / 'ai-system'
+        if UNAVAILABLE:
+            return  # Every entry point refuses through boundary().
         self.root.mkdir(mode=0o700, exist_ok=True)
         fd = open_directory(self.root)
         os.close(fd)

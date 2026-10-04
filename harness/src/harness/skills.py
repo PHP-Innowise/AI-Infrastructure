@@ -20,6 +20,8 @@ import time
 import uuid
 from urllib.request import Request, urlopen
 
+from .filesystem import fs
+from . import process_runtime
 from .sessions import SessionError, open_project_path, read_context
 from .setup import _read, _root_fd, _identity, _metadata, _diff, SetupManager
 
@@ -115,17 +117,15 @@ class SkillManager:
                        'npm_config_ignore_scripts': 'true', 'CI': '1',
                        'XDG_STATE_HOME': str(Path(cwd).parent / 'native-state')}
         try:
-            guarded = [sys.executable, str(Path(__file__).with_name('process_guard.py')), str(read_fd), '--', *command]
             with tempfile.TemporaryFile() as output:
-                process = subprocess.Popen(guarded, cwd=cwd, env=environment, stdin=subprocess.DEVNULL,
-                                           stdout=output, stderr=subprocess.DEVNULL,
-                                           start_new_session=True, pass_fds=(read_fd,))
+                process = process_runtime.launch_guarded(command, read_fd, lock_fd=self.store.runner_lock, cwd=cwd, env=environment, stdin=subprocess.DEVNULL,
+                                           stdout=output, stderr=subprocess.DEVNULL)
                 self.process = process
                 started = time.monotonic()
                 while process.poll() is None:
                     if self.store.stopping.is_set() or time.monotonic() - started > 90:
                         raise SessionError('Loading skills stopped or timed out. Try again.')
-                    if os.fstat(output.fileno()).st_size > 2 * 1024 * 1024:
+                    if fs.fstat(output.fileno()).st_size > 2 * 1024 * 1024:
                         raise SessionError('The skill manager produced too much output.')
                     time.sleep(.05)
                 if process.returncode:
@@ -133,11 +133,10 @@ class SkillManager:
                 output.seek(0)
                 return output.read(2 * 1024 * 1024).decode('utf-8')
         finally:
-            os.close(read_fd)
-            os.close(write_fd)
+            fs.close(read_fd)
+            fs.close(write_fd)
             if self.process:
-                self.store._signal(self.process, signal.SIGKILL)
-                self.process.wait(timeout=3)
+                process_runtime.reap_tree(self.process, owner=self.store)
                 self.process = None
 
     @staticmethod
@@ -198,7 +197,7 @@ class SkillManager:
                             raise SessionError('Invalid staged skill filename.')
                         fd = open_project_path(stage, path.relative_to(stage).as_posix())
                         with os.fdopen(fd, 'rb') as handle:
-                            info = os.fstat(handle.fileno())
+                            info = fs.fstat(handle.fileno())
                             total += info.st_size; count += 1
                             if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
                                     or total > MAX_BYTES or count > MAX_FILES):
@@ -241,7 +240,7 @@ class SkillManager:
         try:
             value = _read(fd, self._record_name(project))
         finally:
-            os.close(fd)
+            fs.close(fd)
         if value is None:
             return {}
         try:
@@ -275,16 +274,16 @@ class SkillManager:
         fd = _root_fd(self.store.state_dir)
         temporary = '.skills-' + uuid.uuid4().hex
         try:
-            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+            descriptor = fs.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | fs.O_NOFOLLOW, 0o600, dir_fd=fd)
             with os.fdopen(descriptor, 'wb') as handle:
                 handle.write(body); handle.flush(); os.fsync(handle.fileno())
-            os.replace(temporary, self._record_name(project), src_dir_fd=fd, dst_dir_fd=fd)
+            fs.replace(temporary, self._record_name(project), src_dir_fd=fd, dst_dir_fd=fd)
         finally:
             try:
-                os.unlink(temporary, dir_fd=fd)
+                fs.unlink(temporary, dir_fd=fd)
             except FileNotFoundError:
                 pass
-            os.close(fd)
+            fs.close(fd)
 
     @staticmethod
     def _tree(root_fd, path):
@@ -292,42 +291,42 @@ class SkillManager:
         total = 0
         def walk(parent, relative):
             nonlocal total
-            directories[relative] = _identity(os.fstat(parent))
+            directories[relative] = _identity(fs.fstat(parent))
             if len(directories) > MAX_FILES or relative.count('/') > 64:
                 raise SessionError('The skill contains too many directories.')
-            for name in sorted(os.listdir(parent)):
+            for name in sorted(fs.listdir(parent)):
                 full = relative + '/' + name
                 if not safe_path(full):
                     raise SessionError('The skill contains an unsupported filename.')
-                info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                info = fs.stat(name, dir_fd=parent, follow_symlinks=False)
                 if stat.S_ISDIR(info.st_mode):
-                    child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                    child = fs.open(name, os.O_RDONLY | fs.O_DIRECTORY | fs.O_NOFOLLOW, dir_fd=parent)
                     try:
                         walk(child, full)
                     finally:
-                        os.close(child)
+                        fs.close(child)
                 else:
                     value = _read(root_fd, full, directories, required=True)
                     total += value['bytes']
                     if len(files) >= MAX_FILES or total > MAX_BYTES:
                         raise SessionError('The skill exceeds the file or size limit.')
                     files[full[len(path)+1:]] = value
-        parent = os.dup(root_fd)
+        parent = fs.dup(root_fd)
         try:
             parts = path.split('/')
             for i, part in enumerate(parts):
                 try:
-                    child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                    child = fs.open(part, os.O_RDONLY | fs.O_DIRECTORY | fs.O_NOFOLLOW, dir_fd=parent)
                 except FileNotFoundError:
                     return files, directories
-                os.close(parent); parent = child
-                directories['/'.join(parts[:i+1])] = _identity(os.fstat(parent))
+                fs.close(parent); parent = child
+                directories['/'.join(parts[:i+1])] = _identity(fs.fstat(parent))
             walk(parent, path)
             return files, directories
         except OSError as error:
             raise SessionError('A skill directory is unsafe or unavailable.') from error
         finally:
-            os.close(parent)
+            fs.close(parent)
 
     @staticmethod
     def _hashes(files):
@@ -345,16 +344,16 @@ class SkillManager:
             except OSError:
                 continue
             try:
-                for name in sorted(os.listdir(fd))[:500]:
+                for name in sorted(fs.listdir(fd))[:500]:
                     if NAME.fullmatch(name) and read_context(root, f'{base}/{name}/SKILL.md') is not None:
                         path = f'{base}/{name}'
                         entries[path] = {'name': name, 'agent': agent, 'path': path, 'managed': False,
                                          'state': 'untracked', 'can_update': False, 'can_remove': False}
             finally:
-                os.close(fd)
+                fs.close(fd)
         fd = _root_fd(root)
         try:
-            identity = list(_identity(os.fstat(fd)))
+            identity = list(_identity(fs.fstat(fd)))
             for path, record in records.items():
                 try:
                     files, _ = self._tree(fd, path)
@@ -368,7 +367,7 @@ class SkillManager:
                     'can_update': status == 'clean' and source_id in self.sources,
                     'can_remove': status == 'clean'}
         finally:
-            os.close(fd)
+            fs.close(fd)
         return {'project_id': project_id, 'installed': [entries[key] for key in sorted(entries)]}
 
     @staticmethod
@@ -376,7 +375,7 @@ class SkillManager:
         try:
             fd = open_project_path(root, path)
             with os.fdopen(fd, 'rb') as handle:
-                info = os.fstat(handle.fileno())
+                info = fs.fstat(handle.fileno())
                 if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size != len(payload):
                     return 'conflict'
                 return 'identical' if handle.read(len(payload) + 1) == payload else 'conflict'
@@ -440,8 +439,8 @@ class SkillManager:
         root = Path(project['path'])
         try:
             fd = open_target_directory(root)
-            info = os.fstat(fd)
-            os.close(fd)
+            info = fs.fstat(fd)
+            fs.close(fd)
         except KitError as error:
             raise SessionError('The registered project path is no longer safe.') from error
         # Keep the preview and write bounded, including copies for multiple tools.
@@ -485,7 +484,7 @@ class SkillManager:
             fd = None
             try:
                 fd = open_target_directory(root)
-                info = os.fstat(fd)
+                info = fs.fstat(fd)
                 if root != preview['root'] or (info.st_dev, info.st_ino) != preview['identity']:
                     raise SessionError('The project changed. Preview again.')
                 records = self._records(self.store.project(preview['project_id']))
@@ -498,32 +497,32 @@ class SkillManager:
                     if statuses[path] == 'identical':
                         unchanged.append(path)
                         continue
-                    parent = os.dup(fd)
+                    parent = fs.dup(fd)
                     try:
                         parts = path.split('/')
                         for part in parts[:-1]:
                             try:
-                                os.mkdir(part, mode=0o755, dir_fd=parent)
+                                fs.mkdir(part, mode=0o755, dir_fd=parent)
                             except FileExistsError:
                                 pass
-                            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
-                            os.close(parent); parent = child
+                            child = fs.open(part, os.O_RDONLY | fs.O_DIRECTORY | fs.O_NOFOLLOW, dir_fd=parent)
+                            fs.close(parent); parent = child
                         temporary = '.harness-skill-' + uuid.uuid4().hex
-                        target = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        target = fs.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | fs.O_NOFOLLOW,
                                          preview['modes'].get(path, 0o644), dir_fd=parent)
                         try:
                             with os.fdopen(target, 'wb') as handle:
                                 handle.write(files[path])
-                                os.fchmod(handle.fileno(), preview['modes'].get(path, 0o644))
+                                fs.fchmod(handle.fileno(), preview['modes'].get(path, 0o644))
                                 handle.flush()
                                 os.fsync(handle.fileno())
                             # Atomic publication without replacing a file created since preflight.
-                            os.link(temporary, parts[-1], src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
+                            fs.link(temporary, parts[-1], src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
                         finally:
-                            os.unlink(temporary, dir_fd=parent)
+                            fs.unlink(temporary, dir_fd=parent)
                         installed.append(path)
                     finally:
-                        os.close(parent)
+                        fs.close(parent)
                 for path, record in preview['records'].items():
                     actual, _ = self._tree(fd, path)
                     if self._hashes(actual) == record['files']:
@@ -536,7 +535,7 @@ class SkillManager:
                 raise SessionError(f'Installation stopped; {len(installed)} files added. Existing files were kept. Refresh and preview again.') from error
             finally:
                 if fd is not None:
-                    os.close(fd)
+                    fs.close(fd)
         return {'ok': True, 'installed': installed, 'unchanged': unchanged,
                 'summary': f'{len(installed)} files installed, {len(unchanged)} already identical. {len(tracked)} skills match tracked payloads. Extra or mismatched files are kept. Start a new agent session to use the skills.'}
 
@@ -556,7 +555,7 @@ class SkillManager:
             if record is None:
                 raise SessionError('This skill is untracked. Preview installation from its source to track matching files first.')
             fd = _root_fd(Path(project['path']))
-            identity = list(_identity(os.fstat(fd)))
+            identity = list(_identity(fs.fstat(fd)))
             if identity != record['identity']:
                 raise SessionError('The project directory changed. Restore it before managing this skill.')
             before, directories = self._tree(fd, path)
@@ -618,7 +617,7 @@ class SkillManager:
             raise SessionError('Could not prepare the skill change. Check source availability and retry; project files were kept.') from error
         finally:
             if fd is not None:
-                os.close(fd)
+                fs.close(fd)
             self.lock.release()
 
     def apply_change(self, preview_id):
@@ -638,7 +637,7 @@ class SkillManager:
             completed = []
             try:
                 records = self._records(project)
-                if (root != preview['root'] or list(_identity(os.fstat(fd))) != preview['identity']
+                if (root != preview['root'] or list(_identity(fs.fstat(fd))) != preview['identity']
                         or records.get(preview['path']) != preview['record']):
                     raise SessionError('The project or tracking record changed. Preview again.')
                 actual, _ = self._tree(fd, preview['path'])
@@ -654,20 +653,20 @@ class SkillManager:
                     if self.store.stopping.is_set():
                         raise SessionError('Skill operation stopped.')
                     self._check_change_root(root, fd, preview)
-                    parent = os.dup(fd)
+                    parent = fs.dup(fd)
                     temporary = None
                     try:
                         parts = full.split('/')
                         for i, part in enumerate(parts[:-1]):
                             if new:
                                 try:
-                                    os.mkdir(part, mode=0o755, dir_fd=parent)
+                                    fs.mkdir(part, mode=0o755, dir_fd=parent)
                                 except FileExistsError:
                                     pass
-                            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
-                            os.close(parent); parent = child
+                            child = fs.open(part, os.O_RDONLY | fs.O_DIRECTORY | fs.O_NOFOLLOW, dir_fd=parent)
+                            fs.close(parent); parent = child
                             prefix = '/'.join(parts[:i+1])
-                            identity = _identity(os.fstat(parent))
+                            identity = _identity(fs.fstat(parent))
                             if prefix in preview['directories'] and preview['directories'][prefix] != identity:
                                 raise SessionError('A skill directory changed during application.')
                             preview['directories'][prefix] = identity
@@ -675,27 +674,27 @@ class SkillManager:
                             raise SessionError('A skill file changed during application.')
                         if new:
                             temporary = '.harness-skill-' + uuid.uuid4().hex
-                            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, new['mode'], dir_fd=parent)
+                            descriptor = fs.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | fs.O_NOFOLLOW, new['mode'], dir_fd=parent)
                             with os.fdopen(descriptor, 'wb') as handle:
-                                handle.write(new['body']); os.fchmod(handle.fileno(), new['mode'])
+                                handle.write(new['body']); fs.fchmod(handle.fileno(), new['mode'])
                                 handle.flush(); os.fsync(handle.fileno())
                         self._check_change_root(root, fd, preview)
                         if _metadata(_read(fd, full)) != old:
                             raise SessionError('A skill file changed during application.')
                         if new is None:
-                            os.unlink(parts[-1], dir_fd=parent)
+                            fs.unlink(parts[-1], dir_fd=parent)
                         elif old is None:
-                            os.link(temporary, parts[-1], src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
+                            fs.link(temporary, parts[-1], src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
                         else:
-                            os.replace(temporary, parts[-1], src_dir_fd=parent, dst_dir_fd=parent)
+                            fs.replace(temporary, parts[-1], src_dir_fd=parent, dst_dir_fd=parent)
                         completed.append(full)
                     finally:
                         if temporary:
                             try:
-                                os.unlink(temporary, dir_fd=parent)
+                                fs.unlink(temporary, dir_fd=parent)
                             except FileNotFoundError:
                                 pass
-                        os.close(parent)
+                        fs.close(parent)
                 self._check_change_root(root, fd, preview)
                 actual, _ = self._tree(fd, preview['path'])
                 if self._hashes(actual) != self._hashes(payloads):
@@ -714,7 +713,7 @@ class SkillManager:
                     raise
                 raise SessionError('The operation failed before changing files. Preview again.') from error
             finally:
-                os.close(fd)
+                fs.close(fd)
             return {'ok': True, 'changed': completed, 'summary': 'Skill removed.' if preview['operation'] == 'remove' else
                     'Reviewed update applied. Start a new agent session to load it.'}
 
@@ -722,10 +721,10 @@ class SkillManager:
     def _check_change_root(root, fd, preview):
         current = _root_fd(root)
         try:
-            if list(_identity(os.fstat(current))) != preview['identity']:
+            if list(_identity(fs.fstat(current))) != preview['identity']:
                 raise SessionError('The project directory changed during application.')
         finally:
-            os.close(current)
+            fs.close(current)
         SetupManager._check_directories(fd, preview['directories'])
 
     def close(self):
