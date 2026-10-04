@@ -296,7 +296,7 @@ $('system-plan-form').addEventListener('submit',event=>{
     for(const empty of [...$('system-runs').options].filter(option=>!option.value)) empty.remove();
     const option=el('option','',systemRunLabel(run)); option.value=run.id;
     $('system-runs').prepend(option); $('system-runs').value=run.id;
-    renderSystemRun(); $('system-run').scrollIntoView({behavior:'smooth',block:'start'}); $('system-run-title').focus({preventScroll:true});
+    renderSystemRun(); $('system-run').scrollIntoView({behavior:scrollMotion(),block:'start'}); $('system-run-title').focus({preventScroll:true});
   });
 });
 async function systemAction(action,extra={}) {

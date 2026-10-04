@@ -647,7 +647,8 @@ Token accounting sums reported input and output, including cached input once
 (Claude reports cache reads/writes separately; Codex cached input is a subset).
 The runner stops when reported tokens reach the threshold, but CLI usage may
 arrive only on completion: this is **not a hard pre-request token cap**, and an
-invocation may exceed it. Unknown tokens/cost remain unknown. The panel shows
+invocation may exceed it. Unknown tokens/cost remain unknown, and costs are the
+CLIs' own estimates, so they read as ≈. The panel shows
 last-launch usage and any reached limit, retained when settings change and reset
 only when the next process starts. Time limits terminate the owned process group.
 
@@ -688,6 +689,15 @@ else from the folder: add a new file to that list, and restart the server to
 see an edit. `tests/test_harness_web.py` checks that the page and the list
 name the same files and keeps the stylesheet on its color, type and spacing
 tokens.
+
+**Motion and numbers.** Durations and easings come from the motion tokens in
+`app.css` (`--motion-*`, `--ease-*`); the same test rejects a literal duration or
+`cubic-bezier()` in a rule, and reduced motion stops every animation, pseudo-elements
+included. Scripted scrolls ask for `scrollMotion()`. Numbers use `fmt` in
+`app-core.js`: exact values as grouped digits, estimates with ≈ and two significant
+digits, bounds with ≤, ≥ or +, and — for unknown, which is never 0. A list that
+refreshes on a poll renders through `keyedRender`, so open details keep their
+state.
 
 ### Connect and prepare a project
 

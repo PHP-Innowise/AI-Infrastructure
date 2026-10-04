@@ -124,7 +124,7 @@ async function openSystemEditor() {
     if(epoch!==systemEditor.epoch) return;
     systemEditor.data=data;systemEditor.dirty=false;renderSystemEditor();$('system-editor-status').textContent='';
     if(typeof restoreDiscovery==='function') await restoreDiscovery();
-    $('system-editor').scrollIntoView({behavior:'smooth',block:'start'});
+    $('system-editor').scrollIntoView({behavior:scrollMotion(),block:'start'});
   } catch(error) { $('system-editor').hidden=false; editorError(error); $('system-editor-status').textContent=''; systemLayout(); }
   finally {systemEditor.pending=typeof systemDiscovery!=='undefined' && systemDiscovery.active;systemControls();}
 }

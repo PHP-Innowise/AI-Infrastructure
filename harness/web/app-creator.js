@@ -136,7 +136,7 @@ function renderCreator() {
   if(['scanning','generating'].includes(run.status)) button('cancel','Cancel phase');
   updateCreatorBudgetControls();
   if(data.session) { const result=el('button','button','View results & run usage'); result.type='button'; result.addEventListener('click',async()=>{await selectSession(data.session.id); setView('changes');}); actions.append(result); }
-  if(run.status==='complete') { const update=el('button','button','Prepare next update'); update.type='button'; update.addEventListener('click',()=>{creatorUi.formOpen=true; renderCreatorLayout(); $('creator-operation').value='update'; $('creator-goal').focus(); $('creator-form').scrollIntoView({behavior:'smooth'});}); actions.append(update); }
+  if(run.status==='complete') { const update=el('button','button','Prepare next update'); update.type='button'; update.addEventListener('click',()=>{creatorUi.formOpen=true; renderCreatorLayout(); $('creator-operation').value='update'; $('creator-goal').focus(); $('creator-form').scrollIntoView({behavior:scrollMotion()});}); actions.append(update); }
 }
 function creatorBudgetsDirty() { return Boolean(creatorUi.detail && JSON.stringify(readBudgets('creator-run-budgets'))!==JSON.stringify(creatorUi.detail.run.budgets)); }
 function updateCreatorBudgetControls() {
@@ -165,7 +165,7 @@ $('creator-form').addEventListener('submit',async event=>{
   event.preventDefault(); if(creatorUi.pending) return; clearTimeout(creatorUi.timer); const epoch=++creatorUi.epoch;
   const body={budgets:readBudgets('creator-budgets'),project_id:$('creator-project').value,provider:$('creator-provider').value,model:$('creator-model').value.trim() || null,thinking_effort:$('creator-effort').value || null,operation:$('creator-operation').value,workspace:$('creator-workspace').value,worktree_branch:$('creator-workspace').value==='worktree'?$('creator-branch').value.trim():'',agents_enabled:$('creator-agents').checked,agent_count:$('creator-count').valueAsNumber,goal:$('creator-goal').value,tools:[...document.querySelectorAll('[name="creator-tool"]:checked')].map(i=>i.value)};
   creatorUi.pending=true; creatorControls(); showError('creator-error','');
-  try { const data=await api('/api/creator',{method:'POST',body}); if(epoch===creatorUi.epoch) { creatorUi.detail=data; creatorUi.formOpen=false; renderCreator(); await loadCreator(data.run.id); $('creator-detail').scrollIntoView({behavior:'smooth',block:'start'}); refreshSessions(); } }
+  try { const data=await api('/api/creator',{method:'POST',body}); if(epoch===creatorUi.epoch) { creatorUi.detail=data; creatorUi.formOpen=false; renderCreator(); await loadCreator(data.run.id); $('creator-detail').scrollIntoView({behavior:scrollMotion(),block:'start'}); refreshSessions(); } }
   catch(error) { if(epoch===creatorUi.epoch) showError('creator-error',textError(error)); }
   finally { creatorUi.pending=false; creatorControls(); if(creatorUi.detail) renderCreator(); }
 });

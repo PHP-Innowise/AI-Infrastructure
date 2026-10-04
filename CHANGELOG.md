@@ -39,6 +39,18 @@ edition's own files remain in that edition's changelog.
   this change keep their totals. The agents panel no longer turns an unreported
   token count or cost into 0.
 
+- Lay the motion and number foundation for the memory views. Motion tokens
+  (fast, base, slow, travel, stagger, pulse and three easings) replace the
+  literal durations, the two pulses share one keyframe, and a guard rejects
+  literal durations and `cubic-bezier()` in rules on both themed pages. Reduced
+  motion now also stops `::before` and `::after` animations (the agents panel's
+  live dot kept pulsing), and scripted scrolls follow it through
+  `scrollMotion()`. Six memory and context colour tokens join both themes,
+  guarded at 3:1 on both surfaces. `fmt` gives numbers one grammar (exact, ≈,
+  ≤ / ≥ / +, —) and the Usage totals use it: unknown totals read — and costs
+  read as the CLIs' estimates. `keyedRender` keeps launch and check details open
+  across result polls; before, every poll collapsed them.
+
 - Bring System Orchestration (PR #36) onto the Harness design. It is a sidebar
   section with two tabs: **Services** (system file, contract map, service cards
   and the editor with **Fill with AI**) and **Changes** (a change selector, the

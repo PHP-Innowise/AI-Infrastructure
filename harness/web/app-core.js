@@ -56,6 +56,49 @@ systemDark.addEventListener('change',applyTheme);
 window.addEventListener('storage',event => { if (event.key === themeKey || event.key === null) { themePreference = readThemePreference(); applyTheme(); } });
 applyTheme();
 const el = (tag, className, text) => { const element = document.createElement(tag); if (className) element.className = className; if (text !== undefined) element.textContent = text; return element; };
+// Motion follows the system setting; a scroll started from script is smooth only when motion is welcome.
+const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+const scrollMotion = () => reducedMotion.matches ? 'auto' : 'smooth';
+// Numbers follow one grammar: exact values are grouped digits, estimates carry ≈ and two significant digits,
+// bounds carry ≤, ≥ or +, and unknown is —, never 0. Each helper returns the visible text and its spoken label.
+const numberText = new Intl.NumberFormat('en-US',{maximumFractionDigits:2});
+function compactNumber(value) {
+  const size = Math.abs(value);
+  return size >= 1e6 ? `${numberText.format(value / 1e6)}M` : size >= 1e4 ? `${numberText.format(Math.round(value / 1e3))}k` : size >= 1e3 ? `${numberText.format(value / 1e3)}k` : numberText.format(value);
+}
+const fmt = {
+  exact: (value, unit = '') => Number.isFinite(value) ? fmt.same(numberText.format(value) + unit) : fmt.unknown(),
+  estimate: (value, unit = '') => { if (!Number.isFinite(value)) return fmt.unknown(); const rounded = Number(value.toPrecision(2)); return {text:`≈ ${compactNumber(rounded)}${unit}`, label:`about ${numberText.format(rounded)}${unit}`}; },
+  atMost: (value, unit = '') => Number.isFinite(value) ? {text:`≤ ${compactNumber(value)}${unit}`, label:`at most ${numberText.format(value)}${unit}`} : fmt.unknown(),
+  atLeast: (value, unit = '') => Number.isFinite(value) ? {text:`≥ ${compactNumber(value)}${unit}`, label:`at least ${numberText.format(value)}${unit}`} : fmt.unknown(),
+  capped: (value, unit = '') => Number.isFinite(value) ? {text:`${numberText.format(value)}+${unit}`, label:`more than ${numberText.format(value)}${unit}`} : fmt.unknown(),
+  // Provider costs are the CLI's own estimates, so money always reads as one.
+  cost: value => { if (!Number.isFinite(value) || value < 0) return fmt.unknown(); const amount = value >= 1 ? value.toFixed(2) : value.toFixed(4).replace(/(\.\d\d\d??)0+$/,'$1'); return {text:`≈ $${amount}`, label:`about ${amount} US dollars`}; },
+  unknown: (label = 'not reported') => ({text:'—', label}),
+  same: text => ({text, label:text}),
+};
+function numberNode(value) {
+  if (value.label === value.text) return el('span','',value.text);
+  const node = el('span'), shown = el('span','',value.text); shown.setAttribute('aria-hidden','true');
+  node.append(shown,el('span','sr-only',value.label)); return node;
+}
+// Keeps one node per key across polls: an unchanged item keeps its node, so an open <details>, focus and scroll
+// survive; a changed item is rebuilt in place and stays open if it was; items that left are removed.
+function keyedRender(container, items, keyOf, build, signatureOf = item => JSON.stringify(item)) {
+  const previous = new Map([...container.children].map(node => [node.dataset.key, node]));
+  items.forEach((item, index) => {
+    const key = String(keyOf(item)), signature = signatureOf(item), old = previous.get(key);
+    let node = old;
+    if (!old || old.dataset.signature !== signature) {
+      node = build(item); node.dataset.key = key; node.dataset.signature = signature;
+      if (old?.open) node.open = true;
+      if (old) old.replaceWith(node);
+    }
+    previous.delete(key);
+    if (container.children[index] !== node) container.insertBefore(node,container.children[index] || null);
+  });
+  for (const node of previous.values()) node.remove();
+}
 const state = { bootstrap:null, sessions:[], selected:null, selectedId:null, view:'sessions', pending:null, loading:false, pollTimer:null, pollController:null, epoch:0, eventIds:new Set(), assistantTexts:new Set(), contextEpoch:0, authFailed:false };
 let attachedFiles = [];
 function renderAttachments() {
@@ -256,7 +299,7 @@ function applyAgentBudgets(id) {
 }
 function readBudgets(id) { return Object.fromEntries(['usd','tokens','seconds'].map(key=>{const input=$(id+'-'+key); return [key,!input.value.trim() ? null : input.valueAsNumber];})); }
 function restoreBudgets(id, budgets, revision) { if($(id).dataset.revision===revision) return; for(const key of ['usd','tokens','seconds']) $(id+'-'+key).value=budgets?.[key] ?? ''; $(id).dataset.revision=revision; for(const key of ['usd','tokens','seconds']) $(id+'-agent-'+key).value=''; }
-function budgetUsage(usage) { return usage ? `Last launch (reported): ${usage.tokens ?? 'unknown'} tokens · ${fleetCost(usage.cost_usd) || 'unknown cost'} · ${usage.seconds}s${usage.limit_reached ? ' · '+usage.limit_reached+' limit reached' : ''}.` : ''; }
+function budgetUsage(usage, label = 'Last launch (reported)') { return usage ? `${label}: ${Number.isFinite(usage.tokens) ? `${fmt.exact(usage.tokens).text} tokens` : 'tokens not reported'} · ${Number.isFinite(usage.cost_usd) ? fmt.cost(usage.cost_usd).text : 'cost not reported'} · ${usage.seconds}s${usage.limit_reached ? ' · '+usage.limit_reached+' limit reached' : ''}.` : ''; }
 function budgetControls(id, provider, locked, usage, fleet=false) {
   for(const key of ['usd','tokens','seconds']) $(id+'-'+key).disabled=locked || key==='usd' && (provider!=='claude' || fleet);
   $(id+'-usd').parentElement.hidden=fleet; if(provider!=='claude' && !fleet) $(id+'-usd').value='';
@@ -419,18 +462,21 @@ function renderResults(data) {
   $('results-files').textContent=snapshot?.files?.map(file=>`${file.status}  ${file.path}`).join('\n') || 'No changed files listed.';
   $('results-diff').textContent=snapshot?.diff || 'No text diff available.';
   $('results-usage-note').textContent=data.notice;
-  const labels={tokens:'tokens',cost_usd:'USD',seconds:'seconds'};
-  $('results-totals').textContent=Object.entries(data.totals).map(([key,value])=>`${key==='cost_usd'?value.reported.toFixed(4):Math.round(value.reported*1000)/1000} ${labels[key]} reported${value.unknown_launches?` + ${value.unknown_launches} unknown launch(es)`:''}`).join(' · ');
-  const launches=$('results-launches'); launches.replaceChildren();
-  for(const run of data.launches) { const details=el('details','fleet-report'); details.append(el('summary','',`${run.started_at} · ${run.kind} · ${run.status}`),el('p','knowledge-note',`${run.settings.provider} / ${run.settings.model || 'default model'} / ${run.settings.thinking_effort || 'default effort'}`),el('p','',budgetUsage(run.usage)),el('pre','fleet-report-text',JSON.stringify({sdd:run.settings.sdd,mode:run.settings.mode,model_routing:run.settings.model_routing,budgets:run.settings.budgets,agent_budget_plan:run.settings.agent_budget_plan,started_at:run.started_at,finished_at:run.finished_at},null,2))); launches.append(details); }
-  if(!data.launches.length) launches.append(el('p','knowledge-note','No launches recorded by this version yet.'));
-  const holder=$('results-checks'); const opened=new Set([...holder.querySelectorAll('details[open]')].map(node=>node.dataset.id)); holder.replaceChildren();
-  for(const check of data.checks) {
-    const details=el('details','fleet-report'); details.dataset.id=check.id; details.open=opened.has(check.id) || ['queued','running','failed','timed_out','output_limit'].includes(check.status);
+  // A total with no report behind it reads —; launches without a report are named, never added as 0.
+  const totals=data.totals, total=(value,format)=>value.unknown_launches && !value.reported ? fmt.unknown() : format(value.reported);
+  const unreported=[['tokens',totals.tokens],['cost',totals.cost_usd]].filter(([,value])=>value.unknown_launches).map(([name,value])=>`${name} not reported for ${value.unknown_launches} launch${value.unknown_launches===1?'':'es'}`);
+  // The totals line is a live region, so it is rewritten only when the numbers change.
+  if($('results-totals').dataset.key!==JSON.stringify(totals)) { $('results-totals').dataset.key=JSON.stringify(totals);
+    $('results-totals').replaceChildren(numberNode(total(totals.tokens,value=>fmt.exact(value,' tokens'))),' · ',numberNode(total(totals.cost_usd,fmt.cost)),' · ',numberNode(total(totals.seconds,value=>fmt.exact(Math.round(value*10)/10,' s'))),...unreported.map(note=>` · ${note}`)); }
+  if(data.launches.length) keyedRender($('results-launches'),data.launches,run=>run.id,run=>{ const details=el('details','fleet-report'); details.append(el('summary','',`${run.started_at} · ${run.kind} · ${run.status}`),el('p','knowledge-note',`${run.settings.provider} / ${run.settings.model || 'default model'} / ${run.settings.thinking_effort || 'default effort'}`),el('p','',budgetUsage(run.usage,'Reported')),el('pre','fleet-report-text',JSON.stringify({sdd:run.settings.sdd,mode:run.settings.mode,model_routing:run.settings.model_routing,budgets:run.settings.budgets,agent_budget_plan:run.settings.agent_budget_plan,started_at:run.started_at,finished_at:run.finished_at},null,2))); return details; });
+  else $('results-launches').replaceChildren(el('p','knowledge-note','No launches recorded by this version yet.'));
+  const holder=$('results-checks');
+  keyedRender(holder,data.checks,check=>check.id,check=>{
+    const details=el('details','fleet-report'); details.dataset.id=check.id; details.open=['queued','running','failed','timed_out','output_limit'].includes(check.status);
     const current=snapshot?.complete && check.snapshot_complete && snapshot.id===check.snapshot_id && !check.workspace_changed;
-    details.append(el('summary','',`${check.status.toUpperCase()} · ${check.command}`),el('p','knowledge-note',`${check.started_at || check.created_at} · exit code: ${check.exit_code ?? 'unavailable'} · ${check.seconds ?? 'unknown'}s · ${check.kind==='target'?`Target ${check.target_branch} · base ${check.target_head} · tested commit ${check.candidate}${check.workspace_changed?' · Check changed the workspace':''}`:current?'Matches the current diff':snapshot && check.snapshot_id && snapshot.id!==check.snapshot_id || check.workspace_changed?'Workspace changed since this check':'Freshness unavailable'}`),el('pre','fleet-report-text',check.output || 'Waiting for output…')); holder.append(details);
-  }
-  if(!data.checks.length) holder.append(el('p','knowledge-note','No independent checks run yet.'));
+    details.append(el('summary','',`${check.status.toUpperCase()} · ${check.command}`),el('p','knowledge-note',`${check.started_at || check.created_at} · exit code: ${check.exit_code ?? 'unavailable'} · ${check.seconds ?? 'unknown'}s · ${check.kind==='target'?`Target ${check.target_branch} · base ${check.target_head} · tested commit ${check.candidate}${check.workspace_changed?' · Check changed the workspace':''}`:current?'Matches the current diff':snapshot && check.snapshot_id && snapshot.id!==check.snapshot_id || check.workspace_changed?'Workspace changed since this check':'Freshness unavailable'}`),el('pre','fleet-report-text',check.output || 'Waiting for output…')); return details;
+  },check=>JSON.stringify([check,snapshot?.id,snapshot?.complete]));
+  if(!data.checks.length) holder.replaceChildren(el('p','knowledge-note','No independent checks run yet.'));
   resultControls(); updateHeader();
   renderViewTabs();
 }
@@ -524,7 +570,7 @@ function tabLabel(view) {
   const data = isResultView(state.view) ? resultUi.data : null;
   if (view === 'changes' && Array.isArray(data?.snapshot?.files)) return `Changes · ${data.snapshot.files.length}`;
   if (view === 'checks' && data?.checks?.length) return `Checks · ${data.checks.filter(check => check.status === 'passed').length}/${data.checks.length}`;
-  if (view === 'usage' && data?.totals?.cost_usd?.reported > 0) return `Usage · $${data.totals.cost_usd.reported.toFixed(2)}`;
+  if (view === 'usage' && data?.totals?.cost_usd?.reported > 0) return `Usage · ${fmt.cost(data.totals.cost_usd.reported).text}`;
   return viewLabels[view];
 }
 function renderViewTabs() {

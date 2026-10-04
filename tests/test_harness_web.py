@@ -1536,6 +1536,42 @@ class HarnessThemeTests(unittest.TestCase):
                                    if float(px) not in (1, 2, 4, 8, 12, 16, 24, 32, 48, 64)})
                 self.assertEqual(off_grid, [], "spacing must sit on the 4px grid")
 
+    def test_motion_comes_from_tokens_and_reduced_motion_stops_it_everywhere(self):
+        for page in THEMED_PAGES:
+            with self.subTest(page=page.relative_to(ROOT).as_posix()):
+                css = stylesheet(page)
+                rules = re.sub(r":root[^{]*\{[^}]*\}", "", css)
+                motion = re.findall(r"(?<![\w-])(?:transition|animation)(?:-[a-z]+)?:\s*([^;}]+)", rules)
+                self.assertTrue(motion)
+                literal = [value for value in motion if "cubic-bezier(" in value
+                           or re.search(r"(?<![\w.-])\d*\.?\d+m?s\b", re.sub(r"var\([^)]*\)", "", value))]
+                self.assertEqual(literal, [], "durations and easings come from the motion tokens")
+                # Pseudo-elements animate too (the agents panel's live dot), so reduced motion must name them.
+                reduced = re.search(r"@media \(prefers-reduced-motion:reduce\) \{ ([^{]+)\{([^}]*)\}", css)
+                self.assertIsNotNone(reduced)
+                self.assertEqual({part.strip() for part in reduced.group(1).split(",")}, {"*", "*::before", "*::after"})
+                self.assertIn("animation:none !important", reduced.group(2))
+                self.assertIn("transition:none !important", reduced.group(2))
+
+    def test_memory_colors_read_as_marks_on_both_surfaces_in_both_themes(self):
+        def luminance(color):
+            channels = [int(color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+            return sum(weight * (c / 12.92 if c <= .04045 else ((c + .055) / 1.055) ** 2.4)
+                       for weight, c in zip((.2126, .7152, .0722), channels))
+        def contrast(a, b):
+            high, low = sorted((luminance(a), luminance(b)), reverse=True)
+            return (high + .05) / (low + .05)
+        css = stylesheet(THEMED_PAGES[0])
+        for block in (re.search(r"\n\s*:root \{([^}]*)\}", css).group(1), re.search(r':root\[data-theme="dark"\] \{([^}]*)\}', css).group(1)):
+            tokens = dict(re.findall(r"(--[\w-]+):(#[0-9a-f]{6})\b", block))
+            tokens.setdefault("--paper", "#ffffff")
+            marks = {name: value for name, value in tokens.items() if name.startswith(("--mem-", "--ctx-"))}
+            self.assertEqual(set(marks), {"--mem-rules", "--mem-bank", "--mem-brain", "--mem-auto", "--ctx-rest", "--ctx-added"})
+            for name, value in marks.items():
+                for surface in ("--paper", "--soft"):
+                    with self.subTest(token=name, surface=surface, paper=tokens["--paper"]):
+                        self.assertGreaterEqual(contrast(value, tokens[surface]), 3, "chart marks need 3:1 (WCAG 1.4.11)")
+
     @unittest.skipUnless(shutil.which("node"), "Theme script check requires Node")
     def test_saved_theme_applies_before_first_paint_in_the_harness_and_its_catalog(self):
         heads = []
@@ -1590,6 +1626,52 @@ assert.equal(env.root.dataset.theme,'dark'); assert.deepEqual(env.checked(),['sy
 env = boot({saved:'light', dark:true, denied:true});
 assert.equal(env.root.dataset.theme,'dark'); assert.deepEqual(env.checked(),['system']);
 env.choose('light'); assert.equal(env.root.dataset.theme,'light'); assert.deepEqual(env.checked(),['light']);""")
+
+
+@unittest.skipUnless(shutil.which("node"), "Page helper checks require Node")
+class PageHelperTests(unittest.TestCase):
+    def run_node(self, source, checks):
+        result = subprocess.run([shutil.which("node"), "-e", "const assert = require('node:assert/strict');\n" + source + checks],
+                                capture_output=True, text=True)
+        if result.returncode:
+            self.fail(result.stderr)
+
+    def test_numbers_follow_one_grammar_and_unknown_is_never_zero(self):
+        page = ui_script()
+        self.run_node(page[page.index("\nconst numberText"):page.index("\nfunction numberNode(")], r"""
+assert.deepEqual(fmt.exact(76450), {text: '76,450', label: '76,450'});
+assert.deepEqual(fmt.exact(Number.NaN), {text: '—', label: 'not reported'});
+assert.deepEqual(fmt.estimate(4123), {text: '≈ 4.1k', label: 'about 4,100'});
+assert.deepEqual([fmt.estimate(520.4).text, fmt.estimate(53210).text, fmt.estimate(1234567).text], ['≈ 520', '≈ 53k', '≈ 1.2M']);
+assert.deepEqual(fmt.atMost(4100), {text: '≤ 4.1k', label: 'at most 4,100'});
+assert.deepEqual([fmt.atLeast(13).text, fmt.capped(200).text, fmt.capped(200).label], ['≥ 13', '200+', 'more than 200']);
+assert.deepEqual(fmt.cost(.3), {text: '≈ $0.30', label: 'about 0.30 US dollars'});
+assert.deepEqual([fmt.cost(4.8312).text, fmt.cost(.0123).text, fmt.cost(.123).text], ['≈ $4.83', '≈ $0.0123', '≈ $0.123']);
+for (const unknown of [null, undefined, -1, Infinity]) assert.equal(fmt.cost(unknown).text, '—');
+assert.equal(fmt.unknown('not recorded').label, 'not recorded');
+""")
+
+    def test_keyed_render_keeps_open_nodes_across_polls(self):
+        page = ui_script()
+        self.run_node(page[page.index("\nfunction keyedRender("):page.index("\nconst state = {")], r"""
+class Item { constructor(value) { this.value = value; this.dataset = {}; this.open = false; this.parent = null; }
+  replaceWith(node) { const list = this.parent.children; list[list.indexOf(this)] = node; node.parent = this.parent; this.parent = null; }
+  remove() { const list = this.parent.children; list.splice(list.indexOf(this), 1); this.parent = null; } }
+const container = {children: [], insertBefore(node, before) {
+  if (node.parent) node.parent.children.splice(node.parent.children.indexOf(node), 1);
+  const at = before ? this.children.indexOf(before) : this.children.length; this.children.splice(at, 0, node); node.parent = this; }};
+const placeholder = new Item('No launches'); container.insertBefore(placeholder, null);
+let built = 0; const render = items => keyedRender(container, items, item => item.id, item => { built++; return new Item(item.value); });
+render([{id: 1, value: 'a'}, {id: 2, value: 'b'}]);
+assert.deepEqual(container.children.map(node => node.value), ['a', 'b']);
+const first = container.children[0]; first.open = true;
+render([{id: 1, value: 'a'}, {id: 2, value: 'b'}]);
+assert.equal(built, 2); assert.equal(container.children[0], first); assert.equal(first.open, true);
+render([{id: 1, value: 'a, running 4s'}, {id: 2, value: 'b'}]);
+assert.notEqual(container.children[0], first); assert.equal(container.children[0].open, true);
+render([{id: 3, value: 'c'}, {id: 2, value: 'b'}]);
+assert.deepEqual(container.children.map(node => node.value), ['c', 'b']); assert.equal(built, 4);
+""")
 
 
 if __name__ == "__main__":
