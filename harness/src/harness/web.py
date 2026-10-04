@@ -36,8 +36,9 @@ from harness import memory_use
 from harness.startup_context import startup_context
 from harness.setup import SetupManager
 from harness.creator import CreatorManager
-from harness.system_orchestration import SystemManager, UNAVAILABLE as SYSTEM_UNAVAILABLE
+from harness.system_orchestration import SystemManager
 from harness.system_discovery import DiscoveryManager
+from harness import discovery_sandbox
 from harness.discovery_sandbox import sandbox_problem
 from harness.project_browser import browse_projects
 from build_kit3_catalog import build_site
@@ -107,8 +108,9 @@ class HarnessServer(ThreadingHTTPServer):
             ],
             # Probed per page load so a host fix is visible after a reload.
             'runtime': {'timeout_seconds': self.sessions.timeout, 'max_active': 1,
-                        'discovery_sandbox': SYSTEM_UNAVAILABLE or sandbox_problem(),
-                        'system_unavailable': SYSTEM_UNAVAILABLE,
+                        'discovery_sandbox': sandbox_problem(),
+                        # Native Windows has no discovery sandbox; the page disables the scan there.
+                        'discovery_supported': not discovery_sandbox.NATIVE_WINDOWS,
                         'max_agents': MAX_AGENTS, 'default_agent_count': DEFAULT_AGENT_COUNT,
                         'context_excerpt_bytes': CONTEXT_EXCERPT_BYTES,
                         'fleet': {key: value for key, value in fleet_runtime().items() if key != 'executable'}},

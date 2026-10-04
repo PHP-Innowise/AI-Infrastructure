@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -12,6 +13,12 @@ from .sessions import SessionError
 
 
 GUIDE = 'See "Troubleshooting AI discovery" in docs/AI-SYSTEM-ORCHESTRATION.md.'
+# The scan agent may read only its evidence copies. No native Windows sandbox here
+# can hide the original source folders from it yet.
+NATIVE_WINDOWS = os.name == 'nt'
+WINDOWS_REASON = ('AI discovery needs bubblewrap on Linux or sandbox-exec on macOS, which keep the original '
+                  'source folders out of the scan agent\'s reach. Native Windows has no such sandbox yet, so '
+                  'fill in the service forms yourself. ' + GUIDE)
 
 
 def _sysctl(name):
@@ -42,6 +49,8 @@ def _probe(executable):
 
 def sandbox_problem():
     """None when the isolation backend starts a process here; otherwise an actionable reason."""
+    if NATIVE_WINDOWS:
+        return WINDOWS_REASON
     backend = isolation_backend()
     if not backend:
         return 'AI discovery requires bubblewrap on Linux or sandbox-exec on macOS. ' + GUIDE
@@ -78,7 +87,8 @@ def runtime_paths(command):
 
 def sandbox_command(workspace, command, provider, source_roots):
     backend = isolation_backend()
-    if not backend:
+    # The Windows Creator sandbox grants read access to the whole disk, so it is never used here.
+    if not backend or backend[0] not in ('bwrap', 'seatbelt'):
         raise SessionError('AI discovery requires bubblewrap or sandbox-exec.')
     workspace = Path(workspace).resolve()
     homes = [p.resolve() for p in provider_state_dirs(provider)]

@@ -8,8 +8,6 @@ const systemViews = ['systems','system-changes'], inSystems = () => systemViews.
 const systemSteps = ['Plan','Review','Run','Receipts'];
 // Errors and progress appear on the tab the action started from.
 const systemNotice = () => state.view === 'system-changes' ? ['system-run-error','system-run-message'] : ['system-error','system-message'];
-// Native Windows has no System Orchestration yet: both tabs say so instead of failing on each request.
-const systemUnavailable = () => state.bootstrap?.runtime?.system_unavailable || '';
 function systemFailure(error, [errorId] = systemNotice()) {
   if (error.name !== 'AbortError') { $(errorId).textContent=error.message; $(errorId).hidden=false; }
 }
@@ -21,10 +19,10 @@ function systemReadRecovered() { if (systemUi.readError) { systemUi.readError=fa
 function systemControls() {
   const requesting=systemUi.pending || !state.bootstrap, run=systemUi.detail, live=Boolean(run?.active);
   const busy=requesting || (typeof systemEditor!=='undefined' && systemEditor.pending);
-  const editing=typeof systemEditor!=='undefined' && (systemEditor.pending || systemEditor.dirty), blocked=Boolean(systemUnavailable());
+  const editing=typeof systemEditor!=='undefined' && (systemEditor.pending || systemEditor.dirty);
   for (const id of ['system-project','system-config','system-load','system-edit','system-choose-project','system-prepare','system-plan-change','system-new-change','system-runs','system-refresh','system-provider','system-mode','system-access','system-timeout','system-reviewed','system-retry','system-accept-changes']) {
     const editorLocked=editing && ['system-project','system-config','system-load','system-choose-project','system-prepare','system-plan-change','system-new-change'].includes(id);
-    $(id).disabled=blocked || (['system-runs','system-refresh'].includes(id) ? requesting : busy) || editorLocked || (['system-provider','system-mode','system-access','system-timeout','system-reviewed'].includes(id) && Boolean(run?.session_id)) || (id==='system-reviewed' && run?.plan.status!=='needs_review');
+    $(id).disabled=(['system-runs','system-refresh'].includes(id) ? requesting : busy) || editorLocked || (['system-provider','system-mode','system-access','system-timeout','system-reviewed'].includes(id) && Boolean(run?.session_id)) || (id==='system-reviewed' && run?.plan.status!=='needs_review');
   }
   $('system-execute').disabled=busy || editing || !run || live || Boolean(run.session_id) || run.plan.status!=='needs_review' || !run.providers?.some(p=>p.id===$('system-provider').value && p.available) || !$('system-reviewed').checked;
   $('system-resume').disabled=busy || editing || live || !run?.providers?.some(p=>p.id===run.provider && p.available);
@@ -41,7 +39,7 @@ function systemLayout() {
   $('system-empty').hidden=Boolean(systemUi.catalog) || editing;
   $('system-plan-form').hidden=!systemUi.formOpen;
   $('system-run').hidden=!hasRun || systemUi.formOpen;
-  $('system-runs-empty').hidden=!(systemUi.listed || systemUnavailable()) || hasRuns || systemUi.formOpen;
+  $('system-runs-empty').hidden=!systemUi.listed || hasRuns || systemUi.formOpen;
   $('system-new-change').setAttribute('aria-expanded',String(systemUi.formOpen));
   $('system-new-change').classList.toggle('primary',systemUi.listed && !hasRuns && !systemUi.formOpen);
   $('system-edit').textContent=systemUi.catalog ? 'Edit system' : 'Create or edit system';
@@ -61,11 +59,6 @@ async function openSystems() {
   setProjectChoices($('system-project'),state.bootstrap.projects,!held && projectFor(sidebar) ? sidebar : $('system-project').value || sidebar || $('project').value);
   // The sidebar may have moved the project while another section was open; its system and changes do not carry over.
   if ($('system-project').value!==systemUi.project) { systemReset(); systemUi.project=$('system-project').value; }
-  const unavailable=systemUnavailable();
-  if (unavailable) {
-    for (const id of ['system-empty','system-runs-empty']) { $(id).querySelector('h3').textContent='Not available on Windows'; $(id).querySelector('.system-note').textContent=unavailable; }
-    systemLayout(); systemControls(); return;
-  }
   await systemHistory();
 }
 // An unlaunched plan that matched no service reports that instead of review.

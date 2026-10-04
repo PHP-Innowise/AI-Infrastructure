@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import uuid
 
 from ai_system_lib import (System, SystemError, digest, encoded, fields, identifier,
@@ -14,10 +15,11 @@ from ai_system_lib import (System, SystemError, digest, encoded, fields, identif
                            read_file, relative, SECRET, source, text)
 from ai_system_execution import load, save
 from .creator import isolation_backend
+from . import discovery_sandbox
 from .discovery_sandbox import sandbox_problem
+from .filesystem import fs
 from .sessions import ACTIVE, SessionError
 from .system_editor import snapshot
-from .system_orchestration import UNAVAILABLE
 
 MAX_FILES = 120
 MAX_FILE = 64 * 1024
@@ -68,14 +70,14 @@ def collect(root, excluded=()):
     """Never follow links or execute target code. Deterministic caps expose omissions."""
     root = Path(root)
     fd = open_directory(root)
-    identity = os.fstat(fd)
+    identity = fs.fstat(fd)
     candidates, visited, omitted = [], [0], [0]
 
     def walk(directory, prefix='', depth=0):
         if depth > 12 or visited[0] >= 12000:
             omitted[0] += 1
             return
-        with os.scandir(directory) as entries:
+        with fs.scandir(directory) as entries:
             bounded = list(islice(entries, 12001))
         if len(bounded) > 12000:
             omitted[0] += 1
@@ -89,23 +91,26 @@ def collect(root, excluded=()):
                 relative(name)
                 if prefix.rstrip('/').split('/')[-1] in ('.cursor', '.claude') and entry.name != 'rules':
                     continue
-                if entry.is_dir(follow_symlinks=False):
+                # Stat through the open parent: a Windows entry's own handle closed with the listing.
+                kind = fs.stat(entry.name, dir_fd=directory, follow_symlinks=False).st_mode
+                if stat.S_ISDIR(kind):
                     if entry.name.lower() in SKIP_DIRS or any(inside(root / name, other) for other in excluded):
                         continue
-                    child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+                    child = fs.open(entry.name, os.O_RDONLY | fs.O_DIRECTORY | fs.O_NOFOLLOW, dir_fd=directory)
                     try:
                         walk(child, name + '/', depth + 1)
                     finally:
-                        os.close(child)
-                elif entry.is_file(follow_symlinks=False) and entry.name.lower() not in SKIP and (
+                        fs.close(child)
+                elif stat.S_ISREG(kind) and entry.name.lower() not in SKIP and (
                         Path(name).suffix.lower() in EXTENSIONS or entry.name in ('CODEOWNERS', '.cursorrules')):
                     candidates.append(name)
-            except (OSError, SystemError):
+            except (OSError, ValueError, SystemError):
+                # A link, a Windows reparse point or an unsafe Windows name is skipped.
                 continue
     try:
         walk(fd)
     finally:
-        os.close(fd)
+        fs.close(fd)
     # Policies and interface specifications get space before implementation files.
     candidates.sort(key=lambda name: ({'policy': 0, 'contract': 1, 'spec': 2, 'code': 3, 'test': 4, 'memory': 5}[kind_for(name)], name))
     evidence, used, validator = {}, 0, Evidence()
@@ -276,8 +281,8 @@ class DiscoveryManager:
         self.sessions, self.editor = sessions, editor
 
     def start(self, data):
-        if UNAVAILABLE:
-            raise SessionError(UNAVAILABLE)
+        if discovery_sandbox.NATIVE_WINDOWS:
+            raise SessionError(discovery_sandbox.WINDOWS_REASON)
         # Probe the sandbox outside the server lock: it starts a short process. A host
         # that blocks bubblewrap gets the actual reason instead of a failed scan later.
         problem = isolation_backend() and sandbox_problem()
@@ -402,8 +407,6 @@ class DiscoveryManager:
             return self.get(session['id'])
 
     def get(self, sid):
-        if UNAVAILABLE:
-            raise SessionError(UNAVAILABLE)
         try:
             return self._get(sid)
         except (SystemError, OSError, ValueError, TypeError, KeyError) as error:

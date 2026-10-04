@@ -1,4 +1,4 @@
-"""Sequential, receipt-backed development workers; stdlib, POSIX only.
+"""Sequential, receipt-backed development workers; stdlib, POSIX and native Windows.
 
 Project Brain owns task state. This journal owns dispatch position and results.
 It never treats a process exit alone as evidence that code is correct.
@@ -11,13 +11,13 @@ from datetime import datetime, timezone
 from functools import wraps
 try:
     import fcntl
-except ImportError:  # native Windows: the Harness imports this module but refuses System Orchestration there
+except ImportError:  # Native Windows locks through portable_fs.open_lock instead.
     fcntl = None
 import json
 import os
 from pathlib import Path
+import re
 import selectors
-import signal
 import stat
 import subprocess
 import sys
@@ -31,11 +31,17 @@ from ai_system_lib import (MAX_BYTES, MAX_SERVICES, SECRET, System, SystemError,
 
 from ai_system_providers import (EXTRA_DIRECTORIES, NATIVE_PROVIDERS, discover_executable,
                                  invocation, worker_result)
+# ai_system_providers put harness/src on the import path.
+from harness import process_runtime
+import portable_fs as fs
 
 RUNTIME = Path(__file__).resolve().parent.parent / "PHP Core/memory-bank/scripts/context.py"
 MAX_OUTPUT = 2 * 1024 * 1024
 MAX_STATE = 8 * MAX_BYTES
-# Harness supplies its trusted watchdog. Standalone CLI behavior is unchanged.
+WINDOWS = os.name == "nt"
+# Harness runners set this to their process_guard.py, which then owns every worker.
+# Standalone POSIX CLI behavior is unchanged. Windows has no process groups, so
+# workers there always start under the guard, whose Job Object owns their tree.
 PROCESS_GUARD = None
 
 
@@ -53,6 +59,23 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def settle(operation):
+    """Run a rename, link or delete, retrying while Windows reports the file in use.
+
+    Windows refuses to replace or delete a file that another handle holds open,
+    such as the Harness reading a journal or a virus scanner. Those handles
+    close within moments. POSIX never refuses, so it never retries.
+    """
+    deadline = time.monotonic() + 2
+    while True:
+        try:
+            return operation()
+        except PermissionError as error:
+            if not WINDOWS or getattr(error, "winerror", None) not in (5, 32) or time.monotonic() >= deadline:
+                raise
+            time.sleep(.05)
+
+
 def save(root, name, value, new=False):
     """Durable atomic replace inside an explicitly opened private directory."""
     identifier(name.removesuffix(".json"))
@@ -63,30 +86,31 @@ def save(root, name, value, new=False):
     temporary = ".pending-" + uuid.uuid4().hex
     try:
         try:
-            info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+            info = fs.stat(name, dir_fd=directory, follow_symlinks=False)
         except FileNotFoundError:
             info = None
         if info is not None and (new or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1):
             raise SystemError("Refused existing or linked execution output")
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        fd = fs.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | fs.O_NOFOLLOW,
                      0o600, dir_fd=directory)
         with os.fdopen(fd, "wb") as handle:
             handle.write(raw)
             handle.flush()
             os.fsync(handle.fileno())
         if new:
-            os.link(temporary, name, src_dir_fd=directory, dst_dir_fd=directory,
-                    follow_symlinks=False)
-            os.unlink(temporary, dir_fd=directory)
+            settle(lambda: fs.link(temporary, name, src_dir_fd=directory, dst_dir_fd=directory,
+                                   follow_symlinks=False))
+            settle(lambda: fs.unlink(temporary, dir_fd=directory))
         else:
-            os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
-        os.fsync(directory)
+            settle(lambda: fs.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory))
+        if not WINDOWS:
+            os.fsync(directory)  # A Windows directory handle cannot be flushed; NTFS journals the rename.
     finally:
         try:
-            os.unlink(temporary, dir_fd=directory)
+            settle(lambda: fs.unlink(temporary, dir_fd=directory))
         except FileNotFoundError:
             pass
-        os.close(directory)
+        fs.close(directory)
 
 
 def load(root, name):
@@ -95,6 +119,22 @@ def load(root, name):
 
 @contextmanager
 def lock_file(root, name):
+    if WINDOWS:
+        # A share-deny open through a rooted handle: a second open fails while this one lives.
+        try:
+            handle = fs.open_lock(absolute(root) / name)
+        except OSError as error:
+            if getattr(error, "winerror", None) != 32:
+                raise
+            raise SystemError("Another executor is using this run or workspace") from None
+        try:
+            info = fs.fstat(handle)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise SystemError("Refused execution lock")
+            yield
+        finally:
+            fs.close(handle)
+        return
     directory = open_directory(root)
     handle = None
     try:
@@ -117,18 +157,28 @@ def lock_file(root, name):
 @contextmanager
 def workspace_locks(system, selected):
     """Serialize this tool's runs, including services sharing a Git checkout."""
-    lock_root = Path(tempfile.gettempdir()) / ("ai-system-locks-" + str(os.getuid()))
-    try:
-        os.mkdir(lock_root, 0o700)
-    except FileExistsError:
-        pass
-    directory = open_directory(lock_root)
-    try:
-        info = os.fstat(directory)
-        if info.st_uid != os.getuid() or info.st_mode & 0o077:
-            raise SystemError("Workspace lock directory must be private")
-    finally:
-        os.close(directory)
+    if WINDOWS:
+        from windows_security import secure_private_dir
+        user = re.sub(r"[^A-Za-z0-9._-]", "_", os.environ.get("USERNAME", "user"))[:64] or "user"
+        lock_root = Path(tempfile.gettempdir()) / ("ai-system-locks-" + user)
+        try:
+            # Owned by this user, with a protected DACL for this user and SYSTEM only.
+            secure_private_dir(lock_root, migrate=False)
+        except OSError:
+            raise SystemError("Workspace lock directory must be private") from None
+    else:
+        lock_root = Path(tempfile.gettempdir()) / ("ai-system-locks-" + str(os.getuid()))
+        try:
+            os.mkdir(lock_root, 0o700)
+        except FileExistsError:
+            pass
+        directory = open_directory(lock_root)
+        try:
+            info = os.fstat(directory)
+            if info.st_uid != os.getuid() or info.st_mode & 0o077:
+                raise SystemError("Workspace lock directory must be private")
+        finally:
+            os.close(directory)
     identities = set()
     for root in [system.root] + [system.services[sid]["root"] for sid in selected]:
         # Git output is a lock identity, never a path we open or write.
@@ -145,12 +195,12 @@ def workspace_locks(system, selected):
         yield
 
 
-def run_process(command, cwd, stdin, timeout, on_line=None, stderr_tail=False):
-    """Bound output, feed stdin without pipe deadlock, reap the process group.
+def run_process(command, cwd, stdin, timeout, on_line=None, stderr_tail=False, env=None):
+    """Bound output, feed stdin without pipe deadlock, reap the process group or job.
 
     on_line receives each complete stdout line as it arrives, for display only.
     stderr_tail returns the last 4 KiB of stderr for failure diagnostics; it is
-    never written to the journal.
+    never written to the journal. env replaces the inherited environment.
     """
     started = time.monotonic()
     output = bytearray()
@@ -177,49 +227,49 @@ def run_process(command, cwd, stdin, timeout, on_line=None, stderr_tail=False):
                 pending.clear()  # An unterminated oversized line is not displayable.
         except Exception:
             on_line = None  # Display only: an observer never changes the dispatch.
-    process = None
+    process = selector = None
     watchdog_read = watchdog_write = None
     errors = tempfile.TemporaryFile() if stderr_tail else None
     with tempfile.TemporaryFile() as source:
         source.write(stdin.encode("utf-8"))
         source.seek(0)
         try:
-            if PROCESS_GUARD is not None:
+            options = {"cwd": str(cwd), "env": env, "stdin": source, "stdout": subprocess.PIPE,
+                       "stderr": errors if errors is not None else subprocess.DEVNULL}
+            if PROCESS_GUARD is not None or WINDOWS:
                 watchdog_read, watchdog_write = os.pipe()
-                command = [sys.executable, str(PROCESS_GUARD), str(watchdog_read), '--', *command]
-            process = subprocess.Popen(command, cwd=str(cwd), stdin=source,
-                                       stdout=subprocess.PIPE,
-                                       stderr=errors if errors is not None else subprocess.DEVNULL,
-                                       start_new_session=True,
-                                       pass_fds=(watchdog_read,) if watchdog_read is not None else ())
+                process = process_runtime.launch_guarded(command, watchdog_read, **options)
+            else:
+                process = subprocess.Popen(command, start_new_session=True, **options)
             if watchdog_read is not None:
                 os.close(watchdog_read)
                 watchdog_read = None
-            with selectors.DefaultSelector() as selector:
-                selector.register(process.stdout, selectors.EVENT_READ)
-                while selector.get_map():
-                    if time.monotonic() - started > timeout:
-                        failure = "timeout"
-                        break
-                    for key, _ in selector.select(0.1):
-                        chunk = os.read(key.fileobj.fileno(), 65536)
-                        if not chunk:
-                            selector.unregister(key.fileobj)
-                            forward(b"", final=True)
-                        else:
-                            output.extend(chunk)
-                            if len(output) > MAX_OUTPUT:
-                                failure = "output_limit"
-                                break
-                            forward(chunk)
-                    if failure:
-                        break
-                remaining = max(0.01, timeout - (time.monotonic() - started))
-                if failure is None:
-                    try:
-                        process.wait(timeout=remaining)
-                    except subprocess.TimeoutExpired:
-                        failure = "timeout"
+            # Windows cannot wait on pipes; the portable selector reads them on a thread there.
+            selector = process_runtime.PipeSelector()
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while selector.get_map():
+                if time.monotonic() - started > timeout:
+                    failure = "timeout"
+                    break
+                for key, _ in selector.select(0.1):
+                    chunk = selector.read(key.fileobj, 65536)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        forward(b"", final=True)
+                    else:
+                        output.extend(chunk)
+                        if len(output) > MAX_OUTPUT:
+                            failure = "output_limit"
+                            break
+                        forward(chunk)
+                if failure:
+                    break
+            remaining = max(0.01, timeout - (time.monotonic() - started))
+            if failure is None:
+                try:
+                    process.wait(timeout=remaining)
+                except subprocess.TimeoutExpired:
+                    failure = "timeout"
         except OSError:
             failure = "start_failed"
         finally:
@@ -228,11 +278,11 @@ def run_process(command, cwd, stdin, timeout, on_line=None, stderr_tail=False):
                     os.close(fd)
             if process is not None:
                 # Even a successful leader may leave children with closed pipes.
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                process_runtime.signal_tree(process, force=True)
                 process.wait()
+            if selector is not None:
+                selector.close()
+            if process is not None:
                 process.stdout.close()
     result = {"returncode": process.returncode if process is not None else None,
               "error": failure, "stdout": bytes(output[:MAX_OUTPUT]),
@@ -244,24 +294,32 @@ def run_process(command, cwd, stdin, timeout, on_line=None, stderr_tail=False):
     return result
 
 
+def linked(info):
+    """A symbolic link, or on Windows any reparse point such as a junction."""
+    return stat.S_ISLNK(info.st_mode) or bool(getattr(info, "st_file_attributes", 0)
+                                              & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+
+
 def guard_brain(root):
     """Native storage may mutate, so refuse existing link-based redirections."""
     fd = open_directory(root)
-    os.close(fd)
+    fs.close(fd)
     for prefix in ("project-brain", "memory-bank"):
         start = root / prefix
-        if start.is_symlink():
-            raise SystemError("Refused linked native runtime storage")
-        if not start.exists():
+        try:
+            if linked(os.lstat(start)):
+                raise SystemError("Refused linked native runtime storage")
+        except FileNotFoundError:
             continue
         count = 0
+        # A link is refused before the walk can descend into it.
         for directory, dirs, files in os.walk(start, followlinks=False):
             for name in dirs + files:
                 count += 1
                 if count > 20000:
                     raise SystemError("Native runtime storage exceeds inspection limit")
                 info = os.lstat(Path(directory) / name)
-                if stat.S_ISLNK(info.st_mode) or (stat.S_ISREG(info.st_mode) and info.st_nlink != 1):
+                if linked(info) or (stat.S_ISREG(info.st_mode) and info.st_nlink != 1):
                     raise SystemError("Refused linked native runtime storage")
                 if not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
                     raise SystemError("Refused special native runtime storage")
@@ -274,9 +332,11 @@ class Brain:
 
     def call(self, *arguments, check=True):
         guard_brain(self.root)
+        # The runtime prints UTF-8 JSON; Windows would otherwise encode a pipe in its ANSI code page.
+        env = {**os.environ, "PYTHONUTF8": "1"} if WINDOWS else None
         result = run_process([sys.executable, str(RUNTIME), "--root", str(self.root),
                               "--mode", "governed", "--owner", self.owner,
-                              *arguments, "--json"], self.root, "", 60)
+                              *arguments, "--json"], self.root, "", 60, env=env)
         if result["error"] or result["returncode"] != 0:
             if not check:
                 return None
@@ -597,9 +657,9 @@ def create_run(system, plan, directory, provider, executable, mode, timeout, acc
                        extra_dirs(state, step, dispatch_access(state, step)))
     parent = open_directory(directory.parent)
     try:
-        os.mkdir(directory.name, 0o700, dir_fd=parent)
+        fs.mkdir(directory.name, 0o700, dir_fd=parent)
     finally:
-        os.close(parent)
+        fs.close(parent)
     save(directory, "plan.json", plan, new=True)
     save(directory, "checkpoint.json", plan, new=True)
     save(directory, "result-schema.json", result_schema(selected), new=True)

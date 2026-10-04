@@ -5,8 +5,12 @@ any stack. It supports separate repositories and service directories in a
 monorepo. Discovery/planning have no dependency on PHP, a model provider, the
 Harness server, LangGraph, or a deployed application. Execution uses a local
 provider CLI/adapter and the generic native Python Brain runtime. Python 3.9+
-on POSIX is required; Git is
-optional and contributes commit provenance when available.
+on Linux, macOS or native Windows is required; Git is
+optional and contributes commit provenance when available. On Windows, a worker
+CLI installed by npm starts through Node.js directly, never through its `.cmd`
+launcher, and each worker's process tree is ended with its Windows job. AI
+discovery in the Harness is the exception: native Windows has no sandbox for it
+yet (see [AI discovery](#troubleshooting-ai-discovery)).
 
 The planning workflow is:
 
@@ -428,7 +432,8 @@ turn raw prompts or unreviewed worker claims into verified durable memory.
 
 `run.json` and `checkpoint.json` are atomically replaced and fsynced. Each
 attempt has an immutable `PHASE-aN.json` receipt. The run directory must be new
-and is created with mode 0700; files use 0600. A launch identity and input hash
+and is created with mode 0700; files use 0600 (on Windows they inherit the
+private Harness state permissions). A launch identity and input hash
 are persisted **before** starting a worker. Do not manually edit journal files.
 
 On resume, completed steps are skipped. A success receipt left behind by a
@@ -536,7 +541,10 @@ Choosing another empty service folder retains that card's entered metadata;
 choosing a folder with a passport loads its existing metadata.
 
 AI discovery runs through the same serialized queue as other Harness work. It
-requires bubblewrap on Linux or `sandbox-exec` on macOS. The filesystem read
+requires bubblewrap on Linux or `sandbox-exec` on macOS. Native Windows has no
+sandbox that keeps the original service folders out of the agent's reach, so
+**Fill with AI** is off there and the editor says why; fill in the forms by hand,
+or scan on Linux or macOS. The filesystem read
 allow-list exposes copied evidence, disposable scratch space, standard OS/CLI
 runtime and the selected provider's account state needed for native login/session
 operation; it never mounts original service folders. Native account state can
@@ -565,9 +573,12 @@ Stale forms/files are rejected. A durable journal restores partial saves after
 failure/restart, preserves detected external content/permission changes as a
 recovery conflict, and acknowledges a fully completed save. Metadata writes
 and recovery wait until queued/running Harness sessions finish. Existing file
-permissions are preserved; new files are private (`0600`). Avoid concurrent
-external metadata writers: POSIX replacement has a small check-to-rename window
-that optimistic fingerprints cannot protect against. Coordinator workspace locks
+permissions are preserved; new files are private (`0600`; on Windows they
+inherit the folder's permissions). Windows refuses to replace a file another
+program holds open, so a save retries for up to 2 seconds before it stops.
+Avoid concurrent external metadata writers: replacement has a small
+check-to-rename window that optimistic fingerprints cannot protect against.
+Coordinator workspace locks
 serialize cooperating system workers, not arbitrary external editors.
 
 You can also choose a registered project in the sidebar and a relative system
@@ -702,6 +713,7 @@ journal keeps its generic code (for example `worker_exit_failure`).
 | --- | --- | --- |
 | `… is not signed in or its login expired` | The native CLI cannot authenticate. A stored login can expire even while a status command still lists it. | Sign in again in a terminal with `claude auth login`, `codex login` or `cursor-agent login`, then retry. |
 | `The AI discovery sandbox cannot start` / `could not start` | The host does not allow the unprivileged user namespaces that bubblewrap needs. | See [Allow bubblewrap](#allow-bubblewrap-on-ubuntu-2310-and-later). |
+| `AI discovery needs bubblewrap on Linux or sandbox-exec on macOS` | The Harness runs on native Windows, which has no discovery sandbox yet. | Fill in the service forms by hand, or scan on Linux or macOS. |
 | `… could not start inside the AI discovery sandbox` | The CLI executable is not reachable inside the sandbox, for example a wrapper script. | Start Harness with the standalone executable: `--claude-bin`, `--codex-bin` or `--cursor-bin`. |
 | `… reached the scan timeout` | The scan ran longer than **Scan timeout**. | Increase the timeout or scan fewer service folders. |
 | `… reported a usage or rate limit` | Provider quota or rate limit. | Retry later or choose another provider. |

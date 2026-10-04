@@ -3,19 +3,16 @@ from __future__ import annotations
 
 from functools import wraps
 import json
-import os
 from pathlib import Path
 import re
 import sys
 import uuid
 
 ROOT = Path(__file__).resolve().parents[3]
-# Descriptor-relative writes, flock and process groups have no native Windows port yet.
-UNAVAILABLE = ('System Orchestration needs Linux or macOS. It is not available on native Windows yet.'
-               if os.name == 'nt' else None)
 sys.path.insert(0, str(ROOT / 'scripts'))
 from ai_system_lib import System, SystemError, open_directory
 import ai_system_execution as execution
+from .filesystem import fs
 from .sessions import SessionError, ACTIVE, open_project_path, now
 from .system_editor import SystemEditor
 
@@ -23,8 +20,6 @@ from .system_editor import SystemEditor
 def boundary(function):
     @wraps(function)
     def checked(*args, **kwargs):
-        if UNAVAILABLE:
-            raise SessionError(UNAVAILABLE)
         try:
             return function(*args, **kwargs)
         except SystemError as error:
@@ -54,11 +49,9 @@ class SystemManager:
         self.sessions = sessions
         self.editor = SystemEditor(sessions)
         self.root = sessions.state_dir / 'ai-system'
-        if UNAVAILABLE:
-            return  # Every entry point refuses through boundary().
         self.root.mkdir(mode=0o700, exist_ok=True)
         fd = open_directory(self.root)
-        os.close(fd)
+        fs.close(fd)
         with sessions.lock:
             sessions.db.execute('CREATE TABLE IF NOT EXISTS system_runs (id TEXT PRIMARY KEY, data TEXT NOT NULL)')
             columns = {row[1] for row in sessions.db.execute('PRAGMA table_info(system_runs)')}
@@ -75,7 +68,7 @@ class SystemManager:
     def _system(self, project_id, config_path):
         project = self.sessions.project(project_id)
         fd = open_project_path(Path(project['path']), config_path)
-        os.close(fd)
+        fs.close(fd)
         # A manifest declares relationships, never host filesystem permissions.
         roots = [p['path'] for p in self.sessions.projects.values()]
         self.editor.check_recovery(Path(project['path']), config_path)
@@ -171,10 +164,11 @@ class SystemManager:
 
         def journal_file(name):
             # A live runner publishes new journal files by link-then-unlink. During
-            # that instant the safe reader refuses the second link; the next poll reads it.
+            # that instant the safe reader refuses the second link, and Windows may
+            # refuse a file the runner is replacing; the next poll reads it.
             try:
                 return execution.load(journal, name)
-            except SystemError:
+            except (SystemError, PermissionError):
                 if result['active']:
                     return None
                 raise

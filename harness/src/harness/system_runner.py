@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import signal
 import sys
@@ -59,6 +60,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--request', type=Path, required=True)
     args = parser.parse_args()
+    if os.name == 'nt':
+        sys.stdout.reconfigure(encoding='utf-8')  # Events are UTF-8 JSON, not the ANSI code page of a pipe.
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
     execution.PROCESS_GUARD = Path(__file__).with_name('process_guard.py')

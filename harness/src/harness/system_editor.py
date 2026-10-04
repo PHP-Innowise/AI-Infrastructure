@@ -5,7 +5,7 @@ from contextlib import nullcontext
 import base64
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import stat
 import time
 from types import SimpleNamespace
@@ -14,7 +14,8 @@ import uuid
 from ai_system_lib import (MAX_BYTES, MAX_SOURCE_BYTES, MAX_SERVICES, System, SystemError,
                            digest, encoded, fields, inside, items, manifest,
                            parse_json, read_file, relative, source, text)
-from ai_system_execution import workspace_locks
+from ai_system_execution import settle, workspace_locks
+from .filesystem import fs
 from .sessions import SessionError, open_project_path
 
 
@@ -22,53 +23,62 @@ def payload(value):
     return (json.dumps(value, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
 
 
+def file_mode(info):
+    """Permission bits to keep across a save. Windows has only a read-only attribute, so it
+    reads as 0o600 or 0o400, which a file created by the save then matches."""
+    if os.name == 'nt':
+        return 0o600 if info.st_mode & stat.S_IWUSR else 0o400
+    return stat.S_IMODE(info.st_mode)
+
+
 def snapshot(root, name):
-    parent = open_project_path(root, str(Path(name).parent), directory=True)
+    parent = open_project_path(root, str(PurePosixPath(name).parent), directory=True)
     try:
-        identity = os.fstat(parent)
+        identity = fs.fstat(parent)
         try:
             raw = read_file(root, name)
             fd = open_project_path(root, name)
             try:
-                info = os.fstat(fd)
+                info = fs.fstat(fd)
             finally:
-                os.close(fd)
+                fs.close(fd)
             return {'sha256': digest(raw), 'body': base64.b64encode(raw).decode(),
-                    'mode': stat.S_IMODE(info.st_mode), 'parent': [identity.st_dev, identity.st_ino]}
+                    'mode': file_mode(info), 'parent': [identity.st_dev, identity.st_ino]}
         except FileNotFoundError:
             return {'sha256': None, 'body': None, 'mode': 0o600,
                     'parent': [identity.st_dev, identity.st_ino]}
     finally:
-        os.close(parent)
+        fs.close(parent)
 
 
 def replace(root, name, raw, expected, mode):
     """Compare again and replace through an opened parent, never a link."""
     if snapshot(root, name) != expected:
         raise SessionError('System files changed. Reload the editor before saving.')
-    parent = open_project_path(root, str(Path(name).parent), directory=True)
+    parent = open_project_path(root, str(PurePosixPath(name).parent), directory=True)
     temporary = '.ai-system-edit-' + uuid.uuid4().hex
     try:
-        identity = os.fstat(parent)
+        identity = fs.fstat(parent)
         if [identity.st_dev, identity.st_ino] != expected['parent']:
             raise SessionError('The selected folder changed. Reload the editor.')
         if raw is None:
-            os.unlink(Path(name).name, dir_fd=parent)
+            settle(lambda: fs.unlink(Path(name).name, dir_fd=parent))
         else:
-            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode, dir_fd=parent)
+            fd = fs.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | fs.O_NOFOLLOW, mode, dir_fd=parent)
             with os.fdopen(fd, 'wb') as handle:
-                os.fchmod(handle.fileno(), mode)
+                fs.fchmod(handle.fileno(), mode)
                 handle.write(raw); handle.flush(); os.fsync(handle.fileno())
             if snapshot(root, name) != expected:
                 raise SessionError('System files changed during saving. Reload the editor.')
-            os.replace(temporary, Path(name).name, src_dir_fd=parent, dst_dir_fd=parent)
-        os.fsync(parent)
+            settle(lambda: fs.replace(temporary, Path(name).name, src_dir_fd=parent, dst_dir_fd=parent))
+        if os.name != 'nt':
+            os.fsync(parent)  # A Windows directory handle cannot be flushed; NTFS journals the rename.
     finally:
         try:
-            os.unlink(temporary, dir_fd=parent)
+            settle(lambda: fs.unlink(temporary, dir_fd=parent))
         except FileNotFoundError:
             pass
-        os.close(parent)
+        fs.close(parent)
 
 
 class Candidate(System):
@@ -144,7 +154,7 @@ class SystemEditor:
     def folder(self, project_id, folder='.'):
         root = Path(self.sessions.project(project_id)['path'])
         fd = open_project_path(root, folder, directory=True)
-        os.close(fd)
+        fs.close(fd)
         return root / folder if folder != '.' else root
 
     def registered(self, root):
@@ -237,8 +247,11 @@ class SystemEditor:
             if prior['body'] is not None:
                 previous = parse_json(base64.b64decode(prior['body']))
                 manifest(previous, previous['id'])  # Refuse unrelated file collisions.
-            registry.append({'id': value['id'], 'root': Path(os.path.relpath(location, config.parent)).as_posix(),
-                             'manifest': service['manifest']})
+            try:
+                folder = Path(os.path.relpath(location, config.parent)).as_posix()
+            except ValueError:  # Windows: a folder on another drive has no relative path.
+                folder = location.as_posix()
+            registry.append({'id': value['id'], 'root': folder, 'manifest': service['manifest']})
         # Commit the system registry last, after every passport has been written.
         add(root, data['config_path'], {'schema_version': 1, 'name': data['name'],
             'services': registry, 'shared_sources': data['shared_sources']}, MAX_BYTES)

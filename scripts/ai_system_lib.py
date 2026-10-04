@@ -14,6 +14,8 @@ import re
 import stat
 import subprocess
 
+import portable_fs as fs
+
 MAX_BYTES = 2 * 1024 * 1024
 MAX_SOURCE_BYTES = 256 * 1024
 MAX_SERVICES = 500
@@ -93,20 +95,12 @@ def absolute(path):
 
 
 def open_directory(path):
-    """Open every component without following links, including ancestors."""
-    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
-        raise SystemError("Filesystem access requires POSIX O_NOFOLLOW support")
-    path = absolute(path)
-    fd = os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        for part in path.parts[1:]:
-            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-            os.close(fd)
-            fd = child
-        return fd
-    except BaseException:
-        os.close(fd)
-        raise
+    """Open every component without following links, including ancestors.
+
+    Windows opens each component from the drive root through a rooted handle and
+    refuses junctions and other reparse points.
+    """
+    return fs.open_target_directory(absolute(path))
 
 
 def read_file(root, name, limit=MAX_BYTES):
@@ -115,12 +109,12 @@ def read_file(root, name, limit=MAX_BYTES):
     try:
         parts = PurePosixPath(name).parts
         for part in parts[:-1]:
-            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-            os.close(fd)
+            child = fs.open(part, os.O_RDONLY | fs.O_DIRECTORY | fs.O_NOFOLLOW, dir_fd=fd)
+            fs.close(fd)
             fd = child
-        file_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+        file_fd = fs.open(parts[-1], os.O_RDONLY | fs.O_NOFOLLOW | fs.O_NONBLOCK, dir_fd=fd)
         try:
-            info = os.fstat(file_fd)
+            info = fs.fstat(file_fd)
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > limit:
                 raise SystemError("Source must be a bounded regular file without hard links")
             with os.fdopen(file_fd, "rb", closefd=False) as handle:
@@ -129,9 +123,12 @@ def read_file(root, name, limit=MAX_BYTES):
                 raise SystemError("Source exceeds size limit")
             return raw
         finally:
-            os.close(file_fd)
+            fs.close(file_fd)
+    except ValueError:
+        # Windows refuses device names, streams and trailing dots as components.
+        raise SystemError("Refused source path") from None
     finally:
-        os.close(fd)
+        fs.close(fd)
 
 
 def parse_json(raw):

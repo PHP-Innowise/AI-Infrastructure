@@ -26,16 +26,30 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Run System Orchestration on native Windows:
+  - System files, run journals and editor saves go through the portable
+    filesystem layer, whose rooted handles refuse junctions. Windows refuses to
+    replace a file another program holds open, for example while the Harness
+    reads a run, so a save retries for up to 2 seconds.
+  - Every worker and Brain call starts under the Harness process guard, whose
+    Windows job ends the whole process tree. A worker CLI installed by npm
+    starts through Node.js directly, never through its `.cmd` launcher.
+  - Run and workspace locks are share-deny opens. The workspace lock folder
+    gets an ACL that admits only the current user and SYSTEM.
+  - Brain calls, the System runner and `scripts/ai_system.py` exchange UTF-8,
+    so a task written in Russian also works on Windows.
+  - AI discovery stays off on Windows: no sandbox there keeps the original
+    service folders out of the agent's reach. The editor says why.
+  - The new `tests.test_ai_system_portable` runs on Linux and in the
+    `windows-harness` job, including a run with an npm-installed Codex fixture.
 - Join the native Windows Harness (PR #35) with the redesigned page and System
   Orchestration (PR #36):
   - The redesigned page keeps its split scripts. Creator names the missing
     isolation as the server reports it.
   - Memory use and the live Codex fill read files through the portable
     filesystem layer.
-  - System Orchestration still needs Linux or macOS. On native Windows the
-    server now starts: `scripts/ai_system_execution.py` imports without `fcntl`.
-    Every System and AI scan request is refused with that reason, and both
-    System tabs show it.
+  - `scripts/ai_system_execution.py` imported `fcntl`, which kept the server
+    from starting on native Windows. It no longer does.
 - Let the browser keep the Harness page files. The page names each style and
   script by its content hash, so a repeat visit loads none of them again (83 KB
   instead of 651 KB here). That address is served `immutable`; any other request

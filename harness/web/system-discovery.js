@@ -22,7 +22,8 @@ function discoveryControls() {
   // A host that blocks the sandbox is named before a scan is attempted; start re-checks it.
   const sandbox=state.bootstrap?.runtime?.discovery_sandbox;
   $('system-discovery-sandbox').textContent=sandbox || ''; $('system-discovery-sandbox').hidden=!sandbox;
-  $('system-discovery-start').disabled=systemEditor.pending || !systemEditor.data?.services.length || !providers.some(p=>p.id===select.value && p.available);
+  // Native Windows cannot sandbox the scan, so the note above says why and the scan stays off.
+  $('system-discovery-start').disabled=state.bootstrap?.runtime?.discovery_supported===false || systemEditor.pending || !systemEditor.data?.services.length || !providers.some(p=>p.id===select.value && p.available);
   $('system-discovery-cancel').hidden=!systemDiscovery.active;
   $('system-discovery-cancel').disabled=!systemDiscovery.id;
 }

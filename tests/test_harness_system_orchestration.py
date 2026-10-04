@@ -416,11 +416,10 @@ if (root / "hold-worker").exists():
 
 
 class NativeWindowsSystemTests(unittest.TestCase):
-    """The native Windows Harness starts and names System Orchestration as unavailable."""
+    """On native Windows, System runs work and only AI discovery is refused, with its reason."""
     request = http_helpers.HarnessWebTests.request
     post = http_helpers.HarnessWebTests.post
     close_server = http_helpers.HarnessWebTests.close_server
-    REASON = 'System Orchestration needs Linux or macOS. It is not available on native Windows yet.'
 
     def test_server_imports_without_posix_only_modules(self):
         code = ("import sys\nfor name in ('fcntl', 'pwd', 'grp', 'resource', 'termios'):\n    sys.modules[name] = None\n"
@@ -429,14 +428,13 @@ class NativeWindowsSystemTests(unittest.TestCase):
                                    capture_output=True, text=True, timeout=60)
         self.assertEqual(0, completed.returncode, completed.stderr)
 
-    def test_every_entry_point_refuses_and_the_server_still_starts(self):
-        from harness import system_discovery, system_orchestration
+    def test_systems_work_and_ai_discovery_names_the_missing_sandbox(self):
+        from harness import discovery_sandbox
+        from harness.sessions import SessionError
         self.root = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.root)
         project = self.root / 'project'
         shutil.copytree(ROOT / 'docs/examples/ai-system', project)
-        for target in (patch.object(system_orchestration, 'UNAVAILABLE', self.REASON),
-                       patch.object(system_discovery, 'UNAVAILABLE', self.REASON),
-                       patch.object(web, 'SYSTEM_UNAVAILABLE', self.REASON),
+        for target in (patch.object(discovery_sandbox, 'NATIVE_WINDOWS', True),
                        patch.object(providers, 'discover_providers', return_value=[]),
                        patch.object(providers, 'model_options', return_value={'models': [], 'efforts': [], 'detail': 'Fixture'})):
             target.start(); self.addCleanup(target.stop)
@@ -446,21 +444,20 @@ class NativeWindowsSystemTests(unittest.TestCase):
         self.thread.start(); self.addCleanup(self.close_server)
         self.token = self.server.token
         project_id = next(iter(self.server.sessions.projects))
-        self.assertFalse((self.root / 'state/ai-system').exists())
         status, bootstrap, _ = self.request('/api/bootstrap')
         self.assertEqual(200, status, bootstrap)
-        self.assertEqual(self.REASON, bootstrap['runtime']['system_unavailable'])
-        self.assertEqual(self.REASON, bootstrap['runtime']['discovery_sandbox'])
-        # Reads keep the generic answer; the page names the reason from the bootstrap instead.
-        for path in ('/api/system-runs?project_id=' + project_id, '/api/system-runs/' + 'a' * 32,
-                     '/api/system-discoveries/' + 'a' * 32):
-            self.assertEqual(400, self.request(path)[0])
+        self.assertIs(False, bootstrap['runtime']['discovery_supported'])
+        self.assertEqual(discovery_sandbox.WINDOWS_REASON, bootstrap['runtime']['discovery_sandbox'])
         body = {'project_id': project_id, 'config_path': 'system.json'}
-        for status, result, _ in (self.post('/api/systems/catalog', body),
-                                  self.post('/api/systems/editor', body),
-                                  self.post('/api/system-runs', {**body, 'task': 'Check', 'change_id': 'change-001'}),
-                                  self.post('/api/system-discoveries', {'editor': {}, 'provider': 'codex'})):
-            self.assertEqual((400, self.REASON), (status, result.get('error')))
+        status, catalog, _ = self.post('/api/systems/catalog', body)
+        self.assertEqual(200, status, catalog)
+        self.assertEqual(200, self.request('/api/system-runs?project_id=' + project_id)[0])
+        status, refused, _ = self.post('/api/system-discoveries', {'editor': {}, 'provider': 'codex'})
+        self.assertEqual((400, discovery_sandbox.WINDOWS_REASON), (status, refused.get('error')))
+        # The Windows Creator sandbox reads the whole disk, so discovery never borrows it.
+        with patch.object(discovery_sandbox, 'isolation_backend', return_value=('windows-codex', 'codex.exe')):
+            with self.assertRaises(SessionError):
+                discovery_sandbox.sandbox_command(self.root / 'agent', ['codex'], 'codex', [project])
 
 
 if __name__ == '__main__':

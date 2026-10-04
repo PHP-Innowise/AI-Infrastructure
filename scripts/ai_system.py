@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Coordinate AI development across registered services (Python stdlib, POSIX)."""
+"""Coordinate AI development across registered services (Python stdlib, POSIX and Windows)."""
 from __future__ import annotations
 
 import argparse
@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import sys
 
+import portable_fs as fs
 from ai_system_lib import MAX_BYTES, System, SystemError, absolute, open_directory, parse_json, read_file, text
 
 
@@ -17,17 +18,17 @@ def write_new(path, value):
     fd = open_directory(path.parent)
     created = False
     try:
-        output = os.open(path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        output = fs.open(path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | fs.O_NOFOLLOW,
                          0o600, dir_fd=fd)
         created = True
-        with os.fdopen(output, "w", encoding="utf-8") as handle:
+        with os.fdopen(output, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(value)
     except BaseException:
         if created:
-            os.unlink(path.name, dir_fd=fd)
+            fs.unlink(path.name, dir_fd=fd)
         raise
     finally:
-        os.close(fd)
+        fs.close(fd)
 
 
 def initialize(root, name):
@@ -36,9 +37,9 @@ def initialize(root, name):
     # Parent must exist; callers explicitly choose a new system workspace.
     fd = open_directory(root.parent)
     try:
-        os.mkdir(root.name, 0o700, dir_fd=fd)
+        fs.mkdir(root.name, 0o700, dir_fd=fd)
     finally:
-        os.close(fd)
+        fs.close(fd)
     write_new(root / "system.json", json.dumps({"schema_version": 1, "name": name,
         "services": [], "shared_sources": []}, ensure_ascii=False, indent=2) + "\n")
     write_new(root / "AGENTS.md", "# System AI coordination\n\n"
@@ -100,6 +101,8 @@ def parser():
 
 
 def main(argv=None):
+    if os.name == "nt" and hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")  # JSON, not the ANSI code page of a Windows pipe.
     args = parser().parse_args(argv)
     try:
         exit_code = 0

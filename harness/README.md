@@ -18,7 +18,7 @@ into Memory Bank. A failed send retains the selected files for correction.
 ## System orchestration in the browser
 
 **System Orchestration** coordinates development changes across registered
-service repositories on Linux and macOS. It has two tabs and works on the project chosen in the
+service repositories. It has two tabs and works on the project chosen in the
 sidebar: **Services** holds the system file, its contract map and the editor;
 **Changes** holds plans, launches, agents and receipts. On **Services**, choose
 **Choose system folder…** to open another folder as the system project (it is
@@ -247,8 +247,9 @@ Projects and state must use local drive paths; junctions, symlinks and UNC/netwo
 roots are refused at protected filesystem boundaries. npm-installed Codex and
 Claude launch through Node.js directly; arbitrary `.cmd`/`.bat` check scripts
 are refused. Use a native executable or Node/Python script for checks.
-System Orchestration needs Linux or macOS. On native Windows both of its tabs
-say so, and the server refuses its requests.
+System Orchestration runs on Windows too. Its AI discovery (**Fill with AI**)
+needs a sandbox that native Windows lacks, so the button is off there and the
+editor says why.
 
 Infrastructure Creator on Windows also needs Codex CLI, even when the selected
 provider is Claude or Cursor. Complete elevated sandbox setup in native Codex
@@ -265,7 +266,8 @@ limited to 50,000 files, 256 MiB total and 4 MiB per file.
 Native providers run under the sandbox account. File-based credentials remain
 in their existing account directory; Windows user-keyring credentials may need
 provider-specific setup and are not copied or exported by Harness.
-The `windows-harness` CI job covers portable/native runtime unit tests. The
+The `windows-harness` CI job covers portable/native runtime unit tests and a
+System Orchestration run with an npm-installed Codex fixture. The
 manual `Windows Creator sandbox` workflow requires a self-hosted Windows runner
 with elevated Codex already configured; it runs actual write-denial and owner
 death tests without model credentials. Native sandbox checks cannot run on a
