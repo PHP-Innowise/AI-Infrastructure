@@ -8,7 +8,7 @@ Project Brain titles and bodies, retrieval queries and every non-chunk path do n
 from __future__ import annotations
 
 from collections import OrderedDict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -301,10 +301,10 @@ def _retrievals(project, prefix, chunk_paths, harness_tasks):
             manifest = _json(content[1]) if content and content[0] <= MANIFEST_BYTES else None
             at = _moment(manifest.get('created_at')) if manifest else None
             if at and isinstance(manifest.get('selected'), list):
-                manifests.append((at, store, manifest))
+                manifests.append((at, store, manifest, f'{store}:{name}'))
     manifests.sort(key=lambda item: item[0])
     tasks, prepared, rows, merged = {}, {}, [], 0
-    for at, store, manifest in manifests:
+    for at, store, manifest, source in manifests:
         selected = [item for item in manifest['selected'] if isinstance(item, dict)]
         key = (manifest.get('task_id'), manifest.get('task_revision'),
                frozenset((item.get('path'), item.get('source_hash')) for item in selected))
@@ -345,13 +345,93 @@ def _retrievals(project, prefix, chunk_paths, harness_tasks):
         else:
             route = 'CLI'
         task = tasks.setdefault(manifest.get('task_id'), len(tasks))
-        row = {'at': at, 'version': manifest.get('schema_version') if type(manifest.get('schema_version')) is int else None,
+        row = {'key': source, 'at': at, 'version': manifest.get('schema_version') if type(manifest.get('schema_version')) is int else None,
                'route': route, 'task': task, **counts, 'chunks': chunks, 'cuts': cuts, 'merged': 0}
         if store == 'governed' and harness_shape:
             prepared[key] = row
         rows.append(row)
-    found = len(rows)
-    return {'items': rows[-RETRIEVAL_LIMIT:], 'found': found, 'merged': merged, 'limit': RETRIEVAL_LIMIT}
+    return rows, merged
+
+
+HISTORY_DAYS = 120
+HISTORY_SCHEMA = '''
+    CREATE TABLE IF NOT EXISTS retrieval_days (project_id TEXT NOT NULL, bank TEXT NOT NULL, day TEXT NOT NULL,
+        data TEXT NOT NULL, PRIMARY KEY (project_id, bank, day));
+    CREATE TABLE IF NOT EXISTS retrieval_seen (project_id TEXT NOT NULL, bank TEXT NOT NULL, manifest TEXT NOT NULL,
+        day TEXT NOT NULL, PRIMARY KEY (project_id, bank, manifest));
+'''
+
+
+def _local_day(moment):
+    return datetime.fromisoformat(moment).astimezone().date().isoformat()
+
+
+def fold(store, project_id, bank_id, rows):
+    """Fold retrievals into this Harness's numbers-only daily rollup and return the kept days, oldest first.
+
+    A project keeps only its newest manifests, so history would end with them. Each
+    manifest is folded once: its name is remembered until it is older than the
+    horizon, and a manifest older than that is never folded.
+    """
+    horizon = (date.today() - timedelta(days=HISTORY_DAYS)).isoformat()
+    with store.lock:
+        store.db.executescript(HISTORY_SCHEMA)
+        seen = {row[0] for row in store.db.execute('SELECT manifest FROM retrieval_seen WHERE project_id=? AND bank=?',
+                                                   (project_id, bank_id))}
+        days, fresh = {}, []
+        for row in rows:
+            day = _local_day(row['at'])
+            if row['key'] in seen or day < horizon:
+                continue
+            fresh.append((project_id, bank_id, row['key'], day))
+            bucket = days.setdefault(day, {'retrievals': 0, 'with_chunk': 0, 'brain': 0, 'bank': 0, 'rules': 0, 'cuts': 0,
+                                           'routes': {}, 'chunks': {}})
+            bucket['retrievals'] += 1
+            bucket['with_chunk'] += bool(row['chunks'])
+            for kind in ('brain', 'bank', 'rules'):
+                bucket[kind] += row[kind]
+            bucket['cuts'] += len(row['cuts'])
+            bucket['routes'][row['route']] = bucket['routes'].get(row['route'], 0) + 1
+            for identity in set(row['chunks']):
+                bucket['chunks'][identity] = bucket['chunks'].get(identity, 0) + 1
+        for day, bucket in days.items():
+            existing = store.db.execute('SELECT data FROM retrieval_days WHERE project_id=? AND bank=? AND day=?',
+                                        (project_id, bank_id, day)).fetchone()
+            total = json.loads(existing[0]) if existing else {}
+            for key, value in bucket.items():
+                if isinstance(value, dict):
+                    merged = total.get(key) if isinstance(total.get(key), dict) else {}
+                    for name, count in value.items():
+                        merged[name] = merged.get(name, 0) + count
+                    total[key] = merged
+                else:
+                    total[key] = total.get(key, 0) + value
+            store.db.execute('INSERT OR REPLACE INTO retrieval_days VALUES (?,?,?,?)', (project_id, bank_id, day, json.dumps(total)))
+        store.db.executemany('INSERT OR IGNORE INTO retrieval_seen VALUES (?,?,?,?)', fresh)
+        store.db.execute('DELETE FROM retrieval_seen WHERE project_id=? AND bank=? AND day<?', (project_id, bank_id, horizon))
+        store.db.commit()
+        kept = store.db.execute('SELECT day,data FROM retrieval_days WHERE project_id=? AND bank=? ORDER BY day DESC LIMIT 366',
+                                (project_id, bank_id)).fetchall()
+    return [{'day': day, **json.loads(data)} for day, data in reversed(kept)]
+
+
+def fold_project(knowledge, project_id):
+    """Fold every bank of a project; a session launch calls this so its retrievals outlive pruning."""
+    info = knowledge.info(project_id)
+    project = knowledge.sessions.project(project_id)['path']
+    tasks = knowledge.sessions.linked_tasks(project_id)
+    for bank in info['banks']:
+        bank_info = knowledge.info(project_id, bank['id'])
+        prefix = bank_info['root'] + '/' if bank_info['root'] else ''
+        chunks = _chunk_names(project, prefix)
+        rows, _ = _retrievals(project, prefix, chunks, tasks)
+        fold(knowledge.sessions, project_id, bank['id'], rows)
+
+
+def _chunk_names(project, prefix):
+    """Chunk IDs by their listing path, from names alone, for folding without reading every chunk."""
+    listing = _files(project, prefix + 'memory-bank/chunks', '.md', CHUNK_LIMIT)
+    return {'chunks/' + name: match.group(0) for name in (listing[0] if listing else []) if (match := CHUNK_ID.match(name))}
 
 
 def _health(project, prefix):
@@ -408,7 +488,7 @@ def read(knowledge, project_id, bank=None, harness_tasks=frozenset()):
                'mode': info['mode'], 'brain_available': info['brain_available'], 'check_available': False,
                # Review state follows the local date, the clock the runtime's eligibility uses.
                'today': date.today().isoformat(),
-               'chunks': None, 'brain': None, 'promotions': None, 'retrievals': None, 'health': None}
+               'chunks': None, 'brain': None, 'promotions': None, 'retrievals': None, 'health': None, 'history': None}
     if info['bank_id'] is None:
         return payload
     prefix = info['root'] + '/' if info['root'] else ''
@@ -420,7 +500,11 @@ def read(knowledge, project_id, bank=None, harness_tasks=frozenset()):
         records, truncated = _records(project, prefix, promoted_ids)
         payload['brain'] = {'items': records, 'truncated': truncated}
         payload['promotions'] = promotions or {'items': [], 'truncated': False}
-    payload['retrievals'] = _retrievals(project, prefix, chunk_paths, harness_tasks)
+    rows, merged = _retrievals(project, prefix, chunk_paths, harness_tasks)
+    history = fold(knowledge.sessions, project_id, info['bank_id'], rows)
+    payload['retrievals'] = {'items': [{key: value for key, value in row.items() if key != 'key'} for row in rows[-RETRIEVAL_LIMIT:]],
+                             'found': len(rows), 'merged': merged, 'limit': RETRIEVAL_LIMIT}
+    payload['history'] = {'days': history, 'horizon': HISTORY_DAYS}
     payload['health'] = _health(project, prefix)
     payload['check_available'] = bool(info['runtime_available'] and chunks is not None
                                       and _runtime_check_available(project, prefix))

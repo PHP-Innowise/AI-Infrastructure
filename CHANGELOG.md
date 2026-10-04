@@ -26,6 +26,23 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Finish the Harness memory views:
+  - **Retrieval history.** Memory use keeps a numbers-only daily rollup of
+    retrievals in the Harness database (`retrieval_days`, with
+    `retrieval_seen` so each manifest counts once). Retrieval history therefore
+    outlives the newest manifests a project keeps. The rollup is folded when
+    the view reads or a session launch ends, and is shown in the Selected
+    breakdown and the chunk card.
+  - **Live Codex fill.** A running Codex launch's fill is read from its rollout
+    as it grows (`context_usage.CodexLive`, every two seconds; the rollout path
+    comes from `providers.codex_rollout`).
+  - **Startup context per edition.** Accelerators › Kit 2 lists the exact
+    startup bytes per edition against their CI ceilings
+    (`GET /api/accelerators/startup`, measured by `scripts/context_budget.py`).
+  - **Calibration citation.** The citation in `context_budget.py` (and in the
+    CI comment) points at `docs/TOKEN-ECONOMY-RESEARCH.md` as of `9435dfc1^`.
+    `9435dfc1` removed the file, which left it dangling.
+
 - Add **Sessions › Usage › Context** to the Harness: how full each turn left the
   agent's context window, how much of it was memory the Harness sent, how the
   turn grew it and when compaction cleared it. Each launch now records a

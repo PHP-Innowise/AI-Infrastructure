@@ -45,7 +45,11 @@ function memoryUseModel(data, windowDays, now = Date.now()) {
   const applied = promotions.filter(item => item.status === 'applied' && within(item.applied_at));
   const pastReview = active.filter(chunk => review(chunk) !== null && review(chunk) < 0), changed = active.filter(chunk => chunk.sources_changed === true);
   const stalled = data.promotions ? pending('automatic') : [];
+  // The daily rollup this Harness keeps outlives the manifests a project prunes.
+  const kept = data.history?.days || [], days = kept.filter(day => within(day.day)), historyChunks = new Map();
+  for (const day of kept) for (const [id,count] of Object.entries(day.chunks || {})) historyChunks.set(id,(historyChunks.get(id) || 0) + count);
   return {
+    history:{days, kept, since:kept[0]?.day || null, retrievals:days.reduce((sum,day) => sum + day.retrievals,0), withChunk:days.reduce((sum,day) => sum + day.with_chunk,0), chunks:historyChunks},
     windowDays, review, selectedIn, cutIn, count:pastReview.length + changed.length + stalled.length,
     brain:data.brain && {total:records.length, open:records.filter(record => record.open).length, archived:records.filter(record => record.archived).length,
       private:records.filter(record => record.private).length, resolved:records.filter(record => within(record.resolved_at)).length,
@@ -210,7 +214,8 @@ function memoryFlow(model, changes) {
   if (changes?.added.length && reducedMotion.matches) bankStage.querySelector('.memory-lead').append(el('span','memory-plus',`+${changes.added.length}`));
   const selected = model.selected;
   const selectedStage = memoryStage('selected','Selected by retrieval',selected.rows.length ? fmt.exact(selected.withChunk) : fmt.unknown('not recorded'),
-    selected.rows.length ? [`of ${plural(selected.rows.length,'retrieval')} · ${plural(selected.distinct,'chunk')}`,`${fmt.exact(selected.reused).text} reused across tasks`] : ['No retrievals recorded on this machine.'],
+    selected.rows.length ? [`of ${plural(selected.rows.length,'retrieval')} · ${plural(selected.distinct,'chunk')}`,`${fmt.exact(selected.reused).text} reused across tasks`,
+      ...(model.history.retrievals > selected.rows.length ? [`${fmt.exact(model.history.retrievals).text} ${windowText} · ${fmt.exact(model.history.withChunk).text} with a chunk`] : [])] : ['No retrievals recorded on this machine.'],
     selected.cutTotal ? [[`${fmt.exact(selected.cutTotal).text} cut at retrieval`]] : []);
   list.append(brain,promotion,bankStage,selectedStage);
   if (governed) {
@@ -266,8 +271,29 @@ function memoryFlowDetail(model) {
     if (!selected.rows.length) { box.append(el('p','knowledge-note','No retrievals recorded on this machine.')); return box; }
     box.append(memoryTable(`Routes of the last ${plural(selected.rows.length,'retrieval')}`,['Route','Retrievals'],Object.entries(selected.routes).sort((a,b) => b[1] - a[1]).map(([route,count]) => [route,fmt.exact(count).text])),
       memoryTable('Chunks cut at retrieval',['Reason','Chunks'],Object.entries(selected.cuts).map(([reason,count]) => [reasonLabel(reason),fmt.exact(count).text])));
+    if (model.history.kept.length) box.append(memoryHistory(model));
     box.append(el('p','knowledge-note',`Reached the agent: at most ${fmt.exact(selected.withChunk).text} of ${fmt.exact(selected.rows.length).text}. ${selected.measured ? `${fmt.exact(selected.dropped).text} of ${plural(selected.measured,'refresh','refreshes')} dropped items to fit 8,000 characters.` : 'Dropped to fit: — (not recorded).'}${selected.merged ? ` ${plural(selected.merged,'freshness re-check')} counted with ${selected.merged === 1 ? 'its' : 'their'} Harness retrieval.` : ''}`));
   }
+  return box;
+}
+// Retrievals per day from the rollup this Harness keeps, in the flow window: one column a day, the part that selected a chunk in the bank's blue.
+function memoryHistory(model) {
+  const box = el('div','memory-history'), days = model.history.days.length ? model.history.days : model.history.kept.slice(-90);
+  const most = Math.max(1,...days.map(day => day.retrievals)), chart = el('div','memory-history-chart');
+  chart.setAttribute('role','img');
+  chart.setAttribute('aria-label',`Retrievals per day since ${memoryDate(days[0].day)}: ${fmt.exact(days.reduce((sum,day) => sum + day.retrievals,0)).text} in total, ${fmt.exact(days.reduce((sum,day) => sum + day.with_chunk,0)).text} selected a chunk.`);
+  for (const day of days) {
+    const column = el('span','memory-history-day'); column.title = `${memoryDate(day.day)}: ${plural(day.retrievals,'retrieval')}, ${fmt.exact(day.with_chunk).text} with a chunk`;
+    const rest = el('span','memory-history-rest'), bank = el('span','memory-history-bank');
+    rest.style.height = `${(day.retrievals - day.with_chunk) / most * 48}px`; bank.style.height = `${day.with_chunk / most * 48}px`;
+    column.append(rest,bank); chart.append(column);
+  }
+  const axis = el('div','memory-history-axis'); axis.setAttribute('aria-hidden','true'); axis.append(el('span','',memoryDate(days[0].day)),el('span','',memoryDate(days.at(-1).day)));
+  const table = el('details','fleet-report'); table.append(el('summary','',`Daily history as a table (${plural(days.length,'day')})`));
+  table.addEventListener('toggle',() => { if (table.open && !table.querySelector('table')) table.append(memoryTable('Retrievals per day',['Day','Retrievals','With a chunk','Cut'],
+    [...days].reverse().map(day => [memoryDate(day.day),fmt.exact(day.retrievals).text,fmt.exact(day.with_chunk).text,fmt.exact(day.cuts).text]))); });
+  const plot = el('div','memory-history-plot'); plot.append(chart,axis);
+  box.append(el('h4','',`Retrievals per day · kept by this Harness since ${memoryDate(model.history.since)}`),plot,table);
   return box;
 }
 function memoryHealth(model) {
@@ -397,7 +423,7 @@ function memoryStripKeys(event) {
 
 const memoryFilters = [['all','All',() => true],['past','Past review',(chunk,model) => model.review(chunk) < 0],['due','Due ≤ 30 d',(chunk,model) => model.review(chunk) >= 0 && model.review(chunk) <= 30],
   ['changed','Sources changed',chunk => chunk.sources_changed === true],['unattested','Not re-attested since promotion',chunk => chunk.auto && !(chunk.last_verified > chunk.created)],
-  ['never','Never selected',(chunk,model) => !model.selectedIn.has(chunk.id)]];
+  ['never','Never selected',(chunk,model) => !model.selectedIn.has(chunk.id) && !model.history.chunks.has(chunk.id)]];
 const memoryMatches = (chunk, model) => [...memoryUse.filters].every(name => memoryFilters.find(([id]) => id === name)?.[2](chunk,model) ?? true);
 function memoryHorizon(model, changes) {
   const section = el('section','memory-section memory-horizon-section'); section.setAttribute('aria-labelledby','memory-horizon-title');
@@ -456,7 +482,7 @@ function showMemoryChunk(chunk, announce = true) {
   card.append(el('p','memory-card-title',`${chunk.id} · ${chunk.title || 'Untitled'}`),
     el('p','memory-card-line',`${humanLabel(chunk.type) || '—'} · ${chunk.auto ? 'auto-promoted' : chunk.promoted ? 'promoted after review' : 'written by a person'}${chunk.auto && chunk.last_verified > chunk.created ? ' · re-attested since' : ''}`),
     el('p','memory-card-line',`Review ${reviewLabel(days)} (${memoryDate(chunk.review_after)})${days < -30 ? ' · shown at ≤ −30' : days > 365 ? ' · shown at ≥ 365' : ''} · last verified ${memoryDate(chunk.last_verified)}`),
-    el('p','memory-card-line',`Sources: ${chunk.sources_changed === true ? '▲ a cited file changed' : chunk.sources_changed === false ? `${plural(chunk.sources,'file')} unchanged` : 'not tracked'} · selected in ${fmt.exact(model.selectedIn.get(chunk.id) || 0).text} of ${fmt.exact(model.selected.rows.length).text} retrievals${model.cutIn.get(chunk.id) ? ` · cut in ${fmt.exact(model.cutIn.get(chunk.id)).text}` : ''} · ${bytesLabel(chunk.bytes)}`));
+    el('p','memory-card-line',`Sources: ${chunk.sources_changed === true ? '▲ a cited file changed' : chunk.sources_changed === false ? `${plural(chunk.sources,'file')} unchanged` : 'not tracked'} · selected in ${fmt.exact(model.selectedIn.get(chunk.id) || 0).text} of ${fmt.exact(model.selected.rows.length).text} retrievals${model.history.since ? ` (${fmt.exact(model.history.chunks.get(chunk.id) || 0).text} since ${memoryDate(model.history.since)})` : ''}${model.cutIn.get(chunk.id) ? ` · cut in ${fmt.exact(model.cutIn.get(chunk.id)).text}` : ''} · ${bytesLabel(chunk.bytes)}`));
   if (memoryUse.check?.skips?.[chunk.id]) card.append(el('p','memory-card-line',`Retrieval skips it: ${reasonLabel(memoryUse.check.skips[chunk.id])}`));
   const actions = el('div','memory-card-actions');
   for (const [label,action] of [['Open in Memory bank',null],['Re-attest…','bank-reverify'],['Retire…','bank-retire']]) { const button = el('button','button',label); button.type = 'button'; button.addEventListener('click',() => openMemoryAction(action,chunk)); actions.append(button); }

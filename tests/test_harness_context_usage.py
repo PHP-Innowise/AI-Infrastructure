@@ -57,10 +57,24 @@ if config["provider"] == "claude":
     for event in events:
         print(json.dumps(event), flush=True)
     sys.exit(0)
-print(json.dumps({"type": "thread.started", "thread_id": "native-context"}), flush=True)
 home = pathlib.Path(os.environ["CODEX_HOME"]); folder = home / "sessions"; folder.mkdir(parents=True, exist_ok=True)
 rollout = folder / "rollout-native-context.jsonl"
 now = datetime.datetime.now(datetime.timezone.utc)
+if config["behavior"] == "slow-codex":
+    import time
+    rollout.write_text(json.dumps({"type": "session_meta", "payload": {"id": "native-context", "cwd": str(pathlib.Path.cwd()), "source": "exec"}}) + "\n")
+    with sqlite3.connect(home / "state_5.sqlite") as db:
+        db.execute("CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT)")
+        db.execute("INSERT OR REPLACE INTO threads VALUES (?,?,?)", ("native-context", str(rollout), str(pathlib.Path.cwd())))
+    print(json.dumps({"type": "thread.started", "thread_id": "native-context"}), flush=True)
+    for step in range(12):
+        with rollout.open("a") as handle:
+            handle.write(json.dumps({"type": "event_msg", "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(), "payload": {"type": "token_count",
+                "info": {"model_context_window": 258400, "last_token_usage": {"input_tokens": 30000 + step * 1000}}}}) + "\n")
+        time.sleep(.25)
+    print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 100, "cached_input_tokens": 50}}), flush=True)
+    sys.exit(0)
+print(json.dumps({"type": "thread.started", "thread_id": "native-context"}), flush=True)
 def at(seconds): return (now + datetime.timedelta(seconds=seconds)).isoformat()
 def count(fill): return {"type": "event_msg", "timestamp": at(0), "payload": {"type": "token_count", "info": {
     "model_context_window": 258400, "last_token_usage": {"input_tokens": fill, "cached_input_tokens": fill // 2, "output_tokens": 9}}}}
@@ -165,7 +179,7 @@ class ContextLaunchTests(unittest.TestCase):
         self.fake.write_text(FAKE_CLI)
         self.events = self.root / "events.json"
         self.events.write_text(json.dumps(CLAUDE_EVENTS))
-        self.calls, self.managers = [], []
+        self.calls, self.managers, self.behavior = [], [], None
         for name, value in (("discover_providers", [{"id": "codex", "available": True, "executable": str(self.fake)},
                                                     {"id": "claude", "available": True, "executable": str(self.fake)}]),
                             ("model_options", {"models": [], "efforts": [], "detail": "Offline fixture"})):
@@ -182,7 +196,7 @@ class ContextLaunchTests(unittest.TestCase):
 
     def build_command(self, provider, executable, project, prompt, **options):
         self.calls.append({"provider": provider, "prompt": prompt, **options})
-        behavior = "events" if self.events.exists() else "plain"
+        behavior = self.behavior or ("events" if self.events.exists() else "plain")
         return [sys.executable, "-u", str(self.fake), json.dumps({"provider": provider, "behavior": behavior, "events": str(self.events)})]
 
     def manager(self, state=None):
@@ -278,6 +292,56 @@ class ContextLaunchTests(unittest.TestCase):
                           "compactions": [{"pre": 52000, "post": 21000, "call": 2}], "hooks": None}, context["fill"])
         self.assertEqual(({"installed": True, "measured": False, "bytes": None}, [{"name": "AGENTS.md", "bytes": 7}]),
                          (context["hooks"], context["cli_files"]))
+
+    def test_codex_fill_grows_while_the_launch_runs(self):
+        self.behavior = "slow-codex"
+        manager = self.manager()
+        with patch.object(context_usage, "WRITE_SECONDS", .2):
+            sid = manager.create({"project_id": next(iter(manager.projects)), "provider": "codex", "prompt": "Grow", "project_context": False})["id"]
+            seen, deadline = [], time.monotonic() + 20
+            while time.monotonic() < deadline:
+                session = manager.get(sid)
+                launches = manager.results.history(sid)["launches"]
+                fill = (launches[0]["context"] or {}).get("fill") if launches else None
+                if session["status"] == "running" and fill and fill["end"] is not None:
+                    seen.append(fill["calls"])
+                if session["status"] not in sessions.ACTIVE and manager.jobs.unfinished_tasks == 0:
+                    break
+                time.sleep(.05)
+        final = manager.results.history(sid)["launches"][0]["context"]["fill"]
+        self.assertEqual((30000, 41000, 12, 258400), (final["start"], final["end"], final["calls"], final["window"]))
+        # The page saw the rollout grow before the turn ended.
+        self.assertTrue(seen and min(seen) < 12, seen)
+        self.assertEqual(sorted(seen), seen)
+
+    def test_live_rollout_reads_only_new_complete_lines(self):
+        home = self.root / "codex-home"
+        folder = home / "sessions"
+        folder.mkdir(parents=True)
+        rollout = folder / "rollout-live.jsonl"
+        now = datetime.now(timezone.utc)
+        meta = json.dumps({"type": "session_meta", "payload": {"id": "native-live", "cwd": str(self.project), "source": "exec"}})
+        count = lambda fill: json.dumps({"type": "event_msg", "timestamp": now.isoformat(), "payload": {"type": "token_count",
+                                         "info": {"model_context_window": 258400, "last_token_usage": {"input_tokens": fill}}}})
+        rollout.write_text(meta + "\n" + count(10000) + "\n")
+        live = context_usage.CodexLive(self.project, now.timestamp() - 1)
+        self.assertFalse(live.poll(None))
+        self.assertFalse(live.poll("native-live"))
+        with sqlite3.connect(home / "state_5.sqlite") as db:
+            db.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT)")
+            db.execute("INSERT INTO threads VALUES (?,?,?)", ("native-live", str(rollout), str(self.project)))
+        live.retry_at = 0
+        self.assertTrue(live.poll("native-live"))
+        self.assertEqual((10000, 1), (live.fill.snapshot()["end"], live.fill.snapshot()["calls"]))
+        with rollout.open("a") as handle:
+            handle.write(count(12000) + "\n" + count(13000)[:40])
+        self.assertTrue(live.poll("native-live"))
+        self.assertEqual((12000, 2), (live.fill.snapshot()["end"], live.fill.snapshot()["calls"]))
+        with rollout.open("a") as handle:
+            handle.write(count(13000)[40:] + "\n")
+        self.assertTrue(live.poll("native-live"))
+        self.assertFalse(live.poll("native-live"))
+        self.assertEqual((10000, 13000, 3, 258400), tuple(live.fill.snapshot()[key] for key in ("start", "end", "calls", "window")))
 
     def test_unreported_fill_stays_unknown_and_old_launch_history_reads_as_not_recorded(self):
         self.events.unlink()

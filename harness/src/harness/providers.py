@@ -311,8 +311,12 @@ def _codex_helper_activity(event):
     return None
 
 
-def codex_rollout_tail(native_id, project):
-    """The last 4 MiB of an exec thread's rollout in this project, or None; nothing outside Codex's own folders."""
+def codex_rollout(native_id, project):
+    """An exec thread's rollout in this project, opened without following links, past its session_meta line.
+
+    Returns (stream, path) or None. Nothing outside Codex's own session folders is
+    opened, and a rollout of another thread, folder or non-exec source is refused.
+    """
     if not isinstance(native_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}', native_id):
         return None
     home = Path(os.environ.get('CODEX_HOME') or str(Path.home() / '.codex')).expanduser()
@@ -338,21 +342,37 @@ def codex_rollout_tail(native_id, project):
             return None
         if not any(root in path.parents for root in (home / 'sessions', home / 'archived_sessions')):
             return None
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        with os.fdopen(descriptor, 'rb') as stream:
+        stream = os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb')
+        try:
             if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
-                return None
+                raise ValueError('not a regular file')
             first = json.loads(stream.readline(65536))
             meta = first.get('payload', {})
             if (first.get('type') != 'session_meta' or not isinstance(meta, dict)
                     or meta.get('id') != native_id or meta.get('cwd') != str(project) or meta.get('source') != 'exec'):
-                return None
+                raise ValueError('another thread')
+        except Exception:
+            stream.close()
+            raise
+        return stream, path
+    except (OSError, ValueError, TypeError, AttributeError, RecursionError):
+        return None
+
+
+def codex_rollout_tail(native_id, project):
+    """The last 4 MiB of an exec thread's rollout in this project, or None."""
+    opened = codex_rollout(native_id, project)
+    if not opened:
+        return None
+    stream = opened[0]
+    try:
+        with stream:
             # ponytail: inspect only the last 4 MiB; absent/older metadata stays unconfirmed.
             offset = max(stream.tell(), os.fstat(stream.fileno()).st_size - 4 * 1024 * 1024)
             if offset > stream.tell():
                 stream.seek(offset); stream.readline(4 * 1024 * 1024)
             return stream.read(4 * 1024 * 1024)
-    except (OSError, ValueError, TypeError, AttributeError, RecursionError):
+    except (OSError, ValueError):
         return None
 
 

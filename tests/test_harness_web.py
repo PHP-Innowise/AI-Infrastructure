@@ -235,6 +235,20 @@ class HarnessWebTests(unittest.TestCase):
         self.assertEqual(400, self.post(base + "/check", {"bank": 3})[0])
         self.assertEqual(400, self.post(base + "/check?bank=memory-bank", {})[0])
 
+    def test_accelerator_startup_bytes_match_the_ci_budget_measurement(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import context_budget
+        status, data, _ = self.request("/api/accelerators/startup")
+        self.assertEqual(200, status)
+        self.assertEqual(["Laravel", "Symfony", "PHP Core", "WordPress"], [row["edition"] for row in data["editions"]])
+        for row in data["editions"]:
+            measured = context_budget.measure_edition(row["edition"])
+            self.assertEqual({key: measured[key] for key in context_budget.STARTUP_CATEGORIES}, row["bytes"])
+            self.assertEqual((sum(row["bytes"].values()), context_budget.startup_tokens(measured)), (row["total"], row["tokens"]))
+            self.assertLessEqual(row["total"], row["ceiling_total"])
+        self.assertEqual("docs/TOKEN-ECONOMY-RESEARCH.md as of 9435dfc1^", data["calibration"])
+        self.assertEqual(400, self.request("/api/accelerators/startup?edition=Laravel")[0])
+
     def test_selecting_brain_record_focuses_editable_progress_without_erasing_draft(self):
         page = ui_script()
         source = page[page.index('\nfunction fillKnowledgeSelection('):page.index('\nfunction submitKnowledgeForm(')]
@@ -1729,7 +1743,8 @@ assert.equal($('project-context-value').textContent, '');
         page = ui_script()
         self.run_node(page[page.index("\nconst numberText"):page.index("\nfunction numberNode(")]
                       + "\nconst memoryKinds = [['brain','Project Brain'],['bank','Memory bank'],['rules','Rules & docs']];"
-                      + page[page.index("\nconst DAY_MS"):page.index("\nconst memoryAnchorKey")], r"""
+                      + page[page.index("\nconst DAY_MS"):page.index("\nconst memoryAnchorKey")]
+                      + page[page.index("\nconst memoryFilters"):page.index("\nconst memoryMatches")], r"""
 const chunk = (id, fields) => ({id, title:id, type:'domain', status:'active', created:'2025-10-01', last_verified:'2025-10-01', review_after:'2026-12-01',
   valid_to:null, promoted:false, auto:false, bytes:100, sources:1, sources_changed:false, path:`chunks/${id}.md`, ...fields});
 const data = {today:'2026-10-04',
@@ -1746,7 +1761,9 @@ const data = {today:'2026-10-04',
   retrievals:{found:3, merged:1, limit:200, items:[{at:'2026-09-27T10:00:00+00:00', route:'Claude hook', task:0, brain:2, bank:2, rules:3, chunks:['A','B'], cuts:[]},
     {at:'2026-10-02T10:00:00+00:00', route:'Harness', task:1, brain:1, bank:1, rules:2, chunks:['B'], cuts:[['C','layer-limit']]},
     {at:'2026-10-03T10:00:00+00:00', route:'not recorded', task:1, brain:1, bank:0, rules:2, chunks:[], cuts:[]}]},
-  health:{truncated:false, items:[{at:'2026-09-20T10:00:00+00:00', dropped:true}, {at:'2026-09-27T10:00:00+00:00', dropped:true}, {at:'2026-10-02T10:00:00+00:00', dropped:false}, {at:'2026-10-03T10:00:00+00:00', dropped:null}]}};
+  health:{truncated:false, items:[{at:'2026-09-20T10:00:00+00:00', dropped:true}, {at:'2026-09-27T10:00:00+00:00', dropped:true}, {at:'2026-10-02T10:00:00+00:00', dropped:false}, {at:'2026-10-03T10:00:00+00:00', dropped:null}]},
+  history:{horizon:120, days:[{day:'2026-07-01', retrievals:40, with_chunk:6, chunks:{F:2}}, {day:'2026-09-28', retrievals:12, with_chunk:2, chunks:{A:1, B:1}},
+    {day:'2026-10-02', retrievals:9, with_chunk:1, chunks:{B:1}}]}};
 const now = Date.parse('2026-10-04T12:00:00Z'), model = memoryUseModel(data, 30, now);
 // Trouble the tab counts: one chunk past review, one citing a changed file, one stalled automatic promotion.
 assert.equal(model.count, 3);
@@ -1774,6 +1791,13 @@ assert.equal(memoryChanges(data, null), null);
 const snapshot = memorySnapshot(data);
 assert.deepEqual([snapshot.today, snapshot.newest, snapshot.chunks.A, Object.keys(snapshot.promotions).length],['2026-10-04', '2026-10-03T10:00:00+00:00', ['active','2025-10-01','2026-10-01'], 4]);
 assert.deepEqual(memoryChanges(data, snapshot), {since:snapshot.at, added:[], retired:[], reattested:[], moved:[], crossed:[], applied:[], retrievals:[], firstNew:3});
+// The kept history counts inside the flow window; per-chunk counts span everything kept.
+assert.deepEqual([model.history.retrievals, model.history.withChunk, model.history.days.length, model.history.since, model.history.chunks.get('F'), model.history.chunks.get('B')],
+  [21, 3, 2, '2026-07-01', 2, 2]);
+assert.deepEqual([memoryUseModel(data, 0, now).history.retrievals, memoryUseModel(data, 7, now).history.retrievals, memoryUseModel(data, 3, now).history.retrievals], [61, 21, 9]);
+const never = memoryFilters.find(([id]) => id === 'never')[2];
+// F was never in the last retrievals, but the kept history saw it selected.
+assert.deepEqual(['A', 'C', 'F'].map(id => never(data.chunks.items.find(item => item.id === id), model)), [false, true, false]);
 """)
 
     def test_context_turns_split_exact_fill_from_estimated_memory_and_bound_earlier_copies(self):

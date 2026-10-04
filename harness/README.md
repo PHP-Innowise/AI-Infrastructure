@@ -341,7 +341,12 @@ another project while a session is open starts a new session draft for it.
   workflow and manifest-aware updates. A selected run shows its phase as five
   steps (Scan, Review profile, Generate, Review files, Apply); **New run** opens
   the form for another one. Kit 2 opens the **Projects & Setup**
-  installer for Laravel, Symfony, PHP Core or WordPress.
+  installer for Laravel, Symfony, PHP Core or WordPress. Its **Startup context
+  per edition** table lists the exact bytes each edition puts in front of the
+  model before any work: AGENTS.md and the skill, command and agent listings.
+  The table sets them against the ceilings `scripts/context_budget.py --check`
+  holds them to, and measures them with the same script, so the page and the CI
+  gate cannot disagree.
 - **Open Source Kit:** the Kit 3 catalog, filters, dossiers and copyable
   installation commands as a tab of Accelerators; inside the Harness the catalog
   drops its own header, hero and footer. **Open in new tab** shows it standalone.
@@ -790,7 +795,8 @@ Fill, window, growth and free space are the provider's own token counts:
   subagent calls are left out. The window comes from the result, and compaction
   from `compact_boundary`. A turn on the same model knows its window from the
   earlier one, so a running turn fills in call by call.
-- **Codex:** the counts come from the thread's rollout once the turn ends.
+- **Codex:** the counts come from the thread's rollout, read as it grows every
+  two seconds while the turn runs and once more when it ends.
 - **Cursor:** reports none; its turns show `—` and the characters the Harness
   added.
 
@@ -842,6 +848,15 @@ retrieval. **Check eligibility** is the one request that runs the installed
 runtime's own rules. It names the rule that held back each resolved record and why
 retrieval skips each chunk, writes nothing, and returns 409 while another
 knowledge operation holds the lock.
+
+Retrieval history outlives the 200 manifests a project keeps. This Harness folds
+each manifest once into a daily rollup in its own database, either when Memory use
+reads it or when a session launch in the project ends. The rollup holds counts per
+day, routes and how often each chunk was selected; no queries or paths. Manifests
+older than 120 days are not folded. **Selected by retrieval** shows the days as a
+chart with a table, the stage card counts the flow window from them, and
+**Never selected** looks at the whole history. Retrievals a project prunes before
+either fold happens are not counted.
 
 The view remembers your last visit in this browser. Coming back shows what changed
 since then, such as new chunks, re-attestations, chunks that crossed their review

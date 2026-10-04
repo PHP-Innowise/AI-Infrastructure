@@ -10,6 +10,8 @@ from __future__ import annotations
 from datetime import datetime
 import json
 import math
+import os
+import stat
 import time
 
 # Live fill reaches the database at most this often, unless it moved by the share below.
@@ -125,17 +127,13 @@ class ContextTracker:
                 return True
         return False
 
-    def merge(self, fill):
-        """Take fill read after the launch (Codex rollouts) where the stream reported none."""
+    def update(self, fill):
+        """Take a Codex rollout's fill as the launch's own: Codex streams none, so the rollout is the source."""
         if not fill:
             return
-        for key in ('start', 'end', 'peak', 'window'):
-            if getattr(self, key) is None and _count(fill.get(key)):
-                setattr(self, key, fill[key])
-        if not self.calls and _count(fill.get('calls')):
-            self.calls = fill['calls']
-        if not self.compactions and isinstance(fill.get('compactions'), list):
-            self.compactions = fill['compactions']
+        self.start, self.end, self.peak, self.calls = fill['start'], fill['end'], fill['peak'], fill['calls']
+        self.window = fill.get('window') or self.window
+        self.compactions = fill.get('compactions') or []
 
     def snapshot(self):
         return {'start': self.start, 'end': self.end, 'peak': self.peak, 'calls': self.calls or None, 'window': self.window,
@@ -154,34 +152,103 @@ class ContextTracker:
         return False
 
 
-def codex_fill(tail, since, until):
-    """Context fill of one Codex launch from its rollout: token_count events and compactions inside the launch."""
-    fills, window, compactions = [], None, []
-    for line in tail.splitlines() if tail else []:
+class CodexFill:
+    """A Codex launch's fill from rollout records: token_count events and compactions inside its time window."""
+
+    def __init__(self, since, until=None):
+        self.since, self.until = since, until
+        self.fills, self.window, self.compactions = [], None, []
+
+    def feed(self, line):
+        """Fold one rollout line in; True when it changed the fill."""
         try:
             record = json.loads(line)
             stamp = datetime.fromisoformat(str(record.get('timestamp', '')).replace('Z', '+00:00'))
         except (ValueError, TypeError, AttributeError, RecursionError):
-            continue
-        if not isinstance(record, dict) or stamp.tzinfo is None or not since <= stamp.timestamp() <= until:
-            continue
+            return False
+        if (not isinstance(record, dict) or stamp.tzinfo is None or stamp.timestamp() < self.since
+                or self.until is not None and stamp.timestamp() > self.until):
+            return False
         payload = record.get('payload') if isinstance(record.get('payload'), dict) else {}
         if record.get('type') == 'event_msg' and payload.get('type') == 'token_count' and isinstance(payload.get('info'), dict):
             info = payload['info']
             last = info.get('last_token_usage') if isinstance(info.get('last_token_usage'), dict) else {}
-            if _count(last.get('input_tokens')):
-                fills.append(last['input_tokens'])
-                for compaction in compactions:
-                    if compaction['post'] is None and compaction['call'] == len(fills) - 1:
-                        compaction['post'] = last['input_tokens']
+            changed = False
             if _count(info.get('model_context_window')):
-                window = info['model_context_window']
-        elif record.get('type') == 'compacted':
-            compactions.append({'pre': fills[-1] if fills else None, 'post': None, 'call': len(fills)})
-    if not fills:
-        return None
-    return {'start': fills[0], 'end': fills[-1], 'peak': max([*fills, *(item['pre'] for item in compactions if item['pre'])]),
-            'calls': len(fills), 'window': window, 'compactions': compactions[:20]}
+                changed, self.window = info['model_context_window'] != self.window, info['model_context_window']
+            if _count(last.get('input_tokens')):
+                self.fills.append(last['input_tokens'])
+                for compaction in self.compactions:
+                    if compaction['post'] is None and compaction['call'] == len(self.fills) - 1:
+                        compaction['post'] = last['input_tokens']
+                return True
+            return changed
+        if record.get('type') == 'compacted':
+            self.compactions.append({'pre': self.fills[-1] if self.fills else None, 'post': None, 'call': len(self.fills)})
+            return True
+        return False
+
+    def snapshot(self):
+        if not self.fills:
+            return None
+        return {'start': self.fills[0], 'end': self.fills[-1],
+                'peak': max([*self.fills, *(item['pre'] for item in self.compactions if item['pre'])]),
+                'calls': len(self.fills), 'window': self.window, 'compactions': self.compactions[:20]}
+
+
+def codex_fill(tail, since, until):
+    """Context fill of one Codex launch from its rollout tail, read once the launch has ended."""
+    fill = CodexFill(since, until)
+    for line in tail.splitlines() if tail else []:
+        fill.feed(line)
+    return fill.snapshot()
+
+
+class CodexLive:
+    """A running Codex launch's rollout, read as it grows: only new complete lines on each poll.
+
+    The rollout path is looked up through Codex's own thread index once the thread
+    is known; until then, and while the index has no row, a poll costs nothing.
+    """
+    LIMIT = 4 * 1024 * 1024
+
+    def __init__(self, project, since):
+        self.project, self.fill = project, CodexFill(since)
+        self.path, self.offset, self.partial, self.retry_at = None, 0, b'', 0.0
+
+    def poll(self, native_id):
+        """Read what the rollout gained since the last poll; True when the fill changed."""
+        from . import providers
+        if not native_id:
+            return False
+        if self.path is None:
+            if time.monotonic() < self.retry_at:
+                return False
+            opened = providers.codex_rollout(native_id, self.project)
+            if not opened:
+                self.retry_at = time.monotonic() + WRITE_SECONDS
+                return False
+            stream, self.path = opened
+            with stream:
+                self.offset = stream.tell()
+        try:
+            stream = os.fdopen(os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb')
+        except OSError:
+            return False
+        with stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode) or os.fstat(stream.fileno()).st_size < self.offset:
+                return False
+            stream.seek(self.offset)
+            data = stream.read(self.LIMIT)
+        self.offset += len(data)
+        lines = (self.partial + data).split(b'\n')
+        self.partial = lines.pop()
+        if len(self.partial) > self.LIMIT:
+            self.partial = b''
+        changed = False
+        for line in lines:
+            changed = self.fill.feed(line) or changed
+        return changed
 
 
 def launch_files(project, provider):

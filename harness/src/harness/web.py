@@ -31,6 +31,7 @@ from harness.attachments import MAX_JSON_BYTES
 from harness.skills import SkillManager
 from harness.knowledge import KnowledgeBusy, KnowledgeManager
 from harness import memory_use
+from harness.startup_context import startup_context
 from harness.setup import SetupManager
 from harness.creator import CreatorManager
 from harness.system_orchestration import SystemManager
@@ -260,6 +261,10 @@ class Handler(BaseHTTPRequestHandler):
                         or ('path' in query and 'bank' not in query)):
                     raise SessionError('Invalid memory request.')
                 self.reply(200, store.memory(path.split('/')[3], query.get('bank', [None])[0], query.get('path', [None])[0]))
+            elif path == '/api/accelerators/startup':
+                if parsed.query:
+                    raise SessionError('Invalid startup context request.')
+                self.reply(200, startup_context(EDITIONS))
             elif path.startswith('/api/projects/') and path.endswith('/memory-use') and len(path.split('/')) == 5:
                 query = parse_qs(parsed.query, strict_parsing=True, keep_blank_values=True) if parsed.query else {}
                 if set(query) - {'bank'} or any(len(values) != 1 or not values[0] for values in query.values()):

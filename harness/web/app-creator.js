@@ -9,7 +9,7 @@ function renderAccelerators() {
     const actions = el('div','accelerator-actions'); const identity = `${kit.id} ${kit.name}`.toLowerCase();
     if (Array.isArray(kit.editions)) {
       const label = el('label','field','Edition'); const select = el('select'); select.id = 'preview-edition'; for (const edition of kit.editions) { const option = el('option','',typeof edition === 'string' ? edition : edition.name); option.value = typeof edition === 'string' ? edition : edition.id; select.append(option); } label.append(select);
-      const button = el('button','button','Open project setup'); button.type = 'button'; button.addEventListener('click',() => openProjectSetup($('accelerator-project').value,select.value)); actions.append(label,button); content.append(actions,el('p','small-note','Choose target tools, review file changes, then install from Projects & Setup.'));
+      const button = el('button','button','Open project setup'); button.type = 'button'; button.addEventListener('click',() => openProjectSetup($('accelerator-project').value,select.value)); actions.append(label,button); content.append(actions,el('p','small-note','Choose target tools, review file changes, then install from Projects & Setup.')); content.append(startupContextBlock());
     } else if (identity.includes('kit3') || identity.includes('open-source') || identity.includes('open source')) {
       const button = el('button','button','Explore the catalog'); button.type = 'button'; button.addEventListener('click',() => setView('kit3')); actions.append(button); content.append(actions);
     } else {
@@ -18,6 +18,40 @@ function renderAccelerators() {
     holder.append(block);
   }
   if (!kits.length) holder.append(el('p','empty-note','No accelerators were reported by this runner.'));
+}
+// What each ready-made edition puts in front of the model before any work, in exact bytes, next to its CI ceiling.
+const startupUi = {data:null,error:'',pending:false};
+function startupContextBlock() {
+  const details = el('details','fleet-report startup-context'); details.append(el('summary','','Startup context per edition'));
+  const body = el('div'); details.append(body);
+  const draw = () => {
+    if (startupUi.pending) { body.replaceChildren(el('p','knowledge-note','Measuring the editions…')); return; }
+    if (startupUi.error) { body.replaceChildren(el('p','error-text',startupUi.error)); return; }
+    if (!startupUi.data) return;
+    const labels = startupUi.data.labels, keys = Object.keys(labels), table = el('table','memory-table'), head = el('tr'), rows = el('tbody');
+    table.append(el('caption','sr-only','Startup bytes per edition'));
+    for (const label of ['Edition',...keys.map(key => humanLabel(labels[key])),'Startup total','≈ tokens','CI ceiling']) { const cell = el('th','',label); cell.scope = 'col'; head.append(cell); }
+    for (const row of startupUi.data.editions) {
+      const line = el('tr'), name = el('th','',row.edition); name.scope = 'row'; line.append(name);
+      if (row.error) { const cell = el('td','',row.error); cell.colSpan = keys.length + 3; line.append(cell); rows.append(line); continue; }
+      for (const key of keys) line.append(el('td','context-number',`${fmt.exact(row.bytes[key]).text} B`));
+      const total = el('td','context-number startup-total'), bar = el('span','startup-bar'), fill = el('span');
+      fill.style.width = row.ceiling_total ? `${Math.min(100,row.total / row.ceiling_total * 100)}%` : '0'; bar.append(fill); bar.setAttribute('aria-hidden','true');
+      total.append(`${fmt.exact(row.total).text} B`,bar);
+      const tokens = el('td','context-number'); tokens.append(numberNode(fmt.estimate(row.tokens,' tokens')));
+      line.append(total,tokens,el('td','context-number',row.ceiling_total ? `${fmt.exact(row.ceiling_total).text} B · ${percentText(row.total,row.ceiling_total)} used` : '—'));
+      rows.append(line);
+    }
+    const thead = el('thead'); thead.append(head); table.append(thead,rows);
+    body.replaceChildren(table,el('p','knowledge-note',`Exact bytes of what a session of each edition is shown before any work: AGENTS.md and the skill, command and agent listings. CI keeps them under these ceilings with scripts/context_budget.py --check. Tokens are estimates from bytes-per-token ratios measured with cl100k (${startupUi.data.calibration}).`));
+  };
+  details.addEventListener('toggle',async () => {
+    if (!details.open || startupUi.data || startupUi.pending) { draw(); return; }
+    startupUi.pending = true; startupUi.error = ''; draw();
+    try { startupUi.data = await api('/api/accelerators/startup'); } catch (error) { startupUi.error = textError(error); }
+    finally { startupUi.pending = false; draw(); }
+  });
+  return details;
 }
 const creatorUi = {initialized:false,epoch:0,pending:false,detail:null,timer:null,available:false,formOpen:false};
 const creatorBusy = run => ['scanning','generating','applying','rolling_back'].includes(run?.status);

@@ -1314,6 +1314,8 @@ class Sessions:
         selector = selectors.DefaultSelector()
         selector.register(process.stdout, selectors.EVENT_READ)
         started = time.monotonic()
+        # Codex streams no per-call fill; its rollout grows with each call and is read as it does.
+        live, live_polled = (context_usage.CodexLive(project, launch_started_at) if tracker and provider == 'codex' else None), 0.0
         buffer = b''
         count, output_bytes = 0, 0
         outcome, terminal, saw_error, fleet_outcome = None, False, False, None
@@ -1357,6 +1359,11 @@ class Sessions:
                 if sid in self.cancelled or self.stopping.is_set():
                     outcome = 'cancelled' if sid in self.cancelled else 'interrupted'
                     break
+                if live and time.monotonic() - live_polled >= context_usage.WRITE_SECONDS:
+                    live_polled = time.monotonic()
+                    if live.poll(native_id):
+                        tracker.update(live.fill.snapshot())
+                        save_context()
                 if budget_usage['limit_reached'] or run_timeout is not None and time.monotonic() - started > run_timeout:
                     budget_usage['limit_reached'] = budget_usage['limit_reached'] or 'time'
                     outcome = 'failed'
@@ -1495,14 +1502,21 @@ class Sessions:
                 self._event(sid, receipt)
             self._event(sid, delegation.summary())
         if tracker:
-            # Codex streams no per-call fill; its rollout holds it, read once the launch has ended.
+            # The whole rollout tail, read once the launch has ended, settles what the live reads saw.
             if provider == 'codex':
-                tracker.merge(context_usage.codex_fill(providers.codex_rollout_tail(native_id, project), launch_started_at, time.time()))
+                tracker.update(context_usage.codex_fill(providers.codex_rollout_tail(native_id, project), launch_started_at, time.time()))
             save_context()
         # Record the closing event before the terminal status: readers that wait for
         # the status to settle must see the complete event history.
         self._event(sid, {"kind": "status", "text": f"Run {outcome}. Process completion is not an independent verification of the task."})
         self._status(sid, outcome or 'failed')
+        # A project keeps only its newest retrieval manifests; fold this launch's into the daily history now.
+        if self.knowledge is not None and not (creator or system_run or discovery):
+            from . import memory_use
+            try:
+                memory_use.fold_project(self.knowledge, session['project_id'])
+            except (SessionError, OSError, ValueError, sqlite3.Error):
+                pass
 
     def close(self):
         self.stopping.set()

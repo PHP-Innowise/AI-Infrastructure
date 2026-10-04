@@ -1,6 +1,6 @@
 """Knowledge › Memory use: an in-process reader of counts and dates, and the runtime check behind a button."""
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -302,6 +302,45 @@ class MemoryUseTests(unittest.TestCase):
         self.assertEqual({"privacy": 3, "authority": 1}, checked["held_back"])
         self.assertEqual({"overdue-review": 2, "needs-review": 2, "superseded": 3, "archived": 2},
                          {reason: list(checked["skips"].values()).count(reason) for reason in set(checked["skips"].values())})
+
+    def test_history_folds_each_retrieval_once_and_outlives_pruned_manifests(self):
+        self.chunk("MEM-20260901-aaaaaaaa", "kept")
+        chunk = {"path": "memory-bank/chunks/MEM-20260901-aaaaaaaa-kept.md", "category": "durable", "estimated_tokens": 30, "source_hash": "c"}
+        policy = {"path": "AGENTS.md", "category": "policy", "estimated_tokens": 40, "source_hash": "p"}
+        now = datetime.now(timezone.utc)
+        moment = lambda days, hours=0: (now - timedelta(days=days, hours=hours)).isoformat()
+        first = self.manifest("local", "hook-1", moment(2), [chunk, policy], host="claude", entry_point="hook-context")
+        self.manifest("local", "hook-2", moment(2, 1), [policy], [{"path": "memory-bank/chunks/MEM-20260901-aaaaaaaa-kept.md", "reason": "budget"}],
+                      host="claude", entry_point="hook-context")
+        self.manifest("local", "ancient", moment(memory_use.HISTORY_DAYS + 5), [chunk])
+        payload = self.read()
+        self.assertNotIn("key", json.dumps(payload["retrievals"]))
+        self.assertNotIn("local:", json.dumps(payload))
+        days = payload["history"]["days"]
+        self.assertEqual(1, len(days))
+        day = days[0]
+        self.assertEqual((2, 1, 1, 2, 1, {"Claude hook": 2}, {"MEM-20260901-aaaaaaaa": 1}),
+                         (day["retrievals"], day["with_chunk"], day["bank"], day["rules"], day["cuts"], day["routes"], day["chunks"]))
+        # Reading again folds nothing twice; a new retrieval adds; a pruned manifest's day stays.
+        self.assertEqual(days, self.read()["history"]["days"])
+        first.unlink()
+        self.manifest("local", "hook-3", moment(0), [chunk], host="claude", entry_point="hook-context")
+        history = {item["day"]: item for item in self.read()["history"]["days"]}
+        self.assertEqual(2, history[day["day"]]["retrievals"])
+        self.assertEqual((1, {"MEM-20260901-aaaaaaaa": 1}), (history[memory_use._local_day(moment(0))]["retrievals"],
+                                                              history[memory_use._local_day(moment(0))]["chunks"]))
+        # Only names inside the horizon are remembered.
+        with self.store.lock:
+            seen = sorted(row[0] for row in self.store.db.execute("SELECT manifest FROM retrieval_seen"))
+        self.assertEqual(["local:hook-1.json", "local:hook-2.json", "local:hook-3.json"], seen)
+
+    def test_a_finished_launch_folds_its_project_history(self):
+        (self.project / "memory-bank/chunks").mkdir(parents=True)
+        self.manifest("local", "hook-1", datetime.now(timezone.utc).isoformat(), [], host="claude", entry_point="hook-context")
+        memory_use.fold_project(self.manager, self.project_id)
+        with self.store.lock:
+            rows = self.store.db.execute("SELECT bank,data FROM retrieval_days").fetchall()
+        self.assertEqual([("memory-bank", 1)], [(row[0], json.loads(row[1])["retrievals"]) for row in rows])
 
     def test_held_back_sentences_become_rule_names(self):
         self.assertEqual(["authority", "privacy", "cited source changed", "no content", "status", "type", "other"],

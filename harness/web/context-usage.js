@@ -88,8 +88,7 @@ function renderContextHeadline(turn) {
   const headline = $('context-headline'), lines = $('context-lines'), exact = value => fmt.exact(value).text, estimate = value => fmt.estimate(value,' tokens');
   if (turn.end !== null && turn.window) headline.textContent = `${exact(turn.end)} of ${exact(turn.window)} tokens in context · ${percentText(turn.end,turn.window)}`;
   else if (turn.end !== null) headline.textContent = `${exact(turn.end)} tokens in context · window not reported`;
-  else headline.textContent = turn.running ? turn.provider === 'codex' ? 'Context size arrives when the turn ends.' : 'Waiting for the first model call.'
-    : turn.recorded ? 'Context size not reported by this provider.' : 'Context details start with the next launch.';
+  else headline.textContent = turn.running ? 'Waiting for the first model call.' : turn.recorded ? 'Context size not reported by this provider.' : 'Context details start with the next launch.';
   const rows = [];
   if (turn.recorded) {
     const memory = el('p','context-line'); memory.append('Memory sent this turn ',numberNode(estimate(turn.memory)));
