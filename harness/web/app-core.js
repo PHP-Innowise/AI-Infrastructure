@@ -559,8 +559,8 @@ document.addEventListener('keydown',event => {
 document.querySelector('.skip').addEventListener('click',event => { event.preventDefault(); $('main').focus(); });
 // Six sections; each groups related views behind tabs. Every view has its own #/view address.
 const resultViews = ['changes','checks','usage'], isResultView = view => resultViews.includes(view);
-const viewGroups = {sessions:['sessions',...resultViews],systems:['systems','system-changes'],knowledge:['brain','memory','context'],skills:['skills','create-skill'],accelerators:['accelerators','creator','kit3'],setup:['setup']};
-const viewLabels = {sessions:'Conversation',systems:'Services','system-changes':'Changes',changes:'Changes',checks:'Checks',usage:'Usage',brain:'Project Brain',memory:'Memory bank',context:'Context files',skills:'Library','create-skill':'Create skill',accelerators:'Overview',creator:'Infrastructure Creator',kit3:'Open Source Kit',setup:'Projects & Setup'};
+const viewGroups = {sessions:['sessions',...resultViews],systems:['systems','system-changes'],knowledge:['memory-use','brain','memory','context'],skills:['skills','create-skill'],accelerators:['accelerators','creator','kit3'],setup:['setup']};
+const viewLabels = {sessions:'Conversation',systems:'Services','system-changes':'Changes',changes:'Changes',checks:'Checks',usage:'Usage','memory-use':'Memory use',brain:'Project Brain',memory:'Memory bank',context:'Context files',skills:'Library','create-skill':'Create skill',accelerators:'Overview',creator:'Infrastructure Creator',kit3:'Open Source Kit',setup:'Projects & Setup'};
 const groupOf = view => Object.keys(viewGroups).find(group => viewGroups[group].includes(view));
 const lastViewInGroup = {};
 function viewFromHash() { let view = ''; try { view = decodeURIComponent(location.hash.replace(/^#\/?/,'')); } catch (_) { return null; } if (view === 'results') view = 'changes'; return groupOf(view) ? view : null; }
@@ -572,6 +572,8 @@ function tabLabel(view) {
   if (view === 'changes' && Array.isArray(data?.snapshot?.files)) return `Changes · ${data.snapshot.files.length}`;
   if (view === 'checks' && data?.checks?.length) return `Checks · ${data.checks.filter(check => check.status === 'passed').length}/${data.checks.length}`;
   if (view === 'usage' && data?.totals?.cost_usd?.reported > 0) return `Usage · ${fmt.cost(data.totals.cost_usd.reported).text}`;
+  // Memory use carries a count only for trouble: chunks past review or citing changed files, and stalled promotions.
+  if (view === 'memory-use' && typeof memoryUse !== 'undefined' && memoryUse.count > 0) return `Memory use · ${memoryUse.count}`;
   return viewLabels[view];
 }
 function renderViewTabs() {
@@ -593,6 +595,7 @@ window.addEventListener('popstate',() => { const view = viewFromHash() || 'sessi
 function setView(view, record = true) {
   const previousView = state.view;
   if (state.view === 'memory' && view !== 'memory') { cancelMemoryRequests(); cancelKnowledgeRead('memory'); }
+  if (state.view === 'memory-use' && view !== 'memory-use') leaveMemoryUse();
   if (state.view === 'brain' && view !== 'brain') { cancelBrainRequests(); cancelKnowledgeRead('brain'); }
   if (state.view === 'creator' && view !== 'creator') { clearTimeout(creatorUi.timer); ++creatorUi.epoch; }
   if (groupOf(state.view) === 'systems' && groupOf(view) !== 'systems' && typeof systemUi !== 'undefined') { clearTimeout(systemUi.timer); ++systemUi.epoch; systemUi.controller?.abort(); }
@@ -608,6 +611,7 @@ function setView(view, record = true) {
   if (view === 'setup') openSetup();
   if (view === 'context') loadContext();
   if (view === 'memory') loadMemory();
+  if (view === 'memory-use') openMemoryUse();
   if (view === 'brain') loadBrain();
   if (view === 'skills') openSkills();
   if (view === 'create-skill') openCreateSkill();
@@ -625,7 +629,7 @@ function setOptions(select, items, getLabel, getValue, previous) {
   else { const first = [...select.options].find(option => !option.disabled); if (first) select.value = first.value; }
   if (!items.length) { const option = el('option','','None available'); option.value = ''; select.append(option); }
 }
-const projectSelects = {sessions:'project',changes:'project',checks:'project',usage:'project',context:'context-project',brain:'brain-project',memory:'memory-project',skills:'skills-project','create-skill':'create-skill-project',setup:'setup-project',creator:'creator-project',accelerators:'accelerator-project',systems:'system-project','system-changes':'system-project'};
+const projectSelects = {sessions:'project',changes:'project',checks:'project',usage:'project',context:'context-project','memory-use':'memory-use-project',brain:'brain-project',memory:'memory-project',skills:'skills-project','create-skill':'create-skill-project',setup:'setup-project',creator:'creator-project',accelerators:'accelerator-project',systems:'system-project','system-changes':'system-project'};
 const currentProject = () => groupOf(state.view) === 'sessions' ? state.selected?.project_id || $('project').value : projectSelects[state.view] ? $(projectSelects[state.view]).value : $('project-switcher').value;
 // Every view follows the sidebar project; views in the middle of an operation keep theirs until it ends.
 function switchProject(id) {
@@ -639,7 +643,7 @@ function switchProject(id) {
 function syncProjectSelects(id, reloadVisible = false) {
   const busy = {'memory-project':knowledgeState.pending,'brain-project':knowledgeState.pending,'skills-project':Boolean(skillsState.pending),'create-skill-project':Boolean(createSkillState.pending),'setup-project':Boolean(setupState.pending || setupState.registerPending),'creator-project':creatorUi.pending,
     'system-project':typeof systemDiscovery !== 'undefined' && Boolean(systemUi.pending || (inSystems() && systemUi.detail?.active) || systemEditor.pending || systemEditor.dirty || systemDiscovery.active)};
-  for (const select of ['context-project','memory-project','brain-project','skills-project','create-skill-project','setup-project','creator-project','accelerator-project','system-project']) if (!busy[select] && projectFor(id) && $(select).value !== id) $(select).value = id;
+  for (const select of ['context-project','memory-use-project','memory-project','brain-project','skills-project','create-skill-project','setup-project','creator-project','accelerator-project','system-project']) if (!busy[select] && projectFor(id) && $(select).value !== id) $(select).value = id;
   // The draft's own handler may already have moved a select, so the visible view reloads regardless.
   const visible = projectSelects[state.view];
   if (reloadVisible && visible && visible !== 'project' && !busy[visible] && $(visible).value === id) $(visible).dispatchEvent(new Event('change'));
@@ -674,6 +678,7 @@ function populateSettings() {
   if (!(typeof systemUi !== 'undefined' && systemUi.pending)) setProjectChoices($('system-project'),boot.projects,$('system-project').value || $('project').value);
   setProjectChoices($('project-switcher'),boot.projects,currentProject());
   for (const scope of ['memory','brain']) if (!knowledgeState.pending) setProjectChoices($(`${scope}-project`),boot.projects,$(`${scope}-project`).value || $('project').value);
+  setProjectChoices($('memory-use-project'),boot.projects,$('memory-use-project').value || $('project').value);
   if (!setupState.pending && !setupState.registerPending) setProjectChoices($('setup-project'),boot.projects,$('setup-project').value || $('project').value,true);
   setOptions($('provider'),boot.providers,item => `${item.name}${item.available ? '' : ' · unavailable'}`,item => item.id,$('provider').value);
   if (!skillsState.pending) { const previousProject = $('skills-project').value; setProjectChoices($('skills-project'),boot.projects,previousProject || $('project').value); if (previousProject && previousProject !== $('skills-project').value) invalidateSkillsPreview(); }
@@ -1294,7 +1299,11 @@ async function pollSession(epoch) {
     const data = await api(`/api/sessions/${encodeURIComponent(state.selectedId)}?after=${cursor}`,{signal:controller.signal});
     if (epoch !== state.epoch) return;
     const conversation = $('conversation'); const atBottom = conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight < 130;
-    if (data.session) { const restore = state.loading || active(state.selected) || active(data.session); upsert(data.session); if (restore) applySessionSettings(data.session); }
+    if (data.session) {
+      const restore = state.loading || active(state.selected) || active(data.session), ended = active(state.selected) && !active(data.session);
+      upsert(data.session); if (restore) applySessionSettings(data.session);
+      if (ended) memoryUseSessionEnded(data.session.project_id);
+    }
     for (const event of data.events || []) appendEvent(event);
     showError('events-error',''); state.loading = false; updateControls();
     if (atBottom) conversation.scrollTop = conversation.scrollHeight;

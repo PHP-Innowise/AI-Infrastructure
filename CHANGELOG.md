@@ -26,6 +26,24 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Add **Knowledge › Memory use** to the Harness. The new first Knowledge tab
+  follows one knowledge root through Project Brain, promotion, the Memory bank
+  and the last 200 retrievals, in fixed-step bands for a 7-, 30- or 90-day
+  window or all time. Rows flag chunks past their review date, chunks whose
+  cited files changed, and stalled automatic promotions. A retrieval strip and a
+  review horizon each have a keyboard-navigable detail card and a table twin. On
+  a return visit the tab shows and replays only what changed since the last one,
+  and reduced motion shows a `+N` mark instead.
+  `harness/src/harness/memory_use.py` reads project files in process, without
+  the knowledge lock and without running project code. Only counts, dates, chunk
+  IDs and chunk titles leave the server; Brain titles and bodies, queries and
+  non-chunk paths do not. A Harness freshness re-check counts with its
+  retrieval. `POST …/memory-use/check` runs the installed runtime's
+  `promotable_records` and `memory_eligibility` on a click and returns 409 while
+  the lock is busy; the knowledge lock's busy error is now `KnowledgeBusy`
+  (HTTP 409). `tests/harness_memory_demo.py` builds a year of history through the
+  copied runtime's own API.
+
 - Show what memory adds where a Harness launch is decided. The linked Brain
   task card shows the capsule against its 8,000-character cap as one bar split
   into Project Brain, Memory bank and Rules & docs, with the items the runtime

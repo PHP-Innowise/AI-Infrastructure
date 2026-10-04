@@ -21,7 +21,7 @@ from urllib.request import Request, build_opener, ProxyHandler
 ROOT = Path(__file__).resolve().parents[3]
 # The page's styles and scripts: an explicit list, read with the page so a running server serves one version.
 ASSETS = {name: 'text/css; charset=utf-8' if name.endswith('.css') else 'text/javascript; charset=utf-8'
-          for name in ('app.css', 'app-core.js', 'app-knowledge.js', 'app-setup.js', 'app-skills.js', 'app-creator.js',
+          for name in ('app.css', 'app-core.js', 'app-knowledge.js', 'memory-use.js', 'app-setup.js', 'app-skills.js', 'app-creator.js',
                        'agent-activity.js', 'system.js', 'system-editor.js', 'system-discovery.js')}
 sys.path.insert(0, str(ROOT / 'harness/src'))
 sys.path.insert(0, str(ROOT / 'scripts'))
@@ -29,7 +29,8 @@ from harness.sessions import Sessions, SessionError, WORKFLOWS, MAX_AGENTS, DEFA
 from harness import clash, sdd
 from harness.attachments import MAX_JSON_BYTES
 from harness.skills import SkillManager
-from harness.knowledge import KnowledgeManager
+from harness.knowledge import KnowledgeBusy, KnowledgeManager
+from harness import memory_use
 from harness.setup import SetupManager
 from harness.creator import CreatorManager
 from harness.system_orchestration import SystemManager
@@ -259,6 +260,13 @@ class Handler(BaseHTTPRequestHandler):
                         or ('path' in query and 'bank' not in query)):
                     raise SessionError('Invalid memory request.')
                 self.reply(200, store.memory(path.split('/')[3], query.get('bank', [None])[0], query.get('path', [None])[0]))
+            elif path.startswith('/api/projects/') and path.endswith('/memory-use') and len(path.split('/')) == 5:
+                query = parse_qs(parsed.query, strict_parsing=True, keep_blank_values=True) if parsed.query else {}
+                if set(query) - {'bank'} or any(len(values) != 1 or not values[0] for values in query.values()):
+                    raise SessionError('Invalid memory use request.')
+                project_id = path.split('/')[3]
+                self.reply(200, memory_use.read(self.server.knowledge, project_id, query.get('bank', [None])[0],
+                                                store.linked_tasks(project_id)))
             elif path.startswith('/api/projects/') and path.split('/')[-1] in ('brain', 'knowledge') and len(path.split('/')) == 5:
                 query = parse_qs(parsed.query, strict_parsing=True, keep_blank_values=True) if parsed.query else {}
                 section = path.split('/')[-1]
@@ -356,6 +364,10 @@ class Handler(BaseHTTPRequestHandler):
                 if urlsplit(self.path).query:
                     raise SessionError('Invalid project knowledge request.')
                 self.reply(200, self.server.knowledge.run(path.split('/')[3], data))
+            elif path.startswith('/api/projects/') and path.endswith('/memory-use/check') and len(path.split('/')) == 6:
+                if urlsplit(self.path).query or set(data) - {'bank'} or not isinstance(data.get('bank', ''), str):
+                    raise SessionError('Invalid eligibility check request.')
+                self.reply(200, memory_use.check(self.server.knowledge, path.split('/')[3], data.get('bank') or None))
             elif path == '/api/skills/discover' and 'source_id' in data and not set(data) - {'source_id', 'refresh'}:
                 self.reply(200, self.server.skills.discover(data['source_id'], data.get('refresh', False)))
             elif path == '/api/skills/change-preview':
@@ -411,6 +423,8 @@ class Handler(BaseHTTPRequestHandler):
                 threading.Thread(target=self.server.shutdown, daemon=True).start()
             else:
                 self.error(404, 'Not found.')
+        except KnowledgeBusy as error:
+            self.error(409, str(error))
         except (SessionError, ValueError, TypeError, RecursionError) as error:
             self.error(400, str(error) if isinstance(error, SessionError) else 'Invalid JSON request.')
         except subprocess.TimeoutExpired:

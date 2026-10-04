@@ -641,6 +641,21 @@ class Sessions:
             raise SessionError('The selected project directory is absent from HEAD. The new worktree was kept for inspection.')
         return cwd, workspace, branch, details['common_dir']
 
+    def linked_tasks(self, key):
+        """Task UUIDs this runner prepared context for; Memory use names their retrievals Harness launches."""
+        self.project(key)
+        with self.lock:
+            rows = self.db.execute('SELECT brain FROM sessions WHERE project_id=? AND brain IS NOT NULL', (key,)).fetchall()
+        tasks = set()
+        for row in rows:
+            try:
+                brain = json.loads(row['brain'])
+            except (TypeError, ValueError):
+                continue
+            if isinstance(brain, dict) and isinstance(brain.get('record_id'), str):
+                tasks.add(brain['record_id'])
+        return frozenset(tasks)
+
     def context(self, key):
         project = self.project(key)
         root = Path(project['path'])

@@ -271,8 +271,8 @@ executable does **not** prove that its account is logged in.
 
 ### Workspace options
 
-The sidebar has six sections: **Sessions**, **System Orchestration**, **Knowledge** (Project Brain,
-Memory bank and Context files tabs), **Skills** (Library and Create skill
+The sidebar has six sections: **Sessions**, **System Orchestration**, **Knowledge** (Memory use,
+Project Brain, Memory bank and Context files tabs), **Skills** (Library and Create skill
 tabs), **Accelerators** (Overview, Infrastructure Creator and Open Source Kit
 tabs) and **Projects & Setup**. Every view has its own address, such as
 `#/brain` or `#/creator`, so a reload or the browser's Back button returns to it.
@@ -316,6 +316,10 @@ another project while a session is open starts a new session draft for it.
   The native CLI can independently load its normal project instructions.
   While the **Project context** chip is on, it shows what those excerpts add to
   each launch, estimated at 4.7 characters per token (`≈ 2.1k tokens`).
+- **Memory use:** how a knowledge root's memory grows, moves, ages and gets
+  selected: Project Brain records, promotions, Memory bank chunks and the last
+  200 retrievals on this machine, with the chunks that need attention. See
+  [Memory use](#memory-use).
 - **Memory bank:** browse a project's `memory-bank`, select a document and
   read its Markdown source, including chunk metadata and status. The repository's
   Laravel, Symfony, PHP Core and WordPress banks appear separately. The viewer
@@ -766,6 +770,54 @@ The Harness adds no second knowledge database and does not directly edit records
 to bypass runtime validation. Raw file editing and import are not exposed by these
 controls. Export downloads are temporary server artifacts.
 
+### Memory use
+
+**Knowledge › Memory use** is the first Knowledge tab. It follows one knowledge
+root through four stages:
+
+- **Project Brain:** records, open work and records resolved in the chosen window
+  (7, 30 or 90 days, or all).
+- **Promotion:** proposals applied after review or automatically, proposals waiting
+  for review, and automatic ones that stalled.
+- **Memory bank:** active chunks split by who vouched for them. A person wrote or
+  reviewed **●**; **○** was auto-promoted and nobody re-attested it since.
+- **Selected by retrieval:** how many of the last 200 retrievals put a chunk in a
+  capsule, how many distinct chunks that was, and how many were cut. A selection
+  shows that a chunk reached a capsule, not that the agent read it.
+
+Below the stages, rows name trouble: chunks past their review date, chunks whose
+cited files changed, and stalled promotions. A chunk past its review date also
+fails bank validation, which stalls every later promotion until it is re-attested
+or retired.
+
+The **Last 200 retrievals** strip has one column per retrieval, and the **Review
+horizon** places each active chunk by days until its review date. Both have a
+detail card, keyboard navigation and a table with the same numbers. **Re-attest…**
+and **Retire…** open Memory bank with the form filled in; the person still runs
+the operation. The tab reads `Memory use · N` while N chunks or promotions need
+attention.
+
+Opening the view reads project files in the server process. It takes no knowledge
+lock and runs no project code, so it cannot make a linked launch's freshness check
+fail. Only counts, dates, chunk IDs and chunk titles reach the page. Project Brain
+titles and bodies, retrieval queries and non-chunk paths stay on the server, and
+private or restricted records count without their type or status. A Harness
+launch re-checks its context before running, and that re-check counts with its
+retrieval. **Check eligibility** is the one request that runs the installed
+runtime's own rules. It names the rule that held back each resolved record and why
+retrieval skips each chunk, writes nothing, and returns 409 while another
+knowledge operation holds the lock.
+
+The view remembers your last visit in this browser. Coming back shows what changed
+since then, such as new chunks, re-attestations, chunks that crossed their review
+date and new retrievals, and replays only those changes. Reduced motion shows the
+final state with a `+N` mark instead. To try it on a realistic project, build the
+demo; its history goes through the copied runtime's own API:
+
+```bash
+python3 tests/harness_memory_demo.py /tmp/shop-api
+```
+
 ### Link a session to a task
 
 Open **Brain task & retrieved context** when creating a session, enable linking, select a bank and an
@@ -847,7 +899,7 @@ an over-allocation result fails the reviewer instead of claiming the limit held.
 Verification from the repository root:
 
 ```bash
-python3 -m unittest tests.test_harness_providers tests.test_harness_sessions tests.test_harness_web tests.test_harness_process_guard tests.test_harness_skills tests.test_harness_fleet tests.test_harness_knowledge tests.test_harness_task_context tests.test_harness_setup tests.test_harness_creator tests.test_harness_results tests.test_harness_delivery tests.test_harness_clash
+python3 -m unittest tests.test_harness_providers tests.test_harness_sessions tests.test_harness_web tests.test_harness_process_guard tests.test_harness_skills tests.test_harness_fleet tests.test_harness_knowledge tests.test_harness_memory_use tests.test_harness_task_context tests.test_harness_setup tests.test_harness_creator tests.test_harness_results tests.test_harness_delivery tests.test_harness_clash
 harness/.venv/bin/python -m unittest discover -s harness/tests -p 'test_*.py'
 ```
 

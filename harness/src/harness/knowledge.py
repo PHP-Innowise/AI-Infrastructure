@@ -103,6 +103,32 @@ else:
         'automatic_promotion': bool(config.get('automatic_promotion'))}, ensure_ascii=False))
 '''
 
+# Check eligibility (Knowledge › Memory use) asks the installed runtime's own rules
+# which resolved records a rule held back and which chunks retrieval skips, so the
+# page never re-implements policy. It runs only on a user action.
+MEMORY_USE_CHECK = r'''
+import json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / 'memory-bank/scripts'))
+from brain_runtime import load_config, promotable_records
+from context import memory_eligibility
+request = json.loads(sys.argv[2])
+held, eligible = None, None
+if request.get('brain'):
+    candidates, blocked = promotable_records(root, load_config(root))
+    held, eligible = [item.get('reason') for item in blocked], len(candidates)
+skips = {}
+chunks = root / 'memory-bank' / 'chunks'
+for path in sorted(chunks.glob('*.md')) if chunks.is_dir() and not chunks.is_symlink() else []:
+    if path.is_symlink() or not path.is_file():
+        continue
+    reason = memory_eligibility(path, root)[1]
+    if reason is not None:
+        skips[path.name] = reason
+print(json.dumps({'held_back': held, 'eligible': eligible, 'skips': skips}))
+'''
+
 
 def _text(value, label, limit=16000):
     try:
@@ -153,6 +179,10 @@ def _entry(path, size, content):
     return result, metadata
 
 
+class KnowledgeBusy(SessionError):
+    """The non-blocking knowledge lock is held by another operation."""
+
+
 class KnowledgeManager:
     def __init__(self, sessions):
         self.sessions = sessions
@@ -165,7 +195,7 @@ class KnowledgeManager:
     @contextmanager
     def _operation(self):
         if not self.lock.acquire(blocking=False):
-            raise SessionError('Another knowledge operation is running. Wait for it to finish.')
+            raise KnowledgeBusy('Another knowledge operation is running. Wait for it to finish.')
         try:
             yield
         finally:
@@ -472,6 +502,26 @@ class KnowledgeManager:
             root = project / info['root']
             self._preflight(root)
             return {**info, **self._inspect_runtime(root, {'task_id': task_id, 'task_only': task_only})}
+
+    def memory_use_check(self, project_id, bank=None):
+        """Run the runtime's eligibility rules for Memory use, under the non-blocking knowledge lock."""
+        with self._operation():
+            if self.closed.is_set() or self.sessions.stopping.is_set():
+                raise SessionError('The knowledge manager is stopping.')
+            info = self.info(project_id, bank)
+            if not info['runtime_available']:
+                raise SessionError('The selected Memory Bank does not have an installed context runtime.')
+            root = Path(self.sessions.project(project_id)['path']) / info['root']
+            self._preflight(root)
+            brain = info['brain_available'] and info['mode'] == 'governed'
+            code, stdout, _ = self._execute([sys.executable, '-c', MEMORY_USE_CHECK, str(root), json.dumps({'brain': brain})], root)
+            try:
+                result = json.loads(stdout)
+            except ValueError as error:
+                raise SessionError('The installed runtime could not check eligibility.') from error
+            if code != 0 or not isinstance(result, dict):
+                raise SessionError('The installed runtime could not check eligibility. Check record validity and source paths.')
+            return {**info, **result}
 
     def run(self, project_id, data, *, _root=None, _ephemeral=False, _gate=None):
         if not isinstance(data, dict) or not isinstance(data.get('action'), str) or data['action'] not in ACTION_FIELDS:

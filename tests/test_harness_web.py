@@ -218,6 +218,23 @@ class HarnessWebTests(unittest.TestCase):
         self.assertEqual(data['session']['mode'], 'edit')
 
     @unittest.skipUnless(shutil.which('node'), 'Browser calculator check requires Node')
+    def test_memory_use_reads_without_the_knowledge_lock_and_its_check_conflicts_when_busy(self):
+        base = f"/api/projects/{self.project_id}/memory-use"
+        status, empty, _ = self.request(base)
+        self.assertEqual((200, None, None), (status, empty["bank_id"], empty["chunks"]))
+        self.assertEqual(400, self.request(base + "?path=chunks")[0])
+        (self.project / "memory-bank/chunks").mkdir(parents=True)
+        self.assertTrue(self.server.knowledge.lock.acquire(blocking=False))
+        try:
+            status, payload, _ = self.request(base)
+            self.assertEqual((200, "memory-bank", []), (status, payload["bank_id"], payload["chunks"]["items"]))
+            status, busy, _ = self.post(base + "/check", {})
+            self.assertEqual((409, "Another knowledge operation is running. Wait for it to finish."), (status, busy["error"]))
+        finally:
+            self.server.knowledge.lock.release()
+        self.assertEqual(400, self.post(base + "/check", {"bank": 3})[0])
+        self.assertEqual(400, self.post(base + "/check?bank=memory-bank", {})[0])
+
     def test_selecting_brain_record_focuses_editable_progress_without_erasing_draft(self):
         page = ui_script()
         source = page[page.index('\nfunction fillKnowledgeSelection('):page.index('\nfunction submitKnowledgeForm(')]
@@ -1706,6 +1723,57 @@ nodes['project-context'].checked = true; contextSizes.files = [{path: 'AGENTS.md
 assert.equal($('project-context-value').textContent, 'no files');
 contextSizes.project = 'p2'; renderContextValue();
 assert.equal($('project-context-value').textContent, '');
+""")
+
+    def test_memory_use_model_counts_the_window_and_what_changed_since_the_last_visit(self):
+        page = ui_script()
+        self.run_node(page[page.index("\nconst numberText"):page.index("\nfunction numberNode(")]
+                      + "\nconst memoryKinds = [['brain','Project Brain'],['bank','Memory bank'],['rules','Rules & docs']];"
+                      + page[page.index("\nconst DAY_MS"):page.index("\nconst memoryAnchorKey")], r"""
+const chunk = (id, fields) => ({id, title:id, type:'domain', status:'active', created:'2025-10-01', last_verified:'2025-10-01', review_after:'2026-12-01',
+  valid_to:null, promoted:false, auto:false, bytes:100, sources:1, sources_changed:false, path:`chunks/${id}.md`, ...fields});
+const data = {today:'2026-10-04',
+  chunks:{bytes:600, truncated:false, items:[chunk('A',{review_after:'2026-10-01'}), chunk('B',{auto:true, promoted:true, created:'2026-09-30', last_verified:'2026-09-30', review_after:'2027-09-30'}),
+    chunk('C',{auto:true, promoted:true, last_verified:'2026-09-02', review_after:'2027-09-02'}), chunk('D',{status:'needs-review'}),
+    chunk('E',{status:'superseded', valid_to:'2026-09-20'}), chunk('F',{review_after:'2026-10-20', sources_changed:true})]},
+  brain:{truncated:false, items:[{type:'task', status:'active', archived:false, open:true, resolved_at:null, promotable:false, promoted:false},
+    {type:'finding', status:'resolved', archived:false, open:false, resolved_at:'2026-09-25T08:00:00+00:00', promotable:true, promoted:false},
+    {type:'finding', status:'resolved', archived:true, open:false, resolved_at:'2026-09-29T08:00:00+00:00', promotable:true, promoted:true},
+    {private:true, archived:true, open:false, resolved_at:'2026-01-02T08:00:00+00:00', promotable:true, promoted:false}]},
+  promotions:{truncated:false, items:[{status:'applied', mode:'automatic', created_at:'2026-09-29T09:00:00+00:00', applied_at:'2026-09-30T09:00:00+00:00'},
+    {status:'applied', mode:'human', created_at:'2026-08-01T09:00:00+00:00', applied_at:'2026-09-15T09:00:00+00:00'},
+    {status:'proposed', mode:'human', created_at:'2026-10-01T09:00:00+00:00', applied_at:null}, {status:'reviewed', mode:'automatic', created_at:'2026-10-02T09:00:00+00:00', applied_at:null}]},
+  retrievals:{found:3, merged:1, limit:200, items:[{at:'2026-09-27T10:00:00+00:00', route:'Claude hook', task:0, brain:2, bank:2, rules:3, chunks:['A','B'], cuts:[]},
+    {at:'2026-10-02T10:00:00+00:00', route:'Harness', task:1, brain:1, bank:1, rules:2, chunks:['B'], cuts:[['C','layer-limit']]},
+    {at:'2026-10-03T10:00:00+00:00', route:'not recorded', task:1, brain:1, bank:0, rules:2, chunks:[], cuts:[]}]},
+  health:{truncated:false, items:[{at:'2026-09-20T10:00:00+00:00', dropped:true}, {at:'2026-09-27T10:00:00+00:00', dropped:true}, {at:'2026-10-02T10:00:00+00:00', dropped:false}, {at:'2026-10-03T10:00:00+00:00', dropped:null}]}};
+const now = Date.parse('2026-10-04T12:00:00Z'), model = memoryUseModel(data, 30, now);
+// Trouble the tab counts: one chunk past review, one citing a changed file, one stalled automatic promotion.
+assert.equal(model.count, 3);
+assert.deepEqual([model.bank.active, model.bank.person, model.bank.auto, model.bank.reattested, model.bank.drafts, model.bank.superseded],[4, 2, 2, 1, 1, 1]);
+assert.deepEqual([model.bank.created, model.bank.retiredInWindow, model.bank.pastReview.map(c => c.id), model.bank.due.map(c => c.id)],[1, 1, ['A'], ['F']]);
+assert.deepEqual([model.brain.total, model.brain.open, model.brain.archived, model.brain.private, model.brain.resolved, model.brain.notPromoted],[4, 1, 2, 1, 2, 1]);
+assert.deepEqual([model.promotion.proposed, model.promotion.applied, model.promotion.auto, model.promotion.human, model.promotion.waiting.length, model.promotion.stalled.length],[3, 2, 1, 1, 1, 1]);
+const selected = model.selected;
+assert.deepEqual([selected.withChunk, selected.selections, selected.distinct, selected.reused, selected.cutTotal, selected.kinds],[2, 3, 2, 1, 1, {brain:4, bank:3, rules:7}]);
+// Dropped-to-fit counts only health lines inside the retrieval window, and an unmeasured line is not a zero.
+assert.deepEqual([selected.dropped, selected.measured, selected.merged],[1, 2, 1]);
+assert.deepEqual([model.review(data.chunks.items[0]), model.review(data.chunks.items[1])],[-3, 361]);
+const week = memoryUseModel(data, 7, now);
+assert.deepEqual([week.promotion.applied, week.brain.resolved, week.bank.created, week.bank.retiredInWindow],[1, 1, 1, 0]);
+assert.equal(memoryUseModel(data, 0, now).promotion.applied, 2);
+assert.deepEqual([bandWidth(0), bandWidth(1), bandWidth(3), bandWidth(10), bandWidth(11), bandWidth(41), bandWidth(51)],[1, 2, 4, 8, 12, 16, 24]);
+assert.deepEqual([reviewLabel(-3), reviewLabel(0), reviewLabel(344), reviewLabel(null)],['3 d overdue', 'today', 'in 344 d', '—']);
+const anchor = {at:'2026-09-28T16:40:00.000Z', today:'2026-09-28', newest:'2026-09-30T00:00:00+00:00',
+  chunks:{A:['active','2025-10-01','2026-10-01'], C:['active','2025-10-01','2026-09-29'], D:['needs-review','2025-10-01','2026-12-01'], E:['active','2025-10-01','2026-12-01'], F:['active','2025-10-01','2026-10-20']},
+  promotions:{'2026-09-29T09:00:00+00:00|automatic':'reviewed', '2026-08-01T09:00:00+00:00|human':'applied'}};
+const changes = memoryChanges(data, anchor), ids = list => list.map(item => item.id);
+assert.deepEqual([ids(changes.added), ids(changes.retired), ids(changes.reattested), ids(changes.moved), ids(changes.crossed)],[['B'], ['E'], ['C'], ['C'], ['A']]);
+assert.deepEqual([changes.applied.map(item => item.mode), changes.retrievals.length, changes.firstNew],[['automatic'], 2, 1]);
+assert.equal(memoryChanges(data, null), null);
+const snapshot = memorySnapshot(data);
+assert.deepEqual([snapshot.today, snapshot.newest, snapshot.chunks.A, Object.keys(snapshot.promotions).length],['2026-10-04', '2026-10-03T10:00:00+00:00', ['active','2025-10-01','2026-10-01'], 4]);
+assert.deepEqual(memoryChanges(data, snapshot), {since:snapshot.at, added:[], retired:[], reattested:[], moved:[], crossed:[], applied:[], retrievals:[], firstNew:3});
 """)
 
     def test_keyed_render_keeps_open_nodes_across_polls(self):

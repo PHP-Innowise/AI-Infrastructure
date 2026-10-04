@@ -274,6 +274,11 @@
         <section class="setup-result" id="setup-result" aria-label="Accelerator installation result" hidden><h3 id="setup-result-title"></h3><p class="knowledge-note" id="setup-result-target"></p><p class="knowledge-note" id="setup-result-summary"></p><pre class="setup-result-paths" id="setup-result-paths" tabindex="0"></pre><p class="knowledge-note">A new session loads the installed instructions.</p><button class="button primary" id="setup-result-start" type="button">Start session in this project</button></section>
       </div></div></section>
       <section class="view" id="context-view" aria-label="Project context" hidden><div class="page-scroll"><div class="page-content"><div class="page-toolbar"><label class="field" data-project-field>Project<select id="context-project"></select></label><button type="button" class="button" id="refresh-context">Refresh</button></div><p class="error-text" id="context-error" role="alert" hidden></p><div class="context-summary" id="context-summary" role="status"></div><div class="file-list" id="context-files"></div></div></div></section>
+      <section class="view" id="memory-use-view" aria-label="Memory use" hidden><div class="page-scroll"><div class="page-content memory-use-page">
+        <div class="page-toolbar memory-use-toolbar"><label class="field" data-project-field>Project<select id="memory-use-project"></select></label><label class="field">Knowledge root<select id="memory-use-bank" disabled><option value="">Choose a project</option></select></label><div class="memory-use-window" id="memory-use-window" role="radiogroup" aria-label="Flow window"></div><button class="button" id="memory-use-refresh" type="button">Refresh</button></div>
+        <p class="memory-use-since" id="memory-use-since" role="status"></p><p class="error-text" id="memory-use-error" role="alert" hidden></p>
+        <div class="memory-use-body" id="memory-use-body" aria-busy="false"></div>
+      </div></div></section>
       <section class="view" id="brain-view" aria-label="Project Brain" hidden><div class="memory-page knowledge-page">
         <div class="memory-toolbar"><label class="field" data-project-field>Project<select id="brain-project"></select></label><label class="field">Project Brain<select id="brain-bank" disabled><option value="">Choose a project</option></select></label><button class="button" id="refresh-brain" type="button">Refresh</button></div>
         <div id="brain-tools"></div>
@@ -340,6 +345,7 @@
   </dialog>
   <script src="/app-core.js"></script>
   <script src="/app-knowledge.js"></script>
+  <script src="/memory-use.js"></script>
   <script src="/app-setup.js"></script>
   <script src="/app-skills.js"></script>
   <script src="/app-creator.js"></script>
