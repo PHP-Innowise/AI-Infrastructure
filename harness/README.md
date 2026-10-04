@@ -314,6 +314,8 @@ another project while a session is open starts a new session draft for it.
   each from `AGENTS.md`, `CLAUDE.md`, `README.md`,
   `project-brain/README.md`, and `specs/MANIFEST.md`. Symlinks are skipped.
   The native CLI can independently load its normal project instructions.
+  While the **Project context** chip is on, it shows what those excerpts add to
+  each launch, estimated at 4.7 characters per token (`≈ 2.1k tokens`).
 - **Memory bank:** browse a project's `memory-bank`, select a document and
   read its Markdown source, including chunk metadata and status. The repository's
   Laravel, Symfony, PHP Core and WordPress banks appear separately. The viewer
@@ -769,9 +771,14 @@ controls. Export downloads are temporary server artifacts.
 Open **Brain task & retrieved context** when creating a session, enable linking, select a bank and an
 existing task or enter a new task ID and goal. **Prepare session** creates the
 workspace first, binds the task there and retrieves a bounded context capsule.
-Inspect the capsule before choosing **Run with this context**. The provider receives
-that saved capsule; the server checks the task revision and source contents again
-before launching it. Changed context requires a fresh preview. Each chat follow-up
+Inspect the capsule before choosing **Run with this context**. A bar above it shows
+how much of the 8,000-character cap the capsule uses, split into Project Brain,
+Memory bank and Rules & docs, and names the items the runtime dropped to fit and the
+characters repeated across the capsule's views. These counts are exact, measured
+on the server the way the runtime measures the cap. The note beside the button
+estimates what the capsule adds to the turn at 3.6 characters per token. The
+provider receives that saved capsule; the server checks the task revision and
+source contents again before launching it. Changed context requires a fresh preview. Each chat follow-up
 also prepares a new capsule. These explicit retrievals disable the runtime's
 repeat-query heuristic while retaining its privacy and source eligibility rules.
 

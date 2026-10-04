@@ -62,13 +62,14 @@ const scrollMotion = () => reducedMotion.matches ? 'auto' : 'smooth';
 // Numbers follow one grammar: exact values are grouped digits, estimates carry ≈ and two significant digits,
 // bounds carry ≤, ≥ or +, and unknown is —, never 0. Each helper returns the visible text and its spoken label.
 const numberText = new Intl.NumberFormat('en-US',{maximumFractionDigits:2});
-function compactNumber(value) {
-  const size = Math.abs(value);
-  return size >= 1e6 ? `${numberText.format(value / 1e6)}M` : size >= 1e4 ? `${numberText.format(Math.round(value / 1e3))}k` : size >= 1e3 ? `${numberText.format(value / 1e3)}k` : numberText.format(value);
+// Thousands and millions in short form; `significant` keeps an estimate's second digit (2.0k, not 2k).
+function compactNumber(value, significant = false) {
+  const size = Math.abs(value), short = (scaled, unit) => `${significant && Math.abs(scaled) < 10 ? scaled.toFixed(1) : numberText.format(Math.abs(scaled) >= 10 ? Math.round(scaled) : scaled)}${unit}`;
+  return size >= 1e6 ? short(value / 1e6,'M') : size >= 1e3 ? short(value / 1e3,'k') : numberText.format(value);
 }
 const fmt = {
   exact: (value, unit = '') => Number.isFinite(value) ? fmt.same(numberText.format(value) + unit) : fmt.unknown(),
-  estimate: (value, unit = '') => { if (!Number.isFinite(value)) return fmt.unknown(); const rounded = Number(value.toPrecision(2)); return {text:`≈ ${compactNumber(rounded)}${unit}`, label:`about ${numberText.format(rounded)}${unit}`}; },
+  estimate: (value, unit = '') => { if (!Number.isFinite(value)) return fmt.unknown(); const rounded = Number(value.toPrecision(2)); return {text:`≈ ${compactNumber(rounded,true)}${unit}`, label:`about ${numberText.format(rounded)}${unit}`}; },
   atMost: (value, unit = '') => Number.isFinite(value) ? {text:`≤ ${compactNumber(value)}${unit}`, label:`at most ${numberText.format(value)}${unit}`} : fmt.unknown(),
   atLeast: (value, unit = '') => Number.isFinite(value) ? {text:`≥ ${compactNumber(value)}${unit}`, label:`at least ${numberText.format(value)}${unit}`} : fmt.unknown(),
   capped: (value, unit = '') => Number.isFinite(value) ? {text:`${numberText.format(value)}+${unit}`, label:`more than ${numberText.format(value)}${unit}`} : fmt.unknown(),
@@ -644,6 +645,28 @@ function syncProjectSelects(id, reloadVisible = false) {
   if (reloadVisible && visible && visible !== 'project' && !busy[visible] && $(visible).value === id) $(visible).dispatchEvent(new Event('change'));
 }
 $('project-switcher').addEventListener('change',() => switchProject($('project-switcher').value));
+// Project context sends bounded excerpts of a few project files with every launch; the chip names their estimated size.
+const contextSizes = {project:null,files:null,epoch:0};
+async function loadContextSizes() {
+  const project = $('project').value;
+  if (!state.bootstrap || !project || contextSizes.project === project) { renderContextValue(); return; }
+  const epoch = ++contextSizes.epoch; Object.assign(contextSizes,{project,files:null}); renderContextValue();
+  try { const data = await api(`/api/projects/${encodeURIComponent(project)}/context`); if (epoch === contextSizes.epoch) contextSizes.files = Array.isArray(data.files) ? data.files : null; }
+  catch (_) { if (epoch === contextSizes.epoch) contextSizes.project = null; }
+  if (epoch === contextSizes.epoch) renderContextValue();
+}
+function renderContextValue() {
+  const value = $('project-context-value'), cap = state.bootstrap?.runtime?.context_excerpt_bytes;
+  const files = $('project-context').checked && contextSizes.project === $('project').value && Number.isInteger(cap) ? contextSizes.files : null;
+  const bytes = files ? files.filter(file => file.exists).reduce((sum,file) => sum + Math.min(file.bytes,cap),0) : null;
+  if (value.dataset.key === String(bytes)) return; value.dataset.key = String(bytes);
+  if (bytes === null) { value.replaceChildren(); return; }
+  if (!bytes) { value.textContent = 'no files'; return; }
+  // Prose excerpts run about 4.7 characters per token (scripts/context_budget.py).
+  const estimate = fmt.estimate(bytes / 4.7,' tokens'), shown = el('span','',estimate.text); shown.setAttribute('aria-hidden','true');
+  value.replaceChildren(shown,el('span','sr-only',`, adds ${estimate.label} per launch`));
+}
+$('project').addEventListener('change',loadContextSizes); $('project-context').addEventListener('change',renderContextValue);
 function populateSettings() {
   const boot = state.bootstrap;
   const draftModel = selectedModel(); const draftEffort = $('thinking-effort').value;
@@ -669,6 +692,7 @@ function populateSettings() {
   if (active(state.selected) || isFleetSession(state.selected)) refreshModelChoices(state.selected.model || null,state.selected.thinking_effort || null);
   else refreshModelChoices(draftModel,draftEffort);
   updateControls(); renderAccelerators(); loadProjectGit(true);
+  loadContextSizes();
 }
 async function bootstrap() {
   $('reconnect').disabled = true; $('connecting').hidden = false;
@@ -1112,7 +1136,7 @@ function updateControls() {
   if ($('provider-hint').textContent !== providerNote) $('provider-hint').textContent = providerNote; $('provider-hint').hidden = !providerNote;
   $('agent-hint').textContent = helperHint(fleet,clashMode,ultracode,provider);
   $('waiting').hidden = !isActive; const waitingText = linked && !state.selected.brain.context_id ? 'Preparing workspace and context. The provider has not started this turn.' : state.selected?.status === 'queued' ? 'Queued — waiting for an available runner.' : existingFleet ? 'Fleet review is running. Stage and reviewer updates appear above.' : isClashSession(state.selected) ? `${providerFor(state.selected.provider)?.name || state.selected.provider} and ${providerFor(state.selected.clash?.challenger)?.name || 'the challenger'} are clashing. Turn events appear above.` : `${providerFor(state.selected?.provider)?.name || 'Agent'} is running. New events will appear here.`; if ($('waiting-text').textContent !== waitingText) $('waiting-text').textContent = waitingText;
-  $('welcome').hidden = hasSession; sessionOptions.validity = {helpers:agentsValid && agentModeValid,clash:clashValid,workspace:workspaceValid,brain:linkValid,budgets:budgetValid,models:routingValid}; renderSessionOptions(); renderSessionSummary(); updateHeader(); updateSkillsControls(); updateKnowledgeControls(); updateSetupControls(); renderFleetSession(); renderClashSession(); renderLinkedSession(); resultControls();
+  $('welcome').hidden = hasSession; sessionOptions.validity = {helpers:agentsValid && agentModeValid,clash:clashValid,workspace:workspaceValid,brain:linkValid,budgets:budgetValid,models:routingValid}; renderSessionOptions(); renderSessionSummary(); updateHeader(); updateSkillsControls(); updateKnowledgeControls(); updateSetupControls(); renderFleetSession(); renderClashSession(); renderLinkedSession(); renderContextValue(); resultControls();
 }
 function applySessionSettings(session, restoreModel = true) { $('sdd-feature').value = session.sdd?.feature || ''; $('sdd-phase').value = session.sdd?.phase || 'specify'; for (const id of ['project','provider','workflow','mode']) $(id).value = session[id === 'project' ? 'project_id' : id] || (id === 'mode' ? 'plan' : id === 'workflow' ? 'native' : ''); $('project-context').checked = Boolean(session.project_context); if (restoreModel || active(session) || isFleetSession(session)) { $('agents-enabled').checked = session.agents_enabled === true; $('agent-count').value = Number.isInteger(session.agent_count) ? session.agent_count : defaultAgentCount(); } $('workspace').value = session.workspace === 'worktree' ? 'worktree' : 'project'; $('worktree-branch').value = session.workspace === 'worktree' ? session.branch || '' : ''; restoreBudgets('session-budgets',session.budgets,session.id+':'+session.budget_revision); restoreModelRouting(session.model_routing); restoreClashSettings(session.clash || null); if (isFleetSession(session)) restoreFleetSettings(session.fleet); if (restoreModel || isFleetSession(session)) refreshModelChoices(session.model || null,session.thinking_effort || null); loadProjectGit(); }
 for (const id of ['workflow','mode','thinking-effort']) $(id).addEventListener('change',updateControls);
@@ -1142,6 +1166,7 @@ function newSession(prompt = '', projectId = $('project').value, show = true) {
   refreshModelChoices(null,null);
   showError('events-error',''); showError('composer-error',''); renderHistory(); if (show) setView('sessions'); updateControls(); if (show) $('prompt').focus();
   $('project').value = projectId; restoreProjectPreferences(projectId);
+  contextSizes.project = null; loadContextSizes();
 }
 $('new-session').addEventListener('click',() => { if (!state.pending) newSession(); });
 function fleetCost(value) { return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? `$${value.toFixed(4).replace(/0+$/,'').replace(/\.$/,'.00')}` : null; }

@@ -335,6 +335,26 @@ input[type="text"],.field input[type="number"],select { width:100%; }
 .linked-context-review { border-color:var(--purple-line); background:var(--purple-faint); }
 .linked-context .knowledge-result { max-height:380px; }
 .linked-context details > summary { cursor:pointer; font-size:var(--text-ui); }
+/* Capsule meter: the track stands for the 8,000-character cap; parts are the kinds of memory, darkest first. */
+.capsule-meter { margin:12px 0; animation:capsule-in var(--motion-fast) var(--ease-enter); }
+.capsule-meter[data-refreshing="true"] { opacity:.6; }
+@keyframes capsule-in { from { opacity:0; } }
+.capsule-bar { position:relative; display:flex; height:8px; border-radius:var(--radius-sm); background:var(--line); }
+.capsule-bar::after { content:""; position:absolute; top:-2px; right:0; bottom:-2px; width:2px; background:var(--ink-2); }
+.capsule-part { flex:none; height:100%; transition:width var(--motion-base) var(--ease-standard); }
+.capsule-part:first-child { border-radius:var(--radius-sm) 0 0 var(--radius-sm); }
+.capsule-part + .capsule-part:not([hidden]) { border-left:2px solid var(--paper); }
+.capsule-part[data-kind="brain"],.capsule-swatch[data-kind="brain"] { background:var(--mem-brain); }
+.capsule-part[data-kind="bank"],.capsule-swatch[data-kind="bank"] { background:var(--mem-bank); }
+.capsule-part[data-kind="rules"],.capsule-swatch[data-kind="rules"] { background:var(--mem-rules); }
+.capsule-facts { margin:8px 0 0; color:var(--ink); font-size:var(--text-ui); font-variant-numeric:tabular-nums; }
+.capsule-repeats { margin:4px 0 0; color:var(--muted); font-size:var(--text-ui); }
+.capsule-repeats .explain { margin-left:4px; vertical-align:middle; }
+.capsule-repeats + .knowledge-note { margin:4px 0 0; }
+.capsule-legend { display:flex; flex-wrap:wrap; gap:4px 12px; margin:8px 0 0; color:var(--ink-2); font-size:var(--text-ui); font-variant-numeric:tabular-nums; }
+.capsule-legend > span { display:inline-flex; align-items:center; gap:4px; }
+.capsule-swatch { width:8px; height:8px; border-radius:var(--radius-sm); }
+.capsule-cost { margin:0; }
 .linked-toolbar { display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; }
 .linked-task-meta { font-size:var(--text-ui); color:var(--muted); line-height:var(--leading-body); overflow-wrap:anywhere; white-space:pre-wrap; }
 .linked-sources { display:grid; gap:8px; max-height:270px; overflow:auto; margin:12px 0; }

@@ -334,6 +334,27 @@ function resetLinkedSelection(session) {
   linkedBrain.epoch++; linkedBrain.controller?.abort(); Object.assign(linkedBrain,{sid:session?.id || null,data:null,loading:false,fetchKey:null,contextKey:null,stale:false,sourceIds:new Set(),promotionId:null,lastRecord:null,records:new Map()});
   $('linked-context-query').value = session?.brain?.query || ''; $('linked-proposal-title').value = ''; $('linked-proposal-content').value = ''; $('linked-promotion-reviewer').value = ''; $('linked-brain-output').hidden = true; $('linked-brain-output').replaceChildren(); $('linked-record-action').value = 'complete'; renderLinkedRecordFields(); showError('linked-brain-error',''); showError('linked-context-error','');
 }
+// The capsule meter at the approval decision: how much of the 8,000-character capsule each kind of memory takes,
+// what repeats, what was dropped to fit, and what the capsule adds to every prepared turn.
+const capsuleKinds = [['brain','Project Brain'],['bank','Memory bank'],['rules','Rules & docs']];
+function renderCapsuleMeter(meter) {
+  const box = $('capsule-meter'); box.hidden = !meter; box.dataset.refreshing = String(state.pending === 'brain-context-refresh');
+  if (!meter || box.dataset.key === JSON.stringify(meter)) return; box.dataset.key = JSON.stringify(meter);
+  const count = value => fmt.exact(value).text, retrieved = meter.items.brain + meter.items.bank + meter.items.rules;
+  const dropped = Object.entries(meter.dropped).map(([layer,number]) => `${count(number)} ${layer} ${number === 1 ? 'item' : 'items'} dropped to fit`);
+  const left = meter.limit - meter.characters;
+  $('capsule-facts').textContent = [`${count(meter.characters)} of ${count(meter.limit)} characters`,...dropped,...(left <= 400 ? [`${count(left)} characters left`] : [])].join(' · ') + (retrieved ? '' : ' · No matching memory for this query.');
+  $('capsule-repeats').textContent = `Each item appears in 3 views: ${count(meter.repeats)} characters repeat`; $('capsule-repeats-line').hidden = !meter.repeats;
+  $('capsule-legend').replaceChildren(...capsuleKinds.filter(([kind]) => meter.kinds[kind]).map(([kind,label]) => { const entry = el('span'), swatch = el('span','capsule-swatch'); swatch.dataset.kind = kind; entry.append(swatch,`${label} ${count(meter.kinds[kind])}`); return entry; }));
+  for (const [kind,label] of capsuleKinds) {
+    const part = $('capsule-bar').querySelector(`[data-kind="${kind}"]`), value = meter.kinds[kind];
+    part.hidden = !value; part.style.width = `${Math.min(100,value / meter.limit * 100)}%`;
+    part.title = `${label} · ${meter.items[kind]} ${meter.items[kind] === 1 ? 'item' : 'items'} · ${count(value)} characters`;
+  }
+  $('capsule-bar').setAttribute('aria-label',`Capsule ${count(meter.characters)} of ${count(meter.limit)} characters: ${capsuleKinds.map(([kind,label]) => `${label.replace('&','and')} ${count(meter.kinds[kind])}`).join(', ')}${dropped.length ? `; ${dropped.join(', ')}` : ''}${meter.repeats ? `; ${count(meter.repeats)} characters repeat` : ''}.`);
+  // Capsule JSON runs about 3.6 characters per token.
+  $('linked-context-cost').replaceChildren('Adds ',numberNode(fmt.estimate(meter.prompt_characters / 3.6,' tokens')),' to every turn.');
+}
 function renderLinkedSession() {
   const session = state.selected; const linked = Boolean(session?.brain); $('linked-context').hidden = !linked; $('linked-result').hidden = !linked; if (!linked) { if (linkedBrain.sid) resetLinkedSelection(null); return; }
   if (linkedBrain.sid !== session.id) resetLinkedSelection(session); const brain = session.brain; const waiting = session.status === 'awaiting_context'; const capsule = brain.capsule; const contextId = brain.context_id || null; const key = `${session.id}:${contextId || ''}`;
@@ -342,7 +363,8 @@ function renderLinkedSession() {
   const task = linkedTask(); $('linked-context-target').textContent = `${linkedSessionTarget()}\nTask: ${brain.task_id || task?.external_id || ''}${task?.id ? ` · ${task.id}` : ''}${Number.isInteger(task?.revision) ? ` · current task revision ${task.revision}` : ''}`;
   const dirtyQuery = $('linked-context-query').value.trim() !== (brain.query || '').trim(); const ready = state.bootstrap && !state.authFailed && !state.pending && !state.loading && !active(session); const canRefresh = ready && !['completed','rejected','awaiting_approval'].includes(session.status);
   $('linked-context-note').textContent = linkedBrain.stale || waiting && !contextId ? 'This context could not be accepted. Refresh it and review the new capsule before running.' : dirtyQuery ? 'The query was edited. Refresh context to prepare a capsule for this query.' : waiting ? 'The workspace and context are prepared. Review this capsule, then explicitly run the selected provider with it.' : session.status === 'completed' ? isFleetSession(session) ? 'This is the reviewed context for the completed Fleet run.' : ['completed','cancelled'].includes(task?.status) ? 'This is the reviewed context for the completed turn. The linked task is terminal; start a new session with an active or new task to continue.' : 'This is the reviewed context for the completed turn. Send a follow-up to prepare another turn.' : 'This is the persisted context for the session’s actual working folder. Refresh retrieves context without running the provider.';
-  $('linked-context-query').disabled = !canRefresh; $('linked-context-refresh').disabled = !canRefresh || !$('linked-context-query').value.trim(); $('linked-context-run').hidden = !waiting; $('linked-context-run').disabled = !ready || !contextId || !capsule || linkedBrain.stale || dirtyQuery || budgetsDirty();
+  renderCapsuleMeter(contextId && !linkedBrain.stale ? session.capsule_meter : null);
+  $('linked-context-query').disabled = !canRefresh; $('linked-context-refresh').disabled = !canRefresh || !$('linked-context-query').value.trim(); $('linked-context-run').hidden = !waiting; $('linked-context-cost').hidden = !waiting || $('capsule-meter').hidden; $('linked-context-run').disabled = !ready || !contextId || !capsule || linkedBrain.stale || dirtyQuery || budgetsDirty();
   $('linked-brain-target').textContent = linkedSessionTarget(); $('linked-brain-task').textContent = task ? JSON.stringify(task,null,2) : 'Task metadata is not yet available.'; $('linked-brain-status').textContent = linkedBrain.loading ? 'Reading task and evidence records from this session workspace…' : linkedBrain.data ? 'Record operations below use this session workspace. Review evidence before saving an outcome or promoting knowledge.' : 'Prepare context before editing linked records.';
   const fetchKey = `${session.id}:${session.status}:${contextId || ''}`; if (!active(session) && !state.loading && !state.pending && linkedBrain.fetchKey !== fetchKey) { linkedBrain.fetchKey = fetchKey; loadLinkedBrain(); }
   updateLinkedRecordControls();

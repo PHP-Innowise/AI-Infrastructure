@@ -116,6 +116,23 @@ class TaskContextTests(unittest.TestCase):
         receipt = json.loads(self.calls[-1]["receipt"].read_text())
         self.assertEqual("TASK-CONTEXT", receipt["task_id"])
 
+    def test_capsule_meter_measures_the_stored_capsule_and_the_inserted_prompt(self):
+        store = self.manager()
+        sid = store.create(self.options(store))["id"]
+        waiting = self.wait_status(store, sid, "awaiting_context")
+        capsule, meter = waiting["brain"]["capsule"], waiting["capsule_meter"]
+        # The copied runtime's own measure (serialize_capsule in memory-bank/scripts/context.py).
+        self.assertEqual(len(json.dumps(capsule, ensure_ascii=False, separators=(",", ":"))), meter["characters"])
+        self.assertEqual(meter["characters"], sum(meter["kinds"].values()))
+        self.assertLessEqual(meter["characters"], meter["limit"])
+        self.assertEqual(sum(len(capsule[layer]) for layer in ("procedural", "semantic", "episodic")),
+                         sum(meter["items"].values()))
+        store.run_context(sid, waiting["brain"]["context_id"])
+        self.wait_status(store, sid, "completed")
+        inserted = sessions.BRAIN_CONTEXT_HEADER + json.dumps(capsule, ensure_ascii=False) + "\n\n"
+        self.assertIn(inserted, self.calls[0]["prompt"])
+        self.assertEqual(len(inserted), meter["prompt_characters"])
+
     def test_reviewed_context_survives_restart_and_each_followup_requires_a_new_receipt(self):
         store = self.manager()
         sid = store.create(self.options(store))["id"]

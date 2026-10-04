@@ -7,7 +7,7 @@ import re
 import uuid
 
 from .knowledge import _path, _text
-from .sessions import SessionError, read_context
+from .sessions import CAPSULE_LIMIT, SessionError, read_context
 
 UUID4 = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}')
 TASK_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._/-]{0,199}')
@@ -83,8 +83,8 @@ class TaskContext:
             encoded.encode('utf-8')
         except (ValueError, RecursionError) as error:
             raise SessionError('The runtime returned an invalid task capsule.') from error
-        if len(encoded) > 8000:
-            raise SessionError('The task capsule exceeds the native 8000-character limit.')
+        if len(encoded) > CAPSULE_LIMIT:
+            raise SessionError(f'The task capsule exceeds the native {CAPSULE_LIMIT}-character limit.')
 
     @staticmethod
     def _material(capsule):

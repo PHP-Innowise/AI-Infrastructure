@@ -25,7 +25,7 @@ ASSETS = {name: 'text/css; charset=utf-8' if name.endswith('.css') else 'text/ja
                        'agent-activity.js', 'system.js', 'system-editor.js', 'system-discovery.js')}
 sys.path.insert(0, str(ROOT / 'harness/src'))
 sys.path.insert(0, str(ROOT / 'scripts'))
-from harness.sessions import Sessions, SessionError, WORKFLOWS, MAX_AGENTS, DEFAULT_AGENT_COUNT, fleet_runtime
+from harness.sessions import Sessions, SessionError, WORKFLOWS, MAX_AGENTS, DEFAULT_AGENT_COUNT, CONTEXT_EXCERPT_BYTES, fleet_runtime
 from harness import clash, sdd
 from harness.attachments import MAX_JSON_BYTES
 from harness.skills import SkillManager
@@ -96,6 +96,7 @@ class HarnessServer(ThreadingHTTPServer):
             'runtime': {'timeout_seconds': self.sessions.timeout, 'max_active': 1,
                         'discovery_sandbox': sandbox_problem(),
                         'max_agents': MAX_AGENTS, 'default_agent_count': DEFAULT_AGENT_COUNT,
+                        'context_excerpt_bytes': CONTEXT_EXCERPT_BYTES,
                         'fleet': {key: value for key, value in fleet_runtime().items() if key != 'executable'}},
         }
 

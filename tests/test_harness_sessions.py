@@ -1092,6 +1092,46 @@ class SessionTests(unittest.TestCase):
         self.assertIsNone(restored["git_common_dir"])
         self.assertEqual(manager.events(sid), [{"id": 7, "kind": "user", "text": "Original legacy request"}])
 
+    def test_capsule_meter_counts_every_copy_the_runtime_cap_counts(self):
+        policy = {"id": "policy:AGENTS.md", "category": "policy", "layer": "procedural", "text": "Rules — één owner."}
+        durable = {"id": "memory:MEM-1", "category": "durable", "layer": "semantic", "text": "Chunk.", "score": 4e-06}
+        handoff = {"id": "brain-handoff:H-1", "category": "handoff", "layer": "episodic", "text": "Last handoff."}
+        capsule = {"task_id": "TASK-1", "working": {"task_id": "TASK-1"},
+                   "procedural": [policy], "semantic": [durable], "episodic": [handoff], "selected": [policy, durable],
+                   "categories": {"policy": [policy], "durable": [durable], "handoff": [handoff], "dynamic": []},
+                   "omitted": {"procedural": 0, "semantic": 2, "episodic": 0}}
+
+        def size(value):
+            return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+        meter = sessions.capsule_meter(capsule)
+        # The runtime measures compact JSON in characters, so non-ASCII text is not counted as escapes.
+        self.assertEqual((size(capsule), 8000), (meter["characters"], meter["limit"]))
+        self.assertLess(meter["characters"], len(json.dumps(capsule, separators=(",", ":"))))
+        # Each item counts in its layer, among the selected items and under its category.
+        rules, bank = 3 * size(policy), 3 * size(durable)
+        self.assertEqual({"brain": size(capsule) - rules - bank, "rules": rules, "bank": bank}, meter["kinds"])
+        self.assertEqual({"brain": 1, "rules": 1, "bank": 1}, meter["items"])
+        self.assertEqual(2 * size(policy) + 2 * size(durable) + size(handoff), meter["repeats"])
+        self.assertEqual({"semantic": 2}, meter["dropped"])
+        inserted = sessions.BRAIN_CONTEXT_HEADER + json.dumps(capsule, ensure_ascii=False) + "\n\n"
+        self.assertEqual(len(inserted), meter["prompt_characters"])
+
+    def test_project_context_sends_at_most_the_excerpt_the_chip_counts(self):
+        (self.project / "CLAUDE.md").write_text("A" * (sessions.CONTEXT_EXCERPT_BYTES + 500))
+        (self.project / "README.md").write_text("Short readme")
+        manager = self.manager()
+        files = {item["path"]: item for item in manager.context(next(iter(manager.projects)))["files"]}
+        # The context listing reports whole files; the page caps each one at the excerpt size.
+        self.assertEqual((sessions.CONTEXT_EXCERPT_BYTES + 500, 12, False),
+                         (files["CLAUDE.md"]["bytes"], files["README.md"]["bytes"], files["AGENTS.md"]["exists"]))
+        sid = self.create(manager, project_context=True)
+        self.assertEqual(self.settled(manager, sid)["status"], "completed")
+        prompt = self.calls[-1]["prompt"]
+        self.assertIn("Project reference: CLAUDE.md\n" + "A" * sessions.CONTEXT_EXCERPT_BYTES + "\n\n", prompt)
+        self.assertNotIn("A" * (sessions.CONTEXT_EXCERPT_BYTES + 1), prompt)
+        self.assertIn("Project reference: README.md\nShort readme", prompt)
+        self.assertIsNone(manager.get(sid)["capsule_meter"])
+
     def test_context_and_state_symlinks_are_not_followed(self):
         outside = self.root / "outside.txt"
         outside.write_text("OUTSIDE SECRET")

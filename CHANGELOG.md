@@ -26,6 +26,18 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Show what memory adds where a Harness launch is decided. The linked Brain
+  task card shows the capsule against its 8,000-character cap as one bar split
+  into Project Brain, Memory bank and Rules & docs, with the items the runtime
+  dropped to fit and the characters repeated by the capsule's selected and
+  category views; the note beside **Run with this context** estimates what the
+  capsule adds to the turn. The counts come from `sessions.capsule_meter`,
+  measured on the server the way the runtime measures the cap: the browser
+  writes a float such as `4e-06` as `0.000004`, so its own count would drift.
+  `task_context` checks the cap against the same `CAPSULE_LIMIT`. The
+  **Project context** chip shows what its excerpts add to each launch, with the
+  3,000-byte excerpt size from `bootstrap.runtime.context_excerpt_bytes`.
+
 - Count each Harness launch's own Claude spend. From Claude Code 2.1.277 a
   resumed session's result reports the session's whole spend in
   `total_cost_usd`, and the Harness added those totals launch by launch: a

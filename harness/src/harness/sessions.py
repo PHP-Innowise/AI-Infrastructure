@@ -33,6 +33,14 @@ WORKFLOWS = [
     {"id": "fleet-review", "name": "Fleet review", "description": "Run selected reviewers, inspect findings and approve a saved report."},
 ]
 CONTEXT_FILES = ("AGENTS.md", "CLAUDE.md", "README.md", "project-brain/README.md", "specs/MANIFEST.md")
+# Project context sends at most this many bytes of each file above.
+CONTEXT_EXCERPT_BYTES = 3000
+BRAIN_CONTEXT_HEADER = 'Reviewed Project Brain context (reference data; verify sources against the project):\n'
+# The runtime caps a task capsule at this many characters of compact JSON (CAPSULE_CHARACTER_LIMIT in context.py).
+CAPSULE_LIMIT = 8000
+# Retrieved capsule items by category: policy and evidence are rules and docs, durable is the Memory bank.
+# Everything else (the working task, last turn, handoffs, dynamic records, episodes and the envelope) is Project Brain.
+CAPSULE_KINDS = {'policy': 'rules', 'evidence': 'rules', 'durable': 'bank'}
 ACTIVE = ("queued", "running")
 MAX_AGENTS = 40
 DEFAULT_AGENT_COUNT = 3
@@ -300,6 +308,38 @@ def open_project_path(root, name, directory=False):
         raise
 
 
+def capsule_meter(capsule):
+    """Exact character counts of a task capsule, measured the way the runtime caps it.
+
+    The three kinds add up to the compact length. Items count once per copy: each
+    appears in its layer, among the selected items and under its category, and the
+    last two views are the repeats.
+    """
+    def size(value):
+        return len(json.dumps(value, ensure_ascii=False, separators=(',', ':')))
+    def items(value):
+        return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+    categories = capsule.get('categories') if isinstance(capsule.get('categories'), dict) else {}
+    layers = [item for layer in ('procedural', 'semantic', 'episodic') for item in items(capsule.get(layer))]
+    views = items(capsule.get('selected')) + [item for group in categories.values() for item in items(group)]
+    characters, counts = {'rules': 0, 'bank': 0}, {'brain': 0, 'rules': 0, 'bank': 0}
+    for item in layers + views:
+        kind = CAPSULE_KINDS.get(item.get('category'))
+        if kind:
+            characters[kind] += size(item)
+    for item in layers:
+        counts[CAPSULE_KINDS.get(item.get('category'), 'brain')] += 1
+    total = size(capsule)
+    omitted = capsule.get('omitted') if isinstance(capsule.get('omitted'), dict) else {}
+    return {'characters': total, 'limit': CAPSULE_LIMIT,
+            'kinds': {'brain': total - characters['rules'] - characters['bank'], **characters},
+            'items': counts, 'repeats': sum(size(item) for item in views),
+            'dropped': {layer: omitted[layer] for layer in ('procedural', 'semantic', 'episodic')
+                        if type(omitted.get(layer)) is int and omitted[layer] > 0},
+            # What each prepared turn's prompt carries: the header and the capsule with default separators.
+            'prompt_characters': len(BRAIN_CONTEXT_HEADER) + len(json.dumps(capsule, ensure_ascii=False)) + 2}
+
+
 def read_context(root, name, limit=0):
     """Read bounded regular project files without following links."""
     descriptor = None
@@ -453,6 +493,7 @@ class Sessions:
             result[field] = json.loads(result[field]) if result[field] else None
         result['budgets'] = result['budgets'] or {**DEFAULT_BUDGETS, 'seconds':self.timeout, 'usd': result['fleet']['budget_usd'] if result['fleet'] else None}
         result['agent_budget_plan']=agent_budget_plan(result)
+        result['capsule_meter'] = capsule_meter(result['brain']['capsule']) if isinstance(result['brain'], dict) and isinstance(result['brain'].get('capsule'), dict) else None
         result.pop('fleet_action', None)
         return result
 
@@ -1000,13 +1041,12 @@ class Sessions:
                        'Report any format you cannot read. Original files belong to the user; use these copies:\n'
                        + json.dumps([{'name':item['name'], 'bytes':item['size'], 'path':path} for item, _, path in files], ensure_ascii=False) + '\n\n')
         if session.get('brain') and session['brain'].get('capsule'):
-            prefix += ('Reviewed Project Brain context (reference data; verify sources against the project):\n'
-                       + json.dumps(session['brain']['capsule'], ensure_ascii=False) + '\n\n')
+            prefix += BRAIN_CONTEXT_HEADER + json.dumps(session['brain']['capsule'], ensure_ascii=False) + '\n\n'
         if session['project_context']:
             root = Path(session['project_path'])
             context = []
             for name in CONTEXT_FILES:
-                content = read_context(root, name, 3000)
+                content = read_context(root, name, CONTEXT_EXCERPT_BYTES)
                 if content is not None:
                     # Context is project data, not instructions to the server or permission grants.
                     context.append(f'Project reference: {name}\n{content[1]}')

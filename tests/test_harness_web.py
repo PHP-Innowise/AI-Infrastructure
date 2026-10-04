@@ -545,6 +545,8 @@ assert.equal(fields['brain-op-progress'].scrolled,true);
         self.assertNotIn("executable", boot["providers"][0])
         self.assertEqual({kit["id"] for kit in boot["accelerators"]}, {"kit1", "kit2", "kit3"})
         self.assertEqual((boot["runtime"]["max_agents"], boot["runtime"]["default_agent_count"]), (40, 3))
+        # The Project context chip caps each file at the excerpt size the prompt sends.
+        self.assertEqual(boot["runtime"]["context_excerpt_bytes"], 3000)
         self.assertEqual(headers["Cache-Control"], "no-store")
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
         self.assertIn("frame-ancestors 'self'", headers["Content-Security-Policy"])
@@ -1642,13 +1644,68 @@ class PageHelperTests(unittest.TestCase):
 assert.deepEqual(fmt.exact(76450), {text: '76,450', label: '76,450'});
 assert.deepEqual(fmt.exact(Number.NaN), {text: '—', label: 'not reported'});
 assert.deepEqual(fmt.estimate(4123), {text: '≈ 4.1k', label: 'about 4,100'});
-assert.deepEqual([fmt.estimate(520.4).text, fmt.estimate(53210).text, fmt.estimate(1234567).text], ['≈ 520', '≈ 53k', '≈ 1.2M']);
+assert.deepEqual([fmt.estimate(520.4).text, fmt.estimate(53210).text, fmt.estimate(1234567).text, fmt.estimate(1988).text, fmt.estimate(149e3).text],
+  ['≈ 520', '≈ 53k', '≈ 1.2M', '≈ 2.0k', '≈ 150k']);
+assert.deepEqual([fmt.atMost(4000).text, fmt.atLeast(12345).text], ['≤ 4k', '≥ 12k']);
 assert.deepEqual(fmt.atMost(4100), {text: '≤ 4.1k', label: 'at most 4,100'});
 assert.deepEqual([fmt.atLeast(13).text, fmt.capped(200).text, fmt.capped(200).label], ['≥ 13', '200+', 'more than 200']);
 assert.deepEqual(fmt.cost(.3), {text: '≈ $0.30', label: 'about 0.30 US dollars'});
 assert.deepEqual([fmt.cost(4.8312).text, fmt.cost(.0123).text, fmt.cost(.123).text], ['≈ $4.83', '≈ $0.0123', '≈ $0.123']);
 for (const unknown of [null, undefined, -1, Infinity]) assert.equal(fmt.cost(unknown).text, '—');
 assert.equal(fmt.unknown('not recorded').label, 'not recorded');
+""")
+
+    def test_capsule_meter_and_context_chip_read_exact_counts_and_marked_estimates(self):
+        page = ui_script()
+        parts = [page[page.index(start):page.index(end)] for start, end in (
+            ("\nconst el = (tag", "\n// Motion follows"), ("\nconst numberText", "\n// Keeps one node per key"),
+            ("\nconst capsuleKinds", "\nfunction renderLinkedSession("),
+            ("\nfunction renderContextValue(", "\n$('project').addEventListener('change',loadContextSizes)"))]
+        self.run_node(r"""
+class Node { constructor() { this.children = []; this.dataset = {}; this.attributes = {}; this.style = {}; this.hidden = false; this.own = ''; }
+  get textContent() { return this.children.length ? this.children.map(child => typeof child === 'string' ? child : child.textContent).join('') : this.own; }
+  set textContent(value) { this.children = []; this.own = String(value); }
+  setAttribute(name, value) { this.attributes[name] = String(value); }
+  append(...nodes) { this.children.push(...nodes); }
+  replaceChildren(...nodes) { this.own = ''; this.children = nodes; }
+  querySelector(selector) { return this.children.find(child => selector === `[data-kind="${child.dataset.kind}"]`); } }
+const document = {createElement: () => new Node()}, nodes = {}, $ = id => nodes[id] ??= new Node();
+const state = {pending: null, bootstrap: {runtime: {context_excerpt_bytes: 3000}}};
+const contextSizes = {project: 'p1', files: null};
+for (const kind of ['brain', 'bank', 'rules']) { const part = new Node(); part.dataset.kind = kind; $('capsule-bar').append(part); }
+""" + "".join(parts), r"""
+const part = kind => $('capsule-bar').querySelector(`[data-kind="${kind}"]`);
+renderCapsuleMeter({characters: 7650, limit: 8000, kinds: {brain: 2592, bank: 4296, rules: 762}, items: {brain: 2, bank: 3, rules: 1},
+  repeats: 1448, dropped: {semantic: 2, episodic: 1}, prompt_characters: 7946});
+assert.equal($('capsule-meter').hidden, false);
+assert.equal($('capsule-facts').textContent, '7,650 of 8,000 characters · 2 semantic items dropped to fit · 1 episodic item dropped to fit · 350 characters left');
+assert.equal($('capsule-repeats').textContent, 'Each item appears in 3 views: 1,448 characters repeat');
+assert.deepEqual($('capsule-legend').children.map(entry => entry.textContent), ['Project Brain 2,592', 'Memory bank 4,296', 'Rules & docs 762']);
+assert.deepEqual(['brain', 'bank', 'rules'].map(kind => part(kind).style.width), ['32.4%', '53.7%', '9.525%']);
+assert.equal(part('bank').title, 'Memory bank · 3 items · 4,296 characters');
+assert.equal($('capsule-bar').attributes['aria-label'], 'Capsule 7,650 of 8,000 characters: Project Brain 2,592, Memory bank 4,296, Rules and docs 762; 2 semantic items dropped to fit, 1 episodic item dropped to fit; 1,448 characters repeat.');
+const cost = $('linked-context-cost').children;
+assert.deepEqual([cost[0], cost[1].children[0].textContent, cost[1].children[0].attributes['aria-hidden'], cost[1].children[1].textContent, cost[2]],
+  ['Adds ', '≈ 2.2k tokens', 'true', 'about 2,200 tokens', ' to every turn.']);
+renderCapsuleMeter({characters: 900, limit: 8000, kinds: {brain: 900, bank: 0, rules: 0}, items: {brain: 0, bank: 0, rules: 0},
+  repeats: 0, dropped: {}, prompt_characters: 1000});
+assert.equal($('capsule-facts').textContent, '900 of 8,000 characters · No matching memory for this query.');
+assert.deepEqual([$('capsule-repeats-line').hidden, part('bank').hidden, part('rules').hidden, $('capsule-legend').children.length], [true, true, true, 1]);
+renderCapsuleMeter(null);
+assert.equal($('capsule-meter').hidden, true);
+
+nodes['project-context'] = {checked: true}; nodes.project = {value: 'p1'};
+contextSizes.files = [{path: 'AGENTS.md', exists: true, bytes: 13998}, {path: 'CLAUDE.md', exists: true, bytes: 871}, {path: 'README.md', exists: false, bytes: 0}];
+renderContextValue();
+const chip = $('project-context-value').children;
+// Each file counts up to the 3,000-byte excerpt: (3,000 + 871) / 4.7 ≈ 820 tokens.
+assert.deepEqual([chip[0].textContent, chip[0].attributes['aria-hidden'], chip[1].textContent], ['≈ 820 tokens', 'true', ', adds about 820 tokens per launch']);
+nodes['project-context'].checked = false; renderContextValue();
+assert.equal($('project-context-value').textContent, '');
+nodes['project-context'].checked = true; contextSizes.files = [{path: 'AGENTS.md', exists: false, bytes: 0}]; renderContextValue();
+assert.equal($('project-context-value').textContent, 'no files');
+contextSizes.project = 'p2'; renderContextValue();
+assert.equal($('project-context-value').textContent, '');
 """)
 
     def test_keyed_render_keeps_open_nodes_across_polls(self):
