@@ -393,6 +393,25 @@ class MemoryBankValidatorTest(unittest.TestCase):
 
         self.assertTrue(any("overdue for review" in error for error in errors))
 
+    def test_messages_name_paths_from_the_bank_parent(self) -> None:
+        # A refused write's reason travels into the next Task Capsule, and the
+        # machine's home directory has no business in a prompt.
+        self.add_chunk()
+        verified = date.today() - timedelta(days=2)
+        self.update_chunk_metadata(
+            created=verified.isoformat(),
+            last_verified=verified.isoformat(),
+            review_after=(date.today() - timedelta(days=1)).isoformat(),
+        )
+        self.bank.joinpath("chunks", "notes.txt").write_text("x\n", encoding="utf-8")
+
+        errors = VALIDATOR.validate_bank(self.bank)
+
+        self.assertGreaterEqual(len(errors), 2, errors)
+        for error in errors:
+            self.assertTrue(error.startswith("memory-bank/"), error)
+            self.assertNotIn(str(self.repository), error)
+
     def test_type_must_be_a_string(self) -> None:
         self.add_chunk()
         self.update_chunk_metadata(type=[])

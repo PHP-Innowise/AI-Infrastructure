@@ -1718,6 +1718,8 @@ class ContextEngineTest(unittest.TestCase):
                 "--progress",
                 "Earlier outcome.\nLatest outcome.",
                 "--next-step",
+                "Reproduce the report.",
+                "--next-step",
                 "Inspect the implementation.",
                 "--next-step",
                 "Run focused tests.",
@@ -1737,13 +1739,19 @@ class ContextEngineTest(unittest.TestCase):
         self.assertEqual(0, packet.returncode, packet.stderr)
         payload = json.loads(packet.stdout)
         self.assertEqual("Review branding safely now", payload["query"])
+        # The newest steps and files: the tail of each list is the work in
+        # hand, and the head is where the branch started.
         self.assertEqual(
             {
                 "task_id": "CAPSULE-PROJECTION",
                 "goal": "Review account workflow.",
                 "progress": "Earlier outcome. Latest outcome.",
-                "next_steps": ["Run final verification."],
-                "files": files[:8],
+                "next_steps": [
+                    "Inspect the implementation.",
+                    "Run focused tests.",
+                    "Run final verification.",
+                ],
+                "files": files[-8:],
                 "sources": sources[:4],
             },
             payload["working"],
@@ -1751,13 +1759,47 @@ class ContextEngineTest(unittest.TestCase):
         self.assertEqual(
             {
                 "working_files": 2,
-                "working_next_steps": 2,
+                "working_next_steps": 1,
                 "working_sources": 2,
                 "working_progress_characters": 0,
                 "last_turn_characters": 0,
             },
             payload["omitted"],
         )
+
+    def test_done_steps_can_leave_and_touched_files_move_last(self) -> None:
+        # Steps were append-only, so finished work stayed "next" forever; and
+        # a file kept the position of its first touch, so the one in hand fell
+        # out of the capsule's projection of the newest.
+        self.assertEqual(
+            0,
+            self.run_context(
+                "start", "--task-id", "LIGHT-STEPS", "--goal",
+                "Keep the steps current.",
+                "--file", "src/A.php", "--file", "src/B.php",
+            ).returncode,
+        )
+        self.assertEqual(
+            0,
+            self.run_context(
+                "update", "--task-id", "LIGHT-STEPS", "--next-step", "Write the test."
+            ).returncode,
+        )
+
+        updated = self.run_context(
+            "update", "--task-id", "LIGHT-STEPS", "--replace-next-steps",
+            "--next-step", "Ship it.", "--file", "src/A.php", "--json",
+        )
+
+        self.assertEqual(0, updated.returncode, updated.stderr)
+        task = json.loads(updated.stdout)
+        self.assertEqual(["Ship it."], task["next_steps"])
+        self.assertEqual(["src/B.php", "src/A.php"], task["files"])
+        cleared = self.run_context(
+            "update", "--task-id", "LIGHT-STEPS", "--replace-next-steps", "--json"
+        )
+        self.assertEqual(0, cleared.returncode, cleared.stderr)
+        self.assertEqual([], json.loads(cleared.stdout)["next_steps"])
 
     def test_context_revalidates_legacy_working_privacy_data(self) -> None:
         self.assertEqual(

@@ -3,8 +3,9 @@
 Records, promotions, re-attestations, retirements and promoted chunks go through the
 copied runtime's own API, with its clock moved to each event's moment, so every
 shape is one the runtime writes and every rule it enforces still applies. Two
-chunks pass their review date three days before today, and because an overdue
-chunk fails bank validation, the two automatic promotions after it stall.
+chunks pass their review date three days before today: they leave retrieval,
+and the two automatic promotions after them still apply, because a write is
+refused only for what it introduces.
 Retrieval manifests and refresh-health lines are written directly against the
 manifest schema: 200 real retrievals over a small fixture would select the same
 few documents.
@@ -220,7 +221,7 @@ def _plan(now):
     window = [('w-auto-0', 27, 'finding'), ('w-auto-1', 24, 'bug'), ('w-auto-2', 22, 'decision'), ('w-auto-3', 18, 'finding'),
               ('w-human', 16, 'finding'), ('w-observed', 12, 'finding'), ('w-auto-4', 11, 'incident'),
               ('w-restricted', 9, 'bug'), ('w-waiting', 5, 'finding'), ('w-auto-5', 4, 'finding'),
-              ('w-stalled-0', 2, 'bug'), ('w-stalled-1', 1, 'finding')]
+              ('w-late-0', 2, 'bug'), ('w-late-1', 1, 'finding')]
     for key, days, kind in window:
         if key == 'w-observed':
             resolve(key, days, kind, authority='observed')

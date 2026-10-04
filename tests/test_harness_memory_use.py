@@ -272,16 +272,16 @@ class MemoryUseTests(unittest.TestCase):
         chunks, rows = payload["chunks"]["items"], payload["retrievals"]["items"]
         statuses = {status: sum(item["status"] == status for item in chunks) for status in ("active", "needs-review", "superseded", "archived")}
         self.assertEqual((story["chunks"], story["drafts"]), (len(chunks), statuses["needs-review"]))
-        self.assertEqual({"active": 61, "needs-review": 2, "superseded": 3, "archived": 2}, statuses)
+        self.assertEqual({"active": 63, "needs-review": 2, "superseded": 3, "archived": 2}, statuses)
         # Two cited files changed after attestation, and two chunks crossed their review date three days ago.
         self.assertEqual(2, sum(item["sources_changed"] is True for item in chunks))
         overdue = [item for item in chunks if item["status"] == "active" and item["review_after"] < payload["today"]]
         self.assertEqual(2, len(overdue))
-        self.assertEqual(40, sum(item["auto"] for item in chunks))
-        # An overdue chunk fails bank validation, so automatic promotions after it stall.
+        self.assertEqual(42, sum(item["auto"] for item in chunks))
+        # An overdue chunk leaves retrieval but no longer fails the writes after it, so nothing stalls.
         promotions = payload["promotions"]["items"]
         stalled = [item for item in promotions if item["mode"] == "automatic" and item["status"] in ("proposed", "reviewed")]
-        self.assertEqual((40, 3, 7, 1), (sum(item["mode"] == "automatic" and item["status"] == "applied" for item in promotions),
+        self.assertEqual((42, 0, 7, 1), (sum(item["mode"] == "automatic" and item["status"] == "applied" for item in promotions),
                                           len(stalled), sum(item["mode"] == "human" and item["status"] == "applied" for item in promotions),
                                           sum(item["mode"] == "human" and item["status"] == "proposed" for item in promotions)))
         self.assertEqual(story["records"], len(payload["brain"]["items"]))
