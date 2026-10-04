@@ -309,6 +309,8 @@ another project while a session is open starts a new session draft for it.
   test/lint command in its workspace, and inspect persisted output, exit code and
   check status separately from the agent outcome. Shows every recorded launch
   and total reported tokens, USD and run time; missing provider usage stays unknown.
+  Usage opens with **Context**, how full each turn left the context window; see
+  [Context window](#context-window).
 - **Project context:** availability and size of a fixed set of project
   instructions and references. Optional prompt context includes up to 3 KB
   each from `AGENTS.md`, `CLAUDE.md`, `README.md`,
@@ -770,6 +772,39 @@ The Harness adds no second knowledge database and does not directly edit records
 to bypass runtime validation. Raw file editing and import are not exposed by these
 controls. Export downloads are temporary server artifacts.
 
+### Context window
+
+**Sessions › Usage** opens with **Context**: how full the agent's context window
+is, how much of it is memory the Harness sent, how the turn grew it and when
+compaction cleared it. One bar per turn splits the window into memory parts
+(Project Brain, Memory bank, Rules & docs), everything else at turn start, what
+the turn added, and free space. A legend table carries the same numbers, and its
+rows open into the capsule against its 8,000-character cap, each project excerpt
+sent of its full size, and the rest: Harness instructions, a bound on earlier
+turns' memory (reset by compaction), the rules the CLI loads itself and the memory
+its hooks injected. A turns strip and a turn table compare turns.
+
+Fill, window, growth and free space are the provider's own token counts:
+
+- **Claude:** each main-thread model call is counted once by message ID, and
+  subagent calls are left out. The window comes from the result, and compaction
+  from `compact_boundary`. A turn on the same model knows its window from the
+  earlier one, so a running turn fills in call by call.
+- **Codex:** the counts come from the thread's rollout once the turn ends.
+- **Cursor:** reports none; its turns show `—` and the characters the Harness
+  added.
+
+Memory parts are estimates: capsule JSON at 3.6 characters per token, prose at
+4.7. Session launches of Claude add `--include-hook-events` so hook output can be
+measured. Only its character counts per memory kind are kept, and Codex hooks
+read as *not measured*.
+
+Each launch stores these numbers in a `context` column, as integers plus the fixed
+context-file names; no prompt, file or hook text. A Fleet or Clash launch row says
+how much memory its prefix carried and to how many agents. Once the latest native
+turn fills half its window, or compacts, a meter beside the composer shows the
+percentage and opens this view.
+
 ### Memory use
 
 **Knowledge › Memory use** is the first Knowledge tab. It follows one knowledge
@@ -899,7 +934,7 @@ an over-allocation result fails the reviewer instead of claiming the limit held.
 Verification from the repository root:
 
 ```bash
-python3 -m unittest tests.test_harness_providers tests.test_harness_sessions tests.test_harness_web tests.test_harness_process_guard tests.test_harness_skills tests.test_harness_fleet tests.test_harness_knowledge tests.test_harness_memory_use tests.test_harness_task_context tests.test_harness_setup tests.test_harness_creator tests.test_harness_results tests.test_harness_delivery tests.test_harness_clash
+python3 -m unittest tests.test_harness_providers tests.test_harness_sessions tests.test_harness_web tests.test_harness_process_guard tests.test_harness_skills tests.test_harness_fleet tests.test_harness_knowledge tests.test_harness_memory_use tests.test_harness_context_usage tests.test_harness_task_context tests.test_harness_setup tests.test_harness_creator tests.test_harness_results tests.test_harness_delivery tests.test_harness_clash
 harness/.venv/bin/python -m unittest discover -s harness/tests -p 'test_*.py'
 ```
 

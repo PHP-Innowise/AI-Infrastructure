@@ -26,6 +26,22 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Add **Sessions › Usage › Context** to the Harness: how full each turn left the
+  agent's context window, how much of it was memory the Harness sent, how the
+  turn grew it and when compaction cleared it. Each launch now records a
+  numbers-only `context` column in `launches` (migrated in place; older launches
+  read as not recorded). The column holds the prompt ledger built in
+  `Sessions._prompt` (capsule by memory kind, project excerpts sent of their
+  full size, attachments, instructions and the message) and the fill that
+  `context_usage.ContextTracker` reads from the provider's own usage. Claude
+  calls are counted once per message ID, subagents are left out, and compaction
+  comes from `compact_boundary`; Codex fill is read from the thread's rollout at
+  the end of the launch, and Cursor reports none. Session launches of Claude add
+  `--include-hook-events`, and only the character counts of hook output are
+  kept. Fleet and Clash launch rows name the memory prefix and how many agents
+  received it. `Sessions.get` adds `context_last` for a composer meter that
+  appears once the latest turn fills half its window or compacts.
+
 - Add **Knowledge › Memory use** to the Harness. The new first Knowledge tab
   follows one knowledge root through Project Brain, promotion, the Memory bank
   and the last 200 retrievals, in fixed-step bands for a 7-, 30- or 90-day

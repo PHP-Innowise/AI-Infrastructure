@@ -1776,6 +1776,58 @@ assert.deepEqual([snapshot.today, snapshot.newest, snapshot.chunks.A, Object.key
 assert.deepEqual(memoryChanges(data, snapshot), {since:snapshot.at, added:[], retired:[], reattested:[], moved:[], crossed:[], applied:[], retrievals:[], firstNew:3});
 """)
 
+    def test_context_turns_split_exact_fill_from_estimated_memory_and_bound_earlier_copies(self):
+        page = ui_script()
+        source = page[page.index("// Sessions › Usage › Context"):page.index("\n$('context-meter').addEventListener")]
+        self.run_node(page[page.index("\nconst numberText"):page.index("\nfunction numberNode(")]
+                      + page[page.index("\nconst plural"):page.index("\nconst reasonLabel")]
+                      + "\nconst window = {matchMedia: () => ({matches: false, addEventListener() {}})};"
+                      + "\nconst el = (tag, className, text) => ({tag, className, textContent: text});\n" + source, r"""
+const ledger = {message: 388, instructions: 300, total: 18000, attachments: {characters: 214, count: 1},
+  capsule: {characters: 6895, inserted: 7157, kinds: {brain: 2409, bank: 1858, rules: 2890}, repeats: 3121, dropped: {semantic: 2}, items: {brain: 1, bank: 1, rules: 2}},
+  excerpts: [{name: 'AGENTS.md', sent: 3000, full: 13998, characters: 3000}, {name: 'README.md', sent: 3000, full: 18245, characters: 3000},
+             {name: 'project-brain/README.md', sent: 3000, full: 5919, characters: 3000}, {name: 'specs/MANIFEST.md', sent: 871, full: 871, characters: 871}]};
+const launch = (id, fill, extra = {}) => ({id, kind: 'native', status: 'completed', started_at: '2026-10-03T15:05:00+00:00', settings: {provider: 'claude'},
+  context: fill === undefined ? null : {version: 1, provider: 'claude', agents: 1, ledger, fill, hooks: {installed: true, measured: true, bytes: null}, cli_files: []}, ...extra});
+const turns = contextTurns([
+  launch('t1'),
+  launch('t2', {start: 31840, end: 61870, peak: 61870, calls: 18, window: 200000, compactions: [], cache_share: .88, hooks: null}),
+  launch('t3', {start: 66410, end: 52800, peak: 171900, calls: 31, window: 200000, compactions: [{pre: 171900, post: 29400, call: 24}], cache_share: .93, hooks: null}),
+  launch('t4', {start: 57190, end: 76450, peak: 76450, calls: 14, window: 200000, compactions: [], cache_share: .91, hooks: null}),
+  {id: 'fleet', kind: 'fleet', status: 'completed', started_at: '2026-10-03T15:10:00+00:00', settings: {provider: 'claude'}, context: {ledger, agents: 5, fill: null}},
+  launch('t5', {start: 80960, end: 106600, peak: 106600, calls: 11, window: 200000, compactions: [], cache_share: .94, hooks: null}, {status: 'running'})]);
+assert.deepEqual(turns.map(turn => turn.ordinal), [1, 2, 3, 4, 5]);
+const t4 = turns[3];
+// Memory is estimated from characters: capsule ÷ 3.6, excerpts ÷ 4.7, summed before rounding.
+assert.equal(Math.round(t4.memory), 4088);
+assert.deepEqual([fmt.estimate(t4.memory).text, fmt.estimate(t4.parts.brain).text, fmt.estimate(t4.parts.bank).text, fmt.estimate(t4.parts.rules).text],
+  ['≈ 4.1k', '≈ 670', '≈ 520', '≈ 2.9k']);
+assert.deepEqual([t4.added, t4.free, fmt.estimate(t4.rest).text, percentText(t4.end, t4.window), percentText(t4.memory, t4.end, true)],
+  [19260, 123550, '≈ 53k', '38%', '≈ 5%']);
+assert.deepEqual([t4.characters.rules, t4.calls, percentText(t4.cache, 1)], [2890 + 9871, 14, '91%']);
+const geometry = contextGeometry(t4);
+assert.equal(Math.round(geometry.brain + geometry.bank + geometry.rules + geometry.rest + geometry.added), 76450);
+// A compacted turn draws its final fill unsplit and has no growth.
+const t3 = turns[2];
+assert.deepEqual([t3.compacted, t3.added, contextGeometry(t3), t3.free, percentText(t3.end, t3.window), percentText(t3.peak, t3.window)],
+  [true, null, {added: 52800}, 147200, '26%', '86%']);
+// Earlier copies: bounded by the memory of turns since the last compaction; an unrecorded turn makes it unknown.
+assert.deepEqual(earlierMemory(turns, 4), {total: t4.memory, from: 4});
+assert.deepEqual(earlierMemory(turns, 3), {total: 0, from: 3});
+assert.deepEqual(earlierMemory(turns, 1), {unknown: 1});
+assert.deepEqual([turns[0].recorded, turns[0].end, contextGeometry(turns[0])], [false, null, null]);
+assert.equal(turns[4].running, true);
+const unknown = contextTurn(launch('cursor', {start: null, end: null, peak: null, calls: null, window: null, compactions: [], cache_share: null, hooks: null}), 6);
+assert.deepEqual([unknown.recorded, unknown.end, unknown.rest, unknown.free, contextGeometry(unknown)], [true, null, null, null, null]);
+// Memory that exceeds the reported start leaves the remainder unknown rather than negative.
+assert.equal(contextTurn(launch('small', {start: 3000, end: 3500, peak: 3500, calls: 1, window: 200000, compactions: [], cache_share: null, hooks: null}), 7).rest, null);
+assert.deepEqual([percentText(1, 1000), percentText(0, 10), percentText(5, 0)], ['<1%', '0%', null]);
+// Fleet and Clash send one prefix to every agent; their launch row names the memory once with the count.
+assert.equal(contextLaunchLine({kind: 'fleet', context: {ledger, agents: 5}}).textContent, 'Memory prefix ≈\u00a04.1k sent to 5 agents');
+assert.equal(contextLaunchLine({kind: 'clash', context: {ledger, agents: 2}}).textContent, 'Memory prefix ≈\u00a04.1k sent to 2 agents');
+assert.deepEqual([contextLaunchLine({kind: 'native', context: {ledger, agents: 1}}), contextLaunchLine({kind: 'fleet', context: null})], [null, null]);
+""")
+
     def test_keyed_render_keeps_open_nodes_across_polls(self):
         page = ui_script()
         self.run_node(page[page.index("\nfunction keyedRender("):page.index("\nconst state = {")], r"""

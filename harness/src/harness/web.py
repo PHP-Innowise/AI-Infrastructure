@@ -21,7 +21,7 @@ from urllib.request import Request, build_opener, ProxyHandler
 ROOT = Path(__file__).resolve().parents[3]
 # The page's styles and scripts: an explicit list, read with the page so a running server serves one version.
 ASSETS = {name: 'text/css; charset=utf-8' if name.endswith('.css') else 'text/javascript; charset=utf-8'
-          for name in ('app.css', 'app-core.js', 'app-knowledge.js', 'memory-use.js', 'app-setup.js', 'app-skills.js', 'app-creator.js',
+          for name in ('app.css', 'app-core.js', 'app-knowledge.js', 'memory-use.js', 'context-usage.js', 'app-setup.js', 'app-skills.js', 'app-creator.js',
                        'agent-activity.js', 'system.js', 'system-editor.js', 'system-discovery.js')}
 sys.path.insert(0, str(ROOT / 'harness/src'))
 sys.path.insert(0, str(ROOT / 'scripts'))

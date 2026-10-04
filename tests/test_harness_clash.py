@@ -374,6 +374,9 @@ class ClashCycleTests(unittest.TestCase):
         history = manager.results.history(sid)
         self.assertEqual([launch["kind"] for launch in history["launches"]], ["clash"])
         self.assertEqual(history["launches"][0]["settings"]["clash"], session["clash"])
+        # Both participants receive the same context prefix; Usage names it once with the count.
+        context = history["launches"][0]["context"]
+        self.assertEqual((2, 0, None), (context["agents"], context["ledger"]["message"], context["fill"]))
         self.assertEqual(session["budget_usage"]["tokens"], 84)
         self.assertEqual(session["budget_usage"]["cost_usd"], 0.1)
         snapshot = manager.results.snapshot(sid)

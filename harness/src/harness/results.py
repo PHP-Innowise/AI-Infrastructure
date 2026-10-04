@@ -27,11 +27,14 @@ class Results:
                 CREATE TABLE IF NOT EXISTS launches (
                     id TEXT PRIMARY KEY, session_id TEXT NOT NULL, kind TEXT NOT NULL,
                     status TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT,
-                    settings TEXT NOT NULL, usage TEXT);
+                    settings TEXT NOT NULL, usage TEXT, context TEXT);
                 CREATE INDEX IF NOT EXISTS launches_session ON launches(session_id,started_at);
                 CREATE TABLE IF NOT EXISTS checks (
                     id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL);
             ''')
+            # Context ledgers arrived after launches did; older rows keep NULL and read as not recorded.
+            if 'context' not in {row['name'] for row in sessions.db.execute('PRAGMA table_info(launches)')}:
+                sessions.db.execute('ALTER TABLE launches ADD COLUMN context TEXT')
             # Old sessions do not contain enough information to reconstruct every turn.
             sessions.db.execute("UPDATE launches SET status='interrupted',finished_at=? WHERE status='running'", (now(),))
             rows=sessions.db.execute('SELECT id,data FROM checks').fetchall()
@@ -55,13 +58,30 @@ class Results:
                                      (json.dumps(value),session['id']))
             self.sessions.db.commit()
 
-    def start_launch(self, sid, generation):
+    def start_launch(self, sid, generation, context=None):
         session=self.sessions.get(sid)
         settings={k:session[k] for k in ('provider','model','thinking_effort','agents_enabled','agent_count','budgets','agent_budget_plan','sdd','mode','model_routing','clash')}
         kind='fleet' if session['fleet'] else 'clash' if session['clash'] else 'creator-'+session['creator']['phase'] if session['creator'] else 'native'
         with self.sessions.lock:
-            self.sessions.db.execute('INSERT INTO launches VALUES (?,?,?,?,?,?,?,NULL)',
-                (generation,sid,kind,'running',now(),None,json.dumps(settings)))
+            self.sessions.db.execute('INSERT INTO launches (id,session_id,kind,status,started_at,finished_at,settings,usage,context) VALUES (?,?,?,?,?,?,?,NULL,?)',
+                (generation,sid,kind,'running',now(),None,json.dumps(settings),json.dumps(context) if context else None))
+            self.sessions.db.commit()
+
+    def last_window(self, sid, model):
+        """The context window an earlier native turn of this session reported for the same model, or None."""
+        with self.sessions.lock:
+            rows = self.sessions.db.execute("SELECT settings,context FROM launches WHERE session_id=? AND kind='native' AND context IS NOT NULL "
+                                            "ORDER BY started_at DESC,rowid DESC LIMIT 20", (sid,)).fetchall()
+        for row in rows:
+            window = ((json.loads(row['context']) or {}).get('fill') or {}).get('window')
+            if json.loads(row['settings']).get('model') == model and type(window) is int and window > 0:
+                return window
+        return None
+
+    def update_context(self, generation, context):
+        """Replace a launch's context record: the prompt ledger plus the fill observed so far, integers only."""
+        with self.sessions.lock:
+            self.sessions.db.execute('UPDATE launches SET context=? WHERE id=?',(json.dumps(context),generation))
             self.sessions.db.commit()
 
     def finish_launch(self, generation, status):
@@ -78,7 +98,8 @@ class Results:
                      if json.loads(row['creator'])['run_id']==session['creator']['run_id']]
             placeholders=','.join('?' for _ in ids)
             rows=self.sessions.db.execute(f'SELECT * FROM launches WHERE session_id IN ({placeholders}) ORDER BY started_at,rowid',ids).fetchall()
-            records=[{**dict(row),'settings':json.loads(row['settings']),'usage':json.loads(row['usage']) if row['usage'] else None} for row in rows]
+            records=[{**dict(row),'settings':json.loads(row['settings']),'usage':json.loads(row['usage']) if row['usage'] else None,
+                      'context':json.loads(row['context']) if row['context'] else None} for row in rows]
             checks=[json.loads(row[0]) for row in self.sessions.db.execute('SELECT data FROM checks WHERE session_id=? ORDER BY rowid DESC LIMIT 50',(sid,))]
         totals={}
         for key in ('tokens','cost_usd','seconds'):

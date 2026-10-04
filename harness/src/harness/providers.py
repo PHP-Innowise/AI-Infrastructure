@@ -311,10 +311,10 @@ def _codex_helper_activity(event):
     return None
 
 
-def codex_journal_activity(native_id, project, since, until):
-    """Read only bounded lifecycle metadata when exec JSON omits V2 activity."""
+def codex_rollout_tail(native_id, project):
+    """The last 4 MiB of an exec thread's rollout in this project, or None; nothing outside Codex's own folders."""
     if not isinstance(native_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}', native_id):
-        return []
+        return None
     home = Path(os.environ.get('CODEX_HOME') or str(Path.home() / '.codex')).expanduser()
     try:
         databases = sorted((p for p in home.glob('state_*.sqlite')
@@ -332,26 +332,36 @@ def codex_journal_activity(native_id, project, since, until):
             if row:
                 break
         else:
-            return []
+            return None
         path = Path(row[0])
         if str(project) != row[1] or path.suffix != '.jsonl' or path.resolve() != path:
-            return []
+            return None
         if not any(root in path.parents for root in (home / 'sessions', home / 'archived_sessions')):
-            return []
+            return None
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(descriptor, 'rb') as stream:
             if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
-                return []
+                return None
             first = json.loads(stream.readline(65536))
             meta = first.get('payload', {})
             if (first.get('type') != 'session_meta' or not isinstance(meta, dict)
                     or meta.get('id') != native_id or meta.get('cwd') != str(project) or meta.get('source') != 'exec'):
-                return []
+                return None
             # ponytail: inspect only the last 4 MiB; absent/older metadata stays unconfirmed.
             offset = max(stream.tell(), os.fstat(stream.fileno()).st_size - 4 * 1024 * 1024)
             if offset > stream.tell():
                 stream.seek(offset); stream.readline(4 * 1024 * 1024)
-            tail = stream.read(4 * 1024 * 1024)
+            return stream.read(4 * 1024 * 1024)
+    except (OSError, ValueError, TypeError, AttributeError, RecursionError):
+        return None
+
+
+def codex_journal_activity(native_id, project, since, until):
+    """Read only bounded lifecycle metadata when exec JSON omits V2 activity."""
+    tail = codex_rollout_tail(native_id, project)
+    if not tail:
+        return []
+    try:
         turns, activities = set(), []
         for line in tail.splitlines():
             try:
@@ -475,8 +485,13 @@ class DelegationTracker:
 def build_command(provider: str, executable: str, project: Path, prompt: str,
                   mode: str = "plan", model: Optional[str] = None,
                   session_id: Optional[str] = None, agents_enabled: bool = False,
-                  agent_count: int = 3, thinking_effort: Optional[str] = None, budget_usd: Optional[float] = None) -> list[str]:
-    """Construct argv only. The caller must launch with cwd=project and no shell."""
+                  agent_count: int = 3, thinking_effort: Optional[str] = None, budget_usd: Optional[float] = None,
+                  hook_events: bool = False) -> list[str]:
+    """Construct argv only. The caller must launch with cwd=project and no shell.
+
+    `hook_events` asks Claude to stream hook lifecycle events, so a session launch can
+    count the memory its hooks inject; other providers ignore it.
+    """
     if provider not in PROVIDERS or mode not in ("plan", "edit"):
         raise ValueError("unknown provider or mode")
     _agent_options(provider, agents_enabled, agent_count)
@@ -519,6 +534,8 @@ def build_command(provider: str, executable: str, project: Path, prompt: str,
             command.extend(["--allowedTools", "Agent", "Task"])
         if session_id:
             command.extend(["--resume", session_id])
+        if hook_events:
+            command.append("--include-hook-events")
     elif provider == "codex":
         # Resume does not accept --sandbox/--cd: global flags precede `exec`.
         command = [executable, "--ask-for-approval", "never", "--sandbox",
