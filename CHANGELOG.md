@@ -26,6 +26,15 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Let the browser keep the Harness page files. The page names each style and
+  script by its content hash, so a repeat visit loads none of them again (83 KB
+  instead of 651 KB here). That address is served `immutable`; any other request
+  for a page file revalidates by ETag (304), and API answers stay `no-store`. The
+  session list in `/api/bootstrap` and `/api/sessions` now carries summaries
+  (`Sessions.summaries()`, one query), so 200 sessions with capsules weigh 71 KB
+  instead of 1.96 MB. Opening a session takes its settings from the full record
+  the first poll brings.
+
 - Finish the Harness memory views:
   - **Retrieval history.** Memory use keeps a numbers-only daily rollup of
     retrievals in the Harness database (`retrieval_days`, with

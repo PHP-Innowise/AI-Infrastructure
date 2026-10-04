@@ -530,6 +530,22 @@ class Sessions:
         return {'fill': fill['end'], 'window': fill.get('window'), 'compacted': bool(fill.get('compactions')),
                 'at': row['started_at'], 'running': row['status'] == 'running'}
 
+    # What the sidebar shows of a session: which one, where it stands and how it runs. No capsules, results or fill.
+    SUMMARY_FIELDS = ('id', 'title', 'project_id', 'status', 'created_at', 'updated_at', 'provider', 'model',
+                      'thinking_effort', 'mode', 'workflow', 'clash', 'creator')
+
+    def summaries(self):
+        """The newest sessions as list entries, read in one query; the page fetches a session in full when it opens it."""
+        with self.lock:
+            rows = self.db.execute(f"SELECT {','.join(self.SUMMARY_FIELDS)} FROM sessions ORDER BY updated_at DESC,rowid DESC LIMIT 200").fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            for field in ('clash', 'creator'):
+                item[field] = json.loads(item[field]) if item[field] else None
+            result.append({**item, 'summary': True})
+        return result
+
     def list(self):
         with self.lock:
             rows = self.db.execute("SELECT id FROM sessions ORDER BY updated_at DESC,rowid DESC LIMIT 200").fetchall()

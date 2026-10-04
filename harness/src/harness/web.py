@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -63,6 +64,15 @@ class HarnessServer(ThreadingHTTPServer):
             self.catalog = build_site(Path(self.catalog_dir.name)).read_bytes()
             self.page = (ROOT / 'harness/web/index.html').read_bytes()
             self.assets = {'/' + name: ((ROOT / 'harness/web' / name).read_bytes(), content_type) for name, content_type in ASSETS.items()}
+            # The page names each style and script with its content hash, so a browser may keep them for good:
+            # a changed file is a new address, and an old page never pairs with a new script.
+            self.versions = {path: hashlib.sha256(body).hexdigest()[:16] for path, (body, _) in self.assets.items()}
+            for path, version in self.versions.items():
+                for attribute in (b'src', b'href'):
+                    self.page = self.page.replace(b'%s="%s"' % (attribute, path.encode()), b'%s="%s?v=%s"' % (attribute, path.encode(), version.encode()))
+            # The page itself is revalidated against its hash on every load.
+            self.tags = {path: '"' + hashlib.sha256(body).hexdigest()[:32] + '"' for path, body in (
+                ('/', self.page), ('/kit3/', self.catalog), *((name, body) for name, (body, _) in self.assets.items()))}
         except Exception:
             if hasattr(self, 'setup_manager'):
                 self.setup_manager.close()
@@ -87,7 +97,7 @@ class HarnessServer(ThreadingHTTPServer):
             'csrf': self.token,
             'projects': self.sessions.list_projects(),
             'providers': [{k: v for k, v in p.items() if k != 'executable'} for p in self.sessions.providers.values()],
-            'workflows': WORKFLOWS, 'sdd_phases': sdd.PHASES, 'sessions': self.sessions.list(),
+            'workflows': WORKFLOWS, 'sdd_phases': sdd.PHASES, 'sessions': self.sessions.summaries(),
             'clash': {'workflows': list(clash.WORKFLOWS), 'stages': clash.STAGES, 'max_rounds': clash.MAX_ROUNDS, 'default_rounds': clash.DEFAULT_ROUNDS},
             'accelerators': [
                 {'id': 'kit1', 'name': 'Kit 1 · Infrastructure Creator', 'description': 'Scan, review, generate and apply a bespoke accelerator; update manifest-owned files.'},
@@ -113,7 +123,23 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass  # Prompts, session IDs and tokens do not belong in access logs.
 
-    def reply(self, status, payload, content_type='application/json; charset=utf-8', filename=None):
+    def static(self, path, body, content_type, version=None):
+        """A page file read at start. An asset asked for by its current hash is kept for good;
+        anything else is kept and revalidated against its hash on every load."""
+        if version is not None and version == self.server.versions.get(path):
+            self.reply(200, body, content_type, cache='private, max-age=31536000, immutable')
+            return
+        tag = self.server.tags[path]
+        offered = {value.strip() for value in self.headers.get('If-None-Match', '').split(',')}
+        if tag in offered or '*' in offered:
+            self.send_response(304)
+            self.send_header('ETag', tag)
+            self.send_header('Cache-Control', 'no-cache')
+            self.end_headers()
+            return
+        self.reply(200, body, content_type, etag=tag)
+
+    def reply(self, status, payload, content_type='application/json; charset=utf-8', filename=None, etag=None, cache=None):
         body = payload if isinstance(payload, bytes) else json.dumps(payload, ensure_ascii=False).encode()
         self.send_response(status)
         self.send_header('Content-Type', content_type)
@@ -124,7 +150,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header('Content-Disposition', 'attachment; filename="fleet-review.md"')
         elif content_type == 'application/zip':
             self.send_header('Content-Disposition', 'attachment; filename="project-knowledge.zip"')
-        self.send_header('Cache-Control', 'no-store')
+        # API answers and downloads are never stored; only the page files may be kept.
+        self.send_header('Cache-Control', cache or ('no-cache' if etag else 'no-store'))
+        if etag:
+            self.send_header('ETag', etag)
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('Referrer-Policy', 'no-referrer')
         self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-src 'self'; frame-ancestors 'self'; base-uri 'none'; object-src 'none'; form-action 'self'")
@@ -162,17 +191,17 @@ class Handler(BaseHTTPRequestHandler):
         store = self.server.sessions
         try:
             if path == '/':
-                self.reply(200, self.server.page, 'text/html; charset=utf-8')
+                self.static('/', self.server.page, 'text/html; charset=utf-8')
             elif path in ('/kit3/', '/kit3/index.html'):
-                self.reply(200, self.server.catalog, 'text/html; charset=utf-8')
+                self.static('/kit3/', self.server.catalog, 'text/html; charset=utf-8')
             elif path in self.server.assets:
-                self.reply(200, *self.server.assets[path])
+                self.static(path, *self.server.assets[path], version=(query.get('v') or [None])[0])
             elif path == '/api/health':
                 self.reply(200, {'ok': True, 'instance': self.server.instance})
             elif path == '/api/bootstrap':
                 self.reply(200, self.server.bootstrap())
             elif path == '/api/sessions':
-                self.reply(200, {'sessions': store.list()})
+                self.reply(200, {'sessions': store.summaries()})
             elif path == '/api/projects':
                 if parsed.query:
                     raise SessionError('Invalid project listing request.')

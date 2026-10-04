@@ -2,6 +2,7 @@
 
 import contextlib
 import base64
+import hashlib
 import http.client
 import io
 import json
@@ -218,6 +219,22 @@ class HarnessWebTests(unittest.TestCase):
         self.assertEqual(data['session']['mode'], 'edit')
 
     @unittest.skipUnless(shutil.which('node'), 'Browser calculator check requires Node')
+    def test_session_list_carries_summaries_and_the_full_session_comes_on_its_own(self):
+        self.server.sessions.providers["codex"]["available"] = True
+        session = self.post("/api/sessions", self.options())[1]["session"]
+        with self.server.sessions.lock:
+            self.server.sessions.db.execute("UPDATE sessions SET brain=? WHERE id=?", (json.dumps({"capsule": {"working": {"goal": "x" * 6000}}}), session["id"]))
+            self.server.sessions.db.commit()
+        boot, listed = self.request("/api/bootstrap")[1]["sessions"], self.request("/api/sessions")[1]["sessions"]
+        self.assertEqual(boot, listed)
+        self.assertEqual(set(web.Sessions.SUMMARY_FIELDS) | {"summary"}, set(listed[0]))
+        self.assertEqual((session["id"], session["title"], session["status"], True), (listed[0]["id"], listed[0]["title"], listed[0]["status"], listed[0]["summary"]))
+        # The heavy parts stay with the session itself.
+        self.assertNotIn("x" * 6000, json.dumps(listed))
+        full = self.request(f"/api/sessions/{session['id']}")[1]["session"]
+        self.assertIn("x" * 6000, json.dumps(full))
+        self.assertNotIn("summary", full)
+
     def test_memory_use_reads_without_the_knowledge_lock_and_its_check_conflicts_when_busy(self):
         base = f"/api/projects/{self.project_id}/memory-use"
         status, empty, _ = self.request(base)
@@ -583,22 +600,37 @@ assert.equal(fields['brain-op-progress'].scrolled,true);
         self.assertIn("frame-ancestors 'self'", headers["Content-Security-Policy"])
         page_html = (WEB / "index.html").read_text(encoding="utf-8")
         self.assertEqual(set(re.findall(r'(?:src|href)="/([^"/]+)"', page_html)), set(web.ASSETS))
+        served = self.request("/")[1]
+        self.assertEqual(len(web.ASSETS), len(re.findall(rb'(?:src|href)="/[^"/?]+\?v=[0-9a-f]{16}"', served)))
         for name, content_type in web.ASSETS.items():
             with self.subTest(asset=name):
                 status, body, asset_headers = self.request("/" + name)
                 self.assertEqual((status, body), (200, (WEB / name).read_bytes()))
                 self.assertEqual(asset_headers["Content-Type"], content_type)
                 self.assertEqual(asset_headers["X-Content-Type-Options"], "nosniff")
-                self.assertEqual(asset_headers["Cache-Control"], "no-store")
+                # Page files are kept by the browser and revalidated by their hash on every load.
+                self.assertEqual(asset_headers["Cache-Control"], "no-cache")
+                tag = asset_headers["ETag"]
+                self.assertEqual(tag, '"' + hashlib.sha256(body).hexdigest()[:32] + '"')
+                self.assertEqual(self.request("/" + name, headers={"If-None-Match": tag})[:2], (304, b""))
+                self.assertEqual(self.request("/" + name, headers={"If-None-Match": '"stale", ' + tag})[0], 304)
+                self.assertEqual(self.request("/" + name, headers={"If-None-Match": '"stale"'})[:2], (200, body))
+                # The served page names the asset by its hash; that address may be kept for good.
+                version = re.search(r'="/%s\?v=([0-9a-f]{16})"' % re.escape(name), served.decode()).group(1)
+                self.assertEqual(version, hashlib.sha256(body).hexdigest()[:16])
+                pinned = self.request(f"/{name}?v={version}")
+                self.assertEqual((pinned[0], pinned[1], pinned[2]["Cache-Control"]), (200, body, "private, max-age=31536000, immutable"))
+                self.assertEqual(self.request(f"/{name}?v=0000000000000000")[2]["Cache-Control"], "no-cache")
                 head_status, head, head_headers = self.request("/" + name, "HEAD")
                 self.assertEqual((head_status, head, int(head_headers["Content-Length"])), (200, b"", len(body)))
         for path, marker in (("/", b"AI Infrastructure Harness"),
                              ("/kit3/", b"Open Source Kit"),
                              ("/kit3/index.html", b"Open Source Kit")):
             with self.subTest(path=path):
-                status, page, _ = self.request(path)
+                status, page, page_headers = self.request(path)
                 self.assertEqual(status, 200)
                 self.assertIn(marker, page)
+                self.assertEqual(self.request(path, headers={"If-None-Match": page_headers["ETag"]})[:2], (304, b""))
                 head_status, head, head_headers = self.request(path, "HEAD")
                 self.assertEqual(head_status, 200)
                 self.assertEqual(head, b"")

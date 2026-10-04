@@ -824,7 +824,8 @@ function upsert(session) { if (!session?.id) return; const index = state.session
 async function refreshSessions() { $('refresh-sessions').disabled = true; try { const data = await api('/api/sessions'); state.sessions = data.sessions || []; renderHistory(); } catch (error) { showError('events-error',textError(error)); } finally { $('refresh-sessions').disabled = false; } }
 $('refresh-sessions').addEventListener('click',refreshSessions);
 function updateHeader() {
-  const session = state.selected;
+  // While an opened session loads, its list entry names it, so the header does not flash 'New session'.
+  const session = state.selected || (state.loading && state.selectedId ? state.sessions.find(item => item.id === state.selectedId) || null : null);
   const sessionLine = session ? `${projectFor(session.project_id)?.name || 'Project'} · ${isFleetSession(session) ? 'Fleet review · ' : isClashSession(session) ? `Clash vs ${providerFor(session.clash?.challenger)?.name || session.clash?.challenger || 'challenger'} · ` : ''}${providerFor(session.provider)?.name || session.provider}` : '';
   $('page-title').textContent = groupOf(state.view) === 'sessions' ? session?.title || 'New session' : {systems:'System Orchestration',knowledge:'Knowledge',skills:'Skills',accelerators:'Accelerators',setup:'Projects & Setup'}[groupOf(state.view)];
   $('page-subtitle').textContent = groupOf(state.view) === 'sessions' ? session ? sessionLine : [projectFor($('project').value)?.name,providerFor($('provider').value)?.name].filter(Boolean).join(' · ') : [state.view === 'kit3' ? '' : projectFor(currentProject())?.name,groupOf(state.view) === 'systems' ? $('system-config').value.trim() : ({brain:'Browsing runs no commands.',memory:'Browsing runs no commands.',context:'Files added to a session when Project context is on.'})[state.view]].filter(Boolean).join(' · ');
@@ -1322,7 +1323,9 @@ async function selectSession(id) {
   if (id !== state.selectedId) { sessionOptions.open = null; $('session-settings-toggle').setAttribute('aria-expanded','false'); $('sessions-view').classList.remove('output-resized'); $('sessions-view').style.removeProperty('--configuration-height'); }
   clearAttachments();
   saveSessionPreferences(); ++preferenceEpoch; restoringSessionPreferences = false;
-  stopPolling(); const epoch = ++state.epoch; state.selectedId = id; state.selected = state.sessions.find(item => item.id === id) || null; state.eventIds.clear(); state.assistantTexts.clear(); state.loading = true;
+  // The list holds summaries; a session's settings come from its full record, which the first poll brings.
+  const listed = state.sessions.find(item => item.id === id);
+  stopPolling(); const epoch = ++state.epoch; state.selectedId = id; state.selected = listed && !listed.summary ? listed : null; state.eventIds.clear(); state.assistantTexts.clear(); state.loading = true;
   resetFleetProgress();
   $('events').replaceChildren(); $('prompt').value = ''; showError('composer-error',''); showError('events-error','');
   if (state.selected) applySessionSettings(state.selected);

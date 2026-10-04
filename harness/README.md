@@ -677,6 +677,19 @@ repository files. This is a personal local tool, not a remotely hosted or
 multi-user service. Fleet review runs the existing LangGraph graph in a separate
 local Python process, with the same queue and workspace checks as native sessions.
 
+The browser keeps the page's styles and scripts between visits:
+
+- **Styles and scripts.** The server reads them once at start, and the page names
+  each by its content hash (`app-core.js?v=…`). That address is cached as
+  immutable, so an updated Harness changes the address and an old page never meets
+  a new script.
+- **The page itself.** It is revalidated by its hash on every load.
+- **API answers and downloads.** They stay `no-store`.
+
+The session list in `/api/bootstrap` and `/api/sessions` carries summaries: id,
+title, project, status, times, provider, model, mode, workflow, Clash and Creator.
+Opening a session fetches its full record, capsule included.
+
 #### Interface copy
 
 Keep the browser workspace quiet as it grows:
