@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import uuid
 
+from . import memory_draft
 from .knowledge import _path, _text
 from .sessions import CAPSULE_LIMIT, SessionError, read_context
 
@@ -202,7 +203,59 @@ class TaskContext:
         brain, options, workspace, _ = self._bound(session)
         result = self.knowledge.inspect(session['project_id'], options['bank'], _root=workspace,
                                        task_id=options.get('record_id') or options['task_id'])
-        return {**result, 'context_id': brain.get('context_id'), 'approved': brain.get('approved') is True}
+        return {**result, 'context_id': brain.get('context_id'), 'approved': brain.get('approved') is True,
+                'memory_draft': memory_draft.latest(self.sessions, session['id'])}
+
+    def save_memory(self, session, data):
+        """Record a reviewed memory draft through the runtime's own commands.
+
+        The task's progress and next steps are updated first; each kept learning
+        becomes a verified finding or decision, resolved or accepted with its
+        consequence as the content promotion carries; then automatic promotion
+        runs once, under the runtime's own rules. Each command is atomic, the
+        chain is not: a failure reports what was already saved.
+        """
+        _, options, workspace, info = self._bound(session)
+        draft = memory_draft.submission(data)
+        memory_draft.check_sources(Path(workspace) / info['root'], draft)
+        task = self.knowledge.inspect(session['project_id'], options['bank'], _root=workspace,
+                                      task_id=options.get('record_id') or options['task_id'], task_only=True)['task']
+        if task.get('status') in ('completed', 'cancelled'):
+            raise SessionError('The linked task is finished. Link an active task to save more.')
+        saved = {'task': None, 'records': [], 'promotion': None}
+        reason = 'Saved from a reviewed Harness session'
+        try:
+            if draft['progress'] or draft['next_steps']:
+                fields = {'record_id': task['id'], 'revision': task['revision'], 'reason': reason}
+                if draft['progress']:
+                    fields['progress'] = draft['progress']
+                if draft['next_steps']:
+                    # The draft is the current plan, so it replaces the list rather
+                    # than appending to steps the run may have finished.
+                    fields.update(next_steps=draft['next_steps'], replace_next_steps=True)
+                updated = self._call(session, options, workspace, 'brain-update', **fields)
+                saved['task'] = {'id': updated.get('id'), 'revision': updated.get('revision')}
+            for learning in draft['learnings']:
+                created = self._call(session, options, workspace, 'brain-create',
+                                     record_type=learning['type'],
+                                     external_id=memory_draft.external_id(options['task_id'], learning['type']),
+                                     title=learning['title'], goal=learning['consequence'],
+                                     sources=learning['sources'], authority='verified')
+                closed = self._call(session, options, workspace, 'brain-update', record_id=created['id'],
+                                    revision=created['revision'], progress=learning['consequence'],
+                                    transition='resolved' if learning['type'] == 'finding' else 'accepted',
+                                    reason=reason)
+                saved['records'].append({'id': closed.get('id'), 'type': closed.get('type'),
+                                         'title': closed.get('title'), 'status': closed.get('status')})
+            if saved['records']:
+                promotion = self.knowledge.run(session['project_id'], {'bank': options['bank'], 'action': 'promote-auto'},
+                                               _root=workspace)
+                saved['promotion'] = (promotion['result'] if promotion.get('ok') and isinstance(promotion.get('result'), dict)
+                                      else {'error': promotion.get('error') or 'Automatic promotion did not run.'})
+        except (SessionError, KeyError, TypeError) as error:
+            message = str(error) if isinstance(error, SessionError) else 'The runtime returned an unexpected record.'
+            return {'ok': False, 'saved': saved, 'error': message}
+        return {'ok': True, 'saved': saved, 'error': None}
 
     def run(self, session, data):
         _, options, workspace, _ = self._bound(session)

@@ -42,11 +42,13 @@ ACTION_FIELDS = {
     'bank-retire': ('memory_id', 'valid_to', 'superseded_by', 'reason'),
     'start': ('task_id', 'goal', 'files', 'sources'),
     'brain-create': ('record_type', 'external_id', 'title', 'goal', 'files', 'sources', 'privacy', 'authority'),
-    'brain-update': ('record_id', 'revision', 'progress', 'next_steps', 'phase', 'transition', 'reason', 'authority'),
+    'brain-update': ('record_id', 'revision', 'progress', 'next_steps', 'replace_next_steps', 'phase', 'transition',
+                     'reason', 'authority'),
     'complete': ('task_id', 'revision', 'outcome', 'verification', 'sources'),
     'promote-propose': ('source_ids', 'title', 'content'),
     'promote-review': ('promotion_id', 'reviewer', 'reject'),
     'promote-apply': ('promotion_id',),
+    'promote-auto': (),
     'export': ('include_archive', 'include_superseded'),
 }
 
@@ -345,7 +347,7 @@ class KnowledgeManager:
             if field not in data or field in ('record_type', 'layer') or (field == 'query' and query is not None):
                 continue
             value = data[field]
-            if field in ('include_archive', 'include_superseded', 'reject'):
+            if field in ('include_archive', 'include_superseded', 'reject', 'replace_next_steps'):
                 if type(value) is not bool:
                     raise SessionError('Operation options must be booleans.')
                 if value:
@@ -393,7 +395,7 @@ class KnowledgeManager:
                     except ValueError as error:
                         raise SessionError('Use a date in YYYY-MM-DD format.') from error
                 arguments.append('--' + names.get(field, field.replace('_', '-')) + '=' + value)
-        if action == 'brain-update' and not any(field in data for field in ('progress', 'next_steps', 'phase', 'transition', 'authority')):
+        if action == 'brain-update' and not any(field in data for field in ('progress', 'next_steps', 'replace_next_steps', 'phase', 'transition', 'authority')):
             raise SessionError('Choose a record field or lifecycle transition to update.')
         if query is not None:
             # Positional queries follow --, so leading hyphens stay literal.
@@ -536,7 +538,7 @@ class KnowledgeManager:
             if not info['runtime_available']:
                 raise SessionError('The selected Memory Bank does not have an installed context runtime.')
             if action in ('start', 'brain-create', 'brain-update', 'complete', 'rebind',
-                          'promote-propose', 'promote-review', 'promote-apply') and info['mode'] != 'governed':
+                          'promote-propose', 'promote-review', 'promote-apply', 'promote-auto') and info['mode'] != 'governed':
                 raise SessionError('Project Brain editing requires the project to use governed mode.')
             project = Path(_root) if _root is not None else Path(self.sessions.project(project_id)['path'])
             root = project / info['root']
@@ -586,6 +588,8 @@ class KnowledgeManager:
                     message = 'This lifecycle transition is not allowed from the current record state.'
                 elif 'secret' in detail.lower():
                     message = 'The runtime refused content matching its secret-protection rules.'
+                elif 'unrecognized arguments' in detail or 'invalid choice' in detail:
+                    message = 'The installed context runtime is older than this operation. Update the accelerator in this project first.'
                 response['error'] = message
             elif result is None:
                 response.update(ok=False, error='The context runtime did not return a valid JSON result. Refresh before retrying; changes may have been applied.')

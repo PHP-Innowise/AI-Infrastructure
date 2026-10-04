@@ -29,6 +29,22 @@ print(json.dumps({"type": "turn.completed"}), flush=True)
 '''
 
 
+FAKE_DRAFT = r'''
+import json, os, pathlib, sys
+receipt = pathlib.Path(sys.argv[1])
+receipt.write_text(json.dumps({"cwd": os.getcwd(), "prompt": sys.stdin.read(),
+                              "task_id": os.environ.get("CONTEXT_TASK_ID")}))
+draft = {"progress": "The cobalt rule is checked at allocation.", "next_steps": ["Cover the release path."],
+         "learnings": [{"type": "finding", "title": "Cobalt allocation needs one owner",
+                        "consequence": "Every cobalt allocation names exactly one owner.",
+                        "sources": ["specs/authority.md"]}]}
+text = "Checked the rule.\n\n```memory-draft\n" + json.dumps(draft) + "\n```"
+print(json.dumps({"type": "thread.started", "thread_id": "native-context-fixture"}), flush=True)
+print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": text}}), flush=True)
+print(json.dumps({"type": "turn.completed"}), flush=True)
+'''
+
+
 class TaskContextTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -115,6 +131,71 @@ class TaskContextTests(unittest.TestCase):
             self.wait_status(store, sid, "completed")
         receipt = json.loads(self.calls[-1]["receipt"].read_text())
         self.assertEqual("TASK-CONTEXT", receipt["task_id"])
+
+    def linked_run(self, store):
+        sid = store.create(self.options(store))["id"]
+        waiting = self.wait_status(store, sid, "awaiting_context")
+        store.run_context(sid, waiting["brain"]["context_id"])
+        self.wait_status(store, sid, "completed")
+        return sid
+
+    def test_linked_runs_ask_for_a_memory_draft_and_unlinked_runs_do_not(self):
+        from harness import memory_draft
+        store = self.manager()
+        self.linked_run(store)
+        self.assertIn(memory_draft.INSTRUCTION, self.calls[-1]["prompt"])
+        unlinked = {key: value for key, value in self.options(store).items() if key != "brain"}
+        sid = store.create(unlinked)["id"]
+        self.wait_status(store, sid, "completed")
+        self.assertNotIn("memory-draft", self.calls[-1]["prompt"])
+
+    def test_the_draft_a_run_leaves_reads_back_and_saves_through_the_runtime(self):
+        self.fake.write_text(FAKE_DRAFT)
+        store = self.manager()
+        sid = self.linked_run(store)
+        before = store.brain_info(sid)
+        self.assertEqual("drafted", before["memory_draft"]["state"])
+        draft = before["memory_draft"]["draft"]
+        self.assertEqual("The cobalt rule is checked at allocation.", draft["progress"])
+
+        result = store.save_memory(sid, {**draft, "verified": True})
+
+        self.assertTrue(result["ok"], result)
+        saved = result["saved"]
+        self.assertGreater(saved["task"]["revision"], before["task"]["revision"])
+        self.assertEqual([("finding", "resolved")], [(item["type"], item["status"]) for item in saved["records"]])
+        task = store.brain_info(sid)["task"]
+        self.assertEqual("The cobalt rule is checked at allocation.", task["progress"])
+        # The draft is the current plan, so it replaced the steps rather than appending.
+        self.assertEqual(["Cover the release path."], task["next_steps"])
+        finding = next(record for record in store.brain_info(sid)["records"] if record["id"] == saved["records"][0]["id"])
+        self.assertEqual(("verified", "Every cobalt allocation names exactly one owner."),
+                         (finding["authority"], finding["progress"]))
+        promotion = saved["promotion"]
+        self.assertTrue(promotion["enabled"], promotion)
+        self.assertEqual(1, len(promotion["promoted"]), promotion)
+        chunk = next((self.project / "memory-bank/chunks").glob(promotion["promoted"][0]["memory_id"] + "-*.md"))
+        self.assertIn("auto-promoted", chunk.read_text(encoding="utf-8"))
+
+    def test_saving_refuses_unconfirmed_or_unsourced_learnings_and_a_finished_task(self):
+        store = self.manager()
+        sid = self.linked_run(store)
+        learning = {"type": "decision", "title": "Owners are explicit", "consequence": "Name the owner.",
+                    "sources": ["specs/authority.md"]}
+        for data, message in (({"learnings": [learning]}, "Confirm that you checked"),
+                              ({"learnings": [{**learning, "sources": ["specs/missing.md"]}], "verified": True},
+                               "Source not found"),
+                              ({}, "Nothing to save")):
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(sessions.SessionError, message):
+                    store.save_memory(sid, data)
+        self.assertEqual([], [record for record in store.brain_info(sid)["records"] if record["type"] == "decision"])
+        task = store.brain_info(sid)["task"]
+        completed = store.brain_action(sid, {"action": "complete", "revision": task["revision"],
+                                             "outcome": "Verified", "verification": ["Fixture"]})
+        self.assertTrue(completed["ok"], completed)
+        with self.assertRaisesRegex(sessions.SessionError, "linked task is finished"):
+            store.save_memory(sid, {"progress": "More"})
 
     def test_capsule_meter_measures_the_stored_capsule_and_the_inserted_prompt(self):
         store = self.manager()

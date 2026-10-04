@@ -26,6 +26,20 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Harness: **Save to memory** after a linked run. Agents left to policy almost
+  never record what a run established — 0 memory commands in ~1,850 prompts on
+  four real installations — so a linked launch's prompt now asks the agent to
+  close its final reply with a `memory-draft` block (progress, up to three next
+  steps, up to three learnings with source files). Nothing is written from it:
+  the session page shows the draft as an editable form, and only on Save, with
+  the person confirming each kept learning against its sources, does the
+  Harness run the runtime's own commands — `brain-update` on the task (next
+  steps replaced), `brain-create` + `brain-update` for each learning as a
+  verified, resolved finding or accepted decision, then `promote-auto` once.
+  Sources must be regular files in the session workspace; a failed command
+  reports what was already saved. `harness/src/harness/memory_draft.py`,
+  `POST /api/sessions/<id>/memory`; `brain_info` carries `memory_draft`.
+
 - `context.py promote-auto` runs automatic promotion now, under the same rules
   as a turn boundary, and does nothing unless `automatic_promotion` is enabled.
   Knowledge recorded deliberately no longer waits for `--flush-after` turns.

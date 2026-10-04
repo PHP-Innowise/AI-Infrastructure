@@ -312,6 +312,7 @@ function updateLinkedRecordControls() {
   $('linked-promotion-approve').disabled = $('linked-promotion-reject').disabled = !ready || !proposed || !reviewer || reviewer === proposal?.proposer;
   $('linked-promotion-apply').disabled = !ready || !approved;
   $('linked-brain-refresh').disabled = !state.bootstrap || Boolean(state.pending) || linkedBrain.loading || !state.selected?.brain;
+  updateMemorySaveControls();
 }
 function submitLinkedRecord() {
   if (!linkedSessionReady() || $('linked-record-submit').disabled || !$('linked-record-form').reportValidity()) return; const action = $('linked-record-action').value; const fields = {}; let error = '';
@@ -331,7 +332,8 @@ function renderLinkedPromotions() {
 }
 function renderLinkedPromotionPreview() { const proposal = selectedLinkedPromotion(); $('linked-promotion-preview').hidden = !proposal; $('linked-promotion-preview').textContent = proposal ? JSON.stringify(proposal,null,2) : ''; $('linked-promotion-state').textContent = proposal ? `${humanLabel(proposal.status)}${proposal.outcome ? ` · ${proposal.outcome}` : ''}${proposal.destination_memory_id ? ` · Memory ${proposal.destination_memory_id}` : ''}` : 'No saved proposals in this workspace.'; updateLinkedRecordControls(); }
 function resetLinkedSelection(session) {
-  linkedBrain.epoch++; linkedBrain.controller?.abort(); Object.assign(linkedBrain,{sid:session?.id || null,data:null,loading:false,fetchKey:null,contextKey:null,stale:false,sourceIds:new Set(),promotionId:null,lastRecord:null,records:new Map()});
+  linkedBrain.epoch++; linkedBrain.controller?.abort(); Object.assign(linkedBrain,{sid:session?.id || null,data:null,loading:false,fetchKey:null,contextKey:null,memoryKey:null,stale:false,sourceIds:new Set(),promotionId:null,lastRecord:null,records:new Map()});
+  $('memory-save-result').hidden = true; $('memory-save-result').replaceChildren(); $('memory-save-learnings').replaceChildren(); $('memory-save-progress').value = ''; $('memory-save-next').value = ''; showError('memory-save-error','');
   $('linked-context-query').value = session?.brain?.query || ''; $('linked-proposal-title').value = ''; $('linked-proposal-content').value = ''; $('linked-promotion-reviewer').value = ''; $('linked-brain-output').hidden = true; $('linked-brain-output').replaceChildren(); $('linked-record-action').value = 'complete'; renderLinkedRecordFields(); showError('linked-brain-error',''); showError('linked-context-error','');
 }
 // The capsule meter at the approval decision: how much of the 8,000-character capsule each kind of memory takes,
@@ -371,7 +373,7 @@ function renderLinkedSession() {
 }
 async function loadLinkedBrain() {
   const session = state.selected; if (!session?.brain || state.pending) return; const sid = session.id; linkedBrain.controller?.abort(); const controller = new AbortController(); linkedBrain.controller = controller; const epoch = ++linkedBrain.epoch; linkedBrain.loading = true; showError('linked-brain-error',''); updateLinkedRecordControls();
-  try { const data = await api(`/api/sessions/${encodeURIComponent(sid)}/brain`,{signal:controller.signal}); if (epoch !== linkedBrain.epoch || sid !== state.selectedId) return; linkedBrain.data = data; renderLinkedPromotions(); }
+  try { const data = await api(`/api/sessions/${encodeURIComponent(sid)}/brain`,{signal:controller.signal}); if (epoch !== linkedBrain.epoch || sid !== state.selectedId) return; linkedBrain.data = data; renderLinkedPromotions(); renderMemorySave(); }
   catch (error) { if (error.name !== 'AbortError' && epoch === linkedBrain.epoch && sid === state.selectedId) { linkedBrain.data = null; showError('linked-brain-error',textError(error)); } }
   finally { if (epoch === linkedBrain.epoch && sid === state.selectedId) { linkedBrain.loading = false; linkedBrain.controller = null; updateControls(); } }
 }
@@ -395,7 +397,55 @@ async function runLinkedBrainOperation(action,fields) {
   } catch (error) { if (sid === state.selectedId && epoch === state.epoch) { status.textContent = 'Operation did not complete successfully.'; output.append(el('p','error-text',`${textError(error)}${error.status === 0 ? ' Refresh task records before retrying; changes may have been applied.' : ''}`)); } }
   finally { state.pending = null; if (sid === state.selectedId && epoch === state.epoch) { await loadLinkedBrain(); updateControls(); } }
 }
+// Save to memory: the draft a linked run's agent leaves at its end, edited and confirmed here. Nothing is written until Save.
+const memorySaveNotes = {drafted:'Drafted by the agent at the end of its last run. Nothing is saved until you choose Save to memory.',unreadable:'The last run left a memory draft that could not be read. Write one here, or leave it.',missing:'The last run left no memory draft. Write one here, or leave it.',none:'When a run finishes, its agent drafts what to remember here.'};
+function memoryField(text,control,wide) { const label = el('label',wide ? 'field wide' : 'field'); label.append(el('span','',text),control); return label; }
+function memoryLearningRow(learning = {type:'finding',title:'',consequence:'',sources:[]}) {
+  const row = el('div','memory-learning'); const head = el('div','memory-learning-head'); const keep = el('label','checkbox'); const keepInput = el('input'); keepInput.type = 'checkbox'; keepInput.checked = true; keepInput.dataset.role = 'keep'; keep.append(keepInput,'Keep');
+  const type = el('select'); type.dataset.role = 'type'; for (const [value,text] of [['finding','Finding'],['decision','Decision']]) { const option = el('option','',text); option.value = value; type.append(option); } type.value = learning.type === 'decision' ? 'decision' : 'finding';
+  const remove = el('button','button','Remove'); remove.type = 'button'; remove.addEventListener('click',() => { row.remove(); updateMemorySaveControls(); }); head.append(keep,memoryField('Type',type),remove);
+  const title = el('input'); title.type = 'text'; title.maxLength = 200; title.value = learning.title || ''; title.dataset.role = 'title';
+  const consequence = el('textarea'); consequence.rows = 2; consequence.maxLength = 1000; consequence.value = learning.consequence || ''; consequence.dataset.role = 'consequence';
+  const sources = el('textarea'); sources.rows = 2; sources.placeholder = 'One project file per line, for example src/Billing/Totals.php'; sources.value = (learning.sources || []).join('\n'); sources.dataset.role = 'sources';
+  row.append(head,memoryField('Title',title,true),memoryField('Rule or decision',consequence,true),memoryField('Sources',sources,true));
+  for (const control of [keepInput,type,title,consequence,sources]) control.addEventListener('input',updateMemorySaveControls); return row;
+}
+function renderMemorySave() {
+  const draft = linkedBrain.data?.memory_draft || {state:'none',draft:null,event_id:null}; const key = `${linkedBrain.sid}:${draft.state}:${draft.event_id ?? ''}`;
+  if (linkedBrain.memoryKey !== key) { linkedBrain.memoryKey = key; const value = draft.draft || {progress:'',next_steps:[],learnings:[]}; $('memory-save-progress').value = value.progress || ''; $('memory-save-next').value = (value.next_steps || []).join('\n'); $('memory-save-learnings').replaceChildren(...(value.learnings || []).map(memoryLearningRow)); $('memory-save-verified').checked = false; showError('memory-save-error',''); }
+  $('memory-save-note').textContent = memorySaveNotes[draft.state] || memorySaveNotes.none; updateMemorySaveControls();
+}
+function updateMemorySaveControls() {
+  const session = state.selected; const finished = ['completed','cancelled'].includes(linkedTask()?.status); $('memory-save').hidden = !session?.brain || isFleetSession(session);
+  const ready = linkedSessionReady() && !finished; for (const control of $('memory-save-form').querySelectorAll('input,textarea,select,button')) control.disabled = !ready;
+  const rows = [...$('memory-save-learnings').children]; const kept = rows.filter(row => row.querySelector('[data-role="keep"]').checked);
+  $('memory-save-add').disabled = !ready || rows.length >= 3; $('memory-save-verified-field').hidden = !kept.length; $('memory-save-submit').disabled = !ready || Boolean(kept.length && !$('memory-save-verified').checked);
+  if (finished) $('memory-save-note').textContent = 'The linked task is finished. Link an active task to save more.';
+}
+function memorySaveSummary(data) {
+  const lines = [], saved = data.saved || {}, promotion = saved.promotion;
+  if (saved.task) lines.push(el('p','knowledge-note',`Task updated to revision ${saved.task.revision}.`));
+  for (const record of saved.records || []) lines.push(el('p','knowledge-note',`Saved ${record.type} “${record.title}” as ${record.status}.`));
+  if (promotion?.error) lines.push(el('p','knowledge-note',`Not promoted yet: ${promotion.error} The records stay eligible; propose them under Durable memory below.`));
+  else if (promotion?.enabled === false) lines.push(el('p','knowledge-note','Automatic promotion is off for this project. Propose the saved records under Durable memory below.'));
+  else if (promotion) { for (const item of promotion.promoted || []) lines.push(el('p','knowledge-note',`Promoted to durable memory as ${item.memory_id}.`)); for (const item of [...(promotion.blocked || []),...(promotion.failed || [])]) lines.push(el('p','knowledge-note',`Held back from durable memory: ${item.reason}`)); }
+  if (!data.ok) lines.push(el('p','error-text',`Stopped: ${data.error}${lines.length ? ' What is listed above was saved.' : ''}`));
+  return lines.length ? lines : [el('p','knowledge-note','Saved.')];
+}
+async function submitMemorySave() {
+  if ($('memory-save-submit').disabled || !linkedSessionReady()) return; const sid = state.selectedId; const epoch = state.epoch; const lines = value => value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  const progress = $('memory-save-progress').value.trim(); const nextSteps = lines($('memory-save-next').value); const kept = [...$('memory-save-learnings').children].filter(row => row.querySelector('[data-role="keep"]').checked);
+  const learnings = kept.map(row => ({type:row.querySelector('[data-role="type"]').value,title:row.querySelector('[data-role="title"]').value.trim(),consequence:row.querySelector('[data-role="consequence"]').value.trim(),sources:lines(row.querySelector('[data-role="sources"]').value)}));
+  const error = nextSteps.length > 3 ? 'Keep at most three next steps.' : nextSteps.some(step => step.length > 300) ? 'Write each next step in at most 300 characters.' : learnings.some(item => !item.title || !item.consequence || !item.sources.length) ? 'Each kept learning needs a title, a rule or decision, and at least one source file.' : !progress && !nextSteps.length && !learnings.length ? 'Nothing to save: write progress, a next step or a learning.' : '';
+  showError('memory-save-error',error); if (error) return; const result = $('memory-save-result'); result.hidden = false; result.replaceChildren(el('p','knowledge-note','Saving in the session workspace…')); state.pending = 'memory-save'; updateControls();
+  try { const data = await api(`/api/sessions/${encodeURIComponent(sid)}/memory`,{method:'POST',body:{progress,next_steps:nextSteps,learnings,verified:$('memory-save-verified').checked}}); if (sid !== state.selectedId || epoch !== state.epoch) return; result.replaceChildren(...memorySaveSummary(data)); const saved = data.saved?.records?.length || 0; kept.slice(0,saved).forEach(row => row.remove()); if (saved) $('memory-save-verified').checked = false; }
+  catch (failure) { if (sid === state.selectedId && epoch === state.epoch) result.replaceChildren(el('p','error-text',`${textError(failure)}${failure.status === 0 ? ' Refresh task records before retrying; changes may have been applied.' : ''}`)); }
+  finally { state.pending = null; if (sid === state.selectedId && epoch === state.epoch) { await loadLinkedBrain(); updateControls(); } }
+}
 buildLinkedRecordTools();
+$('memory-save-form').addEventListener('submit',event => { event.preventDefault(); submitMemorySave(); });
+$('memory-save-add').addEventListener('click',() => { if ($('memory-save-learnings').children.length < 3) { $('memory-save-learnings').append(memoryLearningRow()); updateMemorySaveControls(); } });
+for (const id of ['memory-save-progress','memory-save-next','memory-save-verified']) $(id).addEventListener('input',updateMemorySaveControls);
 $('brain-link-enabled').addEventListener('change',() => { if ($('brain-link-enabled').checked) loadBrainLinkTasks(); updateControls(); }); $('brain-link-bank').addEventListener('change',() => loadBrainLinkTasks()); $('brain-link-refresh').addEventListener('click',() => loadBrainLinkTasks());
 for (const id of ['brain-link-kind','brain-link-task']) $(id).addEventListener('change',updateControls); for (const id of ['brain-link-task-id','brain-link-goal','brain-link-query']) $(id).addEventListener('input',updateControls);
 $('linked-context-form').addEventListener('submit',event => { event.preventDefault(); if ($('linked-context-form').reportValidity()) linkedContextAction('refresh'); }); $('linked-context-run').addEventListener('click',() => linkedContextAction('run')); $('linked-context-query').addEventListener('input',renderLinkedSession); $('linked-brain-refresh').addEventListener('click',() => loadLinkedBrain());

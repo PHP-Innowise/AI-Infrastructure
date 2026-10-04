@@ -362,6 +362,16 @@ input[type="text"],.field input[type="number"],select { width:100%; }
 .linked-source input { margin-top:4px; }
 .linked-source span { font-size:var(--text-ui); line-height:var(--leading-body); overflow-wrap:anywhere; }
 .linked-source small { display:block; color:var(--muted); font-size:var(--text-meta); margin-top:4px; }
+.memory-save { margin:16px 0; padding:12px 16px; border:1px solid var(--line); border-radius:var(--radius-md); }
+.memory-save h3 { font-size:var(--text-body); font-weight:var(--weight-strong); margin:0 0 4px; }
+.memory-save .knowledge-form-grid { margin:12px 0; }
+.memory-save-learnings { border:0; padding:0; margin:0 0 12px; min-width:0; }
+.memory-save-learnings legend { padding:0; font-size:var(--text-ui); font-weight:var(--weight-strong); color:var(--ink); }
+#memory-save-learnings { display:grid; gap:12px; margin:8px 0 12px; }
+.memory-learning { display:grid; grid-template-columns:minmax(0,1fr); gap:8px; padding:12px; border:1px solid var(--line); border-radius:var(--radius); }
+.memory-learning-head { display:flex; flex-wrap:wrap; align-items:end; gap:12px; }
+.memory-learning .field { display:grid; gap:4px; min-width:0; }
+.memory-learning textarea { width:100%; }
 .linked-result .knowledge-tools { margin-top:16px; }
 .linked-result .knowledge-tools:last-child { margin-bottom:0; }
 @media (max-width:760px) { .linked-context,.linked-result { padding:16px; } }

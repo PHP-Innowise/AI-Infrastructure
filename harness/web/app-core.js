@@ -1237,6 +1237,9 @@ async function fleetAction(action) {
   finally { if (state.pending === pending) { state.pending = null; updateControls(); } }
 }
 $('fleet-approve').addEventListener('click',() => fleetAction('approve')); $('fleet-reject').addEventListener('click',() => fleetAction('reject')); $('fleet-resume').addEventListener('click',() => fleetAction('resume'));
+// A linked run's memory draft is reviewed in Save to memory; the reply says where instead of showing its JSON twice.
+const MEMORY_DRAFT_BLOCK = /```memory-draft[^\S\n]*\n[\s\S]*?\n[^\S\n]*```/g;
+function withoutMemoryDraft(text) { return text.replace(MEMORY_DRAFT_BLOCK,'[Memory draft: review it under Save to memory below.]').trim(); }
 function appendEvent(event) {
   if (event.id === undefined || event.id === null || state.eventIds.has(String(event.id))) return;
   state.eventIds.add(String(event.id)); let text = typeof event.text === 'string' ? event.text : '';
@@ -1269,7 +1272,7 @@ function appendEvent(event) {
     const type = kind === 'text' ? 'assistant' : kind; const block = el('article',`message ${type}`); block.dataset.provider = String(event.provider || ''); const heading = el('div','message-label');
     const tagged = typeof event.provider === 'string' && event.provider ? `${providerFor(event.provider)?.name || event.provider}${typeof event.role === 'string' && event.role ? ` · ${humanLabel(event.role)}` : ''}${Number.isInteger(event.round) && event.round > 0 ? ` · round ${event.round}` : ''}` : '';
     const label = kind === 'user' ? 'You' : kind === 'error' ? `Session error${tagged ? ` · ${tagged}` : ''}` : kind === 'result' ? 'Result' : tagged || providerFor(state.selected?.provider)?.name || 'Assistant';
-    heading.append(el('span','avatar',kind === 'user' ? 'Y' : kind === 'error' ? '!' : 'AI'),document.createTextNode(label)); block.append(heading,el('pre','message-body',text));
+    heading.append(el('span','avatar',kind === 'user' ? 'Y' : kind === 'error' ? '!' : 'AI'),document.createTextNode(label)); block.append(heading,el('pre','message-body',['text','assistant','result'].includes(kind) ? withoutMemoryDraft(text) : text));
     if (kind === 'user' && Array.isArray(event.attachments)) {
       const files = el('div','attachment-list');
       for (const file of event.attachments) {

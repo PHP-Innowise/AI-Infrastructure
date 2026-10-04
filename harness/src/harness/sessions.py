@@ -1044,6 +1044,15 @@ class Sessions:
                 raise SessionError('Finish the session before recording its task outcome.')
             return self._task_context().run(session, data)
 
+    def save_memory(self, sid, data):
+        """Save a reviewed memory draft. Several runtime commands run in turn, so the
+        store lock covers only the state check; each command takes the knowledge lock."""
+        with self.lock:
+            session = self.get(sid)
+            if session['status'] in ACTIVE:
+                raise SessionError('Wait for this session to finish before saving to memory.')
+        return self._task_context().save_memory(session, data)
+
     def _continue_fleet(self, sid, action):
         with self.lock:
             session = self.get(sid)
@@ -1159,6 +1168,11 @@ class Sessions:
                        f"shared launch deadline {str(plan['shared_seconds'])+'s' if plan['shared_seconds'] is not None else 'uncapped'}. "
                        "These are planning shares, not separate native CLI limits. Include the main agent's "
                        "usage in ordinary sessions. Keep all helpers and retries within the shared total.\n\n")
+        if session.get('brain') and prompt:
+            # Only a run with a message of its own: Fleet and Clash build their context
+            # from an empty prompt, and their reviewers do not own the linked task.
+            from .memory_draft import INSTRUCTION
+            prompt += '\n\n' + INSTRUCTION
         text = prefix + prompt + '\n\nHarness session delegation requirement:\n' + delegation
         if ledger is not None:
             counted = ((parts['capsule'] or {}).get('inserted', 0) + sum(item['characters'] for item in parts['excerpts'] or [])

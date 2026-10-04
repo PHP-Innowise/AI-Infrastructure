@@ -939,6 +939,21 @@ creating a second task. The reviewed capsule survives server restarts in session
 history; canonical task and knowledge records remain owned by the project runtime.
 Offline Fleet demonstrations cannot link a real task.
 
+**Save to memory.** A linked run's prompt asks the agent to close its final reply
+with a `memory-draft` block (762 characters of instruction per linked launch):
+where the task stands, up to three next steps, and up to three learnings, each a
+finding or decision with the project files that prove it. Nothing is written from
+it. When the run finishes, **Save to memory** under **Record result & durable
+memory** shows the draft as a form. Edit it, uncheck what should not be kept, and
+confirm that you checked each kept learning against its sources. Saving updates the
+linked task's progress and replaces its next steps, records each kept learning as a
+verified finding (resolved) or decision (accepted) with its rule as content, then
+runs the project's automatic promotion once (`context.py promote-auto`). That
+promotes them under the runtime's own rules, or reports that automatic promotion is
+off, in which case propose them under **Durable memory** below. The commands run in
+turn; if one fails, the result lists what was already saved. A run that left no
+draft, or one that could not be read, leaves the form empty to fill by hand.
+
 After a successful run, explicitly enter the task outcome and verification to
 complete it at its current revision. Process success never completes the task
 automatically. To retain reusable knowledge, create and verify a separate finding
