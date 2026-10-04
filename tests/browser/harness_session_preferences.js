@@ -26,24 +26,24 @@ async (page) => {
   const snapshot = () => tab.evaluate(() => Object.fromEntries(['project','provider','workflow','mode','model','thinking-effort','agent-count','workspace','worktree-branch','session-budgets-usd','session-budgets-tokens','session-budgets-seconds'].map(id => [id,document.getElementById(id).value]).concat([['agents-enabled',document.getElementById('agents-enabled').checked]])));
   try {
     await tab.goto('http://127.0.0.1:8766/'); await ready();
-    await tab.locator('#project').selectOption('b');
+    await tab.locator('#project-switcher').selectOption('b');
     await tab.locator('#provider').selectOption('claude');
     await tab.locator('#mode').selectOption('edit');
     await tab.locator('#model-choice').selectOption('--custom--');
     await tab.locator('#model').fill('draft-model');
     await tab.locator('#thinking-effort').selectOption('high');
-    await tab.locator('#agents-enabled').check(); await tab.locator('#agent-count').fill('5');
+    await tab.locator('#option-helpers').click(); await tab.locator('#agents-enabled').check(); await tab.locator('#agent-count').fill('5');
     await tab.locator('#workspace-worktree-option:not(:disabled)').waitFor({state:'attached'});
-    await tab.locator('#workspace').selectOption('worktree'); await tab.locator('#worktree-branch').fill('feature/draft');
-    await tab.locator('#session-budgets > details > summary').click();
+    await tab.locator('#option-workspace').click(); await tab.locator('#workspace').selectOption('worktree'); await tab.locator('#worktree-branch').fill('feature/draft');
+    await tab.locator('#option-budgets').click();
     for (const [key,value] of Object.entries({usd:'12',tokens:'12345',seconds:'600'})) await tab.locator('#session-budgets-'+key).fill(value);
     const expected = await snapshot();
     await tab.reload(); await ready();
     check(JSON.stringify(await snapshot()) === JSON.stringify(expected),'Reload must preserve the selected project and all launch settings');
-    await tab.locator('#project').selectOption('a');
+    await tab.locator('#project-switcher').selectOption('a');
     check(await tab.locator('#session-budgets-tokens').inputValue() === '','A new project must not inherit another project budget');
     await tab.locator('#provider').selectOption('codex');
-    await tab.locator('#project').selectOption('b');
+    await tab.locator('#project-switcher').selectOption('b');
     check(JSON.stringify(await snapshot()) === JSON.stringify(expected),'Switching projects must restore their own settings');
     await tab.getByRole('button',{name:/Saved session/}).click();
     await tab.locator('#events .message').waitFor();
@@ -53,17 +53,19 @@ async (page) => {
     check(await tab.locator('#session-budgets-tokens').inputValue() === '777','Session budgets must come from the server');
     await tab.getByRole('button',{name:'New session',exact:true}).click();
     check(JSON.stringify(await snapshot()) === JSON.stringify(expected),'New session must restore the project draft');
-    await tab.locator('#project').selectOption('a');
+    await tab.locator('#project-switcher').selectOption('a');
     await tab.locator('#workflow').selectOption('sdd'); await tab.locator('#sdd-feature').fill('saved-feature');
-    await tab.locator('#model-routing-config > summary').click(); await tab.locator('#model-routing-enabled').check();
+    await tab.locator('#option-models').click(); await tab.locator('#model-routing-enabled').check();
     for (const role of ['plan','edit']) {
       await tab.locator('#routing-'+role+'-model-choice').selectOption('--custom--');
       await tab.locator('#routing-'+role+'-model').fill(role+'-model');
       await tab.locator('#routing-'+role+'-thinking-effort').selectOption(role==='plan'?'high':'low');
     }
-    await tab.locator('#session-budgets > details > summary').click();
+    // The per-agent split appears once more than one agent runs.
+    await tab.locator('#option-helpers').click(); await tab.locator('#agents-enabled').check();
+    await tab.locator('#option-budgets').click();
     await tab.locator('#session-budgets-agent-tokens').fill('321');
-    await tab.locator('#brain-link-config > summary').click(); await tab.locator('#brain-link-enabled').check();
+    await tab.locator('#option-brain').click(); await tab.locator('#brain-link-enabled').check();
     await tab.locator('#brain-link-bank').selectOption('bank-two');
     await tab.locator('#brain-link-task').selectOption('task-two'); await tab.locator('#brain-link-query').fill('Saved context query');
     const extras = () => tab.evaluate(() => Object.fromEntries(['sdd-feature','sdd-phase','routing-plan-model','routing-edit-model','routing-plan-thinking-effort','routing-edit-thinking-effort','brain-link-bank','brain-link-task','brain-link-query','session-budgets-agent-tokens'].map(id=>[id,document.getElementById(id).value]).concat(['model-routing-enabled','brain-link-enabled'].map(id=>[id,document.getElementById(id).checked]))));

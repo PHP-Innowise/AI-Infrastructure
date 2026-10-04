@@ -2,11 +2,13 @@
 
 import contextlib
 import base64
+import hashlib
 import http.client
 import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -19,6 +21,22 @@ from urllib.parse import urlencode
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "harness/src"))
 from harness import providers, web
+
+WEB = Path(__file__).resolve().parents[1] / "harness/web"
+
+
+def ui_script():
+    """The page's scripts in load order as one text; the Node checks slice functions out of it."""
+    page = (WEB / "index.html").read_text(encoding="utf-8")
+    return "\n".join((WEB / name).read_text(encoding="utf-8") for name in re.findall(r'<script src="/([\w.-]+\.js)"></script>', page))
+
+
+def stylesheet(page):
+    """A page's styles: inline, or the files its <link> elements name next to it."""
+    html = page.read_text(encoding="utf-8")
+    if "<style>" in html:
+        return html[html.index("<style>"):html.index("</style>")]
+    return "\n".join((page.parent / name).read_text(encoding="utf-8") for name in re.findall(r'<link rel="stylesheet" href="/([\w.-]+\.css)">', html))
 
 
 class HarnessWebTests(unittest.TestCase):
@@ -201,9 +219,56 @@ class HarnessWebTests(unittest.TestCase):
         self.assertEqual(data['session']['mode'], 'edit')
 
     @unittest.skipUnless(shutil.which('node'), 'Browser calculator check requires Node')
+    def test_session_list_carries_summaries_and_the_full_session_comes_on_its_own(self):
+        self.server.sessions.providers["codex"]["available"] = True
+        session = self.post("/api/sessions", self.options())[1]["session"]
+        with self.server.sessions.lock:
+            self.server.sessions.db.execute("UPDATE sessions SET brain=? WHERE id=?", (json.dumps({"capsule": {"working": {"goal": "x" * 6000}}}), session["id"]))
+            self.server.sessions.db.commit()
+        boot, listed = self.request("/api/bootstrap")[1]["sessions"], self.request("/api/sessions")[1]["sessions"]
+        self.assertEqual(boot, listed)
+        self.assertEqual(set(web.Sessions.SUMMARY_FIELDS) | {"summary"}, set(listed[0]))
+        self.assertEqual((session["id"], session["title"], session["status"], True), (listed[0]["id"], listed[0]["title"], listed[0]["status"], listed[0]["summary"]))
+        # The heavy parts stay with the session itself.
+        self.assertNotIn("x" * 6000, json.dumps(listed))
+        full = self.request(f"/api/sessions/{session['id']}")[1]["session"]
+        self.assertIn("x" * 6000, json.dumps(full))
+        self.assertNotIn("summary", full)
+
+    def test_memory_use_reads_without_the_knowledge_lock_and_its_check_conflicts_when_busy(self):
+        base = f"/api/projects/{self.project_id}/memory-use"
+        status, empty, _ = self.request(base)
+        self.assertEqual((200, None, None), (status, empty["bank_id"], empty["chunks"]))
+        self.assertEqual(400, self.request(base + "?path=chunks")[0])
+        (self.project / "memory-bank/chunks").mkdir(parents=True)
+        self.assertTrue(self.server.knowledge.lock.acquire(blocking=False))
+        try:
+            status, payload, _ = self.request(base)
+            self.assertEqual((200, "memory-bank", []), (status, payload["bank_id"], payload["chunks"]["items"]))
+            status, busy, _ = self.post(base + "/check", {})
+            self.assertEqual((409, "Another knowledge operation is running. Wait for it to finish."), (status, busy["error"]))
+        finally:
+            self.server.knowledge.lock.release()
+        self.assertEqual(400, self.post(base + "/check", {"bank": 3})[0])
+        self.assertEqual(400, self.post(base + "/check?bank=memory-bank", {})[0])
+
+    def test_accelerator_startup_bytes_match_the_ci_budget_measurement(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import context_budget
+        status, data, _ = self.request("/api/accelerators/startup")
+        self.assertEqual(200, status)
+        self.assertEqual(["Laravel", "Symfony", "PHP Core", "WordPress"], [row["edition"] for row in data["editions"]])
+        for row in data["editions"]:
+            measured = context_budget.measure_edition(row["edition"])
+            self.assertEqual({key: measured[key] for key in context_budget.STARTUP_CATEGORIES}, row["bytes"])
+            self.assertEqual((sum(row["bytes"].values()), context_budget.startup_tokens(measured)), (row["total"], row["tokens"]))
+            self.assertLessEqual(row["total"], row["ceiling_total"])
+        self.assertEqual("docs/TOKEN-ECONOMY-RESEARCH.md as of 9435dfc1^", data["calibration"])
+        self.assertEqual(400, self.request("/api/accelerators/startup?edition=Laravel")[0])
+
     def test_selecting_brain_record_focuses_editable_progress_without_erasing_draft(self):
-        page = (Path(__file__).resolve().parents[1] / 'harness/web/index.html').read_text()
-        source = page[page.index('    function fillKnowledgeSelection('):page.index('    function submitKnowledgeForm(')]
+        page = ui_script()
+        source = page[page.index('\nfunction fillKnowledgeSelection('):page.index('\nfunction submitKnowledgeForm(')]
         script = """const assert = require('node:assert/strict');
 const fields = {
   'brain-knowledge-action': {value:'brain-update'},
@@ -227,8 +292,8 @@ assert.equal(fields['brain-op-progress'].scrolled,true);
 
     @unittest.skipUnless(shutil.which('node'), 'Browser calculator check requires Node')
     def test_browser_budget_calculator_forms_shared_limits_with_parallel_deadlines(self):
-        page=(Path(__file__).resolve().parents[1]/'harness/web/index.html').read_text()
-        source=page[page.index('    function perAgentTotals('):page.index('    function agentBudgetControls(')]
+        page=ui_script()
+        source=page[page.index('\nfunction perAgentTotals('):page.index('\nfunction agentBudgetControls(')]
         scenarios=[
             ({'usd':2,'tokens':10000,'seconds':120},{'count':4,'waves':1,'fleet':False},{'usd':8,'tokens':40000,'seconds':120}),
             ({'usd':1,'tokens':1000,'seconds':100},{'count':5,'waves':3,'fleet':True},{'usd':5,'tokens':5000,'seconds':300}),
@@ -528,21 +593,50 @@ assert.equal(fields['brain-op-progress'].scrolled,true);
         self.assertNotIn("executable", boot["providers"][0])
         self.assertEqual({kit["id"] for kit in boot["accelerators"]}, {"kit1", "kit2", "kit3"})
         self.assertEqual((boot["runtime"]["max_agents"], boot["runtime"]["default_agent_count"]), (40, 3))
+        # The Project context chip caps each file at the excerpt size the prompt sends.
+        self.assertEqual(boot["runtime"]["context_excerpt_bytes"], 3000)
         self.assertEqual(headers["Cache-Control"], "no-store")
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
         self.assertIn("frame-ancestors 'self'", headers["Content-Security-Policy"])
+        page_html = (WEB / "index.html").read_text(encoding="utf-8")
+        self.assertEqual(set(re.findall(r'(?:src|href)="/([^"/]+)"', page_html)), set(web.ASSETS))
+        served = self.request("/")[1]
+        self.assertEqual(len(web.ASSETS), len(re.findall(rb'(?:src|href)="/[^"/?]+\?v=[0-9a-f]{16}"', served)))
+        for name, content_type in web.ASSETS.items():
+            with self.subTest(asset=name):
+                status, body, asset_headers = self.request("/" + name)
+                self.assertEqual((status, body), (200, (WEB / name).read_bytes()))
+                self.assertEqual(asset_headers["Content-Type"], content_type)
+                self.assertEqual(asset_headers["X-Content-Type-Options"], "nosniff")
+                # Page files are kept by the browser and revalidated by their hash on every load.
+                self.assertEqual(asset_headers["Cache-Control"], "no-cache")
+                tag = asset_headers["ETag"]
+                self.assertEqual(tag, '"' + hashlib.sha256(body).hexdigest()[:32] + '"')
+                self.assertEqual(self.request("/" + name, headers={"If-None-Match": tag})[:2], (304, b""))
+                self.assertEqual(self.request("/" + name, headers={"If-None-Match": '"stale", ' + tag})[0], 304)
+                self.assertEqual(self.request("/" + name, headers={"If-None-Match": '"stale"'})[:2], (200, body))
+                # The served page names the asset by its hash; that address may be kept for good.
+                version = re.search(r'="/%s\?v=([0-9a-f]{16})"' % re.escape(name), served.decode()).group(1)
+                self.assertEqual(version, hashlib.sha256(body).hexdigest()[:16])
+                pinned = self.request(f"/{name}?v={version}")
+                self.assertEqual((pinned[0], pinned[1], pinned[2]["Cache-Control"]), (200, body, "private, max-age=31536000, immutable"))
+                self.assertEqual(self.request(f"/{name}?v=0000000000000000")[2]["Cache-Control"], "no-cache")
+                head_status, head, head_headers = self.request("/" + name, "HEAD")
+                self.assertEqual((head_status, head, int(head_headers["Content-Length"])), (200, b"", len(body)))
         for path, marker in (("/", b"AI Infrastructure Harness"),
                              ("/kit3/", b"Open Source Kit"),
                              ("/kit3/index.html", b"Open Source Kit")):
             with self.subTest(path=path):
-                status, page, _ = self.request(path)
+                status, page, page_headers = self.request(path)
                 self.assertEqual(status, 200)
                 self.assertIn(marker, page)
+                self.assertEqual(self.request(path, headers={"If-None-Match": page_headers["ETag"]})[:2], (304, b""))
                 head_status, head, head_headers = self.request(path, "HEAD")
                 self.assertEqual(head_status, 200)
                 self.assertEqual(head, b"")
                 self.assertEqual(int(head_headers["Content-Length"]), len(page))
-        for path in ("/index.html", "/kit3", "/api/bootstrap/", "/harness/web/index.html",
+        for path in ("/index.html", "/kit3", "/api/bootstrap/", "/harness/web/index.html", "/harness/web/app.css",
+                     "/app-unknown.js", "/app.css/", "/APP.CSS",
                      "/scripts/install_accelerator.py", "/../state/sessions.sqlite3", "/%2e%2e/secret"):
             with self.subTest(path=path):
                 self.assertEqual(self.request(path)[0], 404)
@@ -1460,6 +1554,357 @@ assert.equal(fields['brain-op-progress'].scrolled,true);
             self.assertEqual(spawn.call_args.kwargs["cwd"], web.ROOT)
         finally:
             os.chdir(previous)
+
+
+ROOT = Path(__file__).resolve().parents[1]
+# The harness serves the Kit 3 catalog in a same-origin frame, so both pages share one theme contract.
+THEMED_PAGES = (ROOT / "harness/web/index.html", ROOT / "install/open-source-kit/web/index.html")
+COLOR_LITERAL = re.compile(r"#[0-9a-fA-F]{3,8}\b|(?<![\w-])(?:white|black)(?![\w-])"
+                           r"|\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color-mix)\(")
+
+
+class HarnessThemeTests(unittest.TestCase):
+    def run_node(self, script):
+        result = subprocess.run([shutil.which("node"), "-e", script], capture_output=True, text=True)
+        if result.returncode:
+            self.fail(result.stderr)
+
+    def test_stylesheets_take_every_color_from_matching_light_and_dark_tokens(self):
+        for page in THEMED_PAGES:
+            with self.subTest(page=page.relative_to(ROOT).as_posix()):
+                html = page.read_text(encoding="utf-8")
+                css = stylesheet(page)
+                light = re.search(r"\n\s*:root \{([^}]*)\}", css).group(1)
+                dark = re.search(r'\n\s*:root\[data-theme="dark"\] \{([^}]*)\}', css).group(1)
+                tokens = set(re.findall(r"(--[\w-]+)\s*:", light))
+                self.assertEqual(tokens, set(re.findall(r"(--[\w-]+)\s*:", dark)),
+                                 "every token needs a light and a dark value")
+                self.assertEqual(COLOR_LITERAL.findall(css.replace(light, "").replace(dark, "")), [],
+                                 "add a token to both :root sets instead of a literal color")
+                defined = set(re.findall(r"(--[\w-]+)\s*:", " ".join(re.findall(r":root[^{]*\{([^}]*)\}", css))))
+                runtime = set(re.findall(r"setProperty\('(--[\w-]+)'", html + ui_script()))
+                self.assertLessEqual(set(re.findall(r"var\((--[\w-]+)", css)) - runtime, defined)
+        switch = re.findall(r'<input type="radio" name="theme" value="(\w+)">', THEMED_PAGES[0].read_text(encoding="utf-8"))
+        self.assertEqual(switch, ["system", "light", "dark"])
+
+    def test_stylesheets_take_type_and_shape_from_the_scale_and_space_from_the_grid(self):
+        for page in THEMED_PAGES:
+            with self.subTest(page=page.relative_to(ROOT).as_posix()):
+                rules = re.sub(r":root[^{]*\{[^}]*\}", "", stylesheet(page))
+                for prop in ("font-size", "line-height", "font-weight", "border-radius", "font"):
+                    literal = [value for value in re.findall(rf"(?<![\w-]){prop}:\s*([^;}}]+)", rules)
+                               if any(unit != "%" and float(number) for number, unit in
+                                      re.findall(r"(?<![\w-])(\d*\.?\d+)(px|em|rem|%)?(?!\w)", re.sub(r"var\([^)]*\)", "", value)))]
+                    self.assertEqual(literal, [], f"{prop} must come from a scale token")
+                spacing = re.findall(r"(?<![\w-])(?:padding|margin|gap|row-gap|column-gap)(?:-[a-z]+)?:\s*([^;}]+)", rules)
+                off_grid = sorted({px for value in spacing for px in re.findall(r"(\d+(?:\.\d+)?)px", value)
+                                   if float(px) not in (1, 2, 4, 8, 12, 16, 24, 32, 48, 64)})
+                self.assertEqual(off_grid, [], "spacing must sit on the 4px grid")
+
+    def test_motion_comes_from_tokens_and_reduced_motion_stops_it_everywhere(self):
+        for page in THEMED_PAGES:
+            with self.subTest(page=page.relative_to(ROOT).as_posix()):
+                css = stylesheet(page)
+                rules = re.sub(r":root[^{]*\{[^}]*\}", "", css)
+                motion = re.findall(r"(?<![\w-])(?:transition|animation)(?:-[a-z]+)?:\s*([^;}]+)", rules)
+                self.assertTrue(motion)
+                literal = [value for value in motion if "cubic-bezier(" in value
+                           or re.search(r"(?<![\w.-])\d*\.?\d+m?s\b", re.sub(r"var\([^)]*\)", "", value))]
+                self.assertEqual(literal, [], "durations and easings come from the motion tokens")
+                # Pseudo-elements animate too (the agents panel's live dot), so reduced motion must name them.
+                reduced = re.search(r"@media \(prefers-reduced-motion:reduce\) \{ ([^{]+)\{([^}]*)\}", css)
+                self.assertIsNotNone(reduced)
+                self.assertEqual({part.strip() for part in reduced.group(1).split(",")}, {"*", "*::before", "*::after"})
+                self.assertIn("animation:none !important", reduced.group(2))
+                self.assertIn("transition:none !important", reduced.group(2))
+
+    def test_memory_colors_read_as_marks_on_both_surfaces_in_both_themes(self):
+        def luminance(color):
+            channels = [int(color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+            return sum(weight * (c / 12.92 if c <= .04045 else ((c + .055) / 1.055) ** 2.4)
+                       for weight, c in zip((.2126, .7152, .0722), channels))
+        def contrast(a, b):
+            high, low = sorted((luminance(a), luminance(b)), reverse=True)
+            return (high + .05) / (low + .05)
+        css = stylesheet(THEMED_PAGES[0])
+        for block in (re.search(r"\n\s*:root \{([^}]*)\}", css).group(1), re.search(r':root\[data-theme="dark"\] \{([^}]*)\}', css).group(1)):
+            tokens = dict(re.findall(r"(--[\w-]+):(#[0-9a-f]{6})\b", block))
+            tokens.setdefault("--paper", "#ffffff")
+            marks = {name: value for name, value in tokens.items() if name.startswith(("--mem-", "--ctx-"))}
+            self.assertEqual(set(marks), {"--mem-rules", "--mem-bank", "--mem-brain", "--mem-auto", "--ctx-rest", "--ctx-added"})
+            for name, value in marks.items():
+                for surface in ("--paper", "--soft"):
+                    with self.subTest(token=name, surface=surface, paper=tokens["--paper"]):
+                        self.assertGreaterEqual(contrast(value, tokens[surface]), 3, "chart marks need 3:1 (WCAG 1.4.11)")
+
+    @unittest.skipUnless(shutil.which("node"), "Theme script check requires Node")
+    def test_saved_theme_applies_before_first_paint_in_the_harness_and_its_catalog(self):
+        heads = []
+        for page in THEMED_PAGES:
+            head = page.read_text(encoding="utf-8").split("</head>", 1)[0]
+            heads.append(head[head.index("<script>") + len("<script>"):head.index("</script>")])
+        self.run_node("const assert = require('node:assert/strict');\nconst heads = " + json.dumps(heads) + """;
+for (const saved of [null,'light','dark','sepia','denied']) for (const systemDark of [false,true]) {
+  const themes = heads.map(source => {
+    const root = {dataset:{}};
+    const localStorage = {getItem(key) { assert.equal(key,'harness.theme.v1'); if (saved === 'denied') throw new Error('denied'); return saved; }};
+    const window = {matchMedia: () => ({matches:systemDark, addEventListener() {}}), addEventListener() {}};
+    new Function('window','document','localStorage',source)(window,{documentElement:root},localStorage);
+    return root.dataset.theme;
+  });
+  const expected = saved === 'light' || saved === 'dark' ? saved : systemDark ? 'dark' : 'light';
+  assert.deepEqual(themes,[expected,expected],`saved ${saved}, system ${systemDark ? 'dark' : 'light'}`);
+}""")
+
+    @unittest.skipUnless(shutil.which("node"), "Theme script check requires Node")
+    def test_theme_switch_saves_the_choice_and_follows_the_system_and_other_tabs(self):
+        page = ui_script()
+        start = page.index("\nconst themeKey = ") + 1
+        source = page[start:page.index("\napplyTheme();\n", start) + len("\napplyTheme();\n")]
+        self.run_node("const assert = require('node:assert/strict');\nconst source = " + json.dumps(source) + """;
+function boot({saved = null, dark = false, denied = false} = {}) {
+  const env = {stored:saved === null ? {} : {'harness.theme.v1':saved}, denied, listeners:{}, root:{dataset:{}}};
+  env.system = {matches:dark, addEventListener: (type,listener) => { env.listeners.system = listener; }};
+  env.radios = ['system','light','dark'].map(value => ({value, checked:false, addEventListener(type,listener) { this.change = listener; }}));
+  const localStorage = {
+    getItem: key => { if (env.denied) throw new Error('denied'); return key in env.stored ? env.stored[key] : null; },
+    setItem: (key,value) => { if (env.denied) throw new Error('denied'); env.stored[key] = String(value); },
+    removeItem: key => { if (env.denied) throw new Error('denied'); delete env.stored[key]; },
+  };
+  const window = {matchMedia: () => env.system, addEventListener: (type,listener) => { env.listeners[type] = listener; }};
+  new Function('window','document','localStorage',source)(window,{documentElement:env.root, querySelectorAll: () => env.radios},localStorage);
+  env.choose = value => { const radio = env.radios.find(r => r.value === value); radio.checked = true; radio.change(); };
+  env.checked = () => env.radios.filter(r => r.checked).map(r => r.value);
+  env.flip = matches => { env.system.matches = matches; env.listeners.system(); };
+  return env;
+}
+let env = boot();
+assert.equal(env.root.dataset.theme,'light'); assert.deepEqual(env.checked(),['system']);
+env.flip(true); assert.equal(env.root.dataset.theme,'dark');
+env.choose('light'); assert.equal(env.stored['harness.theme.v1'],'light'); assert.equal(env.root.dataset.theme,'light'); assert.deepEqual(env.checked(),['light']);
+env.flip(false); env.flip(true); assert.equal(env.root.dataset.theme,'light');
+env.stored['harness.theme.v1'] = 'dark'; env.listeners.storage({key:'harness.theme.v1'});
+assert.equal(env.root.dataset.theme,'dark'); assert.deepEqual(env.checked(),['dark']);
+env.choose('system'); assert.equal('harness.theme.v1' in env.stored,false); assert.equal(env.root.dataset.theme,'dark');
+env = boot({saved:'sepia', dark:true});
+assert.equal(env.root.dataset.theme,'dark'); assert.deepEqual(env.checked(),['system']);
+env = boot({saved:'light', dark:true, denied:true});
+assert.equal(env.root.dataset.theme,'dark'); assert.deepEqual(env.checked(),['system']);
+env.choose('light'); assert.equal(env.root.dataset.theme,'light'); assert.deepEqual(env.checked(),['light']);""")
+
+
+@unittest.skipUnless(shutil.which("node"), "Page helper checks require Node")
+class PageHelperTests(unittest.TestCase):
+    def run_node(self, source, checks):
+        result = subprocess.run([shutil.which("node"), "-e", "const assert = require('node:assert/strict');\n" + source + checks],
+                                capture_output=True, text=True)
+        if result.returncode:
+            self.fail(result.stderr)
+
+    def test_numbers_follow_one_grammar_and_unknown_is_never_zero(self):
+        page = ui_script()
+        self.run_node(page[page.index("\nconst numberText"):page.index("\nfunction numberNode(")], r"""
+assert.deepEqual(fmt.exact(76450), {text: '76,450', label: '76,450'});
+assert.deepEqual(fmt.exact(Number.NaN), {text: '—', label: 'not reported'});
+assert.deepEqual(fmt.estimate(4123), {text: '≈ 4.1k', label: 'about 4,100'});
+assert.deepEqual([fmt.estimate(520.4).text, fmt.estimate(53210).text, fmt.estimate(1234567).text, fmt.estimate(1988).text, fmt.estimate(149e3).text],
+  ['≈ 520', '≈ 53k', '≈ 1.2M', '≈ 2.0k', '≈ 150k']);
+assert.deepEqual([fmt.atMost(4000).text, fmt.atLeast(12345).text], ['≤ 4k', '≥ 12k']);
+assert.deepEqual(fmt.atMost(4100), {text: '≤ 4.1k', label: 'at most 4,100'});
+assert.deepEqual([fmt.atLeast(13).text, fmt.capped(200).text, fmt.capped(200).label], ['≥ 13', '200+', 'more than 200']);
+assert.deepEqual(fmt.cost(.3), {text: '≈ $0.30', label: 'about 0.30 US dollars'});
+assert.deepEqual([fmt.cost(4.8312).text, fmt.cost(.0123).text, fmt.cost(.123).text], ['≈ $4.83', '≈ $0.0123', '≈ $0.123']);
+for (const unknown of [null, undefined, -1, Infinity]) assert.equal(fmt.cost(unknown).text, '—');
+assert.equal(fmt.unknown('not recorded').label, 'not recorded');
+""")
+
+    def test_capsule_meter_and_context_chip_read_exact_counts_and_marked_estimates(self):
+        page = ui_script()
+        parts = [page[page.index(start):page.index(end)] for start, end in (
+            ("\nconst el = (tag", "\n// Motion follows"), ("\nconst numberText", "\n// Keeps one node per key"),
+            ("\nconst capsuleKinds", "\nfunction renderLinkedSession("),
+            ("\nfunction renderContextValue(", "\n$('project').addEventListener('change',loadContextSizes)"))]
+        self.run_node(r"""
+class Node { constructor() { this.children = []; this.dataset = {}; this.attributes = {}; this.style = {}; this.hidden = false; this.own = ''; }
+  get textContent() { return this.children.length ? this.children.map(child => typeof child === 'string' ? child : child.textContent).join('') : this.own; }
+  set textContent(value) { this.children = []; this.own = String(value); }
+  setAttribute(name, value) { this.attributes[name] = String(value); }
+  append(...nodes) { this.children.push(...nodes); }
+  replaceChildren(...nodes) { this.own = ''; this.children = nodes; }
+  querySelector(selector) { return this.children.find(child => selector === `[data-kind="${child.dataset.kind}"]`); } }
+const document = {createElement: () => new Node()}, nodes = {}, $ = id => nodes[id] ??= new Node();
+const state = {pending: null, bootstrap: {runtime: {context_excerpt_bytes: 3000}}};
+const contextSizes = {project: 'p1', files: null};
+for (const kind of ['brain', 'bank', 'rules']) { const part = new Node(); part.dataset.kind = kind; $('capsule-bar').append(part); }
+""" + "".join(parts), r"""
+const part = kind => $('capsule-bar').querySelector(`[data-kind="${kind}"]`);
+renderCapsuleMeter({characters: 7650, limit: 8000, kinds: {brain: 2592, bank: 4296, rules: 762}, items: {brain: 2, bank: 3, rules: 1},
+  repeats: 1448, dropped: {semantic: 2, episodic: 1}, prompt_characters: 7946});
+assert.equal($('capsule-meter').hidden, false);
+assert.equal($('capsule-facts').textContent, '7,650 of 8,000 characters · 2 semantic items dropped to fit · 1 episodic item dropped to fit · 350 characters left');
+assert.equal($('capsule-repeats').textContent, 'Each item appears in 3 views: 1,448 characters repeat');
+assert.deepEqual($('capsule-legend').children.map(entry => entry.textContent), ['Project Brain 2,592', 'Memory bank 4,296', 'Rules & docs 762']);
+assert.deepEqual(['brain', 'bank', 'rules'].map(kind => part(kind).style.width), ['32.4%', '53.7%', '9.525%']);
+assert.equal(part('bank').title, 'Memory bank · 3 items · 4,296 characters');
+assert.equal($('capsule-bar').attributes['aria-label'], 'Capsule 7,650 of 8,000 characters: Project Brain 2,592, Memory bank 4,296, Rules and docs 762; 2 semantic items dropped to fit, 1 episodic item dropped to fit; 1,448 characters repeat.');
+const cost = $('linked-context-cost').children;
+assert.deepEqual([cost[0], cost[1].children[0].textContent, cost[1].children[0].attributes['aria-hidden'], cost[1].children[1].textContent, cost[2]],
+  ['Adds ', '≈ 2.2k tokens', 'true', 'about 2,200 tokens', ' to every turn.']);
+renderCapsuleMeter({characters: 900, limit: 8000, kinds: {brain: 900, bank: 0, rules: 0}, items: {brain: 0, bank: 0, rules: 0},
+  repeats: 0, dropped: {}, prompt_characters: 1000});
+assert.equal($('capsule-facts').textContent, '900 of 8,000 characters · No matching memory for this query.');
+assert.deepEqual([$('capsule-repeats-line').hidden, part('bank').hidden, part('rules').hidden, $('capsule-legend').children.length], [true, true, true, 1]);
+renderCapsuleMeter(null);
+assert.equal($('capsule-meter').hidden, true);
+
+nodes['project-context'] = {checked: true}; nodes.project = {value: 'p1'};
+contextSizes.files = [{path: 'AGENTS.md', exists: true, bytes: 13998}, {path: 'CLAUDE.md', exists: true, bytes: 871}, {path: 'README.md', exists: false, bytes: 0}];
+renderContextValue();
+const chip = $('project-context-value').children;
+// Each file counts up to the 3,000-byte excerpt: (3,000 + 871) / 4.7 ≈ 820 tokens.
+assert.deepEqual([chip[0].textContent, chip[0].attributes['aria-hidden'], chip[1].textContent], ['≈ 820 tokens', 'true', ', adds about 820 tokens per launch']);
+nodes['project-context'].checked = false; renderContextValue();
+assert.equal($('project-context-value').textContent, '');
+nodes['project-context'].checked = true; contextSizes.files = [{path: 'AGENTS.md', exists: false, bytes: 0}]; renderContextValue();
+assert.equal($('project-context-value').textContent, 'no files');
+contextSizes.project = 'p2'; renderContextValue();
+assert.equal($('project-context-value').textContent, '');
+""")
+
+    def test_memory_use_model_counts_the_window_and_what_changed_since_the_last_visit(self):
+        page = ui_script()
+        self.run_node(page[page.index("\nconst numberText"):page.index("\nfunction numberNode(")]
+                      + "\nconst memoryKinds = [['brain','Project Brain'],['bank','Memory bank'],['rules','Rules & docs']];"
+                      + page[page.index("\nconst DAY_MS"):page.index("\nconst memoryAnchorKey")]
+                      + page[page.index("\nconst memoryFilters"):page.index("\nconst memoryMatches")], r"""
+const chunk = (id, fields) => ({id, title:id, type:'domain', status:'active', created:'2025-10-01', last_verified:'2025-10-01', review_after:'2026-12-01',
+  valid_to:null, promoted:false, auto:false, bytes:100, sources:1, sources_changed:false, path:`chunks/${id}.md`, ...fields});
+const data = {today:'2026-10-04',
+  chunks:{bytes:600, truncated:false, items:[chunk('A',{review_after:'2026-10-01'}), chunk('B',{auto:true, promoted:true, created:'2026-09-30', last_verified:'2026-09-30', review_after:'2027-09-30'}),
+    chunk('C',{auto:true, promoted:true, last_verified:'2026-09-02', review_after:'2027-09-02'}), chunk('D',{status:'needs-review'}),
+    chunk('E',{status:'superseded', valid_to:'2026-09-20'}), chunk('F',{review_after:'2026-10-20', sources_changed:true})]},
+  brain:{truncated:false, items:[{type:'task', status:'active', archived:false, open:true, resolved_at:null, promotable:false, promoted:false},
+    {type:'finding', status:'resolved', archived:false, open:false, resolved_at:'2026-09-25T08:00:00+00:00', promotable:true, promoted:false},
+    {type:'finding', status:'resolved', archived:true, open:false, resolved_at:'2026-09-29T08:00:00+00:00', promotable:true, promoted:true},
+    {private:true, archived:true, open:false, resolved_at:'2026-01-02T08:00:00+00:00', promotable:true, promoted:false}]},
+  promotions:{truncated:false, items:[{status:'applied', mode:'automatic', created_at:'2026-09-29T09:00:00+00:00', applied_at:'2026-09-30T09:00:00+00:00'},
+    {status:'applied', mode:'human', created_at:'2026-08-01T09:00:00+00:00', applied_at:'2026-09-15T09:00:00+00:00'},
+    {status:'proposed', mode:'human', created_at:'2026-10-01T09:00:00+00:00', applied_at:null}, {status:'reviewed', mode:'automatic', created_at:'2026-10-02T09:00:00+00:00', applied_at:null}]},
+  retrievals:{found:3, merged:1, limit:200, items:[{at:'2026-09-27T10:00:00+00:00', route:'Claude hook', task:0, brain:2, bank:2, rules:3, chunks:['A','B'], cuts:[]},
+    {at:'2026-10-02T10:00:00+00:00', route:'Harness', task:1, brain:1, bank:1, rules:2, chunks:['B'], cuts:[['C','layer-limit']]},
+    {at:'2026-10-03T10:00:00+00:00', route:'not recorded', task:1, brain:1, bank:0, rules:2, chunks:[], cuts:[]}]},
+  health:{truncated:false, items:[{at:'2026-09-20T10:00:00+00:00', dropped:true}, {at:'2026-09-27T10:00:00+00:00', dropped:true}, {at:'2026-10-02T10:00:00+00:00', dropped:false}, {at:'2026-10-03T10:00:00+00:00', dropped:null}]},
+  history:{horizon:120, days:[{day:'2026-07-01', retrievals:40, with_chunk:6, chunks:{F:2}}, {day:'2026-09-28', retrievals:12, with_chunk:2, chunks:{A:1, B:1}},
+    {day:'2026-10-02', retrievals:9, with_chunk:1, chunks:{B:1}}]}};
+const now = Date.parse('2026-10-04T12:00:00Z'), model = memoryUseModel(data, 30, now);
+// Trouble the tab counts: one chunk past review, one citing a changed file, one stalled automatic promotion.
+assert.equal(model.count, 3);
+assert.deepEqual([model.bank.active, model.bank.person, model.bank.auto, model.bank.reattested, model.bank.drafts, model.bank.superseded],[4, 2, 2, 1, 1, 1]);
+assert.deepEqual([model.bank.created, model.bank.retiredInWindow, model.bank.pastReview.map(c => c.id), model.bank.due.map(c => c.id)],[1, 1, ['A'], ['F']]);
+assert.deepEqual([model.brain.total, model.brain.open, model.brain.archived, model.brain.private, model.brain.resolved, model.brain.notPromoted],[4, 1, 2, 1, 2, 1]);
+assert.deepEqual([model.promotion.proposed, model.promotion.applied, model.promotion.auto, model.promotion.human, model.promotion.waiting.length, model.promotion.stalled.length],[3, 2, 1, 1, 1, 1]);
+const selected = model.selected;
+assert.deepEqual([selected.withChunk, selected.selections, selected.distinct, selected.reused, selected.cutTotal, selected.kinds],[2, 3, 2, 1, 1, {brain:4, bank:3, rules:7}]);
+// Dropped-to-fit counts only health lines inside the retrieval window, and an unmeasured line is not a zero.
+assert.deepEqual([selected.dropped, selected.measured, selected.merged],[1, 2, 1]);
+assert.deepEqual([model.review(data.chunks.items[0]), model.review(data.chunks.items[1])],[-3, 361]);
+const week = memoryUseModel(data, 7, now);
+assert.deepEqual([week.promotion.applied, week.brain.resolved, week.bank.created, week.bank.retiredInWindow],[1, 1, 1, 0]);
+assert.equal(memoryUseModel(data, 0, now).promotion.applied, 2);
+assert.deepEqual([bandWidth(0), bandWidth(1), bandWidth(3), bandWidth(10), bandWidth(11), bandWidth(41), bandWidth(51)],[1, 2, 4, 8, 12, 16, 24]);
+assert.deepEqual([reviewLabel(-3), reviewLabel(0), reviewLabel(344), reviewLabel(null)],['3 d overdue', 'today', 'in 344 d', '—']);
+const anchor = {at:'2026-09-28T16:40:00.000Z', today:'2026-09-28', newest:'2026-09-30T00:00:00+00:00',
+  chunks:{A:['active','2025-10-01','2026-10-01'], C:['active','2025-10-01','2026-09-29'], D:['needs-review','2025-10-01','2026-12-01'], E:['active','2025-10-01','2026-12-01'], F:['active','2025-10-01','2026-10-20']},
+  promotions:{'2026-09-29T09:00:00+00:00|automatic':'reviewed', '2026-08-01T09:00:00+00:00|human':'applied'}};
+const changes = memoryChanges(data, anchor), ids = list => list.map(item => item.id);
+assert.deepEqual([ids(changes.added), ids(changes.retired), ids(changes.reattested), ids(changes.moved), ids(changes.crossed)],[['B'], ['E'], ['C'], ['C'], ['A']]);
+assert.deepEqual([changes.applied.map(item => item.mode), changes.retrievals.length, changes.firstNew],[['automatic'], 2, 1]);
+assert.equal(memoryChanges(data, null), null);
+const snapshot = memorySnapshot(data);
+assert.deepEqual([snapshot.today, snapshot.newest, snapshot.chunks.A, Object.keys(snapshot.promotions).length],['2026-10-04', '2026-10-03T10:00:00+00:00', ['active','2025-10-01','2026-10-01'], 4]);
+assert.deepEqual(memoryChanges(data, snapshot), {since:snapshot.at, added:[], retired:[], reattested:[], moved:[], crossed:[], applied:[], retrievals:[], firstNew:3});
+// The kept history counts inside the flow window; per-chunk counts span everything kept.
+assert.deepEqual([model.history.retrievals, model.history.withChunk, model.history.days.length, model.history.since, model.history.chunks.get('F'), model.history.chunks.get('B')],
+  [21, 3, 2, '2026-07-01', 2, 2]);
+assert.deepEqual([memoryUseModel(data, 0, now).history.retrievals, memoryUseModel(data, 7, now).history.retrievals, memoryUseModel(data, 3, now).history.retrievals], [61, 21, 9]);
+const never = memoryFilters.find(([id]) => id === 'never')[2];
+// F was never in the last retrievals, but the kept history saw it selected.
+assert.deepEqual(['A', 'C', 'F'].map(id => never(data.chunks.items.find(item => item.id === id), model)), [false, true, false]);
+""")
+
+    def test_context_turns_split_exact_fill_from_estimated_memory_and_bound_earlier_copies(self):
+        page = ui_script()
+        source = page[page.index("// Sessions › Usage › Context"):page.index("\n$('context-meter').addEventListener")]
+        self.run_node(page[page.index("\nconst numberText"):page.index("\nfunction numberNode(")]
+                      + page[page.index("\nconst plural"):page.index("\nconst reasonLabel")]
+                      + "\nconst window = {matchMedia: () => ({matches: false, addEventListener() {}})};"
+                      + "\nconst el = (tag, className, text) => ({tag, className, textContent: text});\n" + source, r"""
+const ledger = {message: 388, instructions: 300, total: 18000, attachments: {characters: 214, count: 1},
+  capsule: {characters: 6895, inserted: 7157, kinds: {brain: 2409, bank: 1858, rules: 2890}, repeats: 3121, dropped: {semantic: 2}, items: {brain: 1, bank: 1, rules: 2}},
+  excerpts: [{name: 'AGENTS.md', sent: 3000, full: 13998, characters: 3000}, {name: 'README.md', sent: 3000, full: 18245, characters: 3000},
+             {name: 'project-brain/README.md', sent: 3000, full: 5919, characters: 3000}, {name: 'specs/MANIFEST.md', sent: 871, full: 871, characters: 871}]};
+const launch = (id, fill, extra = {}) => ({id, kind: 'native', status: 'completed', started_at: '2026-10-03T15:05:00+00:00', settings: {provider: 'claude'},
+  context: fill === undefined ? null : {version: 1, provider: 'claude', agents: 1, ledger, fill, hooks: {installed: true, measured: true, bytes: null}, cli_files: []}, ...extra});
+const turns = contextTurns([
+  launch('t1'),
+  launch('t2', {start: 31840, end: 61870, peak: 61870, calls: 18, window: 200000, compactions: [], cache_share: .88, hooks: null}),
+  launch('t3', {start: 66410, end: 52800, peak: 171900, calls: 31, window: 200000, compactions: [{pre: 171900, post: 29400, call: 24}], cache_share: .93, hooks: null}),
+  launch('t4', {start: 57190, end: 76450, peak: 76450, calls: 14, window: 200000, compactions: [], cache_share: .91, hooks: null}),
+  {id: 'fleet', kind: 'fleet', status: 'completed', started_at: '2026-10-03T15:10:00+00:00', settings: {provider: 'claude'}, context: {ledger, agents: 5, fill: null}},
+  launch('t5', {start: 80960, end: 106600, peak: 106600, calls: 11, window: 200000, compactions: [], cache_share: .94, hooks: null}, {status: 'running'})]);
+assert.deepEqual(turns.map(turn => turn.ordinal), [1, 2, 3, 4, 5]);
+const t4 = turns[3];
+// Memory is estimated from characters: capsule ÷ 3.6, excerpts ÷ 4.7, summed before rounding.
+assert.equal(Math.round(t4.memory), 4088);
+assert.deepEqual([fmt.estimate(t4.memory).text, fmt.estimate(t4.parts.brain).text, fmt.estimate(t4.parts.bank).text, fmt.estimate(t4.parts.rules).text],
+  ['≈ 4.1k', '≈ 670', '≈ 520', '≈ 2.9k']);
+assert.deepEqual([t4.added, t4.free, fmt.estimate(t4.rest).text, percentText(t4.end, t4.window), percentText(t4.memory, t4.end, true)],
+  [19260, 123550, '≈ 53k', '38%', '≈ 5%']);
+assert.deepEqual([t4.characters.rules, t4.calls, percentText(t4.cache, 1)], [2890 + 9871, 14, '91%']);
+const geometry = contextGeometry(t4);
+assert.equal(Math.round(geometry.brain + geometry.bank + geometry.rules + geometry.rest + geometry.added), 76450);
+// A compacted turn draws its final fill unsplit and has no growth.
+const t3 = turns[2];
+assert.deepEqual([t3.compacted, t3.added, contextGeometry(t3), t3.free, percentText(t3.end, t3.window), percentText(t3.peak, t3.window)],
+  [true, null, {added: 52800}, 147200, '26%', '86%']);
+// Earlier copies: bounded by the memory of turns since the last compaction; an unrecorded turn makes it unknown.
+assert.deepEqual(earlierMemory(turns, 4), {total: t4.memory, from: 4});
+assert.deepEqual(earlierMemory(turns, 3), {total: 0, from: 3});
+assert.deepEqual(earlierMemory(turns, 1), {unknown: 1});
+assert.deepEqual([turns[0].recorded, turns[0].end, contextGeometry(turns[0])], [false, null, null]);
+assert.equal(turns[4].running, true);
+const unknown = contextTurn(launch('cursor', {start: null, end: null, peak: null, calls: null, window: null, compactions: [], cache_share: null, hooks: null}), 6);
+assert.deepEqual([unknown.recorded, unknown.end, unknown.rest, unknown.free, contextGeometry(unknown)], [true, null, null, null, null]);
+// Memory that exceeds the reported start leaves the remainder unknown rather than negative.
+assert.equal(contextTurn(launch('small', {start: 3000, end: 3500, peak: 3500, calls: 1, window: 200000, compactions: [], cache_share: null, hooks: null}), 7).rest, null);
+assert.deepEqual([percentText(1, 1000), percentText(0, 10), percentText(5, 0)], ['<1%', '0%', null]);
+// Fleet and Clash send one prefix to every agent; their launch row names the memory once with the count.
+assert.equal(contextLaunchLine({kind: 'fleet', context: {ledger, agents: 5}}).textContent, 'Memory prefix ≈\u00a04.1k sent to 5 agents');
+assert.equal(contextLaunchLine({kind: 'clash', context: {ledger, agents: 2}}).textContent, 'Memory prefix ≈\u00a04.1k sent to 2 agents');
+assert.deepEqual([contextLaunchLine({kind: 'native', context: {ledger, agents: 1}}), contextLaunchLine({kind: 'fleet', context: null})], [null, null]);
+""")
+
+    def test_keyed_render_keeps_open_nodes_across_polls(self):
+        page = ui_script()
+        self.run_node(page[page.index("\nfunction keyedRender("):page.index("\nconst state = {")], r"""
+class Item { constructor(value) { this.value = value; this.dataset = {}; this.open = false; this.parent = null; }
+  replaceWith(node) { const list = this.parent.children; list[list.indexOf(this)] = node; node.parent = this.parent; this.parent = null; }
+  remove() { const list = this.parent.children; list.splice(list.indexOf(this), 1); this.parent = null; } }
+const container = {children: [], insertBefore(node, before) {
+  if (node.parent) node.parent.children.splice(node.parent.children.indexOf(node), 1);
+  const at = before ? this.children.indexOf(before) : this.children.length; this.children.splice(at, 0, node); node.parent = this; }};
+const placeholder = new Item('No launches'); container.insertBefore(placeholder, null);
+let built = 0; const render = items => keyedRender(container, items, item => item.id, item => { built++; return new Item(item.value); });
+render([{id: 1, value: 'a'}, {id: 2, value: 'b'}]);
+assert.deepEqual(container.children.map(node => node.value), ['a', 'b']);
+const first = container.children[0]; first.open = true;
+render([{id: 1, value: 'a'}, {id: 2, value: 'b'}]);
+assert.equal(built, 2); assert.equal(container.children[0], first); assert.equal(first.open, true);
+render([{id: 1, value: 'a, running 4s'}, {id: 2, value: 'b'}]);
+assert.notEqual(container.children[0], first); assert.equal(container.children[0].open, true);
+render([{id: 3, value: 'c'}, {id: 2, value: 'b'}]);
+assert.deepEqual(container.children.map(node => node.value), ['c', 'b']); assert.equal(built, 4);
+""")
 
 
 if __name__ == "__main__":

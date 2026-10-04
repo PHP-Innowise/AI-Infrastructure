@@ -271,6 +271,20 @@ print(json.dumps({'type':'turn.completed'}),flush=True)
         self.assertEqual((self.target/'AGENTS.md').read_text(),'original\n')
         self.assertFalse((self.target/'.infra-manifest.json').exists())
 
+    def test_postcheck_failure_rolls_back_even_when_journal_is_truncated(self):
+        run,directory,stage=self.prepared();(self.target/'AGENTS.md').write_text('original\n')
+        self.approve(run,directory); pub=creator_runner.publisher(); publish=pub.publish
+        def interrupted_journal(*args):
+            publish(*args)
+            (directory/'journal/journal.json').write_text('{')
+        with patch.object(pub,'publish',side_effect=interrupted_journal), \
+             patch.object(creator_runner,'verify',side_effect=[None,sessions.SessionError('postcheck failed')]):
+            with self.assertRaisesRegex(sessions.SessionError,'postcheck failed'):
+                creator_runner.apply(run)
+        self.assertEqual((self.target/'AGENTS.md').read_text(),'original\n')
+        self.assertFalse((self.target/'.infra-manifest.json').exists())
+        self.assertEqual(json.loads((directory/'journal/journal.json').read_text())['status'],'rolled-back')
+
     def test_partial_publication_recovery_preserves_later_edits(self):
         run,directory,stage=self.prepared();(self.target/'AGENTS.md').write_text('original\n')
         approval=self.approve(run,directory);pub=creator_runner.publisher()

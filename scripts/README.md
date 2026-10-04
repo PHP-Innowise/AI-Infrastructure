@@ -11,6 +11,37 @@ states an external command requirement. Run examples from the repository root.
 
 ## Catalog
 
+### `ai_system.py` / `ai_system_lib.py` / `ai_system_execution.py` / `ai_system_providers.py`
+
+**Purpose and status.** Optional stack-neutral system coordination companion;
+source-only and not part of installed editions. It accepts explicit service
+passports and produces a declared impact map, globally bounded source context,
+and a reviewable plan. Explicit execution launches sequential development
+workers, native Brain tasks and receipt-backed recovery.
+
+```bash
+python3 scripts/ai_system.py validate --system docs/examples/ai-system/system.json
+python3 scripts/ai_system.py map --system docs/examples/ai-system/system.json
+python3 scripts/ai_system.py plan --system docs/examples/ai-system/system.json \
+  --task "Change cancellation behavior" --change-id chg-001 --service orders
+```
+
+- Commands: `init`, `validate`, `catalog`, `map`, `locate`, `plan`, `verify`,
+  `execute`, `resume`, `run-status`.
+- Dependencies: Python 3.9+ standard library on POSIX; optional Git provenance.
+  Execution uses the trusted checkout native runtime and a locally configured
+  Codex, Claude Code or Cursor Agent CLI, or an explicitly selected provider adapter.
+  Native adapters share stdlib Harness command/permission builders.
+- Writes: `init` creates a new system workspace; `plan --output` creates only a
+  new requested file. `execute`/`resume` write private journals and native tasks;
+  `--mode edit` enables scoped worker edits, and `execute --access all` lets every
+  worker read, and in edit mode change, all selected service folders (default
+  `service`: own service only). Declaration/query commands are read-only.
+- Access: external service roots require repeatable caller `--allow-root`;
+  passport metadata cannot authorize arbitrary filesystem access.
+- Tests: `python3 -m unittest tests.test_ai_system tests.test_ai_system_providers tests.test_ai_system_execution`, also in the dedicated CI job.
+- Full contract and sample: [System-level AI Coordination](../docs/AI-SYSTEM-ORCHESTRATION.md).
+
 ### `build_mirrors.py`
 
 **Purpose and status.** Maintainer build tool; source-only and not installed.

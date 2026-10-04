@@ -13,7 +13,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "harness" / "src"))
 from harness import sessions
@@ -337,6 +337,34 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(self.calls[0]['budget_usd'],.5)
         self.assertTrue(any('token limit' in event.get('text','') for event in manager.events(sid)))
         self.assert_process_gone(self.calls[0])
+
+    def test_resumed_claude_launch_counts_only_its_own_spend(self):
+        # From Claude Code 2.1.277 a resumed result reports the session's whole spend; "total <usd> <version>" drives the fixture.
+        self.fake.write_text(FAKE_CLI.replace(
+            '    print(json.dumps({"type": "system", "subtype": "init", "session_id": "native-original"}), flush=True)',
+            '    words = behavior.split()\n'
+            '    init = {"type": "system", "subtype": "init", "session_id": "native-original"}\n'
+            '    if len(words) == 3: init["claude_code_version"] = words[2]\n'
+            '    print(json.dumps(init), flush=True)').replace(
+            '"session_id": "native-original", "result": "Fixture answer"}',
+            '"session_id": "native-original", "result": "Fixture answer", **({"total_cost_usd": float(words[1])} if words[0] == "total" else {})}'))
+        manager = self.manager()
+        for version, totals, own in (('2.1.278', ('0.5', '0.8', '0', '0.95'), [.5, .3, None, .15]),
+                                     ('2.1.276', ('0.5', '0.3'), [.5, .3])):
+            sid = manager.create({'project_id': next(iter(manager.projects)), 'provider': 'claude', 'project_context': False,
+                                  'prompt': f'total {totals[0]} {version}', 'budgets': {'usd': .6, 'tokens': None, 'seconds': 5}})['id']
+            self.settled(manager, sid)
+            for total in totals[1:]:
+                manager.send(sid, f'total {total} {version}'); self.settled(manager, sid)
+            history = manager.results.history(sid)
+            self.assertEqual([launch['usage']['cost_usd'] for launch in history['launches']], own, version)
+            self.assertEqual(history['totals']['cost_usd']['reported'], sum(cost for cost in own if cost is not None), version)
+            self.assertEqual(history['totals']['cost_usd']['unknown_launches'], own.count(None), version)
+            # The USD cap applies to the launch's own spend, not to spend restored from earlier launches.
+            self.assertTrue(all(launch['usage']['limit_reached'] is None for launch in history['launches']), version)
+            self.assertTrue(all(isinstance(launch['usage']['cost_usd_reported'], float) for launch in history['launches']), version)
+        resumed = [call for call in self.calls if call.get('session_id') == 'native-original']
+        self.assertEqual(len(resumed), 4)
 
     def test_explicit_time_budget_terminates_process_and_can_be_increased(self):
         manager=self.manager(timeout=10); sid=self.create(manager,prompt='sleep',project_context=False,budgets={'seconds':1})
@@ -1064,6 +1092,46 @@ class SessionTests(unittest.TestCase):
         self.assertIsNone(restored["git_common_dir"])
         self.assertEqual(manager.events(sid), [{"id": 7, "kind": "user", "text": "Original legacy request"}])
 
+    def test_capsule_meter_counts_every_copy_the_runtime_cap_counts(self):
+        policy = {"id": "policy:AGENTS.md", "category": "policy", "layer": "procedural", "text": "Rules — één owner."}
+        durable = {"id": "memory:MEM-1", "category": "durable", "layer": "semantic", "text": "Chunk.", "score": 4e-06}
+        handoff = {"id": "brain-handoff:H-1", "category": "handoff", "layer": "episodic", "text": "Last handoff."}
+        capsule = {"task_id": "TASK-1", "working": {"task_id": "TASK-1"},
+                   "procedural": [policy], "semantic": [durable], "episodic": [handoff], "selected": [policy, durable],
+                   "categories": {"policy": [policy], "durable": [durable], "handoff": [handoff], "dynamic": []},
+                   "omitted": {"procedural": 0, "semantic": 2, "episodic": 0}}
+
+        def size(value):
+            return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+        meter = sessions.capsule_meter(capsule)
+        # The runtime measures compact JSON in characters, so non-ASCII text is not counted as escapes.
+        self.assertEqual((size(capsule), 8000), (meter["characters"], meter["limit"]))
+        self.assertLess(meter["characters"], len(json.dumps(capsule, separators=(",", ":"))))
+        # Each item counts in its layer, among the selected items and under its category.
+        rules, bank = 3 * size(policy), 3 * size(durable)
+        self.assertEqual({"brain": size(capsule) - rules - bank, "rules": rules, "bank": bank}, meter["kinds"])
+        self.assertEqual({"brain": 1, "rules": 1, "bank": 1}, meter["items"])
+        self.assertEqual(2 * size(policy) + 2 * size(durable) + size(handoff), meter["repeats"])
+        self.assertEqual({"semantic": 2}, meter["dropped"])
+        inserted = sessions.BRAIN_CONTEXT_HEADER + json.dumps(capsule, ensure_ascii=False) + "\n\n"
+        self.assertEqual(len(inserted), meter["prompt_characters"])
+
+    def test_project_context_sends_at_most_the_excerpt_the_chip_counts(self):
+        (self.project / "CLAUDE.md").write_text("A" * (sessions.CONTEXT_EXCERPT_BYTES + 500))
+        (self.project / "README.md").write_text("Short readme")
+        manager = self.manager()
+        files = {item["path"]: item for item in manager.context(next(iter(manager.projects)))["files"]}
+        # The context listing reports whole files; the page caps each one at the excerpt size.
+        self.assertEqual((sessions.CONTEXT_EXCERPT_BYTES + 500, 12, False),
+                         (files["CLAUDE.md"]["bytes"], files["README.md"]["bytes"], files["AGENTS.md"]["exists"]))
+        sid = self.create(manager, project_context=True)
+        self.assertEqual(self.settled(manager, sid)["status"], "completed")
+        prompt = self.calls[-1]["prompt"]
+        self.assertIn("Project reference: CLAUDE.md\n" + "A" * sessions.CONTEXT_EXCERPT_BYTES + "\n\n", prompt)
+        self.assertNotIn("A" * (sessions.CONTEXT_EXCERPT_BYTES + 1), prompt)
+        self.assertIn("Project reference: README.md\nShort readme", prompt)
+        self.assertIsNone(manager.get(sid)["capsule_meter"])
+
     def test_context_and_state_symlinks_are_not_followed(self):
         outside = self.root / "outside.txt"
         outside.write_text("OUTSIDE SECRET")
@@ -1091,6 +1159,22 @@ class SessionTests(unittest.TestCase):
         with self.assertRaises(sessions.SessionError):
             self.manager(state=other_state)
         self.assertEqual(outside.read_text(), "OUTSIDE SECRET")
+
+
+
+class GitCleanupTests(unittest.TestCase):
+    def test_unconfirmed_worktree_process_cleanup_stops_new_admission(self):
+        process = Mock(returncode=0)
+        process.communicate.return_value = ('', '')
+        process.wait.side_effect = subprocess.TimeoutExpired('git fixture', 3)
+        owner = Mock(stopping=threading.Event())
+        with patch.object(sessions.process_runtime, 'launch_guarded', return_value=process), \
+                patch.object(sessions.process_runtime, 'signal_tree'):
+            with self.assertRaisesRegex(sessions.SessionError, 'cleanup could not be confirmed'):
+                sessions.run_git(Path.cwd(), 'worktree', 'add', 'fixture', guard_lock=99, guard_owner=owner)
+        self.assertTrue(owner.stopping.is_set())
+        process.stdout.close.assert_called_once()
+        process.stderr.close.assert_called_once()
 
 
 if __name__ == "__main__":

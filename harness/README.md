@@ -15,6 +15,81 @@ Filenames and sizes are validated, and stored bytes are checked before use.
 Attachments are reference data and are not automatically executed or promoted
 into Memory Bank. A failed send retains the selected files for correction.
 
+## System orchestration in the browser
+
+**System Orchestration** coordinates development changes across registered
+service repositories. It has two tabs and works on the project chosen in the
+sidebar: **Services** holds the system file, its contract map and the editor;
+**Changes** holds plans, launches, agents and receipts. On **Services**, choose
+**Choose system folder…** to open another folder as the system project (it is
+added to your projects and becomes the working project in every view), then
+**Create or edit system**.
+Use **Add service folder** to browse existing folders; selected folders are
+registered automatically. Select **Codex, Claude Code or Cursor Agent**, then
+**Fill with AI** to discover the system name, service IDs, owners, responsibilities,
+capabilities, contracts, dependencies and context sources from a bounded evidence
+snapshot. The ordinary forms are populated automatically, with cited files and
+uncertainties available for review. Unknown owners stay `unknown`; complete
+dependency coverage stays unconfirmed. Review or adjust the result, then
+**Save system**. The application writes `system.json` and service passports,
+no JSON editing is required, and the editor gives way to the updated map.
+Existing systems open in the same form.
+AI scanning uses the single Harness queue, supports cancellation and restores
+its original draft after interruption/reload. It requires bubblewrap on Linux or
+`sandbox-exec` on macOS, plus an installed/authenticated native CLI. The agent
+reads copied evidence; original service folders and unrelated projects are absent
+from its filesystem. OS/CLI runtime and that provider's native account state remain
+available for login and normal CLI operation. This is not isolation from the
+provider's own account/history data. Secret patterns, links, binaries, dependency
+trees and ineligible memory chunks are excluded. Limits are 50 services, 120 files
+and 1 MiB per root, 64 KiB per file, 8 MiB total; omissions are reported. Sources
+are checked again before accepting results and at both save stages. Manual
+editing remains available when a CLI or isolation backend is unavailable.
+A failed scan names its cause (for example an expired CLI login with the command
+to sign in again, or a host that blocks bubblewrap's user namespaces), and the
+editor warns before scanning when the sandbox cannot start on this host. See
+[Troubleshooting AI discovery](../docs/AI-SYSTEM-ORCHESTRATION.md#troubleshooting-ai-discovery).
+Alternatively, **Load system** reads an existing relative system file
+(`system.json` by default). Inspect the declared graph, capabilities and memory
+ownership, then **Plan a change** (or **New change** on the **Changes** tab):
+describe the task, choose starting services or changed contracts, and prepare a
+bounded context/impact plan. Review its sources before execution. The backend
+checks freshness again when queued work actually starts.
+
+A change moves through **Plan**, **Review**, **Run** and **Receipts**. In the
+**Launch** card of the reviewed plan, choose **Codex, Claude Code or Cursor
+Agent**. Each uses
+its configured CLI and default model. The provider is fixed after launch,
+including recovery. Browser requests cannot supply executables. Workers run
+sequentially through the same single Harness queue;
+read-only is the default. Native system/service Brain task records are written
+even in read-only mode. Edit mode uses each service's current checkout.
+**Service folder access** decides which selected service folders agents may use:
+**All selected services** (the browser default) lets every agent read all of
+them and, in edit mode, lets each service agent change files in any of them;
+**Own service only** keeps each service agent in its own folder. The system
+folder stays read-only. Claude receives the folders through `--add-dir`, Codex
+through writable roots; Cursor Agent supports only own-service access.
+
+The **Agents** panel follows a launched run live: one card per agent (contract,
+each service, verification) with state, time, granted folders, tool calls,
+tokens and changed files, and a timeline of what the selected agent says, plans,
+reads, runs and edits. Paths appear as `service · path`. It stores no file
+contents, diffs, command output or prompts, redacts detected secrets and is
+bounded per agent and launch; receipts stay authoritative. During **Fill with
+AI** the same panel follows the discovery agent and maps copied evidence back to
+original service paths.
+
+Saved changes show dispatch state, worker-reported checks, scoped changed files,
+the knowledge handoff and, behind a toggle, native task references and the
+runner log. Cancel stops provider trees;
+recovery requires an explicit resume and an explicit dispatch retry after an
+ambiguous interruption. Inspect partial edits before accepting changed sources.
+Completed dispatches are skipped, and server restart never automatically resumes
+work. The folder picker registers external service roots; existing manifests
+can also use roots registered in **Projects & Setup**. The manifest
+cannot grant host filesystem access. See the [system orchestration guide](../docs/AI-SYSTEM-ORCHESTRATION.md#harness-ui).
+
 ## Infrastructure Creator in the browser
 
 Choose **Infrastructure Creator** (also available through Kit 1), a registered
@@ -26,10 +101,10 @@ files are not copied. Targets must be outside the Harness source/state trees.
 The server copies the existing generator into a private task workspace and runs
 its native workflow in the shared session queue. Filesystem isolation is
 required: **bubblewrap** (`bwrap`) on Linux, or the built-in **sandbox-exec**
-(Seatbelt) on macOS. Agent writes are confined to the workspace, a private
+(Seatbelt) on macOS, or native **Codex elevated sandbox** with permission-profile support on Windows. Agent writes are confined to the workspace, a private
 temporary directory and native provider account-state directories; the project
 and Creator control files stay read-only (bind mounts on Linux, write denial on
-macOS). Native authentication remains with each provider. Network
+macOS, elevated capability/ACL policy on Windows). Native authentication remains with each provider. Network
 access and native integrations remain available; this is filesystem isolation,
 not a general-purpose sandbox for hostile plugins. Apple marks `sandbox-exec`
 as deprecated but still ships it; a provider CLI that must write outside its
@@ -159,10 +234,45 @@ session/workspace; it does not transfer conversations between providers.
 
 ### Starting the server
 
-Requires Linux or macOS, Python 3.9+ and at least one authenticated native
+Supports Linux, macOS and native Windows 10/11 through Git Bash, with Python 3.10+ and at least one authenticated native
 agent CLI. The web server uses only Python's standard library; no venv,
 Node frontend build or API-key form is required.
 Fleet review additionally uses the optional LangGraph runtime described below.
+
+On Windows, install Python, Git for Windows and the native agent CLI, then run
+these commands in Git Bash. The launcher tries a working Python 3 interpreter
+named `python3`, then `python`; a Microsoft Store alias is skipped. State defaults
+to `%LOCALAPPDATA%/ai-infrastructure-harness` (Linux/macOS retain XDG state).
+Projects and state must use local drive paths; junctions, symlinks and UNC/network
+roots are refused at protected filesystem boundaries. npm-installed Codex and
+Claude launch through Node.js directly; arbitrary `.cmd`/`.bat` check scripts
+are refused. Use a native executable or Node/Python script for checks.
+System Orchestration runs on Windows too. Its AI discovery (**Fill with AI**)
+runs in Codex's elevated sandbox, like Creator phases, and needs Codex for that
+even when Claude or Cursor scans. Before each scan a probe checks inside the same
+sandbox that no original file is readable.
+
+Infrastructure Creator on Windows also needs Codex CLI, even when the selected
+provider is Claude or Cursor. Complete elevated sandbox setup in native Codex
+(the setup may request UAC). Harness supplies a random per-launch permission
+profile; target, Git common directory, source and control state remain read-only.
+A native boundary probe runs before each phase; failure stops the phase without
+falling back to unelevated execution. Provider state must not overlap protected
+project or Harness directories. Installed runtime checks use a disposable copy
+so the target SQLite cache is unchanged. Git Bash must provide `bash` for hook
+syntax checks; NTFS does not provide Unix executable permission bits.
+The probe scans protected trees with a 100,000-entry limit; large trees add
+startup time and trees beyond that limit are refused. Validation copies are
+limited to 50,000 files, 256 MiB total and 4 MiB per file.
+Native providers run under the sandbox account. File-based credentials remain
+in their existing account directory; Windows user-keyring credentials may need
+provider-specific setup and are not copied or exported by Harness.
+The `windows-harness` CI job covers portable/native runtime unit tests and a
+System Orchestration run with an npm-installed Codex fixture. The
+manual `Windows Creator sandbox` workflow requires a self-hosted Windows runner
+with elevated Codex already configured; it runs actual write-denial and owner
+death tests without model credentials. Native sandbox checks cannot run on a
+Linux workstation.
 
 From the repository root:
 
@@ -196,6 +306,14 @@ executable does **not** prove that its account is logged in.
 
 ### Workspace options
 
+The sidebar has six sections: **Sessions**, **System Orchestration**, **Knowledge** (Memory use,
+Project Brain, Memory bank and Context files tabs), **Skills** (Library and Create skill
+tabs), **Accelerators** (Overview, Infrastructure Creator and Open Source Kit
+tabs) and **Projects & Setup**. Every view has its own address, such as
+`#/brain` or `#/creator`, so a reload or the browser's Back button returns to it.
+The **Project** selector at the top of the sidebar applies to every view; choosing
+another project while a session is open starts a new session draft for it.
+
 - **Projects & Setup:** add an existing project, inspect its Git state and
   accelerator readiness, select an edition and target tools, then preview and
   install the reviewed files. The resulting project is available in the session,
@@ -205,7 +323,11 @@ executable does **not** prove that its account is logged in.
   additional-agent switch and a concurrent helper limit (1–40, default 3).
   Shows the selected project's Git branch and changes, with a refresh control.
   Choose the project directory or a new Git worktree with an optional new branch name.
-  Native messages and tool status appear as they arrive. Cancel stops the
+  The launch fields sit in one row; optional settings are chips (Helpers, Clash,
+  Run in, Brain task, Budgets, Models) that show their current value and open one
+  panel at a time. An open session collapses to one summary line; **Next-turn
+  settings** expands what a follow-up can change. Native messages appear as they
+  arrive, and consecutive tool and status steps fold into one row. Cancel stops the
   process group; follow-ups resume the same native session and workspace directory.
 - **Clash with a challenger:** a checkbox on Workspace and Review sessions that
   pits the selected provider against a different challenger provider on the
@@ -217,15 +339,24 @@ executable does **not** prove that its account is logged in.
   reviewers run directly through the selected Claude/Codex/Cursor provider in
   plan mode, without nested helpers. The additional-agent limit bounds concurrent
   reviewers. Offline dry-run uses labelled synthetic findings and no model calls.
-- **Results & usage:** open a session's changed files and Git diff, run an explicit
+- **Changes, Checks and Usage:** tabs of the open session next to Conversation. Changes shows the files and Git diff
+  (and Worktree delivery for worktree sessions), Checks runs an explicit
   test/lint command in its workspace, and inspect persisted output, exit code and
   check status separately from the agent outcome. Shows every recorded launch
   and total reported tokens, USD and run time; missing provider usage stays unknown.
+  Usage opens with **Context**, how full each turn left the context window; see
+  [Context window](#context-window).
 - **Project context:** availability and size of a fixed set of project
   instructions and references. Optional prompt context includes up to 3 KB
   each from `AGENTS.md`, `CLAUDE.md`, `README.md`,
   `project-brain/README.md`, and `specs/MANIFEST.md`. Symlinks are skipped.
   The native CLI can independently load its normal project instructions.
+  While the **Project context** chip is on, it shows what those excerpts add to
+  each launch, estimated at 4.7 characters per token (`≈ 2.1k tokens`).
+- **Memory use:** how a knowledge root's memory grows, moves, ages and gets
+  selected: Project Brain records, promotions, Memory bank chunks and the last
+  200 retrievals on this machine, with the chunks that need attention. See
+  [Memory use](#memory-use).
 - **Memory bank:** browse a project's `memory-bank`, select a document and
   read its Markdown source, including chunk metadata and status. The repository's
   Laravel, Symfony, PHP Core and WordPress banks appear separately. The viewer
@@ -240,19 +371,29 @@ executable does **not** prove that its account is logged in.
   handoffs, promotion records and archives. Start tasks, create operational
   records, update progress and complete tasks through the existing governed
   runtime. Numeric revisions protect updates and completion against stale edits.
-- **Accelerators:** Kit 1 opens **Infrastructure Creator** for the full
-  Scan → Review → Generate → Apply workflow and manifest-aware updates.
-  Kit 2 opens the same **Projects & Setup** installer for Laravel, Symfony,
-  PHP Core or WordPress.
-- **Open Source Kit:** the existing Kit 3 catalog, filters, dossiers and
-  copyable installation commands inside the same browser workspace.
+- **Accelerators:** the Overview tab presents the three kits. Kit 1 is the
+  **Infrastructure Creator** tab for the full Scan → Review → Generate → Apply
+  workflow and manifest-aware updates. A selected run shows its phase as five
+  steps (Scan, Review profile, Generate, Review files, Apply); **New run** opens
+  the form for another one. Kit 2 opens the **Projects & Setup**
+  installer for Laravel, Symfony, PHP Core or WordPress. Its **Startup context
+  per edition** table lists the exact bytes each edition puts in front of the
+  model before any work: AGENTS.md and the skill, command and agent listings.
+  The table sets them against the ceilings `scripts/context_budget.py --check`
+  holds them to, and measures them with the same script, so the page and the CI
+  gate cannot disagree.
+- **Open Source Kit:** the Kit 3 catalog, filters, dossiers and copyable
+  installation commands as a tab of Accelerators; inside the Harness the catalog
+  drops its own header, hero and footer. **Open in new tab** shows it standalone.
 - **Skills:** choose a registered project and a catalog source, click **Load
   skills**, select individual skills and Claude/Codex/Cursor, then **Preview
   installation** and **Install selected skills**. The preview lists every
   destination and any conflicts. Installation adds missing files, keeps
   identical files and refuses differing files or unsafe paths. The installed
-  list shows the project's existing skill folders; start a new agent session
-  to load newly installed skills. Tracked skills show their source and commit (or
+  list shows one row per skill with a chip for each tool that has a copy (path
+  and source in the chip's tooltip); start a new agent session to load newly
+  installed skills. While you browse the catalog, a bar at the bottom keeps the
+  selection and **Preview installation** in view. Tracked skills show their source and commit (or
   a content hash for local skills). Use **Check update** or **Preview removal**,
   review the file diffs, then apply the single-use preview. Local edits and extra
   files block updates/removal. **Refresh source** reloads the catalog snapshot
@@ -263,6 +404,11 @@ executable does **not** prove that its account is logged in.
   Creation works offline without Node.js or a model call. It shares the
   Skills installer's collision checks and never overwrites an existing file.
   The form draft survives section changes until the page is reloaded.
+- **Theme:** the switch at the bottom of the sidebar chooses **System**,
+  **Light** or **Dark**. The choice is stored in this browser and applied before
+  the page paints; **System** follows the operating-system setting as it
+  changes. The Kit 3 catalog follows the same choice, including when opened in a
+  new tab from the Harness; served alone by `./kit3 serve`, it follows the system.
 
 Worktrees start from the selected project's current committed `HEAD`; uncommitted
 changes and untracked files stay in the original checkout. Git and at least one
@@ -535,7 +681,11 @@ Overspending remains recorded, blocks successful review completion, and counts
 against later Fleet allocations; it is never rounded down or retried automatically.
 Codex and Cursor
 have no verified monetary cap here. Native-session caps apply per turn; Creator
-caps apply per scan/generate phase. Fleet's USD cap remains shared across
+caps apply per scan/generate phase. From Claude Code 2.1.277 a resumed session
+reports its whole spend, so each turn (and each Clash turn) counts only its growth
+over the session's previous report, read from the CLI version the turn announces;
+totals and caps never count an earlier turn twice. When that share cannot be told,
+the turn's cost stays unknown. Fleet's USD cap remains shared across
 reviewers and retries, with prior costs/reservations retained when edited.
 If an earlier uncapped call has unknown cost, a new capped Fleet is required.
 Fleet token/time thresholds apply per graph invocation; reviewer timeouts remain
@@ -545,13 +695,15 @@ Token accounting sums reported input and output, including cached input once
 (Claude reports cache reads/writes separately; Codex cached input is a subset).
 The runner stops when reported tokens reach the threshold, but CLI usage may
 arrive only on completion: this is **not a hard pre-request token cap**, and an
-invocation may exceed it. Unknown tokens/cost remain unknown. The panel shows
+invocation may exceed it. Unknown tokens/cost remain unknown, and costs are the
+CLIs' own estimates, so they read as ≈. The panel shows
 last-launch usage and any reached limit, retained when settings change and reset
 only when the next process starts. Time limits terminate the owned process group.
 
 History is stored in a private SQLite database under
 `$XDG_STATE_HOME/ai-infrastructure-harness` (default
-`~/.local/state/ai-infrastructure-harness`); `--state-dir` selects a separate
+`~/.local/state/ai-infrastructure-harness`) on Linux/macOS, or
+`%LOCALAPPDATA%/ai-infrastructure-harness` on Windows; `--state-dir` selects a separate
 instance. State and logs are local and are not installed into projects.
 Keep that directory private: prompts and agent answers are retained there.
 
@@ -560,6 +712,54 @@ per-process token and matching Origin/Host; static routes do not expose
 repository files. This is a personal local tool, not a remotely hosted or
 multi-user service. Fleet review runs the existing LangGraph graph in a separate
 local Python process, with the same queue and workspace checks as native sessions.
+
+The browser keeps the page's styles and scripts between visits:
+
+- **Styles and scripts.** The server reads them once at start, and the page names
+  each by its content hash (`app-core.js?v=…`). That address is cached as
+  immutable, so an updated Harness changes the address and an old page never meets
+  a new script.
+- **The page itself.** It is revalidated by its hash on every load.
+- **API answers and downloads.** They stay `no-store`.
+
+The session list in `/api/bootstrap` and `/api/sessions` carries summaries: id,
+title, project, status, times, provider, model, mode, workflow, Clash and Creator.
+Opening a session fetches its full record, capsule included.
+
+#### Interface copy
+
+Keep the browser workspace quiet as it grows:
+
+- A hint is one short sentence (about 12 words) and appears where a decision is made.
+- No text for a disabled or unchecked control, except a provider limit that applies in that state.
+- Show status only on change or trouble; a working state needs no "available" or "complete" line.
+- Say each fact once, next to the control it concerns. Reference text goes behind a **?** toggle.
+- Errors appear after the user acts, not on arrival.
+- Never shorten away what will run, write or spend at the moment of decision.
+
+#### Page files
+
+The page has no build step. `harness/web/index.html` holds the markup and the
+theme script that runs before the first paint, `app.css` holds the styles, and
+classic scripts share their top-level names in load order: `app-core.js`
+(shell, theme, routing, sessions), `app-knowledge.js`, `app-setup.js`,
+`app-skills.js`, `app-creator.js`, then System Orchestration's
+`agent-activity.js` (the agents panel), `system.js`, `system-editor.js` and
+`system-discovery.js`. The server reads the page and the files
+named in `ASSETS` (`harness/src/harness/web.py`) at start and serves nothing
+else from the folder: add a new file to that list, and restart the server to
+see an edit. `tests/test_harness_web.py` checks that the page and the list
+name the same files and keeps the stylesheet on its color, type and spacing
+tokens.
+
+**Motion and numbers.** Durations and easings come from the motion tokens in
+`app.css` (`--motion-*`, `--ease-*`); the same test rejects a literal duration or
+`cubic-bezier()` in a rule, and reduced motion stops every animation, pseudo-elements
+included. Scripted scrolls ask for `scrollMotion()`. Numbers use `fmt` in
+`app-core.js`: exact values as grouped digits, estimates with ≈ and two significant
+digits, bounds with ≤, ≥ or +, and — for unknown, which is never 0. A list that
+refreshes on a poll renders through `keyedRender`, so open details keep their
+state.
 
 ### Connect and prepare a project
 
@@ -626,14 +826,110 @@ The Harness adds no second knowledge database and does not directly edit records
 to bypass runtime validation. Raw file editing and import are not exposed by these
 controls. Export downloads are temporary server artifacts.
 
+### Context window
+
+**Sessions › Usage** opens with **Context**: how full the agent's context window
+is, how much of it is memory the Harness sent, how the turn grew it and when
+compaction cleared it. One bar per turn splits the window into memory parts
+(Project Brain, Memory bank, Rules & docs), everything else at turn start, what
+the turn added, and free space. A legend table carries the same numbers, and its
+rows open into the capsule against its 8,000-character cap, each project excerpt
+sent of its full size, and the rest: Harness instructions, a bound on earlier
+turns' memory (reset by compaction), the rules the CLI loads itself and the memory
+its hooks injected. A turns strip and a turn table compare turns.
+
+Fill, window, growth and free space are the provider's own token counts:
+
+- **Claude:** each main-thread model call is counted once by message ID, and
+  subagent calls are left out. The window comes from the result, and compaction
+  from `compact_boundary`. A turn on the same model knows its window from the
+  earlier one, so a running turn fills in call by call.
+- **Codex:** the counts come from the thread's rollout, read as it grows every
+  two seconds while the turn runs and once more when it ends.
+- **Cursor:** reports none; its turns show `—` and the characters the Harness
+  added.
+
+Memory parts are estimates: capsule JSON at 3.6 characters per token, prose at
+4.7. Session launches of Claude add `--include-hook-events` so hook output can be
+measured. Only its character counts per memory kind are kept, and Codex hooks
+read as *not measured*.
+
+Each launch stores these numbers in a `context` column, as integers plus the fixed
+context-file names; no prompt, file or hook text. A Fleet or Clash launch row says
+how much memory its prefix carried and to how many agents. Once the latest native
+turn fills half its window, or compacts, a meter beside the composer shows the
+percentage and opens this view.
+
+### Memory use
+
+**Knowledge › Memory use** is the first Knowledge tab. It follows one knowledge
+root through four stages:
+
+- **Project Brain:** records, open work and records resolved in the chosen window
+  (7, 30 or 90 days, or all).
+- **Promotion:** proposals applied after review or automatically, proposals waiting
+  for review, and automatic ones that stalled.
+- **Memory bank:** active chunks split by who vouched for them. A person wrote or
+  reviewed **●**; **○** was auto-promoted and nobody re-attested it since.
+- **Selected by retrieval:** how many of the last 200 retrievals put a chunk in a
+  capsule, how many distinct chunks that was, and how many were cut. A selection
+  shows that a chunk reached a capsule, not that the agent read it.
+
+Below the stages, rows name trouble: chunks past their review date, chunks whose
+cited files changed, and stalled promotions. A chunk past its review date also
+fails bank validation, which stalls every later promotion until it is re-attested
+or retired.
+
+The **Last 200 retrievals** strip has one column per retrieval, and the **Review
+horizon** places each active chunk by days until its review date. Both have a
+detail card, keyboard navigation and a table with the same numbers. **Re-attest…**
+and **Retire…** open Memory bank with the form filled in; the person still runs
+the operation. The tab reads `Memory use · N` while N chunks or promotions need
+attention.
+
+Opening the view reads project files in the server process. It takes no knowledge
+lock and runs no project code, so it cannot make a linked launch's freshness check
+fail. Only counts, dates, chunk IDs and chunk titles reach the page. Project Brain
+titles and bodies, retrieval queries and non-chunk paths stay on the server, and
+private or restricted records count without their type or status. A Harness
+launch re-checks its context before running, and that re-check counts with its
+retrieval. **Check eligibility** is the one request that runs the installed
+runtime's own rules. It names the rule that held back each resolved record and why
+retrieval skips each chunk, writes nothing, and returns 409 while another
+knowledge operation holds the lock.
+
+Retrieval history outlives the 200 manifests a project keeps. This Harness folds
+each manifest once into a daily rollup in its own database, either when Memory use
+reads it or when a session launch in the project ends. The rollup holds counts per
+day, routes and how often each chunk was selected; no queries or paths. Manifests
+older than 120 days are not folded. **Selected by retrieval** shows the days as a
+chart with a table, the stage card counts the flow window from them, and
+**Never selected** looks at the whole history. Retrievals a project prunes before
+either fold happens are not counted.
+
+The view remembers your last visit in this browser. Coming back shows what changed
+since then, such as new chunks, re-attestations, chunks that crossed their review
+date and new retrievals, and replays only those changes. Reduced motion shows the
+final state with a `+N` mark instead. To try it on a realistic project, build the
+demo; its history goes through the copied runtime's own API:
+
+```bash
+python3 tests/harness_memory_demo.py /tmp/shop-api
+```
+
 ### Link a session to a task
 
 Open **Brain task & retrieved context** when creating a session, enable linking, select a bank and an
 existing task or enter a new task ID and goal. **Prepare session** creates the
 workspace first, binds the task there and retrieves a bounded context capsule.
-Inspect the capsule before choosing **Run with this context**. The provider receives
-that saved capsule; the server checks the task revision and source contents again
-before launching it. Changed context requires a fresh preview. Each chat follow-up
+Inspect the capsule before choosing **Run with this context**. A bar above it shows
+how much of the 8,000-character cap the capsule uses, split into Project Brain,
+Memory bank and Rules & docs, and names the items the runtime dropped to fit and the
+characters repeated across the capsule's views. These counts are exact, measured
+on the server the way the runtime measures the cap. The note beside the button
+estimates what the capsule adds to the turn at 3.6 characters per token. The
+provider receives that saved capsule; the server checks the task revision and
+source contents again before launching it. Changed context requires a fresh preview. Each chat follow-up
 also prepares a new capsule. These explicit retrievals disable the runtime's
 repeat-query heuristic while retaining its privacy and source eligibility rules.
 
@@ -662,6 +958,13 @@ python3 -m venv harness/.venv
 harness/.venv/bin/python -m pip install -e harness
 ```
 
+For native Windows/Git Bash:
+
+```bash
+python -m venv harness/.venv
+harness/.venv/Scripts/python.exe -m pip install -e harness
+```
+
 Restart the browser server after installation. A different prepared Python can
 be selected with `HARNESS_FLEET_PYTHON=/absolute/path/to/python`. Ordinary sessions
 remain available when this optional runtime is missing.
@@ -679,7 +982,7 @@ remain available when this optional runtime is missing.
    and download Markdown, or **Reject report** to finish without publishing it.
    The preview is visible before approval. Reports stay in local server storage.
 
-Checkpoints live under `state/fleet/<session-id>/`. A waiting review survives
+Checkpoints live under `<state-dir>/fleet/<session-id>/`. A waiting review survives
 server restarts. **Resume** on an interrupted/failed/cancelled run continues from
 its checkpoint; successful reviewer nodes are retained. Provider failures stop
 the graph and are not reported as code findings. Session settings stay fixed;
@@ -702,7 +1005,7 @@ an over-allocation result fails the reviewer instead of claiming the limit held.
 Verification from the repository root:
 
 ```bash
-python3 -m unittest tests.test_harness_providers tests.test_harness_sessions tests.test_harness_web tests.test_harness_process_guard tests.test_harness_skills tests.test_harness_fleet tests.test_harness_knowledge tests.test_harness_task_context tests.test_harness_setup tests.test_harness_creator tests.test_harness_results tests.test_harness_delivery tests.test_harness_clash
+python3 -m unittest tests.test_harness_providers tests.test_harness_sessions tests.test_harness_web tests.test_harness_process_guard tests.test_harness_skills tests.test_harness_fleet tests.test_harness_knowledge tests.test_harness_memory_use tests.test_harness_context_usage tests.test_harness_task_context tests.test_harness_setup tests.test_harness_creator tests.test_harness_results tests.test_harness_delivery tests.test_harness_clash
 harness/.venv/bin/python -m unittest discover -s harness/tests -p 'test_*.py'
 ```
 

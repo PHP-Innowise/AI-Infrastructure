@@ -26,6 +26,292 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Run System Orchestration on native Windows:
+  - System files, run journals and editor saves go through the portable
+    filesystem layer, whose rooted handles refuse junctions. Windows refuses to
+    replace a file another program holds open, for example while the Harness
+    reads a run, so a save retries for up to 2 seconds.
+  - Every worker and Brain call starts under the Harness process guard, whose
+    Windows job ends the whole process tree. A worker CLI installed by npm
+    starts through Node.js directly, never through its `.cmd` launcher.
+  - Run and workspace locks are share-deny opens. The workspace lock folder
+    gets an ACL that admits only the current user and SYSTEM.
+  - Brain calls, the System runner and `scripts/ai_system.py` exchange UTF-8,
+    so a task written in Russian also works on Windows.
+  - AI discovery (**Fill with AI**) runs in Codex's elevated sandbox, as Creator
+    phases do. Its permission profile is an allow-list: the platform minimum,
+    the CLI runtime, Python, the run folder and the provider's account state,
+    with every selected service folder denied outright. Codex denies a folder
+    with an inherited Windows ACE, which a file with its own allow entry
+    escapes. So before every scan a probe inside the same sandbox opens each
+    original file and folder, up to 100,000, and the scan starts only if none
+    is readable. A Codex agent inside drops its own nested sandbox, as Creator's
+    does.
+  - The new `tests.test_ai_system_portable` runs on Linux and in the
+    `windows-harness` job, including a run with an npm-installed Codex fixture.
+    `tests.test_harness_system_discovery` checks the scan profile, and with a
+    local Codex CLI enforces it through Codex's Linux sandbox. The new
+    `tests.test_windows_discovery` runs it in the real elevated sandbox, in the
+    manual Windows sandbox workflow.
+- Join the native Windows Harness (PR #35) with the redesigned page and System
+  Orchestration (PR #36):
+  - The redesigned page keeps its split scripts. Creator names the missing
+    isolation as the server reports it.
+  - Memory use and the live Codex fill read files through the portable
+    filesystem layer.
+  - `scripts/ai_system_execution.py` imported `fcntl`, which kept the server
+    from starting on native Windows. It no longer does.
+- Let the browser keep the Harness page files. The page names each style and
+  script by its content hash, so a repeat visit loads none of them again (83 KB
+  instead of 651 KB here). That address is served `immutable`; any other request
+  for a page file revalidates by ETag (304), and API answers stay `no-store`. The
+  session list in `/api/bootstrap` and `/api/sessions` now carries summaries
+  (`Sessions.summaries()`, one query), so 200 sessions with capsules weigh 71 KB
+  instead of 1.96 MB. Opening a session takes its settings from the full record
+  the first poll brings.
+
+- Finish the Harness memory views:
+  - **Retrieval history.** Memory use keeps a numbers-only daily rollup of
+    retrievals in the Harness database (`retrieval_days`, with
+    `retrieval_seen` so each manifest counts once). Retrieval history therefore
+    outlives the newest manifests a project keeps. The rollup is folded when
+    the view reads or a session launch ends, and is shown in the Selected
+    breakdown and the chunk card.
+  - **Live Codex fill.** A running Codex launch's fill is read from its rollout
+    as it grows (`context_usage.CodexLive`, every two seconds; the rollout path
+    comes from `providers.codex_rollout`).
+  - **Startup context per edition.** Accelerators › Kit 2 lists the exact
+    startup bytes per edition against their CI ceilings
+    (`GET /api/accelerators/startup`, measured by `scripts/context_budget.py`).
+  - **Calibration citation.** The citation in `context_budget.py` (and in the
+    CI comment) points at `docs/TOKEN-ECONOMY-RESEARCH.md` as of `9435dfc1^`.
+    `9435dfc1` removed the file, which left it dangling.
+
+- Add **Sessions › Usage › Context** to the Harness: how full each turn left the
+  agent's context window, how much of it was memory the Harness sent, how the
+  turn grew it and when compaction cleared it. Each launch now records a
+  numbers-only `context` column in `launches` (migrated in place; older launches
+  read as not recorded). The column holds the prompt ledger built in
+  `Sessions._prompt` (capsule by memory kind, project excerpts sent of their
+  full size, attachments, instructions and the message) and the fill that
+  `context_usage.ContextTracker` reads from the provider's own usage. Claude
+  calls are counted once per message ID, subagents are left out, and compaction
+  comes from `compact_boundary`; Codex fill is read from the thread's rollout at
+  the end of the launch, and Cursor reports none. Session launches of Claude add
+  `--include-hook-events`, and only the character counts of hook output are
+  kept. Fleet and Clash launch rows name the memory prefix and how many agents
+  received it. `Sessions.get` adds `context_last` for a composer meter that
+  appears once the latest turn fills half its window or compacts.
+
+- Add **Knowledge › Memory use** to the Harness. The new first Knowledge tab
+  follows one knowledge root through Project Brain, promotion, the Memory bank
+  and the last 200 retrievals, in fixed-step bands for a 7-, 30- or 90-day
+  window or all time. Rows flag chunks past their review date, chunks whose
+  cited files changed, and stalled automatic promotions. A retrieval strip and a
+  review horizon each have a keyboard-navigable detail card and a table twin. On
+  a return visit the tab shows and replays only what changed since the last one,
+  and reduced motion shows a `+N` mark instead.
+  `harness/src/harness/memory_use.py` reads project files in process, without
+  the knowledge lock and without running project code. Only counts, dates, chunk
+  IDs and chunk titles leave the server; Brain titles and bodies, queries and
+  non-chunk paths do not. A Harness freshness re-check counts with its
+  retrieval. `POST …/memory-use/check` runs the installed runtime's
+  `promotable_records` and `memory_eligibility` on a click and returns 409 while
+  the lock is busy; the knowledge lock's busy error is now `KnowledgeBusy`
+  (HTTP 409). `tests/harness_memory_demo.py` builds a year of history through the
+  copied runtime's own API.
+
+- Show what memory adds where a Harness launch is decided. The linked Brain
+  task card shows the capsule against its 8,000-character cap as one bar split
+  into Project Brain, Memory bank and Rules & docs, with the items the runtime
+  dropped to fit and the characters repeated by the capsule's selected and
+  category views; the note beside **Run with this context** estimates what the
+  capsule adds to the turn. The counts come from `sessions.capsule_meter`,
+  measured on the server the way the runtime measures the cap: the browser
+  writes a float such as `4e-06` as `0.000004`, so its own count would drift.
+  `task_context` checks the cap against the same `CAPSULE_LIMIT`. The
+  **Project context** chip shows what its excerpts add to each launch, with the
+  3,000-byte excerpt size from `bootstrap.runtime.context_excerpt_bytes`.
+
+- Count each Harness launch's own Claude spend. From Claude Code 2.1.277 a
+  resumed session's result reports the session's whole spend in
+  `total_cost_usd`, and the Harness added those totals launch by launch: a
+  resumed Claude session's Usage totals, its "Usage · $" label and the launch
+  USD cap counted earlier launches again, and Clash turns did the same.
+  `providers.RunCost` now keeps each launch's and each Clash turn's growth over
+  the native session's last reported total (`sessions.cost_totals`), read per
+  run from the CLI version in the init event; older CLIs keep their per-run
+  cost. When the share cannot be told the cost stays unknown, never 0, and the
+  launch records the raw report as `cost_usd_reported`. Launches recorded before
+  this change keep their totals. The agents panel no longer turns an unreported
+  token count or cost into 0.
+
+- Lay the motion and number foundation for the memory views. Motion tokens
+  (fast, base, slow, travel, stagger, pulse and three easings) replace the
+  literal durations, the two pulses share one keyframe, and a guard rejects
+  literal durations and `cubic-bezier()` in rules on both themed pages. Reduced
+  motion now also stops `::before` and `::after` animations (the agents panel's
+  live dot kept pulsing), and scripted scrolls follow it through
+  `scrollMotion()`. Six memory and context colour tokens join both themes,
+  guarded at 3:1 on both surfaces. `fmt` gives numbers one grammar (exact, ≈,
+  ≤ / ≥ / +, —) and the Usage totals use it: unknown totals read — and costs
+  read as the CLIs' estimates. `keyedRender` keeps launch and check details open
+  across result polls; before, every poll collapsed them.
+
+- Bring System Orchestration (PR #36) onto the Harness design. It is a sidebar
+  section with two tabs: **Services** (system file, contract map, service cards
+  and the editor with **Fill with AI**) and **Changes** (a change selector, the
+  new-change form with starting services as chips, and the selected change as
+  **Plan · Review · Run · Receipts** steps with its launch, recovery, agents and
+  receipts). It follows the sidebar **Project** instead of its own project
+  select; **Choose system folder…** adds a folder and makes it the working
+  project in every view. The map is drawn at its natural size in theme colors,
+  so it reads the same in the dark theme. Available services and completed
+  receipts carry no label; native task references and the runner log sit behind
+  toggles. Saving the system closes the editor onto the updated map. The launch
+  note names edit mode's writes in each service's current checkout, recovery
+  names the provider that resumes, starting services carry their dependency
+  warnings and the plan lists its warnings. Runner transcripts of system changes
+  and AI scans in **Sessions** point back to System Orchestration. The
+  screenshots in `docs/AI-SYSTEM-ORCHESTRATION.md` show the new layout.
+
+- Split the Harness page: markup stays in `harness/web/index.html`, styles move
+  to `app.css` and the script to five classic files (`app-core.js`,
+  `app-knowledge.js`, `app-setup.js`, `app-skills.js`, `app-creator.js`) that
+  load in order with no build step. The code moved unchanged apart from
+  indentation. The server serves only the files named in `ASSETS`, read at
+  start with the page; a test checks that the page and the list agree.
+
+- Finish the Harness redesign plan. One **Project** selector in the sidebar
+  drives every view (the per-view project selects are gone from the screen); an
+  open session of another project yields to a new draft. Results splits into
+  **Changes · Checks · Usage** tabs next to Conversation, with counts, and shows
+  Worktree delivery only for worktree sessions. The Creator shows a run's phase
+  as five steps and keeps the new-run form behind **New run**. Skills lists one
+  row per installed skill with tool chips (36 rows instead of 108 for the demo
+  project), compacts the catalog, and keeps the selection and **Preview
+  installation** in a bar at the bottom.
+
+- Regroup the Harness into five sections: Sessions, Knowledge (Project Brain,
+  Memory bank, Context files), Skills (Library, Create skill), Accelerators
+  (Overview, Infrastructure Creator, Open Source Kit) and Projects & Setup.
+  Tabs replace the separate entries, every view has its own `#/view` address,
+  and Results & verification becomes a tab of the open session. Slogan headings
+  give way to one title per view, and the embedded Kit 3 catalog drops its own
+  header, hero and footer. Setup readiness now separates the constant `scope`
+  notes from real `diagnostics`, so only problems are highlighted. Copy across
+  Setup, Creator, Skills, Knowledge and Results is cut to the decision point;
+  the README gains interface copy rules. Fixes: Creator no longer posts a
+  `null` thinking effort when a run's provider differs from the form; Setup
+  hides a used preview after installing and no longer preselects an edition;
+  Create skill shows what is missing when clicked; Recent sessions keeps focus
+  while a session runs; Memory documents open on their text, with front matter
+  under Metadata.
+
+- Calm the Harness Sessions screen. The launch fields sit in one row, and Mode
+  appears only when the workflow leaves it open. Optional settings (helpers,
+  Clash, workspace, Brain task, budgets, separate models) become chips that
+  show their current value and open one panel at a time. An open session
+  collapses to a single summary line with **Next-turn settings**. Fleet review
+  ticks its helpers itself, the SDD slug waits for input before showing an
+  error, and hints, budget, Clash and composer copy keep only what matters at
+  the moment of decision. Consecutive activity steps fold into one row, and a
+  failed run shows one error card. Both Harness pages now take font size,
+  weight, line height and radius from scale tokens, with spacing on a 4px grid;
+  `tests.test_harness_web` enforces this. One field style replaces seven
+  copies, and muted text and focus rings gain contrast.
+
+- Add a dark theme to the Harness browser workspace: a System / Light / Dark
+  switch at the bottom of the sidebar, stored in the browser and applied before
+  first paint, so a dark page never flashes white; **System** follows the OS
+  setting live. The Kit 3 catalog follows the same choice inside the Harness and
+  the OS theme when served alone. Both stylesheets now take every color from
+  paired light/dark tokens, enforced by `tests.test_harness_web`; the Setup
+  preview's collision label uses the error color instead of an undefined
+  `--red`.
+
+- Show a live **Agents** panel for System Orchestration runs and AI scans: one
+  card per contract, service, verification or discovery agent with state, time,
+  granted folders, tool calls, tokens and changed files, plus a timeline of its
+  messages, reasoning summaries, plans and tool targets. Workers stream native
+  output line by line; Claude workers now use `stream-json` with the same
+  `--json-schema` terminal `structured_output`. Activity is display-only,
+  redacted, bounded per agent and launch, and never stores file contents, diffs,
+  command output or prompts. Run details list each launch; runner status no
+  longer disappears behind the first page of events.
+- Add `--access all` (browser default: **All selected services**) so every
+  system worker can read all selected service folders and, in edit mode, change
+  files in any of them; the system folder stays read-only. Claude receives the
+  folders through `--add-dir`, Codex through writable roots; Cursor is limited to
+  the own-service scope. Cross-service changes are reported as
+  `<service-id>/<path>` and adopted only when reported. Contract and verification
+  workers now read every selected service under Claude in both scopes. The scope
+  is pinned in the journal; older journals resume with the own-service scope.
+- Fix intermittent HTTP 400 responses while polling a live system run: a journal
+  file being published by link-then-unlink is read on the next poll instead.
+- Replace the opaque `Native AI discovery CLI failed` with the actual cause: an
+  expired or missing CLI login (with `claude auth login`, `codex login` or
+  `cursor-agent login`), a sandbox that cannot start (with AppArmor and
+  user-namespace hints), a CLI that cannot start inside the sandbox, a timeout or
+  a rate limit. Blocked system dispatches show the same CLI reason on the agent
+  card and in the run log. Probe bubblewrap before queueing a scan and warn in the
+  editor. Document troubleshooting, including an AppArmor profile for bubblewrap,
+  and enable user namespaces for the discovery tests on GitHub's Ubuntu runners.
+
+- Automatically fill Harness system/service forms through Codex, Claude or
+  Cursor from bounded, filtered evidence snapshots. Show sources/uncertainties,
+  validate every service and contract, retain unknown ownership and incomplete
+  dependency coverage, and require fresh evidence at preview and final save.
+  Use the existing serialized queue/watchdog for cancellation/restart; isolate
+  source reads from original projects while allowing native CLI runtime/account
+  state. Cover real subprocess adapters and the visible browser form flow.
+
+- Create and edit system orchestration in Harness through a folder browser and
+  forms for service ownership, capabilities, contracts, dependencies and context
+  sources. Register selected folders and generate metadata without JSON input.
+  Validate the full graph before saving, reject stale forms/files, preserve file
+  permissions and recover interrupted multi-file saves with a durable journal.
+  Block metadata writes/recovery during active sessions; retain detected external
+  edits as conflicts. Cover localhost API, persistence and failure paths.
+
+- Support Claude Code and Cursor Agent for system workers in the CLI and Harness
+  UI alongside Codex. Share native permission/delegation flags, validate Claude
+  structured output and Cursor terminal reports, bound Cursor prompt bytes,
+  and pin provider/executable across recovery. Preserve legacy Codex requests.
+  Cover native reports, modes, retry and cancellation with deterministic CLIs.
+
+- Integrate system orchestration into Harness UI: declared service graphs,
+  capabilities and memory ownership, reviewed context/impact plans, sequential
+  Codex execution through the shared queue, live receipts/native task references,
+  cancellation and explicit recovery. Derive filesystem access from registered
+  projects; preserve pending launch identity across crashes and stop detached
+  worker trees through nested watchdogs. Cover real HTTP/native Brain paths on
+  Python 3.9 and current Python using deterministic provider fixtures.
+
+- Add an optional stack-neutral system planner (`scripts/ai_system.py`) for
+  service passports, declared contract impact, globally budgeted context,
+  Mermaid maps and cross-service plans. Preserve local Brain/Memory ownership,
+  require explicit access to external roots, fingerprint sources/commits and
+  detect changed or newly available inputs. Include a synthetic three-service
+  example and stdlib regression coverage. Add explicit sequential Codex/custom
+  adapter execution, native system/service Brain tasks, structured terminal
+  receipts, source checkpoints and crash-safe reconciliation. Require explicit
+  retries for ambiguous writes; complete tasks only after reported cross-service
+  verification and preserve knowledge handoff without promoting raw context.
+
+- Fix native Windows Harness guard shutdown and private-state ownership on
+  elevated runners. Reject non-UTF-8 Creator plans with a controlled error and
+  make pipe and plan fixtures independent of Windows newline/encoding defaults.
+
+- Add native Windows/Git Bash Harness runtime support: working Python fallback,
+  Job Object process cleanup, threaded bounded pipe reads, retained admission
+  locks, rooted no-reparse filesystem operations and private state ACLs.
+  Launch supported npm CLI shims directly through Node.js, support Windows
+  Fleet venv paths and Project Brain process locks, and add a native Windows
+  acceptance CI job. Creator also supports native Windows through Codex elevated
+  permission profiles, with read-only project/control roots, per-phase boundary
+  probes and disposable installed-runtime validation copies.
+
 - Run Harness Creator phases on macOS through the built-in `sandbox-exec`
   (Seatbelt) profile when bubblewrap is absent: writes are allowed only in the
   run workspace, a private temporary directory, the per-user temporary space and

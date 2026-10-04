@@ -6,6 +6,15 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Fixed
 
+- Reject Windows ADS, device names and ambiguous paths in publication/manifest
+  plans. Validate shell hook syntax through Bash on Windows, where NTFS lacks
+  Unix executable permission bits. Harness Creator now has an elevated Codex
+  sandbox backend and validates installed runtime files in a disposable copy.
+
+- Keep generated Project Brain mutation locks portable on native Windows using
+  a serialized CRT byte-range lock, while retaining POSIX flock and nested
+  thread reentrancy. Regenerate memory-seed mirrors and the policy lock.
+
 - **`memory-seed` asset `context.py` counted promotion iterator records instead of
   applied promotions in memory status.** The generator copies the shared
   memory/context core verbatim into every generated project, so the asset now

@@ -1,0 +1,17 @@
+name: Windows Creator sandbox
+on:
+  workflow_dispatch:
+
+# This runner needs native Codex with its elevated sandbox setup completed.
+# No model credentials are needed: tests sandbox Python fixtures directly.
+jobs:
+  creator:
+    runs-on: [self-hosted, Windows, codex-sandbox]
+    timeout-minutes: 20
+    env:
+      HARNESS_WINDOWS_CREATOR_SANDBOX: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify real elevated sandbox boundaries for Creator and AI discovery
+        shell: pwsh
+        run: python -m unittest tests.test_windows_creator tests.test_windows_discovery -v

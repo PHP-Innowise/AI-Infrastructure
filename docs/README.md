@@ -15,6 +15,7 @@ your situation.
 - **Diagnose installation or runtime problems:** [Troubleshooting](TROUBLESHOOTING.md)
 - **Add or change accelerator behavior:** [Extending the Accelerator](EXTENDING.md)
 - **Run orchestrated workflows:** [Orchestrator Commands](ORCHESTRATOR-COMMANDS.md)
+- **Coordinate changes across services:** [System-level AI Coordination](AI-SYSTEM-ORCHESTRATION.md) — stack-neutral catalogs, plans, sequential workers and recovery.
 - **See a complete task lifecycle:** [User Task Workflow Example](examples/USER-TASK-WORKFLOW-EXAMPLE.md)
 - **Compare the repository in English or Russian:** [English overview](../README_EN.md) · [Russian overview](../README_RU.md)
 
