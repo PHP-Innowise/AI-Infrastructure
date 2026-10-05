@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[3]
 # The page's styles and scripts: an explicit list, read with the page so a running server serves one version.
 ASSETS = {name: 'text/css; charset=utf-8' if name.endswith('.css') else 'text/javascript; charset=utf-8'
           for name in ('app.css', 'app-core.js', 'app-knowledge.js', 'memory-use.js', 'context-usage.js', 'app-setup.js', 'app-skills.js', 'app-creator.js',
-                       'agent-activity.js', 'system.js', 'system-editor.js', 'system-discovery.js', 'run-model.js', 'run-view.js')}
+                       'agent-activity.js', 'system.js', 'system-editor.js', 'system-discovery.js', 'run-model.js', 'run-view.js', 'skill-hints.js')}
 sys.path.insert(0, str(ROOT / 'harness/src'))
 sys.path.insert(0, str(ROOT / 'scripts'))
 from harness.filesystem import fs, secure_private_dir, default_state_dir, existing_directory
@@ -286,6 +286,15 @@ class Handler(BaseHTTPRequestHandler):
                 if parsed.query:
                     raise SessionError('Invalid Git status request.')
                 self.reply(200, store.git(path.split('/')[3]))
+            elif path.startswith('/api/projects/') and path.endswith('/skill-hints') and len(path.split('/')) == 5:
+                query = parse_qs(parsed.query, strict_parsing=True) if parsed.query else {}
+                if set(query) - {'provider', 'worktree'} or 'provider' not in query or any(len(values) != 1 for values in query.values()):
+                    raise SessionError('Invalid skill hint request.')
+                self.reply(200, store.skill_hints(path.split('/')[3], query['provider'][0], query.get('worktree', [None])[0]))
+            elif path.startswith('/api/sessions/') and path.endswith('/skill-hints') and len(path.split('/')) == 5:
+                if parsed.query:
+                    raise SessionError('Invalid skill hint request.')
+                self.reply(200, store.session_skill_hints(path.split('/')[3]))
             elif path.startswith('/api/projects/') and path.endswith('/worktrees') and len(path.split('/')) == 5:
                 if parsed.query:
                     raise SessionError('Invalid worktree listing request.')
@@ -428,7 +437,7 @@ class Handler(BaseHTTPRequestHandler):
                 _, _, _, sid, action = path.split('/')
                 if store.get(sid).get('system_discovery') and action != 'cancel':
                     raise SessionError('AI discovery sessions only support cancellation. Start a new scan in the system editor.')
-                if action == 'messages' and 'prompt' in data and not set(data) - {'prompt', 'model', 'thinking_effort', 'sdd', 'model_routing', 'mode', 'attachments', 'agents_enabled', 'agent_count', 'clash'}:
+                if action == 'messages' and 'prompt' in data and not set(data) - {'prompt', 'model', 'thinking_effort', 'sdd', 'model_routing', 'mode', 'attachments', 'agents_enabled', 'agent_count', 'clash', 'skills'}:
                     self.reply(200, {'session': store.send(sid, data['prompt'], {k: v for k, v in data.items() if k != 'prompt'})})
                 elif action == 'check':
                     self.reply(202,{'session':store.results.start_check(sid,data)})

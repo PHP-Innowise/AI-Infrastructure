@@ -750,6 +750,77 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(Path(self.calls[-1]["pid_path"] + ".cwd").read_text(), str(task / "packages/app"))
         self.assertTrue(before.is_dir())
 
+    def write_skill(self, root, base, name, head=""):
+        folder = root / base / name
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "SKILL.md").write_text(f"---\nname: {name}\ndescription: The {name} fixture.\n{head}---\n# {name}\n", encoding="utf-8")
+
+    def test_invoked_skills_become_an_explicit_request_and_a_leading_claude_skill_goes_first(self):
+        self.write_skill(self.project, ".claude/skills", "sdd", "disable-model-invocation: true\n")
+        self.write_skill(self.project, ".claude/skills", "php-review")
+        self.write_skill(self.project, ".agents/skills", "php-review")
+        (self.project / "README.md").write_text("FIXTURE README EXCERPT\n", encoding="utf-8")
+        manager = self.manager()
+        key = next(iter(manager.projects))
+        self.assertEqual([(item["name"], item["start_only"]) for item in manager.skill_hints(key, "claude")["skills"]],
+                         [("php-review", False), ("sdd", True)])
+        self.assertEqual([item["path"] for item in manager.skill_hints(key, "codex")["skills"]], [".agents/skills/php-review/SKILL.md"])
+        for provider, worktree in (("unknown", None), ("claude", "0" * 16)):
+            with self.subTest(provider=provider, worktree=worktree), self.assertRaises(sessions.SessionError):
+                manager.skill_hints(key, provider, worktree)
+        for skills in ("php-review", ["php-review"] * 2, ["../escape"], [1]):
+            with self.subTest(skills=skills), self.assertRaises(sessions.SessionError):
+                manager.create(dict(project_id=key, provider="claude", prompt="complete", skills=skills))
+        self.assertEqual(manager.list(), [])
+
+        message = "/sdd login flow, then check it with /php-review"
+        sid = manager.create(dict(project_id=key, provider="claude", prompt=message, project_context=True, skills=["php-review"]))["id"]
+        self.assertEqual(self.settled(manager, sid)["status"], "completed")
+        prompt = self.calls[-1]["prompt"]
+        # Claude Code expands the leading skill itself: the message comes first, and the Harness context after it says
+        # where the user's own text ends, since the CLI hands everything after the name to the skill.
+        self.assertTrue(prompt.startswith(message + "\n\n" + sessions.LEAD_CONTEXT_HEADER + "\n\nHarness skill request:"))
+        self.assertIn("- php-review (.claude/skills/php-review/SKILL.md): invoke it with the Skill tool.", prompt)
+        self.assertNotIn("- sdd (", prompt)
+        self.assertLess(prompt.index("Harness skill request"), prompt.index("FIXTURE README EXCERPT"))
+        self.assertLess(prompt.index("FIXTURE README EXCERPT"), prompt.index("Harness session delegation requirement"))
+        self.assertIn("Skills requested in this message: sdd, php-review. Claude Code loads sdd from the start of the message. "
+                      "Harness asked the agent to load it before acting: php-review.", [event.get("text") for event in manager.events(sid)])
+        self.assertEqual(manager.events(sid)[0]["skills"], ["php-review"])
+        self.assertEqual(manager.results.history(sid)["launches"][-1]["context"]["ledger"]["message"], len(message))
+        self.assertEqual([item["name"] for item in manager.session_skill_hints(sid)["skills"]], ["php-review", "sdd"])
+        # A follow-up that only mentions a skill leaves it to the agent; one the person picked is requested.
+        manager.send(sid, "Explain what /php-review checks, do not run it")
+        self.assertEqual(self.settled(manager, sid)["status"], "completed")
+        self.assertNotIn("Harness skill request", self.calls[-1]["prompt"])
+        manager.send(sid, "Now run /php-review on the change", {"skills": ["php-review"]})
+        self.assertEqual(self.settled(manager, sid)["status"], "completed")
+        self.assertIn("- php-review (.claude/skills/php-review/SKILL.md): invoke it with the Skill tool.", self.calls[-1]["prompt"])
+        with self.assertRaises(sessions.SessionError):
+            manager.send(sid, "complete", {"skills": "php-review"})
+
+        # `/php-review,` is not a command Claude Code expands: the Harness context keeps its place and a request line is added.
+        loose = manager.create(dict(project_id=key, provider="claude", prompt="/php-review, focus on auth", project_context=True))["id"]
+        self.assertEqual(self.settled(manager, loose)["status"], "completed")
+        prompt = self.calls[-1]["prompt"]
+        self.assertTrue(prompt.startswith("Optional project reference excerpts"))
+        self.assertIn("/php-review, focus on auth\n\nHarness skill request:", prompt)
+        self.assertNotIn(sessions.LEAD_CONTEXT_HEADER, prompt)
+
+        codex = self.create(manager, "Look at the diff with $php-review and /sdd", project_context=True, skills=["php-review", "sdd"])
+        self.assertEqual(self.settled(manager, codex)["status"], "completed")
+        prompt = self.calls[-1]["prompt"]
+        # Without a leading Claude skill the Harness context leads as before; Codex reads the skill's own file.
+        self.assertTrue(prompt.startswith("Optional project reference excerpts"))
+        self.assertIn("Look at the diff with $php-review and /sdd\n\nHarness skill request:", prompt)
+        self.assertIn("- php-review (.agents/skills/php-review/SKILL.md): read that file and follow it.", prompt)
+        self.assertNotIn("sdd (", prompt)
+
+        plain = manager.create(dict(project_id=key, provider="claude", prompt="complete without /unknown or src/php-review"))["id"]
+        self.assertEqual(self.settled(manager, plain)["status"], "completed")
+        self.assertNotIn("Harness skill request", self.calls[-1]["prompt"])
+        self.assertFalse(any("Skills requested" in (event.get("text") or "") for event in manager.events(plain)))
+
     @unittest.skipUnless(shutil.which("git"), "Git workspace tests require git")
     def test_existing_worktree_list_leaves_out_harness_state_and_names_a_checkout_by_what_it_holds(self):
         self.initialize_git()
@@ -769,6 +840,9 @@ class SessionTests(unittest.TestCase):
         with self.assertRaisesRegex(sessions.SessionError, "no longer lists"):
             self.create(manager, workspace="existing-worktree", worktree_id=first)
         self.assertEqual(manager.list(), [])
+        self.assertEqual([item["name"] for item in manager.skill_hints(key, "codex", second)["skills"]], [])
+        with self.assertRaises(sessions.SessionError):
+            manager.skill_hints(key, "codex", first)
 
     def test_completion_requires_successful_terminal_and_zero_exit(self):
         manager = self.manager()

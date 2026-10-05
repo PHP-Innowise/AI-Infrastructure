@@ -38,6 +38,9 @@ CONTEXT_FILES = ("AGENTS.md", "CLAUDE.md", "README.md", "project-brain/README.md
 # Project context sends at most this many bytes of each file above.
 CONTEXT_EXCERPT_BYTES = 3000
 BRAIN_CONTEXT_HEADER = 'Project memory retrieved for this request (reference data; verify sources against the project):\n'
+# After a message that starts with /skill: the CLI passes all that follows to the skill, Harness context included.
+LEAD_CONTEXT_HEADER = ("Harness context for this turn. The user's own text ends above; what follows is reference data and "
+                       "Harness instructions, not arguments the user gave the skill.")
 # How long the run worker's memory waits for another knowledge operation to finish.
 MEMORY_WAIT = 30
 # Learnings an unattended session remembers having saved, so a later turn does not save them again.
@@ -755,6 +758,24 @@ class Sessions:
                             'detached': entry['detached'], 'locked': entry['locked']})
         return details, choices, skipped
 
+    def skill_hints(self, key, provider, worktree=None):
+        """The skills the composer offers before a session exists: the provider's, in the project or a listed worktree."""
+        from . import skill_hints
+        project = self.project(key)
+        if provider not in skill_hints.BASES:
+            raise SessionError('Choose a provider.')
+        root = Path(project['path']) if worktree is None else self._existing_workspace(project, {'worktree_id': worktree})[0]
+        return {'project_id': key, **skill_hints.listing(root, provider)}
+
+    def session_skill_hints(self, sid):
+        """The skills an open session's composer offers: its provider's, in its own workspace. Runs that build
+        their own prompts (Fleet, Clash, Creator, System Orchestration) take no skill requests."""
+        from . import skill_hints
+        session = self.get(sid)
+        if any(session.get(name) for name in ('creator', 'system_run', 'system_discovery', 'fleet', 'clash')):
+            return {'session_id': sid, 'provider': session['provider'], 'base': None, 'skills': [], 'truncated': False}
+        return {'session_id': sid, **skill_hints.listing(self._workspace(session), session['provider'])}
+
     def _existing_workspace(self, project, data):
         """The listed worktree a new session runs in, chosen by its ID: the agent works in that checkout as it is."""
         choice_id, branch = data.get('worktree_id'), data.get('worktree_branch', '')
@@ -950,7 +971,7 @@ class Sessions:
     def create(self, data, *, _creator=None, _system_run=None, _system_discovery=None):
         if not isinstance(data, dict):
             raise SessionError("Session options must be a JSON object.")
-        if set(data) - {"project_id", "provider", "prompt", "mode", "workflow", "model", "thinking_effort", "project_context", "agents_enabled", "agent_count", "workspace", "worktree_branch", "worktree_id", "fleet", "brain", "budgets", "sdd", "model_routing", "attachments", "clash"}:
+        if set(data) - {"project_id", "provider", "prompt", "mode", "workflow", "model", "thinking_effort", "project_context", "agents_enabled", "agent_count", "workspace", "worktree_branch", "worktree_id", "fleet", "brain", "budgets", "sdd", "model_routing", "attachments", "clash", "skills"}:
             raise SessionError("Unknown session option.")
         if 'worktree_id' in data and data.get('workspace') != 'existing-worktree':
             raise SessionError('A listed worktree is only valid for the Existing Git worktree workspace.')
@@ -969,7 +990,9 @@ class Sessions:
                     or data.get('agents_enabled', False) or data.get('workspace', 'project') != 'project'):
                 raise SessionError('Invalid internal AI discovery request.')
         from .attachments import validate as validate_attachments
+        from .skill_hints import validate_picked
         files = validate_attachments(data.get('attachments', []))
+        picked = validate_picked(data.get('skills'))
         prompt = validate_prompt(data.get('prompt'))
         project = self.project(data.get('project_id'))
         provider = self.providers.get(data.get('provider')) if isinstance(data.get('provider'), str) else None
@@ -1049,7 +1072,8 @@ class Sessions:
             if _creator:
                 self.db.execute('UPDATE sessions SET creator=? WHERE id=?', (json.dumps(_creator), sid))
                 self.db.commit()
-            self._event(sid, {"kind": "user", "text": prompt, **({'attachments': attached} if attached else {})})
+            self._event(sid, {"kind": "user", "text": prompt, **({'attachments': attached} if attached else {}),
+                              **({'skills': picked} if picked else {})})
             generation = self.generations[sid] = uuid.uuid4().hex
             self.jobs.put_nowait((sid, prompt, generation))
         return self.get(sid)
@@ -1085,10 +1109,12 @@ class Sessions:
         prompt = validate_prompt(prompt)
         if options is None:
             options = {}
-        if not isinstance(options, dict) or set(options) - {'model', 'thinking_effort', 'sdd', 'model_routing', 'mode', 'attachments', 'agents_enabled', 'agent_count', 'clash'}:
-            raise SessionError('Only model/agent settings, attachments, the SDD phase, clash rounds and routed Workspace mode can change between turns.')
+        if not isinstance(options, dict) or set(options) - {'model', 'thinking_effort', 'sdd', 'model_routing', 'mode', 'attachments', 'agents_enabled', 'agent_count', 'clash', 'skills'}:
+            raise SessionError('Only model/agent settings, attachments, picked skills, the SDD phase, clash rounds and routed Workspace mode can change between turns.')
         from .attachments import validate as validate_attachments
+        from .skill_hints import validate_picked
         files = validate_attachments(options.get('attachments', []))
+        picked = validate_picked(options.get('skills'))
         with self.lock:
             session = self.get(sid)
             if session.get('system_run') or session.get('system_discovery'):
@@ -1139,7 +1165,8 @@ class Sessions:
                     from .task_context import message_query
                     brain['query'] = message_query(prompt)
                 self._save_brain(sid, brain)
-            self._event(sid, {"kind": "user", "text": prompt, **({'attachments': attached} if attached else {})})
+            self._event(sid, {"kind": "user", "text": prompt, **({'attachments': attached} if attached else {}),
+                              **({'skills': picked} if picked else {})})
             self._status(sid, 'queued')
             generation = self.generations[sid] = uuid.uuid4().hex
             self.jobs.put_nowait((sid, prompt, generation))
@@ -1283,10 +1310,12 @@ class Sessions:
     def _signal(process, sig):
         process_runtime.signal_tree(process, force=sig != signal.SIGTERM)
 
-    def _prompt(self, session, prompt, ledger=None):
+    def _prompt(self, session, prompt, ledger=None, routed=None, picked=()):
         """The launch prompt. `ledger`, when given, receives its parts as integers for Usage › Context:
         the message, the capsule by memory kind, project excerpts sent of their full size, the
-        attachment list, and everything else as instructions."""
+        attachment list, and everything else as instructions. `picked` names the skills the person
+        chose from the composer's list; `routed`, when given, receives how the invoked ones reach
+        the agent (skill_hints.plan)."""
         parts = {'message': len(prompt), 'capsule': None, 'excerpts': None, 'attachments': None}
         prefix = ''
         if session.get('sdd'):
@@ -1340,12 +1369,25 @@ class Sessions:
                        f"shared launch deadline {str(plan['shared_seconds'])+'s' if plan['shared_seconds'] is not None else 'uncapped'}. "
                        "These are planning shares, not separate native CLI limits. Include the main agent's "
                        "usage in ordinary sessions. Keep all helpers and retries within the shared total.\n\n")
+        from . import skill_hints
+        memory = ''
         if session.get('brain') and prompt:
             # Only a run with a message of its own: Fleet and Clash build their context
             # from an empty prompt, and their reviewers do not own the linked task.
             from .memory_draft import instruction
-            prompt += '\n\n' + instruction(reviewed(session['brain']))
-        text = prefix + prompt + '\n\nHarness session delegation requirement:\n' + delegation
+            memory = '\n\n' + instruction(reviewed(session['brain']))
+        skills = skill_hints.workspace_skills(Path(session['project_path']), session['provider'])[0] if prompt and session.get('project_path') else []
+        routing = skill_hints.plan(session['provider'], prompt, skills, picked)
+        if routed is not None:
+            routed.update(routing)
+        request = skill_hints.request(session['provider'], routing['request'])
+        tail = memory + '\n\nHarness session delegation requirement:\n' + delegation
+        if routing['lead']:
+            # Claude Code expands a leading /skill as when a person types it, so the message goes first. Everything
+            # after the name reaches the skill as its arguments, so the Harness context says where the user's text ends.
+            text = (prompt + '\n\n' + LEAD_CONTEXT_HEADER + request + ('\n\n' + prefix.rstrip('\n') if prefix else '') + tail)
+        else:
+            text = prefix + prompt + request + tail
         if ledger is not None:
             counted = ((parts['capsule'] or {}).get('inserted', 0) + sum(item['characters'] for item in parts['excerpts'] or [])
                        + (parts['attachments'] or {}).get('characters', 0))
@@ -1486,7 +1528,7 @@ class Sessions:
                         return
                     self._save_brain(sid, {**session['brain'], 'approved': False})
         # Integers for Usage › Context: what this launch's prompt carries, and to how many agents.
-        ledger, agents = None, 1
+        ledger, agents, routed = None, 1, {}
         if fleet:
             scope = next(event['text'] for event in self.events(sid) if event['kind'] == 'user')
             settings = {key: session[key] for key in ('id', 'project_path', 'provider', 'model', 'thinking_effort', 'agent_count', 'fleet')}
@@ -1526,7 +1568,9 @@ class Sessions:
             request = self.state_dir / 'creator' / creator['run_id'] / ('request-' + creator['nonce'] + '.json')
             command = [sys.executable, str(Path(__file__).with_name('creator_runner.py')), '--request', str(request)]
         else:
-            prompt = self._prompt(session, prompt, ledger := {})
+            # The message being launched is the session's newest; its event carries the skills picked for it.
+            picked = (self.recent_events(sid, ('user',), 1) or [{}])[-1].get('skills') or []
+            prompt = self._prompt(session, prompt, ledger := {}, routed, picked)
             command = providers.build_command(provider, self.providers[provider]['executable'], project, prompt,
                 mode=session['mode'], model=session['model'], session_id=session['native_session_id'],
                 agents_enabled=session['agents_enabled'], agent_count=session['agent_count'],
@@ -1576,6 +1620,9 @@ class Sessions:
             self._event(sid, {'kind':'status','text':f"Launch budgets: USD {budgets['usd'] if budgets['usd'] is not None else 'uncapped'}; tokens {budgets['tokens'] if budgets['tokens'] is not None else 'uncapped'}; time {str(run_timeout)+'s' if run_timeout is not None else 'uncapped'}. Token checks depend on provider usage reports."})
             self._event(sid, {"kind": "status", "text": f"Running {provider} in {session['mode']} mode."})
             self._event(sid, {"kind": "status", "text": f"Workspace: {session['project_path']} ({session['workspace']})."})
+            if routed.get('invoked'):
+                from .skill_hints import notice
+                self._event(sid, {"kind": "status", "text": notice(provider, routed)})
             self._event(sid, {"kind": "status", "text": f"Model: {session['model'] or 'provider default'}. Thinking effort: {session['thinking_effort'] or 'provider default'}."})
             agent_status = f"Exactly {session['agent_count']} additional agents are required this turn; use batches if native concurrency is lower." if session['agents_enabled'] else 'Additional agents disabled; the main agent runs alone.'
             if fleet:

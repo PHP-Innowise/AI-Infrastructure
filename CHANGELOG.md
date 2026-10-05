@@ -40,6 +40,24 @@ edition's own files remain in that edition's changelog.
   listing `worktree_id` on session creation. The Creator still offers only the
   project folder or a new worktree.
 
+- Harness: **skill hints** in the composer. `/` (or `$`, Codex's spelling)
+  where a word starts lists the provider's skills in the session's workspace
+  (`.claude/skills`, `.agents/skills`, `.cursor/skills`), with keyboard
+  selection; `user-invocable: false` skills stay hidden. A message invokes a
+  skill by starting with its name or by containing one picked from the list
+  (sent as `skills`); other mentions stay text. Each invoked skill gets an
+  explicit *Harness skill request* after the message: the Skill tool for
+  Claude, or the skill's `SKILL.md` for Codex and Cursor. Claude skills with
+  `disable-model-invocation: true` run only from the start of a message. A
+  Claude message that starts with exactly `/skill` and a space now goes first
+  in the prompt, so Claude Code expands it itself; the Harness context follows,
+  labelled. Until now the memory capsule or project excerpts usually came
+  first, and the CLI read the command as plain text. New:
+  `harness/src/harness/skill_hints.py`, `harness/web/skill-hints.js`,
+  `GET /api/projects/{id}/skill-hints?provider=` (optional `worktree=`),
+  `GET /api/sessions/{id}/skill-hints` and a `skills` list on session creation
+  and follow-up messages.
+
 - System Orchestration judges a memory chunk's `review_after` and `valid_to`
   by the local calendar, the one the native Memory Bank contract it applies
   uses. It read the UTC date, so west of UTC a chunk valid through today was

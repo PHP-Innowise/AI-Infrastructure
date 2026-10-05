@@ -324,6 +324,7 @@ another project while a session is open starts a new session draft for it.
   Shows the selected project's Git branch and changes, with a refresh control.
   Choose the project directory, a new Git worktree with an optional new branch name, or
   an existing Git worktree of the same repository (see [Existing worktrees](#existing-worktrees)).
+  Type `/` in the message (`$` for Codex) to pick a skill (see [Skill hints](#skill-hints)).
   The launch fields sit in one row; optional settings are chips (Helpers, Clash,
   Run in, Memory, Budgets, Models) that show their current value and open one
   panel at a time. An open session collapses to one summary line; **Next-turn
@@ -772,7 +773,8 @@ The page has no build step. `harness/web/index.html` holds the markup and the
 theme script that runs before the first paint, `app.css` holds the styles, and
 classic scripts share their top-level names in load order: `app-core.js`
 (shell, theme, routing, sessions), `run-model.js` and `run-view.js` (the run view's
-event model and its strip, tabs and receipt), `app-knowledge.js`, `app-setup.js`,
+event model and its strip, tabs and receipt), `skill-hints.js` (the composer's skill
+list), `app-knowledge.js`, `app-setup.js`,
 `app-skills.js`, `app-creator.js`, then System Orchestration's
 `agent-activity.js` (the agents panel), `system.js`, `system-editor.js` and
 `system-discovery.js`. The server reads the page and the files
@@ -790,6 +792,43 @@ included. Scripted scrolls ask for `scrollMotion()`. Numbers use `fmt` in
 digits, bounds with ≤, ≥ or +, and — for unknown, which is never 0. A list that
 refreshes on a poll renders through `keyedRender`, so open details keep their
 state.
+
+### Skill hints
+
+Typing `/` where a word starts in the message lists the skills the session's
+provider loads from its workspace: `.claude/skills` for Claude, `.agents/skills`
+for Codex, `.cursor/skills` for Cursor. Codex writes skills as `$name`, and `$`
+works for every provider. Names that start with what you typed come first, then
+names and descriptions that contain it. Up and Down move through the list, Enter
+or Tab inserts the name, and Escape closes the list until you leave that name.
+The list follows Claude Code's own menu and leaves out skills marked
+`user-invocable: false`. Personal and plugin skills, and skill folders behind a
+symbolic link, are not listed either; naming one leaves it to the agent, as
+before. The list comes from the open session's workspace. Before a session
+exists, it comes from the project folder or the chosen existing worktree.
+Fleet review and Clash write their own prompts, so they take no skill requests.
+
+A message *invokes* a skill when it starts with the skill's name, or when it
+still contains a name you picked from the list (at most five per message). Any
+other mention is plain text: "do not run /deploy yet" asks for nothing. Picked
+names travel with the message as `skills` and the runner checks them against the
+same folder at launch. Each invoked skill gets a *Harness skill request* line
+right after the message, as follows:
+
+- Claude: invoke the skill with the Skill tool.
+- Codex and Cursor: read that `SKILL.md` and follow it.
+- Claude skills marked `disable-model-invocation: true`: the Skill tool refuses
+  them, so they run only from the start of a message. The list marks them *Only
+  at the start of a message*. Picked anywhere else they are not loaded, and the
+  conversation says so.
+
+A Claude message that starts with exactly `/name` followed by a space or its end
+goes first in the prompt, so Claude Code expands the skill as when a person
+types it. `/name,` or `/name:` is not a command there, so it gets a request
+line instead. Claude Code passes everything after the name to the skill as its
+arguments. In this case the memory, project excerpts, attachment list and
+Harness instructions come after a line saying the user's own text ends above.
+The conversation names the requested skills in a status line.
 
 ### Connect and prepare a project
 

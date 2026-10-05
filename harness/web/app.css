@@ -248,7 +248,17 @@ input[type="text"],.field input[type="number"],select { width:100%; }
 @keyframes pulse { 50% { opacity:.35; } }
 .composer-area { padding:12px var(--page-x) 16px; background:var(--paper); flex:none; }
 .composer-wrap { max-width:796px; margin:auto; }
-.composer { border:1px solid var(--field-line); border-radius:var(--radius-lg); padding:16px; box-shadow:0 2px 8px var(--composer-shadow); }
+.composer { position:relative; border:1px solid var(--field-line); border-radius:var(--radius-lg); padding:16px; box-shadow:0 2px 8px var(--composer-shadow); }
+/* Skill hints open above the message, inside the composer's width; the list scrolls, the message stays in place. */
+.skill-hints { position:absolute; left:8px; right:8px; bottom:calc(100% + 4px); z-index:10; max-height:min(40vh,320px); overflow:auto; padding:4px; border:1px solid var(--field-line); border-radius:var(--radius); background:var(--paper); box-shadow:0 4px 16px var(--composer-shadow); }
+.skill-hints-list { list-style:none; margin:0; padding:0; }
+.skill-hint { display:flex; flex-direction:column; gap:2px; padding:8px 12px; border-radius:var(--radius-sm); cursor:pointer; }
+.skill-hint:hover { background:var(--hover); }
+.skill-hint[aria-selected="true"] { background:var(--purple-soft); }
+.skill-hint-name { color:var(--ink); font-family:var(--font-mono); font-size:var(--text-ui); line-height:var(--leading-ui); overflow-wrap:anywhere; }
+.skill-hint[aria-selected="true"] .skill-hint-name { color:var(--purple); }
+.skill-hint-description { color:var(--muted); font-size:var(--text-meta); line-height:var(--leading-ui); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.skill-hints-note { margin:0; padding:8px 12px; color:var(--muted); font-size:var(--text-ui); line-height:var(--leading-ui); }
 .composer:focus-within { border-color:var(--focus); box-shadow:0 0 0 2px var(--focus-glow); }
 .composer textarea { display:block; width:100%; resize:vertical; min-height:64px; max-height:210px; border:0; outline:0; background:transparent; color:var(--ink); padding:0 2px; font-size:var(--text-body); line-height:var(--leading-body); }
 .composer textarea::placeholder { color:var(--faint); }
