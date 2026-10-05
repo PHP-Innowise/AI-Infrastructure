@@ -739,7 +739,10 @@ const runView = (() => {
     const run = typeof event.launch_id === 'string' ? ui.model.runs.get(event.launch_id) : null;
     if (event.compaction && typeof event.compaction === 'object') {
       const {pre,post} = event.compaction;
-      return divider(typeof event.text === 'string' && event.text ? event.text : `Context compacted · ${fmt.exact(pre).text} → ${Number.isFinite(post) ? fmt.exact(post).text : '—'} tokens. The CLI replaced earlier conversation with a summary.`,'run-compaction',event.id,true);
+      // Only the sizes the CLI reported, as the server writes it; it may report the size before without the size after.
+      const known = value => Number.isFinite(value), size = known(pre) && known(post) ? ` · ${fmt.exact(pre).text} → ${fmt.exact(post).text} tokens`
+        : known(pre) ? ` at ${fmt.exact(pre).text} tokens` : known(post) ? ` to ${fmt.exact(post).text} tokens` : '';
+      return divider(typeof event.text === 'string' && event.text ? event.text : `Context compacted${size}. The CLI replaced earlier conversation with a summary.`,'run-compaction',event.id,true);
     }
     // The announcer says this milestone once; the log's copy is a separator it does not read out.
     if (event.targets === 'limited') return quiet(divider('Step details are not recorded after this point; steps are still counted.','run-limited',event.id,false));

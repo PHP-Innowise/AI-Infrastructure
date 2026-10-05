@@ -303,6 +303,15 @@ def user_home():
         return None
 
 
+def compaction_text(pre, post):
+    """The divider names only the sizes the CLI reported; it may report the size before without the size after."""
+    if pre is not None and post is not None:
+        size = f' · {pre:,} → {post:,} tokens'
+    else:
+        size = f' at {pre:,} tokens' if pre is not None else f' to {post:,} tokens' if post is not None else ''
+    return f'Context compacted{size}. The CLI replaced earlier conversation with a summary.'
+
+
 class Enricher:
     """Moves a native launch's tool targets onto its stored events within their own budget; never raises.
 
@@ -494,10 +503,7 @@ class Enricher:
                     break
                 self.compactions += 1
                 pre, post = ((value if type(value) is int else None) for value in (item.get('pre'), item.get('post')))
-                event = {'kind': 'status', 'compaction': {'pre': pre, 'post': post},
-                         'text': f"Context compacted · {'—' if pre is None else f'{pre:,}'} → "
-                                 f"{'—' if post is None else f'{post:,}'} tokens. "
-                                 'The CLI replaced earlier conversation with a summary.'}
+                event = {'kind': 'status', 'compaction': {'pre': pre, 'post': post}, 'text': compaction_text(pre, post)}
                 if self.allow_extra(event):
                     result.append(event)
         except Exception:  # Display-only, as in take().

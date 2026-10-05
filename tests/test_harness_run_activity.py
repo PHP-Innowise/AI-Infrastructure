@@ -250,9 +250,12 @@ class EnricherTests(Replay):
         enricher = Enricher('claude', POSIX)
         self.assertEqual([{'kind': 'status', 'compaction': {'pre': 166040, 'post': 38900},
                            'text': 'Context compacted · 166,040 → 38,900 tokens. The CLI replaced earlier conversation with a summary.'},
+                          {'kind': 'status', 'compaction': {'pre': 166040, 'post': None},
+                           'text': 'Context compacted at 166,040 tokens. The CLI replaced earlier conversation with a summary.'},
                           {'kind': 'status', 'compaction': {'pre': None, 'post': None},
-                           'text': 'Context compacted · — → — tokens. The CLI replaced earlier conversation with a summary.'}],
-                         enricher.compaction([{'pre': 166040, 'post': 38900, 'call': 4}, {'pre': None, 'post': None, 'call': 9}]))
+                           'text': 'Context compacted. The CLI replaced earlier conversation with a summary.'}],
+                         enricher.compaction([{'pre': 166040, 'post': 38900, 'call': 4}, {'pre': 166040, 'post': None, 'call': 7},
+                                              {'pre': None, 'post': None, 'call': 9}]))
         self.assertEqual([], enricher.compaction([{'pre': 1, 'post': 1}, {'pre': 2, 'post': 2}]))
 
 
