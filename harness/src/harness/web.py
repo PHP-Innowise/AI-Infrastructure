@@ -286,6 +286,10 @@ class Handler(BaseHTTPRequestHandler):
                 if parsed.query:
                     raise SessionError('Invalid Git status request.')
                 self.reply(200, store.git(path.split('/')[3]))
+            elif path.startswith('/api/projects/') and path.endswith('/worktrees') and len(path.split('/')) == 5:
+                if parsed.query:
+                    raise SessionError('Invalid worktree listing request.')
+                self.reply(200, store.worktrees(path.split('/')[3]))
             elif path.startswith('/api/projects/') and path.endswith('/memory') and len(path.split('/')) == 5:
                 query = parse_qs(parsed.query, strict_parsing=True, keep_blank_values=True) if parsed.query else {}
                 if (set(query) - {'bank', 'path'} or any(len(values) != 1 or not values[0] for values in query.values())

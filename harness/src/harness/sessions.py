@@ -48,6 +48,8 @@ CAPSULE_LIMIT = 8000
 # Everything else (the working task, last turn, handoffs, dynamic records, episodes and the envelope) is Project Brain.
 CAPSULE_KINDS = {'policy': 'rules', 'evidence': 'rules', 'durable': 'bank'}
 ACTIVE = ("queued", "running")
+# Workspace › Existing Git worktree lists at most this many checkouts.
+MAX_WORKTREES = 200
 MAX_AGENTS = 40
 DEFAULT_AGENT_COUNT = 3
 MEMORY_BANKS = (
@@ -230,6 +232,46 @@ def git_details(root, include_status=True):
             'reason': reason,
             'root': str(top), 'common_dir': str(existing_directory(root / common.stdout.strip())
                 if os.name == 'nt' else (root / common.stdout.strip()).resolve())}
+
+
+def git_worktrees(root):
+    """The worktrees Git records for the repository holding root, main checkout first, as Git lists them."""
+    listing = run_git(root, 'worktree', 'list', '--porcelain', '-z')
+    if listing.returncode:
+        raise SessionError('Git could not list the worktrees of this repository.')
+    entries = []
+    for field in listing.stdout.split('\0'):
+        name, _, value = field.partition(' ')
+        if name == 'worktree':
+            entries.append({'path': value, 'head': None, 'branch': None,
+                            'bare': False, 'detached': False, 'locked': False, 'prunable': False})
+        elif entries and name == 'HEAD':
+            entries[-1]['head'] = value
+        elif entries and name == 'branch':
+            entries[-1]['branch'] = value[len('refs/heads/'):] if value.startswith('refs/heads/') else value
+        elif entries and name in ('bare', 'detached', 'locked', 'prunable'):
+            # Locked and prunable may carry a reason after the name; only the state matters here.
+            entries[-1][name] = True
+    return entries
+
+
+def inside(path, folder):
+    left, right = os.path.normcase(os.path.abspath(path)), os.path.normcase(os.path.abspath(folder))
+    try:
+        return os.path.commonpath((left, right)) == right
+    except ValueError:
+        return False
+
+
+def project_prefix(source, top):
+    """Where the registered project sits inside its checkout; every worktree holds it at the same place."""
+    try:
+        prefix = Path(os.path.relpath(source, top)) if os.name == 'nt' else Path(source).relative_to(Path(top))
+    except ValueError:
+        raise SessionError('Git project root changed.') from None
+    if prefix.is_absolute() or '..' in prefix.parts:
+        raise SessionError('Git project root changed.')
+    return prefix
 
 
 def validate_prompt(prompt):
@@ -670,6 +712,67 @@ class Sessions:
     def git(self, key):
         return {'project_id': key, **git_details(self.project(key)['path'])}
 
+    def worktrees(self, key):
+        """Workspace › Existing Git worktree: the other checkouts of the project's repository a new session can run in."""
+        project = self.project(key)
+        try:
+            details, choices, skipped = self._worktree_choices(project)
+        except SessionError as error:
+            return {'project_id': key, 'is_git': False, 'worktrees': [], 'skipped': 0, 'reason': str(error)}
+        return {'project_id': key, 'is_git': details['is_git'], 'skipped': skipped, 'reason': None,
+                'worktrees': [{name: choice[name] for name in ('id', 'path', 'folder', 'branch', 'head', 'detached', 'locked')}
+                              for choice in choices]}
+
+    def _worktree_choices(self, project):
+        """Every checkout Git lists for the project's repository except the project's own and the Harness's
+        (session and Delivery check worktrees), with the folder a session would run in. Unusable ones are only
+        counted. An ID covers the path and what is checked out there."""
+        source = Path(project['path'])
+        details = git_details(source, include_status=False)
+        if not details['is_git']:
+            return details, [], 0
+        top = Path(details['root'])
+        prefix = project_prefix(source, top)
+        choices, skipped = [], 0
+        for entry in git_worktrees(source):
+            if entry['bare'] or not entry['path'] or same_path(entry['path'], top) or inside(entry['path'], self.state_dir):
+                continue
+            root = Path(entry['path'])
+            folder = root / prefix
+            try:
+                if entry['prunable'] or not root.is_absolute() or len(choices) == MAX_WORKTREES or not folder.is_dir():
+                    raise OSError('Unusable worktree')
+                if os.name == 'nt':
+                    existing_directory(folder)
+                elif folder.resolve() != folder:
+                    raise OSError('Linked worktree folder')
+            except OSError:
+                skipped += 1
+                continue
+            checkout = entry['branch'] or 'detached:' + str(entry['head'])
+            choices.append({'id': hashlib.sha256((os.path.normcase(str(root)) + '\0' + checkout).encode()).hexdigest()[:16],
+                            'path': str(root), 'folder': str(folder), 'branch': entry['branch'], 'head': entry['head'],
+                            'detached': entry['detached'], 'locked': entry['locked']})
+        return details, choices, skipped
+
+    def _existing_workspace(self, project, data):
+        """The listed worktree a new session runs in, chosen by its ID: the agent works in that checkout as it is."""
+        choice_id, branch = data.get('worktree_id'), data.get('worktree_branch', '')
+        if not isinstance(choice_id, str) or not re.fullmatch('[a-f0-9]{16}', choice_id):
+            raise SessionError('Choose one of the listed worktrees.')
+        if branch != '':
+            raise SessionError('A new branch name is only valid for a new worktree.')
+        details, choices, _ = self._worktree_choices(project)
+        choice = next((item for item in choices if item['id'] == choice_id), None)
+        if choice is None:
+            raise SessionError('Git no longer lists that worktree for this project. Refresh Git and choose again.')
+        folder = Path(choice['folder'])
+        current = git_details(folder, include_status=False)
+        if (not current['is_git'] or not same_path(current['root'], choice['path'])
+                or not same_path(current['common_dir'], details['common_dir'])):
+            raise SessionError('That folder is no longer a worktree of this repository. Refresh Git and choose again.')
+        return folder, 'existing-worktree', current['branch'], details['common_dir']
+
     def _workspace(self, session):
         source = Path(self.project(session['project_id'])['path'])
         project = Path(session['project_path'])
@@ -688,6 +791,19 @@ class Sessions:
         if session['workspace'] == 'project':
             if not same_path(project, source):
                 raise SessionError('The original project is no longer registered.')
+        elif session['workspace'] == 'existing-worktree':
+            # Someone else's checkout: it may change branch, but it stays a registered worktree of this repository.
+            original, current = git_details(source, include_status=False), git_details(project, include_status=False)
+            if (not original['is_git'] or not current['is_git']
+                    or not same_path(original['common_dir'], session['git_common_dir'])
+                    or not same_path(current['common_dir'], session['git_common_dir'])):
+                raise SessionError('The selected worktree no longer belongs to this project.')
+            root = Path(current['root'])
+            if (not same_path(project, root / project_prefix(source, original['root']))
+                    or same_path(root, original['root']) or inside(root, self.state_dir)):
+                raise SessionError('The selected worktree no longer belongs to this project.')
+            if not any(same_path(entry['path'], root) and not entry['prunable'] for entry in git_worktrees(source)):
+                raise SessionError('The selected worktree is no longer registered in Git.')
         else:
             original, current = git_details(source), git_details(project)
             root = self.state_dir / 'worktrees' / session['id']
@@ -834,8 +950,10 @@ class Sessions:
     def create(self, data, *, _creator=None, _system_run=None, _system_discovery=None):
         if not isinstance(data, dict):
             raise SessionError("Session options must be a JSON object.")
-        if set(data) - {"project_id", "provider", "prompt", "mode", "workflow", "model", "thinking_effort", "project_context", "agents_enabled", "agent_count", "workspace", "worktree_branch", "fleet", "brain", "budgets", "sdd", "model_routing", "attachments", "clash"}:
+        if set(data) - {"project_id", "provider", "prompt", "mode", "workflow", "model", "thinking_effort", "project_context", "agents_enabled", "agent_count", "workspace", "worktree_branch", "worktree_id", "fleet", "brain", "budgets", "sdd", "model_routing", "attachments", "clash"}:
             raise SessionError("Unknown session option.")
+        if 'worktree_id' in data and data.get('workspace') != 'existing-worktree':
+            raise SessionError('A listed worktree is only valid for the Existing Git worktree workspace.')
         if _system_run is not None:
             if (not isinstance(_system_run, dict) or set(_system_run) != {'run_id', 'nonce'}
                     or any(not isinstance(v, str) or not re.fullmatch('[a-f0-9]{32}', v) for v in _system_run.values())
@@ -862,10 +980,14 @@ class Sessions:
         if mode not in ('plan', 'edit') or workflow not in tuple(w['id'] for w in WORKFLOWS):
             raise SessionError("Unknown mode or workflow.")
         sdd_settings = sdd.validate(data.get('sdd'), workflow)
+        # An existing worktree is resolved now: the SDD check below reads its documents, not the project's.
+        existing = self._existing_workspace(project, data) if data.get('workspace') == 'existing-worktree' and not _creator else None
         if sdd_settings:
             mode = sdd.mode(sdd_settings)
             if data.get('workspace', 'project') == 'project':
                 sdd.check(Path(project['path']), sdd_settings)
+            elif existing:
+                sdd.check(existing[0], sdd_settings)
         clash_settings = clash.validate(data.get('clash'), workflow, provider['id'])
         if clash_settings:
             if data.get('model_routing') is not None:
@@ -911,7 +1033,7 @@ class Sessions:
                 path = self.state_dir / 'system-discovery' / _system_discovery['run_id'] / 'agent'
                 workspace, branch, common = 'system-discovery', None, None
             else:
-                path, workspace, branch, common = self._new_workspace(project, data, sid)
+                path, workspace, branch, common = existing or self._new_workspace(project, data, sid)
             attached = self.attachments.save(sid, files)
             self.db.execute("""INSERT INTO sessions
                 (id,title,project_id,project_path,provider,model,mode,workflow,project_context,

@@ -26,6 +26,20 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Harness: **Existing Git worktree** as a third workspace. A new session can run
+  in a checkout that Git lists for the project's repository: one made outside
+  the Harness, for example by a script that also prepares the task's
+  environment. The picker lists every other checkout except the project's own
+  folder and anything inside the runner's state, such as session and Delivery
+  check worktrees, and chooses none for you. The session uses the checkout as it
+  is, with its branch, uncommitted files and environment. An entry's ID covers
+  its path and branch, so a folder reused for another branch needs a refresh.
+  Follow-ups accept a switched branch, but refuse a checkout that Git no longer
+  lists, that became a link or that belongs to another repository. New:
+  `GET /api/projects/{id}/worktrees`, `workspace: "existing-worktree"` with a
+  listing `worktree_id` on session creation. The Creator still offers only the
+  project folder or a new worktree.
+
 - System Orchestration judges a memory chunk's `review_after` and `valid_to`
   by the local calendar, the one the native Memory Bank contract it applies
   uses. It read the UTC date, so west of UTC a chunk valid through today was

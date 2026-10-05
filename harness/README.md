@@ -322,7 +322,8 @@ another project while a session is open starts a new session draft for it.
   Workspace/Plan/Review workflow, Plan/Edit mode, project memory (on by
   default), additional-agent switch and a concurrent helper limit (1–40, default 3).
   Shows the selected project's Git branch and changes, with a refresh control.
-  Choose the project directory or a new Git worktree with an optional new branch name.
+  Choose the project directory, a new Git worktree with an optional new branch name, or
+  an existing Git worktree of the same repository (see [Existing worktrees](#existing-worktrees)).
   The launch fields sit in one row; optional settings are chips (Helpers, Clash,
   Run in, Memory, Budgets, Models) that show their current value and open one
   panel at a time. An open session collapses to one summary line; **Next-turn
@@ -424,6 +425,33 @@ Use **Results & usage → Worktree delivery** to commit selected files and trans
 a reviewed commit to a local project branch. Use normal Git worktree commands for
 other worktree management. Project context in a run comes from its selected workspace; the separate
 Memory bank and Skills sections continue to use the registered project directory.
+
+#### Existing worktrees
+
+**Existing Git worktree** runs a new session in a checkout you made yourself, for
+example with a script that also prepares the task's environment (containers, `.env`,
+`vendor/`). The list comes from `git worktree list` for the registered project's
+repository. It shows every other checkout except the project's own folder and
+the Harness's own worktrees. Each entry shows its folder and branch, or
+*detached* and the commit; the full path appears under the picker. Nothing is
+chosen for you. A checkout whose folder is missing, sits behind a symbolic
+link or lacks the project's subfolder is counted under the picker, not listed.
+Anything inside the runner's state directory, including Delivery's
+disposable check worktrees, is left out entirely. An entry's ID covers its path
+and its branch (or commit when detached). A folder your script reused for
+another branch is a new entry, and a choice made from the old list is refused
+until you refresh. **Refresh Git** lists the worktrees again; a draft remembers
+the choice per project.
+
+The session runs in that checkout as it is: its branch, uncommitted and ignored
+files and prepared environment are used, and the Harness copies, resets or
+removes nothing. For a project inside a repository, the same subfolder of the
+worktree is used. Follow-ups accept a branch you switched there, and refuse a
+checkout that Git no longer lists, that was replaced by a link, or that belongs
+to another repository. Worktree delivery stays with the Harness's own worktrees:
+commit and merge an existing worktree's work with your usual Git commands. The
+picker sends a listing ID, never a path; the runner looks the ID up again in
+Git's list before it creates the session.
 
 **Results & Verification** compares the workspace with the commit recorded before
 the first launch, including committed, staged, unstaged and nonignored untracked

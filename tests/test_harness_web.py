@@ -567,6 +567,46 @@ assert.equal(nodes.at(-1).children.at(-1).textContent,'Done.\\n\\n[Memory draft:
         self.git_command("add", "README.md")
         self.git_command("commit", "--quiet", "-m", "Initialize HTTP fixture")
 
+    @unittest.skipUnless(shutil.which('node'), 'Worktree picker check requires Node')
+    def test_worktree_picker_names_checkouts_and_never_chooses_one_for_the_person(self):
+        page = ui_script()
+        source = page[page.index('\nfunction workspaceLabel('):page.index('\nasync function loadProjectWorktrees(')]
+        script = """const assert = require('node:assert/strict');
+const select = {dataset:{}, options:[], current:'', get firstChild() { return this.options[0]; },
+  replaceChildren(...items) { this.options = items; this.current = items[0]?.value ?? ''; },
+  get value() { return this.current; }, set value(id) { this.current = this.options.some(option => option.value === id) ? id : ''; }};
+const fields = {'existing-worktree': select, project: {value:'p1'}}; const $ = id => fields[id];
+const el = (tag, className, text) => ({tag, className, textContent:text, value:text});
+const projectWorktreeState = {projectId:'p1', data:null, pending:true, error:null, preferred:''};
+""" + source + """
+assert.equal(workspaceLabel('existing-worktree'),'Existing Git worktree'); assert.equal(workspaceLabel('project'),'Project folder');
+assert.equal(worktreeLabel({path:'/work/task-123', branch:'task-123', head:'a'.repeat(40)}),'task-123 · task-123');
+assert.equal(worktreeLabel({path:'C:\\\\work\\\\review', branch:null, head:'0123456789abcdef', locked:true}),'review · detached 01234567 · locked');
+assert.equal(worktreeLabel({path:'/work/fresh/', branch:null, head:null}),'fresh · no commits');
+// Until the list arrives the picker is empty and says it is loading.
+let listed = renderExistingWorktrees(); assert.equal(listed.loading,true); assert.equal(listed.choice,null);
+const one = {id:'1'.repeat(16), path:'/work/task-1', folder:'/work/task-1', branch:'task-1', head:'b'.repeat(40)};
+const two = {id:'2'.repeat(16), path:'/work/task-2', folder:'/work/task-2/app', branch:'task-2', head:'c'.repeat(40)};
+Object.assign(projectWorktreeState,{pending:false, data:{worktrees:[one,two], skipped:3}});
+listed = renderExistingWorktrees();
+assert.deepEqual(select.options.map(option => [option.value, option.textContent]), [['','Choose a worktree…'],[one.id,'task-1 · task-1'],[two.id,'task-2 · task-2']]);
+// Nothing is chosen for the person: a wrong checkout would run the agent somewhere else.
+assert.equal(listed.choice,null); assert.equal(listed.skipped,3); assert.equal(listed.loading,false);
+select.value = two.id; assert.equal(renderExistingWorktrees().choice.folder,'/work/task-2/app');
+// A refresh with the same checkouts keeps the choice; a new list keeps it while it is still listed.
+Object.assign(projectWorktreeState,{data:{worktrees:[two,one], skipped:0}}); assert.equal(renderExistingWorktrees().choice.id,two.id);
+Object.assign(projectWorktreeState,{data:{worktrees:[one], skipped:0}}); assert.equal(renderExistingWorktrees().choice,null);
+// A draft's choice comes back once its checkout is listed again; another project's list never inherits it.
+projectWorktreeState.preferred = two.id; Object.assign(projectWorktreeState,{data:{worktrees:[one,two], skipped:0}});
+assert.equal(renderExistingWorktrees().choice.id,two.id);
+select.value = ''; delete select.dataset.key; assert.equal(renderExistingWorktrees().choice.id,two.id);
+fields.project.value = 'p2'; listed = renderExistingWorktrees(); assert.deepEqual([listed.choices, listed.choice, listed.error], [[], null, '']);
+assert.equal(select.options[0].textContent,'No other worktrees');
+fields.project.value = 'p1'; Object.assign(projectWorktreeState,{data:{worktrees:[], skipped:0, reason:'Git could not list the worktrees of this repository.'}});
+assert.match(renderExistingWorktrees().error,/could not list/);
+"""
+        subprocess.run([shutil.which('node'), '-e', script], check=True, capture_output=True, text=True)
+
     @unittest.skipUnless(shutil.which("git"), "Git workspace tests require git")
     def test_git_http_metadata_tracks_branch_and_dirty_state_and_project_is_default(self):
         path = f"/api/projects/{self.project_id}/git"
@@ -639,6 +679,40 @@ assert.equal(nodes.at(-1).children.at(-1).textContent,'Done.\\n\\n[Memory draft:
         for field in ("workspace", "branch", "project_id", "project_path", "git_common_dir"):
             self.assertEqual(resumed["session"][field], original[field])
         self.assertEqual(resumed["session"]["native_session_id"], "fixture-worktree")
+
+    @unittest.skipUnless(shutil.which("git"), "Worktree routes require Git")
+    def test_existing_worktree_http_listing_and_creation_keep_the_chosen_checkout(self):
+        path = f"/api/projects/{self.project_id}/worktrees"
+        self.assertEqual(self.request(path)[1], {"project_id": self.project_id, "is_git": False, "worktrees": [],
+                                                 "skipped": 0, "reason": None})
+        self.initialize_git()
+        task = self.root / "http-task"
+        self.git_command("worktree", "add", "--quiet", "-b", "http-task", str(task))
+        status, listing, _ = self.request(path)
+        self.assertEqual(status, 200)
+        self.assertEqual([(entry["path"], entry["branch"]) for entry in listing["worktrees"]], [(str(task), "http-task")])
+        for invalid in (path + "?refresh=1", f"/api/projects/{'0' * 16}/worktrees", path + "/extra"):
+            with self.subTest(path=invalid):
+                self.assertIn(self.request(invalid)[0], (400, 404))
+        choice = listing["worktrees"][0]["id"]
+        store = self.server.sessions
+        for changes in ({"workspace": "existing-worktree"}, {"workspace": "existing-worktree", "worktree_id": "f" * 16},
+                        {"workspace": "project", "worktree_id": choice},
+                        {"workspace": "existing-worktree", "worktree_id": choice, "worktree_branch": "new"}):
+            with self.subTest(changes=changes):
+                self.assertEqual(self.post("/api/sessions", self.options(provider="claude", **changes))[0], 400)
+        self.assertEqual(store.list(), [])
+        status, created, _ = self.post("/api/sessions", self.options(provider="claude", workspace="existing-worktree", worktree_id=choice))
+        self.assertEqual(status, 201)
+        session = created["session"]
+        self.assertEqual((session["workspace"], session["branch"], session["project_path"], session["git_common_dir"]),
+                         ("existing-worktree", "http-task", str(task), str(self.project / ".git")))
+        with store.lock:
+            store.db.execute("UPDATE sessions SET status='completed',native_session_id='fixture-existing' WHERE id=?", (session["id"],))
+            store.db.commit()
+        status, resumed, _ = self.post(f"/api/sessions/{session['id']}/messages", {"prompt": "Continue in my checkout"})
+        self.assertEqual(status, 200)
+        self.assertEqual(resumed["session"]["project_path"], str(task))
 
     def test_fleet_http_decisions_resume_and_report_enforce_state_auth_and_schema(self):
         store = self.server.sessions

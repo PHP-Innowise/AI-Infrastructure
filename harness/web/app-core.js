@@ -139,6 +139,8 @@ const setupState = {pending:null,registerPending:false,projectsPending:false,pro
 const skillsState = {catalog:null,catalogPending:false,catalogEpoch:0,catalogError:false,sourceId:null,discoveredSourceId:null,skills:[],selectedSkills:new Set(),selectedAgents:new Set(),agentsInitialized:false,pending:null,actionEpoch:0,preview:null,installed:[],installedProjectId:null,installedEpoch:0,installedController:null,installedPending:false,installedError:false,changePreview:null,changeTimer:null};
 const createSkillState = {selectedAgents:new Set(),agentsInitialized:false,touched:new Set(),pending:null,epoch:0,preview:null,resultProjectId:null};
 const projectGitState = {projectId:null,data:null,pending:false,error:null,epoch:0,controller:null};
+// Workspace › Existing Git worktree: the project's other checkouts; `preferred` is the choice a draft or the person made.
+const projectWorktreeState = {projectId:null,data:null,pending:false,error:null,epoch:0,controller:null,preferred:''};
 const fleetUi = {lenses:new Set(),initialized:false,reviewers:new Map(),stage:null,resultKey:null,reportOpenedFor:null};
 const active = session => session && ['queued','running'].includes(session.status);
 const isFleetSession = session => session?.workflow === 'fleet-review';
@@ -722,7 +724,8 @@ function captureSessionPreferences() {
   // Until the knowledge roots load, their selects are empty: keep the root and task this project last saved.
   const settled = brainLinkLoaded() && !brainLinkDraft.error, kept = settled ? null : readSessionPreferences().drafts?.[sessionDraftProject || $('project').value];
   return {fields:Object.fromEntries(sessionPreferenceFields.map(id => [id,$(id).type === 'checkbox' ? $(id).checked : $(id).value])),model:selectedModel(),effort:$('thinking-effort').value,routing:modelRouting(),lenses:[...fleetUi.lenses],
-    bank:settled ? $('brain-link-bank').value : typeof kept?.bank === 'string' ? kept.bank : '',task:settled ? $('brain-link-task').value : typeof kept?.task === 'string' ? kept.task : ''};
+    bank:settled ? $('brain-link-bank').value : typeof kept?.bank === 'string' ? kept.bank : '',task:settled ? $('brain-link-task').value : typeof kept?.task === 'string' ? kept.task : '',
+    worktree:projectWorktreeState.preferred};
 }
 function saveSessionPreferences(projectId = sessionDraftProject || $('project').value) {
   if (!sessionPreferencesReady || restoringSessionPreferences || !state.bootstrap) return;
@@ -758,6 +761,8 @@ async function restoreProjectPreferences(projectId) {
     restoreModelRouting(routing?.plan && routing?.edit ? Object.fromEntries(['plan','edit'].map(role => [role,{model:text(routing[role].model),thinking_effort:text(routing[role].thinking_effort)}])) : null);
     refreshModelChoices(text(draft?.model),text(draft?.effort));
     fleetUi.lenses = new Set((Array.isArray(draft?.lenses) ? draft.lenses : []).filter(id => (fleetMetadata().lenses || []).some(lens => lens.id === id))); renderFleetLenses();
+    // The picker re-applies the saved choice on its next render, even for the list it already shows.
+    projectWorktreeState.preferred = /^[a-f0-9]{16}$/.test(saved?.worktree || '') ? saved.worktree : ''; $('existing-worktree').value = ''; delete $('existing-worktree').dataset.key;
     loadProjectGit(true); updateControls();
     await loadBrainLinkTasks(true);
     if (epoch !== preferenceEpoch || state.selectedId) return;
@@ -835,10 +840,16 @@ function updateWorkspaceControls() {
   const projectId = $('project').value; const hasSession = Boolean(state.selectedId); const ready = Boolean(state.bootstrap) && !state.authFailed;
   const data = projectGitState.projectId === projectId ? projectGitState.data : null; const checking = projectGitState.projectId === projectId && projectGitState.pending;
   const worktree = $('workspace').value === 'worktree'; const available = Boolean(data?.is_git && data.head && data.worktree_available && !checking && !projectGitState.error);
+  const existing = $('workspace').value === 'existing-worktree'; const listed = renderExistingWorktrees();
   $('workspace').disabled = !ready || hasSession || Boolean(state.pending) || state.loading;
   $('workspace-worktree-option').disabled = !available && !(hasSession && worktree);
+  $('workspace-existing-option').disabled = !data?.is_git && !(hasSession && existing);
   $('worktree-branch-field').hidden = hasSession || !worktree;
   $('worktree-branch').disabled = !ready || hasSession || !worktree || Boolean(state.pending) || state.loading;
+  $('existing-worktree-field').hidden = hasSession || !existing;
+  $('existing-worktree').disabled = !ready || hasSession || !existing || Boolean(state.pending) || state.loading || !listed.choices.length;
+  $('existing-worktree-hint').textContent = hasSession || !existing ? '' : listed.choice ? `Folder: ${listed.choice.folder}` : listed.skipped ? `${listed.skipped} more ${listed.skipped === 1 ? 'worktree is' : 'worktrees are'} not listed: a missing or linked folder, no project folder in it, or past the first 200.` : '';
+  $('existing-worktree-hint').hidden = !$('existing-worktree-hint').textContent;
   $('refresh-project-git').disabled = !state.bootstrap || !projectId || checking;
   let status = 'Choose a project to check its Git branch.';
   if (checking) status = 'Checking project Git…';
@@ -846,18 +857,57 @@ function updateWorkspaceControls() {
   else if (data && !data.is_git) status = 'No Git repository';
   else if (data?.is_git) status = `${data.branch ? `Project branch: ${data.branch}` : data.head ? `Project checkout: detached HEAD · ${data.head.slice(0,8)}` : 'Git repository · no committed HEAD'}${data.head ? data.dirty ? ' · uncommitted changes' : ' · clean' : data.branch ? ' · no commits' : ''}`;
   $('project-git-status').textContent = status;
-  $('workspace-hint').textContent = hasSession ? 'Workspace settings stay fixed for this session. Git status above is for the registered project.' : worktree ? `${checking ? 'Checking worktree availability. ' : ''}A new worktree starts from committed HEAD. Uncommitted edits are not copied.` : data?.is_git ? 'Runs in the current project checkout, including uncommitted files and edits.' : 'The agent runs in the selected project folder.';
+  $('workspace-hint').textContent = hasSession ? 'Workspace settings stay fixed for this session. Git status above is for the registered project.' : worktree ? `${checking ? 'Checking worktree availability. ' : ''}A new worktree starts from committed HEAD. Uncommitted edits are not copied.` : existing ? `${listed.loading ? 'Listing worktrees. ' : ''}Runs in the chosen checkout as it is: its branch, uncommitted files and the environment you prepared there.` : data?.is_git ? 'Runs in the current project checkout, including uncommitted files and edits.' : 'The agent runs in the selected project folder.';
   let message = '';
   if (!hasSession && worktree && !checking && !available) message = projectGitState.error || (data?.reason || (data && !data.is_git ? 'This project has no Git repository. Choose Current project folder.' : 'A worktree requires an available Git repository with a committed HEAD. Refresh Git or choose Current project folder.'));
+  else if (!hasSession && existing && !checking && data && !data.is_git) message = 'This project has no Git repository. Choose Current project folder.';
+  else if (!hasSession && existing && !listed.loading) message = listed.error || (!listed.choices.length ? 'Git lists no other worktree of this project. Create one with git worktree add or your own script, then Refresh Git.' : '');
   else if (projectGitState.projectId === projectId && projectGitState.error) message = projectGitState.error;
   if (!hasSession && worktree && $('worktree-branch').value.length > 256) message = 'Use at most 256 characters for the new branch name.';
   showError('workspace-error',message);
   $('workspace-session-info').hidden = !state.selected;
-  $('workspace-session-branch').textContent = state.selected ? `Branch when created: ${state.selected.branch || 'none recorded'} · ${state.selected.workspace === 'worktree' ? 'Git worktree' : 'Project folder'}` : '';
+  $('workspace-session-branch').textContent = state.selected ? `Branch when created: ${state.selected.branch || 'none recorded'} · ${workspaceLabel(state.selected.workspace)}` : '';
   $('workspace-session-path').textContent = state.selected ? `Working folder: ${state.selected.project_path || 'not recorded'}` : '';
-  return hasSession || $('workspace').value === 'project' || worktree && available && $('worktree-branch').value.length <= 256;
+  return hasSession || $('workspace').value === 'project' || worktree && available && $('worktree-branch').value.length <= 256 || existing && Boolean(listed.choice);
+}
+function workspaceLabel(workspace) { return {worktree:'Git worktree','existing-worktree':'Existing Git worktree'}[workspace] || 'Project folder'; }
+// A checkout reads as its folder and what it has checked out; the hint under the picker gives the whole path.
+function worktreeLabel(item) {
+  const name = item.path.split(/[\\/]/).filter(Boolean).pop() || item.path;
+  return `${name} · ${item.branch || (item.head ? `detached ${item.head.slice(0,8)}` : 'no commits')}${item.locked ? ' · locked' : ''}`;
+}
+// Fills the picker only when the list changes, so a poll never resets a choice; nothing is chosen for the person.
+function renderExistingWorktrees() {
+  const select = $('existing-worktree'), projectId = $('project').value;
+  const own = projectWorktreeState.projectId === projectId, data = own ? projectWorktreeState.data : null, choices = data?.worktrees || [];
+  const key = JSON.stringify([projectId,choices.map(item => [item.id,worktreeLabel(item)])]);
+  if (select.dataset.key !== key) {
+    const wanted = [select.value,projectWorktreeState.preferred].find(id => id && choices.some(item => item.id === id)) || ''; select.dataset.key = key;
+    select.replaceChildren(el('option','',choices.length ? 'Choose a worktree…' : 'No other worktrees'),...choices.map(item => { const option = el('option','',worktreeLabel(item)); option.value = item.id; return option; }));
+    select.firstChild.value = ''; select.value = wanted;
+  }
+  return {choices,choice:choices.find(item => item.id === select.value) || null,skipped:data?.skipped || 0,
+    loading:own && projectWorktreeState.pending && !data,error:own ? projectWorktreeState.error || data?.reason || '' : ''};
+}
+async function loadProjectWorktrees(force = false) {
+  const projectId = $('project').value;
+  if (!force && projectWorktreeState.projectId === projectId && (projectWorktreeState.pending || projectWorktreeState.data || projectWorktreeState.error)) return;
+  projectWorktreeState.controller?.abort(); const controller = new AbortController(); const epoch = ++projectWorktreeState.epoch;
+  // A refresh keeps the list it replaces, so the picker does not flicker empty.
+  if (projectWorktreeState.projectId !== projectId) projectWorktreeState.data = null;
+  Object.assign(projectWorktreeState,{projectId,error:null,pending:Boolean(projectId && state.bootstrap),controller});
+  if (!projectId || !state.bootstrap) { projectWorktreeState.controller = null; return; }
+  try {
+    const data = await api(`/api/projects/${encodeURIComponent(projectId)}/worktrees`,{signal:controller.signal});
+    if (epoch !== projectWorktreeState.epoch || projectId !== $('project').value) return;
+    if (data.project_id !== projectId || typeof data.is_git !== 'boolean' || !Array.isArray(data.worktrees) || !Number.isInteger(data.skipped)
+        || data.worktrees.some(item => !/^[a-f0-9]{16}$/.test(item?.id || '') || typeof item.path !== 'string' || typeof item.folder !== 'string')) throw new Error('The runner returned an incomplete worktree list. Refresh Git to try again.');
+    projectWorktreeState.data = data;
+  } catch (error) { if (error.name !== 'AbortError' && epoch === projectWorktreeState.epoch && projectId === $('project').value) { projectWorktreeState.data = null; projectWorktreeState.error = error.status === 0 ? 'Worktrees could not be listed. Refresh Git to try again.' : textError(error); } }
+  finally { if (epoch === projectWorktreeState.epoch) { projectWorktreeState.pending = false; projectWorktreeState.controller = null; updateControls(); } }
 }
 async function loadProjectGit(force = false) {
+  loadProjectWorktrees(force);
   const projectId = $('project').value;
   if (!force && projectGitState.projectId === projectId && (projectGitState.pending || projectGitState.data || projectGitState.error)) return;
   projectGitState.controller?.abort(); const controller = new AbortController(); const epoch = ++projectGitState.epoch;
@@ -1020,12 +1070,13 @@ function renderSessionOptions() {
   for (const id of ['project','provider','workflow']) $(id).closest('label').hidden = hasSession;
   const shown = {helpers:!clashMode && !session?.creator, clash:clashAvailable() && !fleet && !isFleetSession(session) && !session?.creator, workspace:!hasSession, brain:!hasSession, budgets:!session?.creator, models:!fleet && !clashMode && !fleetDryRun()};
   const valid = sessionOptions.validity || {}, invalid = {helpers:valid.helpers === false, clash:valid.clash === false, workspace:valid.workspace === false, brain:valid.brain === false, budgets:valid.budgets === false || !$('session-budgets-agent-error').hidden, models:valid.models === false};
-  const on = {helpers:fleet || $('agents-enabled').checked, clash:clashMode, workspace:$('workspace').value === 'worktree', brain:brainLinkActive(), budgets:budgetSummary(sessionBudgets()) !== 'No limits', models:Boolean(modelRouting())};
+  const on = {helpers:fleet || $('agents-enabled').checked, clash:clashMode, workspace:$('workspace').value !== 'project', brain:brainLinkActive(), budgets:budgetSummary(sessionBudgets()) !== 'No limits', models:Boolean(modelRouting())};
   const count = $('agent-count').valueAsNumber, git = projectGitState.projectId === $('project').value ? projectGitState.data : null, branch = $('worktree-branch').value.trim();
   $('option-helpers-label').textContent = fleet ? 'Reviewers at once' : 'Helpers';
   $('option-helpers-value').textContent = on.helpers ? (Number.isInteger(count) ? String(count) : '') : $('provider').value === 'cursor' ? 'Off · not enforced' : 'Off';
   $('option-clash-value').textContent = clashMode ? `${providerFor($('clash-challenger').value)?.name || 'challenger'} · ${$('clash-rounds').value} ${$('clash-rounds').value === '1' ? 'round' : 'rounds'}` : 'Off';
-  $('option-workspace-value').textContent = on.workspace ? `New worktree${branch ? ` · ${branch}` : ''}` : `Project folder${git?.branch ? ` · ${git.branch}` : ''}${git?.dirty ? ' · uncommitted changes' : ''}`;
+  const chosen = $('workspace').value === 'existing-worktree' ? (projectWorktreeState.data?.worktrees || []).find(item => item.id === $('existing-worktree').value) : null;
+  $('option-workspace-value').textContent = $('workspace').value === 'existing-worktree' ? `Worktree · ${chosen ? worktreeLabel(chosen) : 'choose one'}` : on.workspace ? `New worktree${branch ? ` · ${branch}` : ''}` : `Project folder${git?.branch ? ` · ${git.branch}` : ''}${git?.dirty ? ' · uncommitted changes' : ''}`;
   $('option-budgets-value').textContent = budgetSummary(sessionBudgets());
   if (sessionOptions.open && !shown[sessionOptions.open]) sessionOptions.open = null;
   sessionOptions.blocked = Object.keys(shown).find(name => shown[name] && invalid[name]) || null;
@@ -1051,7 +1102,7 @@ function renderSessionSummary() {
   const count = $('agent-count').valueAsNumber, budgets = budgetSummary(sessionBudgets());
   $('session-summary-text').textContent = [workflow,session.workflow === 'native' ? $('mode').value === 'edit' ? 'Edit' : 'Plan' : '',providerFor(session.provider)?.name || session.provider,
     isFleetSession(session) ? '' : selectedModel() || 'default model',!isFleetSession(session) && $('thinking-effort').value ? humanLabel($('thinking-effort').value) : '',
-    `${session.workspace === 'worktree' ? 'Worktree' : 'Project folder'}${session.branch ? ` · ${session.branch}` : ''}`,
+    `${{worktree:'Worktree','existing-worktree':'Existing worktree'}[session.workspace] || 'Project folder'}${session.branch ? ` · ${session.branch}` : ''}`,
     clashSelected() ? `Clash vs ${providerFor($('clash-challenger').value)?.name || 'challenger'}` : !isFleetSession(session) && $('agents-enabled').checked && Number.isInteger(count) ? `${count} ${count === 1 ? 'helper' : 'helpers'}` : '',
     session.brain?.task_id ? `Task ${session.brain.task_id}` : '',budgets === 'No limits' ? '' : budgets].filter(Boolean).join(' · ');
   renderSendBlock(!expanded);
@@ -1129,7 +1180,7 @@ function updateControls() {
   // Reviewed memory stops before each turn for a person; unattended memory needs nothing and changes no label.
   const reviewing = hasSession ? linked && brainReviewed(state.selected.brain) : brainLinkActive() && $('brain-link-review').checked;
   const remembering = hasSession ? linked && !brainReviewed(state.selected.brain) : brainLinkActive() && !$('brain-link-review').checked;
-  $('send-label').textContent = state.pending === 'create' ? reviewing ? 'Preparing…' : 'Starting…' : state.pending === 'followup' ? 'Sending…' : !hasSession && $('workspace').value === 'worktree' && projectGitState.pending ? 'Checking Git…' : isActive ? 'Session active' : noResume || terminalLinkedTask ? 'New session needed' : hasSession ? reviewing ? 'Prepare follow-up' : clashMode ? 'Start next cycle' : 'Send follow-up' : reviewing ? 'Prepare session' : fleet ? dryRun ? 'Start dry-run' : 'Start fleet review' : clashMode ? 'Start clash' : 'Start session';
+  $('send-label').textContent = state.pending === 'create' ? reviewing ? 'Preparing…' : 'Starting…' : state.pending === 'followup' ? 'Sending…' : !hasSession && ($('workspace').value === 'worktree' && projectGitState.pending || $('workspace').value === 'existing-worktree' && projectWorktreeState.pending && !projectWorktreeState.data) ? 'Checking Git…' : isActive ? 'Session active' : noResume || terminalLinkedTask ? 'New session needed' : hasSession ? reviewing ? 'Prepare follow-up' : clashMode ? 'Start next cycle' : 'Send follow-up' : reviewing ? 'Prepare session' : fleet ? dryRun ? 'Start dry-run' : 'Start fleet review' : clashMode ? 'Start clash' : 'Start session';
   $('composer-note').textContent = budgetsDirty() ? 'Save budget changes before launching.' : terminalLinkedTask ? 'Choose an active or new Brain task in a new session.' : noResume ? systemOwned ? 'Continue in System Orchestration.' : 'Use New session in the sidebar.' : isActive ? 'Wait for completion, or cancel the session.' : 'Ctrl / ⌘ + Enter to send';
   $('composer-note').classList.toggle('shortcut',$('composer-note').textContent === 'Ctrl / ⌘ + Enter to send');
   const caption = terminalLinkedTask ? 'The linked Brain task is completed or cancelled. Start a new session with an active or new task to continue.' : reviewing && !noResume ? 'You review the prepared workspace and context before the agent runs.' : remembering && !noResume && !clashMode && !fleet ? 'Project memory is retrieved for each message and saved when the run completes.' : clashMode && !hasSession ? 'Both participants share the session budgets.' : clashMode && !noResume ? 'A follow-up starts the next cycle; both native sessions resume. Untick Clash for a normal follow-up.' : fleet && !hasSession ? 'Scope and reviewers are fixed once the review starts.' : noResume ? systemOwned === 'run' ? 'This launch belongs to a system change. Resume, cancel or review it under System Orchestration › Changes.' : systemOwned === 'scan' ? 'This is an AI scan of service folders. Start a new scan from the system editor.' : state.selected.status === 'cancelled' ? 'Cancelled before a resumable native session was created.' : 'No resumable native session was returned. Start a new session to continue.' : '';
@@ -1142,7 +1193,7 @@ function updateControls() {
   runView.sync(waitingText);
   $('welcome').hidden = hasSession; sessionOptions.validity = {helpers:agentsValid && agentModeValid,clash:clashValid,workspace:workspaceValid,brain:linkValid,budgets:budgetValid,models:routingValid}; renderSessionOptions(); renderSessionSummary(); updateHeader(); updateSkillsControls(); updateKnowledgeControls(); updateSetupControls(); renderFleetSession(); renderClashSession(); renderLinkedSession(); if (typeof renderContextMeter === 'function') renderContextMeter(); resultControls();
 }
-function applySessionSettings(session, restoreModel = true) { $('sdd-feature').value = session.sdd?.feature || ''; $('sdd-phase').value = session.sdd?.phase || 'specify'; for (const id of ['project','provider','workflow','mode']) $(id).value = session[id === 'project' ? 'project_id' : id] || (id === 'mode' ? 'plan' : id === 'workflow' ? 'native' : ''); if (restoreModel || active(session) || isFleetSession(session)) { $('agents-enabled').checked = session.agents_enabled === true; $('agent-count').value = Number.isInteger(session.agent_count) ? session.agent_count : defaultAgentCount(); } $('workspace').value = session.workspace === 'worktree' ? 'worktree' : 'project'; $('worktree-branch').value = session.workspace === 'worktree' ? session.branch || '' : ''; restoreBudgets('session-budgets',session.budgets,session.id+':'+session.budget_revision); restoreModelRouting(session.model_routing); restoreClashSettings(session.clash || null); if (isFleetSession(session)) restoreFleetSettings(session.fleet); if (restoreModel || isFleetSession(session)) refreshModelChoices(session.model || null,session.thinking_effort || null); loadProjectGit(); }
+function applySessionSettings(session, restoreModel = true) { $('sdd-feature').value = session.sdd?.feature || ''; $('sdd-phase').value = session.sdd?.phase || 'specify'; for (const id of ['project','provider','workflow','mode']) $(id).value = session[id === 'project' ? 'project_id' : id] || (id === 'mode' ? 'plan' : id === 'workflow' ? 'native' : ''); if (restoreModel || active(session) || isFleetSession(session)) { $('agents-enabled').checked = session.agents_enabled === true; $('agent-count').value = Number.isInteger(session.agent_count) ? session.agent_count : defaultAgentCount(); } $('workspace').value = ['worktree','existing-worktree'].includes(session.workspace) ? session.workspace : 'project'; $('worktree-branch').value = session.workspace === 'worktree' ? session.branch || '' : ''; restoreBudgets('session-budgets',session.budgets,session.id+':'+session.budget_revision); restoreModelRouting(session.model_routing); restoreClashSettings(session.clash || null); if (isFleetSession(session)) restoreFleetSettings(session.fleet); if (restoreModel || isFleetSession(session)) refreshModelChoices(session.model || null,session.thinking_effort || null); loadProjectGit(); }
 for (const id of ['workflow','mode','thinking-effort']) $(id).addEventListener('change',updateControls);
 $('provider').addEventListener('change',() => { refreshModelChoices(null,null); restoreModelRouting(null); renderClashChallengers(); if (fleetSelected() && !fleetBudgetSupported() && !state.selectedId) $('fleet-budget').value = ''; updateControls(); });
 $('fleet-dry-run').addEventListener('change',() => { if (!fleetBudgetSupported()) $('fleet-budget').value = ''; updateControls(); });
@@ -1150,7 +1201,8 @@ $('fleet-budget').addEventListener('input',updateControls); $('fleet-worker-time
 $('model-choice').addEventListener('change',() => { refreshEffortChoices(); updateControls(); if ($('model-choice').value === CUSTOM_MODEL) $('model').focus(); });
 $('model').addEventListener('input',() => { refreshEffortChoices(); updateControls(); });
 $('project').addEventListener('change',() => { clearAttachments(); saveSessionPreferences(); $('context-project').value = $('project').value; if (!knowledgeState.pending) { $('memory-project').value = $('project').value; $('brain-project').value = $('project').value; } $('accelerator-project').value = $('project').value; restoreProjectPreferences($('project').value); });
-$('workspace').addEventListener('change',() => { if ($('workspace').value === 'worktree') loadProjectGit(true); updateControls(); });
+$('workspace').addEventListener('change',() => { if ($('workspace').value !== 'project') loadProjectGit(true); updateControls(); });
+$('existing-worktree').addEventListener('change',() => { projectWorktreeState.preferred = $('existing-worktree').value; updateControls(); });
 $('worktree-branch').addEventListener('input',updateControls);
 $('refresh-project-git').addEventListener('click',() => loadProjectGit(true));
 $('prompt').addEventListener('input',updateControls);
@@ -1381,7 +1433,7 @@ $('session-form').addEventListener('submit',async event => {
   event.preventDefault(); if ($('send').disabled || state.pending || isFleetSession(state.selected)) return;
   const prompt = $('prompt').value.trim(); const followup = Boolean(state.selectedId); state.pending = followup ? 'followup' : 'create'; showError('composer-error',''); updateControls();
   const turn = {prompt,agents_enabled:$('agents-enabled').checked,agent_count:$('agent-count').valueAsNumber,model_routing:modelRouting(),...(followup && $('workflow').value === 'native' && modelRouting() ? {mode:$('mode').value} : {}),...($('workflow').value === 'sdd' ? {sdd:sddSettings()} : {}),...(clashSelected() ? {clash:clashSettings()} : followup ? {clash:null} : {}),model:fleetDryRun() ? null : selectedModel(),thinking_effort:fleetDryRun() ? null : $('thinking-effort').value || null};
-  const body = followup ? turn : {...turn,budgets:sessionBudgets(),project_id:$('project').value,provider:$('provider').value,mode:$('mode').value,workflow:$('workflow').value,project_context:true,workspace:$('workspace').value,...($('workspace').value === 'worktree' && $('worktree-branch').value.trim() ? {worktree_branch:$('worktree-branch').value.trim()} : {}),...(fleetSelected() ? {fleet:fleetSettings()} : {}),...(brainLinkActive() ? {brain:brainLinkConfig()} : {})};
+  const body = followup ? turn : {...turn,budgets:sessionBudgets(),project_id:$('project').value,provider:$('provider').value,mode:$('mode').value,workflow:$('workflow').value,project_context:true,workspace:$('workspace').value,...($('workspace').value === 'worktree' && $('worktree-branch').value.trim() ? {worktree_branch:$('worktree-branch').value.trim()} : {}),...($('workspace').value === 'existing-worktree' ? {worktree_id:$('existing-worktree').value} : {}),...(fleetSelected() ? {fleet:fleetSettings()} : {}),...(brainLinkActive() ? {brain:brainLinkConfig()} : {})};
   try {
     if (attachedFiles.length) body.attachments = await Promise.all(attachedFiles.map(encodeAttachment));
     const data = await api(followup ? `/api/sessions/${encodeURIComponent(state.selectedId)}/messages` : '/api/sessions',{method:'POST',body});
