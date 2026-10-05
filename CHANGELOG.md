@@ -26,6 +26,41 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Harness: **Existing Git worktree** as a third workspace. A new session can run
+  in a checkout that Git lists for the project's repository: one made outside
+  the Harness, for example by a script that also prepares the task's
+  environment. The picker lists every other checkout except the project's own
+  folder and anything inside the runner's state, such as session and Delivery
+  check worktrees, and chooses none for you. The session uses the checkout as it
+  is, with its branch, uncommitted files and environment. An entry's ID covers
+  its path and branch, so a folder reused for another branch needs a refresh.
+  Follow-ups accept a switched branch, but refuse a checkout that Git no longer
+  lists, that became a link or that belongs to another repository. New:
+  `GET /api/projects/{id}/worktrees`, `workspace: "existing-worktree"` with a
+  listing `worktree_id` on session creation. The Creator still offers only the
+  project folder or a new worktree.
+
+- Harness: **slash commands** work as in the CLI behind the session.
+  - In a Workspace session, `/` at the start of a message lists the CLI's own commands, with keyboard
+    selection. Tab inserts the name; Enter inserts it and runs a command that needs no argument.
+  - Claude Code's list is the CLI's own, from an `initialize` control request to `claude -p` in the
+    workspace (no turn, no model call): built-ins that work in print mode, project, personal and plugin
+    commands and skills; the probe runs no hooks. A message that starts with one goes to Claude Code
+    exactly as typed, without Harness memory, task or instructions. Sessions with reviewed memory refuse
+    commands.
+  - `/clear` (`/reset`, `/new`), `/model` and `/effort` act on the page when typed alone or with one
+    value, and the API refuses them in a message.
+  - A Claude message that starts with `/` but is not one of the CLI's commands is marked as the user's
+    text, so the CLI does not run it.
+  - Codex reads messages as text, so the Harness does what the Codex app would. `$name` anywhere names
+    one of Codex's own skills (`codex app-server` `skills/list`) and gets an explicit request.
+    `/prompts:name` expands a custom prompt, `/init` asks for an AGENTS.md guide, and `/new`, `/model`,
+    `/diff` and `/status` act on the page.
+  - New: `harness/src/harness/commands.py`, `harness/web/composer-commands.js`,
+    `GET /api/projects/{id}/commands?provider=` (optional `worktree=`) and
+    `GET /api/sessions/{id}/commands`. Both need the page's token, and the page now sends it with
+    every request.
+
 - System Orchestration judges a memory chunk's `review_after` and `valid_to`
   by the local calendar, the one the native Memory Bank contract it applies
   uses. It read the UTC date, so west of UTC a chunk valid through today was

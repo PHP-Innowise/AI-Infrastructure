@@ -536,6 +536,8 @@ class SkillManager:
             finally:
                 if fd is not None:
                     fs.close(fd)
+        # The composer's command lists name the skills a CLI loads; the next one lists these too.
+        self.store.catalog.clear()
         return {'ok': True, 'installed': installed, 'unchanged': unchanged,
                 'summary': f'{len(installed)} files installed, {len(unchanged)} already identical. {len(tracked)} skills match tracked payloads. Extra or mismatched files are kept. Start a new agent session to use the skills.'}
 
@@ -714,6 +716,7 @@ class SkillManager:
                 raise SessionError('The operation failed before changing files. Preview again.') from error
             finally:
                 fs.close(fd)
+            self.store.catalog.clear()
             return {'ok': True, 'changed': completed, 'summary': 'Skill removed.' if preview['operation'] == 'remove' else
                     'Reviewed update applied. Start a new agent session to load it.'}
 

@@ -322,7 +322,10 @@ another project while a session is open starts a new session draft for it.
   Workspace/Plan/Review workflow, Plan/Edit mode, project memory (on by
   default), additional-agent switch and a concurrent helper limit (1–40, default 3).
   Shows the selected project's Git branch and changes, with a refresh control.
-  Choose the project directory or a new Git worktree with an optional new branch name.
+  Choose the project directory, a new Git worktree with an optional new branch name, or
+  an existing Git worktree of the same repository (see [Existing worktrees](#existing-worktrees)).
+  Type `/` at the start of a message for the CLI's own commands, and `$` in a Codex session for its
+  skills (see [Slash commands](#slash-commands)).
   The launch fields sit in one row; optional settings are chips (Helpers, Clash,
   Run in, Memory, Budgets, Models) that show their current value and open one
   panel at a time. An open session collapses to one summary line; **Next-turn
@@ -424,6 +427,33 @@ Use **Results & usage → Worktree delivery** to commit selected files and trans
 a reviewed commit to a local project branch. Use normal Git worktree commands for
 other worktree management. Project context in a run comes from its selected workspace; the separate
 Memory bank and Skills sections continue to use the registered project directory.
+
+#### Existing worktrees
+
+**Existing Git worktree** runs a new session in a checkout you made yourself, for
+example with a script that also prepares the task's environment (containers, `.env`,
+`vendor/`). The list comes from `git worktree list` for the registered project's
+repository. It shows every other checkout except the project's own folder and
+the Harness's own worktrees. Each entry shows its folder and branch, or
+*detached* and the commit; the full path appears under the picker. Nothing is
+chosen for you. A checkout whose folder is missing, sits behind a symbolic
+link or lacks the project's subfolder is counted under the picker, not listed.
+Anything inside the runner's state directory, including Delivery's
+disposable check worktrees, is left out entirely. An entry's ID covers its path
+and its branch (or commit when detached). A folder your script reused for
+another branch is a new entry, and a choice made from the old list is refused
+until you refresh. **Refresh Git** lists the worktrees again; a draft remembers
+the choice per project.
+
+The session runs in that checkout as it is: its branch, uncommitted and ignored
+files and prepared environment are used, and the Harness copies, resets or
+removes nothing. For a project inside a repository, the same subfolder of the
+worktree is used. Follow-ups accept a branch you switched there, and refuse a
+checkout that Git no longer lists, that was replaced by a link, or that belongs
+to another repository. Worktree delivery stays with the Harness's own worktrees:
+commit and merge an existing worktree's work with your usual Git commands. The
+picker sends a listing ID, never a path; the runner looks the ID up again in
+Git's list before it creates the session.
 
 **Results & Verification** compares the workspace with the commit recorded before
 the first launch, including committed, staged, unstaged and nonignored untracked
@@ -744,7 +774,8 @@ The page has no build step. `harness/web/index.html` holds the markup and the
 theme script that runs before the first paint, `app.css` holds the styles, and
 classic scripts share their top-level names in load order: `app-core.js`
 (shell, theme, routing, sessions), `run-model.js` and `run-view.js` (the run view's
-event model and its strip, tabs and receipt), `app-knowledge.js`, `app-setup.js`,
+event model and its strip, tabs and receipt), `composer-commands.js` (the composer's slash
+commands), `app-knowledge.js`, `app-setup.js`,
 `app-skills.js`, `app-creator.js`, then System Orchestration's
 `agent-activity.js` (the agents panel), `system.js`, `system-editor.js` and
 `system-discovery.js`. The server reads the page and the files
@@ -762,6 +793,61 @@ included. Scripted scrolls ask for `scrollMotion()`. Numbers use `fmt` in
 digits, bounds with ≤, ≥ or +, and — for unknown, which is never 0. A list that
 refreshes on a poll renders through `keyedRender`, so open details keep their
 state.
+
+### Slash commands
+
+In a Workspace session, `/` works as it does in the CLI behind the session. It opens a list only at the
+start of the message, as in Claude Code and Codex, and the list follows what you type. Matches come in
+this order:
+
+1. a name or alias that starts with the letters;
+2. a name with a word that does (`:`, `_` and `-` separate words);
+3. a name that contains the letters;
+4. a description that does.
+
+Up and Down move through the list. Tab inserts the name. Enter inserts it too, and runs a command that
+takes no argument, or only an optional one, as the CLIs do. Escape closes the list until you leave that
+name.
+
+- **Claude Code:** the list is the CLI's own. The Harness asks `claude -p` in the session's workspace
+  with an `initialize` control request, using the session's launch settings with hooks off (a
+  SessionStart hook would act on the checkout and on sessions running in it). This starts no turn and
+  calls no model, and takes well under a second. The answer covers the built-in commands that work in
+  print mode, project and personal commands and skills, plugin commands and MCP prompts, with each
+  one's description, argument hint and aliases. The list is reused for a minute and forgotten when the
+  Skills library installs or changes a skill. A name it lacks is checked against a fresh list once the
+  cached one is a few seconds old.
+  A message that starts with one of these commands goes to Claude Code exactly as you typed it, so the
+  CLI runs it as in its own terminal. No memory capsule, project excerpts, Harness task or Harness
+  instructions are added, and no memory draft is expected. Only the list of attached files is
+  appended, and the project's own hooks deliver its memory. A session whose memory you review
+  before each run refuses commands, since they would skip that review.
+  A name the CLI does not list, or a slash later in the text, is ordinary text with the usual Harness
+  context. When nothing would come before it, such a message is marked as the user's text, so the
+  CLI does not read the slash as a command.
+- **Commands the page carries out**, when typed alone or with one value:
+  - `/clear` (also `/reset`, `/new`) starts a new session, since a resumed conversation cannot start
+    over in place; in a draft, it only empties the field.
+  - `/model [name]` and `/effort [level]` set the next turn's model and thinking effort, or open those
+    fields.
+
+  A sentence that merely starts with one of them is not run on the page. The API refuses all of them
+  in a message, so neither the CLI nor the session settings change by accident.
+- **Codex:** `codex exec` reads every message as plain text, so the Harness does what the Codex app
+  would.
+  - `$` where a word starts, anywhere in the message, lists Codex's own skills, from `codex app-server`
+    `skills/list` (no model call): repository, user, plugin and system skills. Each `$name` in a
+    message gets a *Harness skill request* line that names the skill's `SKILL.md`. Code is not a
+    mention: in backticks, after `(` or a quote, or followed by `=`, `->`, `::`, `[` or `(`.
+  - `/prompts:name` expands a custom prompt from `$CODEX_HOME/prompts` as the Codex app does. `$1`–`$9`
+    are positional arguments, `$ARGUMENTS` is all of them, `$NAME` comes from `NAME=value`, and `$$`
+    is a dollar sign. A missing named argument is refused before the run.
+  - `/init` asks for an `AGENTS.md` contributor guide.
+  - `/new`, `/model`, `/diff` and `/status` act on the page.
+- **Cursor:** the list holds the project's Cursor skills. A message that starts with one gets a request line.
+
+Plan, Review, SDD, Fleet review and Clash write their own prompts. In those, `/` is plain text and no
+list opens. Command lists start the native CLIs, so their routes need the page's token, like changes.
 
 ### Connect and prepare a project
 
@@ -1116,7 +1202,7 @@ an over-allocation result fails the reviewer instead of claiming the limit held.
 Verification from the repository root:
 
 ```bash
-python3 -m unittest tests.test_harness_providers tests.test_harness_sessions tests.test_harness_web tests.test_harness_process_guard tests.test_harness_skills tests.test_harness_fleet tests.test_harness_knowledge tests.test_harness_memory_use tests.test_harness_context_usage tests.test_harness_task_context tests.test_harness_setup tests.test_harness_creator tests.test_harness_results tests.test_harness_delivery tests.test_harness_clash
+python3 -m unittest tests.test_harness_providers tests.test_harness_commands tests.test_harness_sessions tests.test_harness_web tests.test_harness_process_guard tests.test_harness_skills tests.test_harness_fleet tests.test_harness_knowledge tests.test_harness_memory_use tests.test_harness_context_usage tests.test_harness_task_context tests.test_harness_setup tests.test_harness_creator tests.test_harness_results tests.test_harness_delivery tests.test_harness_clash
 harness/.venv/bin/python -m unittest discover -s harness/tests -p 'test_*.py'
 ```
 

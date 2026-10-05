@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[3]
 # The page's styles and scripts: an explicit list, read with the page so a running server serves one version.
 ASSETS = {name: 'text/css; charset=utf-8' if name.endswith('.css') else 'text/javascript; charset=utf-8'
           for name in ('app.css', 'app-core.js', 'app-knowledge.js', 'memory-use.js', 'context-usage.js', 'app-setup.js', 'app-skills.js', 'app-creator.js',
-                       'agent-activity.js', 'system.js', 'system-editor.js', 'system-discovery.js', 'run-model.js', 'run-view.js')}
+                       'agent-activity.js', 'system.js', 'system-editor.js', 'system-discovery.js', 'run-model.js', 'run-view.js', 'composer-commands.js')}
 sys.path.insert(0, str(ROOT / 'harness/src'))
 sys.path.insert(0, str(ROOT / 'scripts'))
 from harness.filesystem import fs, secure_private_dir, default_state_dir, existing_directory
@@ -179,6 +179,15 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def token_ok(self):
+        # Listing commands starts the native CLIs, so it needs the page's token like a change does: another local
+        # page can send a same-site GET without an Origin header.
+        token = self.headers.get('X-Harness-Token', '')
+        if not token.isascii() or not secrets.compare_digest(token, self.server.token):
+            self.error(403, 'Reload the page to renew the session token.')
+            return False
+        return True
+
     def do_HEAD(self):
         self.do_GET()
 
@@ -286,6 +295,23 @@ class Handler(BaseHTTPRequestHandler):
                 if parsed.query:
                     raise SessionError('Invalid Git status request.')
                 self.reply(200, store.git(path.split('/')[3]))
+            elif path.startswith('/api/projects/') and path.endswith('/commands') and len(path.split('/')) == 5:
+                if not self.token_ok():
+                    return
+                query = parse_qs(parsed.query, strict_parsing=True) if parsed.query else {}
+                if set(query) - {'provider', 'worktree'} or 'provider' not in query or any(len(values) != 1 for values in query.values()):
+                    raise SessionError('Invalid command list request.')
+                self.reply(200, store.command_listing(path.split('/')[3], query['provider'][0], query.get('worktree', [None])[0]))
+            elif path.startswith('/api/sessions/') and path.endswith('/commands') and len(path.split('/')) == 5:
+                if not self.token_ok():
+                    return
+                if parsed.query:
+                    raise SessionError('Invalid command list request.')
+                self.reply(200, store.session_commands(path.split('/')[3]))
+            elif path.startswith('/api/projects/') and path.endswith('/worktrees') and len(path.split('/')) == 5:
+                if parsed.query:
+                    raise SessionError('Invalid worktree listing request.')
+                self.reply(200, store.worktrees(path.split('/')[3]))
             elif path.startswith('/api/projects/') and path.endswith('/memory') and len(path.split('/')) == 5:
                 query = parse_qs(parsed.query, strict_parsing=True, keep_blank_values=True) if parsed.query else {}
                 if (set(query) - {'bank', 'path'} or any(len(values) != 1 or not values[0] for values in query.values())
@@ -352,9 +378,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.trusted_request():
             return
-        token = self.headers.get('X-Harness-Token', '')
-        if not token.isascii() or not secrets.compare_digest(token, self.server.token):
-            self.error(403, 'Reload the page to renew the session token.')
+        if not self.token_ok():
             return
         store = self.server.sessions
         try:
