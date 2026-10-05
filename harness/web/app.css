@@ -257,6 +257,7 @@ input[type="text"],.field input[type="number"],select { width:100%; }
 .skill-hint[aria-selected="true"] { background:var(--purple-soft); }
 .skill-hint-name { color:var(--ink); font-family:var(--font-mono); font-size:var(--text-ui); line-height:var(--leading-ui); overflow-wrap:anywhere; }
 .skill-hint[aria-selected="true"] .skill-hint-name { color:var(--purple); }
+.skill-hint-argument { color:var(--faint); }
 .skill-hint-description { color:var(--muted); font-size:var(--text-meta); line-height:var(--leading-ui); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .skill-hints-note { margin:0; padding:8px 12px; color:var(--muted); font-size:var(--text-ui); line-height:var(--leading-ui); }
 .composer:focus-within { border-color:var(--focus); box-shadow:0 0 0 2px var(--focus-glow); }

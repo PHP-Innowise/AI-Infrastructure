@@ -567,84 +567,118 @@ assert.equal(nodes.at(-1).children.at(-1).textContent,'Done.\\n\\n[Memory draft:
         self.git_command("add", "README.md")
         self.git_command("commit", "--quiet", "-m", "Initialize HTTP fixture")
 
-    @unittest.skipUnless(shutil.which('node'), 'Skill hint check requires Node')
-    def test_skill_hints_open_where_a_word_starts_and_insert_the_chosen_name(self):
+    @unittest.skipUnless(shutil.which('node'), 'Composer command check requires Node')
+    def test_composer_commands_open_at_the_start_like_the_clis_and_rank_like_claude_code(self):
         page = ui_script()
-        source = page[page.index('\nconst SKILL_TOKEN'):page.index('\nconst skillHints = ')]
+        source = page[page.index('\nconst PAGE_COMMANDS'):page.index('\nconst composerCommands = ')]
         script = """const assert = require('node:assert/strict');
-""" + source + """
-const at = text => skillToken(text, text.length);
-assert.equal(at(''),null); assert.equal(at('plain words'),null);
+""" + source + r"""
+const at = (text, skills = false) => commandToken(text, text.length, skills);
+// `/` opens the commands only where the message starts, as in Claude Code and Codex.
 assert.deepEqual(at('/'),{start:0,end:1,trigger:'/',query:''});
-assert.deepEqual(at('Run /php-re'),{start:4,end:11,trigger:'/',query:'php-re'});
-assert.deepEqual(at('Codex: $doc'),{start:7,end:11,trigger:'$',query:'doc'});
-assert.deepEqual(at('(/sd'),{start:1,end:4,trigger:'/',query:'sd'}); assert.equal(at('line\\n/sd').start,5);
-// A slash or dollar inside a word is a path, a URL or an amount, not a skill.
-for (const text of ['src/app','https://x.test/a','US$5','/sdd done','/a/b']) assert.equal(at(text),null,text);
-// The caret inside a name: the whole name is the token, so a choice replaces all of it.
-assert.deepEqual(skillToken('Run /php-review now',8),{start:4,end:15,trigger:'/',query:'php'});
-const skills = [{name:'review'},{name:'php-review',description:'Reviews PHP.'},{name:'deploy',description:'Ships after review.'},{name:'pest'}];
-assert.deepEqual(matchSkills(skills,'').map(skill => skill.name),['deploy','pest','php-review','review']);
-assert.deepEqual(matchSkills(skills,'REV').map(skill => skill.name),['review','php-review','deploy']);
-assert.deepEqual(matchSkills(skills,'p').map(skill => skill.name),['pest','php-review','deploy']);
-assert.deepEqual(matchSkills(skills,'zzz'),[]);
-assert.deepEqual(insertSkill('Run /php tests',{start:4,end:8,trigger:'/'},'php-review'),{replacement:'/php-review',value:'Run /php-review tests',caret:15});
-assert.deepEqual(insertSkill('/sd',{start:0,end:3,trigger:'/'},'sdd'),{replacement:'/sdd ',value:'/sdd ',caret:5});
-assert.deepEqual(insertSkill('Use $d',{start:4,end:6,trigger:'$'},'docs'),{replacement:'$docs ',value:'Use $docs ',caret:10});
-// A message sends the chosen names it still contains, in order; a name inside a path or one typed but never chosen stays out.
-const chosen = new Set(['php-review','sdd','docs.v2']);
-assert.deepEqual(pickedSkills('Run /sdd now, then (/php-review). Not src/php-review or $docs.v2.',chosen),['sdd','php-review','docs.v2']);
-assert.deepEqual(pickedSkills('/php-reviewer and /sdd/x and /deploy',chosen),[]);
-assert.deepEqual(pickedSkills('/sdd /sdd',chosen),['sdd']);
+assert.deepEqual(at('/rev'),{start:0,end:4,trigger:'/',query:'rev'});
+assert.deepEqual(commandToken('/review src',4,false),{start:0,end:7,trigger:'/',query:'rev'});
+for (const text of ['Run /rev','/review now','line\n/rev',' /rev','src/rev']) assert.equal(at(text),null,text);
+// `$` names a Codex skill where a word starts, anywhere in the message, and only in a Codex session.
+assert.deepEqual(at('Check $php',true),{start:6,end:10,trigger:'$',query:'php'});
+assert.deepEqual(at('Use ($adv:rev',true),{start:5,end:13,trigger:'$',query:'adv:rev'});
+assert.equal(at('Check $php',false),null); assert.equal(at('costs US$5',true),null);
+const items = [{name:'review'},{name:'php-review',description:'Reviews PHP.'},{name:'security-review'},{name:'clear',aliases:['reset','new']},
+  {name:'unite-cms:init',description:'Plugin init'},{name:'deploy',description:'Ships after review.'}];
+assert.deepEqual(rankCommands(items,'').map(item => item.name),items.map(item => item.name));
+assert.deepEqual(rankCommands(items,'rev').map(item => item.name),['review','php-review','security-review','deploy']);
+assert.deepEqual(rankCommands(items,'init').map(item => item.name),['unite-cms:init']);
+assert.deepEqual(rankCommands(items,'new').map(item => item.name),['clear']);
+assert.deepEqual(rankCommands(items,'zzz'),[]);
+assert.deepEqual(insertCommand('/rev src',{start:0,end:4,trigger:'/'},'review'),{replacement:'/review',value:'/review src',caret:7});
+assert.deepEqual(insertCommand('/co',{start:0,end:3,trigger:'/'},'compact'),{replacement:'/compact ',value:'/compact ',caret:9});
+assert.deepEqual(insertCommand('Use $d',{start:4,end:6,trigger:'$'},'docs'),{replacement:'$docs ',value:'Use $docs ',caret:10});
+// Page commands: listed ones by their kind, and the providers' own before the list arrives.
+const listed = [{name:'clear',aliases:['reset','new'],kind:'page',action:'new'},{name:'model',kind:'page',action:'model'},{name:'compact',kind:'native'}];
+assert.deepEqual(pageCommand('/reset','claude',listed),{action:'new',name:'reset',argument:''});
+assert.deepEqual(pageCommand(' /model  claude-sonnet-5-5 ','claude',listed),{action:'model',name:'model',argument:'claude-sonnet-5-5'});
+// A sentence that starts with a page command is a message: nothing is taken from it.
+assert.equal(pageCommand('/model picker is broken, fix it','claude',listed),null); assert.equal(pageCommand('/new feature for the cart','claude',listed),null);
+assert.equal(pageCommand('/diff looks wrong','codex',null),null); assert.equal(pageCommand('/diff now','codex',null),null);
+assert.equal(pageCommand('/compact now','claude',listed),null); assert.equal(pageCommand('Use /model','claude',listed),null);
+assert.deepEqual(pageCommand('/effort high','claude',null),{action:'effort',name:'effort',argument:'high'});
+assert.deepEqual(pageCommand('/diff','codex',null),{action:'diff',name:'diff',argument:''});
+assert.equal(pageCommand('/diff','claude',null),null); assert.equal(pageCommand('/init','codex',null),null);
 """
         subprocess.run([shutil.which('node'), '-e', script], check=True, capture_output=True, text=True)
 
-    @unittest.skipUnless(shutil.which('node'), 'Skill hint module check requires Node')
-    def test_skill_hint_list_opens_closes_and_sends_only_chosen_names(self):
+    @unittest.skipUnless(shutil.which('node'), 'Composer command module check requires Node')
+    def test_command_list_inserts_runs_and_acts_on_the_page_like_the_clis(self):
         page = ui_script()
-        source = page[page.index('\nconst SKILL_TOKEN'):]
+        source = page[page.index('\nconst PAGE_COMMANDS'):]
         source = source[:source.index('\n})();') + 6]
-        script = """const assert = require('node:assert/strict');
+        script = r"""const assert = require('node:assert/strict');
 const handlers = {};
-const node = id => ({id, hidden:true, children:[], attributes:{}, dataset:{}, textContent:'', value:'', selectionStart:0, selectionEnd:0, disabled:false,
+const node = id => ({id, hidden:true, children:[], attributes:{}, dataset:{}, textContent:'', value:'', selectionStart:0, selectionEnd:0, disabled:false, options:[],
   addEventListener(type, fn) { (handlers[id + ':' + type] ||= []).push(fn); }, setAttribute(name, value) { this.attributes[name] = String(value); },
   removeAttribute(name) { delete this.attributes[name]; }, replaceChildren(...items) { this.children = items; }, append(...items) { this.children.push(...items); },
   focus() { document.activeElement = this; }, setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; },
-  dispatchEvent(event) { for (const fn of handlers[this.id + ':' + event.type] || []) fn(event); }});
-const nodes = Object.fromEntries(['prompt','skill-hints-panel','skill-hints','skill-hints-note','skill-hints-status','session-form','project','provider','workspace','existing-worktree'].map(id => [id, node(id)]));
+  dispatchEvent(event) { for (const fn of handlers[this.id + ':' + event.type] || []) fn(event); }, click() { this.clicked = (this.clicked || 0) + 1; }});
+const nodes = Object.fromEntries(['prompt','skill-hints-panel','skill-hints','skill-hints-note','skill-hints-status','session-form','project','provider','workflow',
+  'workspace','existing-worktree','send','session-settings','session-settings-toggle','model-choice','thinking-effort'].map(id => [id, node(id)]));
 const $ = id => nodes[id]; const el = (tag, className, text) => ({...node(tag), className, textContent:text});
 const document = {activeElement:null, execCommand:() => false}; global.Event = class { constructor(type) { this.type = type; } };
-nodes.project.value = 'p1'; nodes.provider.value = 'claude'; nodes.workspace.value = 'project';
+Object.assign(nodes.project,{value:'p1'}); Object.assign(nodes.provider,{value:'claude'}); Object.assign(nodes.workflow,{value:'native'}); Object.assign(nodes.workspace,{value:'project'});
+nodes['thinking-effort'].options = [{value:''},{value:'high'}];
+let submitted = 0, sessions = 0, model = null, view = null, failing = false, requests = 0;
+nodes['session-form'].requestSubmit = () => { submitted++; };
 const state = {selectedId:null, selected:null}; const fleetSelected = () => false, clashSelected = () => false, textError = error => error.message;
-let requests = 0, fail = false;
-const api = async url => { requests++; if (fail) throw Object.assign(new Error('down'), {status:0});
-  return {skills:[{name:'php-review', description:'Review PHP.', path:'.claude/skills/php-review/SKILL.md', start_only:false},
-                  {name:'sdd', description:'Specs.', path:'.claude/skills/sdd/SKILL.md', start_only:true}]}; };
+const providerFor = id => ({name:{claude:'Claude Code',codex:'Codex'}[id]}); const newSession = () => { sessions++; };
+const refreshModelChoices = value => { model = value; }; const updateControls = () => {}; const setView = name => { view = name; }; const showError = () => {};
+const api = async url => { requests++; if (failing) throw Object.assign(new Error('down'), {status:0});
+  return url.includes('provider=codex') ? {commands:[{name:'new',kind:'page',action:'new',hint:''},{name:'init',kind:'prompt',hint:''}],
+    skills:[{name:'php-review',description:'Review PHP.',path:'/p/SKILL.md'}],error:null}
+  : {commands:[{name:'php-review',description:'Review PHP. (project)',hint:'<path>',kind:'native',aliases:[]},
+               {name:'compact',description:'Free up context',hint:'<optional custom summarization instructions>',kind:'native',aliases:[]},
+               {name:'clear',description:'Start over',hint:'[name]',kind:'page',action:'new',aliases:['reset','new']},
+               {name:'model',description:'Set the model',hint:'<model>',kind:'page',action:'model',aliases:[]}],skills:[],error:null}; };
 const fire = (type, extra = {}) => { const event = {type, key:'', preventDefault() { this.prevented = true; }, stopPropagation() {}, ...extra};
   for (const fn of handlers['prompt:' + type] || []) fn(event); return event; };
 const prompt = nodes.prompt, panel = nodes['skill-hints-panel'], list = nodes['skill-hints'];
 const type = value => { prompt.value = value; prompt.selectionStart = prompt.selectionEnd = value.length; fire('input'); };
 const settle = () => new Promise(resolve => setTimeout(resolve, 0));
-""" + source + """
+const names = () => list.children.map(item => item.children[0].textContent + item.children[0].children.map(part => part.textContent).join(''));
+""" + source + r"""
 (async () => {
   prompt.focus(); type('/'); await settle();
-  assert.equal(panel.hidden, false); assert.deepEqual(list.children.map(item => item.children[0].textContent), ['/php-review','/sdd']);
-  assert.match(list.children[1].children[1].textContent, /^Only at the start of a message · Specs/);
-  // Escape closes the list for this token; deleting it and typing / again opens the list again.
-  assert.equal(fire('keydown', {key:'Escape'}).prevented, true); assert.equal(panel.hidden, true);
-  type('/'); assert.equal(panel.hidden, true);
+  assert.equal(panel.hidden, false); assert.deepEqual(names(), ['/php-review <path>','/compact <optional custom summarization instructions>','/clear [name]','/model <model>']);
+  assert.match(list.children[2].children[1].textContent, /Also \/reset, \/new · In the Harness/);
+  // No menu for a slash later in the message.
+  type('Run /php'); assert.equal(panel.hidden, true);
+  // Tab inserts; Enter on a command that needs an argument inserts and waits for it.
+  type('/ph'); fire('keydown', {key:'Tab'}); assert.equal(prompt.value, '/php-review '); assert.equal(submitted, 0);
+  type('/ph'); fire('keydown', {key:'Enter'}); assert.equal(prompt.value, '/php-review '); assert.equal(submitted, 0);
+  // Enter on a command whose argument is optional sends at once, as Claude Code runs it.
+  type('/comp'); fire('keydown', {key:'Enter'}); assert.equal(prompt.value, '/compact '); assert.equal(submitted, 1);
+  // Page commands act here. In a draft, /clear only empties the field (the draft is already new); /model picks a model.
+  type('/cl'); fire('keydown', {key:'Enter'}); assert.equal(sessions, 0); assert.equal(prompt.value, '');
+  assert.equal(composerCommands.intercept('/model claude-sonnet-5-5'), true); assert.equal(model, 'claude-sonnet-5-5');
+  assert.equal(composerCommands.intercept('/compact'), false); assert.equal(composerCommands.intercept('Use /clear'), false);
+  // A sentence is sent as it is, and the field keeps it.
+  prompt.value = '/model picker is broken, fix it'; assert.equal(composerCommands.intercept(prompt.value), false); assert.equal(prompt.value, '/model picker is broken, fix it');
+  assert.equal(document.activeElement, nodes['model-choice']);
+  // Escape closes the list for this token; leaving the token and typing / again opens it.
+  prompt.focus(); type('/'); await settle(); assert.equal(panel.hidden, false); fire('keydown', {key:'Escape'}); assert.equal(panel.hidden, true); type('/'); assert.equal(panel.hidden, true);
   type(''); type('/'); assert.equal(panel.hidden, false);
-  // Enter inserts the highlighted name; the message then sends it as chosen, and a name only typed is not.
-  type('Run /php'); fire('keydown', {key:'Enter'});
-  assert.equal(prompt.value, 'Run /php-review '); assert.equal(panel.hidden, true);
-  assert.deepEqual(skillHints.picked(prompt.value + 'then /sdd'), ['php-review']);
-  // Sending empties the message: the next one starts without choices.
-  prompt.value = ''; skillHints.sync(); assert.deepEqual(skillHints.picked('Run /php-review'), []);
+  // Codex: / lists what the Harness does for its commands, $ lists Codex's own skills anywhere in the message.
+  nodes.provider.value = 'codex'; type('/'); await settle(); assert.deepEqual(names(), ['/new','/init']);
+  type('Look at it with $ph'); await settle(); assert.deepEqual(names(), ['$php-review']);
+  fire('keydown', {key:'Enter'}); assert.equal(prompt.value, 'Look at it with $php-review '); assert.equal(submitted, 1);
+  assert.equal(composerCommands.intercept('/diff'), true); assert.equal(view, null);
+  state.selectedId = 's1'; state.selected = {id:'s1', provider:'codex', workflow:'native'};
+  assert.equal(composerCommands.intercept('/diff'), true); assert.equal(view, 'changes');
+  assert.equal(composerCommands.intercept('/new'), true); assert.equal(sessions, 1);
+  // No commands where the Harness writes the prompt.
+  state.selected = {...state.selected, workflow:'plan'}; type('/'); assert.equal(panel.hidden, true);
+  state.selectedId = null; state.selected = null;
   // A failing list is not fetched again on every key press inside the same token.
-  // (Another provider means another list, fetched fresh.)
-  type(''); fail = true; nodes.provider.value = 'codex'; const before = requests; type('Next /x'); await settle(); type('Next /xy'); type('Next /xyz'); await settle();
+  nodes.provider.value = 'cursor'; failing = true; type(''); const before = requests; type('/x'); await settle(); type('/xy'); type('/xyz'); await settle();
   assert.equal(requests - before, 1); assert.match(nodes['skill-hints-note'].textContent, /could not be loaded/);
-  fail = false; type('Next /xyz /'); await settle(); assert.equal(requests - before, 2);
 })().catch(error => { console.error(error); process.exit(1); });
 """
         subprocess.run([shutil.which('node'), '-e', script], check=True, capture_output=True, text=True)
@@ -762,38 +796,39 @@ assert.match(renderExistingWorktrees().error,/could not list/);
             self.assertEqual(resumed["session"][field], original[field])
         self.assertEqual(resumed["session"]["native_session_id"], "fixture-worktree")
 
-    def test_skill_hint_routes_list_the_providers_skills_and_refuse_extra_input(self):
-        folder = self.project / ".claude/skills/php-review"
-        folder.mkdir(parents=True)
-        (folder / "SKILL.md").write_text("---\nname: php-review\ndescription: Review PHP.\n---\n# Review\n", encoding="utf-8")
-        path = f"/api/projects/{self.project_id}/skill-hints"
-        status, data, _ = self.request(path + "?provider=claude")
-        self.assertEqual(status, 200)
-        self.assertEqual(data, {"project_id": self.project_id, "provider": "claude", "base": ".claude/skills", "truncated": False,
-                                "skills": [{"name": "php-review", "description": "Review PHP.", "path": ".claude/skills/php-review/SKILL.md", "start_only": False}]})
-        self.assertEqual(self.request(path + "?provider=codex")[1]["skills"], [])
-        for invalid in (path, path + "?provider=claude&provider=codex", path + "?provider=unknown", path + "?provider=claude&extra=1",
-                        path + "?provider=claude&worktree=" + "0" * 16, f"/api/projects/{'0' * 16}/skill-hints?provider=claude"):
-            with self.subTest(path=invalid):
-                self.assertEqual(self.request(invalid)[0], 400)
-        for skills in ("php-review", ["php-review", "php-review"], ["../x"], [f"s{index}" for index in range(6)]):
-            with self.subTest(skills=skills):
-                self.assertEqual(self.post("/api/sessions", self.options(provider="claude", skills=skills))[0], 400)
-        status, created, _ = self.post("/api/sessions", self.options(provider="claude", prompt="Inspect with /php-review", skills=["php-review"]))
-        self.assertEqual(status, 201)
-        sid = created["session"]["id"]
-        self.assertEqual(self.request(f"/api/sessions/{sid}")[1]["events"][0]["skills"], ["php-review"])
-        store = self.server.sessions
-        with store.lock:
-            store.db.execute("UPDATE sessions SET status='completed',native_session_id='fixture-skills' WHERE id=?", (sid,))
-            store.db.commit()
-        self.assertEqual(self.post(f"/api/sessions/{sid}/messages", {"prompt": "Again", "skills": "php-review"})[0], 400)
-        self.assertEqual(self.post(f"/api/sessions/{sid}/messages", {"prompt": "Again with /php-review", "skills": ["php-review"]})[0], 200)
-        hints = f"/api/sessions/{sid}/skill-hints"
-        status, data, _ = self.request(hints)
-        self.assertEqual((status, data["session_id"], [item["name"] for item in data["skills"]]), (200, sid, ["php-review"]))
-        self.assertEqual(self.request(hints + "?refresh=1")[0], 400)
-        self.assertEqual(self.request(f"/api/sessions/{'0' * 36}/skill-hints")[0], 400)
+    def test_command_routes_list_the_cli_commands_and_refuse_extra_input(self):
+        listed = [{"name": "php-review", "description": "Review PHP. (project)", "hint": "<path>", "aliases": [], "builtin": False},
+                  {"name": "clear", "description": "Start over", "hint": "[name]", "aliases": ["reset", "new"], "builtin": True}]
+        with patch("harness.commands.claude_commands", return_value=listed) as probe:
+            path = f"/api/projects/{self.project_id}/commands"
+            token = {"X-Harness-Token": self.token}
+            # Listing starts the native CLI, so a read needs the page's token too.
+            for headers in ({}, {"X-Harness-Token": "wrong"}):
+                with self.subTest(headers=headers):
+                    self.assertEqual(self.request(path + "?provider=claude", headers=headers)[0], 403)
+            self.assertEqual(probe.call_count, 0)
+            status, data, _ = self.request(path + "?provider=claude", headers=token)
+            self.assertEqual(status, 200)
+            self.assertEqual((data["project_id"], data["provider"], data["skills"], data["error"]), (self.project_id, "claude", [], None))
+            self.assertEqual([(item["name"], item["kind"], item["action"]) for item in data["commands"]],
+                             [("php-review", "native", None), ("clear", "page", "new")])
+            self.assertEqual(probe.call_args.args[1], self.project)
+            for invalid in (path, path + "?provider=claude&provider=codex", path + "?provider=unknown", path + "?provider=claude&extra=1",
+                            path + "?provider=claude&worktree=" + "0" * 16, f"/api/projects/{'0' * 16}/commands?provider=claude"):
+                with self.subTest(path=invalid):
+                    self.assertEqual(self.request(invalid, headers=token)[0], 400)
+            status, created, _ = self.post("/api/sessions", self.options(provider="claude", prompt="/php-review src", workflow="native"))
+            self.assertEqual(status, 201)
+            sid = created["session"]["id"]
+            self.assertEqual(self.request(f"/api/sessions/{sid}/commands")[0], 403)
+            status, data, _ = self.request(f"/api/sessions/{sid}/commands", headers=token)
+            self.assertEqual((status, data["session_id"], [item["name"] for item in data["commands"]]), (200, sid, ["php-review", "clear"]))
+            self.assertEqual(self.request(f"/api/sessions/{sid}/commands?refresh=1", headers=token)[0], 400)
+            self.assertEqual(self.request(f"/api/sessions/{'0' * 36}/commands", headers=token)[0], 400)
+            # A restart inside a conversation is the page's New session; the API refuses it before anything runs.
+            self.assertEqual(self.post("/api/sessions", self.options(provider="claude", prompt="/clear", workflow="native"))[0], 400)
+            self.assertEqual(self.post("/api/sessions", self.options(provider="claude", prompt="/model sonnet", workflow="native"))[0], 400)
+            self.assertEqual(self.post("/api/sessions", self.options(provider="claude", prompt="Inspect", skills=["php-review"]))[0], 400)
 
     @unittest.skipUnless(shutil.which("git"), "Worktree routes require Git")
     def test_existing_worktree_http_listing_and_creation_keep_the_chosen_checkout(self):

@@ -546,8 +546,9 @@ const textError = error => error.message || 'The local runner could not complete
 function showError(id, message) { $(id).textContent = message || ''; $(id).hidden = !message; }
 function connectionError(error) { if ([401,403].includes(error.status)) state.authFailed = true; $('connection-message').textContent = state.authFailed ? 'The local connection token is no longer accepted. Reconnect before sending another request.' : 'The local runner is not responding. Check that it is still running, then reconnect.'; $('connection-banner').hidden = false; updateControls(); }
 async function api(path, options = {}) {
-  const headers = { Accept:'application/json' };
-  if (options.body !== undefined) { headers['Content-Type'] = 'application/json'; headers['X-Harness-Token'] = state.bootstrap?.csrf || ''; }
+  // The token goes with every request: some reads (a CLI's command list) start native processes and require it.
+  const headers = { Accept:'application/json', 'X-Harness-Token':state.bootstrap?.csrf || '' };
+  if (options.body !== undefined) headers['Content-Type'] = 'application/json';
   let response;
   try { response = await fetch(path,{ method:options.method || 'GET', headers, credentials:'same-origin', cache:'no-store', signal:options.signal, ...(options.body !== undefined ? {body:JSON.stringify(options.body)} : {}) }); }
   catch (error) { if (error.name === 'AbortError') throw error; const failure = new Error('Could not reach the local runner. Refresh sessions before retrying an uncertain request.'); failure.status = 0; connectionError(failure); throw failure; }
@@ -870,11 +871,11 @@ function updateWorkspaceControls() {
   $('workspace-session-path').textContent = state.selected ? `Working folder: ${state.selected.project_path || 'not recorded'}` : '';
   return hasSession || $('workspace').value === 'project' || worktree && available && $('worktree-branch').value.length <= 256 || existing && Boolean(listed.choice);
 }
-// The placeholder names the key that opens skill hints, where the runner takes skill requests (skill-hints.js).
-function skillCue() {
-  const session = state.selected, provider = session?.provider || $('provider').value;
-  if (session ? ['fleet','clash','creator','system_run','system_discovery'].some(name => session[name]) : fleetSelected() || clashSelected()) return '';
-  return ` Type ${provider === 'codex' ? '$' : '/'} for skills.`;
+// The placeholder names the keys that open the CLI's commands and Codex's skills (composer-commands.js).
+function commandCue() {
+  const session = state.selected, provider = session?.provider || $('provider').value, workflow = session?.workflow || $('workflow').value;
+  if (workflow !== 'native' || (session ? ['fleet','clash','creator','system_run','system_discovery'].some(name => session[name]) : fleetSelected() || clashSelected())) return '';
+  return provider === 'codex' ? ' Type / for commands, $ for skills.' : ' Type / for commands.';
 }
 function workspaceLabel(workspace) { return {worktree:'Git worktree','existing-worktree':'Existing Git worktree'}[workspace] || 'Project folder'; }
 // A checkout reads as its folder and what it has checked out; the hint under the picker gives the whole path.
@@ -1178,7 +1179,7 @@ function updateControls() {
   // System changes and AI scans run here as transcripts; they continue under System Orchestration.
   const systemOwned = state.selected?.system_run ? 'run' : state.selected?.system_discovery ? 'scan' : null;
   $('send').disabled = !routingValid || !sddValid || !clashValid || !budgetValid || budgetsDirty() || !ready || pending || state.loading || isActive || noResume || terminalLinkedTask || existingFleet || awaitingContext || !linkValid || brainLinkPending() || !hasSession && projectFor($('project').value)?.available === false || !agentsValid || !agentModeValid || !modelValid || !workspaceValid || !fleetValid || !$('project').value || !provider || !dryRun && !provider.available || !$('prompt').value.trim();
-  $('composer-area').hidden = existingFleet || awaitingContext; $('prompt').disabled = pending || state.loading || noResume || terminalLinkedTask || existingFleet; $('prompt').placeholder = clashMode && !hasSession ? ($('mode').value === 'edit' ? 'Describe the task; the implementer builds it and the challenger attacks the result…' : 'Describe the scope; both providers review it and dispute each other’s findings…') : fleet && !hasSession ? 'Describe the review scope, files, or Git changes to inspect…' : terminalLinkedTask ? 'Start a new session with an active or new task…' : noResume ? 'Start a new session to continue…' : `${hasSession ? 'Write a follow-up for this session…' : 'Describe a task for this project…'}${skillCue()}`;
+  $('composer-area').hidden = existingFleet || awaitingContext; $('prompt').disabled = pending || state.loading || noResume || terminalLinkedTask || existingFleet; $('prompt').placeholder = clashMode && !hasSession ? ($('mode').value === 'edit' ? 'Describe the task; the implementer builds it and the challenger attacks the result…' : 'Describe the scope; both providers review it and dispute each other’s findings…') : fleet && !hasSession ? 'Describe the review scope, files, or Git changes to inspect…' : terminalLinkedTask ? 'Start a new session with an active or new task…' : noResume ? 'Start a new session to continue…' : `${hasSession ? 'Write a follow-up for this session…' : 'Describe a task for this project…'}${commandCue()}`;
   $('attach-files').disabled = !ready || pending || state.loading || isActive || noResume || terminalLinkedTask || existingFleet || awaitingContext;
   $('attachment-input').disabled = $('attach-files').disabled;
   for (const button of $('attachment-list').querySelectorAll('button')) button.disabled = pending;
@@ -1197,7 +1198,7 @@ function updateControls() {
   // A Harness check sets the session running without a launch; the Run strip follows the newest launch instead.
   const waitingText = runView.phase(state.selected) === 'check' ? 'A Harness check is running. Its result appears in Checks.' : linked && brainReviewed(state.selected.brain) && !state.selected.brain.context_id ? 'Preparing workspace and context. The provider has not started this turn.' : state.selected?.status === 'queued' ? 'Queued — waiting for an available runner.' : existingFleet ? 'Fleet review is running. Stage and reviewer updates appear above.' : isClashSession(state.selected) ? `${providerFor(state.selected.provider)?.name || state.selected.provider} and ${providerFor(state.selected.clash?.challenger)?.name || 'the challenger'} are clashing. Turn events appear above.` : `${providerFor(state.selected?.provider)?.name || 'Agent'} is running. New events will appear here.`;
   runView.sync(waitingText);
-  $('welcome').hidden = hasSession; sessionOptions.validity = {helpers:agentsValid && agentModeValid,clash:clashValid,workspace:workspaceValid,brain:linkValid,budgets:budgetValid,models:routingValid}; renderSessionOptions(); renderSessionSummary(); updateHeader(); updateSkillsControls(); updateKnowledgeControls(); updateSetupControls(); renderFleetSession(); renderClashSession(); renderLinkedSession(); if (typeof renderContextMeter === 'function') renderContextMeter(); if (typeof skillHints === 'object') skillHints.sync(); resultControls();
+  $('welcome').hidden = hasSession; sessionOptions.validity = {helpers:agentsValid && agentModeValid,clash:clashValid,workspace:workspaceValid,brain:linkValid,budgets:budgetValid,models:routingValid}; renderSessionOptions(); renderSessionSummary(); updateHeader(); updateSkillsControls(); updateKnowledgeControls(); updateSetupControls(); renderFleetSession(); renderClashSession(); renderLinkedSession(); if (typeof renderContextMeter === 'function') renderContextMeter(); if (typeof composerCommands === 'object') composerCommands.sync(); resultControls();
 }
 function applySessionSettings(session, restoreModel = true) { $('sdd-feature').value = session.sdd?.feature || ''; $('sdd-phase').value = session.sdd?.phase || 'specify'; for (const id of ['project','provider','workflow','mode']) $(id).value = session[id === 'project' ? 'project_id' : id] || (id === 'mode' ? 'plan' : id === 'workflow' ? 'native' : ''); if (restoreModel || active(session) || isFleetSession(session)) { $('agents-enabled').checked = session.agents_enabled === true; $('agent-count').value = Number.isInteger(session.agent_count) ? session.agent_count : defaultAgentCount(); } $('workspace').value = ['worktree','existing-worktree'].includes(session.workspace) ? session.workspace : 'project'; $('worktree-branch').value = session.workspace === 'worktree' ? session.branch || '' : ''; restoreBudgets('session-budgets',session.budgets,session.id+':'+session.budget_revision); restoreModelRouting(session.model_routing); restoreClashSettings(session.clash || null); if (isFleetSession(session)) restoreFleetSettings(session.fleet); if (restoreModel || isFleetSession(session)) refreshModelChoices(session.model || null,session.thinking_effort || null); loadProjectGit(); }
 for (const id of ['workflow','mode','thinking-effort']) $(id).addEventListener('change',updateControls);
@@ -1437,9 +1438,10 @@ async function selectSession(id) {
 }
 $('session-form').addEventListener('submit',async event => {
   event.preventDefault(); if ($('send').disabled || state.pending || isFleetSession(state.selected)) return;
+  // /clear, /new, /model and the like act on the page; they never reach the CLI.
+  if (typeof composerCommands === 'object' && composerCommands.intercept($('prompt').value)) return;
   const prompt = $('prompt').value.trim(); const followup = Boolean(state.selectedId); state.pending = followup ? 'followup' : 'create'; showError('composer-error',''); updateControls();
-  const picked = typeof skillHints === 'object' ? skillHints.picked(prompt) : [];
-  const turn = {prompt,...(picked.length ? {skills:picked} : {}),agents_enabled:$('agents-enabled').checked,agent_count:$('agent-count').valueAsNumber,model_routing:modelRouting(),...(followup && $('workflow').value === 'native' && modelRouting() ? {mode:$('mode').value} : {}),...($('workflow').value === 'sdd' ? {sdd:sddSettings()} : {}),...(clashSelected() ? {clash:clashSettings()} : followup ? {clash:null} : {}),model:fleetDryRun() ? null : selectedModel(),thinking_effort:fleetDryRun() ? null : $('thinking-effort').value || null};
+  const turn = {prompt,agents_enabled:$('agents-enabled').checked,agent_count:$('agent-count').valueAsNumber,model_routing:modelRouting(),...(followup && $('workflow').value === 'native' && modelRouting() ? {mode:$('mode').value} : {}),...($('workflow').value === 'sdd' ? {sdd:sddSettings()} : {}),...(clashSelected() ? {clash:clashSettings()} : followup ? {clash:null} : {}),model:fleetDryRun() ? null : selectedModel(),thinking_effort:fleetDryRun() ? null : $('thinking-effort').value || null};
   const body = followup ? turn : {...turn,budgets:sessionBudgets(),project_id:$('project').value,provider:$('provider').value,mode:$('mode').value,workflow:$('workflow').value,project_context:true,workspace:$('workspace').value,...($('workspace').value === 'worktree' && $('worktree-branch').value.trim() ? {worktree_branch:$('worktree-branch').value.trim()} : {}),...($('workspace').value === 'existing-worktree' ? {worktree_id:$('existing-worktree').value} : {}),...(fleetSelected() ? {fleet:fleetSettings()} : {}),...(brainLinkActive() ? {brain:brainLinkConfig()} : {})};
   try {
     if (attachedFiles.length) body.attachments = await Promise.all(attachedFiles.map(encodeAttachment));

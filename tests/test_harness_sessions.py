@@ -16,7 +16,7 @@ import unittest
 from unittest.mock import patch, Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "harness" / "src"))
-from harness import sessions
+from harness import commands, sessions
 
 
 FAKE_CLI = r'''
@@ -24,6 +24,7 @@ import json, os, pathlib, sys, time
 config = json.loads(sys.argv[1])
 pathlib.Path(config["pid_path"]).write_text(str(os.getpid()))
 pathlib.Path(config["pid_path"] + ".cwd").write_text(str(pathlib.Path.cwd()))
+pathlib.Path(config["pid_path"] + ".env").write_text(json.dumps({key: os.environ.get(key) for key in ("CONTEXT_TASK_ID", "CONTEXT_CAPSULE_DELIVERED")}))
 behavior = config["behavior"]
 if behavior == "no_stdin":
     time.sleep(30)
@@ -750,76 +751,132 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(Path(self.calls[-1]["pid_path"] + ".cwd").read_text(), str(task / "packages/app"))
         self.assertTrue(before.is_dir())
 
-    def write_skill(self, root, base, name, head=""):
-        folder = root / base / name
-        folder.mkdir(parents=True, exist_ok=True)
-        (folder / "SKILL.md").write_text(f"---\nname: {name}\ndescription: The {name} fixture.\n{head}---\n# {name}\n", encoding="utf-8")
+    def native_commands(self, *names):
+        """Claude Code's command list as its initialize answer gives it, without starting a CLI."""
+        listed = [{"name": name, "description": f"The {name} command.", "hint": "", "aliases": ["reset", "new"] if name == "clear" else [],
+                   "builtin": False} for name in names]
+        catalog = patch("harness.commands.claude_commands", return_value=listed)
+        catalog.start()
+        self.addCleanup(catalog.stop)
 
-    def test_invoked_skills_become_an_explicit_request_and_a_leading_claude_skill_goes_first(self):
-        self.write_skill(self.project, ".claude/skills", "sdd", "disable-model-invocation: true\n")
-        self.write_skill(self.project, ".claude/skills", "php-review")
-        self.write_skill(self.project, ".agents/skills", "php-review")
+    def test_a_claude_command_goes_to_the_cli_as_typed_and_other_text_keeps_the_harness_context(self):
+        self.native_commands("php-review", "compact", "clear")
         (self.project / "README.md").write_text("FIXTURE README EXCERPT\n", encoding="utf-8")
         manager = self.manager()
         key = next(iter(manager.projects))
-        self.assertEqual([(item["name"], item["start_only"]) for item in manager.skill_hints(key, "claude")["skills"]],
-                         [("php-review", False), ("sdd", True)])
-        self.assertEqual([item["path"] for item in manager.skill_hints(key, "codex")["skills"]], [".agents/skills/php-review/SKILL.md"])
+        listing = manager.command_listing(key, "claude")
+        self.assertEqual([(item["name"], item["kind"]) for item in listing["commands"]],
+                         [("php-review", "native"), ("compact", "native"), ("clear", "page")])
         for provider, worktree in (("unknown", None), ("claude", "0" * 16)):
             with self.subTest(provider=provider, worktree=worktree), self.assertRaises(sessions.SessionError):
-                manager.skill_hints(key, provider, worktree)
-        for skills in ("php-review", ["php-review"] * 2, ["../escape"], [1]):
-            with self.subTest(skills=skills), self.assertRaises(sessions.SessionError):
-                manager.create(dict(project_id=key, provider="claude", prompt="complete", skills=skills))
-        self.assertEqual(manager.list(), [])
+                manager.command_listing(key, provider, worktree)
 
-        message = "/sdd login flow, then check it with /php-review"
-        sid = manager.create(dict(project_id=key, provider="claude", prompt=message, project_context=True, skills=["php-review"]))["id"]
+        message = "/php-review src/Cart.php focus on rounding"
+        sid = manager.create(dict(project_id=key, provider="claude", prompt=message, project_context=True))["id"]
+        self.assertEqual(self.settled(manager, sid)["status"], "completed")
+        # Exactly what the person typed, as in Claude Code itself: no excerpts, memory or Harness instructions.
+        self.assertEqual(self.calls[-1]["prompt"], message)
+        self.assertIn("Claude Code runs /php-review itself: the message went to it as typed, without Harness memory or instructions.",
+                      [event.get("text") for event in manager.events(sid)])
+        ledger = manager.results.history(sid)["launches"][-1]["context"]["ledger"]
+        self.assertEqual((ledger["message"], ledger["total"], ledger["instructions"]), (len(message), len(message), 0))
+        self.assertEqual([item["name"] for item in manager.session_commands(sid)["commands"]], ["php-review", "compact", "clear"])
+
+        # A follow-up with attachments still names them: the person attached them to this message.
+        manager.send(sid, "/compact keep the decisions", {"attachments": [{"name": "notes.txt", "data": "bm90ZXM="}]})
         self.assertEqual(self.settled(manager, sid)["status"], "completed")
         prompt = self.calls[-1]["prompt"]
-        # Claude Code expands the leading skill itself: the message comes first, and the Harness context after it says
-        # where the user's own text ends, since the CLI hands everything after the name to the skill.
-        self.assertTrue(prompt.startswith(message + "\n\n" + sessions.LEAD_CONTEXT_HEADER + "\n\nHarness skill request:"))
-        self.assertIn("- php-review (.claude/skills/php-review/SKILL.md): invoke it with the Skill tool.", prompt)
-        self.assertNotIn("- sdd (", prompt)
-        self.assertLess(prompt.index("Harness skill request"), prompt.index("FIXTURE README EXCERPT"))
-        self.assertLess(prompt.index("FIXTURE README EXCERPT"), prompt.index("Harness session delegation requirement"))
-        self.assertIn("Skills requested in this message: sdd, php-review. Claude Code loads sdd from the start of the message. "
-                      "Harness asked the agent to load it before acting: php-review.", [event.get("text") for event in manager.events(sid)])
-        self.assertEqual(manager.events(sid)[0]["skills"], ["php-review"])
-        self.assertEqual(manager.results.history(sid)["launches"][-1]["context"]["ledger"]["message"], len(message))
-        self.assertEqual([item["name"] for item in manager.session_skill_hints(sid)["skills"]], ["php-review", "sdd"])
-        # A follow-up that only mentions a skill leaves it to the agent; one the person picked is requested.
-        manager.send(sid, "Explain what /php-review checks, do not run it")
-        self.assertEqual(self.settled(manager, sid)["status"], "completed")
-        self.assertNotIn("Harness skill request", self.calls[-1]["prompt"])
-        manager.send(sid, "Now run /php-review on the change", {"skills": ["php-review"]})
-        self.assertEqual(self.settled(manager, sid)["status"], "completed")
-        self.assertIn("- php-review (.claude/skills/php-review/SKILL.md): invoke it with the Skill tool.", self.calls[-1]["prompt"])
-        with self.assertRaises(sessions.SessionError):
-            manager.send(sid, "complete", {"skills": "php-review"})
+        self.assertTrue(prompt.startswith("/compact keep the decisions\n\nUser-attached reference files"))
+        self.assertNotIn("Harness session delegation requirement", prompt)
+        # Starting over would replace the native conversation: the page does that with New session.
+        for restart in ("/clear", "/reset", "/new please"):
+            with self.subTest(restart=restart), self.assertRaisesRegex(sessions.SessionError, "New session"):
+                manager.send(sid, restart)
+        with self.assertRaisesRegex(sessions.SessionError, "New session"):
+            manager.create(dict(project_id=key, provider="claude", prompt="/clear"))
 
-        # `/php-review,` is not a command Claude Code expands: the Harness context keeps its place and a request line is added.
-        loose = manager.create(dict(project_id=key, provider="claude", prompt="/php-review, focus on auth", project_context=True))["id"]
-        self.assertEqual(self.settled(manager, loose)["status"], "completed")
+        # A name Claude Code does not list, or a slash later in the text, is text with the usual Harness context.
+        unknown = manager.create(dict(project_id=key, provider="claude", prompt="/fix the bug", project_context=True))["id"]
+        self.assertEqual(self.settled(manager, unknown)["status"], "completed")
         prompt = self.calls[-1]["prompt"]
         self.assertTrue(prompt.startswith("Optional project reference excerpts"))
-        self.assertIn("/php-review, focus on auth\n\nHarness skill request:", prompt)
-        self.assertNotIn(sessions.LEAD_CONTEXT_HEADER, prompt)
+        self.assertIn("/fix the bug\n\nHarness session delegation requirement", prompt)
+        self.assertIn("/fix is not a Claude Code command here, so it went as text.", [event.get("text") for event in manager.events(unknown)])
+        # A resumed turn sends no excerpts, so nothing would come before the slash: the text says it is the user's.
+        manager.send(unknown, "/fix it again")
+        self.assertEqual(self.settled(manager, unknown)["status"], "completed")
+        self.assertTrue(self.calls[-1]["prompt"].startswith(sessions.TEXT_MESSAGE_HEADER + "/fix it again\n\n"))
+        # The model and effort belong to the session's fields, set by the page's /model and /effort.
+        for page in ("/model sonnet", "/effort high", "/model picker is broken, fix it"):
+            with self.subTest(page=page), self.assertRaisesRegex(sessions.SessionError, "session settings"):
+                manager.send(unknown, page)
+        # Outside the Workspace workflow the Harness writes the prompt, so a command is text there too.
+        planned = manager.create(dict(project_id=key, provider="claude", prompt="/php-review src", workflow="plan"))["id"]
+        self.assertEqual(self.settled(manager, planned)["status"], "completed")
+        self.assertTrue(self.calls[-1]["prompt"].startswith("Inspect the project and produce an implementation plan"))
+        self.assertEqual(manager.session_commands(planned)["commands"], [])
 
-        codex = self.create(manager, "Look at the diff with $php-review and /sdd", project_context=True, skills=["php-review", "sdd"])
-        self.assertEqual(self.settled(manager, codex)["status"], "completed")
+    def test_a_claude_command_leaves_memory_to_the_project_hooks_and_a_reviewed_session_refuses_it(self):
+        self.native_commands("php-review")
+        manager = self.manager()
+        key = next(iter(manager.projects))
+        sid = manager.create(dict(project_id=key, provider="claude", prompt="complete"))["id"]
+        self.assertEqual(self.settled(manager, sid)["status"], "completed")
+        def link(brain):
+            with manager.lock:
+                manager.db.execute("UPDATE sessions SET brain=? WHERE id=?", (json.dumps(brain), sid))
+                manager.db.commit()
+        # Automatic memory: the command gets no Harness capsule, task or capsule claim, and leaves no draft to save.
+        link({"task_id": "T-auto", "bank": "memory-bank", "review": False, "capsule": {"task_id": "T-auto"}})
+        with patch.object(sessions.Sessions, "_recall", side_effect=AssertionError("recall for a command")), \
+                patch.object(sessions.Sessions, "_remember", side_effect=AssertionError("remember for a command")):
+            manager.send(sid, "/php-review src")
+            self.assertEqual(self.settled(manager, sid)["status"], "completed")
+        self.assertEqual(self.calls[-1]["prompt"], "/php-review src")
+        self.assertEqual(json.loads(Path(self.calls[-1]["pid_path"] + ".env").read_text()),
+                         {"CONTEXT_TASK_ID": None, "CONTEXT_CAPSULE_DELIVERED": None})
+        # Reviewed memory: a person approves what each run receives, so a command that skips it does not run.
+        link({"task_id": "T-review", "bank": "memory-bank", "review": True})
+        before = len(self.calls)
+        manager.send(sid, "/php-review src")
+        session = self.settled(manager, sid)
+        self.assertEqual((session["status"], len(self.calls)), ("failed", before))
+        self.assertIn("reviews project memory before each run", manager.events(sid)[-1]["text"])
+
+    def test_codex_skills_mentioned_with_a_dollar_and_its_prompts_reach_codex_as_the_codex_app_sends_them(self):
+        skills = [{"name": "php-review", "description": "Review PHP.", "path": str(self.project / ".agents/skills/php-review/SKILL.md"), "scope": "repo"}]
+        listing = patch("harness.commands.codex_skills", return_value=skills)
+        listing.start()
+        self.addCleanup(listing.stop)
+        home = self.root / "codex-home"
+        (home / "prompts").mkdir(parents=True)
+        (home / "prompts" / "review.md").write_text("---\ndescription: Review\n---\nReview $FILES carefully.\n", encoding="utf-8")
+        environment = patch.dict(os.environ, {"CODEX_HOME": str(home)})
+        environment.start()
+        self.addCleanup(environment.stop)
+        manager = self.manager()
+        key = next(iter(manager.projects))
+        self.assertEqual([item["name"] for item in manager.command_listing(key, "codex")["skills"]], ["php-review"])
+
+        sid = self.create(manager, "Look at the diff with $php-review first")
+        self.assertEqual(self.settled(manager, sid)["status"], "completed")
         prompt = self.calls[-1]["prompt"]
-        # Without a leading Claude skill the Harness context leads as before; Codex reads the skill's own file.
-        self.assertTrue(prompt.startswith("Optional project reference excerpts"))
-        self.assertIn("Look at the diff with $php-review and /sdd\n\nHarness skill request:", prompt)
-        self.assertIn("- php-review (.agents/skills/php-review/SKILL.md): read that file and follow it.", prompt)
-        self.assertNotIn("sdd (", prompt)
+        self.assertIn(f"Look at the diff with $php-review first\n\nHarness skill request: the user invoked these skills for this message. "
+                      f"Load each one before you act and follow it for this request:\n- php-review ({self.project}/.agents/skills/php-review/SKILL.md): "
+                      "read that file and follow it.", prompt)
+        self.assertIn("Codex skills requested: php-review.", [event.get("text") for event in manager.events(sid)])
 
-        plain = manager.create(dict(project_id=key, provider="claude", prompt="complete without /unknown or src/php-review"))["id"]
-        self.assertEqual(self.settled(manager, plain)["status"], "completed")
-        self.assertNotIn("Harness skill request", self.calls[-1]["prompt"])
-        self.assertFalse(any("Skills requested" in (event.get("text") or "") for event in manager.events(plain)))
+        manager.send(sid, "/prompts:review FILES=src/Cart.php")
+        self.assertEqual(self.settled(manager, sid)["status"], "completed")
+        self.assertTrue(self.calls[-1]["prompt"].startswith("Review src/Cart.php carefully.\n\nHarness session delegation requirement"))
+        self.assertEqual(manager.events(sid)[-1]["kind"], "status")
+        self.assertIn("/prompts:review FILES=src/Cart.php", [event.get("text") for event in manager.events(sid) if event["kind"] == "user"])
+        for wrong in ("/prompts:review", "/prompts:missing x"):
+            with self.subTest(wrong=wrong), self.assertRaises(sessions.SessionError):
+                manager.send(sid, wrong)
+        manager.send(sid, "/init")
+        self.assertEqual(self.settled(manager, sid)["status"], "completed")
+        self.assertTrue(self.calls[-1]["prompt"].startswith(commands.INIT_PROMPT))
 
     @unittest.skipUnless(shutil.which("git"), "Git workspace tests require git")
     def test_existing_worktree_list_leaves_out_harness_state_and_names_a_checkout_by_what_it_holds(self):
@@ -840,9 +897,9 @@ class SessionTests(unittest.TestCase):
         with self.assertRaisesRegex(sessions.SessionError, "no longer lists"):
             self.create(manager, workspace="existing-worktree", worktree_id=first)
         self.assertEqual(manager.list(), [])
-        self.assertEqual([item["name"] for item in manager.skill_hints(key, "codex", second)["skills"]], [])
+        self.assertEqual(manager.command_listing(key, "cursor", second)["commands"], [])
         with self.assertRaises(sessions.SessionError):
-            manager.skill_hints(key, "codex", first)
+            manager.command_listing(key, "cursor", first)
 
     def test_completion_requires_successful_terminal_and_zero_exit(self):
         manager = self.manager()

@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "harness/src"))
-from harness import sessions, skill_hints, skills
+from harness import sessions, skills
 
 
 class HarnessSkillTests(unittest.TestCase):
@@ -609,114 +609,6 @@ class HarnessSkillTests(unittest.TestCase):
         self.assertTrue((destination / "scripts/check.sh").stat().st_mode & 0o100)
         self.assertEqual((destination / "SKILL.md").stat().st_mode & 0o111, 0)
 
-
-class SkillHintTests(unittest.TestCase):
-    """The composer's skill list and the skills a message names; no server or native CLI."""
-
-    def setUp(self):
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
-
-    def skill(self, base, folder, head):
-        target = self.root / base / folder
-        target.mkdir(parents=True, exist_ok=True)
-        (target / "SKILL.md").write_text(head + "\n# Body\n", encoding="utf-8")
-        return target
-
-    def test_frontmatter_reads_names_folded_descriptions_and_invocation_flags(self):
-        meta = skill_hints.frontmatter("---\nname: php-review\ndescription: >-\n  Reviews PHP code\n  for defects.\n"
-                                       "disable-model-invocation: true\n---\n# PHP review\n")
-        self.assertEqual(meta, {"name": "php-review", "description": "Reviews PHP code for defects.", "model": False, "user": True})
-        quoted = skill_hints.frontmatter('---\nname: "sdd"\ndescription: "Spec-driven: specs/ and tasks/."\nuser-invocable: False\n---\n')
-        self.assertEqual((quoted["name"], quoted["description"], quoted["model"], quoted["user"]),
-                         ("sdd", "Spec-driven: specs/ and tasks/.", True, False))
-        self.assertEqual(skill_hints.frontmatter("# No frontmatter\ndescription: not metadata\n"),
-                         {"name": None, "description": "", "model": True, "user": True})
-        long = skill_hints.frontmatter("---\ndescription: " + "word " * 200 + "\n---\n")["description"]
-        self.assertEqual((len(long), long[-1]), (skill_hints.DESCRIPTION_CHARS, "…"))
-
-    def test_listing_offers_what_the_provider_loads_and_hides_what_people_cannot_invoke(self):
-        self.skill(".claude/skills", "php-review", "---\nname: php-review\ndescription: Review PHP changes.\n---")
-        self.skill(".claude/skills", "background", "---\nname: background\nuser-invocable: false\n---")
-        self.skill(".claude/skills", "renamed-folder", "---\nname: renamed\ndescription: Named in its frontmatter.\n---")
-        self.skill(".claude/skills", "bad name", "---\nname: bad\n---")
-        (self.root / ".claude/skills/empty").mkdir()
-        self.skill(".agents/skills", "codex-only", "---\ndescription: For Codex.\n---")
-        outside = self.root.parent / (self.root.name + "-outside")
-        outside.mkdir()
-        self.addCleanup(lambda: __import__("shutil").rmtree(outside))
-        (outside / "SKILL.md").write_text("---\nname: leaked\n---\n")
-        (self.root / ".claude/skills/linked").symlink_to(outside, target_is_directory=True)
-        claude = skill_hints.listing(self.root, "claude")
-        self.assertEqual((claude["provider"], claude["base"], claude["truncated"]), ("claude", ".claude/skills", False))
-        self.assertEqual(claude["skills"], [
-            {"name": "php-review", "description": "Review PHP changes.", "path": ".claude/skills/php-review/SKILL.md", "start_only": False},
-            {"name": "renamed", "description": "Named in its frontmatter.", "path": ".claude/skills/renamed-folder/SKILL.md", "start_only": False}])
-        self.assertEqual([item["name"] for item in skill_hints.listing(self.root, "codex")["skills"]], ["codex-only"])
-        self.assertEqual(skill_hints.listing(self.root, "cursor")["skills"], [])
-        self.assertEqual(skill_hints.listing(self.root, "unknown"), {"provider": "unknown", "base": None, "skills": [], "truncated": False})
-        # The limit counts every skill read, hidden ones too, so a listing never reads past it.
-        with patch.object(skill_hints, "LIMIT", 2):
-            limited = skill_hints.listing(self.root, "claude")
-        self.assertEqual(([item["name"] for item in limited["skills"]], limited["truncated"]), (["php-review"], True))
-        self.skill(".claude/skills", "sdd", "---\nname: sdd\ndisable-model-invocation: true\n---")
-        self.skill(".agents/skills", "sdd", "---\nname: sdd\ndisable-model-invocation: true\n---")
-        # Only Claude refuses such a skill outside the start of a message.
-        self.assertEqual([item["start_only"] for item in skill_hints.listing(self.root, "claude")["skills"] if item["name"] == "sdd"], [True])
-        self.assertEqual([item["start_only"] for item in skill_hints.listing(self.root, "codex")["skills"] if item["name"] == "sdd"], [False])
-
-    def test_a_message_invokes_a_skill_by_starting_with_it_or_by_a_pick_and_mentions_stay_text(self):
-        skills = [{"name": name, "path": f".claude/skills/{name}/SKILL.md", "model": name != "sdd", "user": name != "hidden"}
-                  for name in ("sdd", "php-review", "docs", "deploy", "hidden")]
-        def names(message, picked=(), provider="claude"):
-            routed = skill_hints.plan(provider, message, skills, picked)
-            return ([skill["name"] for skill in routed["invoked"]], (routed["lead"] or {}).get("name"),
-                    [skill["name"] for skill in routed["request"]], [skill["name"] for skill in routed["refused"]])
-        # A mention is text: only a leading name or a skill picked from the list asks the agent to run it.
-        self.assertEqual(names("Do not run /deploy yet, just explain what it does"), ([], None, [], []))
-        self.assertEqual(names("Do not run /deploy yet", picked=["deploy"]), (["deploy"], None, ["deploy"], []))
-        message = "/sdd login flow, then (/php-review) and $docs."
-        self.assertEqual(names(message), (["sdd"], "sdd", [], []))
-        self.assertEqual(names(message, picked=["php-review", "docs"]), (["sdd", "php-review", "docs"], "sdd", ["php-review", "docs"], []))
-        # Claude runs a skill the Skill tool refuses only from the start of a message, so a pick elsewhere is refused.
-        self.assertEqual(names("First /sdd login", picked=["sdd"]), (["sdd"], None, [], ["sdd"]))
-        self.assertEqual(names("First $sdd login", picked=["sdd"], provider="codex"), (["sdd"], None, ["sdd"], []))
-        # Claude Code cuts a command at the first space: only `/name` followed by a space or the end expands natively.
-        for leading in ("/php-review", "/php-review focus on auth", "/php-review\nfocus"):
-            with self.subTest(leading=leading):
-                self.assertEqual(names(leading)[1], "php-review")
-        for loose in ("/php-review, focus on auth", "/php-review: focus", "/php-review.", "$php-review focus"):
-            with self.subTest(loose=loose):
-                self.assertEqual(names(loose)[:3], (["php-review"], None, ["php-review"]))
-        self.assertIsNone(names("/docs now", provider="codex")[1])
-        for text in ("src/sdd", "see /docs/a.md", "/docs.md", "costs US$5 or a$docs", "https://x.test/sdd", "/hidden", "/unknown", "/sdd-plus"):
-            with self.subTest(text=text):
-                self.assertEqual(names(text, picked=["sdd", "docs", "hidden"])[0], [])
-        self.assertEqual(names("/sdd again /sdd", picked=["sdd"])[0], ["sdd"])
-        many = [{"name": f"s{index}", "path": "p", "model": True, "user": True} for index in range(9)]
-        routed = skill_hints.plan("claude", " ".join(f"/s{index}" for index in range(9)), many, [f"s{index}" for index in range(9)])
-        self.assertEqual(len(routed["invoked"]), skill_hints.REQUEST_LIMIT)
-
-        routed = skill_hints.plan("claude", "/sdd login, then /php-review and /sdd", skills, ["php-review"])
-        self.assertEqual(skill_hints.request("claude", routed["request"]),
-                         "\n\nHarness skill request: the user invoked these skills for this message. Load each one before you act "
-                         "and follow it for this request:\n- php-review (.claude/skills/php-review/SKILL.md): invoke it with the Skill tool.")
-        self.assertIn("read that file and follow it", skill_hints.request("codex", routed["request"]))
-        self.assertEqual(skill_hints.request("claude", []), "")
-        self.assertEqual(skill_hints.notice("claude", routed),
-                         "Skills requested in this message: sdd, php-review. Claude Code loads sdd from the start of the message. "
-                         "Harness asked the agent to load it before acting: php-review.")
-        self.assertEqual(skill_hints.notice("claude", skill_hints.plan("claude", "Then /sdd", skills, ["sdd"])),
-                         "Skills requested in this message: sdd. Not loaded: sdd runs only from the start of a message (disable-model-invocation).")
-        self.assertIsNone(skill_hints.notice("claude", skill_hints.plan("claude", "plain", skills)))
-
-    def test_picked_skills_are_a_short_list_of_distinct_names(self):
-        self.assertEqual(skill_hints.validate_picked(None), [])
-        self.assertEqual(skill_hints.validate_picked(["php-review", "sdd"]), ["php-review", "sdd"])
-        for value in ("sdd", {"sdd": 1}, [1], ["sdd", "sdd"], ["../x"], ["bad name"], [f"s{index}" for index in range(6)]):
-            with self.subTest(value=value), self.assertRaises(sessions.SessionError):
-                skill_hints.validate_picked(value)
 
 if __name__ == "__main__":
     unittest.main()
