@@ -117,9 +117,6 @@ svg { flex:none; }
 .chip[data-on="true"]:not([aria-expanded="true"]) { border-color:var(--purple-line); }
 .chip[data-on="true"] .chip-value { color:var(--ink); }
 .chip[data-invalid="true"]::after,#session-settings-toggle[data-invalid="true"]::after { content:""; width:6px; height:6px; border-radius:50%; background:var(--error-dot); }
-.chip-toggle { cursor:pointer; }
-.chip-toggle input { margin:0; accent-color:var(--purple); }
-.chip-toggle:has(input:disabled) { color:var(--muted); cursor:default; }
 .option-panel { max-width:1160px; margin:8px 0 0; padding:12px 16px; border:1px solid var(--line); border-radius:var(--radius-md); background:var(--soft); }
 .option-panel .knowledge-form-grid { margin:8px 0; }
 .option-panel .knowledge-note { margin:8px 0 0; }

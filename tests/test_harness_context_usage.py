@@ -235,10 +235,10 @@ class ContextLaunchTests(unittest.TestCase):
         ledger, fill = context["ledger"], context["fill"]
         self.assertEqual(("claude", 1, len("Fix the retry bug"), len(self.calls[0]["prompt"])),
                          (context["provider"], context["agents"], ledger["message"], ledger["total"]))
+        # Claude loads CLAUDE.md by itself, so the excerpts leave it out; it counts as a CLI file instead.
         self.assertEqual([{"name": "AGENTS.md", "sent": 3000, "full": 13998, "characters": 3000},
-                          {"name": "CLAUDE.md", "sent": 270, "full": 270, "characters": 270},
                           {"name": "README.md", "sent": 7, "full": 7, "characters": 7}], ledger["excerpts"])
-        self.assertEqual(ledger["total"] - ledger["message"] - 3277, ledger["instructions"])
+        self.assertEqual(ledger["total"] - ledger["message"] - 3007, ledger["instructions"])
         self.assertEqual((32000, 31000, 150000, 3, 200000), (fill["start"], fill["end"], fill["peak"], fill["calls"], fill["window"]))
         self.assertEqual(hook_parts(HOOK_TEXT), fill["hooks"])
         self.assertEqual(({"installed": True, "measured": True, "bytes": None}, [{"name": "CLAUDE.md", "bytes": 270}]),

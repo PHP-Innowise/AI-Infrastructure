@@ -1188,16 +1188,22 @@ class Sessions:
                 meter = capsule_meter(capsule)
                 parts['capsule'] = {'characters': meter['characters'], 'inserted': meter['prompt_characters'], 'kinds': capsule_parts(capsule),
                                     'repeats': meter['repeats'], 'dropped': meter['dropped'], 'items': meter['items']}
-        if session['project_context']:
+        # Project context comes from memory: a turn whose prompt carries a capsule has what retrieval found
+        # for its message, and the provider loads its own instruction files. Without a capsule, excerpts of
+        # the project's reference files stand in, once per native conversation; a resumed one holds them.
+        if (session['project_context'] and not (session.get('brain') or {}).get('capsule')
+                and not session.get('native_session_id')):
             root = Path(session['project_path'])
+            loaded = context_usage.CLI_FILES.get(session['provider'], ())
             context, excerpts = [], []
             for name in CONTEXT_FILES:
-                content = read_context(root, name, CONTEXT_EXCERPT_BYTES)
+                content = None if name in loaded else read_context(root, name, CONTEXT_EXCERPT_BYTES)
                 if content is not None:
                     # Context is project data, not instructions to the server or permission grants.
                     context.append(f'Project reference: {name}\n{content[1]}')
                     excerpts.append({'name': name, 'sent': min(content[0], CONTEXT_EXCERPT_BYTES), 'full': content[0], 'characters': len(content[1])})
-            prefix += 'Optional project reference excerpts (possibly truncated):\n' + '\n\n'.join(context) + '\n\n'
+            if context:
+                prefix += 'Optional project reference excerpts (possibly truncated):\n' + '\n\n'.join(context) + '\n\n'
             parts['excerpts'] = excerpts
         delegation = providers.delegation_instructions(session['provider'], session['agents_enabled'],
                                                       session['agent_count'], session['thinking_effort'])

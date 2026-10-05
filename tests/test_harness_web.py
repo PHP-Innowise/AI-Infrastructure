@@ -359,7 +359,7 @@ assert.equal(updateBrainLinkControls(),true); assert.equal(brainLinkPending(),tr
 // A project without a governed runtime starts its sessions without memory; nothing blocks them.
 Object.assign(brainLinkDraft,{loading:false, meta:{runtime_available:false}});
 assert.equal(updateBrainLinkControls(),true); assert.equal(brainLinkActive(),false); assert.equal(brainLinkPending(),false);
-assert.equal(fields['brain-link-summary'].textContent,'Unavailable'); assert.match(fields['brain-link-availability'].textContent,/start without project memory/);
+assert.equal(fields['brain-link-summary'].textContent,'Project files'); assert.match(fields['brain-link-availability'].textContent,/excerpts of its reference files/);
 brainLinkDraft.error = 'Read failed.'; assert.equal(updateBrainLinkControls(),true); assert.deepEqual(errors,[]); brainLinkDraft.error = '';
 // With a governed runtime the default needs nothing from a person: no task, no query, no review.
 Object.assign(brainLinkDraft,{meta:{runtime_available:true, mode:'governed'}, banks:[{id:'memory-bank'}]}); fields['brain-link-bank'].value = 'memory-bank';
@@ -711,7 +711,7 @@ assert.equal(nodes.at(-1).children.at(-1).textContent,'Done.\\n\\n[Memory draft:
         self.assertNotIn("executable", boot["providers"][0])
         self.assertEqual({kit["id"] for kit in boot["accelerators"]}, {"kit1", "kit2", "kit3"})
         self.assertEqual((boot["runtime"]["max_agents"], boot["runtime"]["default_agent_count"]), (40, 3))
-        # The Project context chip caps each file at the excerpt size the prompt sends.
+        # Usage › Context labels project reference excerpts by the size the prompt sends.
         self.assertEqual(boot["runtime"]["context_excerpt_bytes"], 3000)
         self.assertEqual(headers["Cache-Control"], "no-store")
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
@@ -1840,12 +1840,11 @@ for (const unknown of [null, undefined, -1, Infinity]) assert.equal(fmt.cost(unk
 assert.equal(fmt.unknown('not recorded').label, 'not recorded');
 """)
 
-    def test_capsule_meter_and_context_chip_read_exact_counts_and_marked_estimates(self):
+    def test_capsule_meter_reads_exact_counts_and_marked_estimates(self):
         page = ui_script()
         parts = [page[page.index(start):page.index(end)] for start, end in (
             ("\nconst el = (tag", "\n// Motion follows"), ("\nconst numberText", "\n// Keeps one node per key"),
-            ("\nconst capsuleKinds", "\nfunction renderLinkedSession("),
-            ("\nfunction renderContextValue(", "\n$('project').addEventListener('change',loadContextSizes)"))]
+            ("\nconst capsuleKinds", "\nfunction renderLinkedSession("))]
         self.run_node(r"""
 class Node { constructor() { this.children = []; this.dataset = {}; this.attributes = {}; this.style = {}; this.hidden = false; this.own = ''; }
   get textContent() { return this.children.length ? this.children.map(child => typeof child === 'string' ? child : child.textContent).join('') : this.own; }
@@ -1856,7 +1855,6 @@ class Node { constructor() { this.children = []; this.dataset = {}; this.attribu
   querySelector(selector) { return this.children.find(child => selector === `[data-kind="${child.dataset.kind}"]`); } }
 const document = {createElement: () => new Node()}, nodes = {}, $ = id => nodes[id] ??= new Node();
 const state = {pending: null, bootstrap: {runtime: {context_excerpt_bytes: 3000}}};
-const contextSizes = {project: 'p1', files: null};
 for (const kind of ['brain', 'bank', 'rules']) { const part = new Node(); part.dataset.kind = kind; $('capsule-bar').append(part); }
 """ + "".join(parts), r"""
 const part = kind => $('capsule-bar').querySelector(`[data-kind="${kind}"]`);
@@ -1878,19 +1876,6 @@ assert.equal($('capsule-facts').textContent, '900 of 8,000 characters · No matc
 assert.deepEqual([$('capsule-repeats-line').hidden, part('bank').hidden, part('rules').hidden, $('capsule-legend').children.length], [true, true, true, 1]);
 renderCapsuleMeter(null);
 assert.equal($('capsule-meter').hidden, true);
-
-nodes['project-context'] = {checked: true}; nodes.project = {value: 'p1'};
-contextSizes.files = [{path: 'AGENTS.md', exists: true, bytes: 13998}, {path: 'CLAUDE.md', exists: true, bytes: 871}, {path: 'README.md', exists: false, bytes: 0}];
-renderContextValue();
-const chip = $('project-context-value').children;
-// Each file counts up to the 3,000-byte excerpt: (3,000 + 871) / 4.7 ≈ 820 tokens.
-assert.deepEqual([chip[0].textContent, chip[0].attributes['aria-hidden'], chip[1].textContent], ['≈ 820 tokens', 'true', ', adds about 820 tokens per launch']);
-nodes['project-context'].checked = false; renderContextValue();
-assert.equal($('project-context-value').textContent, '');
-nodes['project-context'].checked = true; contextSizes.files = [{path: 'AGENTS.md', exists: false, bytes: 0}]; renderContextValue();
-assert.equal($('project-context-value').textContent, 'no files');
-contextSizes.project = 'p2'; renderContextValue();
-assert.equal($('project-context-value').textContent, '');
 """)
 
     def test_memory_use_model_counts_the_window_and_what_changed_since_the_last_visit(self):

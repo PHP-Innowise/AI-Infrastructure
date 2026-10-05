@@ -319,8 +319,8 @@ another project while a session is open starts a new session draft for it.
   install the reviewed files. The resulting project is available in the session,
   skills and knowledge selectors immediately.
 - **Sessions:** registered project, Claude/Codex/Cursor, model and thinking effort,
-  Workspace/Plan/Review workflow, Plan/Edit mode, optional project context,
-  additional-agent switch and a concurrent helper limit (1–40, default 3).
+  Workspace/Plan/Review workflow, Plan/Edit mode, project memory (on by
+  default), additional-agent switch and a concurrent helper limit (1–40, default 3).
   Shows the selected project's Git branch and changes, with a refresh control.
   Choose the project directory or a new Git worktree with an optional new branch name.
   The launch fields sit in one row; optional settings are chips (Helpers, Clash,
@@ -347,12 +347,14 @@ another project while a session is open starts a new session draft for it.
   Usage opens with **Context**, how full each turn left the context window; see
   [Context window](#context-window).
 - **Project context:** availability and size of a fixed set of project
-  instructions and references. Optional prompt context includes up to 3 KB
-  each from `AGENTS.md`, `CLAUDE.md`, `README.md`,
-  `project-brain/README.md`, and `specs/MANIFEST.md`. Symlinks are skipped.
-  The native CLI can independently load its normal project instructions.
-  While the **Project context** chip is on, it shows what those excerpts add to
-  each launch, estimated at 4.7 characters per token (`≈ 2.1k tokens`).
+  instructions and references: `AGENTS.md`, `CLAUDE.md`, `README.md`,
+  `project-brain/README.md` and `specs/MANIFEST.md`. There is no separate switch
+  for them; **Use project memory** decides what the project contributes (see
+  [Project memory](#project-memory)). A turn whose prompt carries a memory capsule
+  sends no excerpts. Without one, the first launch of a conversation sends up to
+  3 KB of each file the provider does not load by itself (Claude loads
+  `CLAUDE.md`, Codex `AGENTS.md`); a resumed conversation already holds them.
+  Symlinks are skipped.
 - **Memory use:** how a knowledge root's memory grows, moves, ages and gets
   selected: Project Brain records, promotions, Memory bank chunks and the last
   200 retrievals on this machine, with the chunks that need attention. See
@@ -1006,8 +1008,9 @@ or held back. A run that fails or is cancelled saves nothing.
 
 Choose an existing task, or a new task with your own ID and goal, under **Memory**;
 memory still runs by itself for it. In a project without a governed context
-runtime, sessions start without memory unless a task was chosen explicitly. Turn
-**Use project memory** off to start without it.
+runtime, sessions start with excerpts of the project's reference files instead of
+retrieved memory, unless a task was chosen explicitly. Turn **Use project memory**
+off to start with neither.
 
 #### Review by hand
 

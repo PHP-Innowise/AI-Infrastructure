@@ -88,6 +88,13 @@ edition's own files remain in that edition's changelog.
   refusing them. Memory use names these retrievals Harness, and the Claude and
   Codex read hooks, which call `refresh`, by their host instead of CLI.
 
+- Harness: the **Project context** chip is gone; **Use project memory** decides
+  what the project contributes. A turn whose prompt carries a memory capsule no
+  longer also gets the reference-file excerpts; without a capsule (no governed
+  runtime, or retrieval failed) they stand in, sent once per native
+  conversation instead of on every resume, and leave out the instruction file
+  the provider loads by itself (`CLAUDE.md` for Claude, `AGENTS.md` for Codex).
+
 - The Claude and Codex read hooks (`working-memory-read.sh`) stand down when
   `CONTEXT_CAPSULE_DELIVERED=1`. The Harness sets it when it has already put
   the turn's capsule into the prompt, retrieved for the message alone; the hook
