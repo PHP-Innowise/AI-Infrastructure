@@ -858,6 +858,10 @@ Creator and System runs keep their own progress and show only their waiting line
   fills the Checks form with the bare command and names what was removed; nothing
   runs until you press **Run check**.
 
+![Detailed › Files during a run: the file being read carries a ring, edits are filled, a created file has a plus](../docs/images/harness-run-view/files-map.jpg)
+
+![Detailed › Commands: a check that failed twice and then passed, and a PHPStan run piped to tail marked unknown](../docs/images/harness-run-view/commands.jpg)
+
 Steps in the conversation name their target (`Bash · php artisan test --filter=OrderTest · failed`),
 and each group sums them up (*Looked for "rules(" · opened 4 files · edited 1*). A
 compaction leaves a divider. When the turn ends, a **run receipt** follows the
@@ -866,6 +870,8 @@ and checks, the plan, tokens and cost as the provider reported them, moments to 
 to, the workspace diff (with files changed outside edit tools) and whether a Harness
 check ran after the turn. *Process complete* is not a verification of the task.
 Earlier turns fold into one line.
+
+![Run receipt: what was opened, searched, edited and run, checks, plan, cost, moments to jump to, and a file changed outside edit tools](../docs/images/harness-run-view/receipt.jpg)
 
 When the tab is in the background, its title and icon carry the state (`● Running`,
 `✓ Finished`, `⚑ Needs approval`). **Notify me when it finishes** asks the browser for
