@@ -319,15 +319,15 @@ another project while a session is open starts a new session draft for it.
   install the reviewed files. The resulting project is available in the session,
   skills and knowledge selectors immediately.
 - **Sessions:** registered project, Claude/Codex/Cursor, model and thinking effort,
-  Workspace/Plan/Review workflow, Plan/Edit mode, optional project context,
-  additional-agent switch and a concurrent helper limit (1–40, default 3).
+  Workspace/Plan/Review workflow, Plan/Edit mode, project memory (on by
+  default), additional-agent switch and a concurrent helper limit (1–40, default 3).
   Shows the selected project's Git branch and changes, with a refresh control.
   Choose the project directory or a new Git worktree with an optional new branch name.
   The launch fields sit in one row; optional settings are chips (Helpers, Clash,
   Run in, Memory, Budgets, Models) that show their current value and open one
   panel at a time. An open session collapses to one summary line; **Next-turn
   settings** expands what a follow-up can change. Native messages appear as they
-  arrive, and consecutive tool and status steps fold into one row. Cancel stops the
+  arrive, and consecutive tool steps fold into one row (see [Watching a run](#watching-a-run)). Cancel stops the
   process group; follow-ups resume the same native session and workspace directory.
 - **Clash with a challenger:** a checkbox on Workspace and Review sessions that
   pits the selected provider against a different challenger provider on the
@@ -347,12 +347,13 @@ another project while a session is open starts a new session draft for it.
   Usage opens with **Context**, how full each turn left the context window; see
   [Context window](#context-window).
 - **Project context:** availability and size of a fixed set of project
-  instructions and references. Optional prompt context includes up to 3 KB
-  each from `AGENTS.md`, `CLAUDE.md`, `README.md`,
-  `project-brain/README.md`, and `specs/MANIFEST.md`. Symlinks are skipped.
-  The native CLI can independently load its normal project instructions.
-  While the **Project context** chip is on, it shows what those excerpts add to
-  each launch, estimated at 4.7 characters per token (`≈ 2.1k tokens`).
+  instructions and references: `AGENTS.md`, `CLAUDE.md`, `README.md`,
+  `project-brain/README.md` and `specs/MANIFEST.md`. There is no switch for
+  them: they are part of project memory (see [Project memory](#project-memory)). A turn whose prompt carries a memory capsule
+  sends no excerpts. Without one, the first launch of a conversation sends up to
+  3 KB of each file the provider does not load by itself (Claude loads
+  `CLAUDE.md`, Codex `AGENTS.md`); a resumed conversation already holds them.
+  Symlinks are skipped.
 - **Memory use:** how a knowledge root's memory grows, moves, ages and gets
   selected: Project Brain records, promotions, Memory bank chunks and the last
   200 retrievals on this machine, with the chunks that need attention. See
@@ -742,7 +743,8 @@ Keep the browser workspace quiet as it grows:
 The page has no build step. `harness/web/index.html` holds the markup and the
 theme script that runs before the first paint, `app.css` holds the styles, and
 classic scripts share their top-level names in load order: `app-core.js`
-(shell, theme, routing, sessions), `app-knowledge.js`, `app-setup.js`,
+(shell, theme, routing, sessions), `run-model.js` and `run-view.js` (the run view's
+event model and its strip, tabs and receipt), `app-knowledge.js`, `app-setup.js`,
 `app-skills.js`, `app-creator.js`, then System Orchestration's
 `agent-activity.js` (the agents panel), `system.js`, `system-editor.js` and
 `system-discovery.js`. The server reads the page and the files
@@ -825,6 +827,68 @@ Explicit operation buttons invoke that selected runtime with fixed arguments:
 The Harness adds no second knowledge database and does not directly edit records
 to bypass runtime validation. Raw file editing and import are not exposed by these
 controls. Export downloads are temporary server artifacts.
+
+### Watching a run
+
+While a Workspace, Plan, Review or SDD turn runs, a strip above the composer says
+what the agent is doing now: the tool, its target and how long that call has been
+open (`● Reading app/Models/Order.php · 0:03`), or *Model's turn* between calls.
+Below it are the counts: files opened and changed, the agent's plan (*Plan 3 of 5*),
+the last check runs (`Checks ✗ ✗ ✓`), failed steps and the time, with a warning from
+80% of the time budget. After 30 seconds without events it says so instead of
+guessing why. A Harness check reads *A Harness check is running*; Fleet, Clash,
+Creator and System runs keep their own progress and show only their waiting line.
+
+**Calm** is the default; **Detailed** (remembered in this browser) opens three tabs:
+
+- **Files:** every file a tool named, as a chip with its name in folder blocks, in the
+  order it was first touched. An outline is opened, a fill is an edit the tool
+  reported as ok, `+` created, `!` a tool error, a struck name deleted, `×N` opened
+  again, a dot a helper agent's file and a ring the call that is open now. Hover or
+  focus a chip for its path and steps, **Show in conversation**, **Add path to
+  message** or **Copy path**. **List** shows the same set as a tree. Untouched files
+  are not shown, and Codex reads through shell commands, so its reads are not listed.
+- **Plan:** the agent's own todo list with what was added or dropped. The agent
+  ticks it; Harness does not verify it. After the run, **Continue with N unchecked
+  items** fills the message box and sends nothing.
+- **Commands:** PHP checks (PHPUnit, Pest, `artisan test`, PHPStan, Psalm, PHPCS, linters,
+  Composer, Symfony and WordPress checks) as runs per target, other commands, and
+  fixers such as Pint marked *changed files · not a check*. A pipe, `|| true`, a later
+  `;` command or `&` makes the result *unknown*. After the run, **Run in Harness**
+  fills the Checks form with the bare command and names what was removed; nothing
+  runs until you press **Run check**.
+
+![Detailed › Files during a run: the file being read carries a ring, edits are filled, a created file has a plus](../docs/images/harness-run-view/files-map.jpg)
+
+![Detailed › Commands: a check that failed twice and then passed, and a PHPStan run piped to tail marked unknown](../docs/images/harness-run-view/commands.jpg)
+
+Steps in the conversation name their target (`Bash · php artisan test --filter=OrderTest · failed`),
+and each group sums them up (*Looked for "rules(" · opened 4 files · edited 1*). A
+compaction leaves a divider. When the turn ends, a **run receipt** follows the
+result: outcome and duration, files opened and edited by tools, searches, commands
+and checks, the plan, tokens and cost as the provider reported them, moments to jump
+to, the workspace diff (with files changed outside edit tools) and whether a Harness
+check ran after the turn. *Process complete* is not a verification of the task.
+Earlier turns fold into one line.
+
+![Run receipt: what was opened, searched, edited and run, checks, plan, cost, moments to jump to, and a file changed outside edit tools](../docs/images/harness-run-view/receipt.jpg)
+
+When the tab is in the background, its title and icon carry the state (`● Running`,
+`✓ Finished`, `⚑ Needs approval`). **Notify me when it finishes** asks the browser for
+permission on that click only; the notification says how long the run took and what
+it cost, never the session title, a path or agent text, and makes no sound. Coming
+back after two minutes or more shows *While you were away* with what changed and a
+*New since* line in the conversation.
+
+For native launches the runner stores each tool's target with its event in the local
+`sessions.sqlite3`, beside the conversation it already keeps: the tool, a
+project-relative path (only the name of a file outside the project), the command or
+search pattern with secrets redacted, the outcome and Codex's exit code. A command keeps
+its first line and stops at a heredoc, so a script or patch body is not stored; an MCP
+tool shows only its name, never its arguments. File contents, diffs, tool results and
+command output are never stored. Past about 4,000
+targets in one launch the map stops (counts then read `≥`) and the receipt keeps the
+full totals. Runs recorded before this show tool names only.
 
 ### Context window
 
@@ -919,8 +983,8 @@ python3 tests/harness_memory_demo.py /tmp/shop-api
 
 ### Project memory
 
-A new session uses project memory by default; the **Memory** chip shows
-**Automatic**. Nothing waits for a person. The first message names a new Brain task
+Every new session uses project memory, and there is no switch to turn it off;
+the **Memory** chip shows **Automatic**. Nothing waits for a person. The first message names a new Brain task
 (`harness/<first words>-<6 hex>`, its goal the message's first line). Every message,
 the first and each follow-up, is the retrieval query for its own turn: the server
 runs the project's `context.py refresh` with the provider as host, so instruction
@@ -949,8 +1013,8 @@ or held back. A run that fails or is cancelled saves nothing.
 
 Choose an existing task, or a new task with your own ID and goal, under **Memory**;
 memory still runs by itself for it. In a project without a governed context
-runtime, sessions start without memory unless a task was chosen explicitly. Turn
-**Use project memory** off to start without it.
+runtime, sessions start with excerpts of the project's reference files instead of
+retrieved memory, unless a task was chosen explicitly.
 
 #### Review by hand
 

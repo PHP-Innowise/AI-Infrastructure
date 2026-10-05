@@ -588,6 +588,168 @@ class EventTests(unittest.TestCase):
 
 
 
+class TargetTests(unittest.TestCase):
+    """Run-view targets ride on the same labels: same count and order with or without them."""
+
+    def aligned(self, provider, events):
+        enriched = []
+        for event in events:
+            plain, targeted = providers.normalize_event(provider, event), providers.normalize_event(provider, event, targets=True)
+            with self.subTest(provider=provider, event=event):
+                self.assertEqual(plain, [{key: value for key, value in item.items() if key != "targets"}
+                                         for item in targeted if item["kind"] != "plan"])
+            enriched.extend(targeted)
+        self.assertNotIn("PRIVATE", json.dumps(enriched))
+        return enriched
+
+    def test_claude_targets_pair_by_call_and_mark_helpers(self):
+        def assistant(parent, *blocks):
+            return {"type": "assistant", "parent_tool_use_id": parent, "session_id": "s",
+                    "message": {"id": "msg_1", "role": "assistant", "content": list(blocks)}}
+        def use(call, name, **arguments):
+            return {"type": "tool_use", "id": call, "name": name, "input": arguments}
+        events = self.aligned("claude", [
+            {"type": "system", "subtype": "init", "session_id": "s", "apiKeySource": "PRIVATE"},
+            assistant(None, {"type": "thinking", "thinking": "PRIVATE REASONING"}, {"type": "text", "text": "Reading."},
+                      use("toolu_1", "Read", file_path="/repo/app/Order.php"),
+                      use("toolu_2", "TodoWrite", todos=[]),
+                      use("toolu_3", "TodoWrite", todos=[{"content": "Inspect", "status": "completed", "activeForm": "Inspecting"},
+                                                         {"content": "Fix", "status": "in_progress", "activeForm": "Fixing the rules"},
+                                                         {"content": "Test", "status": "pending", "activeForm": "Testing"}]),
+                      use("toolu_4", "StructuredOutput", command="PRIVATE", summary="PRIVATE"),
+                      use("toolu_5", "Task", description="Find validation tests", prompt="PRIVATE", subagent_type="general")),
+            assistant("toolu_5", use("toolu_6", "Grep", pattern="rules(", path="/repo/app/Http"),
+                      use("toolu_7", "TodoWrite", todos=[{"content": "Helper step", "status": "pending"}])),
+            {"type": "user", "parent_tool_use_id": "toolu_5", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_6", "content": "PRIVATE", "is_error": False}]}},
+            {"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": "PRIVATE", "is_error": True},
+                {"type": "tool_result", "tool_use_id": "toolu_5", "content": [{"type": "text", "text": "PRIVATE"}]}]}}])
+        tools = [event for event in events if event["kind"] == "tool"]
+        self.assertEqual([("Read", "/repo/app/Order.php", None, None), ("TodoWrite", None, None, None),
+                          ("TodoWrite", None, None, None), ("StructuredOutput", None, "Final structured report", None),
+                          ("Task", None, "Find validation tests", None), ("Grep", "/repo/app/Http", '"rules("', "toolu_5"),
+                          ("TodoWrite", None, None, "toolu_5")],
+                         [(t["targets"]["tool"], t["targets"].get("path"), t["targets"].get("detail"), t["targets"].get("parent"))
+                          for t in tools if t["targets"]["state"] == "started"])
+        # Completions carry the call and the tool's own report, never a name or the result.
+        self.assertEqual([{"state": "completed", "ok": True, "call": "toolu_6"}, {"state": "completed", "ok": False, "call": "toolu_1"},
+                          {"state": "completed", "ok": True, "call": "toolu_5"}],
+                         [t["targets"] for t in tools if t["targets"]["state"] == "completed"])
+        # Only the main thread's non-empty todo list is the run's plan.
+        self.assertEqual([{"kind": "plan", "items": [{"text": "Inspect", "status": "done"}, {"text": "Fix", "status": "active"},
+                                                     {"text": "Test", "status": "pending"}], "total": 3, "active_form": "Fixing the rules"}],
+                         [event for event in events if event["kind"] == "plan"])
+        self.assertEqual("plan", events[events.index(tools[2]) + 1]["kind"])
+
+    def test_codex_targets_commands_changes_declines_and_helpers(self):
+        command = "/bin/bash -lc 'php artisan test --filter=OrderTest'"
+        events = self.aligned("codex", [
+            {"type": "thread.started", "thread_id": "t"},
+            {"type": "item.completed", "item": {"id": "item_0", "type": "reasoning", "text": "PRIVATE REASONING"}},
+            {"type": "item.started", "item": {"id": "item_1", "type": "command_execution", "command": command,
+                                             "aggregated_output": "", "exit_code": None, "status": "in_progress"}},
+            {"type": "item.completed", "item": {"id": "item_1", "type": "command_execution", "command": command,
+                                               "aggregated_output": "PRIVATE", "exit_code": 1, "status": "failed"}},
+            {"type": "item.completed", "item": {"id": "item_2", "type": "file_change", "status": "completed",
+                                               "changes": [{"path": "/repo/app/Order.php", "kind": "update"}]}},
+            {"type": "item.completed", "item": {"id": "item_3", "type": "file_change", "status": "completed", "changes": [
+                {"path": "/repo/app/Requests/StoreOrder.php", "kind": "add"}, {"path": "/repo/old.php", "kind": "delete"}]}},
+            {"type": "item.completed", "item": {"id": "item_4", "type": "command_execution", "command": "rm -rf bootstrap/cache",
+                                               "aggregated_output": "", "exit_code": None, "status": "declined"}},
+            {"type": "item.started", "item": {"id": "item_5", "type": "todo_list", "items": [
+                {"text": "Read", "completed": True}, {"text": "Fix", "completed": False}]}},
+            {"type": "item.started", "item": {"id": "item_6", "type": "collab_tool_call", "tool": "spawn_agent", "status": "in_progress",
+                                             "sender_thread_id": "PRIVATE", "receiver_thread_ids": [], "prompt": "PRIVATE"}},
+            {"type": "item.updated", "item": {"id": "item_6", "type": "collab_tool_call", "tool": "spawn_agent", "status": "in_progress",
+                                             "sender_thread_id": "PRIVATE", "receiver_thread_ids": ["PRIVATE"], "prompt": "PRIVATE"}},
+            {"type": "item.completed", "item": {"id": "item_6", "type": "collab_tool_call", "tool": "spawn_agent", "status": "completed",
+                                               "sender_thread_id": "PRIVATE", "receiver_thread_ids": ["PRIVATE"], "prompt": "PRIVATE"}},
+            {"type": "item.completed", "item": {"id": "item_7", "type": "sub_agent_activity", "kind": "started",
+                                               "agent_thread_id": "01a077b1-db6a-7460-b717-293ca1ecda3e", "agent_path": "/root/PRIVATE"}},
+            {"type": "item.completed", "item": {"id": "item_8", "type": "mcp_tool_call", "server": "docs", "tool": "search",
+                                               "arguments": {"q": "PRIVATE"}, "result": "PRIVATE", "status": "completed"}},
+            {"type": "item.completed", "item": {"id": "item_9", "type": "web_search", "query": "laravel form request"}},
+            {"type": "item.completed", "item": {"id": "item_10", "type": "agent_message", "text": "Done."}}])
+        self.assertEqual([("command_execution: started", {"state": "started", "ok": True, "tool": "Shell", "call": "item_1",
+                                                          "detail": "php artisan test --filter=OrderTest"}),
+                          ("command_execution: completed", {"state": "completed", "ok": False, "tool": "Shell", "call": "item_1",
+                                                            "detail": "php artisan test --filter=OrderTest", "exit_code": 1}),
+                          ("file_change: completed", {"state": "completed", "ok": True, "tool": "Edit", "call": "item_2",
+                                                      "changes": [{"path": "/repo/app/Order.php", "kind": "update"}]}),
+                          ("file_change: completed", {"state": "completed", "ok": True, "tool": "Edit", "call": "item_3", "changes": [
+                              {"path": "/repo/app/Requests/StoreOrder.php", "kind": "add"}, {"path": "/repo/old.php", "kind": "delete"}]}),
+                          # The label still says ok; the target says the approval policy declined it, which is not a failure.
+                          ("command_execution: completed", {"state": "completed", "ok": False, "tool": "Shell", "call": "item_4",
+                                                            "detail": "rm -rf bootstrap/cache", "outcome": "not_run"}),
+                          ("Agent spawn_agent: in_progress", {"state": "started", "ok": True, "tool": "Agent", "call": "item_6",
+                                                              "detail": "spawn_agent"}),
+                          ("Agent spawn_agent: in_progress", None),
+                          ("Agent spawn_agent: completed", {"state": "completed", "ok": True, "tool": "Agent", "call": "item_6",
+                                                           "detail": "spawn_agent"}),
+                          ("Agent activity: started", None),
+                          ("mcp_tool_call: completed", {"state": "completed", "ok": True, "tool": "MCP", "call": "item_8", "detail": "docs.search"}),
+                          ("web_search: completed", {"state": "completed", "ok": True, "tool": "WebSearch", "call": "item_9",
+                                                     "detail": "laravel form request"})],
+                         [(event["text"], event.get("targets")) for event in events if event["kind"] == "tool"])
+        self.assertEqual([True], [event["ok"] for event in events if event.get("targets", {}).get("outcome") == "not_run"])
+        self.assertIn({"kind": "plan", "items": [{"text": "Read", "status": "done"}, {"text": "Fix", "status": "pending"}], "total": 2}, events)
+        self.assertEqual([], providers.normalize_event("codex", {"type": "item.started", "item": {"id": "item_5", "type": "todo_list", "items": []}}, targets=True))
+
+    def test_cursor_targets_use_success_and_rejected_and_tolerate_missing_args(self):
+        events = self.aligned("cursor", [
+            {"type": "tool_call", "subtype": "started", "call_id": "call_1", "tool_call": {"readToolCall": {"args": {"path": "/repo/src/a.ts"}}}},
+            {"type": "tool_call", "subtype": "completed", "call_id": "call_1", "tool_call": {"readToolCall": {
+                "result": {"success": {"content": "PRIVATE", "totalLines": 12}}}}},
+            {"type": "tool_call", "subtype": "started", "call_id": "call_2", "tool_call": {"shellToolCall": {
+                "args": {"command": "npm test", "workingDirectory": "/repo"}}}},
+            {"type": "tool_call", "subtype": "completed", "call_id": "call_2", "tool_call": {"shellToolCall": {
+                "args": {"command": "npm test"}, "result": {"rejected": {"command": "npm test", "reason": "PRIVATE"}}}}},
+            {"type": "tool_call", "subtype": "completed", "call_id": "call_3", "tool_call": {"editToolCall": {
+                "args": {"path": "src/a.ts", "streamContent": "PRIVATE"}, "result": {"error": {"message": "PRIVATE"}}}}},
+            {"type": "tool_call", "subtype": "started", "call_id": "call_4", "tool_call": {"mcpToolCall": {
+                "args": {"providerIdentifier": "docs", "toolName": "lookup", "args": {"q": "PRIVATE"}}}}},
+            {"type": "tool_call", "subtype": "started", "call_id": "call_5", "tool_call": {"updateTodosToolCall": {"args": {"todos": [
+                {"id": "1", "content": "Read", "status": "TODO_STATUS_COMPLETED"}, {"id": "2", "content": "Fix", "status": "TODO_STATUS_IN_PROGRESS"},
+                {"id": "3", "content": "Skip", "status": "TODO_STATUS_CANCELLED"}]}}}}])
+        self.assertEqual([("readToolCall: started", True, {"state": "started", "ok": True, "tool": "Read", "call": "call_1", "path": "/repo/src/a.ts"}),
+                          ("readToolCall: completed", True, {"state": "completed", "ok": True, "tool": "Read", "call": "call_1"}),
+                          ("shellToolCall: started", True, {"state": "started", "ok": True, "tool": "Shell", "call": "call_2", "detail": "npm test"}),
+                          ("shellToolCall: completed", True, {"state": "completed", "ok": False, "tool": "Shell", "call": "call_2",
+                                                              "detail": "npm test", "outcome": "not_run"}),
+                          ("editToolCall: completed", False, {"state": "completed", "ok": False, "tool": "Edit", "call": "call_3", "path": "src/a.ts"}),
+                          ("mcpToolCall: started", True, {"state": "started", "ok": True, "tool": "MCP", "call": "call_4", "detail": "docs.lookup"}),
+                          ("updateTodosToolCall: started", True, {"state": "started", "ok": True, "tool": "UpdateTodos", "call": "call_5"})],
+                         [(event["text"], event["ok"], event["targets"]) for event in events if event["kind"] == "tool"])
+        self.assertEqual({"kind": "plan", "total": 3, "items": [{"text": "Read", "status": "done", "id": "1"},
+                          {"text": "Fix", "status": "active", "id": "2"}, {"text": "Skip", "status": "cancelled", "id": "3"}]}, events[-1])
+
+    def test_mcp_and_unknown_tools_never_forward_their_arguments(self):
+        # An MCP tool's arguments go to another service; a detail comes only from the argument that names a tool's target.
+        events = self.aligned("claude", [{"type": "assistant", "parent_tool_use_id": None, "session_id": "s", "message": {
+            "id": "msg_1", "role": "assistant", "content": [
+                {"type": "tool_use", "id": "toolu_1", "name": "mcp__linear__create_issue", "input": {
+                    "title": "PRIVATE", "description": "Customer PRIVATE jane@example.com card 4242", "teamId": "PRIVATE"}},
+                {"type": "tool_use", "id": "toolu_2", "name": "mcp__db__query", "input": {"query": "SELECT * FROM users WHERE email='PRIVATE'",
+                                                                                        "path": "/PRIVATE"}},
+                {"type": "tool_use", "id": "toolu_3", "name": "Bash", "input": {"command": "php artisan test", "description": "PRIVATE"}},
+                {"type": "tool_use", "id": "toolu_4", "name": "WebSearch", "input": {"query": "laravel form request"}},
+                {"type": "tool_use", "id": "toolu_5", "name": "Notify", "input": {"description": "PRIVATE", "command": "PRIVATE"}}]}}])
+        self.assertEqual([("mcp__linear__create_issue", "linear.create_issue"), ("mcp__db__query", "db.query"), ("Bash", "php artisan test"),
+                          ("WebSearch", '"laravel form request"'), ("Notify", None)],
+                         [(event["targets"]["tool"], event["targets"].get("detail")) for event in events if event["kind"] == "tool"])
+        self.assertFalse(any("path" in event["targets"] for event in events if event["kind"] == "tool"))
+        cursor = [item for item in providers.activity_events("cursor", {"type": "tool_call", "subtype": "started", "call_id": "c1", "tool_call": {
+            "function": {"name": "send_message", "arguments": json.dumps({"query": "PRIVATE", "description": "PRIVATE"})}}})]
+        self.assertEqual([None], [item.get("detail") for item in cursor])
+
+    def test_targets_off_by_default_keep_every_other_transcript_unchanged(self):
+        event = {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "toolu_1", "name": "TodoWrite", "input": {"todos": [{"content": "A", "status": "pending"}]}}]}}
+        self.assertEqual([{"kind": "tool", "text": "TodoWrite: started"}], providers.normalize_event("claude", event))
+        self.assertEqual([], providers.normalize_event("codex", {"type": "item.updated", "item": {"type": "todo_list", "items": [{"text": "A"}]}}))
+
+
 class ActivityEventTests(unittest.TestCase):
     """Agents panel activity: tool targets and reasoning, never contents or output."""
 
@@ -623,13 +785,15 @@ class ActivityEventTests(unittest.TestCase):
         self.assertEqual({"type": "tool", "tool": "Read", "state": "started", "ok": True, "call": "toolu_1",
                           "path": "/repo/orders/spec.md"}, tools[0])
         self.assertEqual(("/repo/a.py", None), (tools[1]["path"], tools[1].get("detail")))
-        self.assertEqual("pytest -q --maxfail 1", tools[2]["detail"])
+        # A command keeps its first line: a later line is another command, or a script's body.
+        self.assertEqual("pytest -q …", tools[2]["detail"])
         self.assertEqual("https://example.com/doc", tools[3]["detail"])
         self.assertEqual("Final structured report", tools[4]["detail"])
         self.assertEqual(("/repo/payments", '"order.cancelled"'), (tools[5]["path"], tools[5]["detail"]))
         self.assertEqual([("toolu_1", True), ("toolu_3", False)],
                          [(t["call"], t["ok"]) for t in tools if t["state"] == "completed"])
-        self.assertIn({"type": "plan", "text": "✓ Read\n→ Edit\n○ Test"}, items)
+        self.assertIn({"type": "plan", "text": "✓ Read\n→ Edit\n○ Test", "items": [
+            {"text": "Read", "status": "done"}, {"text": "Edit", "status": "active"}, {"text": "Test", "status": "pending"}]}, items)
         self.assertIn({"type": "usage", "kind": "usage", "input_tokens": 3, "output_tokens": 2, "cost_usd": 0.5}, items)
         self.assertEqual({"type": "error", "text": "Turn limit"}, items[-1])
 
@@ -660,7 +824,8 @@ class ActivityEventTests(unittest.TestCase):
                          [(t["tool"], t["state"], t["ok"], t.get("detail")) for t in tools])
         self.assertEqual("/repo/a.py", tools[2]["path"])
         self.assertIn({"type": "thinking", "text": "Consider idempotency."}, items)
-        self.assertIn({"type": "plan", "text": "✓ Read\n○ Fix"}, items)
+        self.assertIn({"type": "plan", "text": "✓ Read\n○ Fix", "items": [
+            {"text": "Read", "status": "done"}, {"text": "Fix", "status": "pending"}]}, items)
         self.assertIn({"type": "text", "text": "Done."}, items)
         self.assertEqual(10, next(item for item in items if item["type"] == "usage")["input_tokens"])
         self.assertEqual({"type": "error", "text": "Request failed"}, items[-1])
@@ -687,7 +852,7 @@ class ActivityEventTests(unittest.TestCase):
         self.assertEqual([("Read", "started", True, "src/a.ts", None), ("Read", "completed", True, "src/a.ts", None),
                           ("Edit", "started", True, "src/a.ts", None), ("Shell", "completed", False, None, "npm test"),
                           ("Custom", "started", True, "x.md", None), ("MCP docs.lookup", "started", True, None, None)], tools)
-        self.assertIn({"type": "plan", "text": "✓ A\n→ B"}, items)
+        self.assertIn({"type": "plan", "text": "✓ A\n→ B", "items": [{"text": "A", "status": "done"}, {"text": "B", "status": "active"}]}, items)
         self.assertEqual([{"type": "thinking_delta", "text": "Partial "}, {"type": "thinking_end"}], items[-2:])
 
     def test_malformed_events_and_unknown_providers(self):

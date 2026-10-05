@@ -327,7 +327,8 @@ class MemoryUseTests(unittest.TestCase):
         self.chunk("MEM-20260901-aaaaaaaa", "kept")
         chunk = {"path": "memory-bank/chunks/MEM-20260901-aaaaaaaa-kept.md", "category": "durable", "estimated_tokens": 30, "source_hash": "c"}
         policy = {"path": "AGENTS.md", "category": "policy", "estimated_tokens": 40, "source_hash": "p"}
-        now = datetime.now(timezone.utc)
+        # Yesterday's local noon: two retrievals an hour apart share a local day at any time of day.
+        now = datetime.now().astimezone().replace(hour=12, minute=0, second=0, microsecond=0) - timedelta(days=1)
         moment = lambda days, hours=0: (now - timedelta(days=days, hours=hours)).isoformat()
         first = self.manifest("local", "hook-1", moment(2), [chunk, policy], host="claude", entry_point="hook-context")
         self.manifest("local", "hook-2", moment(2, 1), [policy], [{"path": "memory-bank/chunks/MEM-20260901-aaaaaaaa-kept.md", "reason": "budget"}],

@@ -7,7 +7,8 @@ import http.client
 import io
 import json
 import os
-from pathlib import Path
+from datetime import datetime, timedelta, timezone
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import sqlite3
@@ -15,12 +16,13 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 from urllib.parse import urlencode
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "harness/src"))
-from harness import providers, web
+from harness import providers, run_activity, sessions, web
 
 WEB = Path(__file__).resolve().parents[1] / "harness/web"
 
@@ -336,12 +338,12 @@ assert.equal(stopped.at(-1).textContent,'Stopped: Stale revision. What is listed
         subprocess.run([shutil.which('node'), '-e', script], check=True, capture_output=True, text=True)
 
     @unittest.skipUnless(shutil.which('node'), 'Project memory composer check requires Node')
-    def test_project_memory_is_on_by_default_and_never_blocks_a_project_without_it(self):
+    def test_project_memory_is_always_on_and_never_blocks_a_project_without_it(self):
         page = ui_script()
         source = page[page.index('\nfunction brainLinkConfig('):page.index('\nasync function loadBrainLinkTasks(')]
         script = """const assert = require('node:assert/strict');
 const control = value => ({value, checked:false, disabled:false, hidden:false, textContent:''});
-const fields = {}; for (const id of ['brain-link-enabled','brain-link-review','brain-link-kind','brain-link-bank','brain-link-task','brain-link-task-id',
+const fields = {}; for (const id of ['brain-link-review','brain-link-kind','brain-link-bank','brain-link-task','brain-link-task-id',
   'brain-link-goal','brain-link-query','brain-link-refresh','brain-link-config','brain-link-fields','brain-link-summary','brain-link-mode-note',
   'brain-link-existing-field','brain-link-id-field','brain-link-goal-field','brain-link-query-field','brain-link-availability','project']) fields[id] = control('');
 const $ = id => fields[id]; const errors = []; const showError = (id, text) => { if (text) errors.push(text); };
@@ -349,7 +351,6 @@ const state = {bootstrap:{}, authFailed:false, selectedId:null, pending:null}; l
 const brainLinkDraft = {epoch:0, projectId:null, bankId:null, banks:[], tasks:[], meta:null, loading:false, error:'', controller:null};
 """ + source + """
 fields.project.value = 'p1'; resetBrainLink();
-assert.equal(fields['brain-link-enabled'].checked,true);
 assert.deepEqual(brainLinkConfig(),{bank:'',review:false,auto:true});
 // Until the project's memory is read, a new session waits rather than starting without it; nothing is flagged.
 Object.assign(brainLinkDraft,{projectId:'p1', loading:true});
@@ -357,7 +358,7 @@ assert.equal(updateBrainLinkControls(),true); assert.equal(brainLinkPending(),tr
 // A project without a governed runtime starts its sessions without memory; nothing blocks them.
 Object.assign(brainLinkDraft,{loading:false, meta:{runtime_available:false}});
 assert.equal(updateBrainLinkControls(),true); assert.equal(brainLinkActive(),false); assert.equal(brainLinkPending(),false);
-assert.equal(fields['brain-link-summary'].textContent,'Unavailable'); assert.match(fields['brain-link-availability'].textContent,/start without project memory/);
+assert.equal(fields['brain-link-summary'].textContent,'Project files'); assert.match(fields['brain-link-availability'].textContent,/excerpts of its reference files/);
 brainLinkDraft.error = 'Read failed.'; assert.equal(updateBrainLinkControls(),true); assert.deepEqual(errors,[]); brainLinkDraft.error = '';
 // With a governed runtime the default needs nothing from a person: no task, no query, no review.
 Object.assign(brainLinkDraft,{meta:{runtime_available:true, mode:'governed'}, banks:[{id:'memory-bank'}]}); fields['brain-link-bank'].value = 'memory-bank';
@@ -374,8 +375,9 @@ fields['brain-link-task-id'].value = 'TASK-9'; fields['brain-link-goal'].value =
 assert.deepEqual(brainLinkConfig(),{bank:'memory-bank',review:false,task_id:'TASK-9',create:true,goal:'Ship it'});
 // A named task is a choice that has to hold: a project without a runtime refuses it instead of dropping it.
 brainLinkDraft.meta = {runtime_available:false}; assert.equal(updateBrainLinkControls(),false); assert.equal(brainLinkActive(),true);
-fields['brain-link-enabled'].checked = false; assert.equal(updateBrainLinkControls(),true); assert.equal(brainLinkActive(),false);
-assert.equal(fields['brain-link-summary'].textContent,'Off');
+assert.match(fields['brain-link-availability'].textContent,/Choose New task from the first message/);
+// Back to the default, the same project starts with its reference files: there is no off switch to reach for.
+fields['brain-link-kind'].value = 'auto'; assert.equal(updateBrainLinkControls(),true); assert.equal(fields['brain-link-summary'].textContent,'Project files');
 // Sessions linked before memory ran by itself were linked for review.
 assert.equal(brainReviewed({task_id:'T'}),true); assert.equal(brainReviewed({review:false}),false);
 """
@@ -395,6 +397,7 @@ const el = (tag, className, text) => ({tag, className, textContent:text, dataset
 const state = {eventIds:new Set(), assistantTexts:new Set(), selected:{provider:'codex', brain:{review:false}}};
 const brainReviewed = brain => brain?.review !== false; const providerFor = () => ({name:'Codex'}); const humanLabel = value => value;
 const document = {createTextNode: text => ({textContent:text})};
+const runView = {observe() {}, statusNode: () => null};
 """ + shown + append + """
 appendEvent({id:1, kind:'memory', ok:true, text:'Project memory for this turn: task harness/x-1, 1 Memory Bank chunk (812 characters).'});
 appendEvent({id:2, kind:'memory', ok:false, text:'Project memory was not retrieved for this turn: Capsule unavailable.'});
@@ -708,7 +711,7 @@ assert.equal(nodes.at(-1).children.at(-1).textContent,'Done.\\n\\n[Memory draft:
         self.assertNotIn("executable", boot["providers"][0])
         self.assertEqual({kit["id"] for kit in boot["accelerators"]}, {"kit1", "kit2", "kit3"})
         self.assertEqual((boot["runtime"]["max_agents"], boot["runtime"]["default_agent_count"]), (40, 3))
-        # The Project context chip caps each file at the excerpt size the prompt sends.
+        # Usage › Context labels project reference excerpts by the size the prompt sends.
         self.assertEqual(boot["runtime"]["context_excerpt_bytes"], 3000)
         self.assertEqual(headers["Cache-Control"], "no-store")
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
@@ -1837,12 +1840,11 @@ for (const unknown of [null, undefined, -1, Infinity]) assert.equal(fmt.cost(unk
 assert.equal(fmt.unknown('not recorded').label, 'not recorded');
 """)
 
-    def test_capsule_meter_and_context_chip_read_exact_counts_and_marked_estimates(self):
+    def test_capsule_meter_reads_exact_counts_and_marked_estimates(self):
         page = ui_script()
         parts = [page[page.index(start):page.index(end)] for start, end in (
             ("\nconst el = (tag", "\n// Motion follows"), ("\nconst numberText", "\n// Keeps one node per key"),
-            ("\nconst capsuleKinds", "\nfunction renderLinkedSession("),
-            ("\nfunction renderContextValue(", "\n$('project').addEventListener('change',loadContextSizes)"))]
+            ("\nconst capsuleKinds", "\nfunction renderLinkedSession("))]
         self.run_node(r"""
 class Node { constructor() { this.children = []; this.dataset = {}; this.attributes = {}; this.style = {}; this.hidden = false; this.own = ''; }
   get textContent() { return this.children.length ? this.children.map(child => typeof child === 'string' ? child : child.textContent).join('') : this.own; }
@@ -1853,7 +1855,6 @@ class Node { constructor() { this.children = []; this.dataset = {}; this.attribu
   querySelector(selector) { return this.children.find(child => selector === `[data-kind="${child.dataset.kind}"]`); } }
 const document = {createElement: () => new Node()}, nodes = {}, $ = id => nodes[id] ??= new Node();
 const state = {pending: null, bootstrap: {runtime: {context_excerpt_bytes: 3000}}};
-const contextSizes = {project: 'p1', files: null};
 for (const kind of ['brain', 'bank', 'rules']) { const part = new Node(); part.dataset.kind = kind; $('capsule-bar').append(part); }
 """ + "".join(parts), r"""
 const part = kind => $('capsule-bar').querySelector(`[data-kind="${kind}"]`);
@@ -1875,19 +1876,6 @@ assert.equal($('capsule-facts').textContent, '900 of 8,000 characters · No matc
 assert.deepEqual([$('capsule-repeats-line').hidden, part('bank').hidden, part('rules').hidden, $('capsule-legend').children.length], [true, true, true, 1]);
 renderCapsuleMeter(null);
 assert.equal($('capsule-meter').hidden, true);
-
-nodes['project-context'] = {checked: true}; nodes.project = {value: 'p1'};
-contextSizes.files = [{path: 'AGENTS.md', exists: true, bytes: 13998}, {path: 'CLAUDE.md', exists: true, bytes: 871}, {path: 'README.md', exists: false, bytes: 0}];
-renderContextValue();
-const chip = $('project-context-value').children;
-// Each file counts up to the 3,000-byte excerpt: (3,000 + 871) / 4.7 ≈ 820 tokens.
-assert.deepEqual([chip[0].textContent, chip[0].attributes['aria-hidden'], chip[1].textContent], ['≈ 820 tokens', 'true', ', adds about 820 tokens per launch']);
-nodes['project-context'].checked = false; renderContextValue();
-assert.equal($('project-context-value').textContent, '');
-nodes['project-context'].checked = true; contextSizes.files = [{path: 'AGENTS.md', exists: false, bytes: 0}]; renderContextValue();
-assert.equal($('project-context-value').textContent, 'no files');
-contextSizes.project = 'p2'; renderContextValue();
-assert.equal($('project-context-value').textContent, '');
 """)
 
     def test_memory_use_model_counts_the_window_and_what_changed_since_the_last_visit(self):
@@ -2024,6 +2012,603 @@ assert.notEqual(container.children[0], first); assert.equal(container.children[0
 render([{id: 3, value: 'c'}, {id: 2, value: 'b'}]);
 assert.deepEqual(container.children.map(node => node.value), ['c', 'b']); assert.equal(built, 4);
 """)
+
+
+# Run view. Raw streams in the shapes the CLIs print (claude -p stream-json, codex exec --json, cursor-agent
+# stream-json) go through the backend's own normalize_event and Enricher, the way the session pump stores them,
+# so a change on either side of the event contract fails here rather than on a real project.
+def claude_raw(root="/repo"):
+    def use(i, name, **inputs):
+        return {"type": "tool_use", "id": f"toolu_{i:02d}", "name": name, "input": inputs}
+    def say(*blocks, parent=None):
+        return {"type": "assistant", "parent_tool_use_id": parent, "message": {"role": "assistant", "content": list(blocks)}}
+    def done(*ids, error=()):
+        return {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": f"toolu_{i:02d}", "content": "PRIVATE OUTPUT", "is_error": i in error} for i in ids]}}
+    steps = [("Inspect OrderController@store", "Inspecting the controller"), ("Add StoreOrderRequest", "Adding the request class"),
+             ("Use the request in the controller", "Wiring the request"), ("Write feature tests", "Writing feature tests"),
+             ("Run the order tests", "Running the order tests")]
+    todos = lambda *states: {"todos": [{"content": text, "status": state, "activeForm": form} for (text, form), state in zip(steps, states)]}
+    r = root + "/"
+    return [
+        {"type": "system", "subtype": "init", "session_id": "s-claude", "model": "claude-sonnet"},
+        say({"type": "text", "text": "I'll look at how orders are created."}, use(1, "Read", file_path=r + "app/Http/Controllers/OrderController.php")), done(1),
+        say(use(2, "Read", file_path=r + "app/Models/Order.php"), use(3, "Read", file_path=r + "routes/api.php"), use(4, "Read", file_path=r + "app/Models/OrderItem.php")), done(2, 3, 4),
+        say(use(5, "TodoWrite", **todos("in_progress", "pending", "pending", "pending", "pending"))), done(5),
+        say(use(6, "Grep", pattern="rules(", path=r + "app/Http"), use(7, "Glob", pattern="**/*Order*.php")), done(6, 7),
+        say(use(8, "Write", file_path=r + "app/Http/Requests/StoreOrderRequest.php", content="PRIVATE")), done(8),
+        say(use(9, "Edit", file_path=r + "app/Http/Controllers/OrderController.php", old_string="PRIVATE", new_string="PRIVATE")), done(9),
+        say(use(10, "TodoWrite", **todos("completed", "completed", "completed", "in_progress", "pending"))), done(10),
+        say(use(11, "Write", file_path=r + "tests/Feature/OrderValidationTest.php", content="PRIVATE")), done(11),
+        say(use(12, "Bash", command="php artisan test --filter=OrderTest", description="Run the order tests")), done(12, error=(12,)),
+        say(use(13, "Edit", file_path=r + "app/Http/Requests/StoreOrderRequest.php", old_string="x", new_string="y")), done(13),
+        say(use(14, "Bash", command="php artisan test --filter=OrderTest")), done(14, error=(14,)),
+        say(use(15, "Task", description="Find validation tests", prompt="PRIVATE", subagent_type="general-purpose")),
+        say(use(16, "Grep", pattern="foreignId", path=r + "database/migrations"), parent="toolu_15"), done(16),
+        say(use(17, "Read", file_path=r + "database/migrations/2024_01_01_create_orders_table.php"), parent="toolu_15"), done(17), done(15),
+        say(use(18, "Edit", file_path=r + "tests/Feature/OrderValidationTest.php", old_string="a", new_string="b")), done(18),
+        say(use(19, "Bash", command="php artisan test --filter=OrderTest")), done(19),
+        say(use(20, "Read", file_path="/home/dev/.config/composer/auth.json")), done(20, error=(20,)),
+        say(use(21, "Bash", command="vendor/bin/phpstan analyse app | tail -20")), done(21),
+        say(use(22, "TodoWrite", todos=todos("completed", "completed", "completed", "completed", "completed")["todos"][:4]
+                + [{"content": "Note the new rules in docs/api/orders.md", "status": "pending", "activeForm": "Noting the rules"}])), done(22),
+        say(use(23, "Bash", command="vendor/bin/pint app/Http")), done(23),
+        say({"type": "text", "text": "Added StoreOrderRequest and tests."}),
+        {"type": "result", "subtype": "success", "is_error": False, "result": "Added StoreOrderRequest and tests.", "total_cost_usd": 1.37,
+         "usage": {"input_tokens": 41200, "cache_read_input_tokens": 360000, "output_tokens": 11680}},
+    ]
+
+
+def codex_raw(root="/repo"):
+    def command(i, text, exit_code=0):
+        wrapped = f"/bin/bash -lc '{text}'"
+        return [{"type": "item.started", "item": {"id": f"item_{i}", "type": "command_execution", "command": wrapped, "status": "in_progress"}},
+                {"type": "item.completed", "item": {"id": f"item_{i}", "type": "command_execution", "command": wrapped, "aggregated_output": "PRIVATE",
+                                                    "exit_code": exit_code, "status": "completed" if exit_code == 0 else "failed"}}]
+    def change(i, *changes):
+        item = {"id": f"item_{i}", "type": "file_change", "changes": [{"path": f"{root}/{path}", "kind": kind} for path, kind in changes]}
+        return [{"type": "item.started", "item": {**item, "status": "in_progress"}}, {"type": "item.completed", "item": {**item, "status": "completed"}}]
+    todo = lambda *done: {"type": "item.updated", "item": {"id": "item_3", "type": "todo_list", "items": [
+        {"text": text, "completed": flag} for text, flag in zip(("Inspect the order model", "Add StoreOrderRequest", "Run the tests"), done)]}}
+    return [
+        {"type": "thread.started", "thread_id": "t-codex"}, {"type": "turn.started"},
+        *command(1, "sed -n 1,200p app/Models/Order.php"), *command(2, 'rg -n "rules(" app/Http'), todo(True, False, False),
+        *change(4, ("app/Http/Requests/StoreOrderRequest.php", "add")), *command(5, "php artisan test --filter=OrderTest", 1),
+        *change(6, ("app/Http/Controllers/OrderController.php", "update"), ("app/Http/Legacy/OrderValidator.php", "delete")),
+        *command(7, "php artisan test --filter=OrderTest"),
+        {"type": "item.completed", "item": {"id": "item_8", "type": "command_execution", "command": "rm -rf build", "status": "declined"}},
+        {"type": "item.started", "item": {"id": "item_9", "type": "collab_tool_call", "tool": "spawn_agent", "status": "in_progress", "receiver_thread_ids": ["PRIVATE"]}},
+        # Codex repeats the operation while it runs; only the start carries targets.
+        {"type": "item.updated", "item": {"id": "item_9", "type": "collab_tool_call", "tool": "spawn_agent", "status": "in_progress", "receiver_thread_ids": ["PRIVATE"]}},
+        {"type": "item.completed", "item": {"id": "item_9", "type": "collab_tool_call", "tool": "spawn_agent", "status": "completed", "receiver_thread_ids": ["PRIVATE"]}},
+        todo(True, True, True),
+        {"type": "item.completed", "item": {"id": "item_10", "type": "agent_message", "text": "Done. The order tests pass."}},
+        {"type": "turn.completed", "usage": {"input_tokens": 12000, "cached_input_tokens": 8000, "output_tokens": 3000}},
+    ]
+
+
+def cursor_raw(root="/repo"):
+    call = lambda phase, i, key, **body: {"type": "tool_call", "subtype": phase, "call_id": f"c{i}", "tool_call": {key: body}}
+    return [
+        {"type": "system", "subtype": "init", "session_id": "c-cursor", "model": "auto"},
+        call("started", 1, "readToolCall", args={"path": f"{root}/src/Order.php"}),
+        call("completed", 1, "readToolCall", args={"path": f"{root}/src/Order.php"}, result={"success": {"content": "PRIVATE"}}),
+        call("started", 2, "grepToolCall", args={"pattern": "function store", "path": f"{root}/src"}), call("completed", 2, "grepToolCall", result={"success": {}}),
+        call("started", 3, "editToolCall", args={"path": f"{root}/src/Order.php", "streamContent": "PRIVATE"}), call("completed", 3, "editToolCall", result={"success": {}}),
+        call("started", 4, "shellToolCall", args={"command": "vendor/bin/phpunit --filter OrderTest"}),
+        call("completed", 4, "shellToolCall", args={"command": "vendor/bin/phpunit --filter OrderTest"}, result={"success": {"exitCode": 0}}),
+        call("completed", 5, "shellToolCall", args={"command": "rm -rf vendor"}, result={"rejected": {"command": "rm -rf vendor", "reason": "PRIVATE"}}),
+        call("started", 6, "updateTodosToolCall", args={"todos": [{"content": "Read Order", "status": "TODO_STATUS_COMPLETED"}, {"content": "Fix store()", "status": "TODO_STATUS_IN_PROGRESS"}]}),
+        call("completed", 6, "updateTodosToolCall", result={"success": {}}),
+        {"type": "assistant", "model_call_id": "m1", "message": {"role": "assistant", "content": [{"type": "text", "text": "Fixed store()."}]}},
+        {"type": "result", "subtype": "success", "is_error": False, "result": "Fixed store().", "usage": {"inputTokens": 100, "outputTokens": 20}},
+    ]
+
+
+def pumped(provider, raw, targets=True, launch="L1", compaction_after=None, outcome="completed", start=datetime(2026, 10, 4, 14, 0, tzinfo=timezone.utc), first_id=1):
+    """What the session pump stores for one native launch: plans and limited notices outside its count, targets after it."""
+    enricher = run_activity.Enricher(provider, PurePosixPath("/repo"), None) if targets else None
+    stored = [{"kind": "user", "text": "Add validation to POST /orders and cover it with tests."},
+              {"kind": "status", "text": f"Running {provider} in edit mode.", "launch_id": launch}]
+    count = output_bytes = 0
+    for index, event in enumerate(raw):
+        for clean in providers.normalize_event(provider, event, targets=targets):
+            if clean.get("kind") == "plan":
+                plan = enricher.plan(clean) if enricher else None
+                if plan:
+                    stored.append({**plan, "launch_id": launch})
+                continue
+            display = enricher.take(clean, count, output_bytes) if enricher and clean.get("kind") == "tool" else None
+            output_bytes += len(json.dumps(clean))
+            count += 1
+            if display:
+                clean.update(display)
+            elif enricher and clean.get("kind") == "tool" and (limited := enricher.notice()):
+                stored.append({**limited, "launch_id": launch})
+            stored.append({**clean, "launch_id": launch})
+        if enricher and index == compaction_after:
+            stored.extend({**notice, "launch_id": launch} for notice in enricher.compaction([{"pre": 166040, "post": 38900}]))
+    stored.append({"kind": "status", "outcome": outcome, "launch_id": launch,
+                   "text": f"Run {outcome}. Process completion is not an independent verification of the task."})
+    return [{**event, "id": first_id + offset, "at": (start + timedelta(seconds=10 * offset)).isoformat(timespec="milliseconds")}
+            for offset, event in enumerate(stored)]
+
+
+@unittest.skipUnless(shutil.which("node"), "Run view checks require Node")
+class RunViewTests(unittest.TestCase):
+    """RunModel (harness/web/run-model.js) has no DOM: these checks load the file in Node as the page does."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.streams = {"claude": pumped("claude", claude_raw(), compaction_after=20), "codex": pumped("codex", codex_raw()),
+                       "cursor": pumped("cursor", cursor_raw()), "claude_labels": pumped("claude", claude_raw(), targets=False),
+                       "codex_labels": pumped("codex", codex_raw(), targets=False)}
+        with patch.object(run_activity, "ENRICH_EVENTS", 12):
+            cls.streams["claude_limited"] = pumped("claude", claude_raw())
+
+    def run_node(self, checks, prelude=""):
+        source = "const assert = require('node:assert/strict');\n" + (WEB / "run-model.js").read_text(encoding="utf-8") \
+            + "\nconst streams = " + json.dumps(self.streams) + ";\n" + prelude + "\n" + checks
+        result = subprocess.run([shutil.which("node"), "-e", source], capture_output=True, text=True)
+        if result.returncode:
+            self.fail(result.stderr)
+
+    def test_claude_targets_fold_into_files_searches_checks_plan_and_moments(self):
+        self.run_node(r"""
+const model = RunModel.create(); RunModel.observe(model, streams.claude); const run = RunModel.current(model);
+assert.deepEqual([run.mode, run.finished, run.outcome, run.ordinal], ['targets', true, 'completed', 1]);
+assert.deepEqual(run.counters, {steps:23, opened:6, edited:3, edits:5, searched:3, commands:5, failed:3, notRun:0, messages:2, commandFailed:2});
+// Files in first-touch order; Write to a path not seen in the session created it, an Edit did not.
+const paths = [...run.paths.values()];
+assert.deepEqual(paths.map(p => p.key), ['app/Http/Controllers/OrderController.php', 'app/Models/Order.php', 'routes/api.php', 'app/Models/OrderItem.php',
+  'app/Http/Requests/StoreOrderRequest.php', 'tests/Feature/OrderValidationTest.php', 'database/migrations/2024_01_01_create_orders_table.php', 'outside:auth.json']);
+const file = key => run.paths.get(key);
+assert.deepEqual([file('app/Http/Requests/StoreOrderRequest.php').created, file('app/Http/Requests/StoreOrderRequest.php').edits, file('app/Http/Controllers/OrderController.php').created], [true, 2, false]);
+assert.deepEqual([file('outside:auth.json').path, file('outside:auth.json').outside, file('outside:auth.json').failed], ['auth.json', true, true]);
+const helper = file('database/migrations/2024_01_01_create_orders_table.php'); assert.deepEqual([helper.helper, helper.main], [true, false]);
+assert.deepEqual(run.searches.map(item => [item.pattern, item.scope, item.helper]), [['"rules("', 'app/Http', false], ['"**/*Order*.php"', '', false], ['"foreignId"', 'database/migrations', true]]);
+assert.deepEqual(RunModel.searchedIn(run, file('app/Http/Controllers/OrderController.php')), ['"rules("', '"**/*Order*.php"']);
+// A Claude completion names only its call; it pairs with the start that named the tool.
+assert.deepEqual([run.calls.get('toolu_12').tool, run.calls.get('toolu_12').ok, run.calls.get('toolu_19').ok], ['Bash', false, true]);
+assert.deepEqual(RunModel.checks(run).map(row => [row.family, row.target, row.runs.map(item => item.glyph), row.green || null, row.masked]),
+  [['Artisan test', '--filter=OrderTest', ['fail', 'fail', 'ok'], {runs:3, edits:2}, null], ['PHPStan', 'app', ['unknown'], null, "piped to tail: exit status is tail's"]]);
+assert.deepEqual(run.commands.filter(cmd => cmd.cls.fixer).map(cmd => cmd.command), ['vendor/bin/pint app/Http']);
+// The plan compares snapshots by exact text only.
+assert.deepEqual([run.plan.items.filter(item => item.status === 'done').length, run.plan.total, [...run.plan.added]], [4, 5, ['Note the new rules in docs/api/orders.md']]);
+assert.deepEqual([run.planChange.added, run.planChange.dropped, run.dropped], [['Note the new rules in docs/api/orders.md'], ['Run the order tests'], ['Run the order tests']]);
+assert.deepEqual(run.moments.map(item => item.kind), ['first-edit', 'first-failed-command', 'compaction', 'check-green', 'plan-changed']);
+assert.deepEqual(run.compactions.map(item => [item.pre, item.post]), [[166040, 38900]]);
+assert.equal(RunModel.now(model, run), null);
+// The receipt and the step groups read the same facts.
+assert.equal(RunModel.groupSummary({steps:7, tools:new Map([['Read', 4], ['Grep', 2], ['Edit', 1]]), patterns:['"rules("', '"**/*Order*.php"'], opened:new Set(['a', 'b', 'c', 'd']), edited:new Set(['a'])}),
+  '7 steps · Read ×4, Grep ×2, Edit · Looked for "rules(", "**/*Order*.php" · opened 4 files · edited 1');
+assert.doesNotMatch(JSON.stringify(run, (key, value) => value instanceof Map || value instanceof Set ? [...value] : value), /PRIVATE|\/repo\//);
+""")
+
+    def test_live_pages_pair_calls_and_say_what_runs_now(self):
+        self.run_node(r"""
+const model = RunModel.create(), events = streams.claude, at = id => Date.parse(events.find(event => event.id === id).at);
+let run = null;
+const feed = upTo => { for (const event of events.filter(event => event.id <= upTo && !feed.seen.has(event.id))) { feed.seen.add(event.id); RunModel.observe(model, [event], {arrival:Date.parse(event.at) + 400, live:true}); } run = RunModel.current(model); };
+feed.seen = new Set();
+const id = (call, state) => events.find(event => event.call === call && event.state === state).id;
+feed(2); assert.deepEqual(RunModel.now(model, run, at(2) + 1000), {kind:'preparing'});
+// The browser's clock runs 400 ms behind the stored `at`; clocks subtract the offset.
+feed(id('toolu_01', 'started')); assert.equal(model.offset, 400);
+let now = RunModel.now(model, run, at(id('toolu_01', 'started')) + 400 + 3000);
+assert.deepEqual([now.kind, now.verb, now.target, now.path, now.clock], ['call', 'Reading', 'app/Http/Controllers/OrderController.php', true, 3]);
+feed(id('toolu_04', 'started')); now = RunModel.now(model, run);
+assert.deepEqual([now.kind, now.verb, now.target, now.more, now.count], ['parallel', 'Reading 3 files', 'app/Models/Order.php', '+2', 3]);
+feed(id('toolu_02', 'completed')); assert.equal(RunModel.now(model, run).verb, 'Reading 2 files');
+feed(id('toolu_16', 'started')); now = RunModel.now(model, run);
+assert.deepEqual([now.kind, now.verb, now.target], ['helper', 'Helper · Searching', '"foreignId" in database/migrations']);
+feed(id('toolu_15', 'completed')); now = RunModel.now(model, run, at(id('toolu_15', 'completed')) + 400 + 45000);
+assert.deepEqual([now.kind, now.verb, now.clock], ['model', "Model's turn", 45]);
+feed(id('toolu_21', 'started')); now = RunModel.now(model, run); assert.deepEqual([now.verb, now.target, now.path], ['Running', 'vendor/bin/phpstan analyse app | tail -20', false]);
+// One live page of changes: what the strip announces and animates.
+const ch = RunModel.observe(model, events.filter(event => event.id > id('toolu_21', 'started')), {arrival:Date.now(), live:true});
+assert.deepEqual([ch.finished, ch.plan, ch.milestones], [run.id, true, ['Run finished']]);
+const first = RunModel.observe(RunModel.create(), events.filter(event => event.id <= id('toolu_12', 'completed')));
+assert.deepEqual(first.milestones, ['First edit: app/Http/Requests/StoreOrderRequest.php', 'Command failed: php artisan test --filter=OrderTest']);
+// History pages and catch-up pages of 250 are drawn final; only a short page of a watched run is live.
+assert.equal(RunModel.live({loaded:false, count:12, running:true, hidden:false}), false);
+assert.equal(RunModel.live({loaded:true, count:250, running:true, hidden:false}), false);
+assert.equal(RunModel.live({loaded:true, count:12, running:true, hidden:true}), false);
+assert.equal(RunModel.live({loaded:true, count:12, running:false, hidden:false}), false);
+assert.equal(RunModel.live({loaded:true, count:12, running:true, hidden:false}), true);
+// Without `at`, history has no clock (never 0:00) and a live event uses its arrival, marked approximate.
+const old = RunModel.create(), plain = streams.claude_labels.filter(event => event.id <= 6).map(({at, ...event}) => event);
+RunModel.observe(old, plain); const oldRun = RunModel.current(old);
+assert.deepEqual([oldRun.startAt, oldRun.approx, RunModel.now(old, oldRun).clock], [null, true, null]);
+RunModel.observe(old, [{id:900, kind:'tool', text:'Bash: started', launch_id:'L1'}], {arrival:5000, live:true});
+assert.deepEqual([RunModel.now(old, oldRun, 9000).verb, RunModel.now(old, oldRun, 9000).clock], ['Running a command', 4]);
+RunModel.observe(old, [{id:901, kind:'tool', text:'Read: started', launch_id:'L1'}], {arrival:6000, live:true});
+assert.deepEqual([RunModel.now(old, oldRun, 9000).verb, RunModel.now(old, oldRun, 9000).clock], ['2 steps running', null]);
+""")
+
+    def test_codex_and_cursor_targets_read_changes_exit_codes_and_not_run(self):
+        self.run_node(r"""
+let model = RunModel.create(); RunModel.observe(model, streams.codex); let run = RunModel.current(model);
+assert.equal(run.mode, 'targets');
+assert.deepEqual(run.counters, {steps:8, opened:0, edited:3, edits:3, searched:0, commands:5, failed:1, notRun:1, messages:1, commandFailed:1});
+assert.deepEqual([...run.paths.values()].map(p => [p.path, p.created, p.deleted]), [['app/Http/Requests/StoreOrderRequest.php', true, false],
+  ['app/Http/Controllers/OrderController.php', false, false], ['app/Http/Legacy/OrderValidator.php', false, true]]);
+assert.deepEqual(run.commands.map(cmd => [cmd.command, cmd.exitCode, cmd.outcome]), [['sed -n 1,200p app/Models/Order.php', 0, null], ['rg -n "rules(" app/Http', 0, null],
+  ['php artisan test --filter=OrderTest', 1, null], ['php artisan test --filter=OrderTest', 0, null], ['rm -rf build', null, 'not_run']]);
+assert.deepEqual(RunModel.checks(run).map(row => row.runs.map(item => item.glyph)), [['fail', 'ok']]);
+assert.deepEqual([run.plan.activeForm, run.plan.items.map(item => item.status)], [null, ['done', 'done', 'done']]);
+const spawn = run.calls.get('item_9'); assert.deepEqual([spawn.tool, RunModel.verbOf(spawn)], ['Agent', 'Starting a helper']);
+// The label-only repeat of the open spawn is not a second step, so nothing is left running after it completes.
+const live = RunModel.create(), upTo = streams.codex.findIndex(event => event.call === 'item_9' && event.state === 'completed');
+RunModel.observe(live, streams.codex.slice(0, upTo + 1)); const liveRun = RunModel.current(live);
+assert.deepEqual([liveRun.anon.length, liveRun.open.size, RunModel.now(live, liveRun).kind], [0, 0, 'model']);
+model = RunModel.create(); RunModel.observe(model, streams.cursor); run = RunModel.current(model);
+assert.deepEqual(run.counters, {steps:6, opened:1, edited:1, edits:1, searched:1, commands:2, failed:0, notRun:1, messages:1, commandFailed:0});
+assert.deepEqual([...run.tools.keys()], ['Read', 'Grep', 'Edit', 'Shell', 'UpdateTodos']);
+assert.deepEqual(RunModel.checks(run).map(row => [row.family, row.target, row.runs.map(item => item.glyph)]), [['PHPUnit', '--filter=OrderTest', ['ok']]]);
+assert.deepEqual(run.plan.items.map(item => item.status), ['done', 'active']);
+""")
+
+    def test_label_only_runs_count_steps_by_starts_and_keep_failures_unattributed(self):
+        self.run_node(r"""
+// Recorded before targets existed: Claude starts carry no ok, completions are unnamed 'Tool: completed'.
+let model = RunModel.create(); RunModel.observe(model, streams.claude_labels); let run = RunModel.current(model);
+assert.equal(run.mode, 'labels'); assert.equal(run.paths.size, 0);
+assert.deepEqual([run.counters.steps, run.counters.failed, run.counters.commands, run.counters.commandFailed], [23, 3, 5, 0]);
+assert.equal(RunModel.tally(run.tools), 'Read ×6, TodoWrite ×3, Grep ×2, Glob, Write ×2, Edit ×3, Bash ×5, Task');
+assert.equal(RunModel.toolName({text:'Tool: completed'}), 'Tool');
+// The Now line names the kind of step; with more than one open it counts them and shows no step clock.
+model = RunModel.create(); const events = streams.claude_labels, upTo = n => events.filter(event => event.id <= n);
+const read = events.find(event => event.text === 'Read: started').id;
+RunModel.observe(model, upTo(read)); run = RunModel.current(model);
+let now = RunModel.now(model, run, Date.parse(events.find(event => event.id === read).at) + 5000);
+assert.deepEqual([now.kind, now.verb, now.clock], ['labels', 'Reading a file', 5]);
+const parallel = events.filter(event => event.text === 'Read: started')[3].id;
+RunModel.observe(model, events.filter(event => event.id > read && event.id <= parallel)); now = RunModel.now(model, run);
+assert.deepEqual([now.verb, now.clock], ['3 steps running', null]);
+// Codex labels name the item type; a failed command is a failed command, a helper journal is a helper.
+model = RunModel.create(); RunModel.observe(model, streams.codex_labels); run = RunModel.current(model);
+assert.deepEqual([run.mode, run.counters.steps, run.counters.commands, run.counters.commandFailed, [...run.tools.keys()]], ['labels', 7, 4, 1, ['Shell', 'Edit', 'Agent']]);
+assert.deepEqual(['command_execution: started', 'file_change: completed', 'mcp_tool_call: started', 'web_search: completed', 'Agent activity: started (native session journal)',
+  'Agent wait: in_progress', 'readToolCall: started', 'Read: started'].map(text => [RunModel.toolName({text}), RunModel.isStart({text})]),
+  [['Shell', true], ['Edit', false], ['MCP', true], ['Web search', false], ['Agent', true], ['Agent', true], ['Read', true], ['Read', true]]);
+""")
+
+    def test_failed_steps_name_the_first_one_to_show_and_plans_keep_their_full_count(self):
+        self.run_node(r"""
+// With targets the first failed call is the step to show; label-only failures name no call, so their own row is.
+let model = RunModel.create(); RunModel.observe(model, streams.claude); let run = RunModel.current(model);
+const first = streams.claude.find(event => event.call && event.state === 'started' && run.calls.get(event.call)?.ok === false && run.calls.get(event.call).outcome !== 'not_run');
+assert.equal(run.firstFailedEventId, first.id);
+model = RunModel.create(); RunModel.observe(model, streams.claude_labels); run = RunModel.current(model);
+assert.equal(run.calls.size, 0);
+assert.equal(run.firstFailedEventId, streams.claude_labels.find(event => event.kind === 'tool' && event.ok === false).id);
+model = RunModel.create(); RunModel.observe(model, streams.claude.filter(event => event.ok !== false)); assert.equal(RunModel.current(model).firstFailedEventId, null);
+// The backend keeps 30 items and sends the full count: the away line and the plan chip say the same denominator.
+model = RunModel.create();
+RunModel.observe(model, [{id:1, kind:'plan', launch_id:'L1', items:Array.from({length:30}, (_, n) => ({text:`Item ${n}`, status:n < 12 ? 'done' : 'pending'})), total:42}]);
+run = RunModel.current(model);
+assert.match(RunModel.awaySummary(run, RunModel.snapshot(run), 3), /plan 12 of 42$/);
+""")
+
+    def test_enrichment_limit_turns_counts_into_lower_bounds(self):
+        self.run_node(r"""
+const model = RunModel.create(), ch = RunModel.observe(model, streams.claude_limited, {arrival:Date.now(), live:true}), run = RunModel.current(model);
+const notices = streams.claude_limited.filter(event => event.targets === 'limited');
+assert.equal(notices.length, 1);
+// Twelve enriched events are seven calls: starts and completions both carry targets.
+assert.deepEqual([run.mode, run.limited.step, run.counters.steps], ['targets', 7, 23]);
+assert.ok(ch.milestones.includes('Step details are no longer recorded'));
+assert.ok(run.counters.opened < 6, 'after the notice, paths are no longer known');
+assert.ok(run.moments.some(item => item.kind === 'limit'));
+// Grep and Glob were open at the notice; their completions arrive as plain labels without a call. They close them in
+// order, so the Now line does not stay on two searches, and their own results stay unknown.
+const open = RunModel.create(); RunModel.observe(open, streams.claude_limited.filter(event => !/^Run completed/.test(event.text || '')));
+const openRun = RunModel.current(open);
+assert.deepEqual([openRun.open.size, openRun.anon.length, RunModel.now(open, openRun).kind], [0, 0, 'model']);
+assert.deepEqual(['toolu_06', 'toolu_07'].map(call => openRun.calls.get(call).state), ['unfinished', 'unfinished']);
+""")
+
+    def test_cursor_delete_tool_marks_the_file_deleted(self):
+        # cursor-agent's delete tool names the file it removes; the receipt's ledger counts it as edited and deleted.
+        raw = [{"type": "tool_call", "subtype": "started", "call_id": "c1", "tool_call": {"deleteToolCall": {"args": {"path": "/repo/src/Old.php"}}}},
+               {"type": "tool_call", "subtype": "completed", "call_id": "c1", "tool_call": {"deleteToolCall": {"args": {"path": "/repo/src/Old.php"}, "result": {"success": {}}}}}]
+        events = pumped("cursor", raw)
+        ledger = run_activity.Enricher("cursor", PurePosixPath("/repo"), None)
+        for event in raw:
+            for clean in providers.normalize_event("cursor", event, targets=True):
+                ledger.take(clean, 0, 0)
+        self.assertEqual((1, 1, ["src/Old.php"]), (ledger.ledger.receipt()["edited"], ledger.ledger.receipt()["deleted"], ledger.ledger.receipt()["edited_paths"]))
+        self.run_node(r"""
+const model = RunModel.create(); RunModel.observe(model, events); const run = RunModel.current(model), file = run.paths.get('src/Old.php');
+assert.deepEqual([run.calls.get('c1').tool, file.deleted, file.edited, run.counters.edited], ['Delete', true, true, 1]);
+assert.deepEqual([RunModel.describe(events.find(event => event.state === 'started')).edit, RunModel.verbOf(run.calls.get('c1'))], [true, 'Deleting']);
+""", prelude="const events = " + json.dumps(events) + ";")
+
+    def real_launch(self, provider, raw):
+        """One native launch through the real session pump with a scripted CLI: (session, stored events, receipt, project)."""
+        fake_cli = ("import json, pathlib, sys\nconfig = json.loads(sys.argv[1])\nsys.stdin.read()\n"
+                    "for line in pathlib.Path(config['events']).read_text(encoding='utf-8').splitlines():\n    print(line, flush=True)\n")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); project = root / "project"; project.mkdir()
+            fake, script = root / "fake_provider.py", root / "events.jsonl"
+            fake.write_text(fake_cli)
+            script.write_text("\n".join(json.dumps(event, ensure_ascii=False) for event in raw(str(project))), encoding="utf-8")
+            with patch.object(providers, "discover_providers", return_value=[{"id": provider, "available": True, "executable": str(fake)}]), \
+                    patch.object(providers, "model_options", return_value={"models": [], "efforts": [], "detail": "Offline fixture"}), \
+                    patch.object(providers, "build_command", side_effect=lambda *args, **options: [sys.executable, "-u", str(fake), json.dumps({"events": str(script)})]):
+                store = sessions.Sessions(root / "state", [project], timeout=120)
+                try:
+                    sid = store.create({"project_id": next(iter(store.projects)), "provider": provider, "prompt": "Add validation to POST /orders",
+                                        "project_context": False})["id"]
+                    deadline = time.monotonic() + 60
+                    while (store.get(sid)["status"] in sessions.ACTIVE or store.jobs.unfinished_tasks) and time.monotonic() < deadline:
+                        time.sleep(.02)
+                    return store.get(sid), store.events(sid), store.results.history(sid)["launches"][-1]["receipt"], str(project)
+                finally:
+                    store.close()
+
+    @unittest.skipUnless(hasattr(os, "killpg"), "Session workers require POSIX process groups")
+    def test_the_real_pump_stores_what_run_model_reads_and_the_receipt_agrees(self):
+        # pumped() above mirrors the pump; this runs the real one, so the two sides of the contract meet as they do in use.
+        for provider, raw in (("claude", claude_raw), ("codex", codex_raw), ("cursor", cursor_raw)):
+            with self.subTest(provider=provider):
+                session, events, receipt, project = self.real_launch(provider, raw)
+                self.assertEqual(("completed", "completed"), (session["status"], session["launch"]["status"]))
+                tools = [event for event in events if event["kind"] in ("tool", "plan")]
+                self.assertNotIn(project, json.dumps(tools, ensure_ascii=False))
+                self.run_node(r"""
+const model = RunModel.create(); RunModel.observe(model, events); const run = RunModel.current(model), paths = [...run.paths.values()];
+assert.deepEqual([run.id, run.mode, run.outcome, run.approx], [launch.id, 'targets', 'completed', false]);
+// The server counts every tool event whatever the display caps; the browser folds the stored ones. Unlimited, they agree.
+const listed = paths.filter(p => !p.outside);
+assert.deepEqual([run.counters.steps, run.counters.opened, run.counters.edited, run.counters.searched, run.counters.commands, run.counters.commandFailed, run.counters.notRun, run.counters.failed],
+  [receipt.steps, receipt.opened, receipt.edited, receipt.searched, receipt.commands, receipt.failed, receipt.not_run, receipt.failed_steps]);
+assert.deepEqual([paths.filter(p => p.created).length, paths.filter(p => p.deleted).length], [receipt.created, receipt.deleted]);
+assert.deepEqual(listed.filter(p => p.opened).map(p => p.path), receipt.opened_paths);
+assert.deepEqual(listed.filter(p => p.edited).map(p => p.path).sort(), [...receipt.edited_paths].sort());
+assert.deepEqual(run.commands.map(cmd => [cmd.command, cmd.ok, cmd.outcome, cmd.exitCode]), receipt.last_commands.map(cmd => [cmd.command, cmd.ok, cmd.outcome, cmd.exit_code]));
+assert.deepEqual(run.searches.map(item => item.pattern), receipt.patterns);
+assert.deepEqual({done:run.plan.items.filter(item => item.status === 'done').length, total:run.plan.total}, receipt.plan);
+""", prelude=f"const events = {json.dumps(events)}, launch = {json.dumps(session['launch'])}, receipt = {json.dumps(receipt)};")
+
+    @unittest.skipUnless(hasattr(os, "killpg"), "Session workers require POSIX process groups")
+    def test_a_launch_that_raises_ends_on_the_worker_error_with_its_receipt(self):
+        # A launch that raises (here the CLI changes its session identity) has no closing status: the worker's error line ends it,
+        # and the receipt the server saved on that path is drawn after it.
+        def raw(root):
+            return [{"type": "system", "subtype": "init", "session_id": "s-one"},
+                    {"type": "assistant", "parent_tool_use_id": None, "message": {"role": "assistant", "content": [
+                        {"type": "tool_use", "id": "toolu_01", "name": "Read", "input": {"file_path": root + "/app/Order.php"}}]}},
+                    {"type": "system", "subtype": "init", "session_id": "s-two"}]
+        session, events, receipt, _ = self.real_launch("claude", raw)
+        self.assertEqual(("failed", "failed"), (session["status"], session["launch"]["status"]))
+        self.assertEqual((1, ["app/Order.php"], False), (receipt["steps"], receipt["opened_paths"], receipt["limited"]))
+        self.assertFalse(any("outcome" in event for event in events))
+        self.run_node(r"""
+const model = RunModel.create(), ch = RunModel.observe(model, events), run = RunModel.current(model), last = events[events.length - 1];
+assert.deepEqual([RunModel.aborted(last), last.launch_id], [true, run.id]);
+assert.deepEqual([run.finished, run.outcome, run.aborted, run.closingEventId, ch.finished], [true, 'failed', true, last.id, run.id]);
+assert.deepEqual([run.calls.get('toolu_01').state, RunModel.now(model, run)], ['unfinished', null]);
+assert.equal(RunModel.aborted({kind:'error', text:'Provider did not complete successfully. Check CLI authentication.'}), false);
+""", prelude=f"const events = {json.dumps(events)};")
+
+    def test_plan_changes_compare_exact_text_and_return_dropped_items(self):
+        self.run_node(r"""
+const model = RunModel.create(); let id = 0;
+const plan = (...items) => RunModel.observe(model, [{id:++id, kind:'plan', launch_id:'L1', items:items.map(([text, status]) => ({text, status})), total:items.length}]);
+plan(['A', 'active'], ['B', 'pending']); const run = RunModel.current(model);
+assert.equal(run.planChange, null);
+plan(['B', 'pending'], ['A', 'done']); assert.equal(run.planChange, null, 'order and status are not changes');
+plan(['A', 'done'], ['B, reworded', 'pending'], ['C', 'pending']);
+assert.deepEqual([run.planChange.added, run.planChange.dropped, run.dropped, [...run.plan.added]], [['B, reworded', 'C'], ['B'], ['B'], ['B, reworded', 'C']]);
+plan(['A', 'done'], ['B', 'pending'], ['C', 'pending']); assert.deepEqual(run.dropped, ['B, reworded'], 'a returning item leaves Dropped');
+plan(['A', 'done'], ['\u202eevil', 'bogus']); assert.deepEqual(run.plan.items[1], {text:'evil', status:'pending'});
+assert.deepEqual(run.moments.filter(item => item.kind === 'plan-changed').length, 1);
+""")
+
+    def test_away_summary_counts_what_changed_while_the_tab_was_hidden(self):
+        self.run_node(r"""
+const model = RunModel.create(), events = streams.claude, cut = events.find(event => event.call === 'toolu_12' && event.state === 'started').id;
+RunModel.observe(model, events.filter(event => event.id <= cut)); const run = RunModel.current(model), before = RunModel.snapshot(run);
+RunModel.observe(model, events.filter(event => event.id > cut && event.call !== 'toolu_21' && !/Run completed/.test(event.text || '')));
+assert.equal(RunModel.awaySummary(run, before, 4), 'While you were away (4 min): 10 steps · 2 edits in 2 files · Artisan test ✗ ✗ ✓ · plan 4 of 5');
+RunModel.observe(model, events.filter(event => /Run completed/.test(event.text || '')));
+assert.match(RunModel.awaySummary(run, before, 6), /^While you were away \(6 min\): run finished · /);
+""")
+
+    def test_classify_command_reads_php_checks_wrappers_masks_and_windows_forms(self):
+        cases = [
+            # command, family, target, check, fixer, masked (substring or None), bare
+            ("php artisan test --filter=OrderTest", "Artisan test", "--filter=OrderTest", True, False, None, "php artisan test --filter=OrderTest"),
+            ("php artisan test", "Artisan test", "all tests", True, False, None, "php artisan test"),
+            ("php artisan test --parallel --testsuite=Feature", "Artisan test", "--testsuite=Feature", True, False, None, None),
+            ("vendor/bin/phpunit", "PHPUnit", "all tests", True, False, None, None),
+            ("./vendor/bin/phpunit --filter OrderTest", "PHPUnit", "--filter=OrderTest", True, False, None, None),
+            ("vendor/bin/phpunit tests/Feature/OrderTest.php", "PHPUnit", "tests/Feature/OrderTest.php", True, False, None, None),
+            ("bin/phpunit --group slow", "PHPUnit", "--group=slow", True, False, None, None),
+            ('vendor/bin/pest --filter="creates order"', "Pest", "--filter=creates order", True, False, None, 'vendor/bin/pest --filter="creates order"'),
+            ("vendor/bin/paratest -p4", "ParaTest", "all tests", True, False, None, None),
+            ("vendor/bin/phpstan analyse app --level=8 --memory-limit=1G", "PHPStan", "app --level=8", True, False, None, None),
+            ("vendor/bin/phpstan analyse -c phpstan.neon", "PHPStan", "project", True, False, None, None),
+            ("php -d memory_limit=-1 vendor/bin/phpstan analyse", "PHPStan", "project", True, False, None, "php -d memory_limit=-1 vendor/bin/phpstan analyse"),
+            ("vendor/bin/psalm --no-cache", "Psalm", "project", True, False, None, None),
+            ("vendor/bin/phpcs --standard=PSR12 src", "PHPCS", "src", True, False, None, None),
+            ("php -l app/Models/Order.php", "PHP lint", "app/Models/Order.php", True, False, None, None),
+            ("vendor/bin/pint", "Pint", "project", False, True, None, None),
+            ("vendor/bin/pint --test", "Pint", "project", True, False, None, None),
+            ("vendor/bin/php-cs-fixer fix --dry-run --diff", "PHP-CS-Fixer", "project", True, False, None, None),
+            ("vendor/bin/php-cs-fixer fix src", "PHP-CS-Fixer", "src", False, True, None, None),
+            ("vendor/bin/phpcbf src", "PHPCBF", "src", False, True, None, None),
+            ("vendor/bin/rector process --dry-run", "Rector", "project", True, False, None, None),
+            ("vendor/bin/rector", "Rector", "project", False, True, None, None),
+            ("bin/console lint:yaml config", "Symfony lint", "lint:yaml config", True, False, None, None),
+            ("php bin/console doctrine:schema:validate", "Doctrine schema", "validate", True, False, None, None),
+            ("wp core verify-checksums", "WP checksums", "core", True, False, None, None),
+            ("composer validate --strict", "Composer", "validate", True, False, None, None),
+            ("composer audit", "Composer", "audit", True, False, None, None),
+            ("composer test", "Composer", "test", True, False, None, None),
+            ("composer exec -- phpunit", "PHPUnit", "all tests", True, False, None, None),
+            ("vendor/bin/codecept run unit", "Codeception", "unit", True, False, None, None),
+            ("cd /repo && vendor/bin/phpunit", "PHPUnit", "all tests", True, False, None, "vendor/bin/phpunit"),
+            ("XDEBUG_MODE=off vendor/bin/phpunit --testsuite=Unit", "PHPUnit", "--testsuite=Unit", True, False, None, "vendor/bin/phpunit --testsuite=Unit"),
+            ("timeout 600 php artisan test", "Artisan test", "all tests", True, False, None, "php artisan test"),
+            ("docker compose exec -T app php artisan test --filter=Order", "Artisan test", "--filter=Order", True, False, None, "php artisan test --filter=Order"),
+            ("docker-compose exec app vendor/bin/phpunit", "PHPUnit", "all tests", True, False, None, "vendor/bin/phpunit"),
+            ("ddev exec vendor/bin/phpstan analyse", "PHPStan", "project", True, False, None, "vendor/bin/phpstan analyse"),
+            ("lando php vendor/bin/phpcs", "PHPCS", "project", True, False, None, "php vendor/bin/phpcs"),
+            ("./vendor/bin/sail artisan test", "Artisan test", "all tests", True, False, None, "php artisan test"),
+            ("sail test --filter=Order", "Artisan test", "--filter=Order", True, False, None, "php artisan test --filter=Order"),
+            ("vendor/bin/phpstan analyse app | tail -20", "PHPStan", "app", True, False, "piped to tail", "vendor/bin/phpstan analyse app"),
+            ("php artisan test 2>&1 | tail -50", "Artisan test", "all tests", True, False, "piped to tail", "php artisan test"),
+            ("vendor/bin/phpunit || true", "PHPUnit", "all tests", True, False, "a failure is ignored", "vendor/bin/phpunit"),
+            ('vendor/bin/phpunit; echo "exit: $?"', "PHPUnit", "all tests", True, False, "the last command sets the exit status", None),
+            ("vendor/bin/phpunit && echo OK", "PHPUnit", "all tests", True, False, None, "vendor/bin/phpunit"),
+            ("vendor/bin/phpunit > /tmp/out.txt 2>&1", "PHPUnit", "all tests", True, False, None, "vendor/bin/phpunit"),
+            ("vendor/bin/phpunit &", "PHPUnit", "all tests", True, False, "background", None),
+            ("set -o pipefail && vendor/bin/phpunit | tee out.log", "PHPUnit", "all tests", True, False, None, "vendor/bin/phpunit"),
+            ("/bin/bash -lc 'vendor/bin/phpunit --filter Order'", "PHPUnit", "--filter=Order", True, False, None, "vendor/bin/phpunit --filter Order"),
+            (r"vendor\bin\phpunit.bat --filter OrderTest", "PHPUnit", "--filter=OrderTest", True, False, None, r"vendor\bin\phpunit.bat --filter OrderTest"),
+            (r"php.exe vendor\bin\phpstan analyse src", "PHPStan", "src", True, False, None, None),
+            (r".\vendor\bin\pest.bat", "Pest", "all tests", True, False, None, None),
+            (r'& "C:\php\php.exe" artisan test', "Artisan test", "all tests", True, False, None, r'"C:\php\php.exe" artisan test'),
+            (r'pwsh -NoProfile -Command "vendor\bin\phpunit | Select-Object -Last 20"', "PHPUnit", "all tests", True, False, "piped to Select-Object", r"vendor\bin\phpunit"),
+            (r'powershell -Command "vendor\bin\phpstan.bat analyse src; exit $LASTEXITCODE"', "PHPStan", "src", True, False, None, r"vendor\bin\phpstan.bat analyse src"),
+            (r"cmd /c vendor\bin\phpcs.bat --standard=PSR12 src", "PHPCS", "src", True, False, None, None),
+            (r'$env:XDEBUG_MODE="off"; vendor\bin\phpunit.bat', "PHPUnit", "all tests", True, False, None, r"vendor\bin\phpunit.bat"),
+        ]
+        others = ["npm test", "git status", "sed -n '1,200p' app/Models/Order.php", 'rg -n "rules(" app/Http', "composer install",
+                  "vendor/bin/phpstan --version", "php artisan migrate", "ls -la", "cat composer.json | head"]
+        self.assertGreaterEqual(len(cases) + len(others), 40)
+        self.run_node("const cases = " + json.dumps(cases) + ", others = " + json.dumps(others) + ";\n" + r"""
+for (const [command, family, target, check, fixer, masked, bare] of cases) {
+  const result = RunModel.classifyCommand(command), label = `classify ${command}`;
+  assert.deepEqual([result.family, result.target, result.check, result.fixer], [family, target, check, fixer], label);
+  if (masked) assert.match(result.masked || '', new RegExp(masked.replace(/[|]/g, '\\|')), label); else assert.equal(result.masked, null, label);
+  if (bare) assert.equal(result.bare, bare, label);
+  assert.equal(result.key, `${family}|${target}`, label);
+  assert.equal(result.runnable, true, `${label} leaves one command Harness can run`);
+}
+for (const command of others) assert.deepEqual([RunModel.classifyCommand(command).family, RunModel.classifyCommand(command).check], [null, false], command);
+// What was peeled off is named, so Run in Harness can say it.
+assert.deepEqual(RunModel.classifyCommand('cd app && XDEBUG_MODE=off vendor/bin/phpunit 2>&1 | tail -5').removed, ['cd', 'environment', 'redirect', '| tail']);
+assert.deepEqual(RunModel.classifyCommand('docker compose exec -T app vendor/bin/phpunit').removed, ['container']);
+// Results.check_command refuses shell operators, control characters and more than 4000 bytes.
+assert.deepEqual(['vendor/bin/phpunit', 'vendor/bin/phpunit | tail', 'a && b', 'x\ny', 'x'.repeat(4001), 'say "open', ''].map(RunModel.runnable), [true, false, false, false, false, false, false]);
+assert.equal(RunModel.classifyCommand('vendor/bin/phpunit --filter \u202eOrder').target, '--filter=Order');
+""")
+
+    def test_step_rows_name_their_tool_and_target_and_groups_count_as_steps_arrive(self):
+        page = ui_script()
+        helpers = page[page.index("\nfunction stepGroup("):page.index("\nfunction appendEvent(")]
+        append = page[page.index("\nfunction appendEvent("):]
+        append = append[:append.index("\n}\n") + 3]
+        self.run_node(r"""
+class Node { constructor(tag, className = '', text) { Object.assign(this, {tag, className, own:text ?? '', children:[], dataset:{}, attributes:{}}); }
+  get textContent() { return this.children.length ? this.children.map(child => child.textContent).join('') : this.own; }
+  set textContent(value) { this.children = []; this.own = String(value); }
+  get classList() { return {contains: name => this.className.split(' ').includes(name)}; }
+  get firstElementChild() { return this.children[0]; } get lastElementChild() { return this.children[this.children.length - 1]; } get lastChild() { return this.lastElementChild; }
+  setAttribute(name, value) { this.attributes[name] = String(value); } append(...nodes) { this.children.push(...nodes); } }
+const events = new Node('div'), $ = id => id === 'events' ? events : null, el = (tag, className, text) => new Node(tag, className, text);
+const document = {createTextNode: text => new Node('#text', '', text)};
+const state = {eventIds:new Set(), assistantTexts:new Set(), stepCalls:new Map(), selected:{provider:'claude'}};
+const runView = {observe() {}, statusNode: () => null}, providerFor = () => ({name:'Claude Code'}), humanLabel = value => value, brainReviewed = () => true;
+const withoutMemoryDraft = text => text, bytesLabel = () => '';
+""" + helpers + append + r"""
+const render = stream => { events.children = []; state.eventIds.clear(); state.stepCalls.clear(); for (const event of streams[stream]) appendEvent(event);
+  const groups = events.children.filter(node => node.className === 'activity-group');
+  return {summaries:groups.map(group => group.firstElementChild.textContent), rows:groups.flatMap(group => group.lastElementChild.children.filter(node => node.className === 'step-row'))}; };
+let {summaries, rows} = render('claude');
+assert.deepEqual(summaries, ['1 step · Session',
+  '13 steps · Read ×4, TodoWrite ×2, Grep, Glob, Write ×2, Edit ×2, Bash · Looked for "rules(", "**/*Order*.php" · opened 4 files · edited 3',
+  '10 steps · Bash ×4, Task, Grep, Read ×2, Edit, TodoWrite · Looked for "foreignId" · opened 2 files · edited 1', '1 step · Usage']);
+// Completions update their start row: one row per call, with the target in a left-to-right <bdi>.
+assert.equal(rows.length, 23);
+const row = call => rows.find(item => item.dataset.call === call), text = node => node.children.map(child => child.textContent).join(' · ');
+assert.equal(text(row('toolu_01')), 'Read · app/Http/Controllers/OrderController.php · done');
+assert.equal(text(row('toolu_12')), 'Bash · php artisan test --filter=OrderTest · failed');
+assert.equal(text(row('toolu_16')), 'Helper · Grep · "foreignId" in database/migrations · done');
+assert.deepEqual([row('toolu_01').children[1].tag, row('toolu_01').children[1].dir, row('toolu_12').dataset.state], ['bdi', 'ltr', 'failed']);
+assert.ok(rows.every(item => Number.isInteger(item.dataset.eventId)));
+assert.doesNotMatch(summaries.join(' '), /found|matches|results/);
+// A label-only run: each completion stays its own row and is not a step; names come from the label.
+({summaries, rows} = render('claude_labels'));
+assert.equal(summaries[1], '23 steps · Read ×6, TodoWrite ×3, Grep ×2, Glob, Write ×2, Edit ×3, Bash ×5, Task');
+assert.deepEqual(rows.slice(0, 2).map(text), ['Read · started', 'Tool · done']);
+({summaries, rows} = render('codex'));
+assert.deepEqual(rows.map(text).slice(0, 3), ['Shell · sed -n 1,200p app/Models/Order.php · exit 0', 'Shell · rg -n "rules(" app/Http · exit 0', 'Edit · app/Http/Requests/StoreOrderRequest.php · done']);
+assert.ok(rows.map(text).includes('Shell · rm -rf build · not run'));
+assert.deepEqual(rows.map(text).filter(line => line.startsWith('Agent')), ['Agent · spawn_agent · done']);
+// A launch that raised ends on the worker's error line: a call it never answered says so instead of "running".
+events.children = []; state.stepCalls.clear();
+appendEvent({id:9001, kind:'tool', text:'Read: started', tool:'Read', call:'toolu_x', state:'started', ok:true, path:'app/Order.php', launch_id:'LX'});
+appendEvent({id:9002, kind:'error', text:'Run failed (SessionError). Check the native CLI and server setup.', launch_id:'LX'});
+assert.deepEqual([state.stepCalls.get('LX|toolu_x').row.dataset.state, text(state.stepCalls.get('LX|toolu_x').row)], ['unfinished', 'Read · app/Order.php · no result']);
+// Codex numbers its items again in every resumed turn: item_1 of turn 2 is not turn 1's call.
+events.children = []; state.stepCalls.clear();
+appendEvent({id:9101, kind:'tool', text:'command_execution: started', tool:'Shell', call:'item_1', state:'started', ok:true, detail:'php artisan test', launch_id:'T1'});
+appendEvent({id:9102, kind:'tool', text:'command_execution: completed', tool:'Shell', call:'item_1', state:'completed', ok:true, exit_code:0, detail:'php artisan test', launch_id:'T1'});
+appendEvent({id:9103, kind:'tool', text:'file_change: completed', tool:'Edit', call:'item_1', state:'completed', ok:true, changes:[{path:'app/Order.php', kind:'update'}], launch_id:'T2'});
+const turns = events.children.filter(node => node.className === 'activity-group').flatMap(group => group.lastElementChild.children);
+assert.deepEqual(turns.map(text), ['Shell · php artisan test · exit 0', 'Edit · app/Order.php · done']);
+assert.match(events.children[events.children.length - 1].firstElementChild.textContent, /^2 steps .* edited 1$/);
+""")
+
+    def test_run_view_scripts_render_text_only_and_guard_every_animation(self):
+        for name in ("run-model.js", "run-view.js"):
+            source = (WEB / name).read_text(encoding="utf-8")
+            with self.subTest(script=name):
+                self.assertIsNone(re.search(r"innerHTML|outerHTML|insertAdjacentHTML|document\.write", source))
+                # The scripts strip bidi controls from agent text and must not carry any themselves (written as \u escapes).
+                self.assertIsNone(re.search("[\u202a-\u202e\u2066-\u2069\u200e\u200f]", source))
+                # Smooth scrolling follows the system setting through scrollMotion().
+                self.assertEqual(re.findall(r"behavior:\s*(?!scrollMotion\(\))[^,}]+", source), [])
+        view = (WEB / "run-view.js").read_text(encoding="utf-8")
+        helper = view[view.index("  function motion("):view.index("\n  }\n", view.index("  function motion(")) + 4]
+        self.assertIn("reducedMotion.matches", helper)
+        self.assertEqual(view.count(".animate("), helper.count(".animate("), "every element.animate goes through motion()")
+        # requestAnimationFrame only schedules a render or a guarded motion() call.
+        for call in re.findall(r"requestAnimationFrame\(([^\n]{0,120})", view):
+            self.assertTrue(call.startswith("() => { ui.raf = 0") or "motion(" in call, call)
+        self.assertNotIn("innerHTML", (WEB / "app-core.js").read_text(encoding="utf-8")[(WEB / "app-core.js").read_text(encoding="utf-8").index("\nfunction stepGroup("):])
+
+    def test_file_chips_read_as_text_on_their_fills_in_both_themes(self):
+        def luminance(color):
+            channels = [int(color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+            return sum(weight * (c / 12.92 if c <= .04045 else ((c + .055) / 1.055) ** 2.4) for weight, c in zip((.2126, .7152, .0722), channels))
+        def contrast(a, b):
+            high, low = sorted((luminance(a), luminance(b)), reverse=True)
+            return (high + .05) / (low + .05)
+        css = stylesheet(THEMED_PAGES[0])
+        self.assertIn('.run-file[data-edited="true"] { background:var(--purple-soft); border-color:var(--purple); color:var(--purple); }', css)
+        for block in (re.search(r"\n\s*:root \{([^}]*)\}", css).group(1), re.search(r':root\[data-theme="dark"\] \{([^}]*)\}', css).group(1)):
+            tokens = dict(re.findall(r"(--[\w-]+):(#[0-9a-f]{6})\b", block)); tokens.setdefault("--paper", "#ffffff")
+            for text, surface in (("--purple", "--purple-soft"), ("--ink-2", "--paper"), ("--error", "--paper"), ("--muted", "--soft"), ("--warning", "--warning-surface")):
+                with self.subTest(text=text, surface=surface, paper=tokens["--paper"]):
+                    self.assertGreaterEqual(contrast(tokens[text], tokens[surface]), 4.5, "chip and strip text needs 4.5:1")
+
+    def test_a_glob_without_a_path_searches_from_its_leading_folders(self):
+        self.run_node(r"""
+const model = RunModel.create(); let id = 0;
+const tool = fields => ({id:++id, kind:'tool', launch_id:'L1', at:'2026-10-04T21:00:00.000+00:00', state:'started', ok:true, ...fields});
+RunModel.observe(model, [tool({text:'Glob: started', tool:'Glob', call:'g1', detail:'"app/**/*Order*.php"'}), tool({text:'Glob: started', tool:'Glob', call:'g2', detail:'"**/*.php"'}),
+  tool({text:'Glob: started', tool:'Glob', call:'g3', detail:'"*.php"', path:'tests'}),
+  tool({text:'Read: started', tool:'Read', call:'r1', path:'routes/api.php'}), tool({text:'Read: started', tool:'Read', call:'r2', path:'app/Models/Order.php'})]);
+const run = RunModel.current(model);
+assert.deepEqual(run.searches.map(item => item.scope), ['app', '', 'tests']);
+// A pattern that starts in app/ was not run over routes/: the file card and the Searched filter say so.
+assert.deepEqual(RunModel.searchedIn(run, run.paths.get('routes/api.php')), ['"**/*.php"']);
+assert.deepEqual(RunModel.searchedIn(run, run.paths.get('app/Models/Order.php')), ['"app/**/*Order*.php"', '"**/*.php"']);
+""")
+
+    def test_hidden_text_in_receipts_and_panes_stays_inside_its_scroller(self):
+        # .sr-only is absolutely positioned: inside a static receipt or pane it escaped the conversation's scroller and
+        # made the page itself scrollable, so scrollIntoView or a focus could shift the whole app up.
+        css = stylesheet(THEMED_PAGES[0])
+        for selector in (".run-pane", ".run-receipt"):
+            with self.subTest(selector=selector):
+                self.assertRegex(css, re.escape(selector) + r" \{ position:relative;")
 
 
 if __name__ == "__main__":

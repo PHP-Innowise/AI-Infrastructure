@@ -26,7 +26,53 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
-- Harness: project memory runs by itself. A new session uses it by default and
+- System Orchestration judges a memory chunk's `review_after` and `valid_to`
+  by the local calendar, the one the native Memory Bank contract it applies
+  uses. It read the UTC date, so west of UTC a chunk valid through today was
+  dropped from plans in the local evening while the Memory Bank still served
+  it. Two tests no longer fail around local midnight: the memory expiry test
+  (UTC date against the contract's local one) and the Memory use history test
+  (two retrievals an hour apart crossed into the previous day before 01:00).
+
+- Harness: **Run view**. While a Workspace, Plan, Review or SDD turn runs, a
+  strip above the composer shows what the agent is doing now: the tool, its
+  target and how long the call has been open, or *Model's turn*. It also shows
+  counts of files, plan items, checks and failed steps. A Harness check no
+  longer reads as "Claude is running". **Calm** is the default. **Detailed**
+  opens three tabs:
+  - **Files:** a map of the files named in tool calls.
+  - **Plan:** the agent's own todo list, with what was added or dropped.
+  - **Commands:** PHP checks as runs per target, a result marked unknown when a
+    pipe or a later command hides it, fixers, and **Run in Harness**.
+
+  Each step in the conversation names its target. A run receipt follows each
+  turn, a compaction leaves a divider, and the tab title and icon carry the
+  state. Notifications are opt-in and private.
+
+  For native launches `providers.normalize_event(..., targets=True)` attaches
+  each tool's canonical name, call ID, state, project-relative path (a file
+  outside the project keeps only its name), redacted detail (a command's first
+  line without a heredoc body; an MCP tool's name, never its arguments), `not_run`
+  outcome, Codex exit code and file changes, and Claude helper parent. These
+  targets live in `harness/src/harness/run_activity.py` (`Enricher`,
+  `RunLedger`, `redact_command`), along with plan events, compaction dividers
+  and one limited notice. They sit outside the launch's 5000-event / 4 MiB
+  failure limit and under caps of their own, so recording them never changes
+  whether a launch fails.
+
+  Other server changes:
+  - Every stored event gets a millisecond `at`.
+  - The closing status carries `outcome`.
+  - `GET /api/sessions/<id>` returns the newest `launch` of any kind.
+  - `launches.receipt` is also saved when a launch hits its output limit, is
+    cancelled or cannot start.
+  - `/results?diff=names` lists changed files without the diff.
+  - System runs' agent panels use the same relative paths and redaction.
+
+  File contents, diffs, tool output and reasoning are never stored.
+  `tests.test_harness_run_activity` joins the CI Harness job.
+
+- Harness: project memory runs by itself. Every new session uses it and
   nothing waits for a person: the first message names a new Brain task, every
   message is the retrieval query for its own turn (`context.py refresh` with
   the provider as host, manifest in the ignored local store), the capsule goes
@@ -38,9 +84,17 @@ edition's own files remain in that edition's changelog.
   costs the turn its memory, never the turn, and the conversation shows a line
   for what each turn carried and saved. Review by hand (prepare, approve, Save
   to memory) is an opt-in, and sessions linked before this keep it. A project
-  without a governed runtime starts its sessions without memory instead of
-  refusing them. Memory use names these retrievals Harness, and the Claude and
+  without a governed runtime starts its sessions with its reference files
+  instead of refusing them. Memory use names these retrievals Harness, and the Claude and
   Codex read hooks, which call `refresh`, by their host instead of CLI.
+
+- Harness: the **Project context** chip and the **Use project memory** checkbox
+  are gone. Project memory is always on and also decides what the project
+  contributes: a turn whose prompt carries a memory capsule no longer also gets
+  the reference-file excerpts; without a capsule (no governed
+  runtime, or retrieval failed) they stand in, sent once per native
+  conversation instead of on every resume, and leave out the instruction file
+  the provider loads by itself (`CLAUDE.md` for Claude, `AGENTS.md` for Codex).
 
 - The Claude and Codex read hooks (`working-memory-read.sh`) stand down when
   `CONTEXT_CAPSULE_DELIVERED=1`. The Harness sets it when it has already put

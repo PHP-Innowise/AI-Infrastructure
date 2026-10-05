@@ -15,8 +15,8 @@ import os
 from pathlib import Path
 import re
 
-from ai_system_lib import SECRET, inside
 from .providers import ACTIVITY_THINKING_LIMIT, activity_events, total_tokens
+from .run_activity import redact_command, relative, strip_root, user_home
 
 # The session store fails a launch above 5000 events or 4 MiB. Everything this
 # stream emits counts against one budget: activity stops at the soft limits, and
@@ -49,7 +49,12 @@ def now():
 
 
 def redact(value):
-    return SECRET.sub('[redacted]', value) if isinstance(value, str) else value
+    """Secrets out of a string, or out of every string in a plan's items."""
+    if isinstance(value, list):
+        return [redact(item) for item in value]
+    if isinstance(value, dict):
+        return {key: redact(item) for key, item in value.items()}
+    return redact_command(value) if isinstance(value, str) else value
 
 
 def bounded(details):
@@ -75,6 +80,7 @@ class ActivityStream:
         self.roots = sorted(((Path(path), sid) for sid, path in roots.items()),
                             key=lambda item: len(item[0].parts), reverse=True)
         self.aliases = {Path(path): value for path, value in (aliases or {}).items()}
+        self.home = user_home()
         self.count = self.bytes = 0
         self.limited = self.silenced = False
         self.agent = None
@@ -164,36 +170,70 @@ class ActivityStream:
                         'text': 'Further activity of this agent is not shown. Its receipt remains authoritative.'})
             return
         event = {'kind': 'agent_activity', **self.agent}
+        changes = item.get('changes') if item['type'] == 'tool' else None
         for key, value in item.items():
+            if key == 'changes':
+                continue
+            if key == 'detail' and item['type'] == 'tool' or key in ('text', 'items') and item['type'] == 'plan':
+                # Commands and plans name files by absolute path: the cwd and the service roots read as relative paths.
+                value = self.unroot(value)
             event[key] = redact(value)
+        if isinstance(changes, list):
+            # A file change lists its own paths: each is mapped like a tool's path, never shown absolute.
+            event['detail'] = redact(', '.join(f"{change.get('kind') or 'change'} {self.shown(change.get('path'))}"
+                                               for change in changes if isinstance(change, dict)
+                                               and isinstance(change.get('path'), str) and change['path'])[:300]) or None
+            if event['detail'] is None:
+                event.pop('detail')
         if 'path' in event:
-            service, path = self.locate(event.pop('path'))
+            service, path, outside = self.locate(event.pop('path'))
             event['path'] = path
             if service:
                 event['service'] = service
+            if outside:
+                event['outside'] = True
         event['text'] = self.describe(event)
         self.agent_count += 1
         self._send(event)
 
     def locate(self, value):
-        """Map an absolute or cwd-relative path to (service ID, service-relative path)."""
+        """Map an absolute or cwd-relative path to (service ID, service-relative path, outside).
+
+        A path outside every root keeps only its basename: the panel never shows an absolute path.
+        """
         path = Path(value)
         if not path.is_absolute():
             path = self.cwd / path
         path = Path(os.path.normpath(str(path)))
         if path in self.aliases:
-            return self.aliases[path]
+            return (*self.aliases[path], False)
         for root, sid in self.roots:
-            if inside(path, root):
-                relative = path.relative_to(root).as_posix()
-                return sid, '' if relative == '.' else relative
-        return None, value
+            located, outside = relative(str(path), root)
+            if not outside:
+                return sid, located, False
+        return None, path.name, True
+
+    def unroot(self, value):
+        """A string, or every string in a plan's items, without the cwd, the service roots or the home folder."""
+        if isinstance(value, list):
+            return [self.unroot(item) for item in value]
+        if isinstance(value, dict):
+            return {key: self.unroot(item) for key, item in value.items()}
+        return strip_root(value, [self.cwd, *(root for root, _ in self.roots)], self.home) if isinstance(value, str) else value
+
+    def shown(self, value):
+        """A path as the panel names it: service and relative path, or the bare name outside every root."""
+        service, path, outside = self.locate(value)
+        if outside:
+            return f'{path} (outside the project)'
+        return ':'.join(part for part in (service, path or '.') if part)
 
     @staticmethod
     def describe(event):
         if event['type'] != 'tool':
             return event.get('text') or ''
         target = ' · '.join(part for part in (event.get('service'), event.get('path')) if part)
+        target += ' (outside the project)' if event.get('outside') else ''
         parts = [event.get('tool', 'Tool'), target, event.get('detail', '')]
         if event['state'] == 'completed':
             parts.append('done' if event.get('ok') else 'failed')

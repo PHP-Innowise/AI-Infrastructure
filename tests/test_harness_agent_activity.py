@@ -43,15 +43,36 @@ class ActivityStreamTests(unittest.TestCase):
         stream.finish('completed', ok=True, error=None, summary='Done for orders')
         self.assertEqual(['agent'] + ['agent_activity'] * 5 + ['usage', 'agent'], [e['kind'] for e in self.events])
         self.assertTrue(all(e['agent'] == 'service-orders' and e['attempt'] == 2 and e['at'] for e in self.events))
-        located = [(e.get('service'), e['path']) for e in self.events if e['kind'] == 'agent_activity']
-        # The nested service root wins over the system root that contains it.
-        self.assertEqual([('orders', 'src/a.py'), ('orders', 'docs/b.md'), ('payments', ''),
-                          ('__system__', 'specs/x.md'), (None, '/elsewhere/c.md')], located)
+        located = [(e.get('service'), e['path'], e.get('outside', False)) for e in self.events if e['kind'] == 'agent_activity']
+        # The nested service root wins over the system root that contains it; outside every root only the name stays.
+        self.assertEqual([('orders', 'src/a.py', False), ('orders', 'docs/b.md', False), ('payments', '', False),
+                          ('__system__', 'specs/x.md', False), (None, 'c.md', True)], located)
         self.assertEqual('Read · payments', self.events[3]['text'])
+        self.assertEqual('Read · c.md (outside the project)', self.events[5]['text'])
+        self.assertNotIn('/elsewhere', json.dumps(self.events))
         started, finished = self.events[0], self.events[-1]
         self.assertEqual(('running', ['orders', 'payments']), (started['status'], started['writable']))
         self.assertEqual(('completed', 120, 0.25, 'Done for orders'),
                          (finished['status'], finished['tokens'], finished['cost_usd'], finished['summary']))
+
+    def test_codex_changes_and_commands_never_show_an_absolute_path(self):
+        stream = self.stream('codex')
+        stream.start('service-orders', 1, '/work/system/services/orders')
+        for item in ({'id': 'i1', 'type': 'file_change', 'status': 'completed', 'changes': [{'path': '/home/u/.aws/credentials', 'kind': 'update'}]},
+                     {'id': 'i2', 'type': 'file_change', 'status': 'completed', 'changes': [
+                         {'path': '/work/system/services/orders/a.php', 'kind': 'update'}, {'path': '/home/u/.ssh/config', 'kind': 'add'}]},
+                     {'id': 'i3', 'type': 'command_execution', 'command': 'cat /work/system/services/orders/x /work/payments/y',
+                      'status': 'completed', 'exit_code': 0},
+                     {'id': 'i4', 'type': 'todo_list', 'items': [{'text': 'Fix /work/system/services/orders/a.php', 'completed': False}]}):
+            stream.line(line({'type': 'item.completed', 'item': item}))
+        activity = [event for event in self.events if event['kind'] == 'agent_activity']
+        self.assertEqual(['update credentials (outside the project)', 'update orders:a.php, add config (outside the project)', 'cat x y'],
+                         [event['detail'] for event in activity[:3]])
+        self.assertEqual(('○ Fix a.php', 'Fix a.php'), (activity[3]['text'], activity[3]['items'][0]['text']))
+        self.assertEqual(('credentials', True), (activity[0]['path'], activity[0]['outside']))
+        stored = json.dumps(activity)
+        for absolute in ('/home/u', '/work/'):
+            self.assertNotIn(absolute, stored)
 
     def test_unreported_usage_stays_unknown_rather_than_zero(self):
         stream = self.stream('codex')
@@ -71,13 +92,18 @@ class ActivityStreamTests(unittest.TestCase):
         stream.start('contracts', 1, '/work/system')
         secret = 'sk-' + 'a' * 30
         stream.line(tool('t1', 'Bash', command='curl -H "api_key=' + 'B' * 20 + '" https://example.com'))
+        # Shorter secrets than the shared pattern catches, and a plan's structured items.
+        stream.line(tool('t2', 'Bash', command='DB_PASSWORD=hunter2 mysql -uroot -pshortpw app'))
+        stream.line(tool('t3', 'TodoWrite', todos=[{'content': 'Export GITHUB_TOKEN=ghp_' + 'c' * 24, 'status': 'pending'}]))
         stream.line(line({'type': 'assistant', 'message': {'role': 'assistant', 'content': [
             {'type': 'text', 'text': 'Found ' + secret}]}}))
         stream.finish('blocked', ok=False, error='worker_blocked', summary='Leaked ' + secret)
         stored = json.dumps(self.events)
-        self.assertNotIn(secret, stored)
-        self.assertNotIn('B' * 20, stored)
-        command, message, finished = self.events[1], self.events[2], self.events[3]
+        for value in (secret, 'B' * 20, 'hunter2', 'shortpw', 'c' * 24):
+            self.assertNotIn(value, stored)
+        self.assertEqual('DB_PASSWORD=[redacted] mysql -uroot -p[redacted] app', self.events[2]['detail'])
+        self.assertEqual('Export GITHUB_TOKEN=[redacted]', self.events[3]['items'][0]['text'])
+        command, message, finished = self.events[1], self.events[4], self.events[5]
         self.assertTrue(all('[redacted]' in value for value in (command['detail'], command['text'],
                                                                message['text'], finished['summary'])))
 

@@ -29,14 +29,16 @@ class Results:
                 CREATE TABLE IF NOT EXISTS launches (
                     id TEXT PRIMARY KEY, session_id TEXT NOT NULL, kind TEXT NOT NULL,
                     status TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT,
-                    settings TEXT NOT NULL, usage TEXT, context TEXT);
+                    settings TEXT NOT NULL, usage TEXT, context TEXT, receipt TEXT);
                 CREATE INDEX IF NOT EXISTS launches_session ON launches(session_id,started_at);
                 CREATE TABLE IF NOT EXISTS checks (
                     id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL);
             ''')
-            # Context ledgers arrived after launches did; older rows keep NULL and read as not recorded.
-            if 'context' not in {row['name'] for row in sessions.db.execute('PRAGMA table_info(launches)')}:
-                sessions.db.execute('ALTER TABLE launches ADD COLUMN context TEXT')
+            # Context ledgers and receipts arrived after launches did; older rows keep NULL and read as not recorded.
+            columns={row['name'] for row in sessions.db.execute('PRAGMA table_info(launches)')}
+            for name in ('context','receipt'):
+                if name not in columns:
+                    sessions.db.execute(f'ALTER TABLE launches ADD COLUMN {name} TEXT')
             # Old sessions do not contain enough information to reconstruct every turn.
             sessions.db.execute("UPDATE launches SET status='interrupted',finished_at=? WHERE status='running'", (now(),))
             rows=sessions.db.execute('SELECT id,data FROM checks').fetchall()
@@ -86,6 +88,12 @@ class Results:
             self.sessions.db.execute('UPDATE launches SET context=? WHERE id=?',(json.dumps(context),generation))
             self.sessions.db.commit()
 
+    def save_receipt(self, generation, receipt):
+        """A native launch's receipt: counts and bounded lists of what its tools reported (run_activity.RunLedger)."""
+        with self.sessions.lock:
+            self.sessions.db.execute('UPDATE launches SET receipt=? WHERE id=?',(json.dumps(receipt,ensure_ascii=False),generation))
+            self.sessions.db.commit()
+
     def finish_launch(self, generation, status):
         with self.sessions.lock:
             self.sessions.db.execute('UPDATE launches SET status=?,finished_at=? WHERE id=? AND status=?',
@@ -101,7 +109,8 @@ class Results:
             placeholders=','.join('?' for _ in ids)
             rows=self.sessions.db.execute(f'SELECT * FROM launches WHERE session_id IN ({placeholders}) ORDER BY started_at,rowid',ids).fetchall()
             records=[{**dict(row),'settings':json.loads(row['settings']),'usage':json.loads(row['usage']) if row['usage'] else None,
-                      'context':json.loads(row['context']) if row['context'] else None} for row in rows]
+                      'context':json.loads(row['context']) if row['context'] else None,
+                      'receipt':json.loads(row['receipt']) if row['receipt'] else None} for row in rows]
             checks=[json.loads(row[0]) for row in self.sessions.db.execute('SELECT data FROM checks WHERE session_id=? ORDER BY rowid DESC LIMIT 50',(sid,))]
         totals={}
         for key in ('tokens','cost_usd','seconds'):
@@ -188,10 +197,13 @@ class Results:
                 'baseline_recorded':bool(base.get('head')),'message':'Current workspace versus the launch baseline. Includes pre-existing and external edits; this is not proof of agent authorship.'}
 
     def get(self, sid, include_diff=True):
+        """History with the workspace snapshot; include_diff='names' keeps its file names and drops the diff text."""
         session=self.sessions.get(sid)
         result={'session_id':sid,**self.history(sid),'workspace':session['project_path']}
         if include_diff:
-            result['snapshot']=self.snapshot(sid) if session['status'] not in ACTIVE else None
+            snapshot=self.snapshot(sid) if session['status'] not in ACTIVE else None
+            if snapshot and include_diff=='names': snapshot.pop('diff',None)
+            result['snapshot']=snapshot
         return result
 
     def save_check(self, check):

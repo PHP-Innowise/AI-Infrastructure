@@ -447,8 +447,12 @@ class SessionTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("git"), "Git workspace tests require git")
     def test_worktree_uses_committed_context_and_keeps_dirty_primary_unchanged_across_resume(self):
         self.initialize_git()
+        (self.project / "README.md").write_text("COMMITTED WORKTREE README\n", encoding="utf-8")
+        self.git_command("add", "README.md")
+        self.git_command("commit", "--quiet", "-m", "Add readme")
         head = self.git_command("rev-parse", "HEAD")
         (self.project / "AGENTS.md").write_text("DIRTY PRIMARY CONTEXT\n", encoding="utf-8")
+        (self.project / "README.md").write_text("DIRTY PRIMARY README\n", encoding="utf-8")
         (self.project / "untracked.txt").write_text("PRIVATE UNCOMMITTED FIXTURE\n", encoding="utf-8")
         primary_status = self.git_command("status", "--porcelain")
         manager = self.manager()
@@ -466,7 +470,10 @@ class SessionTests(unittest.TestCase):
         self.assertFalse((worktree / "untracked.txt").exists())
         self.assertEqual(self.calls[-1]["project"], str(worktree))
         self.assertEqual(Path(self.calls[-1]["pid_path"] + ".cwd").read_text(), str(worktree))
-        self.assertIn("COMMITTED WORKTREE CONTEXT", self.calls[-1]["prompt"])
+        self.assertIn("Project reference: README.md\nCOMMITTED WORKTREE README", self.calls[-1]["prompt"])
+        self.assertNotIn("DIRTY PRIMARY README", self.calls[-1]["prompt"])
+        # Codex loads AGENTS.md by itself; the excerpts do not send it a second time.
+        self.assertNotIn("COMMITTED WORKTREE CONTEXT", self.calls[-1]["prompt"])
         self.assertNotIn("DIRTY PRIMARY CONTEXT", self.calls[-1]["prompt"])
         self.assertEqual(self.git_command("status", "--porcelain"), primary_status)
         self.assertEqual(self.git_command("branch", "--show-current"), "main")
@@ -586,10 +593,10 @@ class SessionTests(unittest.TestCase):
         self.initialize_git()
         nested = self.project / "packages/app"
         nested.mkdir(parents=True)
-        (nested / "AGENTS.md").write_text("NESTED COMMITTED CONTEXT\n", encoding="utf-8")
-        self.git_command("add", "packages/app/AGENTS.md")
+        (nested / "README.md").write_text("NESTED COMMITTED CONTEXT\n", encoding="utf-8")
+        self.git_command("add", "packages/app/README.md")
         self.git_command("commit", "--quiet", "-m", "Add nested project")
-        (nested / "AGENTS.md").write_text("NESTED DIRTY CONTEXT\n", encoding="utf-8")
+        (nested / "README.md").write_text("NESTED DIRTY CONTEXT\n", encoding="utf-8")
         manager = self.manager(projects=[nested])
         sid = self.create(manager, workspace="worktree", project_context=True)
         session = self.settled(manager, sid)
@@ -599,7 +606,7 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(Path(self.calls[-1]["pid_path"] + ".cwd").read_text(), str(expected))
         self.assertIn("NESTED COMMITTED CONTEXT", self.calls[-1]["prompt"])
         self.assertNotIn("NESTED DIRTY CONTEXT", self.calls[-1]["prompt"])
-        self.assertEqual((nested / "AGENTS.md").read_text(), "NESTED DIRTY CONTEXT\n")
+        self.assertEqual((nested / "README.md").read_text(), "NESTED DIRTY CONTEXT\n")
         manager.send(sid, "complete nested followup")
         self.assertEqual(self.settled(manager, sid)["project_path"], str(expected))
 
@@ -627,6 +634,12 @@ class SessionTests(unittest.TestCase):
                 self.assertTrue(any(event.get("text") == "Fixture answer" for event in events))
                 self.assertEqual(manager.events(sid, events[0]["id"]), events[1:])
                 self.assert_process_gone(self.calls[-1])
+                # Every event says when it was stored; the closing one names the outcome.
+                self.assertTrue(all(event["at"].endswith("+00:00") and len(event["at"]) == 29 for event in events))
+                self.assertEqual(("status", expected), (events[-1]["kind"], events[-1]["outcome"]))
+                launch = self.wait_for(lambda: (manager.get(sid)["launch"] or {}).get("status") != "running" and manager.get(sid)["launch"])
+                self.assertEqual(("native", expected), (launch["kind"], launch["status"]))
+                self.assertEqual(0, manager.results.history(sid)["launches"][-1]["receipt"]["steps"])
 
     def test_cancel_and_timeout_terminate_even_when_child_does_not_read_stdin(self):
         for behavior, cancel in (("sleep", True), ("no_stdin", False)):
@@ -643,6 +656,9 @@ class SessionTests(unittest.TestCase):
                     manager.cancel(sid)
                 self.assertEqual(self.settled(manager, sid)["status"], "cancelled" if cancel else "failed")
                 self.assert_process_gone(call)
+                # The receipt is written however the launch ends.
+                self.wait_for(lambda: manager.get(sid)["launch"]["status"] != "running")
+                self.assertIsNotNone(manager.results.history(sid)["launches"][-1]["receipt"])
                 if not cancel:
                     self.assertTrue(any("time limit" in event.get("text", "")
                                         for event in manager.events(sid)))
@@ -892,6 +908,8 @@ class SessionTests(unittest.TestCase):
         sid = self.create(manager, "oversize")
         self.assertEqual(self.settled(manager, sid)["status"], "failed")
         self.assert_process_gone(self.calls[-1])
+        self.wait_for(lambda: manager.get(sid)["launch"]["status"] == "failed")
+        self.assertEqual(0, manager.results.history(sid)["launches"][-1]["receipt"]["steps"])
         next_sid = self.create(manager)
         self.assertEqual(self.settled(manager, next_sid)["status"], "completed")
 
@@ -1131,6 +1149,37 @@ class SessionTests(unittest.TestCase):
         self.assertNotIn("A" * (sessions.CONTEXT_EXCERPT_BYTES + 1), prompt)
         self.assertIn("Project reference: README.md\nShort readme", prompt)
         self.assertIsNone(manager.get(sid)["capsule_meter"])
+
+    def test_project_context_comes_from_memory_and_fills_in_once_without_it(self):
+        (self.project / "AGENTS.md").write_text("AGENTS RULES")
+        (self.project / "CLAUDE.md").write_text("CLAUDE RULES")
+        (self.project / "README.md").write_text("README FACTS")
+        manager = self.manager()
+        sid = self.create(manager, project_context=True)
+        self.assertEqual(self.settled(manager, sid)["status"], "completed")
+        first = self.calls[-1]["prompt"]
+        # Codex loads AGENTS.md by itself; the project's other reference files stand in for memory.
+        self.assertIn("Project reference: README.md\nREADME FACTS", first)
+        self.assertIn("Project reference: CLAUDE.md\nCLAUDE RULES", first)
+        self.assertNotIn("AGENTS RULES", first)
+        # A resumed conversation already holds them.
+        manager.send(sid, "complete follow-up")
+        self.assertEqual(self.settled(manager, sid)["status"], "completed")
+        self.assertNotIn("Optional project reference excerpts", self.calls[-1]["prompt"])
+        launches = manager.results.history(sid)["launches"]
+        self.assertEqual([["CLAUDE.md", "README.md"], None],
+                         [[item["name"] for item in launch["context"]["ledger"]["excerpts"]]
+                          if launch["context"]["ledger"]["excerpts"] is not None else None for launch in launches])
+        # A turn that carries a memory capsule has what retrieval found; nothing is added beside it.
+        session = {**manager.get(sid), "native_session_id": None, "brain": {"capsule": {"query": "q", "working": {}}}}
+        ledger = {}
+        text = manager._prompt(session, "Do it", ledger)
+        self.assertNotIn("Optional project reference excerpts", text)
+        self.assertIsNone(ledger["excerpts"])
+        # Claude loads CLAUDE.md by itself, so its excerpts leave that one out instead.
+        text = manager._prompt({**session, "brain": None, "provider": "claude"}, "Do it", ledger := {})
+        self.assertEqual(["AGENTS.md", "README.md"], [item["name"] for item in ledger["excerpts"]])
+        self.assertNotIn("CLAUDE RULES", text)
 
     def test_context_and_state_symlinks_are_not_followed(self):
         outside = self.root / "outside.txt"

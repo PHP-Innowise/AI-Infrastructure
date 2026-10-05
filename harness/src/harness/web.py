@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[3]
 # The page's styles and scripts: an explicit list, read with the page so a running server serves one version.
 ASSETS = {name: 'text/css; charset=utf-8' if name.endswith('.css') else 'text/javascript; charset=utf-8'
           for name in ('app.css', 'app-core.js', 'app-knowledge.js', 'memory-use.js', 'context-usage.js', 'app-setup.js', 'app-skills.js', 'app-creator.js',
-                       'agent-activity.js', 'system.js', 'system-editor.js', 'system-discovery.js')}
+                       'agent-activity.js', 'system.js', 'system-editor.js', 'system-discovery.js', 'run-model.js', 'run-view.js')}
 sys.path.insert(0, str(ROOT / 'harness/src'))
 sys.path.insert(0, str(ROOT / 'scripts'))
 from harness.filesystem import fs, secure_private_dir, default_state_dir, existing_directory
@@ -264,8 +264,10 @@ class Handler(BaseHTTPRequestHandler):
                                  'files': sdd.artifacts(store._workspace(session), session['sdd'])})
             elif path.startswith('/api/sessions/') and path.endswith('/results') and len(path.split('/')) == 5:
                 query=parse_qs(parsed.query,keep_blank_values=True)
-                if query not in ({},{'diff':['0']}): raise SessionError('Invalid result request.')
-                self.reply(200,store.results.get(path.split('/')[3],include_diff=not query))
+                # diff=0 leaves the workspace snapshot out; diff=names keeps its file list without the diff text.
+                include=next((mode for allowed,mode in (({},True),({'diff':['0']},False),({'diff':['names']},'names')) if query==allowed),None)
+                if include is None: raise SessionError('Invalid result request.')
+                self.reply(200,store.results.get(path.split('/')[3],include_diff=include))
             elif path.startswith('/api/sessions/') and path.endswith('/delivery') and len(path.split('/')) == 5:
                 if parsed.query: raise SessionError('Invalid delivery request.')
                 self.reply(200,store.delivery.get(path.split('/')[3]))

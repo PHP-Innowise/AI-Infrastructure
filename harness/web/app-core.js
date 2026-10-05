@@ -4,12 +4,18 @@
 const $ = id => document.getElementById(id);
 const outputResizer = $('output-resizer');
 const sessionConfiguration = document.querySelector('#sessions-view .configuration');
-function resizeOutput(configurationHeight) {
-  const available = $('sessions-view').clientHeight - $('composer-area').offsetHeight - outputResizer.offsetHeight;
+// The height the person asked for; the shown height is that, clamped to what the composer and the Run strip leave.
+let outputHeightRequest = null;
+function resizeOutput(configurationHeight, requested = true) {
+  if (requested) outputHeightRequest = configurationHeight;
+  const available = $('sessions-view').clientHeight - $('composer-area').offsetHeight - $('run-view').offsetHeight - outputResizer.offsetHeight;
   const height = Math.max(80,Math.min(available - 100,configurationHeight));
   $('sessions-view').style.setProperty('--configuration-height',`${height}px`);
   $('sessions-view').classList.add('output-resized');
 }
+// When the space around it changes (the Run strip or its panel opens or closes), a resized output is clamped again from
+// the person's request, so it shrinks while the strip needs room and grows back afterwards.
+function refitOutput() { if ($('sessions-view').classList.contains('output-resized') && outputHeightRequest !== null) resizeOutput(outputHeightRequest,false); }
 outputResizer.addEventListener('pointerdown',event => {
   if (!event.isPrimary || event.button !== 0) return;
   event.preventDefault(); outputResizer.focus(); outputResizer.setPointerCapture(event.pointerId);
@@ -100,7 +106,7 @@ function keyedRender(container, items, keyOf, build, signatureOf = item => JSON.
   });
   for (const node of previous.values()) node.remove();
 }
-const state = { bootstrap:null, sessions:[], selected:null, selectedId:null, view:'sessions', pending:null, loading:false, pollTimer:null, pollController:null, epoch:0, eventIds:new Set(), assistantTexts:new Set(), contextEpoch:0, authFailed:false };
+const state = { bootstrap:null, sessions:[], selected:null, selectedId:null, view:'sessions', pending:null, loading:false, pollTimer:null, pollController:null, epoch:0, eventIds:new Set(), assistantTexts:new Set(), stepCalls:new Map(), contextEpoch:0, authFailed:false };
 let attachedFiles = [];
 function renderAttachments() {
   $('attachment-list').replaceChildren(); $('attachment-list').hidden = !attachedFiles.length;
@@ -650,28 +656,6 @@ function syncProjectSelects(id, reloadVisible = false) {
   if (reloadVisible && visible && visible !== 'project' && !busy[visible] && $(visible).value === id) $(visible).dispatchEvent(new Event('change'));
 }
 $('project-switcher').addEventListener('change',() => switchProject($('project-switcher').value));
-// Project context sends bounded excerpts of a few project files with every launch; the chip names their estimated size.
-const contextSizes = {project:null,files:null,epoch:0};
-async function loadContextSizes() {
-  const project = $('project').value;
-  if (!state.bootstrap || !project || contextSizes.project === project) { renderContextValue(); return; }
-  const epoch = ++contextSizes.epoch; Object.assign(contextSizes,{project,files:null}); renderContextValue();
-  try { const data = await api(`/api/projects/${encodeURIComponent(project)}/context`); if (epoch === contextSizes.epoch) contextSizes.files = Array.isArray(data.files) ? data.files : null; }
-  catch (_) { if (epoch === contextSizes.epoch) contextSizes.project = null; }
-  if (epoch === contextSizes.epoch) renderContextValue();
-}
-function renderContextValue() {
-  const value = $('project-context-value'), cap = state.bootstrap?.runtime?.context_excerpt_bytes;
-  const files = $('project-context').checked && contextSizes.project === $('project').value && Number.isInteger(cap) ? contextSizes.files : null;
-  const bytes = files ? files.filter(file => file.exists).reduce((sum,file) => sum + Math.min(file.bytes,cap),0) : null;
-  if (value.dataset.key === String(bytes)) return; value.dataset.key = String(bytes);
-  if (bytes === null) { value.replaceChildren(); return; }
-  if (!bytes) { value.textContent = 'no files'; return; }
-  // Prose excerpts run about 4.7 characters per token (scripts/context_budget.py).
-  const estimate = fmt.estimate(bytes / 4.7,' tokens'), shown = el('span','',estimate.text); shown.setAttribute('aria-hidden','true');
-  value.replaceChildren(shown,el('span','sr-only',`, adds ${estimate.label} per launch`));
-}
-$('project').addEventListener('change',loadContextSizes); $('project-context').addEventListener('change',renderContextValue);
 function populateSettings() {
   const boot = state.bootstrap;
   const draftModel = selectedModel(); const draftEffort = $('thinking-effort').value;
@@ -698,7 +682,6 @@ function populateSettings() {
   if (active(state.selected) || isFleetSession(state.selected)) refreshModelChoices(state.selected.model || null,state.selected.thinking_effort || null);
   else refreshModelChoices(draftModel,draftEffort);
   updateControls(); renderAccelerators(); loadProjectGit(true);
-  loadContextSizes();
 }
 async function bootstrap() {
   $('reconnect').disabled = true; $('connecting').hidden = false;
@@ -725,7 +708,7 @@ async function bootstrap() {
 }
 $('reconnect').addEventListener('click',bootstrap);
 const sessionPreferencesKey = 'harness.sessions.preferences.v1';
-const sessionPreferenceFields = ['provider','workflow','mode','project-context','agents-enabled','agent-count','workspace','worktree-branch','sdd-feature','sdd-phase','clash-enabled','clash-challenger','clash-rounds','fleet-dry-run','fleet-budget','fleet-worker-timeout','brain-link-enabled','brain-link-kind','brain-link-review','brain-link-task-id','brain-link-goal','brain-link-query',...['usd','tokens','seconds'].flatMap(key => ['session-budgets-'+key,'session-budgets-agent-'+key])];
+const sessionPreferenceFields = ['provider','workflow','mode','agents-enabled','agent-count','workspace','worktree-branch','sdd-feature','sdd-phase','clash-enabled','clash-challenger','clash-rounds','fleet-dry-run','fleet-budget','fleet-worker-timeout','brain-link-kind','brain-link-review','brain-link-task-id','brain-link-goal','brain-link-query',...['usd','tokens','seconds'].flatMap(key => ['session-budgets-'+key,'session-budgets-agent-'+key])];
 let sessionPreferencesReady = false, sessionDraftProject = null, defaultSessionPreferences = null, restoringSessionPreferences = false, preferenceEpoch = 0;
 function readSessionPreferences() {
   try {
@@ -743,7 +726,7 @@ function captureSessionPreferences() {
 }
 function saveSessionPreferences(projectId = sessionDraftProject || $('project').value) {
   if (!sessionPreferencesReady || restoringSessionPreferences || !state.bootstrap) return;
-  if (!state.selectedId && $('brain-link-enabled').checked && brainLinkStrict() && (brainLinkDraft.loading || brainLinkDraft.error)) return;
+  if (!state.selectedId && brainLinkStrict() && (brainLinkDraft.loading || brainLinkDraft.error)) return;
   if (state.selectedId) projectId = $('project').value;
   if (!projectFor(projectId)) return;
   const saved = readSessionPreferences();
@@ -759,10 +742,10 @@ async function restoreProjectPreferences(projectId) {
   try {
     resetBrainLink();
     for (const draft of [defaultSessionPreferences,saved]) {
-      // A draft saved before project memory ran by itself says "not linked" for nearly everyone; it keeps the new default.
+      // A draft saved before project memory ran by itself chose an existing task for nearly everyone; it keeps the new default.
       const before = draft?.fields && !('brain-link-review' in draft.fields);
       for (const id of sessionPreferenceFields) {
-        if (before && ['brain-link-enabled','brain-link-kind'].includes(id)) continue;
+        if (before && id === 'brain-link-kind') continue;
         const input = $(id), value = draft?.fields?.[id];
         if (input.type === 'checkbox') { if (typeof value === 'boolean') input.checked = value; }
         else if (typeof value === 'string' && value.length <= (input.maxLength > 0 ? input.maxLength : 4000)) {
@@ -776,19 +759,20 @@ async function restoreProjectPreferences(projectId) {
     refreshModelChoices(text(draft?.model),text(draft?.effort));
     fleetUi.lenses = new Set((Array.isArray(draft?.lenses) ? draft.lenses : []).filter(id => (fleetMetadata().lenses || []).some(lens => lens.id === id))); renderFleetLenses();
     loadProjectGit(true); updateControls();
-    if ($('brain-link-enabled').checked) {
-      await loadBrainLinkTasks(true);
-      if (epoch !== preferenceEpoch || state.selectedId) return;
-      if (draft?.bank && ![...$('brain-link-bank').options].some(option => option.value === draft.bank)) {
-        $('brain-link-bank').value = ''; $('brain-link-task').value = '';
-        brainLinkDraft.error = 'The saved knowledge root is unavailable. Choose a root to continue.'; updateControls(); return;
-      }
-      if (typeof draft?.bank === 'string' && [...$('brain-link-bank').options].some(option => option.value === draft.bank) && $('brain-link-bank').value !== draft.bank) { $('brain-link-bank').value = draft.bank; await loadBrainLinkTasks(); }
-      if (epoch !== preferenceEpoch || state.selectedId) return;
-      // A missing saved task must not silently select a different task.
-      $('brain-link-task').value = typeof draft?.task === 'string' ? draft.task : '';
-      updateControls();
+    await loadBrainLinkTasks(true);
+    if (epoch !== preferenceEpoch || state.selectedId) return;
+    // The root and task are this project's own choices; another project's defaults name neither.
+    const own = saved && typeof saved === 'object' ? saved : null;
+    if (own?.bank && ![...$('brain-link-bank').options].some(option => option.value === own.bank)) {
+      // A named task must not silently move to another root; the default just uses the root the project has.
+      if (brainLinkStrict()) { $('brain-link-bank').value = ''; $('brain-link-task').value = ''; brainLinkDraft.error = 'The saved knowledge root is unavailable. Choose a root to continue.'; }
+      updateControls(); return;
     }
+    if (typeof own?.bank === 'string' && [...$('brain-link-bank').options].some(option => option.value === own.bank) && $('brain-link-bank').value !== own.bank) { $('brain-link-bank').value = own.bank; await loadBrainLinkTasks(); }
+    if (epoch !== preferenceEpoch || state.selectedId) return;
+    // A missing saved task must not silently select a different task.
+    $('brain-link-task').value = typeof own?.task === 'string' ? own.task : '';
+    updateControls();
   } finally { if (epoch === preferenceEpoch) { restoringSessionPreferences = false; saveSessionPreferences(); } }
 }
 async function restoreSessionPreferences() {
@@ -843,7 +827,9 @@ function updateHeader() {
   $('cancel-session').hidden = groupOf(state.view) !== 'sessions' || !active(session);
   $('cancel-session').disabled = Boolean(state.pending); $('cancel-session').textContent = state.pending === 'cancel' ? 'Cancelling…' : isResultView(state.view) && resultUi.data?.checks.some(check=>['queued','running'].includes(check.status)) ? 'Cancel check' : 'Cancel session';
   const viewName = state.view === 'sessions' ? '' : viewLabels[state.view]; $('view-heading').textContent = viewLabels[state.view];
-  document.title = `${viewName && viewName !== $('page-title').textContent ? `${viewName} · ` : ''}${state.view === 'sessions' && session ? session.title : $('page-title').textContent} — AI Infrastructure Harness`;
+  // The tab says what the selected session's run is doing, so a person in another window can tell without looking.
+  document.title = `${runView.titlePrefix(state.selected)}${viewName && viewName !== $('page-title').textContent ? `${viewName} · ` : ''}${state.view === 'sessions' && session ? session.title : $('page-title').textContent} — AI Infrastructure Harness`;
+  runView.icon(state.selected);
 }
 function updateWorkspaceControls() {
   const projectId = $('project').value; const hasSession = Boolean(state.selectedId); const ready = Boolean(state.bootstrap) && !state.authFailed;
@@ -1031,7 +1017,7 @@ function budgetSummary(budgets) {
 const sessionOptions = {open:null};
 function renderSessionOptions() {
   const hasSession = Boolean(state.selectedId), session = state.selected, fleet = fleetSelected(), clashMode = clashSelected();
-  for (const id of ['project','provider','workflow','project-context']) $(id).closest('label').hidden = hasSession;
+  for (const id of ['project','provider','workflow']) $(id).closest('label').hidden = hasSession;
   const shown = {helpers:!clashMode && !session?.creator, clash:clashAvailable() && !fleet && !isFleetSession(session) && !session?.creator, workspace:!hasSession, brain:!hasSession, budgets:!session?.creator, models:!fleet && !clashMode && !fleetDryRun()};
   const valid = sessionOptions.validity || {}, invalid = {helpers:valid.helpers === false, clash:valid.clash === false, workspace:valid.workspace === false, brain:valid.brain === false, budgets:valid.budgets === false || !$('session-budgets-agent-error').hidden, models:valid.models === false};
   const on = {helpers:fleet || $('agents-enabled').checked, clash:clashMode, workspace:$('workspace').value === 'worktree', brain:brainLinkActive(), budgets:budgetSummary(sessionBudgets()) !== 'No limits', models:Boolean(modelRouting())};
@@ -1101,7 +1087,7 @@ function updateControls() {
   const fleetValid = updateFleetSettingsControls(); const budgetValid = sessionBudgetControls();
   $('new-session').disabled = pending;
   for (const button of $('history').querySelectorAll('button')) button.disabled = pending;
-  for (const id of ['project','provider','workflow','project-context']) $(id).disabled = !ready || hasSession || pending;
+  for (const id of ['project','provider','workflow']) $(id).disabled = !ready || hasSession || pending;
   const agentsLocked = !ready || pending || state.loading || active(state.selected) || existingFleet || awaitingContext || Boolean(state.selected?.creator);
   if (clashMode) $('agents-enabled').checked = false;
   $('agents-enabled').disabled = agentsLocked || dryRun || clashMode;
@@ -1151,10 +1137,12 @@ function updateControls() {
   const providerNote = dryRun ? 'Offline dry-run can use any provider selection; no native CLI is launched.' : ready && !provider?.available ? 'No provider is ready. Install and sign in with a native CLI, then restart the Harness server.' : provider?.id === 'cursor' ? 'Cursor can’t disable or cap helpers; helper settings are instructions only.' : '';
   if ($('provider-hint').textContent !== providerNote) $('provider-hint').textContent = providerNote; $('provider-hint').hidden = !providerNote;
   $('agent-hint').textContent = helperHint(fleet,clashMode,ultracode,provider);
-  $('waiting').hidden = !isActive; const waitingText = linked && brainReviewed(state.selected.brain) && !state.selected.brain.context_id ? 'Preparing workspace and context. The provider has not started this turn.' : state.selected?.status === 'queued' ? 'Queued — waiting for an available runner.' : existingFleet ? 'Fleet review is running. Stage and reviewer updates appear above.' : isClashSession(state.selected) ? `${providerFor(state.selected.provider)?.name || state.selected.provider} and ${providerFor(state.selected.clash?.challenger)?.name || 'the challenger'} are clashing. Turn events appear above.` : `${providerFor(state.selected?.provider)?.name || 'Agent'} is running. New events will appear here.`; if ($('waiting-text').textContent !== waitingText) $('waiting-text').textContent = waitingText;
-  $('welcome').hidden = hasSession; sessionOptions.validity = {helpers:agentsValid && agentModeValid,clash:clashValid,workspace:workspaceValid,brain:linkValid,budgets:budgetValid,models:routingValid}; renderSessionOptions(); renderSessionSummary(); updateHeader(); updateSkillsControls(); updateKnowledgeControls(); updateSetupControls(); renderFleetSession(); renderClashSession(); renderLinkedSession(); renderContextValue(); if (typeof renderContextMeter === 'function') renderContextMeter(); resultControls();
+  // A Harness check sets the session running without a launch; the Run strip follows the newest launch instead.
+  const waitingText = runView.phase(state.selected) === 'check' ? 'A Harness check is running. Its result appears in Checks.' : linked && brainReviewed(state.selected.brain) && !state.selected.brain.context_id ? 'Preparing workspace and context. The provider has not started this turn.' : state.selected?.status === 'queued' ? 'Queued — waiting for an available runner.' : existingFleet ? 'Fleet review is running. Stage and reviewer updates appear above.' : isClashSession(state.selected) ? `${providerFor(state.selected.provider)?.name || state.selected.provider} and ${providerFor(state.selected.clash?.challenger)?.name || 'the challenger'} are clashing. Turn events appear above.` : `${providerFor(state.selected?.provider)?.name || 'Agent'} is running. New events will appear here.`;
+  runView.sync(waitingText);
+  $('welcome').hidden = hasSession; sessionOptions.validity = {helpers:agentsValid && agentModeValid,clash:clashValid,workspace:workspaceValid,brain:linkValid,budgets:budgetValid,models:routingValid}; renderSessionOptions(); renderSessionSummary(); updateHeader(); updateSkillsControls(); updateKnowledgeControls(); updateSetupControls(); renderFleetSession(); renderClashSession(); renderLinkedSession(); if (typeof renderContextMeter === 'function') renderContextMeter(); resultControls();
 }
-function applySessionSettings(session, restoreModel = true) { $('sdd-feature').value = session.sdd?.feature || ''; $('sdd-phase').value = session.sdd?.phase || 'specify'; for (const id of ['project','provider','workflow','mode']) $(id).value = session[id === 'project' ? 'project_id' : id] || (id === 'mode' ? 'plan' : id === 'workflow' ? 'native' : ''); $('project-context').checked = Boolean(session.project_context); if (restoreModel || active(session) || isFleetSession(session)) { $('agents-enabled').checked = session.agents_enabled === true; $('agent-count').value = Number.isInteger(session.agent_count) ? session.agent_count : defaultAgentCount(); } $('workspace').value = session.workspace === 'worktree' ? 'worktree' : 'project'; $('worktree-branch').value = session.workspace === 'worktree' ? session.branch || '' : ''; restoreBudgets('session-budgets',session.budgets,session.id+':'+session.budget_revision); restoreModelRouting(session.model_routing); restoreClashSettings(session.clash || null); if (isFleetSession(session)) restoreFleetSettings(session.fleet); if (restoreModel || isFleetSession(session)) refreshModelChoices(session.model || null,session.thinking_effort || null); loadProjectGit(); }
+function applySessionSettings(session, restoreModel = true) { $('sdd-feature').value = session.sdd?.feature || ''; $('sdd-phase').value = session.sdd?.phase || 'specify'; for (const id of ['project','provider','workflow','mode']) $(id).value = session[id === 'project' ? 'project_id' : id] || (id === 'mode' ? 'plan' : id === 'workflow' ? 'native' : ''); if (restoreModel || active(session) || isFleetSession(session)) { $('agents-enabled').checked = session.agents_enabled === true; $('agent-count').value = Number.isInteger(session.agent_count) ? session.agent_count : defaultAgentCount(); } $('workspace').value = session.workspace === 'worktree' ? 'worktree' : 'project'; $('worktree-branch').value = session.workspace === 'worktree' ? session.branch || '' : ''; restoreBudgets('session-budgets',session.budgets,session.id+':'+session.budget_revision); restoreModelRouting(session.model_routing); restoreClashSettings(session.clash || null); if (isFleetSession(session)) restoreFleetSettings(session.fleet); if (restoreModel || isFleetSession(session)) refreshModelChoices(session.model || null,session.thinking_effort || null); loadProjectGit(); }
 for (const id of ['workflow','mode','thinking-effort']) $(id).addEventListener('change',updateControls);
 $('provider').addEventListener('change',() => { refreshModelChoices(null,null); restoreModelRouting(null); renderClashChallengers(); if (fleetSelected() && !fleetBudgetSupported() && !state.selectedId) $('fleet-budget').value = ''; updateControls(); });
 $('fleet-dry-run').addEventListener('change',() => { if (!fleetBudgetSupported()) $('fleet-budget').value = ''; updateControls(); });
@@ -1173,7 +1161,7 @@ function stopPolling() { clearTimeout(state.pollTimer); state.pollTimer = null; 
 function newSession(prompt = '', projectId = $('project').value, show = true) {
   saveSessionPreferences();
   clearAttachments();
-  stopPolling(); state.epoch++; state.selectedId = null; state.selected = null; state.loading = false; state.eventIds.clear(); state.assistantTexts.clear(); $('events').replaceChildren(); $('prompt').value = prompt;
+  stopPolling(); state.epoch++; state.selectedId = null; state.selected = null; state.loading = false; state.eventIds.clear(); state.assistantTexts.clear(); state.stepCalls.clear(); runView.reset(); $('events').replaceChildren(); $('prompt').value = prompt;
   sessionOptions.open = null; $('session-settings-toggle').setAttribute('aria-expanded','false'); sddSlugTouched = false; $('sessions-view').classList.remove('output-resized'); $('sessions-view').style.removeProperty('--configuration-height');
   resetBrainLink(); restoreModelRouting(null); $('sdd-feature').value = ''; $('sdd-phase').value = 'specify'; restoreClashSettings(null);
   $('agents-enabled').checked = false; $('agent-count').value = defaultAgentCount();
@@ -1182,7 +1170,6 @@ function newSession(prompt = '', projectId = $('project').value, show = true) {
   refreshModelChoices(null,null);
   showError('events-error',''); showError('composer-error',''); renderHistory(); if (show) setView('sessions'); updateControls(); if (show) $('prompt').focus();
   $('project').value = projectId; restoreProjectPreferences(projectId);
-  contextSizes.project = null; loadContextSizes();
 }
 $('new-session').addEventListener('click',() => { if (!state.pending) newSession(); });
 function fleetCost(value) { return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? `$${value.toFixed(4).replace(/0+$/,'').replace(/\.$/,'.00')}` : null; }
@@ -1250,9 +1237,50 @@ const MEMORY_DRAFT_BLOCK = /```memory-draft[^\S\n]*\n[\s\S]*?\n[^\S\n]*```/g;
 // The reply points at where the draft went instead of repeating its JSON: the Save to memory form when a person
 // reviews it, or the project memory line the run adds once it has saved the draft itself.
 function withoutMemoryDraft(text,reviewed = true) { return text.replace(MEMORY_DRAFT_BLOCK,reviewed ? '[Memory draft: review it under Save to memory below.]' : '[Memory draft: saved to project memory when the run completes.]').trim(); }
+// Consecutive steps share one collapsed row. Its summary counts are kept as steps arrive, never recounted from the rows.
+function stepGroup() {
+  let group = $('events').lastElementChild;
+  if (!group?.classList.contains('activity-group')) {
+    group = el('details','activity-group'); group.setAttribute('aria-live','off'); group.append(el('summary'),el('div','activity-steps'));
+    group.steps = {steps:0,tools:new Map(),patterns:[],opened:new Set(),edited:new Set()}; $('events').append(group);
+  }
+  return group;
+}
+function countStep(group, name) { group.steps.steps++; group.steps.tools.set(name,(group.steps.tools.get(name) || 0) + 1); group.firstElementChild.textContent = RunModel.groupSummary(group.steps); }
+const stepWord = event => event.outcome === 'not_run' ? ['notrun','not run'] : Number.isInteger(event.exit_code) ? [event.ok === false ? 'failed' : 'done',`exit ${event.exit_code}`] : event.ok === false ? ['failed','failed'] : ['done','done'];
+// A step row names the tool, its target and its state. A completion that carries its call updates the start row in place;
+// a label-only completion stays a row of its own and is not counted as a step.
+// Calls pair within their launch: Codex numbers its items item_0, item_1… again in every resumed turn.
+const stepKey = (event, call) => `${typeof event.launch_id === 'string' ? event.launch_id : ''}|${call}`;
+function appendStep(event) {
+  const step = RunModel.describe(event), known = step.call ? state.stepCalls.get(stepKey(event,step.call)) : null;
+  // Codex repeats an open helper operation's label while it runs; the row of its start already stands for it.
+  if (step.progress && [...state.stepCalls.values()].some(entry => entry.launch === event.launch_id && entry.op === step.progress && entry.row.dataset.state === 'running')) return;
+  if (!step.start && known) {
+    const [mark,word] = stepWord(event); known.row.dataset.state = mark; known.row.lastChild.textContent = word;
+    if (event.ok !== false && event.outcome !== 'not_run' && known.edit) { for (const path of known.paths) known.group.steps.edited.add(path); known.group.firstElementChild.textContent = RunModel.groupSummary(known.group.steps); }
+    return;
+  }
+  const group = stepGroup(), row = el('div','step-row'), counted = step.start || Boolean(step.call && typeof event.tool === 'string'), [mark,word] = step.start ? [step.call ? 'running' : 'started',step.call ? 'running' : 'started'] : stepWord(event);
+  const by = typeof event.provider === 'string' && event.provider ? `${providerFor(event.provider)?.name || event.provider} · ` : '';
+  row.dataset.eventId = event.id; row.dataset.state = mark; if (step.call) row.dataset.call = step.call;
+  row.append(el('span','step-name',`${by}${step.helper ? 'Helper · ' : ''}${step.tool}`));
+  if (step.target) { const target = el('bdi','step-target',step.target); target.dir = 'ltr'; row.append(target); }
+  row.append(el('span','step-state',word)); group.lastElementChild.append(row);
+  if (step.call && step.start) state.stepCalls.set(stepKey(event,step.call),{row,group,launch:event.launch_id,edit:step.edit,paths:step.paths,op:step.op});
+  if (!counted) return;
+  if (step.pattern) group.steps.patterns.push(step.pattern);
+  if (step.read) for (const path of step.paths) group.steps.opened.add(path);
+  if (!step.start && step.edit && event.ok !== false && event.outcome !== 'not_run') for (const path of step.paths) group.steps.edited.add(path);
+  countStep(group,step.tool);
+}
+// The end of a launch: calls it never answered show that instead of "running".
+function closeSteps(launch) { if (typeof launch === 'string') for (const entry of state.stepCalls.values()) if (entry.launch === launch && entry.row.dataset.state === 'running') { entry.row.dataset.state = 'unfinished'; entry.row.lastChild.textContent = 'no result'; } }
+// A launch that raised ends on the worker's error line instead of a closing status; its receipt follows that line.
+function closeAborted(event) { if (!RunModel.aborted(event)) return; closeSteps(event.launch_id); const node = runView.statusNode(event); if (node) $('events').append(node); }
 function appendEvent(event) {
   if (event.id === undefined || event.id === null || state.eventIds.has(String(event.id))) return;
-  state.eventIds.add(String(event.id)); let text = typeof event.text === 'string' ? event.text : '';
+  state.eventIds.add(String(event.id)); runView.observe(event); let text = typeof event.text === 'string' ? event.text : '';
   const kind = event.kind === 'result' && event.ok === false ? 'error' : event.kind;
   if (kind === 'fleet_stage') {
     observeFleetEvent(event); text = [fleetStageName(event.stage),humanLabel(event.status)].filter(Boolean).join(' · ');
@@ -1267,21 +1295,21 @@ function appendEvent(event) {
   }
   if (!text.trim()) return;
   if (kind === 'memory') {
-    const block = el('p','memory-event'); block.dataset.ok = String(event.ok !== false); block.setAttribute('role','status'); block.textContent = text; $('events').append(block);
+    const block = el('p','memory-event'); block.dataset.ok = String(event.ok !== false); block.dataset.eventId = event.id; block.setAttribute('role','status'); block.textContent = text; $('events').append(block);
   } else if (kind === 'delegation') {
-    const block = el('div','memory-notice'); block.setAttribute('role','status'); block.append(el('strong','',Number.isInteger(event.required_count) ? event.status === 'confirmed' ? 'Required helper count confirmed. ' : 'Required helper count not confirmed. ' : event.status === 'confirmed' ? 'Helper launch confirmed. ' : 'Helper launch not confirmed. '),document.createTextNode(text)); $('events').append(block);
+    const block = el('div','memory-notice'); block.dataset.eventId = event.id; block.setAttribute('role','status'); block.append(el('strong','',Number.isInteger(event.required_count) ? event.status === 'confirmed' ? 'Required helper count confirmed. ' : 'Required helper count not confirmed. ' : event.status === 'confirmed' ? 'Helper launch confirmed. ' : 'Helper launch not confirmed. '),document.createTextNode(text)); $('events').append(block);
   } else if (kind === 'clash_turn') {
-    const block = el('div','clash-turn'); block.setAttribute('role','status'); block.textContent = text; $('events').append(block);
+    const block = el('div','clash-turn'); block.dataset.eventId = event.id; block.setAttribute('role','status'); block.textContent = text; $('events').append(block);
   } else if (kind === 'agent') {
     // System Orchestration shows these per agent; the runner transcript keeps a compact trail.
-    const block = el('div','clash-turn'); block.setAttribute('role','status'); block.textContent = [text,typeof event.summary === 'string' ? event.summary : ''].filter(Boolean).join('\n'); $('events').append(block);
+    const block = el('div','clash-turn'); block.dataset.eventId = event.id; block.setAttribute('role','status'); block.textContent = [text,typeof event.summary === 'string' ? event.summary : ''].filter(Boolean).join('\n'); $('events').append(block);
   } else if (['user','text','assistant','error','result'].includes(kind)) {
     const normalized = text.trim();
     if (kind === 'result' && state.assistantTexts.has(normalized)) return;
     if (['text','assistant','result'].includes(kind)) state.assistantTexts.add(normalized);
     const previous = $('events').lastElementChild;
-    if (kind === 'error' && previous?.classList.contains('error') && previous.classList.contains('message') && previous.dataset.provider === String(event.provider || '')) { previous.setAttribute('aria-atomic','false'); previous.append(el('pre','message-body',text)); return; }
-    const type = kind === 'text' ? 'assistant' : kind; const block = el('article',`message ${type}`); block.dataset.provider = String(event.provider || ''); const heading = el('div','message-label');
+    if (kind === 'error' && previous?.classList.contains('error') && previous.classList.contains('message') && previous.dataset.provider === String(event.provider || '')) { previous.setAttribute('aria-atomic','false'); previous.append(el('pre','message-body',text)); closeAborted(event); return; }
+    const type = kind === 'text' ? 'assistant' : kind; const block = el('article',`message ${type}`); block.dataset.provider = String(event.provider || ''); block.dataset.eventId = event.id; const heading = el('div','message-label');
     const tagged = typeof event.provider === 'string' && event.provider ? `${providerFor(event.provider)?.name || event.provider}${typeof event.role === 'string' && event.role ? ` · ${humanLabel(event.role)}` : ''}${Number.isInteger(event.round) && event.round > 0 ? ` · round ${event.round}` : ''}` : '';
     const label = kind === 'user' ? 'You' : kind === 'error' ? `Session error${tagged ? ` · ${tagged}` : ''}` : kind === 'result' ? 'Result' : tagged || providerFor(state.selected?.provider)?.name || 'Assistant';
     heading.append(el('span','avatar',kind === 'user' ? 'Y' : kind === 'error' ? '!' : 'AI'),document.createTextNode(label)); block.append(heading,el('pre','message-body',['text','assistant','result'].includes(kind) ? withoutMemoryDraft(text,!state.selected?.brain || brainReviewed(state.selected.brain)) : text));
@@ -1294,18 +1322,18 @@ function appendEvent(event) {
       }
       block.append(files);
     }
-    if (kind === 'error') block.setAttribute('role','alert'); $('events').append(block);
-  } else if (['tool','status','usage','session','fleet_stage','fleet_reviewer','agent_activity'].includes(kind)) {
-    const block = el('details','activity'); const label = kind === 'tool' ? `Tool activity${typeof event.provider === 'string' && event.provider ? ` · ${providerFor(event.provider)?.name || event.provider}` : ''}${typeof event.name === 'string' ? ` · ${event.name}` : ''}` : kind === 'fleet_reviewer' ? `Reviewer · ${fleetLensName(event.lens)}` : kind === 'agent_activity' ? `Agent activity${typeof event.agent === 'string' ? ` · ${event.agent}` : ''}${typeof event.type === 'string' ? ` · ${humanLabel(event.type)}` : ''}` : ({status:'Runner status',usage:'Usage',session:'Native session',fleet_stage:'Fleet stage'})[kind]; block.append(el('summary','',label),el('pre','',text));
-    // Consecutive steps share one collapsed row, so a long run reads as a few lines instead of dozens.
-    block.dataset.step = kind === 'tool' ? typeof event.name === 'string' && event.name ? event.name : 'Tool' : kind === 'fleet_reviewer' ? 'Reviewer' : kind === 'agent_activity' ? typeof event.agent === 'string' && event.agent ? event.agent : 'Agent' : ({status:'Status',usage:'Usage',session:'Session',fleet_stage:'Stage'})[kind];
-    if (kind === 'status') { $('events').append(block); return; }
-    let group = $('events').lastElementChild;
-    if (!group?.classList.contains('activity-group')) { group = el('details','activity-group'); group.setAttribute('aria-live','off'); group.append(el('summary'),el('div','activity-steps')); $('events').append(group); }
-    group.lastElementChild.append(block);
-    const counts = {}; for (const step of group.lastElementChild.children) counts[step.dataset.step] = (counts[step.dataset.step] || 0) + 1;
-    const total = group.lastElementChild.children.length;
-    group.firstElementChild.textContent = `${total} ${total === 1 ? 'step' : 'steps'} · ${Object.entries(counts).map(([name,count]) => count > 1 ? `${name} ×${count}` : name).join(', ')}`;
+    if (kind === 'error') block.setAttribute('role','alert'); $('events').append(block); if (kind === 'error') closeAborted(event);
+  } else if (kind === 'tool') {
+    appendStep(event);
+  } else if (kind === 'status') {
+    if (event.outcome || /^Run \w+\. Process completion is not/.test(text)) closeSteps(event.launch_id);
+    let block = runView.statusNode(event);
+    if (!block) { block = el('details','activity'); block.append(el('summary','','Runner status'),el('pre','',text)); }
+    block.dataset.eventId = event.id; $('events').append(block);
+  } else if (['usage','session','fleet_stage','fleet_reviewer','agent_activity'].includes(kind)) {
+    const block = el('details','activity'); const label = kind === 'fleet_reviewer' ? `Reviewer · ${fleetLensName(event.lens)}` : kind === 'agent_activity' ? `Agent activity${typeof event.agent === 'string' ? ` · ${event.agent}` : ''}${typeof event.type === 'string' ? ` · ${humanLabel(event.type)}` : ''}` : ({usage:'Usage',session:'Native session',fleet_stage:'Fleet stage'})[kind]; block.append(el('summary','',label),el('pre','',text));
+    block.dataset.eventId = event.id; const group = stepGroup(); group.lastElementChild.append(block);
+    countStep(group,kind === 'fleet_reviewer' ? 'Reviewer' : kind === 'agent_activity' ? typeof event.agent === 'string' && event.agent ? event.agent : 'Agent' : ({usage:'Usage',session:'Session',fleet_stage:'Stage'})[kind]);
   }
 }
 async function pollSession(epoch) {
@@ -1321,15 +1349,17 @@ async function pollSession(epoch) {
       upsert(data.session); if (restore) applySessionSettings(data.session);
       if (ended) memoryUseSessionEnded(data.session.project_id);
     }
-    for (const event of data.events || []) appendEvent(event);
-    showError('events-error',''); state.loading = false; updateControls();
+    // One page is folded into the run model event by event, then drawn once; history pages are drawn without motion.
+    const events = data.events || []; runView.begin(events.length);
+    for (const event of events) appendEvent(event);
+    runView.end(events.length); runView.connection(true); showError('events-error',''); state.loading = false; updateControls();
     if (atBottom) conversation.scrollTop = conversation.scrollHeight;
     // A completed run may still have more than one page of recorded events.
     if ((data.events || []).length === 250) state.pollTimer = setTimeout(() => pollSession(epoch),0);
     else if (active(state.selected)) state.pollTimer = setTimeout(() => pollSession(epoch),1000);
   } catch (error) {
     if (error.name === 'AbortError' || epoch !== state.epoch) return;
-    state.loading = false; showError('events-error',textError(error)); updateControls();
+    state.loading = false; showError('events-error',textError(error)); if (error.status === 0) runView.connection(false); updateControls();
     if (active(state.selected) && ![401,403,404].includes(error.status)) state.pollTimer = setTimeout(() => pollSession(epoch),2500);
   } finally { if (state.pollController === controller) state.pollController = null; }
 }
@@ -1340,7 +1370,8 @@ async function selectSession(id) {
   saveSessionPreferences(); ++preferenceEpoch; restoringSessionPreferences = false;
   // The list holds summaries; a session's settings come from its full record, which the first poll brings.
   const listed = state.sessions.find(item => item.id === id);
-  stopPolling(); const epoch = ++state.epoch; state.selectedId = id; state.selected = listed && !listed.summary ? listed : null; state.eventIds.clear(); state.assistantTexts.clear(); state.loading = true;
+  stopPolling(); const epoch = ++state.epoch; state.selectedId = id; state.selected = listed && !listed.summary ? listed : null; state.eventIds.clear(); state.assistantTexts.clear(); state.stepCalls.clear(); state.loading = true;
+  runView.reset(id);
   resetFleetProgress();
   $('events').replaceChildren(); $('prompt').value = ''; showError('composer-error',''); showError('events-error','');
   if (state.selected) applySessionSettings(state.selected);
@@ -1350,7 +1381,7 @@ $('session-form').addEventListener('submit',async event => {
   event.preventDefault(); if ($('send').disabled || state.pending || isFleetSession(state.selected)) return;
   const prompt = $('prompt').value.trim(); const followup = Boolean(state.selectedId); state.pending = followup ? 'followup' : 'create'; showError('composer-error',''); updateControls();
   const turn = {prompt,agents_enabled:$('agents-enabled').checked,agent_count:$('agent-count').valueAsNumber,model_routing:modelRouting(),...(followup && $('workflow').value === 'native' && modelRouting() ? {mode:$('mode').value} : {}),...($('workflow').value === 'sdd' ? {sdd:sddSettings()} : {}),...(clashSelected() ? {clash:clashSettings()} : followup ? {clash:null} : {}),model:fleetDryRun() ? null : selectedModel(),thinking_effort:fleetDryRun() ? null : $('thinking-effort').value || null};
-  const body = followup ? turn : {...turn,budgets:sessionBudgets(),project_id:$('project').value,provider:$('provider').value,mode:$('mode').value,workflow:$('workflow').value,project_context:$('project-context').checked,workspace:$('workspace').value,...($('workspace').value === 'worktree' && $('worktree-branch').value.trim() ? {worktree_branch:$('worktree-branch').value.trim()} : {}),...(fleetSelected() ? {fleet:fleetSettings()} : {}),...(brainLinkActive() ? {brain:brainLinkConfig()} : {})};
+  const body = followup ? turn : {...turn,budgets:sessionBudgets(),project_id:$('project').value,provider:$('provider').value,mode:$('mode').value,workflow:$('workflow').value,project_context:true,workspace:$('workspace').value,...($('workspace').value === 'worktree' && $('worktree-branch').value.trim() ? {worktree_branch:$('worktree-branch').value.trim()} : {}),...(fleetSelected() ? {fleet:fleetSettings()} : {}),...(brainLinkActive() ? {brain:brainLinkConfig()} : {})};
   try {
     if (attachedFiles.length) body.attachments = await Promise.all(attachedFiles.map(encodeAttachment));
     const data = await api(followup ? `/api/sessions/${encodeURIComponent(state.selectedId)}/messages` : '/api/sessions',{method:'POST',body});
