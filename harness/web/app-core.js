@@ -708,7 +708,7 @@ async function bootstrap() {
 }
 $('reconnect').addEventListener('click',bootstrap);
 const sessionPreferencesKey = 'harness.sessions.preferences.v1';
-const sessionPreferenceFields = ['provider','workflow','mode','agents-enabled','agent-count','workspace','worktree-branch','sdd-feature','sdd-phase','clash-enabled','clash-challenger','clash-rounds','fleet-dry-run','fleet-budget','fleet-worker-timeout','brain-link-enabled','brain-link-kind','brain-link-review','brain-link-task-id','brain-link-goal','brain-link-query',...['usd','tokens','seconds'].flatMap(key => ['session-budgets-'+key,'session-budgets-agent-'+key])];
+const sessionPreferenceFields = ['provider','workflow','mode','agents-enabled','agent-count','workspace','worktree-branch','sdd-feature','sdd-phase','clash-enabled','clash-challenger','clash-rounds','fleet-dry-run','fleet-budget','fleet-worker-timeout','brain-link-kind','brain-link-review','brain-link-task-id','brain-link-goal','brain-link-query',...['usd','tokens','seconds'].flatMap(key => ['session-budgets-'+key,'session-budgets-agent-'+key])];
 let sessionPreferencesReady = false, sessionDraftProject = null, defaultSessionPreferences = null, restoringSessionPreferences = false, preferenceEpoch = 0;
 function readSessionPreferences() {
   try {
@@ -726,7 +726,7 @@ function captureSessionPreferences() {
 }
 function saveSessionPreferences(projectId = sessionDraftProject || $('project').value) {
   if (!sessionPreferencesReady || restoringSessionPreferences || !state.bootstrap) return;
-  if (!state.selectedId && $('brain-link-enabled').checked && brainLinkStrict() && (brainLinkDraft.loading || brainLinkDraft.error)) return;
+  if (!state.selectedId && brainLinkStrict() && (brainLinkDraft.loading || brainLinkDraft.error)) return;
   if (state.selectedId) projectId = $('project').value;
   if (!projectFor(projectId)) return;
   const saved = readSessionPreferences();
@@ -742,10 +742,10 @@ async function restoreProjectPreferences(projectId) {
   try {
     resetBrainLink();
     for (const draft of [defaultSessionPreferences,saved]) {
-      // A draft saved before project memory ran by itself says "not linked" for nearly everyone; it keeps the new default.
+      // A draft saved before project memory ran by itself chose an existing task for nearly everyone; it keeps the new default.
       const before = draft?.fields && !('brain-link-review' in draft.fields);
       for (const id of sessionPreferenceFields) {
-        if (before && ['brain-link-enabled','brain-link-kind'].includes(id)) continue;
+        if (before && id === 'brain-link-kind') continue;
         const input = $(id), value = draft?.fields?.[id];
         if (input.type === 'checkbox') { if (typeof value === 'boolean') input.checked = value; }
         else if (typeof value === 'string' && value.length <= (input.maxLength > 0 ? input.maxLength : 4000)) {
@@ -759,22 +759,20 @@ async function restoreProjectPreferences(projectId) {
     refreshModelChoices(text(draft?.model),text(draft?.effort));
     fleetUi.lenses = new Set((Array.isArray(draft?.lenses) ? draft.lenses : []).filter(id => (fleetMetadata().lenses || []).some(lens => lens.id === id))); renderFleetLenses();
     loadProjectGit(true); updateControls();
-    if ($('brain-link-enabled').checked) {
-      await loadBrainLinkTasks(true);
-      if (epoch !== preferenceEpoch || state.selectedId) return;
-      // The root and task are this project's own choices; another project's defaults name neither.
-      const own = saved && typeof saved === 'object' ? saved : null;
-      if (own?.bank && ![...$('brain-link-bank').options].some(option => option.value === own.bank)) {
-        // A named task must not silently move to another root; the default just uses the root the project has.
-        if (brainLinkStrict()) { $('brain-link-bank').value = ''; $('brain-link-task').value = ''; brainLinkDraft.error = 'The saved knowledge root is unavailable. Choose a root to continue.'; }
-        updateControls(); return;
-      }
-      if (typeof own?.bank === 'string' && [...$('brain-link-bank').options].some(option => option.value === own.bank) && $('brain-link-bank').value !== own.bank) { $('brain-link-bank').value = own.bank; await loadBrainLinkTasks(); }
-      if (epoch !== preferenceEpoch || state.selectedId) return;
-      // A missing saved task must not silently select a different task.
-      $('brain-link-task').value = typeof own?.task === 'string' ? own.task : '';
-      updateControls();
+    await loadBrainLinkTasks(true);
+    if (epoch !== preferenceEpoch || state.selectedId) return;
+    // The root and task are this project's own choices; another project's defaults name neither.
+    const own = saved && typeof saved === 'object' ? saved : null;
+    if (own?.bank && ![...$('brain-link-bank').options].some(option => option.value === own.bank)) {
+      // A named task must not silently move to another root; the default just uses the root the project has.
+      if (brainLinkStrict()) { $('brain-link-bank').value = ''; $('brain-link-task').value = ''; brainLinkDraft.error = 'The saved knowledge root is unavailable. Choose a root to continue.'; }
+      updateControls(); return;
     }
+    if (typeof own?.bank === 'string' && [...$('brain-link-bank').options].some(option => option.value === own.bank) && $('brain-link-bank').value !== own.bank) { $('brain-link-bank').value = own.bank; await loadBrainLinkTasks(); }
+    if (epoch !== preferenceEpoch || state.selectedId) return;
+    // A missing saved task must not silently select a different task.
+    $('brain-link-task').value = typeof own?.task === 'string' ? own.task : '';
+    updateControls();
   } finally { if (epoch === preferenceEpoch) { restoringSessionPreferences = false; saveSessionPreferences(); } }
 }
 async function restoreSessionPreferences() {
@@ -1383,7 +1381,7 @@ $('session-form').addEventListener('submit',async event => {
   event.preventDefault(); if ($('send').disabled || state.pending || isFleetSession(state.selected)) return;
   const prompt = $('prompt').value.trim(); const followup = Boolean(state.selectedId); state.pending = followup ? 'followup' : 'create'; showError('composer-error',''); updateControls();
   const turn = {prompt,agents_enabled:$('agents-enabled').checked,agent_count:$('agent-count').valueAsNumber,model_routing:modelRouting(),...(followup && $('workflow').value === 'native' && modelRouting() ? {mode:$('mode').value} : {}),...($('workflow').value === 'sdd' ? {sdd:sddSettings()} : {}),...(clashSelected() ? {clash:clashSettings()} : followup ? {clash:null} : {}),model:fleetDryRun() ? null : selectedModel(),thinking_effort:fleetDryRun() ? null : $('thinking-effort').value || null};
-  const body = followup ? turn : {...turn,budgets:sessionBudgets(),project_id:$('project').value,provider:$('provider').value,mode:$('mode').value,workflow:$('workflow').value,project_context:$('brain-link-enabled').checked,workspace:$('workspace').value,...($('workspace').value === 'worktree' && $('worktree-branch').value.trim() ? {worktree_branch:$('worktree-branch').value.trim()} : {}),...(fleetSelected() ? {fleet:fleetSettings()} : {}),...(brainLinkActive() ? {brain:brainLinkConfig()} : {})};
+  const body = followup ? turn : {...turn,budgets:sessionBudgets(),project_id:$('project').value,provider:$('provider').value,mode:$('mode').value,workflow:$('workflow').value,project_context:true,workspace:$('workspace').value,...($('workspace').value === 'worktree' && $('worktree-branch').value.trim() ? {worktree_branch:$('worktree-branch').value.trim()} : {}),...(fleetSelected() ? {fleet:fleetSettings()} : {}),...(brainLinkActive() ? {brain:brainLinkConfig()} : {})};
   try {
     if (attachedFiles.length) body.attachments = await Promise.all(attachedFiles.map(encodeAttachment));
     const data = await api(followup ? `/api/sessions/${encodeURIComponent(state.selectedId)}/messages` : '/api/sessions',{method:'POST',body});

@@ -65,12 +65,12 @@ async (page) => {
     await tab.locator('#option-helpers').click(); await tab.locator('#agents-enabled').check();
     await tab.locator('#option-budgets').click();
     await tab.locator('#session-budgets-agent-tokens').fill('321');
-    // Project memory is on by default; a named task under review is the choice that has to survive.
-    await tab.locator('#option-brain').click(); check(await tab.locator('#brain-link-enabled').isChecked(),'Project memory must be on by default');
+    // Project memory is always on; a named task under review is the choice that has to survive.
+    await tab.locator('#option-brain').click(); check(await tab.locator('#brain-link-enabled').count() === 0,'Project memory must have no off switch');
     await tab.locator('#brain-link-bank').selectOption('bank-two'); await tab.locator('#brain-link-kind').selectOption('existing');
     await tab.locator('#brain-link-task').selectOption('task-two');
     await tab.locator('#brain-link-review').check(); await tab.locator('#brain-link-query').fill('Saved context query');
-    const extras = () => tab.evaluate(() => Object.fromEntries(['sdd-feature','sdd-phase','routing-plan-model','routing-edit-model','routing-plan-thinking-effort','routing-edit-thinking-effort','brain-link-bank','brain-link-kind','brain-link-task','brain-link-query','session-budgets-agent-tokens'].map(id=>[id,document.getElementById(id).value]).concat(['model-routing-enabled','brain-link-enabled','brain-link-review'].map(id=>[id,document.getElementById(id).checked]))));
+    const extras = () => tab.evaluate(() => Object.fromEntries(['sdd-feature','sdd-phase','routing-plan-model','routing-edit-model','routing-plan-thinking-effort','routing-edit-thinking-effort','brain-link-bank','brain-link-kind','brain-link-task','brain-link-query','session-budgets-agent-tokens'].map(id=>[id,document.getElementById(id).value]).concat(['model-routing-enabled','brain-link-review'].map(id=>[id,document.getElementById(id).checked]))));
     const expectedExtras = await extras();
     await tab.reload(); await ready();
     check(JSON.stringify(await extras()) === JSON.stringify(expectedExtras),'Routing, SDD, per-agent budgets and Brain selections must survive reload');

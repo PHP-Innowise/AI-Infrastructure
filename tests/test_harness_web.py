@@ -338,12 +338,12 @@ assert.equal(stopped.at(-1).textContent,'Stopped: Stale revision. What is listed
         subprocess.run([shutil.which('node'), '-e', script], check=True, capture_output=True, text=True)
 
     @unittest.skipUnless(shutil.which('node'), 'Project memory composer check requires Node')
-    def test_project_memory_is_on_by_default_and_never_blocks_a_project_without_it(self):
+    def test_project_memory_is_always_on_and_never_blocks_a_project_without_it(self):
         page = ui_script()
         source = page[page.index('\nfunction brainLinkConfig('):page.index('\nasync function loadBrainLinkTasks(')]
         script = """const assert = require('node:assert/strict');
 const control = value => ({value, checked:false, disabled:false, hidden:false, textContent:''});
-const fields = {}; for (const id of ['brain-link-enabled','brain-link-review','brain-link-kind','brain-link-bank','brain-link-task','brain-link-task-id',
+const fields = {}; for (const id of ['brain-link-review','brain-link-kind','brain-link-bank','brain-link-task','brain-link-task-id',
   'brain-link-goal','brain-link-query','brain-link-refresh','brain-link-config','brain-link-fields','brain-link-summary','brain-link-mode-note',
   'brain-link-existing-field','brain-link-id-field','brain-link-goal-field','brain-link-query-field','brain-link-availability','project']) fields[id] = control('');
 const $ = id => fields[id]; const errors = []; const showError = (id, text) => { if (text) errors.push(text); };
@@ -351,7 +351,6 @@ const state = {bootstrap:{}, authFailed:false, selectedId:null, pending:null}; l
 const brainLinkDraft = {epoch:0, projectId:null, bankId:null, banks:[], tasks:[], meta:null, loading:false, error:'', controller:null};
 """ + source + """
 fields.project.value = 'p1'; resetBrainLink();
-assert.equal(fields['brain-link-enabled'].checked,true);
 assert.deepEqual(brainLinkConfig(),{bank:'',review:false,auto:true});
 // Until the project's memory is read, a new session waits rather than starting without it; nothing is flagged.
 Object.assign(brainLinkDraft,{projectId:'p1', loading:true});
@@ -376,8 +375,9 @@ fields['brain-link-task-id'].value = 'TASK-9'; fields['brain-link-goal'].value =
 assert.deepEqual(brainLinkConfig(),{bank:'memory-bank',review:false,task_id:'TASK-9',create:true,goal:'Ship it'});
 // A named task is a choice that has to hold: a project without a runtime refuses it instead of dropping it.
 brainLinkDraft.meta = {runtime_available:false}; assert.equal(updateBrainLinkControls(),false); assert.equal(brainLinkActive(),true);
-fields['brain-link-enabled'].checked = false; assert.equal(updateBrainLinkControls(),true); assert.equal(brainLinkActive(),false);
-assert.equal(fields['brain-link-summary'].textContent,'Off');
+assert.match(fields['brain-link-availability'].textContent,/Choose New task from the first message/);
+// Back to the default, the same project starts with its reference files: there is no off switch to reach for.
+fields['brain-link-kind'].value = 'auto'; assert.equal(updateBrainLinkControls(),true); assert.equal(fields['brain-link-summary'].textContent,'Project files');
 // Sessions linked before memory ran by itself were linked for review.
 assert.equal(brainReviewed({task_id:'T'}),true); assert.equal(brainReviewed({review:false}),false);
 """

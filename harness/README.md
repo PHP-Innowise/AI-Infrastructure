@@ -348,9 +348,8 @@ another project while a session is open starts a new session draft for it.
   [Context window](#context-window).
 - **Project context:** availability and size of a fixed set of project
   instructions and references: `AGENTS.md`, `CLAUDE.md`, `README.md`,
-  `project-brain/README.md` and `specs/MANIFEST.md`. There is no separate switch
-  for them; **Use project memory** decides what the project contributes (see
-  [Project memory](#project-memory)). A turn whose prompt carries a memory capsule
+  `project-brain/README.md` and `specs/MANIFEST.md`. There is no switch for
+  them: they are part of project memory (see [Project memory](#project-memory)). A turn whose prompt carries a memory capsule
   sends no excerpts. Without one, the first launch of a conversation sends up to
   3 KB of each file the provider does not load by itself (Claude loads
   `CLAUDE.md`, Codex `AGENTS.md`); a resumed conversation already holds them.
@@ -978,8 +977,8 @@ python3 tests/harness_memory_demo.py /tmp/shop-api
 
 ### Project memory
 
-A new session uses project memory by default; the **Memory** chip shows
-**Automatic**. Nothing waits for a person. The first message names a new Brain task
+Every new session uses project memory, and there is no switch to turn it off;
+the **Memory** chip shows **Automatic**. Nothing waits for a person. The first message names a new Brain task
 (`harness/<first words>-<6 hex>`, its goal the message's first line). Every message,
 the first and each follow-up, is the retrieval query for its own turn: the server
 runs the project's `context.py refresh` with the provider as host, so instruction
@@ -1009,8 +1008,7 @@ or held back. A run that fails or is cancelled saves nothing.
 Choose an existing task, or a new task with your own ID and goal, under **Memory**;
 memory still runs by itself for it. In a project without a governed context
 runtime, sessions start with excerpts of the project's reference files instead of
-retrieved memory, unless a task was chosen explicitly. Turn **Use project memory**
-off to start with neither.
+retrieved memory, unless a task was chosen explicitly.
 
 #### Review by hand
 

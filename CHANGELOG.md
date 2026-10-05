@@ -72,7 +72,7 @@ edition's own files remain in that edition's changelog.
   File contents, diffs, tool output and reasoning are never stored.
   `tests.test_harness_run_activity` joins the CI Harness job.
 
-- Harness: project memory runs by itself. A new session uses it by default and
+- Harness: project memory runs by itself. Every new session uses it and
   nothing waits for a person: the first message names a new Brain task, every
   message is the retrieval query for its own turn (`context.py refresh` with
   the provider as host, manifest in the ignored local store), the capsule goes
@@ -84,13 +84,14 @@ edition's own files remain in that edition's changelog.
   costs the turn its memory, never the turn, and the conversation shows a line
   for what each turn carried and saved. Review by hand (prepare, approve, Save
   to memory) is an opt-in, and sessions linked before this keep it. A project
-  without a governed runtime starts its sessions without memory instead of
-  refusing them. Memory use names these retrievals Harness, and the Claude and
+  without a governed runtime starts its sessions with its reference files
+  instead of refusing them. Memory use names these retrievals Harness, and the Claude and
   Codex read hooks, which call `refresh`, by their host instead of CLI.
 
-- Harness: the **Project context** chip is gone; **Use project memory** decides
-  what the project contributes. A turn whose prompt carries a memory capsule no
-  longer also gets the reference-file excerpts; without a capsule (no governed
+- Harness: the **Project context** chip and the **Use project memory** checkbox
+  are gone. Project memory is always on and also decides what the project
+  contributes: a turn whose prompt carries a memory capsule no longer also gets
+  the reference-file excerpts; without a capsule (no governed
   runtime, or retrieval failed) they stand in, sent once per native
   conversation instead of on every resume, and leave out the instruction file
   the provider loads by itself (`CLAUDE.md` for Claude, `AGENTS.md` for Codex).
