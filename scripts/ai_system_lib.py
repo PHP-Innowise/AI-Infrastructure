@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections import deque
-from datetime import date, datetime, timezone
+from datetime import date
 from functools import lru_cache
 import hashlib
 import importlib.util
@@ -466,7 +466,9 @@ class System:
                         or "auto-promoted" in items(meta.get("tags", []))
                         or meta.get("superseded_by") is not None):
                     raise SystemError("ineligible_memory")
-                today = datetime.now(timezone.utc).date()
+                # The native contract checked below judges the same dates by the local calendar, as the
+                # Memory Bank runtime does; one clock decides, so a chunk is never usable by one and stale by the other.
+                today = date.today()
                 boundaries = [date.fromisoformat(meta["review_after"])]
                 if meta.get("valid_to") is not None:
                     boundaries.append(date.fromisoformat(meta["valid_to"]))

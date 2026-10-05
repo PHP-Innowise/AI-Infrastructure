@@ -9,7 +9,8 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
-from datetime import datetime, timedelta, timezone
+from datetime import date, timedelta
+import time
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -286,14 +287,32 @@ class SystemTests(unittest.TestCase):
         path.parent.mkdir(parents=True)
         self.update("orders", lambda d: d["sources"].append({"path": str(path.relative_to(root)), "kind": "memory"}))
         metadata = self.memory_metadata(root)
-        now = datetime.now(timezone.utc)
-        metadata["valid_to"] = now.date().isoformat()
+        today = date.today()
+        metadata["valid_to"] = today.isoformat()
         path.write_text("---\n" + json.dumps(metadata) + "\n---\nCurrently usable.")
         plan = self.load().plan("orders", "chg-001", ["orders"])
         self.assertTrue(any(s["kind"] == "memory" for s in plan["context"]["sources"]))
-        with mock.patch.object(ai, "datetime") as clock:
-            clock.now.return_value = now + timedelta(days=1)
+
+        class Tomorrow(date):
+            @classmethod
+            def today(cls):
+                return today + timedelta(days=1)
+
+        # The adapter and the native contract it applies read one local calendar.
+        with mock.patch.object(ai, "date", Tomorrow), mock.patch.object(ai.memory_contract(), "date", Tomorrow):
             self.assertIn("memory_ineligible", [c["reason"] for c in self.load().verify(plan)["changed"]])
+
+    @unittest.skipUnless(hasattr(time, "tzset"), "needs POSIX TZ handling")
+    def test_memory_dates_follow_the_local_calendar_whatever_the_utc_date(self):
+        # A day behind UTC and a day ahead of it, at all but one minute of the day (an offset of a
+        # full day cannot be represented): a chunk valid through today stays usable and expires
+        # tomorrow by the same calendar the Memory Bank uses.
+        test = "tests.test_ai_system.SystemTests.test_memory_expiry_invalidates_plan_without_file_change"
+        for zone in ("AAA+23:59", "AAA-23:59"):
+            with self.subTest(zone=zone):
+                result = subprocess.run([sys.executable, "-m", "unittest", test], cwd=ROOT, capture_output=True,
+                                        text=True, env={**os.environ, "TZ": zone}, timeout=120)
+                self.assertEqual(0, result.returncode, result.stderr[-2000:])
 
     def test_malformed_enum_is_a_validation_error(self):
         self.service("orders")

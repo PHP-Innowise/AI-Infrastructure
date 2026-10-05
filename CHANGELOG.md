@@ -26,6 +26,14 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- System Orchestration judges a memory chunk's `review_after` and `valid_to`
+  by the local calendar, the one the native Memory Bank contract it applies
+  uses. It read the UTC date, so west of UTC a chunk valid through today was
+  dropped from plans in the local evening while the Memory Bank still served
+  it. Two tests no longer fail around local midnight: the memory expiry test
+  (UTC date against the contract's local one) and the Memory use history test
+  (two retrievals an hour apart crossed into the previous day before 01:00).
+
 - Harness: **Run view**. While a Workspace, Plan, Review or SDD turn runs, a
   strip above the composer shows what the agent is doing now: the tool, its
   target and how long the call has been open, or *Model's turn*. It also shows
