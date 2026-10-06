@@ -17,7 +17,7 @@ under the required task staging root, while resolving citations against the
 real target. They are published once at the target root only after the complete
 bundle passes.
 
-- **`memory-bank/`** - the durable, indexed shared-memory layer, plus the **context-brain runtime** under `memory-bank/scripts/`: `context.py` (the CLI facade), `brain_runtime.py` (governed Project Brain runtime), `context_retrieval.py` (local SQLite/BM25 retrieval), and `validate.py` (the bank validator). The runtime is dependency-free (standard library only) and stack-agnostic.
+- **`memory-bank/`** - the durable, indexed shared-memory layer, plus the **context-brain runtime** under `memory-bank/scripts/`: `context.py` (the CLI facade), `brain_runtime.py` (governed Project Brain runtime), `context_retrieval.py` (local SQLite/BM25 retrieval), `validate.py` (the bank validator), and `workspace_roots.py` (where tooling, project and state live - one directory in an installed project). The runtime is dependency-free (standard library only) and stack-agnostic.
 - **`project-brain/`** - the governed control plane for active work: dynamic records (tasks, findings, bugs, incidents, decisions, events), handoffs, the append-only agent message channel that orchestrated flows write to, retrieval manifests, promotion proposals, schemas, and `PROTOCOL.md`. The runtime under `memory-bank/scripts/` operates it.
 
 `skill-forge` separately generates the operational skills that drive this layer in every selected edition (`memory-bank`, `project-brain`, `checkpoint`, `memory` - see `skill-forge/references/php-process-skills.md`), and `hook-forge` generates the working-memory hooks (`working-memory-read.sh` / `working-memory-write.sh`) that call `memory-bank/scripts/context.py refresh` / `turn` automatically. `assets/runtime-contract.json` is the canonical machine-readable source for the quartet's paths, SQLite checkpoint/turn tables, creatable artifacts, command forms, and ownership split. The paths this skill creates are the contract those hooks and skills depend on - never rename them.
@@ -34,7 +34,7 @@ Into the required generation root, create:
 - `memory-bank/README.md`, `memory-bank/INDEX.md`, `memory-bank/.memory-counter` (written fresh)
 - `memory-bank/runtime-contract.json` (copied verbatim from `assets/runtime-contract.json`)
 - `memory-bank/templates/chunk.md` (copied verbatim from `assets/templates/chunk.md`)
-- `memory-bank/scripts/context.py`, `memory-bank/scripts/brain_runtime.py`, `memory-bank/scripts/context_retrieval.py`, `memory-bank/scripts/validate.py` (copied verbatim from `assets/scripts/`)
+- `memory-bank/scripts/context.py`, `memory-bank/scripts/brain_runtime.py`, `memory-bank/scripts/context_retrieval.py`, `memory-bank/scripts/validate.py`, `memory-bank/scripts/workspace_roots.py` (copied verbatim from `assets/scripts/`)
 - `memory-bank/local/.gitkeep` (gitignored machine-local state: the disposable SQLite index `context.db`, turn buffers, ephemeral manifests)
 - `memory-bank/chunks/MEM-{NNNN}-{short-slug}.md` per seeded chunk (starting at `MEM-0001`)
 
@@ -115,7 +115,7 @@ All other `runtime.json` values are shipped defaults (`mode: governed`, `automat
 - [MEM-0001: title (source)]
 - ...
 
-**Runtime:** memory-bank/scripts/ (context.py, brain_runtime.py, context_retrieval.py, validate.py - verbatim)
+**Runtime:** memory-bank/scripts/ (context.py, brain_runtime.py, context_retrieval.py, validate.py, workspace_roots.py - verbatim)
 **Project Brain:** project-brain/ skeleton (framework slug: [slug], canonical edition: [.agents/.claude/.cursor])
 **Counter:** [value]
 **validate.py:** [pass/fail] | **context.py validate:** [pass/fail] | **context.py status:** [pass/fail]

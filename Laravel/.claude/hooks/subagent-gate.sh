@@ -58,6 +58,18 @@ SUB_TYPE=$(printf '%s' "$INPUT" | extract_key subagent_type 2>/dev/null | head -
 [ -z "$SUB_TYPE" ] && exit 0
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+# Installed, the accelerator, the project and its state are all ROOT_DIR.
+# Attached - a launcher lends this clone's edition to a project and names it
+# in ACCELERATOR_HOME - the project and the state directory are the
+# launcher's, so nothing is written into the clone or the project.
+PROJECT_DIR=$ROOT_DIR
+STATE_DIR=$ROOT_DIR
+accelerator_absolute() { case "$1" in /*|[A-Za-z]:[\\/]*) return 0 ;; esac; return 1; }
+if accelerator_absolute "${ACCELERATOR_STATE_DIR:-}" && accelerator_absolute "${ACCELERATOR_PROJECT_DIR:-}" \
+  && [ "$(cd "${ACCELERATOR_HOME:-/nonexistent}" 2>/dev/null && pwd -P)" = "$(cd "$ROOT_DIR" && pwd -P)" ]; then
+  PROJECT_DIR=$ACCELERATOR_PROJECT_DIR
+  STATE_DIR=$ACCELERATOR_STATE_DIR
+fi
 AGENTS_DIR="$ROOT_DIR/.claude/agents"
 
 # Roster = every frontmatter `name:` in the accelerator's agent definitions.
@@ -96,8 +108,8 @@ if printf '%s' "$ROSTER" | grep -qxF -- "$SUB_TYPE"; then
   # Serialize write-capable agents: one at a time per repository. The lock
   # is cleared by subagent-dispatch.sh when the holder finishes and expires
   # by TTL, so a crashed run cannot deadlock delegation.
-  LOCK_ROOT=$(git -C "$ROOT_DIR" rev-parse --show-toplevel 2>/dev/null \
-    || printf '%s' "$ROOT_DIR")
+  LOCK_ROOT=$(git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null \
+    || printf '%s' "$PROJECT_DIR")
   LOCK_KEY=$(printf '%s' "$LOCK_ROOT" | cksum | cut -d' ' -f1)
   LOCK_DIR="${SUBAGENT_WRITE_LOCK_DIR:-/tmp}"
   case "$LOCK_DIR" in
