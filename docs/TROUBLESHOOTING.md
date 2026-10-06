@@ -123,7 +123,9 @@ commands are not intercepted.
    ```
 
 4. Confirm `.codex/hooks.json` is valid and scripts exist under
-   `.codex/hooks/`.
+   `.codex/hooks/`. Codex trusts each hook by the hash of its definition, so
+   after an update that changed a command, `/hooks` lists it for review and
+   it is skipped until trusted again.
 5. Run `bash -n` on each changed hook script and check executable bits.
 6. Review the hook README for payload compatibility with the installed Codex
    version.
@@ -478,7 +480,13 @@ blocked, or a hook times out.
 5. Compare the actual sanitized payload keys with the hook's extraction logic.
 6. Check timeout units: Cursor and Claude both use seconds. A value such as
    `5000` is a millisecond leftover and is not a valid Claude timeout.
-7. Check that Claude hook commands are bare script paths. An
+7. Check that hook commands reach the script from any directory. Claude
+   commands read `"${CLAUDE_PROJECT_DIR}"/.claude/hooks/<script>.sh`, and
+   Codex commands use the `sh -c` launcher that finds `.codex/hooks/` from
+   the session's directory; Cursor keeps bare `.cursor/hooks/<script>.sh`
+   because it runs project hooks from the project root. A bare relative path
+   on Claude Code or Codex exits 127 once the session is in a subdirectory,
+   and both hosts treat that as non-blocking: the guard silently stops. An
    `echo '$TOOL_INPUT' | <script>` wrapper passes the literal variable name
    instead of the payload, and the hook then exits 0 on every call.
 8. Check return-code semantics in the edition hook README.

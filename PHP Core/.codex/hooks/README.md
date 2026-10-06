@@ -32,8 +32,17 @@ No `matcher` is set on any group: each script self-filters on its input before d
 ## Reference
 
 - Codex configuration & hooks: https://developers.openai.com/codex/config-reference
+- Codex hooks (working directory, trust review): https://developers.openai.com/codex/hooks
 
 ## Wiring
+
+Every command in `.codex/hooks.json` is the same root-finding launcher; only the trailing script name changes:
+
+```sh
+sh -c 'd=$(pwd); until [ -z "$d" ] || [ -f "$d/.codex/hooks/$1" ]; do d=${d%/*}; done; exec "$d/.codex/hooks/$1"' sh bash-validator.sh
+```
+
+Codex runs hooks in the session's working directory through the user's login shell (`$SHELL -lc`) and exports no project-root variable, so a bare `.codex/hooks/<script>.sh` exits 127 whenever Codex starts in a subdirectory - a non-blocking failure that silently disables the guard. The launcher walks from that directory towards `/` and runs the nearest `.codex/hooks/<script>.sh`, so it works from any subdirectory, without Git, and when the project sits inside a larger repository. Handing the walk to `sh` keeps it independent of the login shell (bash, zsh, fish). Codex trusts each hook by the hash of its definition: after an update that changes these commands, the changed hooks stay skipped until you review and trust them again in `/hooks`.
 
 `working-memory-read.sh` and `working-memory-write.sh` are wired here to
 `UserPromptSubmit` and `Stop`, the same events they use under Claude Code.

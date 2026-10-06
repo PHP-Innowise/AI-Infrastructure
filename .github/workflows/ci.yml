@@ -154,6 +154,10 @@ jobs:
         run: python3 -m unittest tests.test_installation
       - name: Preserve framework-specific skill semantics
         run: python3 -m unittest tests.test_framework_semantics
+      - name: Hook wiring runs from any working directory
+        # A bare relative hook path exits 127 from a subdirectory, which
+        # Claude Code and Codex treat as non-blocking: the guard fails open.
+        run: python3 -m unittest tests.test_hook_wiring
       - name: Optional developer tooling stays out of the editions
         # The live code2prompt checks skip themselves here (no Rust toolchain);
         # what runs is the containment contract and the argv/exclude pins.

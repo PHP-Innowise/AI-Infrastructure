@@ -162,9 +162,24 @@ where supported, and `2` to block. Timeouts are seconds in both Cursor's
 field. Preserve the native values and schemas when synchronizing hooks.
 
 Claude Code delivers the tool-input JSON to a hook on stdin, so a hook command
-is the bare script path. Wrapping it as `echo '$TOOL_INPUT' | <script>` feeds
+is the script path itself. Wrapping it as `echo '$TOOL_INPUT' | <script>` feeds
 the hook the literal string `$TOOL_INPUT`, which every validator treats as an
 empty payload and passes.
+
+Each host runs a hook command from a different directory, so each wiring file
+anchors the script path its own way:
+
+| Host | Command form | Why |
+| --- | --- | --- |
+| Claude Code | `"${CLAUDE_PROJECT_DIR}"/.claude/hooks/<script>.sh` | Hooks run in the session's current directory, which follows every `cd`; Claude Code exports the project root as `CLAUDE_PROJECT_DIR` and asks for the placeholder double-quoted in shell form. |
+| Codex | `sh -c '...' sh <script>.sh` - a fixed launcher (spelled out in `.codex/hooks/README.md`) that execs the nearest `.codex/hooks/<script>.sh` at or above the session's directory | Codex runs hooks in the session cwd through `$SHELL -lc` and exports no project-root variable. The walk works from a subdirectory, without Git, and for a project nested in a larger repository, and `sh` keeps it independent of the login shell. |
+| Cursor | `.cursor/hooks/<script>.sh` | Cursor runs project hooks from the project root. |
+
+A bare relative path on Claude Code or Codex exits 127 as soon as the
+session's directory is not the project root, and both hosts treat every exit
+other than 2 as non-blocking, so a safety hook would stop guarding without an
+error. `tests/test_hook_wiring.py` runs every wired command from a nested
+directory to keep it that way.
 
 ## Claude Code Activation
 
@@ -223,7 +238,10 @@ project.
    are present.
 4. Open the skills menu or ask Codex to use a known skill such as `verify`,
    `memory`, or `project-brain`.
-5. Start a new session and confirm the metadata-only session hook runs.
+5. Review and trust the hooks in `/hooks`. Codex records trust against each
+   hook definition's hash, so a hook whose command changed in an update is
+   skipped until it is trusted again.
+6. Start a new session and confirm the metadata-only session hook runs.
 
 The shipped config does not require an MCP server. Do not add the commented
 MCP example unless a real workflow needs that server and the team has reviewed

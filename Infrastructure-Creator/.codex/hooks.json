@@ -1,19 +1,19 @@
 {
   "hooks": {
     "SessionStart": [
-      { "hooks": [ { "type": "command", "command": ".codex/hooks/local-context.sh" } ] }
+      { "hooks": [ { "type": "command", "command": "sh -c 'd=$(pwd); until [ -z \"$d\" ] || [ -f \"$d/.codex/hooks/$1\" ]; do d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh local-context.sh" } ] }
     ],
     "PreToolUse": [
       {
         "hooks": [
-          { "type": "command", "command": ".codex/hooks/bash-validator.sh" },
-          { "type": "command", "command": ".codex/hooks/file-naming-validator.sh" },
-          { "type": "command", "command": ".codex/hooks/subagent-gate.sh" }
+          { "type": "command", "command": "sh -c 'd=$(pwd); until [ -z \"$d\" ] || [ -f \"$d/.codex/hooks/$1\" ]; do d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh bash-validator.sh" },
+          { "type": "command", "command": "sh -c 'd=$(pwd); until [ -z \"$d\" ] || [ -f \"$d/.codex/hooks/$1\" ]; do d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh file-naming-validator.sh" },
+          { "type": "command", "command": "sh -c 'd=$(pwd); until [ -z \"$d\" ] || [ -f \"$d/.codex/hooks/$1\" ]; do d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh subagent-gate.sh" }
         ]
       }
     ],
     "PostToolUse": [
-      { "hooks": [ { "type": "command", "command": ".codex/hooks/loop-detection.sh" } ] }
+      { "hooks": [ { "type": "command", "command": "sh -c 'd=$(pwd); until [ -z \"$d\" ] || [ -f \"$d/.codex/hooks/$1\" ]; do d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh loop-detection.sh" } ] }
     ]
   }
 }

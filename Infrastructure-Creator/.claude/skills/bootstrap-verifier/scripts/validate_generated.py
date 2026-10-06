@@ -21,7 +21,11 @@ Checks:
   - Every hook wiring file (.claude/settings.json, .cursor/hooks.json,
     .codex/hooks.json) references only hook scripts that exist and are
     executable - every .sh token in a wired command is resolved, so an
-    interpreter-prefixed "bash .claude/hooks/x.sh" cannot hide a dead hook.
+    interpreter-prefixed "bash .claude/hooks/x.sh" cannot hide a dead hook -
+    and every Claude/Codex hook is anchored to the project root (hook-forge's
+    "${CLAUDE_PROJECT_DIR}"/ prefix and Codex launcher), because a bare
+    relative path exits 127 from a subdirectory and the host lets the call
+    through.
   - The seeded memory-bank passes its own scripts/validate.py.
   - The context-brain runtime is present (context.py, brain_runtime.py,
     context_retrieval.py, validate.py under memory-bank/scripts/) and the
@@ -139,6 +143,30 @@ EDITION_HOOK_WIRING = {
     "cursor": (".cursor/hooks", ".cursor/hooks.json"),
     "codex": (".codex/hooks", ".codex/hooks.json"),
 }
+
+# Root-anchored wiring forms (hook-forge step 9). Claude Code and Codex run a
+# hook command in the session's current directory, so a bare relative
+# ".claude/hooks/x.sh" exits 127 as soon as that directory is not the project
+# root - and both hosts treat any exit other than 2 as non-blocking, so the
+# guardrail silently stops guarding. Cursor runs project hooks from the
+# project root and keeps the bare form.
+#
+# Claude Code exports the project root to every hook as CLAUDE_PROJECT_DIR;
+# its docs ask for the placeholder in double quotes in shell form. The
+# unbraced spelling is the same expansion in the bash/Git Bash shell these
+# hooks need, so both are accepted.
+CLAUDE_HOOK_ROOT_PREFIXES = ('"${CLAUDE_PROJECT_DIR}"/', '"$CLAUDE_PROJECT_DIR"/')
+# Codex exports no project-root variable and runs the command through the
+# user's login shell ($SHELL -lc), so the wiring hands one fixed POSIX walk to
+# `sh`: from the cwd towards /, exec the nearest .codex/hooks/<script>. Only
+# the trailing script name varies; anything else is not this launcher.
+CODEX_HOOK_LAUNCHER = (
+    "sh -c 'd=$(pwd); until [ -z \"$d\" ] || [ -f \"$d/.codex/hooks/$1\" ]; "
+    "do d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh "
+)
+HOOK_SCRIPT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\.sh")
+# Editions whose host does not run hooks from the project root.
+ROOT_ANCHORED_EDITIONS = ("claude", "codex")
 
 # Edition -> (skills dir relative to target, has_agents, has_commands)
 EDITION_LAYOUT = {
@@ -503,6 +531,39 @@ def collect_wired_commands(node) -> list:
     return commands
 
 
+def resolve_wired_scripts(edition: str, command: str) -> tuple:
+    """(script paths relative to the target root, unanchored tokens).
+
+    Strips the documented root anchor before resolving, so the dead-hook check
+    sees the same `.claude/hooks/x.sh` path the anchor expands to. A token
+    that carries no anchor on an edition whose host runs hooks from the
+    session cwd is reported as unanchored; it is still resolved, so a bare
+    path to a missing script reports both problems.
+    """
+    stripped = command.strip()
+    if edition == "codex" and stripped.startswith(CODEX_HOOK_LAUNCHER):
+        name = stripped[len(CODEX_HOOK_LAUNCHER):]
+        if HOOK_SCRIPT_NAME.fullmatch(name):
+            return [f"{EDITION_HOOK_WIRING['codex'][0]}/{name}"], []
+        # Not a bare script name: fall through, so the token is resolved
+        # as written and reported, never trusted.
+    prefixes = CLAUDE_HOOK_ROOT_PREFIXES if edition == "claude" else ()
+    scripts: list = []
+    unanchored: list = []
+    for token in stripped.split():
+        if not token.endswith(".sh"):
+            continue
+        for prefix in prefixes:
+            if token.startswith(prefix):
+                scripts.append(token[len(prefix):])
+                break
+        else:
+            scripts.append(token)
+            if edition in ROOT_ANCHORED_EDITIONS:
+                unanchored.append(token)
+    return scripts, unanchored
+
+
 def validate_hook_wiring(
     target: Path, editions: list, files: dict, errors: list
 ) -> None:
@@ -510,6 +571,8 @@ def validate_hook_wiring(
 
     A wiring entry that points at a missing or non-executable file is a dead
     hook: the host tool fails the call silently and the guardrail never runs.
+    A Claude or Codex entry that is not anchored to the project root is dead
+    the moment the session's cwd is a subdirectory, for the same reason.
     """
     for edition in editions:
         _, wiring_rel = EDITION_HOOK_WIRING[edition]
@@ -527,11 +590,16 @@ def validate_hook_wiring(
             errors.append(f"{wiring_path}: no hook commands wired")
         for command in commands:
             # Check every token ending in .sh, not just the first: a wiring of
-            # the form "bash .claude/hooks/x.sh" (against hook-forge's bare-path
+            # the form "bash .claude/hooks/x.sh" (against hook-forge's wiring
             # rule) must not smuggle a dead hook past this check.
-            script_tokens = [tok for tok in command.split() if tok.endswith(".sh")]
+            script_tokens, unanchored = resolve_wired_scripts(edition, command)
             if not script_tokens:
                 continue  # non-script command (e.g. a notifier); not ours to check
+            for token in unanchored:
+                errors.append(
+                    f"{wiring_path}: wired hook is not anchored to the project "
+                    f"root, so it does not run from a subdirectory: {token}"
+                )
             for script_token in script_tokens:
                 script_path = target / script_token
                 if not is_owned(files, script_token):

@@ -241,11 +241,11 @@
     ".claude/commands/woocommerce.md": "5a4234e7abb2a4bfcd2bcf1cad2d92e0b243a729285bcae9f2dc47b810ac65cf",
     ".claude/commands/wp-cli.md": "278a6ba67dcd038081fca5d7af93d5860b258b810e9e648901f4249f5014637d",
     ".claude/commands/writing-plans.md": "183238cd9fe57613f955cc23496e149b2a3624e8a13b9cd5dd4a2051e915ac53",
-    ".claude/settings.json": "9358b7574f697c557d76ef2a5d026fbc65f2e5ed25be4ff048f1a55627f9c176",
+    ".claude/settings.json": "18ee20653bde90be5f80e17077b9141c20f3b310a7cf4d31aa9867f53292034d",
     ".claude/skills/SKILL FLOW.md": "4c48bccdd0dc852fe62b5b2a7ce1ae5d627702416e432a2cae687f2a71a5ce96",
     ".claude/skills/skill-creator/SKILL.md": "f1bac11cf8ab0e6acb40196165aab0f8e87556a4e182ff00894b6ee11af3a2a5",
     ".codex/config.toml": "34831ec6f4cd6cd3fb26aa2f6136df48c7af807a944ede251b23141711c4aff1",
-    ".codex/hooks.json": "5bb68827214b1adaf071e48a9cdd980420355897fa12dc77917ec62f9e5635d5",
+    ".codex/hooks.json": "521971462d5b7a730f5c1ccbac5650bc501e277729f01103629c85e454d50786",
     ".cursor/hooks.json": "850254308d2f7c159282ccb1426487a70a491404430b62b5099ba2fcd7cdeb05",
     ".cursor/rules/accelerator-workflow.mdc": "b8f7fc57fc48d91eff7efc38bd37722456691dd1b52fe34023cd0c675ece9d83",
     ".cursor/rules/php-standards.mdc": "5707c6bc33ab7a3307942e5e5494a1978ef88c5046b593c078b41d3ba63d6070",
@@ -254,7 +254,7 @@
     ".cursor/skills/skill-creator/SKILL.md": "f1bac11cf8ab0e6acb40196165aab0f8e87556a4e182ff00894b6ee11af3a2a5",
     "AGENTS.md": "3b7bc5d0bb391150e3a8b685adbd4befeb58773612cf56923f1421c61c4b07d2"
   },
-  "policy_digest": "dbd33a58efe6cade671437a6bf7af9172f318a7f0a3c305e442c4c7ea2f70ffe",
+  "policy_digest": "ca3e7e21abff3b445a818d6c69718012c675c1e863e2fef5ed138b59b9a89c97",
   "release": "2.0.0",
   "schema_version": 1
 }

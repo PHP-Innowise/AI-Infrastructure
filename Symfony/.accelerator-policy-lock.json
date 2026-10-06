@@ -252,11 +252,11 @@
     ".claude/commands/twig-ux-reviewer.md": "08266292fa486e0dff4749a3b644c65ce1a04b7c326be6740d46e2bc094a512a",
     ".claude/commands/verify.md": "aac7ddc849c49eb75b8be17748add404ea552d6cb97b067a6c775d3b29066b53",
     ".claude/commands/writing-plans.md": "183238cd9fe57613f955cc23496e149b2a3624e8a13b9cd5dd4a2051e915ac53",
-    ".claude/settings.json": "01c629fd4b4ea0c4f08d77fa1b42cdd92f5f58d4e3df044af20bc17dbb8968ad",
+    ".claude/settings.json": "dc8d46c6507dd18aac3bc4d715ffe8dabe6198acecd78a759d1b5032e88a40c0",
     ".claude/skills/SKILL FLOW.md": "4688e568966c3991ab1b0194830c5be6c94b19371d293c1e863e31817d232411",
     ".claude/skills/skill-creator/SKILL.md": "af64157158595234d0e4c8dbc6508c7a03afea0bacf28a2073b951a45d7e3197",
     ".codex/config.toml": "d86cb424b3b23726ffd3239d4ba2a864cc93424a3ee301a4bdbc7b1e82d09927",
-    ".codex/hooks.json": "5bb68827214b1adaf071e48a9cdd980420355897fa12dc77917ec62f9e5635d5",
+    ".codex/hooks.json": "521971462d5b7a730f5c1ccbac5650bc501e277729f01103629c85e454d50786",
     ".cursor/hooks.json": "850254308d2f7c159282ccb1426487a70a491404430b62b5099ba2fcd7cdeb05",
     ".cursor/rules/accelerator-workflow.mdc": "7d0125b363af86456164901e8f3df2f01fa3cc4941200045e1aa5f070a45df2c",
     ".cursor/rules/php-standards.mdc": "baa7fbf67e55c51dec0634dd58bd8ab20917f5a16a63976122eb21b7a123c81f",
@@ -265,7 +265,7 @@
     ".cursor/skills/skill-creator/SKILL.md": "85238e56099797fdd695cbc2cc65e6958e9ad7806a7e32121bd5a37ccd7e3323",
     "AGENTS.md": "f4e6dcda94b800a9221afa0fa2a9cd28fada0ba9229a32b1e1a83f1eac0fcc9f"
   },
-  "policy_digest": "796373710aca623edeb073a926e486f95a7dcdfb9ba940368ec058ef78a10da7",
+  "policy_digest": "69dc89cbedd9f49c993adcae586a6245ea5330e786298d8d490e60e981e2a386",
   "release": "2.0.0",
   "schema_version": 1
 }

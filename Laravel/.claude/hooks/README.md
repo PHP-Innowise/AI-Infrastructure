@@ -81,6 +81,10 @@ Safety hooks block only operations that are destructive, irreversible, or likely
 | `PreToolUse` | Before a tool executes |
 | `PostToolUse` | After a tool executes |
 
+## Wiring
+
+`.claude/settings.json` registers every script as `"${CLAUDE_PROJECT_DIR}"/.claude/hooks/<script>.sh`. Claude Code runs a hook in the session's current directory, and that directory follows every `cd` the agent makes. A bare `.claude/hooks/<script>.sh` would exit 127 from any subdirectory, and Claude Code treats every exit other than `2` as non-blocking: the Bash Validator would stop blocking without a word. `CLAUDE_PROJECT_DIR` is the project root Claude Code exports to every hook; it stays double-quoted, as Claude Code's shell form requires, so a project path containing spaces survives. Register any hook you add the same way.
+
 ## Personal Hooks
 
 Use `.claude/settings.local.json` for personal hooks that shouldn't be shared with the team.
