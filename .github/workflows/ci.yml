@@ -289,6 +289,12 @@ jobs:
       # scoring and its fixtures are ordinary code and are gated here.
       - name: Routing eval scoring and fixtures
         run: python3 -m unittest tests.test_routing_eval
+      # Symfony's skill-creator adapts the upstream eval scripts to the Codex
+      # and Cursor CLIs; its tests are excluded from installs and ran nowhere.
+      - name: Symfony skill-creator adapter tests
+        run: |
+          (cd "Symfony/.agents/skills/skill-creator" && python3 -m unittest discover -s tests)
+          (cd "Symfony/.cursor/skills/skill-creator" && python3 -m unittest discover -s tests)
       # scripts/check.py is the local twin of this workflow; the test fails
       # when a gate here has no entry there, or an entry there left CI.
       - name: check.py mirrors the workflows

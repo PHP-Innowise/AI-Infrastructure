@@ -515,6 +515,13 @@ def build_groups(root: Path = ROOT, base_ref: Optional[str] = None) -> List[Grou
                 step("Policy lock matches the surface", "python3 scripts/policy_lock.py --check"),
                 unittests("Policy lock regression tests", ["tests.test_policy_lock"]),
                 unittests("Routing eval scoring and fixtures", ["tests.test_routing_eval"]),
+                *(
+                    shell(
+                        "Symfony skill-creator adapter tests",
+                        f'(cd "Symfony/{tree}/skills/skill-creator" && python3 -m unittest discover -s tests)',
+                    )
+                    for tree in (".agents", ".cursor")
+                ),
                 unittests("check.py mirrors the workflows", ["tests.test_check"]),
             ),
         ),
