@@ -926,6 +926,18 @@ assert.match(renderExistingWorktrees().error,/could not list/);
         self.assertEqual(self.request("/api/sessions/unregistered/report")[0], 400)
         self.assertEqual(list(self.project.iterdir()), [])
 
+    def test_sign_in_needs_the_page_token_and_asks_available_clis_only(self):
+        # Asking starts native CLIs, so a page without the token gets nothing.
+        self.assertEqual(self.request("/api/providers/sign-in")[0], 403)
+        token = {"X-Harness-Token": self.token}
+        answer = {"id": "claude", "state": "signed_out", "detail": "Claude Code reports that it is not signed in.",
+                  "login": "claude auth login"}
+        with patch.object(providers, "sign_in_status", return_value=answer) as ask:
+            self.assertEqual(self.request("/api/providers/sign-in", headers=token)[:2], (200, {"providers": [answer]}))
+            self.assertEqual(self.request("/api/providers/sign-in?refresh=yes", headers=token)[0], 400)
+        # The fixture Codex is unavailable: only Claude's CLI is asked.
+        self.assertEqual([("claude", "/never-launched/fixture-claude")], [call.args for call in ask.call_args_list])
+
     def test_bootstrap_and_only_explicit_static_routes_are_served(self):
         status, boot, headers = self.request("/api/bootstrap")
         self.assertEqual(status, 200)

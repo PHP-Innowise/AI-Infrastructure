@@ -148,6 +148,24 @@ const statusLabel = value => ({queued:'Queued',running:'Running',completed:'Proc
 const sessionStatusLabel = session => isFleetSession(session) && session.status === 'completed' ? 'Report saved' : statusLabel(session.status);
 const projectFor = id => state.bootstrap?.projects.find(project => project.id === id);
 const providerFor = id => state.bootstrap?.providers.find(provider => provider.id === id);
+// What each CLI says about its own sign-in, asked without a model call. Advisory: a run is never refused on it.
+const signIn = {states:{}, pending:null};
+const signedOut = id => signIn.states[id]?.state === 'signed_out';
+const providerLabel = item => `${item.name}${!item.available ? ' · unavailable' : signedOut(item.id) ? ' · not signed in' : ''}`;
+async function loadSignIn(refresh = false) {
+  if (!state.bootstrap || state.authFailed || signIn.pending) return;
+  signIn.pending = true;
+  try {
+    const data = await api('/api/providers/sign-in' + (refresh ? '?refresh=1' : ''));
+    signIn.states = Object.fromEntries((Array.isArray(data.providers) ? data.providers : []).filter(item => typeof item?.id === 'string').map(item => [item.id,item]));
+    for (const option of $('provider').options) { const item = providerFor(option.value); if (item) option.textContent = providerLabel(item); }
+    updateControls();
+  } catch (_) { /* Without an answer a run still reports a refused sign-in itself. */ }
+  finally { signIn.pending = null; }
+}
+// Signing in happens in a terminal: ask again when the person comes back to this page.
+window.addEventListener('focus',() => loadSignIn(true));
+document.addEventListener('visibilitychange',() => { if (document.visibilityState === 'visible') loadSignIn(true); });
 const CUSTOM_MODEL = '--custom--';
 const modelMetadata = (providerId = $('provider').value) => providerFor(providerId)?.model_options || {models:[],efforts:[],detail:''};
 const pickerProvider = prefix => prefix === 'clash-' ? $('clash-challenger').value : $('provider').value;
@@ -670,7 +688,7 @@ function populateSettings() {
   for (const scope of ['memory','brain']) if (!knowledgeState.pending) setProjectChoices($(`${scope}-project`),boot.projects,$(`${scope}-project`).value || $('project').value);
   setProjectChoices($('memory-use-project'),boot.projects,$('memory-use-project').value || $('project').value);
   if (!setupState.pending && !setupState.registerPending) setProjectChoices($('setup-project'),boot.projects,$('setup-project').value || $('project').value,true);
-  setOptions($('provider'),boot.providers,item => `${item.name}${item.available ? '' : ' · unavailable'}`,item => item.id,$('provider').value);
+  setOptions($('provider'),boot.providers,providerLabel,item => item.id,$('provider').value);
   if (!skillsState.pending) { const previousProject = $('skills-project').value; setProjectChoices($('skills-project'),boot.projects,previousProject || $('project').value); if (previousProject && previousProject !== $('skills-project').value) invalidateSkillsPreview(); }
   if (!createSkillState.pending) { const previousProject = $('create-skill-project').value; setProjectChoices($('create-skill-project'),boot.projects,previousProject || $('project').value); if (previousProject && previousProject !== $('create-skill-project').value) invalidateCreateSkillPreview(); }
   setOptions($('workflow'),boot.workflows,item => item.name,item => item.id,$('workflow').value);
@@ -694,7 +712,7 @@ async function bootstrap() {
     const boot = await api('/api/bootstrap');
     if (!boot.csrf || !Array.isArray(boot.projects) || !Array.isArray(boot.providers)) throw new Error('The runner returned an incomplete workspace configuration.');
     state.bootstrap = boot; state.authFailed = false; state.sessions = boot.sessions || []; boot.workflows = boot.workflows || []; boot.accelerators = boot.accelerators || [];
-    $('connection-banner').hidden = true; populateSettings(); renderHistory();
+    $('connection-banner').hidden = true; populateSettings(); renderHistory(); loadSignIn();
     if (!sessionPreferencesReady) await restoreSessionPreferences();
     else if (state.selectedId) { stopPolling(); await pollSession(state.epoch); }
     let routed = false;
@@ -1196,8 +1214,18 @@ function updateControls() {
   $('composer-note').classList.toggle('shortcut',$('composer-note').textContent === 'Ctrl / ⌘ + Enter to send');
   const caption = terminalLinkedTask ? 'The linked Brain task is completed or cancelled. Start a new session with an active or new task to continue.' : reviewing && !noResume ? 'You review the prepared workspace and context before the agent runs.' : remembering && !noResume && !clashMode && !fleet ? 'Project memory is retrieved for each message and saved when the run completes.' : clashMode && !hasSession ? 'Both participants share the session budgets.' : clashMode && !noResume ? 'A follow-up starts the next cycle; both native sessions resume. Untick Clash for a normal follow-up.' : fleet && !hasSession ? 'Scope and reviewers are fixed once the review starts.' : noResume ? systemOwned === 'run' ? 'This launch belongs to a system change. Resume, cancel or review it under System Orchestration › Changes.' : systemOwned === 'scan' ? 'This is an AI scan of service folders. Start a new scan from the system editor.' : state.selected.status === 'cancelled' ? 'Cancelled before a resumable native session was created.' : 'No resumable native session was returned. Start a new session to continue.' : '';
   $('composer-caption').textContent = caption; $('composer-caption').hidden = !caption;
-  const providerNote = dryRun ? 'Offline dry-run can use any provider selection; no native CLI is launched.' : ready && !provider?.available ? 'No provider is ready. Install and sign in with a native CLI, then restart the Harness server.' : provider?.id === 'cursor' ? 'Cursor can’t disable or cap helpers; helper settings are instructions only.' : '';
-  if ($('provider-hint').textContent !== providerNote) $('provider-hint').textContent = providerNote; $('provider-hint').hidden = !providerNote;
+  const signInNote = !dryRun && provider?.available && signedOut(provider.id) ? `${provider.name} is not signed in. Sign in from a terminal with ${signIn.states[provider.id].login || 'its CLI'}${hasSession ? ', then send again' : ''}; this page checks again when you come back to it.` : '';
+  const providerNote = dryRun ? 'Offline dry-run can use any provider selection; no native CLI is launched.' : ready && !provider?.available ? 'No provider is ready. Install and sign in with a native CLI, then restart the Harness server.' : signInNote || (provider?.id === 'cursor' ? 'Cursor can’t disable or cap helpers; helper settings are instructions only.' : '');
+  const switchTo = signInNote && !hasSession ? (state.bootstrap?.providers || []).find(item => item.available && signIn.states[item.id]?.state === 'signed_in') : null;
+  const hintKey = `${providerNote}|${switchTo?.id || ''}`;
+  if ($('provider-hint').dataset.key !== hintKey) {
+    $('provider-hint').dataset.key = hintKey;
+    // The sign-in command as code, ready to copy into a terminal.
+    const login = signInNote ? signIn.states[provider.id].login : '', at = login ? providerNote.indexOf(login) : -1;
+    $('provider-hint').replaceChildren(...(at < 0 ? [providerNote] : [providerNote.slice(0,at),el('code','',login),providerNote.slice(at + login.length)]));
+    if (switchTo) { const use = el('button','button compact',`Use ${switchTo.name}`); use.type = 'button'; use.addEventListener('click',() => { $('provider').value = switchTo.id; $('provider').dispatchEvent(new Event('change')); }); $('provider-hint').append(' ',use); }
+  }
+  $('provider-hint').hidden = !providerNote;
   $('agent-hint').textContent = helperHint(fleet,clashMode,ultracode,provider);
   // A Harness check sets the session running without a launch; the Run strip follows the newest launch instead.
   const waitingText = runView.phase(state.selected) === 'check' ? 'A Harness check is running. Its result appears in Checks.' : linked && brainReviewed(state.selected.brain) && !state.selected.brain.context_id ? 'Preparing workspace and context. The provider has not started this turn.' : state.selected?.status === 'queued' ? 'Queued — waiting for an available runner.' : existingFleet ? 'Fleet review is running. Stage and reviewer updates appear above.' : isClashSession(state.selected) ? `${providerFor(state.selected.provider)?.name || state.selected.provider} and ${providerFor(state.selected.clash?.challenger)?.name || 'the challenger'} are clashing. Turn events appear above.` : `${providerFor(state.selected?.provider)?.name || 'Agent'} is running. New events will appear here.`;
@@ -1344,6 +1372,7 @@ function closeAborted(event) { if (!RunModel.aborted(event)) return; closeSteps(
 function appendEvent(event) {
   if (event.id === undefined || event.id === null || state.eventIds.has(String(event.id))) return;
   state.eventIds.add(String(event.id)); runView.observe(event); let text = typeof event.text === 'string' ? event.text : '';
+  if (event.kind === 'error' && typeof event.sign_in === 'string') loadSignIn(true);  // a run was refused for its sign-in
   const kind = event.kind === 'result' && event.ok === false ? 'error' : event.kind;
   if (kind === 'fleet_stage') {
     observeFleetEvent(event); text = [fleetStageName(event.stage),humanLabel(event.status)].filter(Boolean).join(' · ');

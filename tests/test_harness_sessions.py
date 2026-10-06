@@ -37,6 +37,11 @@ for line in config.get('prompt', '').splitlines():
             base64.b64encode(pathlib.Path(item['path']).read_bytes()).decode() for item in files]))
 if config["provider"] == "claude":
     print(json.dumps({"type": "system", "subtype": "init", "session_id": "native-original"}), flush=True)
+    if behavior == "signed_out":
+        # What Claude Code 2.1.278 printed on 2026-10-06 when its OAuth sign-in had expired.
+        print(json.dumps({"type": "result", "subtype": "success", "is_error": True, "session_id": "native-original",
+                          "result": "Failed to authenticate: OAuth session expired and could not be refreshed"}), flush=True)
+        sys.exit(1)
     print(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
         {"type": "text", "text": "Fixture answer"}]}}), flush=True)
     print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
@@ -926,6 +931,39 @@ class SessionTests(unittest.TestCase):
                 launch = self.wait_for(lambda: (manager.get(sid)["launch"] or {}).get("status") != "running" and manager.get(sid)["launch"])
                 self.assertEqual(("native", expected), (launch["kind"], launch["status"]))
                 self.assertEqual(0, manager.results.history(sid)["launches"][-1]["receipt"]["steps"])
+
+    def test_a_refused_sign_in_names_the_command_that_signs_in(self):
+        manager = self.manager()
+        sid = manager.create(dict(project_id=next(iter(manager.projects)), provider="claude", prompt="signed_out"))["id"]
+        self.assertEqual(self.settled(manager, sid)["status"], "failed")
+        errors = [event for event in manager.events(sid) if event["kind"] == "error"]
+        self.assertEqual("claude", errors[-1]["sign_in"])
+        self.assertIn("Claude Code is not signed in", errors[-1]["text"])
+        # The fixture CLI is not on PATH, so the command names its path.
+        self.assertIn(f"`{self.fake} auth login`", errors[-1]["text"])
+        # Any other failure keeps the general message and does not point at the sign-in.
+        sid = self.create(manager, "failed")
+        self.assertEqual(self.settled(manager, sid)["status"], "failed")
+        errors = [event for event in manager.events(sid) if event["kind"] == "error"]
+        self.assertNotIn("sign_in", errors[-1])
+        self.assertIn("Provider did not complete successfully", errors[-1]["text"])
+
+    def test_sign_in_answers_are_cached_and_refreshed_on_request(self):
+        manager = self.manager()
+        asked = []
+
+        def status(provider, executable):
+            asked.append(provider)
+            return {"id": provider, "state": "signed_out" if provider == "claude" else "signed_in", "detail": "", "login": ""}
+        with patch.object(sessions.providers, "sign_in_status", side_effect=status):
+            first = manager.sign_in()
+            self.assertEqual({"claude": "signed_out", "codex": "signed_in"},
+                             {item["id"]: item["state"] for item in first["providers"]})
+            self.assertEqual(first, manager.sign_in())
+            self.assertEqual(2, len(asked))  # cursor is unavailable and never asked
+            manager.sign_in_cache = (time.monotonic() - manager.SIGN_IN_MIN_INTERVAL - 1, first)
+            manager.sign_in(refresh=True)
+            self.assertEqual(4, len(asked))
 
     def test_cancel_and_timeout_terminate_even_when_child_does_not_read_stdin(self):
         for behavior, cancel in (("sleep", True), ("no_stdin", False)):

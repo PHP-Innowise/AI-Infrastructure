@@ -328,6 +328,13 @@ class Handler(BaseHTTPRequestHandler):
                         or ('path' in query and 'bank' not in query)):
                     raise SessionError('Invalid memory request.')
                 self.reply(200, store.memory(path.split('/')[3], query.get('bank', [None])[0], query.get('path', [None])[0]))
+            elif path == '/api/providers/sign-in':
+                # Asking starts the native CLIs (`claude auth status`, `codex login status`): the page's token, as for commands.
+                if not self.token_ok():
+                    return
+                if parsed.query not in ('', 'refresh=1'):
+                    raise SessionError('Invalid sign-in request.')
+                self.reply(200, store.sign_in(refresh=parsed.query == 'refresh=1'))
             elif path == '/api/accelerators/startup':
                 if parsed.query:
                     raise SessionError('Invalid startup context request.')

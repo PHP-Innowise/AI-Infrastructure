@@ -306,6 +306,27 @@ Authenticate using each native CLI in a terminal before running browser
 tasks. Existing native credentials remain managed by that CLI. A detected
 executable does **not** prove that its account is logged in.
 
+**Sessions** therefore asks each found CLI whether it is signed in. These
+commands make no model call and take well under a second:
+
+| Provider | Asked with | Sign in with |
+| --- | --- | --- |
+| Claude Code | `claude auth status --json` (`loggedIn`) | `claude auth login`, or `/login` inside `claude` |
+| Codex | `codex login status` (exit status) | `codex login` |
+| Cursor Agent | `cursor-agent status --format json` (`isAuthenticated`) | `cursor-agent login` |
+
+A provider whose CLI says it is not signed in is listed as
+`Claude Code · not signed in`. A note names the sign-in command and, for a new
+session, offers a provider that is signed in (**Use Codex**). The page asks
+again when it regains focus, so signing in from a terminal clears the note.
+The check is advisory and never refuses a run. A CLI set up for another backend
+reports `unknown` and gets no note: Bedrock, Vertex, a key in the environment
+(`ANTHROPIC_API_KEY`, `CODEX_API_KEY`, `CURSOR_API_KEY`, and so on) or a custom
+Codex provider. When a run fails because the CLI refused its account, as with
+an expired Claude OAuth sign-in, the session error names the provider and the
+command that signs it in, instead of the general failure. The command shows the
+executable's path when the Harness found the CLI outside `PATH`.
+
 ### Desktop application
 
 To start the accelerator like any installed application, run once from the

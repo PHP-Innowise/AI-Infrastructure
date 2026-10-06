@@ -134,6 +134,7 @@ input[type="text"],.field input[type="number"],select { width:100%; }
 .checkbox { display:flex; align-items:center; gap:8px; font-size:var(--text-ui); white-space:nowrap; color:var(--ink-2); }
 .checkbox input { accent-color:var(--purple); width:14px; height:14px; margin:0; }
 .provider-hint { max-width:1160px; margin:8px 0 0; font-size:var(--text-ui); color:var(--warning); overflow-wrap:anywhere; }
+.provider-hint code { font-family:var(--font-mono); }
 .model-details { display:flex; align-items:center; flex-wrap:wrap; gap:8px 16px; max-width:1160px; margin:0 0; }
 .model-details:has(> :not([hidden])) { margin-top:8px; }
 .model-details .field { width:240px; max-width:100%; }

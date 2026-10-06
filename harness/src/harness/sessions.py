@@ -484,6 +484,7 @@ class Sessions:
         self.providers = {p["id"]: p for p in providers.discover_providers(overrides)}
         self.timeout = timeout
         self.lock = threading.RLock()
+        self.sign_in_cache = None
         database = self.state_dir / "sessions.sqlite3"
         if database.is_symlink():
             raise SessionError("Session database must not be a symbolic link.")
@@ -620,6 +621,30 @@ class Sessions:
             return None
         return {'fill': fill['end'], 'window': fill.get('window'), 'compacted': bool(fill.get('compactions')),
                 'at': row['started_at'], 'running': row['status'] == 'running'}
+
+    SIGN_IN_TTL = 30  # seconds a sign-in answer is reused; the page asks again when it regains focus
+    SIGN_IN_MIN_INTERVAL = 3  # even a forced check reuses an answer this fresh
+
+    def sign_in(self, refresh=False):
+        """Whether each available provider's CLI is signed in, asked of the CLIs without a model call."""
+        with self.lock:
+            cached = self.sign_in_cache
+            if cached and time.monotonic() - cached[0] < (self.SIGN_IN_MIN_INTERVAL if refresh else self.SIGN_IN_TTL):
+                return cached[1]
+        available = [provider for provider in self.providers.values() if provider.get('available')]
+        answers = {}
+
+        def ask(provider):
+            answers[provider['id']] = providers.sign_in_status(provider['id'], provider['executable'])
+        workers = [threading.Thread(target=ask, args=(provider,), daemon=True) for provider in available]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(providers.SIGN_IN_TIMEOUT + 5)
+        result = {'providers': [answers[provider['id']] for provider in available if provider['id'] in answers]}
+        with self.lock:
+            self.sign_in_cache = (time.monotonic(), result)
+        return result
 
     # What the sidebar shows of a session: which one, where it stands and how it runs. No capsules, results or fill.
     SUMMARY_FIELDS = ('id', 'title', 'project_id', 'status', 'created_at', 'updated_at', 'provider', 'model',
@@ -1710,6 +1735,7 @@ class Sessions:
         buffer = b''
         count, output_bytes = 0, 0
         outcome, terminal, saw_error, fleet_outcome = None, False, False, None
+        auth_failed = None  # the provider whose CLI refused its account
         native_id = session['native_session_id']
         # A resumed Claude launch may report its session's whole spend; the launch keeps only its own.
         run_cost = None if fleet or clash_settings or creator or system_run or discovery else providers.RunCost(
@@ -1865,6 +1891,9 @@ class Sessions:
                         if clean.get('kind') == 'result':
                             terminal = True
                             saw_error = saw_error or clean.get('ok') is not True
+                        if ((clean.get('kind') == 'error' or clean.get('kind') == 'result' and clean.get('ok') is not True)
+                                and providers.AUTH_FAILURE.search(str(clean.get('text') or ''))):
+                            auth_failed = clean.get('provider') if clean.get('provider') in providers.PROVIDERS else provider
                         if display:
                             clean.update(display)
                         elif enricher and clean.get('kind') == 'tool' and (limited := enricher.notice()):
@@ -1888,7 +1917,11 @@ class Sessions:
                 outcome = 'completed' if code == 0 and terminal and not saw_error else 'failed'
                 if fleet and outcome == 'completed':
                     outcome = fleet_outcome or 'failed'
-                if outcome == 'failed':
+                if outcome == 'failed' and auth_failed:
+                    self.sign_in_cache = None  # the page asks again and marks the provider
+                    self._event(sid, {"kind": "error", "sign_in": auth_failed, "text": providers.sign_in_failure(
+                        auth_failed, self.providers.get(auth_failed, {}).get('executable'))})
+                elif outcome == 'failed':
                     self._event(sid, {"kind": "error", "text": "Provider did not complete successfully. Check CLI authentication, permissions and the reported events."})
         finally:
             fs.close(watchdog_write)
