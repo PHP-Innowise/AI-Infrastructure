@@ -109,6 +109,10 @@ jobs:
         run: python3 scripts/build_mirrors.py --check
       - name: Mirror executor regression tests
         run: python3 -m unittest tests.test_build_mirrors
+      # Hooks run as direct commands; a script that lost its executable bit in
+      # the index exits 126 in every installed project.
+      - name: Executable bits recorded in the Git index
+        run: python3 -m unittest tests.test_file_modes
 
   infrastructure-creator-reliability:
     # Pinned to the 3.9 floor on purpose: a 3.x leg would only repeat the

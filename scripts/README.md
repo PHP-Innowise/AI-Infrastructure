@@ -63,12 +63,19 @@ python3 scripts/build_mirrors.py --write --edition Laravel \
   Laravel, Symfony, PHP Core, and WordPress load rules from
   `memory-bank/scripts/context_retrieval.py`; Infrastructure-Creator loads
   `mirror_rules.py`.
-- **Outputs:** `--check` prints drift, missing files, and unaccounted mirror
-  files and exits nonzero on findings. `--write` prints each changed path.
-- **Dependencies:** Python 3 standard library and a complete repository
-  checkout.
+- **Outputs:** `--check` prints drift, missing files, unaccounted mirror
+  files, and mirrors whose executable bit differs from canon
+  (`mode differs from canon`), and exits nonzero on findings. `--write` prints
+  each changed path; a mode-only repair is printed as `(mode +x)`/`(mode -x)`.
+- **Dependencies:** Python 3 standard library, Git, `file_modes.py`, and a
+  complete repository checkout.
 - **Writes:** `--check` never writes. `--write` creates/updates generated
-  mirror files and regenerates each selected edition's `.gitattributes`.
+  mirror files, gives each the executable bit of its canonical file (also
+  when the bytes already match), and regenerates each selected edition's
+  `.gitattributes`. For a tracked mirror the bit is also recorded in the Git
+  index - the mode only, never the content - because a checkout without
+  filesystem modes (Windows, `core.fileMode=false`) has nowhere else to keep
+  it.
 - **CI relationship:** the `mirrors` job runs `--check`. Edition parity jobs
   also execute the same mirror contract through
   `memory-bank/scripts/context.py parity`.
@@ -83,6 +90,13 @@ python3 scripts/build_mirrors.py --write --edition Laravel \
 | Commands | `.claude/commands` | `.cursor/commands` | Cursor frontmatter and path adaptation |
 | Agents | `.claude/agents` | `.cursor/agents` | Drops Claude-only frontmatter; preserves body |
 | Governance docs | `.claude` | `.cursor`, `.codex` | Tool-tree self-reference rewrites |
+
+Every transformation also carries the canonical file's executable bit: a
+mirror is executable exactly when its canon is. The canonical bit is read from
+the Git index, and from the filesystem only for a path the index does not
+know, so a Windows checkout reads the same answer as Linux. Cursor and Codex
+run the hook mirrors as direct commands; a mirror that lost the bit exits 126
+in every installed project while its bytes still match.
 
 Documented exceptions live in the rules data with justifications; they are not
 an invitation to hand-edit generated files. Notable exceptions include
@@ -130,7 +144,11 @@ python3 scripts/install_accelerator.py \
   documentation to depend on a particular future schema field name.
 - **Outputs:** tab-separated `VERIFIED`, `COLLISION`, `WOULD_*`, `COPY`,
   `MERGE`, `COPY_AS`, `UNCHANGED`, and `COMPLETE` records; meaningful nonzero
-  exit status on inventory errors or refused collisions.
+  exit status on inventory errors or refused collisions. A
+  `NOT_EXECUTABLE\t<component>\t<path>\t<destination>` record on stderr names
+  an identical, therefore untouched, file in the target that should be
+  executable and is not - typically a hook from an install made before
+  executable bits were enforced; repair it with `chmod +x <destination>`.
 - **Dependencies:** Python 3 standard library and Git. Inventory discovery for
   verification/writing is `git ls-files --cached`, so the payload is exactly
   what the index holds. Untracked working-tree content - a client application
@@ -148,6 +166,15 @@ python3 scripts/install_accelerator.py \
   target path rejects symlink components.
 - **CI relationship:** the `installation` job verifies inventories and runs
   installation and framework-semantics tests.
+
+Installed executables get mode `0755` regardless of the source working tree:
+every `*.sh` inside a `hooks/` directory, plus any file recorded `100755` in
+the source checkout's Git index (or, without a Git checkout, carrying the
+executable bit on disk). Every other file keeps normal copy semantics. The
+index is read, not the disk, because a source checkout made on Windows or with
+`core.fileMode=false` has no executable bit on disk and would otherwise
+install hooks that exit 126. The installer reads the index itself rather than
+through `file_modes.py`, because the Harness runs a standalone copy of it.
 
 Collision preflight is completed before normal copies begin. With
 `--merge-existing`, identical files remain `UNCHANGED`; `.gitignore` and
@@ -311,23 +338,26 @@ python3 scripts/asset_parity.py --write
 ```
 
 - **Options:** `--check` (default) reports and exits non-zero on drift;
-  `--write` copies the canonical bytes over drifted or missing asset files and
-  re-checks; `--json` prints a machine-readable report. `--check` and `--write`
-  are mutually exclusive.
+  `--write` copies the canonical bytes over drifted or missing asset files,
+  gives them the canonical executable bit (on disk and, for a tracked file,
+  in the Git index), and re-checks; `--json` prints a machine-readable report.
+  `--check` and `--write` are mutually exclusive.
 - **Inputs:** the asset tree and the first present edition of `Laravel`,
   `Symfony`, `PHP Core`. Any of them will do, because
   `context.py parity --cross-edition` already holds the three to each other -
   that check is this one's prerequisite, not its duplicate.
 - **Outputs:** one line per finding and exit 1; a success message and exit 0
   otherwise. Exit 2 on a missing asset tree.
-- **Dependencies:** Python 3 standard library.
-- **Writes:** none under `--check`; only asset files under `--write`.
+- **Dependencies:** Python 3 standard library, Git, and `file_modes.py`.
+- **Writes:** none under `--check`; only asset files (and their index modes)
+  under `--write`.
 - **CI relationship:** the `parity` job runs `--check` and
   `tests/test_asset_parity.py` once, on the `Laravel` matrix leg.
 
 Five things are enforced: mapped asset files are byte-identical to their
 counterpart (`scripts/` against `memory-bank/scripts/`, `templates/` against
-`memory-bank/templates/`, `project-brain/` against itself); every canonical
+`memory-bank/templates/`, `project-brain/` against itself) and carry the same
+executable bit, read from the Git index first; every canonical
 file the asset is supposed to seed exists in it, so a new core module cannot be
 forgotten; every asset file is either mapped or listed in `ASSET_ONLY` with a
 reason, so a new asset file cannot become silently unchecked;
@@ -340,6 +370,27 @@ Deliberate one-sided files live in `ASSET_ONLY` (the runtime contract, the
 runtime template) and `EDITION_ONLY` (per-target prose, both Python test
 suites, installer bookkeeping, the materialized `runtime.json`). Record a new
 divergence there with its reason rather than widening a glob.
+
+### `file_modes.py`
+
+**Purpose and status.** Shared helper module, imported by `build_mirrors.py`
+and `asset_parity.py`; source-only, not installed, and not run directly.
+
+- **What it answers:** the executable bit Git commits for a path - the index
+  mode for a tracked path, the filesystem bit for an untracked one, and no
+  answer for an untracked path on a filesystem without a trustworthy bit
+  (Windows, `core.fileMode=false`), so callers skip the comparison rather than
+  invent drift.
+- **What it writes:** `set_executable` repairs the disk bit where the disk has
+  one and queues the index mode of a tracked path; `flush` records the queued
+  modes with `git update-index --index-info`, keeping the blob the index
+  already holds. `git update-index --chmod` is avoided on purpose: it also
+  stages the working-tree content.
+- **Dependencies:** Python 3 standard library and Git.
+- **Guard:** `tests/test_file_modes.py` (CI `mirrors` job) holds the
+  repository's own index to the rule: every tracked `hooks/*.sh`, every hook
+  script a tracked wiring file runs (whatever command form wraps it), and
+  every root launcher with a shebang is `100755`.
 
 ### `policy_lock.py`
 

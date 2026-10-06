@@ -17,6 +17,7 @@ Run: python3 -m unittest tests.test_asset_parity
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -228,6 +229,89 @@ class SyncTests(AssetParityFixture):
         # must survive --write as an unresolved finding rather than vanish.
         self.assertIn("maps onto no canonical path", self.reasons())
         self.assertTrue((self.asset / "extras" / "notes.md").is_file())
+
+
+@unittest.skipIf(os.name == "nt", "the filesystem has no executable bit")
+class ExecutableBitTests(AssetParityFixture):
+    """The asset carries the canonical executable bit, not only the bytes.
+
+    `sync` used to rely on `shutil.copy2`, which carries the working-tree bit:
+    on a checkout without filesystem modes a script the edition marks
+    executable was seeded without it, and nothing compared modes at all.
+    """
+
+    SCRIPT = "project-brain/scripts/validate.py"
+    ASSET_SCRIPT = "project-brain/scripts/validate.py"
+
+    def test_executable_bit_drift_is_reported(self) -> None:
+        (self.edition / self.SCRIPT).chmod(0o755)
+        self.assertEqual(
+            self.findings(),
+            [
+                {
+                    "path": self.ASSET_SCRIPT,
+                    "reason": (
+                        f"mode differs from Laravel/{self.SCRIPT} (executable there)"
+                    ),
+                }
+            ],
+        )
+
+    def test_write_repairs_mode_drift(self) -> None:
+        (self.edition / self.SCRIPT).chmod(0o755)
+        asset_parity.sync(self.repo, self.asset, self.findings())
+        self.assertEqual(self.findings(), [], self.reasons())
+        self.assertTrue(os.access(self.asset / self.ASSET_SCRIPT, os.X_OK))
+
+    def test_write_gives_copied_content_the_canonical_bit(self) -> None:
+        self.write(self.edition, self.SCRIPT, "# validate v2\n").chmod(0o755)
+        (self.asset / self.ASSET_SCRIPT).chmod(0o644)
+        asset_parity.sync(self.repo, self.asset, self.findings())
+        self.assertEqual(self.findings(), [], self.reasons())
+        self.assertTrue(os.access(self.asset / self.ASSET_SCRIPT, os.X_OK))
+
+    def git(self, *args: str) -> str:
+        result = subprocess.run(
+            ["git", *args], cwd=self.repo, capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def index_executable_checkout(self) -> None:
+        """Canon executable in the index only, as a Windows-made checkout has it."""
+        self.git("-c", "init.defaultBranch=main", "init", "-q")
+        self.git("add", "--", ".")
+        self.git("update-index", "--chmod=+x", "--", f"Laravel/{self.SCRIPT}")
+
+    def asset_index_mode(self) -> str:
+        listed = self.git(
+            "ls-files",
+            "--stage",
+            "--",
+            f"Infrastructure-Creator/.agents/skills/memory-seed/assets/{self.ASSET_SCRIPT}",
+        )
+        return listed.split(" ", 1)[0]
+
+    def test_index_bit_wins_over_the_working_tree(self) -> None:
+        self.index_executable_checkout()
+        self.assertIn("mode differs", self.reasons())
+        asset_parity.sync(self.repo, self.asset, self.findings())
+        self.assertEqual(self.findings(), [], self.reasons())
+        self.assertEqual(self.asset_index_mode(), "100755")
+        self.assertTrue(os.access(self.asset / self.ASSET_SCRIPT, os.X_OK))
+
+    def test_copied_content_takes_the_index_bit_not_the_disk_bit(self) -> None:
+        self.index_executable_checkout()
+        # copy2 alone would carry the disk's 0644 into the asset.
+        self.write(self.edition, self.SCRIPT, "# validate v2\n")
+        asset_parity.sync(self.repo, self.asset, self.findings())
+        self.assertEqual(self.findings(), [], self.reasons())
+        self.assertEqual(
+            (self.asset / self.ASSET_SCRIPT).read_text(encoding="utf-8"),
+            "# validate v2\n",
+        )
+        self.assertEqual(self.asset_index_mode(), "100755")
+        self.assertTrue(os.access(self.asset / self.ASSET_SCRIPT, os.X_OK))
 
 
 class ShippedAssetTests(unittest.TestCase):

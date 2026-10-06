@@ -8,6 +8,7 @@ import fnmatch
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path, PurePosixPath
@@ -57,6 +58,10 @@ AGENTS_BEGIN = "<!-- BEGIN ACCELERATOR MANAGED POLICY -->"
 AGENTS_END = "<!-- END ACCELERATOR MANAGED POLICY -->"
 ENTRIES_BEGIN = "# BEGIN ACCELERATOR MANAGED ENTRIES"
 ENTRIES_END = "# END ACCELERATOR MANAGED ENTRIES"
+# Mode of an installed executable. Claude Code, Cursor and Codex run every
+# wired hook as a direct command, so a hook installed without the bit exits
+# 126 and its effect - a lock released, a command blocked - never happens.
+EXECUTABLE_INSTALL_MODE = 0o755
 
 
 class InventoryError(Exception):
@@ -293,6 +298,67 @@ def is_source_only(path: str) -> bool:
     )
 
 
+def is_hook_script(path: str) -> bool:
+    """A `*.sh` file inside a `hooks/` directory, which a client runs directly."""
+    pure = PurePosixPath(path)
+    return pure.suffix == ".sh" and "hooks" in pure.parts[:-1]
+
+
+def source_executable_bits(root: Path, edition: str) -> dict[str, bool] | None:
+    """The executable bits the source Git index records for one edition.
+
+    Keyed by edition-relative path. The index, not the working tree, is the
+    authority: a checkout made on Windows or with `core.fileMode=false` has
+    no executable bit on disk, and copying its working tree would install
+    every hook non-executable. Returns None without a Git checkout - a
+    source extracted from an archive, or the standalone copy of this script
+    the Harness runs against a staged source - and the caller then falls
+    back to the filesystem bit.
+
+    Deliberately self-contained rather than shared with
+    `scripts/file_modes.py`: the Harness copies this one file on its own.
+    """
+    source_dir = edition_path(edition).as_posix()
+    command = ["git", "ls-files", "--stage", "-z", "--", source_dir]
+    try:
+        result = subprocess.run(command, cwd=str(root), capture_output=True)
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    prefix = source_dir + "/"
+    bits: dict[str, bool] = {}
+    for record in result.stdout.split(b"\0"):
+        meta, tab, raw = record.partition(b"\t")
+        fields = meta.split()
+        if not tab or len(fields) != 3:
+            continue
+        value = raw.decode("utf-8", "surrogateescape")
+        if value.startswith(prefix):
+            bits.setdefault(value[len(prefix) :], fields[0] == b"100755")
+    return bits
+
+
+def installs_executable(
+    path: str, source: Path, source_path: str, bits: dict[str, bool] | None
+) -> bool:
+    """Whether the installed copy of ``path`` must be executable.
+
+    Hook scripts always are. Any other file follows its source: the index
+    bit when the source checkout records one, otherwise the filesystem bit
+    (where the filesystem has one - Windows reports none for a script).
+    """
+    if is_hook_script(path):
+        return True
+    if bits is not None and source_path in bits:
+        return bits[source_path]
+    return os.name != "nt" and bool(source.stat().st_mode & stat.S_IXUSR)
+
+
+def lacks_executable_bit(path: Path) -> bool:
+    return os.name != "nt" and not path.stat().st_mode & stat.S_IXUSR
+
+
 def build_inventory(root: Path, edition: str) -> dict:
     components = {component: [] for component in COMPONENTS}
     excluded: list[str] = []
@@ -509,16 +575,31 @@ def install(
 
     overwrite_paths = {path for _, path, _ in collisions}
     action = "WOULD_COPY" if dry_run else "COPY"
+    executable_bits = source_executable_bits(root, edition)
     for component, path in files:
         source_path = data["source_overrides"].get(path, path)
         source = root / edition_path(edition) / PurePosixPath(source_path)
         destination = target / PurePosixPath(path)
         if not source.is_file():
             raise InventoryError(f"source file missing: {source}")
+        # Normal copy semantics carry the working-tree mode, which is exactly
+        # what a checkout without filesystem modes gets wrong; an executable
+        # is therefore given its mode explicitly after the copy.
+        executable = installs_executable(path, source, source_path, executable_bits)
         if path in resolutions:
             resolution, resolved_destination, content = resolutions[path]
             if resolution == "unchanged":
                 print(f"UNCHANGED\t{component}\t{path}")
+                # An identical file is never touched - the Harness verifies
+                # every unchanged file against the mode it previewed - so a
+                # hook a previous install left non-executable is named here
+                # for the operator to repair.
+                if executable and lacks_executable_bit(resolved_destination):
+                    relative = resolved_destination.relative_to(target).as_posix()
+                    print(
+                        f"NOT_EXECUTABLE\t{component}\t{path}\t{relative}",
+                        file=sys.stderr,
+                    )
                 continue
             label = {
                 "merge": "WOULD_MERGE" if dry_run else "MERGE",
@@ -528,6 +609,8 @@ def install(
                 resolved_destination.parent.mkdir(parents=True, exist_ok=True)
                 if content is None:
                     shutil.copy2(source, resolved_destination)
+                    if executable:
+                        os.chmod(resolved_destination, EXECUTABLE_INSTALL_MODE)
                 else:
                     resolved_destination.write_bytes(content)
             relative = resolved_destination.relative_to(target).as_posix()
@@ -537,6 +620,8 @@ def install(
         if not dry_run:
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination)
+            if executable:
+                os.chmod(destination, EXECUTABLE_INSTALL_MODE)
             if path in overwrite_paths:
                 current_action = "OVERWRITE"
         print(f"{current_action}\t{component}\t{path}")

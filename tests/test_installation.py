@@ -6,6 +6,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import shlex
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -82,6 +86,64 @@ def source_status() -> str:
     if result.returncode:
         raise AssertionError(result.stderr)
     return result.stdout
+
+
+# The files each client reads its hook wiring from, relative to a project root.
+HOOK_WIRING = (".claude/settings.json", ".cursor/hooks.json", ".codex/hooks.json")
+
+
+# A hook script as a wiring command names it, whatever form wraps the path: a
+# bare relative path, one anchored on "${CLAUDE_PROJECT_DIR}", or a launcher
+# that locates the hooks directory and execs the script named as its first
+# argument. An inline snippet such as the Notification hook's `case ... esac`
+# names none.
+HOOK_SCRIPT_REFERENCE = re.compile(r"\.(?:claude|cursor|codex)/hooks/[A-Za-z0-9_.-]+\.sh")
+HOOK_LAUNCHER = re.compile(r"\.(claude|cursor|codex)/hooks/\$(?:1|\{1\})")
+SCRIPT_NAME = re.compile(r"[A-Za-z0-9_.-]+\.sh")
+
+
+def scripts_named(command: str) -> list[str]:
+    found = HOOK_SCRIPT_REFERENCE.findall(command)
+    launcher = HOOK_LAUNCHER.search(command)
+    if launcher:
+        try:
+            words = shlex.split(command)
+        except ValueError:
+            words = []
+        found += [
+            f".{launcher.group(1)}/hooks/{word}"
+            for word in words[1:]
+            if SCRIPT_NAME.fullmatch(word)
+        ]
+    return found
+
+
+def wired_hook_scripts(project: Path) -> list[str]:
+    """Every project-relative hook script a client's wiring runs."""
+    scripts: list[str] = []
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "command" and isinstance(value, str):
+                    for script in scripts_named(value):
+                        if script not in scripts:
+                            scripts.append(script)
+                else:
+                    walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    for wiring in HOOK_WIRING:
+        path = project / wiring
+        if path.is_file():
+            walk(json.loads(path.read_text(encoding="utf-8")).get("hooks", {}))
+    return scripts
+
+
+def is_executable(path: Path) -> bool:
+    return bool(path.stat().st_mode & stat.S_IXUSR) and os.access(path, os.X_OK)
 
 
 class InventoryTest(unittest.TestCase):
@@ -904,6 +966,218 @@ class CleanInstallTest(unittest.TestCase):
             self.assertEqual(
                 app_db_digest, hashlib.sha256(app_db.read_bytes()).hexdigest()
             )
+
+
+@unittest.skipIf(os.name == "nt", "the filesystem has no executable bit to assert")
+class ExecutableHookInstallTest(unittest.TestCase):
+    """Every hook a client runs directly must arrive executable.
+
+    Cursor wires `.cursor/hooks/subagent-dispatch.sh` (subagentStop) as a
+    direct command. It once shipped 100644 in Cursor and Codex mirrors of all
+    four editions, so every installed project got exit status 126 there and
+    the write-agent lock subagent-gate takes was never released: the next
+    write agent was refused until the lock's 30-minute TTL ran out.
+    """
+
+    def test_every_wired_hook_is_executable_after_install(self) -> None:
+        for edition in EDITIONS:
+            with self.subTest(edition=edition), tempfile.TemporaryDirectory(
+                prefix="executable hooks "
+            ) as raw:
+                target = Path(raw).resolve()
+                result = run(
+                    sys.executable,
+                    str(INSTALLER),
+                    "--edition",
+                    edition,
+                    "--target",
+                    str(target),
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                wired = wired_hook_scripts(target)
+                # Each tool wires several hooks; an empty list would mean the
+                # wiring moved and this test silently checked nothing.
+                for wiring in HOOK_WIRING:
+                    tool_dir = wiring.split("/", 1)[0] + "/"
+                    self.assertTrue(
+                        any(script.startswith(tool_dir) for script in wired),
+                        f"no hook wired in {wiring}",
+                    )
+                for script in wired:
+                    path = target / script
+                    self.assertTrue(path.is_file(), f"{script} is wired but not installed")
+                    self.assertTrue(is_executable(path), f"{script} is not executable")
+                installed_hooks = [
+                    path
+                    for path in target.rglob("*.sh")
+                    if "hooks" in path.relative_to(target).parts[:-1]
+                ]
+                self.assertTrue(installed_hooks)
+                for path in installed_hooks:
+                    self.assertTrue(
+                        is_executable(path),
+                        f"{path.relative_to(target).as_posix()} is not executable",
+                    )
+
+
+@unittest.skipIf(os.name == "nt", "the filesystem has no executable bit to assert")
+class ExecutableBitSourceTest(unittest.TestCase):
+    """The executable bit installs from the source index, not the working tree.
+
+    The synthetic source reproduces the shipped defect: the Cursor and Codex
+    hooks are 100644 in the index, and no file carries the bit on disk - the
+    state of a checkout made on Windows, or with `core.fileMode=false`.
+    """
+
+    HOOKS = (".claude/hooks/gate.sh", ".cursor/hooks/gate.sh", ".codex/hooks/gate.sh")
+    INDEX_EXECUTABLE = ".agents/skills/demo/scripts/run.py"
+    PLAIN_SCRIPT = ".agents/skills/demo/scripts/helper.py"
+
+    def _write_source(self, base: Path) -> None:
+        def command(path: str) -> dict:
+            return {"type": "command", "command": path}
+
+        for edition_path in EDITION_PATHS.values():
+            files = {
+                "VERSION": "0.0.0\n",
+                "AGENTS.md": "# policy\n",
+                ".claude/settings.json": json.dumps(
+                    {"hooks": {"Stop": [{"hooks": [command(self.HOOKS[0])]}]}}
+                ),
+                ".cursor/hooks.json": json.dumps(
+                    {"version": 1, "hooks": {"stop": [{"command": self.HOOKS[1]}]}}
+                ),
+                ".codex/hooks.json": json.dumps(
+                    {"hooks": {"Stop": [{"hooks": [command(self.HOOKS[2])]}]}}
+                ),
+                self.INDEX_EXECUTABLE: "#!/usr/bin/env python3\n",
+                self.PLAIN_SCRIPT: "#!/usr/bin/env python3\n",
+            }
+            for hook in self.HOOKS:
+                files[hook] = "#!/usr/bin/env bash\nexit 0\n"
+            for relative, text in files.items():
+                path = base / edition_path / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8")
+                path.chmod(0o644)
+
+    def _git_source(self, base: Path) -> None:
+        self._write_source(base)
+        for command in (
+            ("git", "-c", "init.defaultBranch=main", "init", "-q", str(base)),
+            ("git", "add", "--", *(path.as_posix() for path in EDITION_PATHS.values())),
+            (
+                "git",
+                "update-index",
+                "--chmod=+x",
+                "--",
+                *(
+                    f"{path.as_posix()}/{relative}"
+                    for path in EDITION_PATHS.values()
+                    for relative in (self.HOOKS[0], self.INDEX_EXECUTABLE)
+                ),
+            ),
+        ):
+            result = run(*command, cwd=base)
+            self.assertEqual(0, result.returncode, result.stderr)
+        generated = run(
+            sys.executable,
+            str(INSTALLER),
+            "--source-root",
+            str(base),
+            "--write-inventories",
+            cwd=base,
+        )
+        self.assertEqual(0, generated.returncode, generated.stderr)
+
+    def _install(self, base: Path, target: Path, *extra: str):
+        return run(
+            sys.executable,
+            str(INSTALLER),
+            "--source-root",
+            str(base),
+            "--edition",
+            "PHP Core",
+            "--target",
+            str(target),
+            *extra,
+            cwd=base,
+        )
+
+    def test_index_bit_wins_over_a_working_tree_without_it(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mode source ") as raw:
+            base = Path(raw).resolve() / "source"
+            target = Path(raw).resolve() / "target"
+            target.mkdir()
+            self._git_source(base)
+            listed = run("git", "ls-files", "--stage", "--", "PHP Core", cwd=base)
+            index_modes = {
+                line.split("\t", 1)[1]: line.split(" ", 1)[0]
+                for line in listed.stdout.splitlines()
+            }
+            self.assertEqual("100755", index_modes["PHP Core/" + self.HOOKS[0]])
+            self.assertEqual("100644", index_modes["PHP Core/" + self.HOOKS[1]])
+            self.assertEqual("100755", index_modes["PHP Core/" + self.INDEX_EXECUTABLE])
+            self.assertTrue(
+                all(
+                    not is_executable(path)
+                    for path in (base / "PHP Core").rglob("*")
+                    if path.is_file()
+                ),
+                "the synthetic source must carry no executable bit on disk",
+            )
+
+            result = self._install(base, target)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(sorted(self.HOOKS), sorted(wired_hook_scripts(target)))
+            for hook in self.HOOKS:
+                # The .claude hook is 100755 in the index; the other two are
+                # 100644 there, as on the commit that shipped the defect, and
+                # still install executable because they are hook scripts.
+                self.assertTrue(is_executable(target / hook), hook)
+            self.assertTrue(is_executable(target / self.INDEX_EXECUTABLE))
+            self.assertFalse(is_executable(target / self.PLAIN_SCRIPT))
+            self.assertFalse(is_executable(target / "AGENTS.md"))
+
+    def test_without_git_the_filesystem_bit_and_the_hook_rule_decide(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mode archive ") as raw:
+            base = Path(raw).resolve() / "source"
+            target = Path(raw).resolve() / "target"
+            target.mkdir()
+            self._git_source(base)
+            # An extracted archive: inventories, files, no index to ask.
+            shutil.rmtree(base / ".git")
+            (base / "PHP Core" / self.PLAIN_SCRIPT).chmod(0o755)
+
+            result = self._install(base, target)
+            self.assertEqual(0, result.returncode, result.stderr)
+            for hook in self.HOOKS:
+                self.assertTrue(is_executable(target / hook), hook)
+            self.assertTrue(is_executable(target / self.PLAIN_SCRIPT))
+            self.assertFalse(is_executable(target / self.INDEX_EXECUTABLE))
+
+    def test_identical_non_executable_hook_is_reported_not_rewritten(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mode reinstall ") as raw:
+            base = Path(raw).resolve() / "source"
+            target = Path(raw).resolve() / "target"
+            target.mkdir()
+            self._git_source(base)
+            first = self._install(base, target)
+            self.assertEqual(0, first.returncode, first.stderr)
+            # A project installed before the fix: identical bytes, no bit.
+            broken = target / self.HOOKS[1]
+            broken.chmod(0o644)
+
+            repeated = self._install(base, target, "--merge-existing")
+            self.assertEqual(0, repeated.returncode, repeated.stderr)
+            self.assertIn(f"UNCHANGED\tcursor\t{self.HOOKS[1]}", repeated.stdout.splitlines())
+            self.assertIn(
+                f"NOT_EXECUTABLE\tcursor\t{self.HOOKS[1]}\t{self.HOOKS[1]}",
+                repeated.stderr.splitlines(),
+            )
+            self.assertEqual(0o644, stat.S_IMODE(broken.stat().st_mode))
+            for hook in (self.HOOKS[0], self.HOOKS[2]):
+                self.assertNotIn(hook, repeated.stderr)
 
 
 if __name__ == "__main__":
