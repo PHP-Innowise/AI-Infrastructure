@@ -864,6 +864,10 @@ class CleanInstallTest(unittest.TestCase):
                     (*context_command, "status", "--json"),
                     (*context_command, "validate", "--json"),
                     (*context_command, "index", "--json"),
+                    # The project-brain skill tells agents to run parity, so
+                    # every tool selection must pass it, including the
+                    # single-tool installs that ship one skill tree.
+                    (*context_command, "parity"),
                 )
                 for command in commands:
                     smoke = run(*command, cwd=target, env=command_env)

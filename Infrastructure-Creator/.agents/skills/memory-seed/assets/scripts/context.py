@@ -75,6 +75,7 @@ from context_retrieval import (
     cross_edition_drift,
     format_cross_edition_drift,
     format_full_mirror_drift,
+    effective_canonical_edition,
     format_skill_mirror_drift,
     full_mirror_drift,
     skill_mirror_drift,
@@ -5725,7 +5726,8 @@ def main() -> int:
                     else:
                         print("Cross-edition core parity passed.")
                     return 0 if not cross else 1
-                canonical = str(load_config(repository)["canonical_edition"])
+                configured = str(load_config(repository)["canonical_edition"])
+                canonical = effective_canonical_edition(repository, configured)
                 # Report through the result path rather than an exception, so
                 # --json produces a machine-readable drift list on failure too.
                 # Raising first made the --json branch unreachable, and a caller
@@ -5737,6 +5739,8 @@ def main() -> int:
                     "canonical_edition": canonical,
                     "drift": drift,
                 }
+                if canonical != configured:
+                    result["configured_canonical_edition"] = configured
                 if not arguments.skills_only:
                     # Full mode adds the MIRROR_RULES contract: every mirrored
                     # class (skills including non-markdown files, hooks,
@@ -5756,7 +5760,12 @@ def main() -> int:
                         print(format_full_mirror_drift(mirror_drift), file=sys.stderr)
                     if result["valid"]:
                         scope = "Skill mirror" if arguments.skills_only else "Mirror"
-                        print(f"{scope} parity passed ({canonical} canonical).")
+                        stand_in = (
+                            f"; configured {configured} is not installed here"
+                            if canonical != configured
+                            else ""
+                        )
+                        print(f"{scope} parity passed ({canonical} canonical{stand_in}).")
                 return 0 if result["valid"] else 1
 
             if arguments.command == "compact":

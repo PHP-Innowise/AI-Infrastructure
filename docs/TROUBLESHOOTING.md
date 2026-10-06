@@ -239,8 +239,12 @@ python3 -m unittest discover memory-bank/tests
 ```
 
 `parity` compares mirrored skills with canonical `.agents/skills/`, as declared
-by `project-brain/config/runtime.json`. `index` may report parity drift but
-still refresh eligible documents; that warning is not a parity pass.
+by `project-brain/config/runtime.json`. A single-tool install (`--tool claude`
+or `--tool cursor`) has no `.agents/skills/`; `parity` then compares against the
+first tree that is installed and names it in its output, and a tool directory
+that holds only its README is not treated as an installed mirror. `index` may
+report parity drift but still refresh eligible documents; that warning is not a
+parity pass.
 
 ### Recover
 

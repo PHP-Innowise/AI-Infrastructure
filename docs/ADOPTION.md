@@ -227,6 +227,7 @@ python3 project-brain/scripts/validate.py --root .
 python3 memory-bank/scripts/context.py status --json
 python3 memory-bank/scripts/context.py validate --json
 python3 memory-bank/scripts/context.py index
+python3 memory-bank/scripts/context.py parity
 git status --short
 ```
 
@@ -235,7 +236,10 @@ Then:
 1. Confirm `memory-bank/local/context.db` exists but remains ignored.
 2. Inspect `project-brain/config/runtime.json`; ready-made editions should
    declare the selected framework, governed mode, `sqlite-fts5`, and
-   `"canonical_edition": ".agents"`.
+   `"canonical_edition": ".agents"`. Keep that value after a single-tool
+   install: `--tool claude` or `--tool cursor` ships no `.agents/skills/`, and
+   `parity` then compares against the tree that is installed and says so
+   (`.claude canonical; configured .agents is not installed here`).
 3. Validate the installed tool using the activation checks in
    [Tool Integrations](TOOL-INTEGRATIONS.md).
 4. Run the consuming project's normal Composer validation, tests, formatter,

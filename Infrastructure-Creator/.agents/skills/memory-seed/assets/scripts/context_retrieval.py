@@ -905,7 +905,27 @@ def reusable_source_state(
     }, fingerprints
 
 
+def effective_canonical_edition(repository: Path, configured: str) -> str:
+    """The skill tree parity compares against in this checkout.
+
+    The configured canonical tree (`.agents`) is absent from a single-tool
+    install: `--tool claude` ships only `.claude/skills`, `--tool cursor` only
+    `.cursor/skills`. Measuring those against a tree that is not there
+    reported every skill as "absent from canonical", so the parity check the
+    project-brain skill tells agents to run failed on every such install. The
+    first tree present, in SKILL_EDITIONS order, stands in for it; the
+    configuration itself is left alone.
+    """
+    if (repository / configured / "skills").is_dir():
+        return configured
+    for edition in SKILL_EDITIONS:
+        if (repository / edition / "skills").is_dir():
+            return edition
+    return configured
+
+
 def skill_mirror_drift(repository: Path, canonical_edition: str) -> list[dict[str, object]]:
+    canonical_edition = effective_canonical_edition(repository, canonical_edition)
     logical: dict[str, dict[str, Path]] = {}
     for edition in SKILL_EDITIONS:
         root = repository / edition / "skills"
@@ -1110,6 +1130,12 @@ def full_mirror_drift(repository: Path) -> list[dict[str, str]]:
     rule the light skills checker applies. Once a mirror directory exists,
     every derived file in it must match, and a mirror file with no canonical
     source is drift too.
+
+    A mirror directory that holds none of a class's files did not receive
+    that class. A `--tool claude` install carries `.cursor/README.md` and
+    `.codex/README.md` and nothing else of those tools, and reading those
+    directories as installed mirrors reported every governance document as
+    missing from them.
     """
     framework = str(load_config(repository).get("framework") or "")
     drift: list[dict[str, str]] = []
@@ -1123,10 +1149,15 @@ def full_mirror_drift(repository: Path) -> list[dict[str, str]]:
                 continue
             transform = _MIRROR_TRANSFORMS[mirror_spec.get("transform", "copy")]
             skips = _mirror_class_skips(cls, mirror_spec, framework)
+            sources = [
+                (rel, path)
+                for rel, path in _mirror_iter_canonical(canonical, cls.get("only"))
+                if not _mirror_is_skipped(rel, skips)
+            ]
+            if sources and not any((mirror / rel).is_file() for rel, _ in sources):
+                continue
             expected: set[str] = set()
-            for rel, path in _mirror_iter_canonical(canonical, cls.get("only")):
-                if _mirror_is_skipped(rel, skips):
-                    continue
+            for rel, path in sources:
                 expected.add(rel)
                 raw = path.read_bytes()
                 try:
