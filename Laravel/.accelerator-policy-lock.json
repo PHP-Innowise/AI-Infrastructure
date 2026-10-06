@@ -43,7 +43,7 @@
   },
   "edition": "Laravel",
   "files": {
-    ".agents/skills/SKILL FLOW.md": "e90c1dd7e243e55cd28f97f031a4eda51de4fa43cd633f0c72c8e7106474ccfe",
+    ".agents/skills/SKILL FLOW.md": "58a09c95acfeba755003aa61dd8f345832c8cc19546d60913754143f6daf2ff0",
     ".agents/skills/api-designer/SKILL.md": "78de544250729dd04c5040210e07c58bd6ec1079c00850461b3d7c58a3fc9e06",
     ".agents/skills/architect/SKILL.md": "a81b32991e583a1b8a9bc3a79f331d3ba93184bc64e6a5ff79546dff26acc621",
     ".agents/skills/architecture-implementer/SKILL.md": "4aad7f4200b32ed1af9534897df7c48c38cfd0506ee851983a199328d4513199",
@@ -250,7 +250,7 @@
     ".cursor/skills/skill-creator/SKILL.md": "f1bac11cf8ab0e6acb40196165aab0f8e87556a4e182ff00894b6ee11af3a2a5",
     "AGENTS.md": "13a25924007b1e8aa4c1e9f8f57bc86aa6f6f6a06c8ca818413021156a6cfb53"
   },
-  "policy_digest": "dd13166f76d14724c19b0513bc8a1968efc03e42ed2d5f21e95041800d2ff5e5",
+  "policy_digest": "888ef059667ea9ef2c37d2f901d64510e508926e729883f3f182f93fa21e5aed",
   "release": "2.0.0",
   "schema_version": 1
 }

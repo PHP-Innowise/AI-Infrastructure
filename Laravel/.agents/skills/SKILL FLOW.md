@@ -7,14 +7,14 @@ This flow keeps Laravel work structured while preserving user control. Agents su
 ```text
 /requirements-analyst
   -> /researcher        (when options/libraries/approaches are unclear)
-  -> /brainstorm
+  -> /brainstorming
   -> /council           (for high-stakes trade-offs)
   -> /architect
   -> /database-designer (when the data model is non-trivial)
   -> /api-designer
   -> /frontend-design
   -> /writing-plans
-  -> /git-worktrees
+  -> /using-git-worktrees
   -> /architecture-implementer   (scaffold the decided structure)
   -> /coder or /coder-frontend or /filament (admin panel work)
        or a specialized implementation skill: /eloquent, /queues-jobs,
@@ -50,7 +50,7 @@ This flow keeps Laravel work structured while preserving user control. Agents su
 - Use `/security-reviewer` for auth, input-handling, SQL, upload, or secret-touching changes.
 - Use `/performance-optimization` when something is measurably slow.
 - Use `/dependency-manager` for Composer audits, updates, and vetting new packages.
-- Use `/debugger` when tests fail for unclear reasons or behavior is unexpected.
+- Use `/systematic-debugger` when tests fail for unclear reasons or behavior is unexpected.
 - Use `documentation-generator` when setup, deployment, worker/cron, API, or architecture documentation changed.
 - Use `project-brain` for governed task lifecycle, handoffs, unified retrieval, all six governed record types, compaction, and automatic or independently reviewed promotions. Governed mode is the default; `--mode lightweight` is an explicit local-only fallback.
 - Use `memory-bank` only for durable retrieval/capture/audit/supersession and governed automatic or independently reviewed promotion application; active work stays in Project Brain.
@@ -60,10 +60,10 @@ This flow keeps Laravel work structured while preserving user control. Agents su
 
 | Phase | Commands |
 | --- | --- |
-| Understanding | `/requirements-analyst`, `/codebase-mapper`, `/researcher`, `/brainstorm` |
+| Understanding | `/requirements-analyst`, `/codebase-mapper`, `/researcher`, `/brainstorming` |
 | Planning | `/council`, `/architect`, `/database-designer`, `/api-designer`, `/frontend-design`, `/writing-plans` |
-| Implementation | `/git-worktrees`, `/architecture-implementer`, `/coder`, `/coder-frontend`, `/filament`, `/eloquent`, `/queues-jobs`, `/events-notifications`, `/auth-scaffolding`, `/caching`, `/console-scheduler`, `/file-storage`, `/package-developer`, `/refactorer` |
-| Quality | `/code-reviewer`, `/security-reviewer`, `/test-generator`, `/performance-optimization`, `/debugger`, `/verify` |
+| Implementation | `/using-git-worktrees`, `/architecture-implementer`, `/coder`, `/coder-frontend`, `/filament`, `/eloquent`, `/queues-jobs`, `/events-notifications`, `/auth-scaffolding`, `/caching`, `/console-scheduler`, `/file-storage`, `/package-developer`, `/refactorer` |
+| Quality | `/code-reviewer`, `/security-reviewer`, `/test-generator`, `/performance-optimization`, `/systematic-debugger`, `/verify` |
 | Finalization | `documentation-generator`, `/release`, `/finishing-branch` |
 | Utility | `project-brain`, `checkpoint`, `memory`, `memory-bank`, `/reflect`, `/skill-creator`, `/review-pr`, `/browser-verify`, `/dependency-manager` |
 

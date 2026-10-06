@@ -44,7 +44,7 @@
   },
   "edition": "Cms/wordpress",
   "files": {
-    ".agents/skills/SKILL FLOW.md": "4b8a592c7a465a0cab0a408fb3fd6247de113d26f309968d7d89d6e9194b0696",
+    ".agents/skills/SKILL FLOW.md": "e0efe4a568179d91efc92329542053c9d2d725c1b7a933761f1044456e1f17cc",
     ".agents/skills/api-designer/SKILL.md": "0d445ec3ce5764b69340f265c00564b16de99691f9f793c1121971be6ce34546",
     ".agents/skills/architect/SKILL.md": "6fed44efa79a260791f5f0c6b8a191b443415fb3cae4df4713f768f03a8c132d",
     ".agents/skills/architecture-implementer/SKILL.md": "a754500cc5505d352cbd6937e0ee7d8846700c96c90872b69b1dced39e0da283",
@@ -254,7 +254,7 @@
     ".cursor/skills/skill-creator/SKILL.md": "f1bac11cf8ab0e6acb40196165aab0f8e87556a4e182ff00894b6ee11af3a2a5",
     "AGENTS.md": "3b7bc5d0bb391150e3a8b685adbd4befeb58773612cf56923f1421c61c4b07d2"
   },
-  "policy_digest": "ca3e7e21abff3b445a818d6c69718012c675c1e863e2fef5ed138b59b9a89c97",
+  "policy_digest": "cd75b39e12ad7ced396e63cdcad3ec9cd07497612f2bc938ad0acbc6d5c85ad2",
   "release": "2.0.0",
   "schema_version": 1
 }

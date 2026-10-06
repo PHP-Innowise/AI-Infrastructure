@@ -440,6 +440,46 @@ it ships no haiku agent.
 `policy_digest` identifies the surface, not a release: a surface change does
 not require a `VERSION` bump, it requires the lock to be regenerated.
 
+### `check_routes.py`
+
+**Purpose and status.** Reference-integrity gate; source-only and not
+installed. Mirrors prove the copies agree with canon; this proves canon points
+at things that exist.
+
+```bash
+python3 scripts/check_routes.py
+python3 scripts/check_routes.py --edition Symfony --edition wordpress
+python3 scripts/check_routes.py --json
+```
+
+- **Options:** repeatable `--edition` (an edition path; `WordPress` and
+  `wordpress` are accepted for `Cms/wordpress`); `--json`; `--allowlist PATH`.
+- **Hook wiring:** every `(.claude|.cursor|.codex)/hooks/<name>.sh` reference
+  in `.claude/settings.json`, `.cursor/hooks.json` and `.codex/hooks.json` —
+  matched on that tail, so the command prefix (`"$CLAUDE_PROJECT_DIR"/...`, a
+  `git rev-parse --show-toplevel` form, bare relative) does not matter — must
+  exist, be tracked, and carry index mode `100755`. A script under a tool's
+  `hooks/` that nothing wires is a warning.
+- **Routing:** Claude command `spawns`, `flow-next`, `flow-alternatives` and
+  `stages[].agents`; command-body `subagent_type`, `` `/x` `` spans and
+  `.<tool>/skills/<x>/` paths (Claude and Cursor); agent `name` (present and
+  unique), Claude `invokes` and "invoke the `x` skill" phrases; every
+  `SKILL FLOW.md` (slash tokens, backticked names, Phase Map items); and
+  `AGENTS.md` slash spans plus "`x` skill/agent/command/hook" phrases. A `/x`
+  resolves to a command or a skill of the same tool (in Claude Code every
+  skill is also `/<skill>`); in the Codex flow (`.agents/skills/SKILL FLOW.md`)
+  only a skill resolves, because Codex has no command layer.
+- **Reachability:** every `.agents/skills/<x>` is named by some command,
+  agent or flow.
+- **Allowlist:** `scripts/check_routes_allowlist.json` — `unwired_hooks`,
+  `unreachable_skills`, `references`; every entry needs a `reason`, an unknown
+  edition is an error, and an entry that matches nothing is a stale warning.
+- **Outputs:** findings grouped by edition with `file:line`; exit 1 on any
+  error, 0 otherwise (warnings allowed), 2 on a usage or Git failure.
+- **Dependencies:** Python 3.9+ standard library and Git (index modes).
+- **Writes:** none.
+- **CI relationship:** the `mirrors` job runs it and its regression tests.
+
 ### `check_stabilization.py`
 
 **Purpose and status.** Policy structure gate; source-only and not installed.

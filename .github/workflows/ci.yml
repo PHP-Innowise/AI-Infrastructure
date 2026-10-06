@@ -113,6 +113,14 @@ jobs:
       # the index exits 126 in every installed project.
       - name: Executable bits recorded in the Git index
         run: python3 -m unittest tests.test_file_modes
+      # Mirrors prove the copies agree with canon; this proves canon points at
+      # things that exist: every wired hook script is tracked as 100755, every
+      # command/agent/flow/AGENTS.md reference resolves in its own tool, and
+      # every skill is reachable or allowlisted with a reason.
+      - name: Wiring and routing references resolve
+        run: |
+          python3 scripts/check_routes.py
+          python3 -m unittest tests.test_check_routes
 
   infrastructure-creator-reliability:
     # Pinned to the 3.9 floor on purpose: a 3.x leg would only repeat the
