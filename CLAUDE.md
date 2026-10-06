@@ -33,19 +33,46 @@ others — verify a change is meaningful for the target stack before porting it.
 ## Commands
 
 All commands run from the repository root unless noted. Requirements: Python 3
-(3.9+), `git`, `bash`, and `shellcheck` for one lint step.
+(3.9+), `git`, `bash`, and `shellcheck` and `php` for two lint steps.
+
+### Before pushing: run what CI runs
+
+```bash
+python3 scripts/check.py                               # every CI job; jobs and matrix legs run in parallel, exit 1 on any failure
+python3 scripts/check.py --list                        # every command per group, and what would skip on this machine
+python3 scripts/check.py --group lint --group mirrors  # only these jobs (repeatable)
+python3 scripts/check.py --fail-fast                   # stop everything at the first failure
+python3 scripts/check.py --strict                      # a missing tool (shellcheck, php, ...) fails instead of skipping
+```
+
+`scripts/check.py` has one group per job in `.github/workflows/*.yml`, each
+the job's `run:` steps in order; runner provisioning (apt-get, venv creation,
+pip install) is not repeated, and a tool the runner has but this machine lacks
+is skipped and named. `tests/test_check.py` fails when a CI command has no
+entry in `check.py` or an entry there is no longer in CI, so the two cannot
+drift apart. The sections below are the individual steps, for running one
+thing at a time; `docs/CI.md` says what each job verifies.
 
 ### Run all edition + generator test suites
 
 ```bash
-for suite in \
-  "Laravel/memory-bank/tests" "Laravel/project-brain/tests" \
-  "Symfony/memory-bank/tests" "Symfony/project-brain/tests" \
-  "PHP Core/memory-bank/tests" "PHP Core/project-brain/tests" \
-  "Cms/wordpress/memory-bank/tests" "Cms/wordpress/project-brain/tests" \
-  "Infrastructure-Creator/tests"; do
-  (cd "$suite" && for test_file in test_*.py; do python3 "$test_file"; done)
-done
+python3 scripts/check.py --group tests
+```
+
+The same as plain shell; the outer subshell makes the first failure the exit
+status without closing your terminal:
+
+```bash
+(
+  for suite in \
+    "Laravel/memory-bank/tests" "Laravel/project-brain/tests" \
+    "Symfony/memory-bank/tests" "Symfony/project-brain/tests" \
+    "PHP Core/memory-bank/tests" "PHP Core/project-brain/tests" \
+    "Cms/wordpress/memory-bank/tests" "Cms/wordpress/project-brain/tests" \
+    "Infrastructure-Creator/tests"; do
+    (cd "$suite" && for test_file in test_*.py; do python3 "$test_file" || exit 1; done) || exit 1
+  done
+)
 ```
 
 Run a single test file directly, e.g. `(cd "Infrastructure-Creator/tests" && python3 test_scan_contracts.py)`.
@@ -60,7 +87,14 @@ python3 -m unittest tests.test_installation
 python3 -m unittest tests.test_framework_semantics
 python3 -m unittest tests.test_collect_context
 python3 -m unittest tests.test_build_mirrors
+python3 -m unittest tests.test_check                    # scripts/check.py still matches the workflows
+python3 -m unittest tests.test_hook_wiring              # Claude Code/Codex hook wiring reaches its scripts from any working directory
+python3 -m unittest tests.test_file_modes               # hook scripts and root launchers are 100755 in the Git index
+python3 -m unittest tests.test_bash_validator_corpus    # every bash-validator.sh copy against tests/fixtures/bash-validator-corpus.json
+python3 -m unittest tests.test_check_routes             # regression tests for scripts/check_routes.py
 ```
+
+`python3 scripts/check.py --list` prints the complete list CI runs.
 
 ### Mirror parity (Claude Code / Cursor / Codex trees must match canon)
 
@@ -69,6 +103,10 @@ python3 scripts/build_mirrors.py --check                 # all editions
 python3 scripts/build_mirrors.py --check --edition Symfony
 python3 scripts/build_mirrors.py --write --edition Laravel --edition "PHP Core"  # after intentional canon edits
 ```
+
+`--write` also gives each mirror its canonical file's executable bit, on disk
+and, for a tracked mirror, in the Git index (`--check` reports a mismatch as
+`mode differs from canon`).
 
 ### Cross-edition / core parity
 
@@ -95,10 +133,18 @@ A change to `memory-bank/scripts/`, `memory-bank/templates/` or
 the editions identical to each other, the second carries the same change into
 the projects the generator builds.
 
+`bash-validator.sh` is framework-shaped and excluded from cross-edition
+parity, but its generic section (between the `bash-validator generic section`
+markers) is byte-identical in the four editions and Infrastructure-Creator.
+Edit it in one `.claude/hooks/bash-validator.sh`, paste the block into the
+other four, run `python3 scripts/build_mirrors.py --write` to regenerate the
+`.cursor`/`.codex` copies, and check with
+`python3 -m unittest tests.test_bash_validator_corpus`.
+
 ### Installer inventory verification
 
 ```bash
-python3 scripts/install_accelerator.py --verify-inventories   # must report VERIFIED for all 3 editions
+python3 scripts/install_accelerator.py --verify-inventories   # must report VERIFIED for every edition
 python3 scripts/install_accelerator.py --write-inventories     # only after intentionally changing distribution files; regenerate then re-verify
 ```
 
@@ -138,32 +184,41 @@ outrank a failing gate: the status is recomputed, never trusted. Most catalog
 entries have no registry file yet and report `NOT REVIEWED` — see
 `install/open-source-kit/README.md`.
 
-### Lint (mirrors CI exactly)
+### Lint
 
 ```bash
-git ls-files -z -- '*.sh' 'collect' | xargs -0 -r -n1 bash -n
-git ls-files -z -- '*.sh' 'collect' | xargs -0 -r shellcheck -S error
-git ls-files -z -- '*.json' | while IFS= read -r -d '' f; do python3 -m json.tool "$f" > /dev/null || echo "Invalid JSON: $f"; done
+python3 scripts/check.py --group lint                  # the whole lint job, including the Cursor render grep and the regression tests
+git ls-files -z -- '*.sh' 'collect' 'kit3' 'harness-server' | xargs -0 -r -n1 bash -n
+git ls-files -z -- '*.sh' 'collect' 'kit3' 'harness-server' | xargs -0 -r shellcheck -S error
+(git ls-files -z -- '*.json' | while IFS= read -r -d '' f; do python3 -m json.tool "$f" > /dev/null || { echo "Invalid JSON: $f" >&2; exit 1; }; done)
 python3 scripts/check_php_snippets.py --require-php   # lints every complete ```<?php``` block in tracked Markdown
 python3 scripts/context_budget.py --check              # startup context-price ceilings per edition (scripts/token_budget.json)
 python3 scripts/context_budget.py                       # print current numbers without gating
+python3 scripts/check_stabilization.py                 # stabilization rules are well-formed
+python3 scripts/policy_lock.py --check                 # policy lock matches the model-facing surface
 ```
 
 ### Other CI-mirroring checks
 
 ```bash
 python3 scripts/check_links.py                                    # relative markdown links resolve
+python3 scripts/check_routes.py                                   # every hook wiring, command/agent/flow route and skill reachability resolves (allowlist: scripts/check_routes_allowlist.json)
 bash scripts/check_core_changelog.sh                               # shared-core diff requires a root CHANGELOG.md entry
 bash scripts/check_core_changelog.sh some-branch                   # against an explicit base ref
 ```
 
-### Optional external harness (not a release gate, separate deps)
+### Optional external harness (separate venv and deps; CI job `harness-fleet`)
 
 ```bash
 python3 -m venv harness/.venv
-harness/.venv/bin/pip install -e "harness[dev]"
-harness/.venv/bin/python -m pytest harness/tests
+harness/.venv/bin/python -m pip install -e harness
+harness/.venv/bin/python -m unittest discover -s harness/tests -p 'test_*.py'
+python3 -m unittest tests.test_harness_fleet
 ```
+
+`python3 scripts/check.py` runs the last two; without `harness/.venv` the graph
+tests skip and it prints the commands that create the venv (`--strict` fails
+instead).
 
 ### Context collection bundler (for pasting a slice of this repo into another model)
 
