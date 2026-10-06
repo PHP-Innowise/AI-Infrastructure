@@ -343,6 +343,79 @@ class HookWiringTest(RoutesFixture):
         self.write(".codex/hooks.json", '{"hooks": {\n  "PreToolUse": [\n}\n')
         self.assert_single_error(self.run_gate(), "hook-wiring", ".codex/hooks.json:", "invalid JSON")
 
+    def test_wired_path_without_the_sh_extension_is_an_error(self) -> None:
+        # The typo that drops ".sh" is still a wired reference: the hook
+        # exits 127 at runtime, which both hosts treat as non-blocking.
+        settings = json.loads(json.dumps(CLAUDE_SETTINGS))
+        settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = (
+            '"$CLAUDE_PROJECT_DIR"/.claude/hooks/subagent-gate'
+        )
+        self.write_json(".claude/settings.json", settings)
+        report = self.run_gate()
+        error = self.assert_single_error(
+            report, "hook-wiring", ".claude/settings.json:", "subagent-gate", "does not exist"
+        )
+        self.assertEqual(error.target, ".claude/hooks/subagent-gate")
+        self.assertEqual(len(report.warnings), 1, self.messages(report, "warning"))
+
+    def test_wired_hooks_path_must_name_a_sh_script(self) -> None:
+        self.hook(".cursor/hooks/gate.py")  # exists, tracked, executable - not a *.sh
+        self.write_json(
+            ".cursor/hooks.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "subagentStart": [{"command": ".cursor/hooks/subagent-gate.sh"}],
+                    "stop": [{"command": ".cursor/hooks/gate.py"}],
+                    "beforeShellExecution": [{"command": "ls .cursor/hooks/"}],
+                },
+            },
+        )
+        self.stage()
+        report = self.run_gate()
+        targets = sorted(item.target for item in report.errors)
+        self.assertEqual(targets, [".cursor/hooks/", ".cursor/hooks/gate.py"], self.messages(report))
+        self.assertTrue(all("*.sh script" in item.message for item in report.errors))
+
+    def test_codex_launcher_argument_must_name_a_sh_script(self) -> None:
+        launcher = (
+            "sh -c 'd=$(pwd); until [ -z \"$d\" ] || [ -f \"$d/.codex/hooks/$1\" ]; "
+            "do d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh "
+        )
+
+        def wire(argument: str) -> None:
+            hooks = json.loads(json.dumps(CODEX_HOOKS))
+            hooks["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = launcher + argument
+            self.write_json(".codex/hooks.json", hooks)
+
+        wire("subagent-gate.sh")
+        self.assertEqual(self.messages(self.run_gate()), [])
+        self.assertEqual(self.messages(self.run_gate(), "warning"), [])
+
+        wire("subagent-gate")
+        error = self.assert_single_error(
+            self.run_gate(), "hook-wiring", ".codex/hooks.json:", "does not exist"
+        )
+        self.assertEqual(error.target, ".codex/hooks/subagent-gate")
+
+        wire("")  # no $1: the launcher execs the hooks directory itself
+        error = self.assert_single_error(self.run_gate(), "hook-wiring", ".codex/hooks.json:")
+        self.assertEqual(error.target, ".codex/hooks/")
+
+    def test_non_utf8_wiring_file_is_a_finding(self) -> None:
+        path = self.edition / ".cursor/hooks.json"
+        path.write_bytes(path.read_bytes() + b"\xff\n")
+        report = self.run_gate()
+        self.assertTrue(
+            any(
+                item.check == "hook-wiring"
+                and item.path == f"{EDITION}/.cursor/hooks.json"
+                and "not valid UTF-8" in item.message
+                for item in report.errors
+            ),
+            self.messages(report),
+        )
+
     def test_unwired_script_warns_until_allowlisted(self) -> None:
         self.hook(".codex/hooks/subagent-dispatch.sh")
         self.stage()
@@ -397,6 +470,83 @@ class RoutingTest(RoutesFixture):
         self.replace(".claude/commands/flow-feature.md", "agents: [code-reviewer]", "agents: [reviewer]")
         self.assert_single_error(
             self.run_gate(), "routing", ".claude/commands/flow-feature.md:5", "'reviewer'"
+        )
+
+    def test_subagent_type_must_be_the_frontmatter_name(self) -> None:
+        # The host and subagent-gate.sh spawn by frontmatter name only; the
+        # file stem and the `spawns` alias (coder-agent) are blocked at runtime.
+        self.replace(".claude/commands/coder.md", "**subagent_type:** `coder`", "**subagent_type:** `coder-agent`")
+        error = self.assert_single_error(
+            self.run_gate(), "routing", ".claude/commands/coder.md:13", "subagent_type 'coder-agent'"
+        )
+        self.assertIn("frontmatter name", error.message)
+
+    def test_flow_stage_agent_must_be_the_frontmatter_name(self) -> None:
+        self.replace(
+            ".claude/commands/flow-feature.md", "agents: [code-reviewer]", "agents: [code-reviewer-agent]"
+        )
+        self.assert_single_error(
+            self.run_gate(), "routing", ".claude/commands/flow-feature.md:5", "'code-reviewer-agent'"
+        )
+
+    def test_agents_md_agent_must_be_the_frontmatter_name(self) -> None:
+        self.replace("AGENTS.md", "the `code-reviewer` agent", "the `code-reviewer-agent` agent")
+        self.assert_single_error(self.run_gate(), "routing", "AGENTS.md:6", "code-reviewer-agent")
+
+    def test_agent_name_must_read_the_same_to_the_gate(self) -> None:
+        # subagent-gate.sh deletes double quotes but keeps single quotes, so
+        # name: 'coder' is "'coder'" on its roster and spawning coder fails.
+        self.replace(".claude/agents/coder-agent.md", "name: coder\n", "name: 'coder'\n")
+        report = self.run_gate()
+        messages = "\n".join(self.messages(report))
+        self.assertIn(".claude/agents/coder-agent.md:2", messages)
+        self.assertIn("reads it as ''coder''", messages)
+        self.assertIn(".claude/commands/coder.md:13 [routing] subagent_type 'coder'", messages)
+        self.assertEqual(check_routes.roster_name(['---', 'name: "coder"  ', '---']), "coder")
+        self.assertEqual(check_routes.roster_name(['---', 'x: 1', '---', 'name: late']), "")
+
+    def test_command_body_spawn_phrases_must_name_an_agent(self) -> None:
+        # Symfony ("Use the Task tool to spawn `x`."), WordPress ("Spawn the
+        # `x` agent with ...", "Spawn `x` with ...") and the bare description
+        # line ("Spawn x agent to ...") are routes too: a Cursor command has no
+        # frontmatter `spawns` to fall back on.
+        phrases = {
+            "Use the Task tool to spawn `{name}`.": 8,
+            "Spawn the `{name}` agent with `$ARGUMENTS`. It executes only the skill.": 8,
+            "Spawn `{name}` with `$ARGUMENTS`.": 8,
+            "Spawn {name} agent to review the change.": 8,
+        }
+        for phrase, line in phrases.items():
+            with self.subTest(phrase=phrase):
+                body = "---\nname: review\ndescription: \"Review.\"\n---\n\n# Review\n\n{}\n"
+                self.write(".cursor/commands/review.md", body.format(phrase.format(name="code-reviewer")))
+                self.assertEqual(self.messages(self.run_gate()), [])
+                self.write(".cursor/commands/review.md", body.format(phrase.format(name="codder")))
+                self.assert_single_error(
+                    self.run_gate(), "routing", f".cursor/commands/review.md:{line}",
+                    "spawn 'codder'", ".cursor/agents",
+                )
+
+    def test_spawn_prose_without_a_name_is_not_a_reference(self) -> None:
+        self.write(
+            ".claude/commands/review.md",
+            "---\nspawns: code-reviewer-agent\nflow-next: null\n---\n\n"
+            "Spawn all three agents of the single `parallel: true` stage in one message;\n"
+            "then spawn each agent with the Task tool, and spawn the `parallel: true` stage's agents.\n"
+            "Spawn one agent at a time. Spawn write-capable agents strictly one at a time.\n"
+            "Spawn only agents from this accelerator's roster.\n"
+            "Never spawn `general-purpose`; do not spawn `explore`, and don't spawn `plan`.\n"
+            "Spawn `Explore` is a built-in, not a project agent name.\n",
+        )
+        self.assertEqual(self.messages(self.run_gate()), [])
+
+    def test_command_body_invoked_skill_must_exist(self) -> None:
+        body = "---\nname: mapper\ndescription: \"Map.\"\n---\n\nInvoke the {} skill and follow it completely.\n"
+        self.write(".cursor/commands/mapper.md", body.format("code-reviewer"))
+        self.assertEqual(self.messages(self.run_gate()), [])
+        self.write(".cursor/commands/mapper.md", body.format("code-reviewr"))
+        self.assert_single_error(
+            self.run_gate(), "routing", ".cursor/commands/mapper.md:6", "invoked skill 'code-reviewr'"
         )
 
     def test_cursor_subagent_type_must_name_a_cursor_agent(self) -> None:
@@ -454,6 +604,70 @@ class RoutingTest(RoutesFixture):
             self.run_gate(), "routing", ".agents/skills/SKILL FLOW.md:6", "Codex has no command layer"
         )
         self.assertEqual(error.target, "debugger")
+
+    def test_codex_flow_bare_step_must_resolve(self) -> None:
+        self.replace(".agents/skills/SKILL FLOW.md", "-> systematic-debugger", "-> systematic-debuger")
+        error = self.assert_single_error(
+            self.run_gate(), "routing", ".agents/skills/SKILL FLOW.md:6", "flow step 'systematic-debuger'"
+        )
+        self.assertEqual(error.target, "systematic-debuger")
+
+    def test_flow_step_alternatives_notes_and_arguments_are_checked(self) -> None:
+        self.replace(
+            ".agents/skills/SKILL FLOW.md",
+            "  -> systematic-debugger\n",
+            "  -> systematic-debugger or ghost-a   (when stuck)\n"
+            "  -> coder, ghost-b, or code-reviewer\n"
+            "  ghost-c <target>  OR  the scan's offer\n"
+            "    ├─ ghost-d          ┐\n"
+            "    │   └─ ghost-e  (needs a list)\n"
+            "    → ghost-f\n",
+        )
+        report = self.run_gate()
+        self.assertEqual(
+            sorted(item.target for item in report.errors),
+            ["ghost-a", "ghost-b", "ghost-c", "ghost-d", "ghost-e", "ghost-f"],
+            self.messages(report),
+        )
+
+    def test_flow_diagram_prose_is_not_a_step(self) -> None:
+        # Infrastructure-Creator's tree mixes steps with prose; a word that
+        # goes on into more words is prose, whatever leads it.
+        self.replace(
+            ".agents/skills/SKILL FLOW.md",
+            "  -> systematic-debugger\n",
+            "  -> systematic-debugger\n"
+            "    ├─ PHP evidence? ──no──► recognizable\n"
+            "    │   ├─ no  → out of scope\n"
+            "    │   └─ yes → offer\n"
+            "    ├─ read <target>/.infra-manifest.json  (no manifest → ABORT)\n"
+            "    ├─ re-validate profile → compare versions\n"
+            "    └─ rewrite manifest → code-reviewer\n"
+            "      + reference docs → mirror 3 editions → self-verify\n"
+            "    → reports path to new sibling\n"
+            "        v                       v\n"
+            "       or a specialized implementation skill\n",
+        )
+        self.assertEqual(self.messages(self.run_gate()), [])
+
+    def test_only_diagram_fences_hold_flow_steps(self) -> None:
+        self.replace(
+            ".agents/skills/SKILL FLOW.md",
+            "- Use `memory` to refresh context.",
+            "- Use `memory` to refresh context.\n\n```bash\nmake\n```",
+        )
+        self.assertEqual(self.messages(self.run_gate()), [])
+
+    def test_skill_flow_backticked_name_with_arguments_must_resolve(self) -> None:
+        self.replace(
+            ".agents/skills/SKILL FLOW.md",
+            "- Use `memory` to refresh context.",
+            "- Use `memory` to refresh context; run `coder <task>`, then `ghost <target>`.",
+        )
+        error = self.assert_single_error(
+            self.run_gate(), "routing", ".agents/skills/SKILL FLOW.md:9", "`ghost`"
+        )
+        self.assertEqual(error.target, "ghost")
 
     def test_skill_flow_backticked_name_must_resolve(self) -> None:
         self.replace(".claude/skills/SKILL FLOW.md", "Use `memory`", "Use `memroy`")
@@ -547,6 +761,31 @@ class AllowlistTest(RoutesFixture):
         self.assertTrue(any("unknown edition 'Laraval'" in item for item in problems))
         self.assertTrue(any("unknown section 'surprise'" in item for item in problems))
 
+    def test_malformed_entries_are_findings_not_crashes(self) -> None:
+        # Each malformed entry is reported by validate_allowlist and takes no
+        # part in matching: no KeyError, no TypeError, and it silences nothing.
+        self.write(".agents/skills/orphan/SKILL.md", SKILL.format(name="orphan"))
+        self.hook(".codex/hooks/subagent-dispatch.sh")
+        self.stage()
+        allowlist = {
+            "unreachable_skills": [{"edition": "*", "reason": "x", "skil": "orphan"}],
+            "unwired_hooks": 5,
+            "references": [{"edition": "*", "reason": "x", "file": "AGENTS.md", "target": 7}],
+        }
+        report = self.run_gate(allowlist)
+        problems = sorted(item.message for item in report.errors if item.check == "allowlist")
+        self.assertEqual(
+            problems,
+            [
+                "references[0] needs a non-empty 'target'",
+                "section 'unwired_hooks' must be a list",
+                "unreachable_skills[0] needs a non-empty 'skill'",
+            ],
+        )
+        self.assertEqual([item.target for item in report.errors if item.check == "reachability"], ["orphan"])
+        self.assertEqual(len(report.warnings), 1, self.messages(report, "warning"))
+        self.assertEqual(report.allowlisted, [])
+
     def test_stale_entry_is_a_warning(self) -> None:
         allowlist = {
             "unreachable_skills": [
@@ -603,6 +842,46 @@ class CommandLineTest(RoutesFixture):
         self.assertEqual(finding["check"], "routing")
         self.assertEqual(finding["line"], 2)
         self.assertEqual(finding["target"], "codder-agent")
+
+    def test_non_utf8_file_is_a_finding_with_valid_json(self) -> None:
+        path = self.edition / ".claude/agents/coder-agent.md"
+        path.write_bytes(path.read_bytes() + b"\n\xe9t\xe9\n")
+        status, output = self.run_main("--json")
+        self.assertEqual(status, 1, output)
+        data = json.loads(output)
+        findings = [
+            item for item in data["findings"]
+            if item["path"] == f"{EDITION}/.claude/agents/coder-agent.md"
+        ]
+        self.assertEqual(len(findings), 1, data["findings"])
+        self.assertEqual(findings[0]["severity"], "error")
+        self.assertIn("not valid UTF-8", findings[0]["message"])
+        # The rest of the file was still checked: nothing else broke.
+        self.assertEqual(data["errors"], 1, data["findings"])
+
+    def test_malformed_allowlist_entry_exits_one_with_valid_json(self) -> None:
+        self.hook(".codex/hooks/subagent-dispatch.sh")
+        self.stage()
+        (self.root / "allowlist.json").write_text(
+            json.dumps(
+                {"unwired_hooks": [{"edition": "*", "reason": "x", "pth": ".codex/hooks/subagent-dispatch.sh"}]}
+            ),
+            encoding="utf-8",
+        )
+        status, output = self.run_main("--json")
+        self.assertEqual(status, 1, output)
+        data = json.loads(output)
+        self.assertEqual(data["errors"], 1)
+        self.assertIn("needs a non-empty 'path'", data["findings"][0]["message"])
+
+    def test_unreadable_allowlist_exits_two_with_valid_json(self) -> None:
+        (self.root / "allowlist.json").write_bytes(b'{"_comment": "caf\xe9"}\n')
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            status, output = self.run_main("--json")
+        self.assertEqual(status, 2)
+        self.assertIn("not valid UTF-8", json.loads(output)["error"])
+        self.assertIn("not valid UTF-8", stderr.getvalue())
 
     def test_edition_aliases(self) -> None:
         self.assertEqual(check_routes.resolve_edition("wordpress"), "Cms/wordpress")

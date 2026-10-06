@@ -10,31 +10,48 @@ PHP Core, WordPress) and Infrastructure-Creator and checks three things.
 
 Hook wiring (``hook-wiring``)
     ``.claude/settings.json``, ``.cursor/hooks.json`` and ``.codex/hooks.json``
-    are scanned line by line for ``(.claude|.cursor|.codex)/hooks/<name>.sh``.
-    Only that tail is matched, so the command prefix (bare relative,
-    ``"$CLAUDE_PROJECT_DIR"/...``, ``$(git rev-parse --show-toplevel)/...``)
-    does not matter. Every referenced script must exist, be tracked in the Git
-    index, and carry index mode 100755: Git records the executable bit, and a
-    script checked out without it fails on every hook event. A ``*.sh`` under
-    a tool's ``hooks/`` directory that no wiring file references is a
-    warning, unless the allowlist gives a reason.
+    are scanned line by line for every name under
+    ``(.claude|.cursor|.codex)/hooks/``, whatever its extension, and for the
+    script name a Codex launcher passes as ``$1``. Only that tail is matched,
+    so the command prefix (bare relative, ``"$CLAUDE_PROJECT_DIR"/...``,
+    ``$(git rev-parse --show-toplevel)/...``) does not matter. Every wired
+    name must be a ``*.sh`` script that exists, is tracked in the Git index,
+    and carries index mode 100755: Git records the executable bit, and a
+    script checked out without it fails on every hook event. A typo that
+    drops ``.sh`` is an error, not an unwired script. A ``*.sh`` under a
+    tool's ``hooks/`` directory that no wiring file references is a warning,
+    unless the allowlist gives a reason.
 
 Routing (``routing``)
     Claude commands: ``spawns`` names an agent (frontmatter ``name``, file
-    stem, or ``<name>-agent``); ``flow-next`` / ``flow-alternatives`` name a
-    command or a skill (in Claude Code every skill is also ``/<skill>``);
-    ``stages[].agents`` name agents. Command bodies (Claude and Cursor):
-    ``subagent_type`` names an agent of the same tool, a ```/x``` code span
-    names a command or skill of the same tool, a ``.<tool>/skills/<x>/`` path
-    names an existing skill. Agents (Claude and Cursor) must carry a unique
-    ``name``; a Claude agent's ``invokes`` and any "invoke the `x` skill"
-    phrase in an agent body must name ``.agents/skills/<x>/SKILL.md``; slash
-    code spans resolve as for commands. Every ``SKILL FLOW.md`` - its slash
-    tokens, its backticked names and its Phase Map items - resolves in its
-    own tool's namespace: Claude and Cursor accept a command or a skill, the
-    Codex edition (``.agents/skills``) accepts a skill only, because Codex has
-    no command layer. ``AGENTS.md`` slash code spans and its "`x` skill",
-    "`x` agent", "`x` command" and "`x` hook" phrases must resolve too.
+    stem, or ``<name>-agent``: it is metadata about the agent file);
+    ``flow-next`` / ``flow-alternatives`` name a command or a skill (in Claude
+    Code every skill is also ``/<skill>``). Everything the orchestrator passes
+    as ``subagent_type`` - ``stages[].agents``, a command body's
+    ``subagent_type`` and its prose spawns ("spawn `x`", "Spawn the `x`
+    agent", "Spawn `x` with", a line opening "Spawn x agent"), and an
+    ``AGENTS.md`` "`x` agent" - must equal an agent's frontmatter ``name`` in
+    the same tool, read the way the host and ``subagent-gate.sh`` read it:
+    both spawn by that name only, so a file stem or ``<name>-agent`` is
+    blocked at runtime. Command bodies (Claude and Cursor) also resolve
+    "invoke the `x` skill" phrases against ``.agents/skills``, a ```/x```
+    code span against the commands and skills of the same tool, and a
+    ``.<tool>/skills/<x>/`` path against existing skills. Agents (Claude and
+    Cursor) must carry a unique, bare kebab-case ``name``; a Claude agent's
+    ``invokes`` and any "invoke the `x` skill" phrase in an agent body must
+    name ``.agents/skills/<x>/SKILL.md``; slash code spans resolve as for
+    commands. Every ``SKILL FLOW.md`` - its slash tokens, its backticked
+    names (also with arguments: ```x <target>```), its Phase Map items, and
+    the bare-name steps of its fenced diagrams (see ``FLOW_STEP``) - resolves
+    in its own tool's namespace: Claude and Cursor accept a command or a
+    skill, the Codex edition (``.agents/skills``) accepts a skill only,
+    because Codex has no command layer. ``AGENTS.md`` slash code spans and
+    its "`x` skill", "`x` agent", "`x` command" and "`x` hook" phrases must
+    resolve too.
+
+    A file that is not valid UTF-8 (or cannot be read) is an error finding
+    under the check that read it; it is still checked with the undecodable
+    bytes replaced, so one bad byte does not hide the file's references.
 
 Reachability (``reachability``)
     Every skill in ``.agents/skills`` is named by some agent, command or flow
@@ -42,7 +59,8 @@ Reachability (``reachability``)
 
 The allowlist (``scripts/check_routes_allowlist.json``) records deliberate
 exceptions, each with a mandatory reason; an entry that no longer matches
-anything is reported as a stale warning so the list cannot rot.
+anything is reported as a stale warning so the list cannot rot. A malformed
+entry is an error and silences nothing.
 
 Usage:
     python3 scripts/check_routes.py                     # all editions
@@ -50,7 +68,9 @@ Usage:
     python3 scripts/check_routes.py --json              # machine-readable
 
 Exit status: 0 when no error is found (warnings allowed), 1 on any error,
-2 on a usage or environment failure. Python 3.9+, standard library plus Git.
+2 on a usage or environment failure (Git unavailable, an allowlist file that
+is not a UTF-8 JSON object; with ``--json`` the reason is printed as
+``{"error": ...}``). Python 3.9+, standard library plus Git.
 """
 
 from __future__ import annotations
@@ -97,11 +117,16 @@ SKILL_FLOW = "SKILL FLOW.md"
 EXECUTABLE_MODE = "100755"
 NULL_VALUES = {"", "null", "none", "~"}
 
-HOOK_REF = re.compile(r"(\.claude|\.cursor|\.codex)/hooks/([A-Za-z0-9._-]+\.sh)")
+# Every place a wiring command names a hooks directory. What follows it, up to
+# a shell delimiter, is the wired name - whatever it is: a typo that drops
+# ".sh" is still a wired reference and must resolve, not fall through to the
+# "unwired script" warning while the hook exits 127 at runtime.
+HOOK_PATH = re.compile(r"(\.claude|\.cursor|\.codex)/hooks/([^\s\"'`;|&()<>]*)")
 # A launcher that locates the hooks directory itself and execs the script
 # named as its first argument - the Codex form:
 # sh -c '... exec "$d/.codex/hooks/$1"' sh local-context.sh
 HOOK_LAUNCHER = re.compile(r"(\.claude|\.cursor|\.codex)/hooks/\$(?:1|\{1\})")
+LAUNCHER_PLACEHOLDERS = {"$1", "${1}"}
 HOOK_SCRIPT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\.sh")
 COMMAND_VALUE = re.compile(r'"command"\s*:\s*("(?:[^"\\]|\\.)*")')
 NAME = r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*"
@@ -117,10 +142,41 @@ SLASH_SPAN = re.compile(rf"^/({NAME})(?:[\s\[].*)?$")
 SLASH_TOKEN = re.compile(
     rf"(?:(?<=^)|(?<=[\s`(\[\"',]))/({NAME})(?![A-Za-z0-9_/{{<>-])(?!\.[A-Za-z0-9])"
 )
-# A backticked bare name in SKILL FLOW.md (`documentation-generator`); slash
-# forms are already covered by SLASH_TOKEN.
-BACKTICK_NAME = re.compile(rf"`({NAME})`")
+# A backticked bare name in SKILL FLOW.md (`documentation-generator`), also
+# with arguments (`infra-build <target>`, `coder [context]`), as SLASH_SPAN
+# allows for slash spans; slash forms are already covered by SLASH_TOKEN.
+BACKTICK_NAME = re.compile(rf"`({NAME})(?:[ \t]+[<\[][^`]*)?`")
+# A step in a fenced SKILL FLOW.md diagram written with bare names (the
+# Codex form, and Infrastructure-Creator's tree). A step starts at the line
+# start, after an optional leading "->" or "→", or right after a tree branch
+# ("├─", "└─"). It counts only when the step ends there: end of line, a
+# "(note)", an "<argument>", or a run of spaces before a box-drawing glyph.
+# Prose in a diagram ("├─ no  → out of scope", "└─ rewrite manifest") goes
+# on with another word, so it never reads as a step. Box-drawing glyphs are
+# U+2500-U+257F; U+25BA is the "►" arrowhead.
+FLOW_STEP_START = re.compile(r"^[ \t]*(?:(?:->|\u2192)[ \t]*)?|[\u251c\u2514]\u2500+[ \t]*")
+FLOW_STEP = re.compile(
+    rf"({NAME}(?:[ \t]*,[ \t]*(?:or[ \t]+)?{NAME}|[ \t]+or[ \t]+{NAME})*)"
+    r"(?=[ \t]*$|[ \t]*\(|[ \t]+<[^<>\s]+>(?:\s|$)|[ \t]{2,}[\u2500-\u257f\u25ba])"
+)
+FLOW_STEP_SEPARATOR = re.compile(r"[ \t]*,[ \t]*(?:or[ \t]+)?|[ \t]+or[ \t]+")
+# Fenced blocks that hold a flow diagram; a ```bash block holds commands.
+FLOW_FENCE_INFO = {"", "text", "txt", "plain", "plaintext"}
 SUBAGENT_TYPE = re.compile(r"subagent_type[*:\s]*`([^`]+)`")
+# The prose spawn forms of a command body: "spawn `x`", "Spawn the `x` agent",
+# "Spawn `x` with $ARGUMENTS". The name must close the code span, so
+# "spawn the `parallel: true` stage's agents" is not a reference, and a
+# negated spawn ("never spawn `general-purpose`") names what must not run.
+SPAWN_AGENT = re.compile(rf"\b(?i:spawn)\s+(?:(?i:the)\s+)?`({NAME})`")
+SPAWN_NEGATED = re.compile(r"(?:\bnot|\bnever|n't)\s*$", re.IGNORECASE)
+# The bare form, "Spawn coder agent to ...", only where a line starts with it:
+# mid-sentence "spawn each agent" / "spawn one agent at a time" is prose.
+SPAWN_AGENT_BARE = re.compile(rf"^\s*Spawn\s+(?:the\s+)?({NAME})\s+agent\b")
+SPAWN_DETERMINERS = {
+    "a", "all", "an", "another", "any", "both", "each", "every", "first",
+    "its", "last", "new", "next", "no", "one", "only", "same", "several",
+    "single", "that", "the", "their", "this",
+}
 SKILL_PATH = re.compile(r"\.(claude|cursor|agents)/skills/([A-Za-z0-9_-]+)/")
 INVOKE_SKILL = re.compile(
     rf"\b(?:invoke|execute)\s+(?:the\s+)?(?:`({NAME})`|({NAME}-{NAME}))\s+skill\b",
@@ -179,30 +235,55 @@ class Report:
 
 
 def wired_hook_scripts(command: str) -> List[str]:
-    """Tool-tree-relative hook scripts one wiring command runs.
+    """Tool-tree-relative hook paths one wiring command runs.
 
-    Two forms name a script: a path ending in ``.<tool>/hooks/<name>.sh``
-    under any prefix (bare, ``"${CLAUDE_PROJECT_DIR}"/``, a git toplevel), and
-    a launcher that execs ``.<tool>/hooks/$1`` with the script name passed as
-    an argument. An inline snippet such as the Notification hook names none.
+    Two forms name a script: a path ``.<tool>/hooks/<name>`` under any prefix
+    (bare, ``"${CLAUDE_PROJECT_DIR}"/``, a git toplevel), and a launcher that
+    execs ``.<tool>/hooks/$1`` with the script name passed as its first
+    argument. Every name is returned as written, whatever its extension, so
+    the caller can reject one that is not an existing ``*.sh`` script; a
+    launcher without a parsable first argument yields ``.<tool>/hooks/``. An
+    inline snippet such as the Notification hook names none.
     """
-    found = [f"{match.group(1)}/hooks/{match.group(2)}" for match in HOOK_REF.finditer(command)]
+    found = [
+        f"{match.group(1)}/hooks/{match.group(2)}"
+        for match in HOOK_PATH.finditer(command)
+        if match.group(2) not in LAUNCHER_PLACEHOLDERS
+    ]
     launcher = HOOK_LAUNCHER.search(command)
     if launcher:
+        # sh -c '<script>' <$0> <$1>: the script name is the word two after
+        # the one carrying the launcher.
         try:
             words = shlex.split(command)
         except ValueError:
             words = []
-        found += [
-            f"{launcher.group(1)}/hooks/{word}"
-            for word in words[1:]
-            if HOOK_SCRIPT_NAME.fullmatch(word)
-        ]
+        position = next(
+            (index for index, word in enumerate(words) if HOOK_LAUNCHER.search(word)), None
+        )
+        argument = ""
+        if position is not None and len(words) > position + 2:
+            argument = words[position + 2]
+        found.append(f"{launcher.group(1)}/hooks/{argument}")
     return list(dict.fromkeys(found))
 
 
-def read_lines(path: Path) -> List[str]:
-    return path.read_text(encoding="utf-8").splitlines()
+def roster_name(lines: Sequence[str]) -> str:
+    """The name ``subagent-gate.sh`` puts on its roster for one agent file.
+
+    The gate reads only the first frontmatter block (line 1 exactly ``---``
+    up to the next exact ``---``), takes the first ``name:`` line, deletes
+    every double quote and trims trailing whitespace, then compares the
+    requested ``subagent_type`` with ``grep -qxF`` - an exact match.
+    """
+    if not lines or lines[0] != "---":
+        return ""
+    for line in lines[1:]:
+        if line == "---":
+            break
+        if line.startswith("name:"):
+            return line[len("name:"):].lstrip(" \t").replace('"', "").rstrip()
+    return ""
 
 
 def parse_frontmatter(lines: Sequence[str]) -> Tuple[Dict[str, Tuple[str, int]], int]:
@@ -279,6 +360,7 @@ class Agent:
     lines: List[str]
     frontmatter: Dict[str, Tuple[str, int]]
     body_start: int
+    roster: str = ""  # the name as subagent-gate.sh reads it
 
 
 class Edition:
@@ -286,6 +368,9 @@ class Edition:
         self.repo_root = repo_root
         self.name = name
         self.root = repo_root / name
+        # path -> (check, message) for every file that could not be read
+        # cleanly; the Checker reports each one as an error.
+        self.unreadable: Dict[Path, Tuple[str, str]] = {}
         self.skills = self._skill_names(self.root / ".agents" / "skills")
         self.tool_skills = {
             tool: self.skills | self._skill_names(self.root / directory / "skills")
@@ -327,22 +412,57 @@ class Edition:
     def _load_agents(self, directory: Path) -> Dict[str, Agent]:
         agents = {}
         for path in self._markdown_files(directory):
-            lines = read_lines(path)
+            lines = self.read_lines(path)
             frontmatter, body_start = parse_frontmatter(lines)
             name = scalar(frontmatter["name"][0]) if "name" in frontmatter else ""
-            agents[path.stem] = Agent(path.stem, name, path, lines, frontmatter, body_start)
+            agents[path.stem] = Agent(
+                path.stem, name, path, lines, frontmatter, body_start, roster_name(lines)
+            )
         return agents
+
+    def read_text(self, path: Path, check: str = "routing") -> str:
+        """``path`` as text. A file that is not valid UTF-8 is recorded as an
+        error and still checked, with the undecodable bytes replaced; one
+        that cannot be read at all is recorded and checked as empty."""
+        try:
+            return path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as error:
+            self.unreadable.setdefault(
+                path,
+                (check, f"file is not valid UTF-8 (byte {error.start}: {error.reason}); "
+                        "it was checked with the undecodable bytes replaced"),
+            )
+            return path.read_bytes().decode("utf-8", "replace")
+        except OSError as error:
+            self.unreadable.setdefault(
+                path, (check, f"file cannot be read: {error.strerror or error}")
+            )
+            return ""
+
+    def read_lines(self, path: Path, check: str = "routing") -> List[str]:
+        return self.read_text(path, check).splitlines()
 
     def rel(self, path: Path) -> str:
         return path.relative_to(self.repo_root).as_posix()
 
     def agent_resolves(self, tool: str, value: str) -> bool:
+        """The lenient form for the ``spawns`` metadata key, which names the
+        agent file (``coder-agent``): the stem, the name or ``<name>-agent``."""
         for agent in self.agents.get(tool, {}).values():
             if value in (agent.stem, agent.name) or (
                 agent.name and value == f"{agent.name}-agent"
             ):
                 return True
         return False
+
+    def agent_named(self, tool: str, value: str) -> bool:
+        """``value`` is what the host spawns by and ``subagent-gate.sh``
+        admits: exactly an agent's frontmatter ``name``, read the same way by
+        both. The file stem and ``<name>-agent`` are rejected at runtime."""
+        return any(
+            agent.name == value and agent.roster == value
+            for agent in self.agents.get(tool, {}).values()
+        )
 
     def namespace(self, tool: str) -> Set[str]:
         """Names a ``/x`` invocation can reach in ``tool``."""
@@ -393,7 +513,7 @@ class Checker:
             wiring_path = edition.root / wiring
             if not wiring_path.is_file():
                 continue
-            text = wiring_path.read_text(encoding="utf-8")
+            text = edition.read_text(wiring_path, "hook-wiring")
             try:
                 json.loads(text)
             except ValueError as error:
@@ -425,7 +545,16 @@ class Checker:
                     )
 
     def _check_hook_script(self, wiring_path: Path, line: int, relative: str) -> None:
+        tree, _, name = relative.partition("/hooks/")
         script = self.edition.root / relative
+        if not HOOK_SCRIPT_NAME.fullmatch(name):
+            state = "is not" if name and script.is_file() else "does not exist and is not"
+            self.add(
+                "error", "hook-wiring", wiring_path, line,
+                f"wired hook {relative} {state} a *.sh script under {tree}/hooks/",
+                relative,
+            )
+            return
         index_key = self.edition.rel(script)
         mode = self.index_modes.get(index_key)
         if not script.is_file() and mode is None:
@@ -456,7 +585,7 @@ class Checker:
         edition = self.edition
         for tool in ("claude", "cursor"):
             for stem, path in sorted(edition.commands.get(tool, {}).items()):
-                lines = read_lines(path)
+                lines = edition.read_lines(path)
                 frontmatter, body_start = parse_frontmatter(lines)
                 if tool == "claude":
                     self._command_frontmatter(path, lines, frontmatter, body_start)
@@ -487,24 +616,38 @@ class Checker:
         for index in range(1, max(body_start - 1, 1)):
             for match in STAGE_AGENTS.finditer(lines[index]):
                 for value in name_list(match.group(1)):
-                    if not edition.agent_resolves("claude", value):
-                        self.add(
-                            "error", "routing", path, index + 1,
-                            f"flow stage agent '{value}' names no .claude/agents agent", value,
-                        )
+                    self._spawned_agent("claude", path, index + 1, value, "flow stage agent")
 
     def _command_body(self, tool: str, path: Path, lines: Sequence[str], start: int) -> None:
-        edition = self.edition
         for number, line in body_lines(lines, start):
             for match in SUBAGENT_TYPE.finditer(line):
-                value = match.group(1).strip()
-                if not edition.agent_resolves(tool, value):
-                    self.add(
-                        "error", "routing", path, number,
-                        f"subagent_type '{value}' names no .{tool}/agents agent", value,
-                    )
+                self._spawned_agent(tool, path, number, match.group(1).strip(), "subagent_type")
+            for match in SPAWN_AGENT.finditer(line):
+                if not SPAWN_NEGATED.search(line[: match.start()]):
+                    self._spawned_agent(tool, path, number, match.group(1), "spawn")
+            bare = SPAWN_AGENT_BARE.match(line)
+            if bare and bare.group(1) not in SPAWN_DETERMINERS:
+                self._spawned_agent(tool, path, number, bare.group(1), "spawn")
+            for match in INVOKE_SKILL.finditer(line):
+                value = (match.group(1) or match.group(2)).lower()
+                self._agent_skill(path, number, value, "invoked skill")
             self._skill_paths(path, number, line)
             self._slash_spans(tool, path, number, line)
+
+    def _spawned_agent(self, tool: str, path: Path, line: int, value: str, label: str) -> None:
+        """A name the orchestrator passes as ``subagent_type``: the host and
+        ``subagent-gate.sh`` accept exactly an agent's frontmatter ``name``."""
+        if self.edition.agent_named(tool, value):
+            return
+        hint = ""
+        if any(agent.name == value for agent in self.edition.agents.get(tool, {}).values()):
+            hint = " (subagent-gate.sh reads that agent's name differently; see its name error)"
+        elif self.edition.agent_resolves(tool, value):
+            hint = " (that is a file name or the spawns alias; spawn by the frontmatter name)"
+        self.add(
+            "error", "routing", path, line,
+            f"{label} '{value}' names no .{tool}/agents agent{hint}", value,
+        )
 
     def _skill_paths(self, path: Path, number: int, line: str) -> None:
         for match in SKILL_PATH.finditer(line):
@@ -561,6 +704,13 @@ class Checker:
                     )
                 else:
                     names[agent.name] = agent
+                if agent.name and (agent.roster != agent.name or not NAME_RE.match(agent.name)):
+                    self.add(
+                        "error", "routing", agent.path, agent.frontmatter["name"][1],
+                        f"agent name '{agent.name}' must be a bare kebab-case name: "
+                        f"subagent-gate.sh reads it as '{agent.roster}', so no spawn "
+                        "would match it", agent.name,
+                    )
                 if tool == "claude":
                     if "invokes" not in agent.frontmatter:
                         self.add(
@@ -595,10 +745,16 @@ class Checker:
             path = self.edition.root / f".{tool}" / "skills" / SKILL_FLOW
             if not path.is_file():
                 continue
-            lines = read_lines(path)
+            lines = self.edition.read_lines(path)
             in_phase_map = False
+            fence: Optional[str] = None  # the open fence's info string
             for number, line in enumerate(lines, 1):
-                if line.startswith("#"):
+                stripped = line.lstrip()
+                if stripped.startswith("```") or stripped.startswith("~~~"):
+                    fence = None if fence is not None else stripped[3:].strip().lower()
+                elif fence in FLOW_FENCE_INFO:
+                    self._flow_steps(tool, path, number, line)
+                if line.startswith("#") and fence is None:
                     in_phase_map = bool(PHASE_MAP_HEADING.match(line))
                 for match in SLASH_TOKEN.finditer(line):
                     name = match.group(1)
@@ -608,6 +764,15 @@ class Checker:
                     self._resolve_invocation(tool, path, number, value, f"`{value}`")
                 if in_phase_map and line.lstrip().startswith("|"):
                     self._phase_map_row(tool, path, number, line)
+
+    def _flow_steps(self, tool: str, path: Path, number: int, line: str) -> None:
+        """Bare-name steps of a fenced flow diagram (see ``FLOW_STEP``)."""
+        for start in FLOW_STEP_START.finditer(line):
+            step = FLOW_STEP.match(line, start.end())
+            if not step:
+                continue
+            for value in FLOW_STEP_SEPARATOR.split(step.group(1)):
+                self._resolve_invocation(tool, path, number, value, f"flow step '{value}'")
 
     def _phase_map_row(self, tool: str, path: Path, number: int, line: str) -> None:
         cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
@@ -628,7 +793,7 @@ class Checker:
         path = edition.root / "AGENTS.md"
         if not path.is_file():
             return
-        lines = read_lines(path)
+        lines = edition.read_lines(path)
         hook_names: Set[str] = set()
         for _, directory, _ in TOOLS:
             hooks_dir = edition.root / directory / "hooks"
@@ -651,7 +816,9 @@ class Checker:
                 if kind == "skill":
                     ok = name in edition.skills
                 elif kind == "agent":
-                    ok = edition.agent_resolves("claude", name) or edition.agent_resolves(
+                    # Policy that says "delegate to the `x` agent" is followed
+                    # by spawning x, so it must be a spawnable name.
+                    ok = edition.agent_named("claude", name) or edition.agent_named(
                         "cursor", name
                     )
                 elif kind == "command":
@@ -685,6 +852,8 @@ class Checker:
         self.check_skill_flows()
         self.check_agents_md()
         self.check_reachability()
+        for path, (check, message) in self.edition.unreadable.items():
+            self.add("error", check, path, None, message, self.edition.rel(path))
         return self.findings
 
 
@@ -712,7 +881,9 @@ def index_modes(repo_root: Path, editions: Sequence[str]) -> Dict[str, str]:
             "git ls-files failed: " + result.stderr.decode("utf-8", "replace").strip()
         )
     modes = {}
-    for entry in result.stdout.decode("utf-8").split("\0"):
+    # surrogateescape decodes a non-UTF-8 file name the way pathlib does, so
+    # the keys still match the paths the checks build.
+    for entry in result.stdout.decode("utf-8", "surrogateescape").split("\0"):
         if not entry:
             continue
         meta, _, path = entry.partition("\t")
@@ -733,6 +904,10 @@ def load_allowlist(path: Path) -> dict:
         data = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}
+    except UnicodeDecodeError as error:
+        raise RoutesError(f"{path}: not valid UTF-8: {error}") from error
+    except OSError as error:
+        raise RoutesError(f"{path}: cannot be read: {error}") from error
     except ValueError as error:
         raise RoutesError(f"{path}: invalid JSON: {error}") from error
     if not isinstance(data, dict):
@@ -740,12 +915,31 @@ def load_allowlist(path: Path) -> dict:
     return data
 
 
+def known_editions(editions: Sequence[str] = ()) -> Set[str]:
+    return set(EDITIONS) | set(editions) | {"*"}
+
+
+def entry_problems(section: str, entry: object, known: Set[str]) -> List[str]:
+    """Why one allowlist entry is malformed; empty when it is well-formed."""
+    if not isinstance(entry, dict):
+        return ["must be an object"]
+    problems = []
+    for required in ("edition", "reason") + ALLOWLIST_SECTIONS[section][0]:
+        value = entry.get(required)
+        if not isinstance(value, str) or not value.strip():
+            problems.append(f"needs a non-empty '{required}'")
+    edition = entry.get("edition")
+    if isinstance(edition, str) and edition.strip() and edition not in known:
+        problems.append(f"names unknown edition '{edition}'")
+    return problems
+
+
 def validate_allowlist(data: dict, label: str, editions: Sequence[str] = ()) -> List[Finding]:
     """Structural problems in the allowlist, as errors: an entry without a
     reason is exactly the silent exemption the file exists to prevent, and an
     entry naming an unknown edition would never match and never go stale."""
     problems = []
-    known = set(EDITIONS) | set(editions) | {"*"}
+    known = known_editions(editions)
     for section, entries in data.items():
         if section.startswith("_") or section == "version":
             continue
@@ -755,19 +949,9 @@ def validate_allowlist(data: dict, label: str, editions: Sequence[str] = ()) -> 
         if not isinstance(entries, list):
             problems.append(f"section '{section}' must be a list")
             continue
-        keys = ALLOWLIST_SECTIONS[section][0]
         for position, entry in enumerate(entries):
-            where = f"{section}[{position}]"
-            if not isinstance(entry, dict):
-                problems.append(f"{where} must be an object")
-                continue
-            for required in ("edition", "reason") + keys:
-                value = entry.get(required)
-                if not isinstance(value, str) or not value.strip():
-                    problems.append(f"{where} needs a non-empty '{required}'")
-            edition = entry.get("edition")
-            if isinstance(edition, str) and edition.strip() and edition not in known:
-                problems.append(f"{where} names unknown edition '{edition}'")
+            for problem in entry_problems(section, entry, known):
+                problems.append(f"{section}[{position}] {problem}")
     return [
         Finding("(allowlist)", "error", "allowlist", label, None, problem)
         for problem in problems
@@ -797,14 +981,19 @@ def apply_allowlist(
     filtered: bool = False,
 ) -> Tuple[List[Finding], List[Finding]]:
     """Split findings into (kept, suppressed) and add a stale warning for
-    every entry that matched nothing in a run that could have matched it."""
+    every entry that matched nothing in a run that could have matched it.
+
+    Only well-formed entries take part: a malformed one is already an error
+    from ``validate_allowlist`` and must not silence anything."""
     kept, suppressed = [], []
     used: Set[Tuple[str, int]] = set()
+    known = known_editions(editions)
     sections = [
         (section, position, entry)
         for section in ALLOWLIST_SECTIONS
-        for position, entry in enumerate(data.get(section, []) or [])
-        if isinstance(entry, dict)
+        if isinstance(data.get(section), list)
+        for position, entry in enumerate(data[section])
+        if not entry_problems(section, entry, known)
     ]
     for finding in findings:
         matched = False
@@ -932,6 +1121,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         report = check_repo(args.root, editions, allowlist, label, bool(args.edition))
     except RoutesError as error:
         print(f"check_routes: {error}", file=sys.stderr)
+        if args.json:
+            print(json.dumps({"editions": editions, "error": str(error)}, indent=2, sort_keys=True))
         return 2
     if args.json:
         print(json.dumps(report.to_json(), indent=2, sort_keys=True))

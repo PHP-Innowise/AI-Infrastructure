@@ -503,28 +503,44 @@ python3 scripts/check_routes.py --json
 
 - **Options:** repeatable `--edition` (an edition path; `WordPress` and
   `wordpress` are accepted for `Cms/wordpress`); `--json`; `--allowlist PATH`.
-- **Hook wiring:** every `(.claude|.cursor|.codex)/hooks/<name>.sh` reference
-  in `.claude/settings.json`, `.cursor/hooks.json` and `.codex/hooks.json` —
-  matched on that tail, so the command prefix (`"$CLAUDE_PROJECT_DIR"/...`, a
+- **Hook wiring:** every name under `(.claude|.cursor|.codex)/hooks/` in
+  `.claude/settings.json`, `.cursor/hooks.json` and `.codex/hooks.json`, and
+  the script name a Codex launcher passes as `$1` — matched on that tail, so
+  the command prefix (`"$CLAUDE_PROJECT_DIR"/...`, a
   `git rev-parse --show-toplevel` form, bare relative) does not matter — must
-  exist, be tracked, and carry index mode `100755`. A script under a tool's
-  `hooks/` that nothing wires is a warning.
-- **Routing:** Claude command `spawns`, `flow-next`, `flow-alternatives` and
-  `stages[].agents`; command-body `subagent_type`, `` `/x` `` spans and
-  `.<tool>/skills/<x>/` paths (Claude and Cursor); agent `name` (present and
-  unique), Claude `invokes` and "invoke the `x` skill" phrases; every
-  `SKILL FLOW.md` (slash tokens, backticked names, Phase Map items); and
-  `AGENTS.md` slash spans plus "`x` skill/agent/command/hook" phrases. A `/x`
-  resolves to a command or a skill of the same tool (in Claude Code every
-  skill is also `/<skill>`); in the Codex flow (`.agents/skills/SKILL FLOW.md`)
-  only a skill resolves, because Codex has no command layer.
+  be a `*.sh` script that exists, is tracked, and carries index mode `100755`;
+  a reference that drops `.sh` is an error, not a silent skip. A script under
+  a tool's `hooks/` that nothing wires is a warning.
+- **Routing:** Claude command `spawns`, `flow-next` and `flow-alternatives`;
+  `stages[].agents`, command-body `subagent_type` and prose spawns
+  ("spawn `x`", "Spawn the `x` agent", "Spawn `x` with", a line opening
+  "Spawn x agent"), which must equal an agent's frontmatter `name` exactly —
+  the host and `subagent-gate.sh` spawn by nothing else, so the file stem and
+  the `<name>-agent` alias that `spawns` accepts are errors there; command-body
+  "invoke the `x` skill" phrases, `` `/x` `` spans and `.<tool>/skills/<x>/`
+  paths (Claude and Cursor); agent `name` (present, unique, bare kebab-case),
+  Claude `invokes` and "invoke the `x` skill" phrases; every `SKILL FLOW.md`
+  (slash tokens, backticked names with or without arguments, Phase Map items,
+  and bare-name steps of fenced diagrams: a step at the line start, after a
+  leading `->`/`→` or a tree branch `├─`/`└─`, that ends the cell — end of
+  line, `(note)`, `<argument>`, or spaces before a box-drawing glyph — so
+  diagram prose is not read as a step); and `AGENTS.md` slash spans plus
+  "`x` skill/agent/command/hook" phrases. A `/x` resolves to a command or a
+  skill of the same tool (in Claude Code every skill is also `/<skill>`); in
+  the Codex flow (`.agents/skills/SKILL FLOW.md`) only a skill resolves,
+  because Codex has no command layer.
+- **Unreadable files:** a file that is not valid UTF-8 is an error finding
+  (exit 1, valid `--json`), still checked with the bad bytes replaced.
 - **Reachability:** every `.agents/skills/<x>` is named by some command,
   agent or flow.
 - **Allowlist:** `scripts/check_routes_allowlist.json` — `unwired_hooks`,
   `unreachable_skills`, `references`; every entry needs a `reason`, an unknown
-  edition is an error, and an entry that matches nothing is a stale warning.
+  edition is an error, a malformed entry is an error that silences nothing,
+  and an entry that matches nothing is a stale warning.
 - **Outputs:** findings grouped by edition with `file:line`; exit 1 on any
-  error, 0 otherwise (warnings allowed), 2 on a usage or Git failure.
+  error, 0 otherwise (warnings allowed), 2 on a usage or Git failure or an
+  allowlist file that is not a UTF-8 JSON object (`--json` then prints
+  `{"error": ...}`).
 - **Dependencies:** Python 3.9+ standard library and Git (index modes).
 - **Writes:** none.
 - **CI relationship:** the `mirrors` job runs it and its regression tests.
