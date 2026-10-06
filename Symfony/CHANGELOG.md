@@ -13,6 +13,7 @@ it at the top of every session.
 
 ### Fixed
 
+- The Definition of Done no longer uses `doctrine:migrations:diff` as a verification step. It generates rather than checks: with a drifted schema it writes a new migration file and exits 0, with a schema in sync it fails, so the check was inverted and mutated the tree. DoD, the `verify` skill and the README now run `doctrine:schema:validate --skip-sync` for the mapping and, against the test database, `doctrine:migrations:migrate -n --env=test`, `doctrine:schema:validate --env=test` and `doctrine:migrations:up-to-date --env=test`.
 - The installed `.gitattributes` is now `.install/gitattributes` (`*.sh text eol=lf`) instead of this repository's generated mirror list, which marked every mirror - hooks included - `-diff` in the client's reviews. Remove the old `-diff` lines from an earlier install by hand.
 - New `.claude/CLAUDE.md` imports `@../AGENTS.md`, so Claude Code loads the policy in projects that have their own `CLAUDE.md` or `CLAUDE.local.md` (Claude Code reads `AGENTS.md` directly only when none exists). `--merge-existing` appends the import to an existing `.claude/CLAUDE.md`.
 - Hooks are wired through the project root: `"${CLAUDE_PROJECT_DIR}"/.claude/hooks/<script>.sh` in `.claude/settings.json`, and a root-finding `sh` launcher in `.codex/hooks.json`. The safety hooks now keep running when the session's directory is a subdirectory; before, they exited 127 and failed open. Policy lock regenerated. Codex users must re-trust the changed hooks once in `/hooks`.
