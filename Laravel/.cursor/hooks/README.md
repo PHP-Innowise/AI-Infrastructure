@@ -17,7 +17,7 @@ These hooks are registered in `.cursor/hooks.json` (schema `version: 1`). Each i
 
 ### beforeShellExecution: Bash Validator
 **Script:** `bash-validator.sh`
-**Purpose:** Blocks destructive shell commands: force-push, hard reset, database drops/truncates, destructive migration resets/rollbacks, secret-writing Composer config, and `--no-verify`.
+**Purpose:** Blocks destructive and secret-exposing shell commands: force push (including `--force-with-lease` and `+refspec`), hard reset, forced clean, `git branch -D`, hook bypass (`--no-verify`, `git commit -n`), recursive `rm` of root/home/working-tree paths, destructive SQL outside read-only searches, destructive `gh` calls, Composer auth tokens, printing `.env` files, and this edition's framework commands (see `.claude/hooks/README.md` for the full list). The command is parsed like a shell would split it, so chains, `$(...)`, `sh -c`, `eval`, wrappers such as `sudo`/`env`/`xargs` and console abbreviations do not hide a command. It is a guard against accidental destruction, not a sandbox: a script written to disk and run later is not inspected.
 **Input key:** `.command` (Cursor supplies the full command string).
 **Return:** `0` = safe, `2` = block.
 

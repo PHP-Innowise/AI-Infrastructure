@@ -266,7 +266,7 @@ class FrameworkSemanticPreservationTest(unittest.TestCase):
         self.assertIn('"Bash(wp:*)"', settings)
         self.assertIn('"Read(wp-config.php)"', settings)
         hook = (root / ".claude/hooks/bash-validator.sh").read_text(encoding="utf-8")
-        self.assertIn("wp[[:space:]]+db", hook)
+        self.assertIn('"argv|wp|db reset|', hook)
         self.assertIn("wp-config", hook)
 
 

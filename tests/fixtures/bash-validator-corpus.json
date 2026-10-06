@@ -1,0 +1,1444 @@
+{
+  "description": "Behavioural corpus for every shipped bash-validator.sh (four editions plus Infrastructure-Creator, each through its .claude, .cursor and .codex copy and its host's payload shape). A case's expectation holds in the editions it lists ('all' = every one) and the opposite holds in the others. Run by tests/test_bash_validator_corpus.py.",
+  "editions": [
+    "laravel",
+    "symfony",
+    "php-core",
+    "wordpress",
+    "infrastructure-creator"
+  ],
+  "decisions": {
+    "--force-with-lease": "Blocked. It still rewrites the remote branch; the lease only protects against overwriting commits the agent has not fetched. AGENTS.md forbids force-push without explicit user consent, and a hook cannot see consent, so the user runs it.",
+    "sandbox": "The validator guards against accidental destruction; it is not a sandbox. A script written to disk and run later, or text piped into a shell, is not inspected."
+  },
+  "cases": [
+    {
+      "command": "git push --force origin main",
+      "expect": "block",
+      "editions": "all",
+      "note": "force push",
+      "category": "destructive command"
+    },
+    {
+      "command": "git push -f",
+      "expect": "block",
+      "editions": "all",
+      "note": "force push, short flag"
+    },
+    {
+      "command": "git push origin +main",
+      "expect": "block",
+      "editions": "all",
+      "note": "a +refspec is a force push of that ref (bypassed the old regex)"
+    },
+    {
+      "command": "git push --force-with-lease origin feature/x",
+      "expect": "block",
+      "editions": "all",
+      "note": "decision: --force-with-lease still rewrites the remote branch; AGENTS.md forbids force-push without consent, so it stays blocked"
+    },
+    {
+      "command": "git push -uf origin main",
+      "expect": "block",
+      "editions": "all",
+      "note": "clustered short flags"
+    },
+    {
+      "command": "git push --mirror backup",
+      "expect": "block",
+      "editions": "all",
+      "note": "--mirror force-updates and deletes remote refs"
+    },
+    {
+      "command": "git push origin main --force",
+      "expect": "block",
+      "editions": "all",
+      "note": "flag after the refspec"
+    },
+    {
+      "command": "FOO=1 git push -f origin main",
+      "expect": "block",
+      "editions": "all",
+      "note": "leading environment assignment"
+    },
+    {
+      "command": "env GIT_TRACE=1 git push --force",
+      "expect": "block",
+      "editions": "all",
+      "note": "env wrapper"
+    },
+    {
+      "command": "command git push --force",
+      "expect": "block",
+      "editions": "all",
+      "note": "command builtin wrapper"
+    },
+    {
+      "command": "nohup git push -f origin main &",
+      "expect": "block",
+      "editions": "all",
+      "note": "nohup wrapper, background job"
+    },
+    {
+      "command": "time git push --force",
+      "expect": "block",
+      "editions": "all",
+      "note": "time keyword"
+    },
+    {
+      "command": "timeout 30 git push --force",
+      "expect": "block",
+      "editions": "all",
+      "note": "timeout wrapper with a duration"
+    },
+    {
+      "command": "xargs -I{} git push --force origin {}",
+      "expect": "block",
+      "editions": "all",
+      "note": "xargs runs the rest of its words"
+    },
+    {
+      "command": "git -C . reset --hard",
+      "expect": "block",
+      "editions": "all",
+      "note": "global -C option before the subcommand (bypassed the old regex)"
+    },
+    {
+      "command": "git reset --hard HEAD~1",
+      "expect": "block",
+      "editions": "all",
+      "note": "hard reset",
+      "category": "destructive command"
+    },
+    {
+      "command": "git reset \\\n  --hard",
+      "expect": "block",
+      "editions": "all",
+      "note": "backslash-newline continuation (bypassed the old regex)"
+    },
+    {
+      "command": "git --no-pager -c color.ui=never reset --hard origin/main",
+      "expect": "block",
+      "editions": "all",
+      "note": "several global options"
+    },
+    {
+      "command": "git --git-dir=.git --work-tree=. reset --hard",
+      "expect": "block",
+      "editions": "all",
+      "note": "--git-dir/--work-tree global options"
+    },
+    {
+      "command": "/usr/bin/git reset --hard",
+      "expect": "block",
+      "editions": "all",
+      "note": "absolute path of the binary"
+    },
+    {
+      "command": "sudo -u deploy git reset --hard",
+      "expect": "block",
+      "editions": "all",
+      "note": "sudo with a value-taking option"
+    },
+    {
+      "command": "exec git reset --hard",
+      "expect": "block",
+      "editions": "all",
+      "note": "exec wrapper"
+    },
+    {
+      "command": "git clean -fdx",
+      "expect": "block",
+      "editions": "all",
+      "note": "clean with a clustered -f"
+    },
+    {
+      "command": "git clean -d --force",
+      "expect": "block",
+      "editions": "all",
+      "note": "clean with --force"
+    },
+    {
+      "command": "git branch -D feature",
+      "expect": "block",
+      "editions": "all",
+      "note": "force delete of a branch"
+    },
+    {
+      "command": "git branch --delete --force feature",
+      "expect": "block",
+      "editions": "all",
+      "note": "long-form force delete"
+    },
+    {
+      "command": "git commit -n -m x",
+      "expect": "block",
+      "editions": "all",
+      "note": "-n is --no-verify for git commit (bypassed the old regex)"
+    },
+    {
+      "command": "git commit --no-verify -m wip",
+      "expect": "block",
+      "editions": "all",
+      "note": "explicit --no-verify"
+    },
+    {
+      "command": "git commit -anm \"wip\"",
+      "expect": "block",
+      "editions": "all",
+      "note": "-n inside a short-option cluster"
+    },
+    {
+      "command": "git push --no-verify origin main",
+      "expect": "block",
+      "editions": "all",
+      "note": "--no-verify on push"
+    },
+    {
+      "command": "git -c core.hooksPath=/dev/null commit -m wip",
+      "expect": "block",
+      "editions": "all",
+      "note": "hooks disabled through a config override"
+    },
+    {
+      "command": "sh -c 'git reset --hard'",
+      "expect": "block",
+      "editions": "all",
+      "note": "sh -c string"
+    },
+    {
+      "command": "bash -lc \"git push --force origin main\"",
+      "expect": "block",
+      "editions": "all",
+      "note": "bash with clustered -lc"
+    },
+    {
+      "command": "eval \"git reset --hard\"",
+      "expect": "block",
+      "editions": "all",
+      "note": "eval string"
+    },
+    {
+      "command": "echo $(git reset --hard)",
+      "expect": "block",
+      "editions": "all",
+      "note": "command substitution"
+    },
+    {
+      "command": "echo `git push -f`",
+      "expect": "block",
+      "editions": "all",
+      "note": "backtick substitution"
+    },
+    {
+      "command": "git fetch origin && git reset --hard origin/main",
+      "expect": "block",
+      "editions": "all",
+      "note": "&& chain"
+    },
+    {
+      "command": "git status; git push -f",
+      "expect": "block",
+      "editions": "all",
+      "note": "; chain"
+    },
+    {
+      "command": "false || git reset --hard",
+      "expect": "block",
+      "editions": "all",
+      "note": "|| chain"
+    },
+    {
+      "command": "git branch --merged | xargs git branch -D",
+      "expect": "block",
+      "editions": "all",
+      "note": "pipe into xargs"
+    },
+    {
+      "command": "(cd sub && git reset --hard)",
+      "expect": "block",
+      "editions": "all",
+      "note": "subshell"
+    },
+    {
+      "command": "{ git push -f; }",
+      "expect": "block",
+      "editions": "all",
+      "note": "brace group"
+    },
+    {
+      "command": "if true; then git reset --hard; fi",
+      "expect": "block",
+      "editions": "all",
+      "note": "if body"
+    },
+    {
+      "command": "for b in a b; do git branch -D $b; done",
+      "expect": "block",
+      "editions": "all",
+      "note": "loop body"
+    },
+    {
+      "command": "docker compose exec app sh -c \"git reset --hard\"",
+      "expect": "block",
+      "editions": "all",
+      "note": "sh -c behind a container wrapper"
+    },
+    {
+      "command": "bash <<'EOF'\ngit reset --hard\nEOF",
+      "expect": "block",
+      "editions": "all",
+      "note": "a shell reading a heredoc runs it"
+    },
+    {
+      "command": "bash -c 'bash -c \"git push --force\"'",
+      "expect": "block",
+      "editions": "all",
+      "note": "nested -c strings"
+    },
+    {
+      "command": "rm -r -f /",
+      "expect": "block",
+      "editions": "all",
+      "note": "split recursive and force flags (bypassed the old regex)"
+    },
+    {
+      "command": "rm -rf /",
+      "expect": "block",
+      "editions": "all",
+      "note": "root",
+      "category": "destructive command"
+    },
+    {
+      "command": "rm -rf ~",
+      "expect": "block",
+      "editions": "all",
+      "note": "home"
+    },
+    {
+      "command": "rm -rf ~/",
+      "expect": "block",
+      "editions": "all",
+      "note": "home with a trailing slash"
+    },
+    {
+      "command": "rm -rf .",
+      "expect": "block",
+      "editions": "all",
+      "note": "working tree"
+    },
+    {
+      "command": "rm -fr ./*",
+      "expect": "block",
+      "editions": "all",
+      "note": "everything in the working tree"
+    },
+    {
+      "command": "rm -Rf \"$HOME\"",
+      "expect": "block",
+      "editions": "all",
+      "note": "quoted $HOME"
+    },
+    {
+      "command": "sudo rm -rf --no-preserve-root /",
+      "expect": "block",
+      "editions": "all",
+      "note": "--no-preserve-root"
+    },
+    {
+      "command": "rm --recursive --force /usr",
+      "expect": "block",
+      "editions": "all",
+      "note": "long options on a top-level system directory"
+    },
+    {
+      "command": "rm -rf *",
+      "expect": "block",
+      "editions": "all",
+      "note": "glob of the whole working tree"
+    },
+    {
+      "command": "cd /tmp && rm -rf -- /",
+      "expect": "block",
+      "editions": "all",
+      "note": "end-of-options marker before the target"
+    },
+    {
+      "command": "mysql -e \"DROP TABLE users;\"",
+      "expect": "block",
+      "editions": "all",
+      "note": "DROP TABLE",
+      "category": "destructive SQL"
+    },
+    {
+      "command": "psql -c \"drop database app\"",
+      "expect": "block",
+      "editions": "all",
+      "note": "SQL keywords are case-insensitive"
+    },
+    {
+      "command": "psql -c 'DROP SCHEMA public CASCADE'",
+      "expect": "block",
+      "editions": "all",
+      "note": "DROP SCHEMA"
+    },
+    {
+      "command": "mysql -e \"TRUNCATE TABLE sessions\"",
+      "expect": "block",
+      "editions": "all",
+      "note": "TRUNCATE TABLE"
+    },
+    {
+      "command": "mysql app -e \"DELETE FROM users WHERE 1=1\"",
+      "expect": "block",
+      "editions": "all",
+      "note": "DELETE with an always-true filter"
+    },
+    {
+      "command": "psql -c \"DELETE FROM users;\"",
+      "expect": "block",
+      "editions": "all",
+      "note": "DELETE without WHERE"
+    },
+    {
+      "command": "echo \"DROP TABLE users;\" | mysql app",
+      "expect": "block",
+      "editions": "all",
+      "note": "SQL piped into a client"
+    },
+    {
+      "command": "mysql app <<'SQL'\nDROP TABLE users;\nSQL",
+      "expect": "block",
+      "editions": "all",
+      "note": "SQL in a heredoc"
+    },
+    {
+      "command": "wp db query \"DROP TABLE wp_posts\"",
+      "expect": "block",
+      "editions": "all",
+      "note": "SQL through WP-CLI"
+    },
+    {
+      "command": "php bin/console dbal:run-sql \"TRUNCATE TABLE messenger_messages\"",
+      "expect": "block",
+      "editions": "all",
+      "note": "SQL through a console command"
+    },
+    {
+      "command": "composer config github-oauth.github.com ghp_example",
+      "expect": "block",
+      "editions": "all",
+      "note": "token written by composer config",
+      "category": "secret exposure"
+    },
+    {
+      "command": "composer config --global http-basic.repo.example.org user pass",
+      "expect": "block",
+      "editions": "all",
+      "note": "http-basic credentials"
+    },
+    {
+      "command": "gh repo delete owner/repo --yes",
+      "expect": "block",
+      "editions": "all",
+      "note": "repository deletion"
+    },
+    {
+      "command": "gh api -X DELETE repos/o/r/git/refs/heads/x",
+      "expect": "block",
+      "editions": "all",
+      "note": "gh api DELETE"
+    },
+    {
+      "command": "gh api --method=delete repos/o/r",
+      "expect": "block",
+      "editions": "all",
+      "note": "gh api DELETE, lower case, = form"
+    },
+    {
+      "command": "gh release delete v1.0.0 -y",
+      "expect": "block",
+      "editions": "all",
+      "note": "release deletion"
+    },
+    {
+      "command": "ddev exec git push -f",
+      "expect": "block",
+      "editions": "all",
+      "note": "git behind a dev-environment launcher"
+    },
+    {
+      "command": "docker compose exec app cat .env",
+      "expect": "block",
+      "editions": "all",
+      "note": "reading .env inside a container",
+      "category": "secret exposure"
+    },
+    {
+      "command": "lando composer config github-oauth.github.com ghp_example",
+      "expect": "block",
+      "editions": "all",
+      "note": "composer behind a launcher"
+    },
+    {
+      "command": "ssh deploy@host git reset --hard",
+      "expect": "block",
+      "editions": "all",
+      "note": "remote command words"
+    },
+    {
+      "command": "cat .env",
+      "expect": "block",
+      "editions": "all",
+      "note": "prints secrets",
+      "category": "secret exposure"
+    },
+    {
+      "command": "head -n 5 .env.local",
+      "expect": "block",
+      "editions": "all",
+      "note": ".env.local"
+    },
+    {
+      "command": "less config/.env.prod.local",
+      "expect": "block",
+      "editions": "all",
+      "note": ".env.<env>.local in a subdirectory"
+    },
+    {
+      "command": "sed -n '1,10p' .env",
+      "expect": "block",
+      "editions": "all",
+      "note": "sed printing lines"
+    },
+    {
+      "command": "cat < .env",
+      "expect": "block",
+      "editions": "all",
+      "note": "input redirection"
+    },
+    {
+      "command": "bat ./.env",
+      "expect": "block",
+      "editions": "all",
+      "note": "bat"
+    },
+    {
+      "command": "ls -la src/",
+      "expect": "pass",
+      "editions": "all",
+      "note": "plain command"
+    },
+    {
+      "command": "git status",
+      "expect": "pass",
+      "editions": "all",
+      "note": "read-only git"
+    },
+    {
+      "command": "git push origin main",
+      "expect": "pass",
+      "editions": "all",
+      "note": "ordinary push"
+    },
+    {
+      "command": "git push -u origin feature/x",
+      "expect": "pass",
+      "editions": "all",
+      "note": "push with upstream"
+    },
+    {
+      "command": "git pull --rebase && git push",
+      "expect": "pass",
+      "editions": "all",
+      "note": "pull then push"
+    },
+    {
+      "command": "git commit -m \"docs: explain why -n is rejected\"",
+      "expect": "pass",
+      "editions": "all",
+      "note": "-n inside a commit message is data"
+    },
+    {
+      "command": "git commit -m \"chore: never git push --force\"",
+      "expect": "pass",
+      "editions": "all",
+      "note": "--force inside a commit message is data"
+    },
+    {
+      "command": "git commit -am \"fix --force flag parsing\"",
+      "expect": "pass",
+      "editions": "all",
+      "note": "-m value inside a cluster"
+    },
+    {
+      "command": "git commit -m \"fix: drop table name typo\"",
+      "expect": "pass",
+      "editions": "all",
+      "note": "SQL words in a commit message are data"
+    },
+    {
+      "command": "git commit -m \"$(cat <<'EOF'\nfeat(db): stop using DROP TABLE in tests (closes #12)\n\nNever git push --force here.\nEOF\n)\"",
+      "expect": "pass",
+      "editions": "all",
+      "note": "heredoc commit message feeding git is data"
+    },
+    {
+      "command": "git branch -d feature",
+      "expect": "pass",
+      "editions": "all",
+      "note": "safe delete; git flags are case-sensitive (blocked by the old grep -i)"
+    },
+    {
+      "command": "git branch -m old new",
+      "expect": "pass",
+      "editions": "all",
+      "note": "rename"
+    },
+    {
+      "command": "git reset --soft HEAD~1",
+      "expect": "pass",
+      "editions": "all",
+      "note": "soft reset"
+    },
+    {
+      "command": "git clean -n",
+      "expect": "pass",
+      "editions": "all",
+      "note": "dry-run clean"
+    },
+    {
+      "command": "git checkout -b feature/x",
+      "expect": "pass",
+      "editions": "all",
+      "note": "branch creation"
+    },
+    {
+      "command": "git log --oneline -5 | cat",
+      "expect": "pass",
+      "editions": "all",
+      "note": "read-only pipeline"
+    },
+    {
+      "command": "git log -S \"DROP TABLE\" --oneline",
+      "expect": "pass",
+      "editions": "all",
+      "note": "pickaxe search for SQL text"
+    },
+    {
+      "command": "git grep -n \"TRUNCATE TABLE\"",
+      "expect": "pass",
+      "editions": "all",
+      "note": "git grep for SQL text"
+    },
+    {
+      "command": "grep \"DROP TABLE\" migrations/",
+      "expect": "pass",
+      "editions": "all",
+      "note": "read-only search (blocked by the old hook)"
+    },
+    {
+      "command": "rg -i \"delete from users\" src/",
+      "expect": "pass",
+      "editions": "all",
+      "note": "ripgrep search"
+    },
+    {
+      "command": "grep -rn \"git reset --hard\" docs/",
+      "expect": "pass",
+      "editions": "all",
+      "note": "searching for a dangerous command"
+    },
+    {
+      "command": "echo \"git push --force is blocked\"",
+      "expect": "pass",
+      "editions": "all",
+      "note": "dangerous text as an echo argument"
+    },
+    {
+      "command": "printf '%s\\n' \"rm -rf /\"",
+      "expect": "pass",
+      "editions": "all",
+      "note": "dangerous text as a printf argument"
+    },
+    {
+      "command": "cat <<'EOF' > docs/notes.md\nNever run git reset --hard here.\nEOF",
+      "expect": "pass",
+      "editions": "all",
+      "note": "heredoc written to a file is data"
+    },
+    {
+      "command": "psql -c \"DELETE FROM sessions WHERE expires_at < now()\"",
+      "expect": "pass",
+      "editions": "all",
+      "note": "filtered DELETE"
+    },
+    {
+      "command": "composer install",
+      "expect": "pass",
+      "editions": "all",
+      "note": "dependency install"
+    },
+    {
+      "command": "composer require laravel/sanctum",
+      "expect": "pass",
+      "editions": "all",
+      "note": "dependency add"
+    },
+    {
+      "command": "composer config --list",
+      "expect": "pass",
+      "editions": "all",
+      "note": "composer config read"
+    },
+    {
+      "command": "vendor/bin/phpunit --filter UserTest",
+      "expect": "pass",
+      "editions": "all",
+      "note": "tests"
+    },
+    {
+      "command": "npm run build",
+      "expect": "pass",
+      "editions": "all",
+      "note": "frontend build"
+    },
+    {
+      "command": "docker compose up -d",
+      "expect": "pass",
+      "editions": "all",
+      "note": "containers"
+    },
+    {
+      "command": "make test",
+      "expect": "pass",
+      "editions": "all",
+      "note": "make"
+    },
+    {
+      "command": "rm -rf vendor",
+      "expect": "pass",
+      "editions": "all",
+      "note": "dependency directory"
+    },
+    {
+      "command": "rm -rf node_modules",
+      "expect": "pass",
+      "editions": "all",
+      "note": "dependency directory"
+    },
+    {
+      "command": "rm -rf ./var/cache",
+      "expect": "pass",
+      "editions": "all",
+      "note": "cache directory"
+    },
+    {
+      "command": "rm -rf build/*",
+      "expect": "pass",
+      "editions": "all",
+      "note": "contents of a build directory"
+    },
+    {
+      "command": "rm -f /tmp/build.log",
+      "expect": "pass",
+      "editions": "all",
+      "note": "single file, not recursive"
+    },
+    {
+      "command": "find . -name '*.orig' -delete",
+      "expect": "pass",
+      "editions": "all",
+      "note": "find cleanup"
+    },
+    {
+      "command": "truncate -s 0 storage/logs/laravel.log",
+      "expect": "pass",
+      "editions": "all",
+      "note": "coreutils truncate is not SQL"
+    },
+    {
+      "command": "cat .env.example",
+      "expect": "pass",
+      "editions": "all",
+      "note": "example env file"
+    },
+    {
+      "command": "head .env.dist",
+      "expect": "pass",
+      "editions": "all",
+      "note": "dist env file"
+    },
+    {
+      "command": "cp .env.example .env",
+      "expect": "pass",
+      "editions": "all",
+      "note": "copying the example is not a read of secrets"
+    },
+    {
+      "command": "sed -i 's/APP_DEBUG=true/APP_DEBUG=false/' .env",
+      "expect": "pass",
+      "editions": "all",
+      "note": "in-place edit prints nothing"
+    },
+    {
+      "command": "gh pr create --title \"Remove delete endpoint\" --body \"x\"",
+      "expect": "pass",
+      "editions": "all",
+      "note": "pull request"
+    },
+    {
+      "command": "gh api repos/o/r/issues --jq '.[] | select(.title | contains(\"delete\"))'",
+      "expect": "pass",
+      "editions": "all",
+      "note": "delete inside a jq filter (blocked by the old hook)"
+    },
+    {
+      "command": "gh issue list",
+      "expect": "pass",
+      "editions": "all",
+      "note": "read-only gh"
+    },
+    {
+      "command": "command -v git",
+      "expect": "pass",
+      "editions": "all",
+      "note": "lookup, not an invocation"
+    },
+    {
+      "command": "docker rm -f old-container",
+      "expect": "pass",
+      "editions": "all",
+      "note": "docker rm is not coreutils rm -r"
+    },
+    {
+      "command": "docker compose run --rm app rm -rf var/cache",
+      "expect": "pass",
+      "editions": "all",
+      "note": "narrow rm behind a launcher"
+    },
+    {
+      "command": "ddev exec git status",
+      "expect": "pass",
+      "editions": "all",
+      "note": "read-only git behind a launcher"
+    },
+    {
+      "command": "tar czf backup.tgz .env.example src",
+      "expect": "pass",
+      "editions": "all",
+      "note": "archiving is not printing"
+    },
+    {
+      "command": "php -l src/Kernel.php",
+      "expect": "pass",
+      "editions": "all",
+      "note": "lint"
+    },
+    {
+      "command": "php artisan migrate:fresh",
+      "expect": "block",
+      "editions": [
+        "laravel",
+        "php-core",
+        "wordpress",
+        "infrastructure-creator"
+      ],
+      "note": "drops all tables",
+      "category": "destructive command"
+    },
+    {
+      "command": "php artisan migrate:fr",
+      "expect": "block",
+      "editions": [
+        "laravel",
+        "php-core",
+        "wordpress",
+        "infrastructure-creator"
+      ],
+      "note": "Symfony Console abbreviation (bypassed the old regex)"
+    },
+    {
+      "command": "php artisan mi:fr --seed",
+      "expect": "block",
+      "editions": [
+        "laravel",
+        "php-core",
+        "wordpress",
+        "infrastructure-creator"
+      ],
+      "note": "per-part abbreviation"
+    },
+    {
+      "command": "php artisan MIGRATE:FRESH",
+      "expect": "block",
+      "editions": [
+        "laravel",
+        "php-core",
+        "wordpress",
+        "infrastructure-creator"
+      ],
+      "note": "case-insensitive fallback of Symfony Console"
+    },
+    {
+      "command": "./vendor/bin/sail artisan migrate:refresh",
+      "expect": "block",
+      "editions": [
+        "laravel",
+        "php-core",
+        "wordpress",
+        "infrastructure-creator"
+      ],
+      "note": "Sail"
+    },
+    {
+      "command": "php artisan migrate:rollback --step=1",
+      "expect": "block",
+      "editions": [
+        "laravel",
+        "php-core",
+        "wordpress",
+        "infrastructure-creator"
+      ],
+      "note": "rollback"
+    },
+    {
+      "command": "php artisan db:wipe --force",
+      "expect": "block",
+      "editions": [
+        "laravel",
+        "php-core",
+        "wordpress",
+        "infrastructure-creator"
+      ],
+      "note": "wipe"
+    },
+    {
+      "command": "php artisan --env=testing migrate:fresh",
+      "expect": "block",
+      "editions": [
+        "laravel",
+        "php-core",
+        "wordpress",
+        "infrastructure-creator"
+      ],
+      "note": "global option before the command"
+    },
+    {
+      "command": "docker compose exec app php artisan migrate:reset",
+      "expect": "block",
+      "editions": [
+        "laravel",
+        "php-core",
+        "wordpress",
+        "infrastructure-creator"
+      ],
+      "note": "inside a container"
+    },
+    {
+      "command": "php artisan db:seed --force",
+      "expect": "block",
+      "editions": [
+        "laravel",
+        "infrastructure-creator"
+      ],
+      "note": "forced seeding"
+    },
+    {
+      "command": "php artisan model:prune",
+      "expect": "block",
+      "editions": [
+        "laravel",
+        "infrastructure-creator"
+      ],
+      "note": "deletes prunable records"
+    },
+    {
+      "command": "php artisan config:show database",
+      "expect": "block",
+      "editions": [
+        "laravel",
+        "infrastructure-creator"
+      ],
+      "note": "prints database credentials (bypassed the old hook)",
+      "category": "secret exposure"
+    },
+    {
+      "command": "php artisan config:show app.key",
+      "expect": "block",
+      "editions": [
+        "laravel",
+        "infrastructure-creator"
+      ],
+      "note": "prints the application key"
+    },
+    {
+      "command": "php artisan env:decrypt --force",
+      "expect": "block",
+      "editions": [
+        "laravel",
+        "infrastructure-creator"
+      ],
+      "note": "writes the decrypted environment"
+    },
+    {
+      "command": "php artisan migrate",
+      "expect": "pass",
+      "editions": "all",
+      "note": "forward migration"
+    },
+    {
+      "command": "php artisan migrate:status",
+      "expect": "pass",
+      "editions": "all",
+      "note": "read-only migration status"
+    },
+    {
+      "command": "php artisan migrate --force",
+      "expect": "pass",
+      "editions": "all",
+      "note": "forward migration in production"
+    },
+    {
+      "command": "php artisan db:seed",
+      "expect": "pass",
+      "editions": "all",
+      "note": "seeding without --force"
+    },
+    {
+      "command": "php artisan test",
+      "expect": "pass",
+      "editions": "all",
+      "note": "tests"
+    },
+    {
+      "command": "php artisan model:prune --pretend",
+      "expect": "pass",
+      "editions": "all",
+      "note": "dry run"
+    },
+    {
+      "command": "php artisan make:migration drop_users_table",
+      "expect": "pass",
+      "editions": "all",
+      "note": "SQL-looking name is not SQL"
+    },
+    {
+      "command": "php artisan help migrate:fresh",
+      "expect": "pass",
+      "editions": "all",
+      "note": "help for a command"
+    },
+    {
+      "command": "php artisan config:show logging",
+      "expect": "pass",
+      "editions": "all",
+      "note": "non-secret configuration"
+    },
+    {
+      "command": "php artisan schema:dump",
+      "expect": "pass",
+      "editions": "all",
+      "note": "schema dump"
+    },
+    {
+      "command": "bin/console d:d:d --force",
+      "expect": "block",
+      "editions": [
+        "symfony",
+        "infrastructure-creator"
+      ],
+      "note": "abbreviation of doctrine:database:drop (bypassed the old regex)",
+      "category": "destructive command"
+    },
+    {
+      "command": "php bin/console doctrine:database:drop --force",
+      "expect": "block",
+      "editions": [
+        "symfony",
+        "infrastructure-creator"
+      ],
+      "note": "database drop"
+    },
+    {
+      "command": "bin/console doc:data:drop --force",
+      "expect": "block",
+      "editions": [
+        "symfony",
+        "infrastructure-creator"
+      ],
+      "note": "per-part abbreviation"
+    },
+    {
+      "command": "symfony console doctrine:schema:drop --force",
+      "expect": "block",
+      "editions": [
+        "symfony",
+        "infrastructure-creator"
+      ],
+      "note": "Symfony CLI wrapper"
+    },
+    {
+      "command": "bin/console doctrine:migrations:execute 'DoctrineMigrations\\Version20240101' --down",
+      "expect": "block",
+      "editions": [
+        "symfony",
+        "infrastructure-creator"
+      ],
+      "note": "down migration"
+    },
+    {
+      "command": "bin/console doctrine:migrations:migrate prev",
+      "expect": "block",
+      "editions": [
+        "symfony",
+        "infrastructure-creator"
+      ],
+      "note": "migrate down"
+    },
+    {
+      "command": "bin/console doctrine:fixtures:load",
+      "expect": "block",
+      "editions": [
+        "symfony",
+        "infrastructure-creator"
+      ],
+      "note": "purges the database"
+    },
+    {
+      "command": "bin/console d:f:l -n",
+      "expect": "block",
+      "editions": [
+        "symfony",
+        "infrastructure-creator"
+      ],
+      "note": "abbreviated purge"
+    },
+    {
+      "command": "bin/console messenger:failed:remove --all",
+      "expect": "block",
+      "editions": [
+        "symfony",
+        "infrastructure-creator"
+      ],
+      "note": "removes every failed message"
+    },
+    {
+      "command": "bin/console secrets:reveal DATABASE_PASSWORD",
+      "expect": "block",
+      "editions": [
+        "symfony",
+        "infrastructure-creator"
+      ],
+      "note": "prints a secret (bypassed the old hook)",
+      "category": "secret exposure"
+    },
+    {
+      "command": "bin/console secrets:list --reveal",
+      "expect": "block",
+      "editions": [
+        "symfony",
+        "infrastructure-creator"
+      ],
+      "note": "prints every secret"
+    },
+    {
+      "command": "bin/console --env=prod secrets:rev APP_SECRET",
+      "expect": "block",
+      "editions": [
+        "symfony",
+        "infrastructure-creator"
+      ],
+      "note": "option before an abbreviated command"
+    },
+    {
+      "command": "bin/console doctrine:migrations:migrate",
+      "expect": "pass",
+      "editions": "all",
+      "note": "forward migration"
+    },
+    {
+      "command": "bin/console doctrine:migrations:migrate --no-interaction",
+      "expect": "pass",
+      "editions": "all",
+      "note": "forward migration, non-interactive"
+    },
+    {
+      "command": "bin/console doctrine:schema:validate",
+      "expect": "pass",
+      "editions": "all",
+      "note": "read-only validation"
+    },
+    {
+      "command": "bin/console doctrine:fixtures:load --append",
+      "expect": "pass",
+      "editions": "all",
+      "note": "appending fixtures"
+    },
+    {
+      "command": "bin/console secrets:list",
+      "expect": "pass",
+      "editions": "all",
+      "note": "names only"
+    },
+    {
+      "command": "bin/console cache:clear",
+      "expect": "pass",
+      "editions": "all",
+      "note": "cache"
+    },
+    {
+      "command": "bin/console messenger:failed:remove 42",
+      "expect": "pass",
+      "editions": "all",
+      "note": "one failed message"
+    },
+    {
+      "command": "php bin/cli.php db:wipe",
+      "expect": "block",
+      "editions": [
+        "php-core",
+        "wordpress",
+        "infrastructure-creator"
+      ],
+      "note": "any php script exposing a wipe command"
+    },
+    {
+      "command": "vendor/bin/phinx rollback",
+      "expect": "block",
+      "editions": [
+        "php-core",
+        "infrastructure-creator"
+      ],
+      "note": "Phinx rollback"
+    },
+    {
+      "command": "vendor/bin/doctrine-migrations migrate first",
+      "expect": "block",
+      "editions": [
+        "php-core",
+        "infrastructure-creator"
+      ],
+      "note": "migrate down to before the first version"
+    },
+    {
+      "command": "php -S localhost:8000 -t public",
+      "expect": "pass",
+      "editions": "all",
+      "note": "built-in server"
+    },
+    {
+      "command": "vendor/bin/phpstan analyse",
+      "expect": "pass",
+      "editions": "all",
+      "note": "static analysis"
+    },
+    {
+      "command": "vendor/bin/doctrine-migrations migrate",
+      "expect": "pass",
+      "editions": "all",
+      "note": "forward migration"
+    },
+    {
+      "command": "vendor/bin/phinx migrate",
+      "expect": "pass",
+      "editions": "all",
+      "note": "forward migration"
+    },
+    {
+      "command": "wp db clean --yes",
+      "expect": "block",
+      "editions": [
+        "wordpress",
+        "infrastructure-creator"
+      ],
+      "note": "removes every prefixed table (bypassed the old regex)",
+      "category": "destructive command"
+    },
+    {
+      "command": "wp site empty --yes",
+      "expect": "block",
+      "editions": [
+        "wordpress",
+        "infrastructure-creator"
+      ],
+      "note": "empties the site (bypassed the old regex)"
+    },
+    {
+      "command": "wp db reset --yes",
+      "expect": "block",
+      "editions": [
+        "wordpress",
+        "infrastructure-creator"
+      ],
+      "note": "removes all tables"
+    },
+    {
+      "command": "wp --allow-root db drop --yes",
+      "expect": "block",
+      "editions": [
+        "wordpress",
+        "infrastructure-creator"
+      ],
+      "note": "global flag before the subcommand"
+    },
+    {
+      "command": "wp site delete 3",
+      "expect": "block",
+      "editions": [
+        "wordpress",
+        "infrastructure-creator"
+      ],
+      "note": "multisite deletion"
+    },
+    {
+      "command": "wp search-replace old new --all-tables",
+      "expect": "block",
+      "editions": [
+        "wordpress",
+        "infrastructure-creator"
+      ],
+      "note": "rewrites every table"
+    },
+    {
+      "command": "wp config shuffle-salts",
+      "expect": "block",
+      "editions": [
+        "wordpress",
+        "infrastructure-creator"
+      ],
+      "note": "rotates salts"
+    },
+    {
+      "command": "wp config get DB_PASSWORD",
+      "expect": "block",
+      "editions": [
+        "wordpress",
+        "infrastructure-creator"
+      ],
+      "note": "prints the database password",
+      "category": "secret exposure"
+    },
+    {
+      "command": "wp config list",
+      "expect": "block",
+      "editions": [
+        "wordpress",
+        "infrastructure-creator"
+      ],
+      "note": "prints every constant with its value"
+    },
+    {
+      "command": "wp config list DB_",
+      "expect": "block",
+      "editions": [
+        "wordpress",
+        "infrastructure-creator"
+      ],
+      "note": "filter that includes DB_PASSWORD"
+    },
+    {
+      "command": "cat wp-config.php",
+      "expect": "block",
+      "editions": [
+        "wordpress",
+        "infrastructure-creator"
+      ],
+      "note": "prints credentials"
+    },
+    {
+      "command": "grep DB_PASSWORD wp-config.php",
+      "expect": "block",
+      "editions": [
+        "wordpress",
+        "infrastructure-creator"
+      ],
+      "note": "prints the password line"
+    },
+    {
+      "command": "php wp-cli.phar db reset --yes",
+      "expect": "block",
+      "editions": [
+        "wordpress",
+        "infrastructure-creator"
+      ],
+      "note": "WP-CLI phar"
+    },
+    {
+      "command": "ddev wp db reset --yes",
+      "expect": "block",
+      "editions": [
+        "wordpress",
+        "infrastructure-creator"
+      ],
+      "note": "WP-CLI behind a launcher"
+    },
+    {
+      "command": "docker compose run --rm wpcli wp config get AUTH_KEY",
+      "expect": "block",
+      "editions": [
+        "wordpress",
+        "infrastructure-creator"
+      ],
+      "note": "credential through a containerised WP-CLI"
+    },
+    {
+      "command": "wp plugin list",
+      "expect": "pass",
+      "editions": "all",
+      "note": "read-only"
+    },
+    {
+      "command": "wp db export backup.sql",
+      "expect": "pass",
+      "editions": "all",
+      "note": "backup"
+    },
+    {
+      "command": "wp config get table_prefix",
+      "expect": "pass",
+      "editions": "all",
+      "note": "non-secret constant"
+    },
+    {
+      "command": "wp config list WP_DEBUG",
+      "expect": "pass",
+      "editions": "all",
+      "note": "non-secret filter"
+    },
+    {
+      "command": "wp search-replace old new --dry-run",
+      "expect": "pass",
+      "editions": "all",
+      "note": "dry run on the default tables"
+    },
+    {
+      "command": "cat wp-config-sample.php",
+      "expect": "pass",
+      "editions": "all",
+      "note": "sample file has no secrets"
+    },
+    {
+      "command": "wp core version",
+      "expect": "pass",
+      "editions": "all",
+      "note": "read-only"
+    },
+    {
+      "command": "echo \"APP_KEY=base64:x\" >> .env",
+      "expect": "block",
+      "editions": [
+        "infrastructure-creator"
+      ],
+      "note": "the generator never writes a target's .env"
+    },
+    {
+      "command": "printf 'X=1\\n' | tee .env",
+      "expect": "block",
+      "editions": [
+        "infrastructure-creator"
+      ],
+      "note": "tee onto .env"
+    }
+  ]
+}

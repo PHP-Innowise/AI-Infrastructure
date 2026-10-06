@@ -33,7 +33,24 @@ Buffering is what keeps per-turn continuity affordable: without it, every turn w
 
 ### PreToolUse (Bash): Bash Validator
 **Script:** `bash-validator.sh`
-**Purpose:** Blocks destructive commands: force-push, hard reset, database drops/truncates, destructive migration resets/rollbacks, secret-writing Composer config, and `--no-verify`.
+**Purpose:** Blocks destructive and secret-exposing shell commands. One generic section, byte-identical in every edition and in Infrastructure-Creator (between the `bash-validator generic section` markers), blocks:
+- force push (`--force`, `-f` in any option cluster, `--force-with-lease`, `--mirror`, a `+refspec`), `git reset --hard`, `git clean -f`, `git branch -D`;
+- hook bypass: `--no-verify`, `git commit -n`, `git -c core.hooksPath=...`;
+- recursive `rm` of `/`, a top-level directory, `~`, `$HOME`, `.`, `..` or `*`, and `--no-preserve-root`;
+- destructive SQL (`DROP TABLE/DATABASE/SCHEMA`, `TRUNCATE TABLE`, `DELETE` without a row filter), except inside a read-only search (`grep`, `rg`, `git grep`, `git log -S`) or a commit message;
+- `gh repo delete/archive`, `gh issue/release delete`, `gh api -X DELETE`, and auth tokens written by `composer config`;
+- printing `.env`, `.env.local` or `.env.*.local` (`cat`, `head`, `tail`, `less`, `more`, `bat`, `sed` without `-i`); `.env.example` and `.env.dist` stay readable.
+
+**Console rules:** `migrate:fresh/refresh/reset/rollback`, `db:wipe` and `schema:drop` run through a PHP console runner (`artisan`, `console`, `phinx`, `doctrine-migrations`, or any `php <script>`), Phinx `rollback`, and Doctrine Migrations `migrate first|prev` and `execute --down`, including the abbreviations a Symfony Console application accepts.
+
+**How it matches:** the command is parsed once, in pure bash with no fork per rule. Line continuations are joined, quotes removed, and `;` `&&` `||` `|` `&`, subshells and newlines split it into simple commands; `$(...)`, backticks, `sh`/`bash -c`, `eval` and a heredoc fed to a shell are checked as commands of their own. Leading `VAR=value`, wrappers (`command`, `exec`, `sudo`, `env`, `nohup`, `time`, `timeout`, `xargs`, ...), a binary's directory (`/usr/bin/git`), git's global options (`-C`, `-c`, `--git-dir`, `--no-pager`) and launchers without rules of their own (`docker compose exec app`, `ddev`, `lando`, `ssh host`) are looked through. Git and option rules are case-sensitive (`git branch -d` passes); SQL keywords are not. A heredoc written to a file or used as a commit message is data.
+
+**Limits:** the validator is a guard against accidental destruction, not a sandbox: a script written to disk and run later, or text piped into a shell, is not inspected. Commands of tens of kilobytes of dense shell syntax take seconds to parse and can approach the hook timeout.
+
+**Diagnostics:** a block prints its rule category, never the command body. Without `jq`, `php` or `python3` to decode the payload the hook warns once and fails open.
+
+**Tests:** the shared corpus `tests/fixtures/bash-validator-corpus.json` in the accelerator repository runs every case through every shipped copy (`.claude`, `.cursor`, `.codex`) and its host's payload shape.
+
 **Return:** 0 = safe command, 2 = block
 
 ### PreToolUse (Agent|Task): Subagent Gate

@@ -55,44 +55,1077 @@ if [ -z "$COMMAND" ]; then
   exit 0
 fi
 
-# BLOCKED patterns - hard block (exit 2), truly destructive/irreversible
-# Artisan rules are anchored to an actual `artisan` invocation: an unanchored
-# `migrate.*(fresh|refresh)` also matches prose and read-only searches.
-BLOCKED_PATTERNS=(
-  "git[^;&|]*[[:space:]]push[^;&|]*(--force([^[:alnum:]]|$)|-f([[:space:]]|$))"
-  "git[[:space:]]+reset[[:space:]]+--hard"
-  "git[[:space:]]+clean[[:space:]].*-f"
-  "git[[:space:]]+branch[[:space:]]+-D"
-  "--no-verify"
-  "DROP[[:space:]]+(TABLE|DATABASE)"
-  "TRUNCATE[[:space:]]+TABLE"
-  "DELETE[[:space:]]+FROM.*WHERE[[:space:]]+1[[:space:]]*=[[:space:]]*1"
-  "(^|[^[:alnum:]_])artisan[[:space:]]+migrate:(fresh|reset|refresh|rollback)([^[:alnum:]:-]|$)"
-  "(^|[^[:alnum:]_])artisan[[:space:]]+db:wipe([^[:alnum:]:-]|$)"
-  "(^|[^[:alnum:]_])artisan[[:space:]]+schema:drop([^[:alnum:]:-]|$)"
-  "(^|[^[:alnum:]_])artisan[^;&|]*[[:space:]]db:seed[^;&|]*--force"
-  "(^|[^[:alnum:]_])artisan[[:space:]]+model:prune"
-  "composer config.*github-oauth"
-  "composer config.*http-basic"
-  "rm[[:space:]]+-rf[[:space:]]+(/|~|\.)[[:space:]]*$"
-  "gh repo delete"
-  "gh repo archive"
-  "gh issue delete"
-  "gh release delete"
-  "gh api.*DELETE"
+# >>> bash-validator generic section >>>
+# Everything from this marker to the closing one is byte-identical in the
+# Laravel, Symfony, PHP Core and WordPress editions and in
+# Infrastructure-Creator (tests/test_bash_validator_corpus.py fails on any
+# drift): edit it in one copy, then paste the block into the other four.
+# Framework rules live below the closing marker, in BV_FRAMEWORK_RULES.
+#
+# The command is parsed once, in pure bash and without a fork per rule, into
+# the simple commands the shell would run:
+#   - backslash-newline continuations are joined and quotes are removed;
+#   - segments split on ; && || | & ( ) and newlines;
+#   - $(...), `...` and <(...) bodies become segments of their own, and so
+#     do the string argument of sh/bash -c, su -c and eval, and a heredoc or
+#     here-string fed to a shell that reads stdin;
+#   - any other heredoc body is data: only the SQL rules of the segment that
+#     owns it read it;
+#   - VAR=value prefixes, wrappers (command, builtin, exec, nohup, time,
+#     sudo, doas, env, nice, ionice, timeout, stdbuf, xargs) and a binary's
+#     directory (/usr/bin/git -> git) are stripped; `php script` runs the
+#     script, so `php artisan` is the program `artisan`; a launcher with no
+#     rules of its own (docker compose exec app, ddev, lando, ssh host) is
+#     checked as the first later word that has rules.
+# Git and flag rules are case-sensitive (git branch -d is not -D); console
+# command names follow Symfony Console (any unambiguous per-part prefix,
+# case-insensitive fallback); SQL keyword rules ignore case and do not fire
+# on read-only searches (grep, rg, ag, ack), on git (git grep/log -S, commit
+# messages), or on the cat/echo/printf that feeds one of those.
+#
+# This is a guard against accidental destruction, not a sandbox: a script
+# written to disk and run later, or text piped into a shell, is not inspected.
+#
+# Rule syntax (BV_GENERIC_RULES below, BV_FRAMEWORK_RULES after the block),
+# fields separated by "|" (so no field may contain one), lists by ",":
+#   argv|<programs>|<leading words>|<condition>|<category>
+#   console|<full command name>|<condition>|<category>
+#   read|<reader programs>|<file names>|<category>
+#   write|<file names>|<category>
+# Programs and readers are plain names; every other list item is a glob.
+# Conditions: empty (always), has:<globs> (an argument matches), lacks:<globs>,
+# arg:<globs> (the first positional argument matches), argsub:<names> (no
+# positional argument, or one that is a substring of a listed name). A file
+# name item "!glob" excludes; reader "sed-print" is sed without -i.
+# Every block names its category; the command body is never printed.
+
+BV_US=$'\037'
+BV_RS=$'\036'
+BV_GS=$'\035'
+BV_NL=$'\n'
+BV_TAB=$'\t'
+BV_CR=$'\r'
+BV_MAX_DEPTH=8
+BV_SEARCH=',grep,egrep,fgrep,rg,ag,ack,git,'
+# A command containing anything but these characters goes through the parser.
+BV_NOT_PLAIN=$'*[!]A-Za-z0-9_./:=@%+,~^!?*{}[;&| \t-]*'
+BV_RE_ASSIGN='^[A-Za-z_][A-Za-z0-9_]*[+]?='
+BV_RE_BROAD='^(/[^/]*|~[A-Za-z0-9._-]*|(\.\.?/)*\.\.?)$'
+BV_SQL_WS="[[:space:]${BV_US}]+"
+BV_RE_SQL_DROP="(^|[^[:alnum:]_])[Dd][Rr][Oo][Pp]${BV_SQL_WS}([Tt][Aa][Bb][Ll][Ee]|[Dd][Aa][Tt][Aa][Bb][Aa][Ss][Ee]|[Ss][Cc][Hh][Ee][Mm][Aa])([^[:alnum:]_]|\$)"
+BV_RE_SQL_TRUNCATE="(^|[^[:alnum:]_])[Tt][Rr][Uu][Nn][Cc][Aa][Tt][Ee]${BV_SQL_WS}[Tt][Aa][Bb][Ll][Ee]([^[:alnum:]_]|\$)"
+BV_RE_SQL_DELETE="(^|[^[:alnum:]_])[Dd][Ee][Ll][Ee][Tt][Ee]${BV_SQL_WS}[Ff][Rr][Oo][Mm]${BV_SQL_WS}([^;[:space:]${BV_US}][^;]*)"
+BV_RE_SQL_WHERE="(^|[^[:alnum:]_])[Ww][Hh][Ee][Rr][Ee]([^[:alnum:]_]|\$)"
+BV_RE_SQL_WHERE_ALL="[Ww][Hh][Ee][Rr][Ee]${BV_SQL_WS}(1[[:space:]]*=[[:space:]]*1|[Tt][Rr][Uu][Ee])([^[:alnum:]_]|\$)"
+
+BV_GENERIC_RULES=(
+  "argv|gh|repo delete||destructive command - gh repo delete"
+  "argv|gh|repo archive||destructive command - gh repo archive"
+  "argv|gh|issue delete||destructive command - gh issue delete"
+  "argv|gh|release delete||destructive command - gh release delete"
+  "argv|composer|config|has:github-oauth*,gitlab-oauth*,gitlab-token*,bitbucket-oauth*,forgejo-token*,http-basic*,bearer*,custom-headers*|secret exposure - composer config writing an auth token"
+  "read|cat,tac,nl,head,tail,less,more,bat,batcat,sed-print|.env,.env.local,.env.*.local|secret exposure - reading a .env file"
 )
 
-# One combined grep decides pass/block instead of one grep fork per pattern;
-# every alternative keeps its own group so "^" anchors keep their standalone
-# meaning. The per-pattern loop runs only after a match, to name the pattern
-# in the block message.
-BLOCKED_REGEX=""
-for PATTERN in "${BLOCKED_PATTERNS[@]}"; do
-  BLOCKED_REGEX="${BLOCKED_REGEX:+$BLOCKED_REGEX|}($PATTERN)"
-done
+bv_hit() { [[ -n $BV_HIT ]] || BV_HIT=$1; }
 
-if printf '%s\n' "$COMMAND" | grep -Eqi -- "$BLOCKED_REGEX"; then
-  echo "BLOCKED: Destructive command detected (rule category: destructive command)." >&2
+# ---- parser ---------------------------------------------------------------
+# bv_parse STOP DEPTH PARENT walks BV_S from BV_P. STOP is "" (end of text),
+# ")" or "`". Segments are appended to the BV_SEG_* arrays; the helpers below
+# work on bv_parse's locals (word, have, want, words, docs, seg).
+
+# BV_UPTO: the text from BV_P up to the first $1 (or to the end; false then).
+# A window is tried first: copying the whole remainder for every token makes
+# long commands quadratic.
+bv_upto() {
+  local w=${BV_S:BV_P:4096}
+  if [[ $w == *"$1"* ]]; then BV_UPTO=${w%%"$1"*}; return 0; fi
+  w=${BV_S:BV_P}
+  BV_UPTO=${w%%"$1"*}
+  [[ $w == *"$1"* ]]
+}
+
+bv_new_seg() {
+  BV_SEG=${#BV_SEG_WORDS[@]}
+  BV_SEG_WORDS[BV_SEG]=''
+  BV_SEG_REDIR[BV_SEG]=''
+  BV_SEG_DOC[BV_SEG]=''
+  BV_SEG_PROG[BV_SEG]=''
+  BV_SEG_DEPTH[BV_SEG]=$1
+  BV_SEG_PARENT[BV_SEG]=$2
+}
+
+bv_word() {
+  (( have )) || return 0
+  case $want in
+    '') words=$words$BV_US$word ;;
+    '<<'|'<<-') docs=$docs$BV_RS$seg$BV_GS$want$BV_GS$word ;;
+    '<<<') BV_SEG_DOC[seg]=${BV_SEG_DOC[seg]}$BV_US$word ;;
+    *) BV_SEG_REDIR[seg]=${BV_SEG_REDIR[seg]}$BV_US$want$BV_GS$word ;;
+  esac
+  word=''; have=0; want=''
+}
+
+bv_end_seg() {
+  BV_SEG_WORDS[seg]=$words
+  words=''; want=''
+}
+
+bv_heredocs() {
+  local list=$docs$BV_RS entry owner op delim rest line body
+  docs=''
+  list=${list#"$BV_RS"}
+  while [[ -n $list ]]; do
+    entry=${list%%"$BV_RS"*}; list=${list#*"$BV_RS"}
+    owner=${entry%%"$BV_GS"*}; entry=${entry#*"$BV_GS"}
+    op=${entry%%"$BV_GS"*}; delim=${entry#*"$BV_GS"}
+    body=''
+    rest=${BV_S:BV_P}
+    # Fast path: a plain << body ends at the first line that is the delimiter.
+    if [[ $op == '<<' && $BV_NL$rest == *"$BV_NL$delim$BV_NL"* && $rest != *"$BV_CR"* ]]; then
+      if [[ $rest == "$delim$BV_NL"* ]]; then
+        BV_P=$(( BV_P + ${#delim} + 1 ))
+      else
+        body=${rest%%"$BV_NL$delim$BV_NL"*}$BV_NL
+        BV_P=$(( BV_P + ${#body} + ${#delim} + 1 ))
+      fi
+      BV_SEG_DOC[owner]=${BV_SEG_DOC[owner]}$BV_US$body
+      continue
+    fi
+    while (( BV_P < BV_L )); do
+      bv_upto "$BV_NL"
+      line=$BV_UPTO
+      BV_P=$(( BV_P + ${#line} + 1 ))
+      line=${line%"$BV_CR"}
+      if [[ $op == '<<-' ]]; then
+        while [[ $line == "$BV_TAB"* ]]; do line=${line#"$BV_TAB"}; done
+      fi
+      [[ $line == "$delim" ]] && break
+      body=$body$line$BV_NL
+    done
+    BV_SEG_DOC[owner]=${BV_SEG_DOC[owner]}$BV_US$body
+  done
+}
+
+bv_dollar() {
+  local depth=$1 seg=$2 indq=$3 c2 c3 start
+  c2=${BV_S:BV_P+1:1}
+  case $c2 in
+    '(')
+      start=$BV_P
+      if [[ ${BV_S:BV_P+2:1} == '(' ]]; then
+        bv_upto '))'
+        BV_P=$(( BV_P + ${#BV_UPTO} + 2 ))
+      else
+        BV_P=$(( BV_P + 2 ))
+        bv_parse ')' $(( depth + 1 )) "$seg"
+      fi
+      word=$word${BV_S:start:BV_P-start} ;;
+    '{')
+      bv_upto '}'
+      BV_P=$(( BV_P + ${#BV_UPTO} + 1 ))
+      word=$word$BV_UPTO'}' ;;
+    "'")
+      if (( indq )); then
+        word=$word'$'; BV_P=$(( BV_P + 1 ))
+      else
+        BV_P=$(( BV_P + 2 ))
+        while (( BV_P < BV_L )); do
+          c3=${BV_S:BV_P:1}
+          case $c3 in
+            "'") BV_P=$(( BV_P + 1 )); break ;;
+            '\')
+              c3=${BV_S:BV_P+1:1}
+              case $c3 in n) c3=$BV_NL ;; t) c3=$BV_TAB ;; esac
+              BV_P=$(( BV_P + 2 )) ;;
+            *) BV_P=$(( BV_P + 1 )) ;;
+          esac
+          word=$word$c3
+        done
+      fi ;;
+    '"')
+      (( indq )) && word=$word'$'
+      BV_P=$(( BV_P + 1 )) ;;
+    *)
+      word=$word'$'; BV_P=$(( BV_P + 1 )) ;;
+  esac
+}
+
+bv_dquote() {
+  local depth=$1 seg=$2 c c2 rest chunk start
+  while (( BV_P < BV_L )); do
+    c=${BV_S:BV_P:1}
+    case $c in
+      '"') BV_P=$(( BV_P + 1 )); return 0 ;;
+      '\')
+        c2=${BV_S:BV_P+1:1}
+        case $c2 in
+          '$'|'`'|'"'|'\') word=$word$c2 ;;
+          "$BV_NL") ;;
+          *) word=$word$c$c2 ;;
+        esac
+        BV_P=$(( BV_P + 2 )) ;;
+      '$') bv_dollar "$depth" "$seg" 1 ;;
+      '`')
+        start=$BV_P; BV_P=$(( BV_P + 1 ))
+        bv_parse '`' $(( depth + 1 )) "$seg"
+        word=$word${BV_S:start:BV_P-start} ;;
+      *)
+        rest=${BV_S:BV_P:256}
+        chunk=${rest%%[\"\\\$\`]*}
+        [[ -n $chunk ]] || chunk=$c
+        word=$word$chunk; BV_P=$(( BV_P + ${#chunk} )) ;;
+    esac
+  done
+}
+
+bv_parse() {
+  local stop=$1 depth=$2 parent=$3
+  local seg word='' have=0 words='' want='' docs='' c c2 rest chunk start
+  bv_new_seg "$depth" "$parent"; seg=$BV_SEG
+  while (( BV_P < BV_L )); do
+    c=${BV_S:BV_P:1}
+    case $c in
+      "$BV_NL")
+        bv_word; bv_end_seg; BV_P=$(( BV_P + 1 ))
+        [[ -z $docs ]] || bv_heredocs
+        bv_new_seg "$depth" "$parent"; seg=$BV_SEG ;;
+      ' '|"$BV_TAB"|"$BV_CR")
+        (( ! have )) || bv_word
+        BV_P=$(( BV_P + 1 )) ;;
+      ';'|'&'|'|')
+        c2=${BV_S:BV_P+1:1}
+        bv_word
+        if [[ $c$c2 == '&>' ]]; then
+          BV_P=$(( BV_P + 2 )); want='>'
+          [[ ${BV_S:BV_P:1} != '>' ]] || BV_P=$(( BV_P + 1 ))
+          continue
+        fi
+        bv_end_seg; BV_P=$(( BV_P + 1 ))
+        case $c$c2 in '&&'|'||'|'|&'|';;'|';&') BV_P=$(( BV_P + 1 )) ;; esac
+        bv_new_seg "$depth" "$parent"; seg=$BV_SEG ;;
+      '(')
+        if (( have )); then
+          word=$word$c; BV_P=$(( BV_P + 1 ))
+        else
+          bv_end_seg; BV_P=$(( BV_P + 1 ))
+          bv_parse ')' "$depth" "$parent"
+          bv_new_seg "$depth" "$parent"; seg=$BV_SEG
+        fi ;;
+      ')')
+        bv_word; bv_end_seg; BV_P=$(( BV_P + 1 ))
+        [[ $stop != ')' ]] || return 0
+        bv_new_seg "$depth" "$parent"; seg=$BV_SEG ;;
+      '`')
+        if [[ $stop == '`' ]]; then
+          bv_word; bv_end_seg; BV_P=$(( BV_P + 1 )); return 0
+        fi
+        start=$BV_P; BV_P=$(( BV_P + 1 ))
+        bv_parse '`' $(( depth + 1 )) "$seg"
+        word=$word${BV_S:start:BV_P-start}; have=1 ;;
+      '<'|'>')
+        c2=${BV_S:BV_P+1:1}
+        if [[ $c2 == '(' ]]; then
+          bv_word
+          start=$BV_P; BV_P=$(( BV_P + 2 ))
+          bv_parse ')' $(( depth + 1 )) "$seg"
+          word=${BV_S:start:BV_P-start}; have=1
+          continue
+        fi
+        # An all-digit word glued to the operator is a file descriptor.
+        if (( have )) && [[ $word =~ ^[0-9]+$ ]]; then word=''; have=0; else bv_word; fi
+        BV_P=$(( BV_P + 1 )); want=$c
+        case $c$c2 in
+          '<<')
+            BV_P=$(( BV_P + 1 )); want='<<'
+            case ${BV_S:BV_P:1} in
+              '<') BV_P=$(( BV_P + 1 )); want='<<<' ;;
+              '-') BV_P=$(( BV_P + 1 )); want='<<-' ;;
+            esac ;;
+          '>>') BV_P=$(( BV_P + 1 )); want='>>' ;;
+          '>&'|'>|'|'<&'|'<>') BV_P=$(( BV_P + 1 )) ;;
+        esac ;;
+      "'")
+        BV_P=$(( BV_P + 1 ))
+        bv_upto "'"
+        word=$word$BV_UPTO; have=1; BV_P=$(( BV_P + ${#BV_UPTO} + 1 )) ;;
+      '"')
+        BV_P=$(( BV_P + 1 )); have=1
+        bv_dquote "$depth" "$seg" ;;
+      '\')
+        c2=${BV_S:BV_P+1:1}
+        if [[ $c2 != "$BV_NL" ]]; then word=$word$c2; have=1; fi
+        BV_P=$(( BV_P + 2 )) ;;
+      '$')
+        have=1
+        bv_dollar "$depth" "$seg" 0 ;;
+      '#')
+        if (( have )); then
+          word=$word$c; BV_P=$(( BV_P + 1 ))
+        else
+          bv_upto "$BV_NL"
+          BV_P=$(( BV_P + ${#BV_UPTO} ))
+        fi ;;
+      *)
+        rest=${BV_S:BV_P:256}
+        chunk=${rest%%[[:space:]\;\&\|\(\)\<\>\'\"\\\$\`\#]*}
+        [[ -n $chunk ]] || chunk=$c
+        word=$word$chunk; have=1; BV_P=$(( BV_P + ${#chunk} )) ;;
+    esac
+  done
+  bv_word; bv_end_seg
+  return 0
+}
+
+bv_run_parse() {
+  local s=$1 line
+  case $s in
+    *"$BV_US"*|*"$BV_RS"*|*"$BV_GS"*)
+      s=${s//"$BV_US"/ }; s=${s//"$BV_RS"/ }; s=${s//"$BV_GS"/ } ;;
+  esac
+  # Fast path: without quotes, expansions, redirections, grouping, comments
+  # or newlines, splitting on ; & | and blanks gives the parser's segments.
+  # shellcheck disable=SC2053 # BV_NOT_PLAIN is a pattern
+  if (( ${#s} <= 4096 )) && [[ $s != $BV_NOT_PLAIN ]]; then
+    s=${s//';'/$BV_NL}; s=${s//'&'/$BV_NL}; s=${s//'|'/$BV_NL}$BV_NL
+    while [[ -n $s ]]; do
+      line=${s%%"$BV_NL"*}; s=${s:${#line}+1}
+      [[ $line == *[![:blank:]]* ]] || continue
+      bv_new_seg "$2" "$3"
+      bv_split_words "$line"
+    done
+    return 0
+  fi
+  BV_S=$s; BV_P=0; BV_L=${#s}
+  bv_parse '' "$2" "$3"
+}
+
+bv_split_words() {
+  local IFS=$' \t' ws
+  set -f
+  # shellcheck disable=SC2206 # deliberate split on blanks, globbing off
+  ws=($1)
+  set +f
+  IFS=$BV_US
+  BV_SEG_WORDS[BV_SEG]=$BV_US${ws[*]}
+}
+
+# ---- normaliser -----------------------------------------------------------
+
+bv_load_words() {
+  local list=${BV_SEG_WORDS[$1]#"$BV_US"} IFS=$BV_US
+  BV_W=()
+  set -f
+  # shellcheck disable=SC2206 # deliberate split on the word separator, globbing off
+  [[ -z $list ]] || BV_W=($list)
+  set +f
+  BV_NW=${#BV_W[@]}
+}
+
+# Advance the caller's i past a wrapper's own options.
+bv_skip_wrapper() {
+  local w takes=''
+  case $1 in
+    command) case ${BV_W[i]-} in -v|-V) i=$BV_NW; return 0 ;; esac ;;
+    sudo) takes=' -u -g -h -p -C -D -r -t -T -U -R ' ;;
+    doas) takes=' -u -C ' ;;
+    env) takes=' -u -C -S ' ;;
+    nice) takes=' -n ' ;;
+    ionice) takes=' -c -n -p -P -u ' ;;
+    timeout) takes=' -s -k ' ;;
+    stdbuf) takes=' -i -o -e ' ;;
+    xargs) takes=' -I -n -P -L -s -d -E -a ' ;;
+    time) takes=' -f -o ' ;;
+    exec) takes=' -a ' ;;
+  esac
+  while (( i < BV_NW )); do
+    w=${BV_W[i]}
+    case $w in
+      --) i=$(( i + 1 )); break ;;
+      -) i=$(( i + 1 )) ;;
+      -?*) if [[ $takes == *" $w "* ]]; then i=$(( i + 2 )); else i=$(( i + 1 )); fi ;;
+      *) break ;;
+    esac
+  done
+  [[ $1 != timeout ]] || i=$(( i + 1 ))
+  return 0
+}
+
+# BV_SCRIPT: index of the script `php` at index $1 - 1 runs (false for -r etc.).
+bv_php_script() {
+  local j=$1
+  BV_SCRIPT=-1
+  while (( j < BV_NW )); do
+    case ${BV_W[j]} in
+      -r|-R|-B|-E|-a|-i|-l|-m|-s|-v|-w|-h|--run|--info) return 1 ;;
+      -f|-F) j=$(( j + 1 )); break ;;
+      -c|-d|-S|-t|-z|--rf|--rc|--re|--rz|--ri) j=$(( j + 2 )) ;;
+      --) j=$(( j + 1 )); break ;;
+      -*) j=$(( j + 1 )) ;;
+      *) break ;;
+    esac
+  done
+  (( j < BV_NW )) || return 1
+  BV_SCRIPT=$j
+}
+
+# BV_PI/BV_PROG/BV_AI: index, normalised name and first argument of the program.
+bv_locate_program() {
+  local i=0 w b
+  while (( i < BV_NW )); do
+    w=${BV_W[i]}
+    case $w in
+      [A-Za-z_]*=*) if [[ $w =~ $BV_RE_ASSIGN ]]; then i=$(( i + 1 )); continue; fi ;;
+    esac
+    bv_base "$w"; b=$BV_BASE
+    case $b in
+      '!'|'{'|'}'|if|then|elif|else|do|while|until|builtin|nohup) i=$(( i + 1 )) ;;
+      command|exec|sudo|doas|env|nice|ionice|timeout|stdbuf|xargs|time)
+        i=$(( i + 1 )); bv_skip_wrapper "$b" ;;
+      *) break ;;
+    esac
+  done
+  BV_PI=$i; BV_AI=$(( i + 1 )); BV_PROG=''
+  (( i < BV_NW )) || { BV_AI=$BV_NW; return 0; }
+  bv_base "${BV_W[i]}"; BV_PROG=$BV_BASE
+  case $BV_PROG in
+    php|php[0-9]*)
+      if bv_php_script "$BV_AI"; then
+        bv_base "${BV_W[BV_SCRIPT]}"; BV_PROG=$BV_BASE; BV_AI=$(( BV_SCRIPT + 1 ))
+      fi ;;
+  esac
+  BV_PROG=${BV_PROG%.phar}
+  [[ $BV_PROG != wp-cli ]] || BV_PROG=wp
+  return 0
+}
+
+# ---- helpers --------------------------------------------------------------
+
+# BV_BASE: $1 without its directory. ${w##*/} is quadratic in the word's
+# length, and no program or file name is longer than this cap.
+bv_base() {
+  case $1 in
+    */*) if (( ${#1} <= 512 )); then BV_BASE=${1##*/}; else BV_BASE=''; fi ;;
+    *) BV_BASE=$1 ;;
+  esac
+}
+
+# True when $1 matches a glob of the comma list $2 and no "!glob" item.
+bv_glob_in() {
+  local v=$1 list=$2, g hit=1
+  while [[ -n $list ]]; do
+    g=${list%%,*}; list=${list#*,}
+    # shellcheck disable=SC2053 # list items are patterns
+    case $g in
+      '!'*) [[ $v != ${g#!} ]] || return 1 ;;
+      *) [[ $v != $g ]] || hit=0 ;;
+    esac
+  done
+  return $hit
+}
+
+# True when $1 is a short-option cluster (-abc) that sets option $2 before a
+# letter of $3 takes the rest of the cluster as its value.
+bv_short() {
+  local w=$1 k c
+  case $w in --*|-|[!-]*|'') return 1 ;; esac
+  (( ${#w} <= 64 )) || return 1
+  for (( k = 1; k < ${#w}; k++ )); do
+    c=${w:k:1}
+    [[ $c != "$2" ]] || return 0
+    [[ -z ${3-} || $3 != *"$c"* ]] || return 1
+  done
+  return 1
+}
+
+# True when the short-option cluster $1 ends in a letter of $2 whose value is
+# the next word.
+bv_short_value() {
+  local w=$1 k c
+  case $w in --*|-|[!-]*|'') return 1 ;; esac
+  (( ${#w} <= 64 )) || return 1
+  for (( k = 1; k < ${#w}; k++ )); do
+    c=${w:k:1}
+    if [[ $2 == *"$c"* ]]; then (( k == ${#w} - 1 )); return; fi
+  done
+  return 1
+}
+
+bv_lower() {
+  BV_LOWER=$1
+  case $1 in *[A-Z]*) ;; *) return 0 ;; esac
+  local s=$1 out='' c k p up=ABCDEFGHIJKLMNOPQRSTUVWXYZ lo=abcdefghijklmnopqrstuvwxyz
+  for (( k = 0; k < ${#s}; k++ )); do
+    c=${s:k:1}
+    case $c in [A-Z]) p=${up%%"$c"*}; c=${lo:${#p}:1} ;; esac
+    out=$out$c
+  done
+  BV_LOWER=$out
+}
+
+# Symfony Console resolution: same number of ":" parts, each typed part (in
+# lower case) a prefix of the full one.
+bv_console_name() {
+  local t=$1 f=$2 tp fp
+  while :; do
+    tp=${t%%:*}; fp=${f%%:*}
+    [[ $fp == "$tp"* ]] || return 1
+    if [[ $t == *:* ]]; then
+      [[ $f == *:* ]] || return 1
+      t=${t#*:}; f=${f#*:}
+    else
+      [[ $f != *:* ]]; return
+    fi
+  done
+}
+
+# BV_CON_NAME/BV_CON_I: the command name (lower case) passed to a console entry
+# point (BV_CONSOLE_ENTRIES, or any `php script` when BV_CONSOLE_PHP_SCRIPTS=1).
+bv_console_locate() {
+  local j=$BV_PI w k
+  BV_CON_NAME=''; BV_CON_I=-1
+  [[ -n $BV_CONSOLE_ENTRIES && $BV_SEARCH,echo,printf, != *",$BV_PROG,"* ]] || return 0
+  # Cheap pre-check: without an entry point or php in the words, nothing to find.
+  w=${BV_SEG_WORDS[BV_CUR]}
+  if [[ $w != *php* ]]; then
+    k=$BV_CONSOLE_ENTRIES,
+    # shellcheck disable=SC2053 # entries are patterns
+    while [[ -n $k && $w != *${k%%,*}* ]]; do k=${k#*,}; done
+    [[ -n $k ]] || return 0
+  fi
+  while (( j < BV_NW )); do
+    w=${BV_W[j]}; k=-1
+    case $w in *[[:space:]]*) j=$(( j + 1 )); continue ;; esac
+    bv_base "$w"
+    if bv_glob_in "$BV_BASE" "$BV_CONSOLE_ENTRIES"; then
+      k=$(( j + 1 ))
+    elif [[ $BV_BASE == php || $BV_BASE == php[0-9]* ]] && bv_php_script $(( j + 1 )); then
+      bv_base "${BV_W[BV_SCRIPT]}"
+      if (( BV_CONSOLE_PHP_SCRIPTS )) || bv_glob_in "$BV_BASE" "$BV_CONSOLE_ENTRIES"; then
+        k=$(( BV_SCRIPT + 1 ))
+      fi
+      j=$BV_SCRIPT
+    fi
+    if (( k >= 0 )); then
+      while (( k < BV_NW )); do
+        case ${BV_W[k]} in
+          -e|--env) k=$(( k + 2 )) ;;
+          -*) k=$(( k + 1 )) ;;
+          *) break ;;
+        esac
+      done
+      if (( k < BV_NW && ${#BV_W[k]} <= 128 )); then
+        bv_lower "${BV_W[k]}"
+        BV_CON_HEAD=${BV_LOWER%%:*}; BV_CON_I=$k
+        # Keep the name only if a console rule's first part can start with it.
+        [[ $BV_CONSOLE_HEADS != *",$BV_CON_HEAD"* ]] || BV_CON_NAME=$BV_LOWER
+      fi
+      return 0
+    fi
+    j=$(( j + 1 ))
+  done
+  return 0
+}
+
+# BV_LEAD_END: index after the positional words $1 (space-separated) that
+# must follow the program; options and @aliases between them are skipped.
+bv_lead() {
+  local lead="$1 " w j=$BV_AI
+  while [[ -n ${lead// /} ]]; do
+    w=${lead%% *}; lead=${lead#* }
+    while (( j < BV_NW )); do
+      case ${BV_W[j]} in -*|@*) j=$(( j + 1 )) ;; *) break ;; esac
+    done
+    [[ ${BV_W[j]-} == "$w" ]] || return 1
+    j=$(( j + 1 ))
+  done
+  BV_LEAD_END=$j
+}
+
+# bv_cond CONDITION FIRST_ARGUMENT FIRST_POSITIONAL
+bv_cond() {
+  local type=${1%%:*} list=${1#*:} j w found=1 name names
+  case $type in
+    '') return 0 ;;
+    has|lacks)
+      for (( j = $2; j < BV_NW; j++ )); do
+        w=${BV_W[j]}
+        [[ $w != -- ]] || break
+        if bv_glob_in "$w" "$list"; then found=0; break; fi
+      done
+      if [[ $type == has ]]; then return $found; fi
+      (( found )) ;;
+    arg)
+      j=$3
+      while (( j < BV_NW )); do
+        case ${BV_W[j]} in -*) j=$(( j + 1 )) ;; *) break ;; esac
+      done
+      (( j < BV_NW )) && bv_glob_in "${BV_W[j]}" "$list" ;;
+    argsub)
+      for (( j = $3; j < BV_NW; j++ )); do
+        w=${BV_W[j]}
+        case $w in -*) continue ;; esac
+        found=0; names=$list,
+        while [[ -n $names ]]; do
+          name=${names%%,*}; names=${names#*,}
+          [[ $name != *"$w"* ]] || return 0
+        done
+      done
+      (( found )) ;;
+    *) return 1 ;;
+  esac
+}
+
+# True when a redirection of the current segment with an operator in the
+# space-separated list $1 targets a file name matching $2.
+bv_redirects() {
+  local list=${BV_SEG_REDIR[BV_CUR]#"$BV_US"} e op t
+  [[ -n $list ]] || return 1
+  list=$list$BV_US
+  while [[ -n $list ]]; do
+    e=${list%%"$BV_US"*}; list=${list#*"$BV_US"}
+    op=${e%%"$BV_GS"*}; t=${e#*"$BV_GS"}
+    [[ " $1 " == *" $op "* ]] || continue
+    bv_base "$t"
+    ! bv_glob_in "$BV_BASE" "$2" || return 0
+  done
+  return 1
+}
+
+# bv_reads READERS FILES: the program prints a file named in FILES.
+bv_reads() {
+  local j w
+  if [[ $BV_PROG == sed && ",$1," == *,sed-print,* ]]; then
+    for (( j = BV_AI; j < BV_NW; j++ )); do
+      case ${BV_W[j]} in -i*|--in-place*) return 1 ;; esac
+    done
+  elif ! bv_glob_in "$BV_PROG" "$1"; then
+    return 1
+  fi
+  for (( j = BV_AI; j < BV_NW; j++ )); do
+    w=${BV_W[j]}
+    case $w in -?*) continue ;; esac
+    bv_base "$w"
+    ! bv_glob_in "$BV_BASE" "$2" || return 0
+  done
+  bv_redirects '<' "$2"
+}
+
+# bv_writes FILES: output redirection (or tee) onto a file named in FILES.
+bv_writes() {
+  local j w
+  if [[ $BV_PROG == tee ]]; then
+    for (( j = BV_AI; j < BV_NW; j++ )); do
+      w=${BV_W[j]}
+      case $w in -?*) continue ;; esac
+      bv_base "$w"
+      ! bv_glob_in "$BV_BASE" "$1" || return 0
+    done
+  fi
+  bv_redirects '> >>' "$1"
+}
+
+# Walk the rules only when one can apply to the segment: an argv rule names
+# the program, a read rule lists it (or sed) and it has a file to read, a
+# console command name was found, or output is redirected (or tee'd).
+bv_apply_rules() {
+  local rule a b c cat argv=0 read=0 write=0
+  if [[ -n $BV_PROG ]]; then
+    [[ $BV_ARGV_PROGS != *",$BV_PROG,"* ]] || argv=1
+    if (( BV_AI < BV_NW )) || [[ ${BV_SEG_REDIR[BV_CUR]} == *'<'* ]]; then
+      [[ $BV_READERS != *",$BV_PROG,"* && $BV_PROG != sed ]] || read=1
+    fi
+  fi
+  [[ $BV_PROG != tee && ${BV_SEG_REDIR[BV_CUR]} != *'>'* ]] || write=1
+  (( argv || read || write )) || [[ -n $BV_CON_NAME ]] || return 0
+  for rule in ${BV_GENERIC_RULES[@]+"${BV_GENERIC_RULES[@]}"} \
+    ${BV_FRAMEWORK_RULES[@]+"${BV_FRAMEWORK_RULES[@]}"}; do
+    case $rule in
+      'argv|'*)
+        (( argv )) || continue
+        rule=${rule#argv|}; a=${rule%%|*}
+        [[ ",$a," == *",$BV_PROG,"* ]] || continue
+        rule=${rule#*|}; b=${rule%%|*}; rule=${rule#*|}; c=${rule%%|*}; cat=${rule#*|}
+        bv_lead "$b" || continue
+        ! bv_cond "$c" "$BV_AI" "$BV_LEAD_END" || { bv_hit "$cat"; return 0; } ;;
+      'console|'*)
+        [[ -n $BV_CON_NAME ]] || continue
+        rule=${rule#console|}; a=${rule%%|*}
+        [[ ${a%%:*} == "$BV_CON_HEAD"* ]] || continue
+        rule=${rule#*|}; c=${rule%%|*}; cat=${rule#*|}
+        bv_console_name "$BV_CON_NAME" "$a" || continue
+        ! bv_cond "$c" $(( BV_CON_I + 1 )) $(( BV_CON_I + 1 )) || { bv_hit "$cat"; return 0; } ;;
+      'read|'*)
+        (( read )) || continue
+        rule=${rule#read|}; a=${rule%%|*}; rule=${rule#*|}; b=${rule%%|*}; cat=${rule#*|}
+        ! bv_reads "$a" "$b" || { bv_hit "$cat"; return 0; } ;;
+      'write|'*)
+        (( write )) || continue
+        rule=${rule#write|}; a=${rule%%|*}; cat=${rule#*|}
+        ! bv_writes "$a" || { bv_hit "$cat"; return 0; } ;;
+    esac
+  done
+  return 0
+}
+
+# BV_ARGV_PROGS/BV_READERS/BV_CONSOLE_HEADS: ",a,b," lists of the programs
+# argv and read rules name (plain names, not globs) and of the first part of
+# every console rule's command name.
+bv_index_rules() {
+  local rule
+  BV_ARGV_PROGS=','; BV_READERS=','; BV_CONSOLE_HEADS=','
+  for rule in ${BV_GENERIC_RULES[@]+"${BV_GENERIC_RULES[@]}"} \
+    ${BV_FRAMEWORK_RULES[@]+"${BV_FRAMEWORK_RULES[@]}"}; do
+    case $rule in
+      'argv|'*) rule=${rule#argv|}; BV_ARGV_PROGS=$BV_ARGV_PROGS${rule%%|*}, ;;
+      'read|'*) rule=${rule#read|}; BV_READERS=$BV_READERS${rule%%|*}, ;;
+      'console|'*) rule=${rule#console|}; rule=${rule%%|*}; BV_CONSOLE_HEADS=$BV_CONSOLE_HEADS${rule%%:*}, ;;
+    esac
+  done
+}
+
+# ---- generic rules --------------------------------------------------------
+
+bv_recurse() {
+  local d=$(( BV_SEG_DEPTH[BV_CUR] + 1 ))
+  [[ -n $1 ]] || return 0
+  (( d <= BV_MAX_DEPTH )) || return 0
+  bv_run_parse "$1" "$d" "$BV_CUR"
+}
+
+# sh/bash/... -c STRING, su -c STRING, and a shell reading a heredoc on stdin.
+bv_shell_scan() {
+  local j=$BV_PI w k cflag sflag
+  while (( j < BV_NW )); do
+    bv_base "${BV_W[j]}"; w=$BV_BASE
+    j=$(( j + 1 ))
+    case $w in
+      su|runuser)
+        for (( k = j; k < BV_NW; k++ )); do
+          case ${BV_W[k]} in
+            -c|--command) bv_recurse "${BV_W[k+1]-}"; break ;;
+            --command=*) bv_recurse "${BV_W[k]#--command=}"; break ;;
+          esac
+        done ;;
+      sh|bash|zsh|dash|ksh|ash|mksh|yash|fish)
+        k=$j; cflag=0; sflag=0
+        while (( k < BV_NW )); do
+          w=${BV_W[k]}
+          case $w in
+            -o|+o|-O|+O|--rcfile|--init-file) k=$(( k + 2 )); continue ;;
+            --) k=$(( k + 1 )); break ;;
+            --command) cflag=1 ;;
+            --*|+*) ;;
+            -?*)
+              ! bv_short "$w" c || cflag=1
+              ! bv_short "$w" s || sflag=1 ;;
+            *) break ;;
+          esac
+          k=$(( k + 1 ))
+        done
+        if (( cflag )); then
+          bv_recurse "${BV_W[k]-}"
+        elif (( j - 1 == BV_PI )) && (( sflag || k >= BV_NW )); then
+          bv_recurse "${BV_SEG_DOC[BV_CUR]}"
+        fi ;;
+    esac
+  done
+  return 0
+}
+
+bv_rule_eval() {
+  local j s=''
+  for (( j = BV_AI; j < BV_NW; j++ )); do s="$s ${BV_W[j]}"; done
+  bv_recurse "$s"
+}
+
+# A `git -c` setting that disables the repository's hooks.
+bv_git_config() {
+  case $1 in
+    [Cc][Oo][Rr][Ee].[Hh][Oo][Oo][Kk][Ss][Pp][Aa][Tt][Hh]=*)
+      bv_hit 'verification bypass - git -c core.hooksPath' ;;
+  esac
+}
+
+# bv_git_scan FROM LONG SHORT STOPS CATEGORY: LONG, or the short option
+# SHORT in a cluster, appears before "--".
+bv_git_scan() {
+  local j w
+  for (( j = $1; j < BV_NW; j++ )); do
+    w=${BV_W[j]}
+    [[ $w != -- ]] || return 0
+    if [[ $w == "$2" ]] || { [[ -n $3 ]] && bv_short "$w" "$3" "$4"; }; then
+      bv_hit "$5"; return 0
+    fi
+  done
+  return 0
+}
+
+bv_git_push() {
+  local j=$1 w opts=1
+  while (( j < BV_NW )); do
+    w=${BV_W[j]}; j=$(( j + 1 ))
+    if (( opts )); then
+      case $w in
+        --) opts=0; continue ;;
+        --force|--force-with-lease|--force-with-lease=*|--mirror)
+          bv_hit 'destructive command - git force push'; return 0 ;;
+        --repo|--receive-pack|--exec|--push-option|-o) j=$(( j + 1 )); continue ;;
+        --*) continue ;;
+        -?*)
+          if bv_short "$w" f o; then bv_hit 'destructive command - git force push'; return 0; fi
+          continue ;;
+      esac
+    fi
+    case $w in +?*) bv_hit 'destructive command - git force push (+refspec)'; return 0 ;; esac
+  done
+  return 0
+}
+
+bv_git_commit() {
+  local j=$1 w
+  while (( j < BV_NW )); do
+    w=${BV_W[j]}; j=$(( j + 1 ))
+    case $w in
+      --) return 0 ;;
+      --no-verify) bv_hit 'verification bypass - git commit --no-verify'; return 0 ;;
+      --message|--file|--author|--date|--template|--reuse-message|--reedit-message|--fixup|--squash|--cleanup|--trailer|--pathspec-from-file)
+        j=$(( j + 1 )) ;;
+      --*) ;;
+      -?*)
+        if bv_short "$w" n mFCctSu; then
+          bv_hit 'verification bypass - git commit -n'; return 0
+        fi
+        ! bv_short_value "$w" mFCct || j=$(( j + 1 )) ;;
+    esac
+  done
+  return 0
+}
+
+bv_git_branch() {
+  local j w del=0 force=0
+  for (( j = $1; j < BV_NW; j++ )); do
+    w=${BV_W[j]}
+    case $w in
+      --) break ;;
+      --delete) del=1 ;;
+      --force) force=1 ;;
+      --*) ;;
+      -?*)
+        if bv_short "$w" D; then del=1; force=1; fi
+        ! bv_short "$w" d || del=1
+        ! bv_short "$w" f || force=1 ;;
+    esac
+  done
+  (( del && force )) && bv_hit 'destructive command - git branch force delete'
+  return 0
+}
+
+bv_rule_git() {
+  local j=$BV_AI w sub=''
+  while (( j < BV_NW )); do
+    w=${BV_W[j]}
+    case $w in
+      -c) bv_git_config "${BV_W[j+1]-}"; j=$(( j + 2 )) ;;
+      -C|--git-dir|--work-tree|--namespace|--super-prefix|--config-env|--attr-source) j=$(( j + 2 )) ;;
+      -*) j=$(( j + 1 )) ;;
+      *) sub=$w; j=$(( j + 1 )); break ;;
+    esac
+  done
+  [[ -z $BV_HIT && -n $sub ]] || return 0
+  case $sub in
+    push) bv_git_push "$j" ;;
+    commit) bv_git_commit "$j"; return 0 ;;
+    reset) bv_git_scan "$j" --hard '' '' 'destructive command - git reset --hard' ;;
+    clean) bv_git_scan "$j" --force f e 'destructive command - git clean --force' ;;
+    branch) bv_git_branch "$j" ;;
+  esac
+  [[ -z $BV_HIT ]] || return 0
+  bv_git_scan "$j" --no-verify '' '' 'verification bypass - git --no-verify'
+}
+
+# Root, home and working-tree targets (/, /usr, ~, $HOME, ., .., *, ./*).
+bv_broad_path() {
+  local t=$1
+  (( ${#t} <= 512 )) || return 1
+  while [[ $t == ?*/ ]]; do t=${t%/}; done
+  case $t in */\*) t=${t%/\*}; [[ -n $t ]] || t=/ ;; esac
+  while [[ $t == ?*/ ]]; do t=${t%/}; done
+  case $t in
+    '*'|'.*'|'$HOME'|'${HOME}'|'$PWD'|'${PWD}'|'$(pwd)'|'`pwd`') return 0 ;;
+  esac
+  [[ $t =~ $BV_RE_BROAD ]]
+}
+
+bv_rule_rm() {
+  local j=$BV_AI w rec=0 broad=0 opts=1
+  while (( j < BV_NW )); do
+    w=${BV_W[j]}; j=$(( j + 1 ))
+    if (( opts )); then
+      case $w in
+        --) opts=0; continue ;;
+        --no-preserve-root) bv_hit 'destructive command - rm --no-preserve-root'; return 0 ;;
+        --recursive) rec=1; continue ;;
+        --*) continue ;;
+        -?*)
+          if bv_short "$w" r || bv_short "$w" R; then rec=1; fi
+          continue ;;
+      esac
+    fi
+    ! bv_broad_path "$w" || broad=1
+  done
+  (( rec && broad )) && bv_hit 'destructive command - recursive rm of a root, home or working-tree path'
+  return 0
+}
+
+bv_rule_gh() {
+  local j w m='' first=''
+  for (( j = BV_AI; j < BV_NW; j++ )); do
+    w=${BV_W[j]}
+    case $w in
+      -X|--method) m=${BV_W[j+1]-}; j=$(( j + 1 )) ;;
+      -X?*) m=${w#-X} ;;
+      --method=*) m=${w#--method=} ;;
+      -*) ;;
+      *) [[ -n $first ]] || first=$w ;;
+    esac
+  done
+  [[ $first == api ]] || return 0
+  case $m in [Dd][Ee][Ll][Ee][Tt][Ee]) bv_hit 'destructive command - gh api DELETE' ;; esac
+  return 0
+}
+
+bv_rule_sql() {
+  local t=$1 n=0 whole rest
+  if [[ $t =~ $BV_RE_SQL_DROP ]]; then
+    bv_hit 'destructive SQL - DROP TABLE/DATABASE/SCHEMA'; return 0
+  fi
+  if [[ $t =~ $BV_RE_SQL_TRUNCATE ]]; then
+    bv_hit 'destructive SQL - TRUNCATE TABLE'; return 0
+  fi
+  while (( n < 16 )) && [[ $t =~ $BV_RE_SQL_DELETE ]]; do
+    whole=${BASH_REMATCH[0]}; rest=${BASH_REMATCH[2]}
+    if ! [[ $rest =~ $BV_RE_SQL_WHERE ]] || [[ $rest =~ $BV_RE_SQL_WHERE_ALL ]]; then
+      bv_hit 'destructive SQL - DELETE without a row filter'; return 0
+    fi
+    rest=${t%%"$whole"*}
+    t=${t:${#rest}+${#whole}}; n=$(( n + 1 ))
+  done
+  return 0
+}
+
+# True when the validator has rules keyed on program $1.
+bv_known_program() {
+  case ,git,rm,gh,eval,echo,printf,sed,tee$BV_SEARCH$BV_ARGV_PROGS$BV_READERS in
+    *",$1,"*) return 0 ;;
+  esac
+  return 1
+}
+
+# A launcher without rules of its own (docker compose exec app, ddev, lando,
+# ssh host, ...) runs a later word as the command: make the first such word
+# that has rules the program, so its rules see it.
+bv_launched() {
+  local k w
+  for (( k = BV_PI + 1; k < BV_NW; k++ )); do
+    w=${BV_W[k]}
+    case $w in -*|*=*|*[[:space:]]*|'') continue ;; esac
+    bv_base "$w"; w=${BV_BASE%.phar}
+    [[ $w != wp-cli ]] || w=wp
+    if [[ -n $w ]] && bv_known_program "$w"; then
+      BV_PI=$k; BV_PROG=$w; BV_AI=$(( k + 1 ))
+      return 0
+    fi
+  done
+  return 1
+}
+
+bv_program_rules() {
+  case $BV_PROG in
+    git) bv_rule_git ;;
+    rm) bv_rule_rm ;;
+    gh) bv_rule_gh ;;
+    eval) bv_rule_eval ;;
+  esac
+}
+
+# SQL text is data in a search, and in the cat/echo/printf that feeds one.
+bv_sql_check() {
+  local parent=${BV_SEG_PARENT[BV_CUR]}
+  [[ $BV_SEARCH != *",$BV_PROG,"* ]] || return 0
+  case $BV_PROG in
+    cat|echo|printf)
+      (( parent < 0 )) || [[ $BV_SEARCH != *",${BV_SEG_PROG[parent]},"* ]] || return 0 ;;
+  esac
+  bv_rule_sql "${BV_SEG_WORDS[BV_CUR]}${BV_SEG_DOC[BV_CUR]}"
+}
+
+bv_check_seg() {
+  local words=${BV_SEG_WORDS[$1]}
+  BV_CUR=$1
+  [[ -n $words || -n ${BV_SEG_REDIR[$1]} || -n ${BV_SEG_DOC[$1]} ]] || return 0
+  bv_load_words "$1"
+  bv_locate_program
+  BV_SEG_PROG[BV_CUR]=$BV_PROG
+  bv_program_rules
+  [[ -z $BV_HIT ]] || return 0
+  if [[ $BV_SEARCH,echo,printf, != *",$BV_PROG,"* ]]; then
+    case $words in *sh*|*su*|*runuser*) bv_shell_scan ;; esac
+  fi
+  bv_console_locate
+  bv_apply_rules
+  [[ -z $BV_HIT ]] || return 0
+  if [[ -n $BV_PROG ]] && ! bv_known_program "$BV_PROG" && bv_launched; then
+    BV_CON_NAME=''
+    bv_program_rules
+    [[ -z $BV_HIT ]] || return 0
+    bv_apply_rules
+    [[ -z $BV_HIT ]] || return 0
+  fi
+  case $words${BV_SEG_DOC[$1]} in
+    *[Dd][Rr][Oo][Pp]*|*[Tt][Rr][Uu][Nn][Cc][Aa][Tt][Ee]*|*[Dd][Ee][Ll][Ee][Tt][Ee]*) bv_sql_check ;;
+  esac
+}
+
+# bv_validate COMMAND: BV_HIT is the first matching rule category, or empty.
+bv_validate() {
+  local i=0
+  export LC_ALL=C
+  BV_HIT=''
+  BV_SEG_WORDS=(); BV_SEG_REDIR=(); BV_SEG_DOC=(); BV_SEG_PROG=()
+  BV_SEG_DEPTH=(); BV_SEG_PARENT=()
+  [[ -n ${BV_ARGV_PROGS-} ]] || bv_index_rules
+  bv_run_parse "$1" 0 -1
+  while (( i < ${#BV_SEG_WORDS[@]} )); do
+    bv_check_seg "$i"
+    [[ -z $BV_HIT ]] || return 0
+    i=$(( i + 1 ))
+  done
+  return 0
+}
+# <<< bash-validator generic section <<<
+
+# Laravel rules. Artisan is a Symfony Console application, so a command is
+# also reachable through any unambiguous abbreviation (migrate:fr, mi:fr);
+# console rules match those too. Commands and options checked against the
+# Laravel 12.x documentation (configuration, eloquent pruning).
+BV_CONSOLE_ENTRIES='artisan'
+BV_CONSOLE_PHP_SCRIPTS=0
+BV_FRAMEWORK_RULES=(
+  "console|migrate:fresh||destructive command - artisan migrate:fresh"
+  "console|migrate:refresh||destructive command - artisan migrate:refresh"
+  "console|migrate:reset||destructive command - artisan migrate:reset"
+  "console|migrate:rollback||destructive command - artisan migrate:rollback"
+  "console|db:wipe||destructive command - artisan db:wipe"
+  "console|db:seed|has:--force,--force=*|destructive command - artisan db:seed --force"
+  "console|model:prune|lacks:--pretend|destructive command - artisan model:prune"
+  "console|env:decrypt||secret exposure - artisan env:decrypt"
+  "console|config:show|arg:database,database.*,app,app.key,app.previous_keys|secret exposure - artisan config:show of credentials"
+)
+
+bv_validate "$COMMAND"
+if [ -n "$BV_HIT" ]; then
+  echo "BLOCKED: Command refused (rule category: $BV_HIT)." >&2
   echo "   This operation is blocked. See AGENTS.md." >&2
   exit 2
 fi
