@@ -124,7 +124,10 @@ agent makes there.
   writing wherever they write: on the verification machine two Codex plugins
   (`agentic-security`, `agentops`) created `.agentic-security/` and `.agentops/`
   in every project they ran in. The accelerator itself writes nothing there.
-- **One edition per session.** A project attaches one edition at a time.
+- **One edition per project.** A project attaches one edition at a time. Every
+  Harness launch carries it - Workspace, Plan, Review and SDD sessions, Clash
+  participants and Fleet reviewers; Infrastructure Creator and System
+  Orchestration runs have their own workspaces and do not use it.
 - **Windows.** Hook commands run through `bash`, as installed hooks already
   require (Git Bash).
 
