@@ -29,7 +29,7 @@ svg { flex:none; }
 .app { display:grid; grid-template-columns:250px minmax(0,1fr); height:100%; }
 .sidebar { background:var(--soft); border-right:1px solid var(--line); display:flex; flex-direction:column; min-height:0; padding:24px 16px 16px; }
 .brand { display:flex; align-items:center; gap:12px; padding:0 8px 24px; }
-.brand-mark { display:grid; place-items:center; width:34px; height:34px; border:1px solid var(--field-line); background:var(--paper); border-radius:var(--radius-md); }
+.brand-logo { display:block; width:34px; height:34px; flex:none; }
 .brand-name { font-size:var(--text-body); font-weight:var(--weight-strong); line-height:var(--leading-ui); }
 .project-switcher { display:flex; flex-direction:column; gap:4px; margin:0 0 12px; color:var(--muted); font-size:var(--text-ui); }
 .project-switcher select { width:100%; }
@@ -211,7 +211,7 @@ input[type="text"],.field input[type="number"],select { width:100%; }
 #sessions-view.output-resized .conversation { flex:1 0 100px; }
 .conversation-inner { max-width:860px; margin:0 auto; padding:32px 32px 12px; }
 .welcome { max-width:660px; margin:48px auto 32px; text-align:center; }
-.welcome-mark { color:var(--purple); width:40px; height:40px; margin-bottom:16px; }
+.welcome-mark { display:block; width:48px; height:48px; margin:0 auto 16px; }
 .welcome h2 { font-size:var(--text-display); font-weight:var(--weight-strong); line-height:var(--leading-tight); margin:0 0 16px; }
 .welcome > p { color:var(--muted); font-size:var(--text-body); max-width:480px; margin:0 auto; line-height:var(--leading-body); }
 .welcome-links { display:flex; gap:12px; justify-content:center; flex-wrap:wrap; margin-top:24px; }

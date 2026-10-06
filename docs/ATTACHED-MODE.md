@@ -44,6 +44,11 @@ Start a session as usual. The `/` menu (Claude Code, Cursor) and the `$` menu
 (Codex) include the edition's commands and skills, and **Memory** works on the
 attached state.
 
+To skip the terminal next time, run `./accelerator-app install` once in the
+clone. **AI Accelerator**, with the hare icon, then appears among the installed
+applications, and a click starts the server and opens this page; see
+[Desktop application](../harness/README.md#desktop-application).
+
 ## Use it from a terminal
 
 From the project folder:

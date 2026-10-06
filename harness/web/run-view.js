@@ -800,19 +800,34 @@ const runView = (() => {
     if (ui.ended?.sid !== session.id) return '';
     return ui.ended.limit === 'time' ? '✕ Time limit · ' : {completed:'✓ Finished · ',failed:'✕ Failed · ',cancelled:'■ Cancelled · ',interrupted:'✕ Interrupted · '}[ui.ended.outcome] || '';
   }
-  // The tab icon is drawn from the theme's own tokens: a dot while running, ! when Harness needs you, ✓ or × at the end.
+  // The tab shows the application's hare - the icon the application list shows - and a run's state as a badge
+  // drawn over it from the theme's own tokens: a dot while running, ! when Harness needs you, ✓ or × at the end.
+  const appIcon = {href:document.querySelector('link[rel="icon"]')?.getAttribute('href') || '', image:null};
+  if (appIcon.href) { const image = new Image(); image.onload = () => { appIcon.image = image; ui.iconKey = ''; icon(state.selected); }; image.src = appIcon.href; }
+  function badge(draw, kind) {
+    const fill = {running:'#ffffff',needs:token('--warning-dot'),done:token('--success-dot'),failed:token('--error-dot')}[kind];
+    draw.fillStyle = fill; draw.beginPath(); draw.arc(47,47,16,0,Math.PI * 2); draw.fill();
+    draw.strokeStyle = '#ffffff'; draw.fillStyle = '#ffffff'; draw.lineWidth = 4.5;
+    if (kind === 'running') { draw.fillStyle = token('--purple'); draw.beginPath(); draw.arc(47,47,8,0,Math.PI * 2); draw.fill(); }
+    else if (kind === 'needs') { draw.beginPath(); draw.moveTo(47,38); draw.lineTo(47,48); draw.stroke(); draw.beginPath(); draw.arc(47,55,2.6,0,Math.PI * 2); draw.fill(); }
+    else if (kind === 'done') { draw.beginPath(); draw.moveTo(40,47); draw.lineTo(45,52); draw.lineTo(54,42); draw.stroke(); }
+    else { draw.beginPath(); draw.moveTo(41,41); draw.lineTo(53,53); draw.moveTo(53,41); draw.lineTo(41,53); draw.stroke(); }
+  }
   function icon(session) {
     const p = phase(session), kind = p ? 'running' : ['awaiting_approval','awaiting_context'].includes(session?.status) ? 'needs' : session && ui.ended?.sid === session.id ? ui.ended.outcome === 'completed' && !ui.ended.limit ? 'done' : ui.ended.outcome === 'cancelled' ? 'idle' : 'failed' : 'idle';
-    const key = `${kind}|${document.documentElement.dataset.theme}`; if (key === ui.iconKey) return; ui.iconKey = key;
+    const key = `${kind}|${document.documentElement.dataset.theme}|${Boolean(appIcon.image)}`; if (key === ui.iconKey) return; ui.iconKey = key;
+    let link = document.querySelector('link[rel="icon"]'); if (!link) { link = document.createElement('link'); link.rel = 'icon'; document.head.append(link); }
+    if (kind === 'idle' && appIcon.href) { link.href = appIcon.href; return; }
     const canvas = document.createElement('canvas'); canvas.width = canvas.height = 64; const draw = canvas.getContext?.('2d'); if (!draw) return;
-    draw.lineWidth = 6; draw.lineCap = 'round'; draw.lineJoin = 'round';
+    draw.lineCap = 'round'; draw.lineJoin = 'round';
+    if (appIcon.image) { draw.drawImage(appIcon.image,0,0,64,64); badge(draw,kind); link.href = canvas.toDataURL('image/png'); return; }
+    draw.lineWidth = 6;
     const ring = color => { draw.strokeStyle = color; draw.beginPath(); draw.arc(32,32,25,0,Math.PI * 2); draw.stroke(); };
     if (kind === 'running') { draw.fillStyle = token('--purple'); draw.beginPath(); draw.arc(32,32,20,0,Math.PI * 2); draw.fill(); }
     else if (kind === 'needs') { ring(token('--warning-dot')); draw.beginPath(); draw.moveTo(32,18); draw.lineTo(32,36); draw.stroke(); draw.fillStyle = token('--warning-dot'); draw.beginPath(); draw.arc(32,45,4,0,Math.PI * 2); draw.fill(); }
     else if (kind === 'done') { ring(token('--success-dot')); draw.beginPath(); draw.moveTo(20,33); draw.lineTo(28,41); draw.lineTo(44,24); draw.stroke(); }
     else if (kind === 'failed') { ring(token('--error-dot')); draw.beginPath(); draw.moveTo(23,23); draw.lineTo(41,41); draw.moveTo(41,23); draw.lineTo(23,41); draw.stroke(); }
     else { draw.strokeStyle = token('--purple'); draw.lineWidth = 5; draw.beginPath(); for (let i = 0; i < 6; i++) { const angle = Math.PI / 3 * i - Math.PI / 2; draw[i ? 'lineTo' : 'moveTo'](32 + 24 * Math.cos(angle),32 + 24 * Math.sin(angle)); } draw.closePath(); draw.stroke(); }
-    let link = document.querySelector('link[rel="icon"]'); if (!link) { link = document.createElement('link'); link.rel = 'icon'; document.head.append(link); }
     link.href = canvas.toDataURL('image/png');
   }
   // Private by default: no session title, path, command or agent text. Only on the person's opt-in, and only when the tab was away.

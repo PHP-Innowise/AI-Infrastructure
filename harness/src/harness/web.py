@@ -23,6 +23,8 @@ ROOT = Path(__file__).resolve().parents[3]
 ASSETS = {name: 'text/css; charset=utf-8' if name.endswith('.css') else 'text/javascript; charset=utf-8'
           for name in ('app.css', 'app-core.js', 'app-knowledge.js', 'memory-use.js', 'context-usage.js', 'app-setup.js', 'app-skills.js', 'app-creator.js',
                        'agent-activity.js', 'system.js', 'system-editor.js', 'system-discovery.js', 'run-model.js', 'run-view.js', 'composer-commands.js')}
+# The application's hare, also the tab icon: the browser shows what the application list does.
+ASSETS['icons/ai-accelerator.svg'] = 'image/svg+xml'
 sys.path.insert(0, str(ROOT / 'harness/src'))
 sys.path.insert(0, str(ROOT / 'scripts'))
 from harness.filesystem import fs, secure_private_dir, default_state_dir, existing_directory, same_path

@@ -306,6 +306,54 @@ Authenticate using each native CLI in a terminal before running browser
 tasks. Existing native credentials remain managed by that CLI. A detected
 executable does **not** prove that its account is logged in.
 
+### Desktop application
+
+To start the accelerator like any installed application, run once from the
+clone (in Git Bash on Windows):
+
+```bash
+./accelerator-app install
+```
+
+**AI Accelerator**, with the hare icon, then appears among the installed
+applications:
+
+| Platform | Where it appears | What is written |
+| --- | --- | --- |
+| Linux (GNOME, KDE and other XDG desktops) | the application menu and search | `~/.local/share/applications/ai-accelerator.desktop`, `~/.local/share/icons/hicolor/*/apps/ai-accelerator.*` |
+| macOS | Launchpad, Spotlight, `~/Applications` | `~/Applications/AI Accelerator.app` |
+| Windows | the Start menu, and **Settings › Apps › Installed apps** with **Uninstall** | a Start menu shortcut, `%APPDATA%\ai-infrastructure-harness\ai-accelerator.ico`, an Uninstall entry under `HKEY_CURRENT_USER` |
+
+A click runs `./accelerator-app open`. If the server is not running, it starts
+it from the clone, as `./harness-server start` does, so the browser asks for a
+project folder. Then it opens the server in the default browser. The entry runs
+the clone itself, so `git pull` updates the application, and nothing else is
+copied. On Linux, the icon's menu also has **Stop the accelerator server**.
+
+A desktop launch lacks the `PATH` additions of a shell profile, such as
+`~/.local/bin`, nvm or Homebrew, where the Claude, Codex and Cursor CLIs, and
+often Python itself, usually live. The application entry therefore names the
+Python that ran `install` (`ACCELERATOR_APP_PYTHON`; the launcher falls back to
+`python3` and `python`). `install` also records the installing shell's `PATH` in
+`app.json`, and `open` puts it in front of the desktop's own. The file is in
+`~/.config/ai-infrastructure-harness/` on Linux,
+`~/Library/Application Support/ai-infrastructure-harness/` on macOS and
+`%APPDATA%\ai-infrastructure-harness\` on Windows. Run `install` again after
+moving the clone or installing a new CLI. When the server cannot start, the
+reason appears as a desktop notification (a message box on Windows) and in
+`launcher.log` beside `app.json`.
+
+```bash
+./accelerator-app status     # is the application installed, is the server running
+./accelerator-app stop       # stop the server
+./accelerator-app uninstall  # remove the application; projects, sessions and memory stay
+```
+
+`harness/web/icons/ai-accelerator.svg` is the icon's source. The PNG sizes next
+to it are rendered from it with `rsvg-convert -w N -h N`, and the Windows ICO
+and macOS ICNS are built from those PNGs at install time. The browser tab shows
+the same hare, with a badge while a run is active, needs you or has ended.
+
 ### Workspace options
 
 The sidebar has five sections: **Sessions**, **System Orchestration**, **Knowledge** (Memory use,

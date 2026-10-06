@@ -67,6 +67,18 @@ From a terminal, `python3 <clone>/scripts/accelerator_attach.py run
 claude|codex|cursor` run in the project folder does the same. Details and
 limits: [docs/ATTACHED-MODE.md](docs/ATTACHED-MODE.md).
 
+To start the accelerator like any other application, run
+`./accelerator-app install` once in the clone (in Git Bash on Windows).
+**AI Accelerator**, with the hare logo, then appears among the installed
+applications: in the application menu of GNOME, KDE and other XDG desktops on
+Linux, in Launchpad and Spotlight on macOS, and in the Start menu and
+**Settings › Apps** on Windows. A click starts the Harness from the clone if it
+is not running and opens it in the browser. Only a shortcut and an icon are
+written to the system, so `git pull` in the clone updates the application too.
+`./accelerator-app uninstall` removes the application; projects and their
+memory stay. Details:
+[harness/README.md](harness/README.md#desktop-application).
+
 When a team wants the accelerator's files in the project's own Git history, use
 the [inventory-driven installer](install/README.md) from this repository root.
 Start with `--dry-run`, select only the required AI integrations, resolve every

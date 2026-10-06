@@ -942,9 +942,12 @@ assert.match(renderExistingWorktrees().error,/could not list/);
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
         self.assertIn("frame-ancestors 'self'", headers["Content-Security-Policy"])
         page_html = (WEB / "index.html").read_text(encoding="utf-8")
-        self.assertEqual(set(re.findall(r'(?:src|href)="/([^"/]+)"', page_html)), set(web.ASSETS))
+        # Every file the page loads is a listed asset; /kit3/ is the catalog page, which has a route of its own.
+        references = [name for name in re.findall(r'(?:src|href)="/([^"]*)"', page_html) if name != "kit3/"]
+        self.assertEqual(set(references), set(web.ASSETS))
         served = self.request("/")[1]
-        self.assertEqual(len(web.ASSETS), len(re.findall(rb'(?:src|href)="/[^"/?]+\?v=[0-9a-f]{16}"', served)))
+        # Each reference is versioned, the hare's three (tab, sidebar, welcome) among them.
+        self.assertEqual(len(references), len(re.findall(rb'(?:src|href)="/[^"?]+\?v=[0-9a-f]{16}"', served)))
         for name, content_type in web.ASSETS.items():
             with self.subTest(asset=name):
                 status, body, asset_headers = self.request("/" + name)

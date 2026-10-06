@@ -227,7 +227,7 @@ EDITION_TEST_SUITES = (
 PARITY_EDITIONS = ("Laravel", "Symfony", "PHP Core", "Cms/wordpress")
 TESTS_LOOP = 'for test_file in test_*.py; do\n  python3 "$test_file"\ndone'
 
-SHELL_FILES = "git ls-files -z -- '*.sh' 'collect' 'kit3' 'harness-server'"
+SHELL_FILES = "git ls-files -z -- '*.sh' 'collect' 'kit3' 'harness-server' 'accelerator-app'"
 
 KIT3_TESTS = (
     "tests.test_registry",
@@ -251,6 +251,7 @@ HARNESS_TESTS = (
     "tests.test_harness_delivery",
     "tests.test_harness_clash",
     "tests.test_harness_accelerators",
+    "tests.test_desktop_app",
 )
 
 # Branches that carry the native-Windows and System-orchestration work run
@@ -299,6 +300,7 @@ WINDOWS_HARNESS_TESTS = (
     "tests.test_windows_creator",
     "tests.test_windows_discovery",
     "tests.test_ai_system_portable",
+    "tests.test_desktop_app",
 )
 WINDOWS_CREATOR_TESTS = ("tests.test_windows_creator", "tests.test_windows_discovery")
 
