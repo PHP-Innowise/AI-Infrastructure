@@ -411,7 +411,8 @@ if (root / "hold-worker").exists():
                 return False
             os.kill(pid, 0)
             return True
-        except ProcessLookupError:
+        except (ProcessLookupError, FileNotFoundError):
+            # FileNotFoundError: the process exited between exists() and read.
             return False
 
 
