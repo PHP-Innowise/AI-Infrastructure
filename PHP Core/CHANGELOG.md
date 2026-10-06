@@ -11,6 +11,13 @@ it at the top of every session.
 
 ## Unreleased
 
+### Fixed
+
+- Hooks are wired through the project root: `"${CLAUDE_PROJECT_DIR}"/.claude/hooks/<script>.sh` in `.claude/settings.json`, and a root-finding `sh` launcher in `.codex/hooks.json`. The safety hooks now keep running when the session's directory is a subdirectory; before, they exited 127 and failed open. Policy lock regenerated. Codex users must re-trust the changed hooks once in `/hooks`.
+- `.cursor/hooks/subagent-dispatch.sh` and `.codex/hooks/subagent-dispatch.sh` are executable again (100644 -> 100755). Cursor runs the hook directly on `subagentStop`; without the bit it exited 126, and the write-agent lock taken by `subagent-gate` stayed held until its 30-minute TTL. To repair an existing install, run `chmod +x .cursor/hooks/*.sh .codex/hooks/*.sh`. Reinstalling with `--merge-existing` lists the affected files as `NOT_EXECUTABLE` on stderr.
+- bash-validator: schema-reset rules (`migrate:fresh/refresh/reset/rollback`, `db:wipe`, `schema:drop`) now resolve Symfony Console abbreviations and fire only for a real console invocation (`artisan`, `console`, `phinx`, `doctrine-migrations` or any `php <script>`). Added Phinx `rollback` and Doctrine Migrations `migrate first|prev` and `execute --down`. The generic rules are documented in the root CHANGELOG.
+- The Codex `SKILL FLOW.md` (`.agents/skills/`) named the Claude/Cursor commands `/brainstorm`, `/git-worktrees`, `/debugger` and `/docs-generator`, which do not exist for Codex (Codex has no command layer). They now name the skills `brainstorming`, `using-git-worktrees`, `systematic-debugger` and `documentation-generator`. Found by the new `scripts/check_routes.py` gate.
+
 ### Changed
 
 - Memory promotion policy now matches runtime configuration: eligible verified

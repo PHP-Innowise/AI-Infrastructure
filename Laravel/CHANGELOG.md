@@ -11,6 +11,13 @@ it at the top of every session.
 
 ## Unreleased
 
+### Fixed
+
+- Hooks are wired through the project root: `"${CLAUDE_PROJECT_DIR}"/.claude/hooks/<script>.sh` in `.claude/settings.json`, and a root-finding `sh` launcher in `.codex/hooks.json`. The safety hooks now keep running when the session's directory is a subdirectory; before, they exited 127 and failed open. Policy lock regenerated. Codex users must re-trust the changed hooks once in `/hooks`.
+- `.cursor/hooks/subagent-dispatch.sh` and `.codex/hooks/subagent-dispatch.sh` are executable again (100644 -> 100755). Cursor runs the hook directly on `subagentStop`; without the bit it exited 126, and the write-agent lock taken by `subagent-gate` stayed held until its 30-minute TTL. To repair an existing install, run `chmod +x .cursor/hooks/*.sh .codex/hooks/*.sh`. Reinstalling with `--merge-existing` lists the affected files as `NOT_EXECUTABLE` on stderr.
+- bash-validator: Artisan rules now match every abbreviation Artisan accepts (`migrate:fr`, `mi:fr`, any case), also through Sail, containers and `--env` placed before the command. `model:prune --pretend` passes. New secret rules block `env:decrypt` and `config:show database|app|app.key`. `schema:drop`, which is not a Laravel command, was dropped from the list (its abbreviation logic would have blocked `schema:d`, i.e. `schema:dump`). The generic rules are documented in the root CHANGELOG.
+- The Codex `SKILL FLOW.md` (`.agents/skills/`) named the Claude/Cursor commands `/brainstorm`, `/git-worktrees` and `/debugger`, which do not exist for Codex (Codex has no command layer). They now name the skills `brainstorming`, `using-git-worktrees` and `systematic-debugger`. Found by the new `scripts/check_routes.py` gate.
+
 ### Changed
 
 - Memory promotion policy now matches runtime configuration: eligible verified

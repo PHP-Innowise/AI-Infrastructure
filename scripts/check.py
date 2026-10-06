@@ -359,6 +359,10 @@ def build_groups(root: Path = ROOT, base_ref: Optional[str] = None) -> List[Grou
             commands=(
                 step("Verify tool mirrors against canon", "python3 scripts/build_mirrors.py --check"),
                 unittests("Mirror executor regression tests", ["tests.test_build_mirrors"]),
+                unittests("Executable bits recorded in the Git index", ["tests.test_file_modes"]),
+                unittests("Bash validator corpus", ["tests.test_bash_validator_corpus"]),
+                step("Wiring and routing references resolve", "python3 scripts/check_routes.py"),
+                unittests("Wiring and routing references resolve", ["tests.test_check_routes"]),
             ),
         ),
         Group(
@@ -400,6 +404,7 @@ def build_groups(root: Path = ROOT, base_ref: Optional[str] = None) -> List[Grou
                     "python3 scripts/install_accelerator.py --verify-inventories",
                 ),
                 unittests("Test selected-tool clean installations", ["tests.test_installation"]),
+                unittests("Hook wiring runs from any working directory", ["tests.test_hook_wiring"]),
                 unittests("Preserve framework-specific skill semantics", ["tests.test_framework_semantics"]),
                 unittests("Optional developer tooling stays out of the editions", ["tests.test_collect_context"]),
                 step("Kit 3 admission registry is well-formed", "python3 scripts/validate_registry.py --check"),
@@ -470,17 +475,7 @@ def build_groups(root: Path = ROOT, base_ref: Optional[str] = None) -> List[Grou
                 step("Policy lock matches the surface", "python3 scripts/policy_lock.py --check"),
                 unittests("Policy lock regression tests", ["tests.test_policy_lock"]),
                 unittests("Routing eval scoring and fixtures", ["tests.test_routing_eval"]),
-                step(
-                    "Command and agent routes resolve",
-                    "python3 scripts/check_routes.py",
-                    paths=("scripts/check_routes.py",),
-                    local_only="added by the routing-check change; wire it into ci.yml's lint job",
-                ),
-                unittests(
-                    "check.py mirrors the workflows",
-                    ["tests.test_check"],
-                    local_only="ci.yml does not run tests/test_check.py yet; wire it into the lint job",
-                ),
+                unittests("check.py mirrors the workflows", ["tests.test_check"]),
             ),
         ),
         Group(

@@ -11,6 +11,12 @@ it at the top of every session.
 
 ## Unreleased
 
+### Fixed
+
+- Hooks are wired through the project root: `"${CLAUDE_PROJECT_DIR}"/.claude/hooks/<script>.sh` in `.claude/settings.json`, and a root-finding `sh` launcher in `.codex/hooks.json`. The safety hooks now keep running when the session's directory is a subdirectory; before, they exited 127 and failed open. Policy lock regenerated. Codex users must re-trust the changed hooks once in `/hooks`.
+- `.cursor/hooks/subagent-dispatch.sh` and `.codex/hooks/subagent-dispatch.sh` are executable again (100644 -> 100755). Cursor runs the hook directly on `subagentStop`; without the bit it exited 126, and the write-agent lock taken by `subagent-gate` stayed held until its 30-minute TTL. To repair an existing install, run `chmod +x .cursor/hooks/*.sh .codex/hooks/*.sh`. Reinstalling with `--merge-existing` lists the affected files as `NOT_EXECUTABLE` on stderr.
+- bash-validator: console rules now match every abbreviation the console accepts (`d:d:d`, `doc:data:drop`, `d:f:l`) via `bin/console`, `php bin/console` and `symfony console`, with options before the command. Added `doctrine:migrations:migrate prev|first` and the secret-printing `secrets:reveal` and `secrets:list --reveal`. The generic rules are documented in the root CHANGELOG.
+
 ### Changed
 
 - Memory promotion policy now matches runtime configuration: eligible verified

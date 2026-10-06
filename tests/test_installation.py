@@ -7,7 +7,6 @@ import hashlib
 import json
 import os
 import re
-import shlex
 import shutil
 import stat
 import subprocess
@@ -92,30 +91,10 @@ def source_status() -> str:
 HOOK_WIRING = (".claude/settings.json", ".cursor/hooks.json", ".codex/hooks.json")
 
 
-# A hook script as a wiring command names it, whatever form wraps the path: a
-# bare relative path, one anchored on "${CLAUDE_PROJECT_DIR}", or a launcher
-# that locates the hooks directory and execs the script named as its first
-# argument. An inline snippet such as the Notification hook's `case ... esac`
-# names none.
-HOOK_SCRIPT_REFERENCE = re.compile(r"\.(?:claude|cursor|codex)/hooks/[A-Za-z0-9_.-]+\.sh")
-HOOK_LAUNCHER = re.compile(r"\.(claude|cursor|codex)/hooks/\$(?:1|\{1\})")
-SCRIPT_NAME = re.compile(r"[A-Za-z0-9_.-]+\.sh")
-
-
-def scripts_named(command: str) -> list[str]:
-    found = HOOK_SCRIPT_REFERENCE.findall(command)
-    launcher = HOOK_LAUNCHER.search(command)
-    if launcher:
-        try:
-            words = shlex.split(command)
-        except ValueError:
-            words = []
-        found += [
-            f".{launcher.group(1)}/hooks/{word}"
-            for word in words[1:]
-            if SCRIPT_NAME.fullmatch(word)
-        ]
-    return found
+# The hook scripts one wiring command runs; the routes gate parses every form
+# the editions use (bare, "${CLAUDE_PROJECT_DIR}"-anchored, Codex launcher).
+sys.path.insert(0, str(ROOT / "scripts"))
+from check_routes import wired_hook_scripts as scripts_named  # noqa: E402
 
 
 def wired_hook_scripts(project: Path) -> list[str]:

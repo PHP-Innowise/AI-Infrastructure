@@ -6,6 +6,7 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Changed
 
+- **The generator's own `bash-validator.sh` shares the editions' parser.** It now carries the same byte-identical generic section as the four editions' validators. Chains, `$(...)`, `sh -c`, `eval`, wrappers, launchers, git global options and Symfony Console abbreviations no longer hide a destructive command, and read-only searches and commit messages that merely mention one now pass (`.env.example` reads too). Its framework rules are the union of the editions' rules (Artisan, Symfony console, PHP console runners, WP-CLI), plus the existing block on writing `.env`, now limited to redirection and `tee`. Blocks still print `[bash-validator] BLOCKED` with a rule category and never the command body. Latency is about 5 ms per call, up from about 3.3 ms, the same as the editions. The hooks README is updated, including that `bash-validator.sh` needs `jq`/`php`/`python3` (it fails open without one) and that it is not a sandbox. Generated targets are unaffected: hook-forge still authors their validators.
 - **`hook-forge` read hook stands down when the host delivered the capsule.**
   A generated `working-memory-read.sh` exits silently when
   `CONTEXT_CAPSULE_DELIVERED` is `1`, as the editions' hooks now do: the
@@ -16,6 +17,13 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Fixed
 
+- **Hooks failed open from a subdirectory, in this edition and in every generated target.** Claude Code and Codex run hooks in the session's current directory, so bare `.claude/hooks/<script>.sh` and `.codex/hooks/<script>.sh` wiring exited 127 there, which both hosts treat as non-blocking.
+  - `hook-forge` now wires Claude hooks as `"${CLAUDE_PROJECT_DIR}"/.claude/hooks/<script>.sh` and Codex hooks through one fixed root-finding `sh -c` launcher. Cursor stays bare, because it runs project hooks from the project root.
+  - bootstrap-verifier's `validate_generated.py` resolves both forms and now rejects bare Claude/Codex paths, tampered launchers, and dead or unowned hooks.
+  - This edition's own `.claude/settings.json` and `.codex/hooks.json` use the same forms. The launcher matters here: Infrastructure-Creator sits below the monorepo's Git root, where a git-toplevel path would miss it.
+  - New `tests/test_hook_wiring_gate.py`; mirrors and policy lock regenerated.
+  - Targets generated earlier keep bare wiring until `infra-update` regenerates it, and the gate now reports it. Codex users must re-trust the changed hooks once in `/hooks`.
+- The `.claude` and `.cursor` copies of `skills/memory-seed/assets/scripts/validate.py` lose a stale executable bit (100755 -> 100644). They now match their `.agents` canon, which has been 100644 since the H1-H4 roadmap commit. `scripts/build_mirrors.py` now enforces the canon's executable bit on every mirror.
 - **`memory-seed` asset carries the memory-core fixes.** Every generated project
   gets the same core as the editions (see the root `CHANGELOG.md`): a Memory
   Bank write is refused only for what it introduces, so a chunk past its review

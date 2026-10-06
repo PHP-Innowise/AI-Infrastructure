@@ -58,6 +58,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shlex
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
@@ -97,6 +98,12 @@ EXECUTABLE_MODE = "100755"
 NULL_VALUES = {"", "null", "none", "~"}
 
 HOOK_REF = re.compile(r"(\.claude|\.cursor|\.codex)/hooks/([A-Za-z0-9._-]+\.sh)")
+# A launcher that locates the hooks directory itself and execs the script
+# named as its first argument - the Codex form:
+# sh -c '... exec "$d/.codex/hooks/$1"' sh local-context.sh
+HOOK_LAUNCHER = re.compile(r"(\.claude|\.cursor|\.codex)/hooks/\$(?:1|\{1\})")
+HOOK_SCRIPT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\.sh")
+COMMAND_VALUE = re.compile(r'"command"\s*:\s*("(?:[^"\\]|\\.)*")')
 NAME = r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*"
 NAME_RE = re.compile(rf"^{NAME}$")
 FRONTMATTER_KEY = re.compile(r"^([A-Za-z0-9_-]+):\s*(.*)$")
@@ -169,6 +176,29 @@ class Report:
 # --------------------------------------------------------------------------
 # Parsing helpers
 # --------------------------------------------------------------------------
+
+
+def wired_hook_scripts(command: str) -> List[str]:
+    """Tool-tree-relative hook scripts one wiring command runs.
+
+    Two forms name a script: a path ending in ``.<tool>/hooks/<name>.sh``
+    under any prefix (bare, ``"${CLAUDE_PROJECT_DIR}"/``, a git toplevel), and
+    a launcher that execs ``.<tool>/hooks/$1`` with the script name passed as
+    an argument. An inline snippet such as the Notification hook names none.
+    """
+    found = [f"{match.group(1)}/hooks/{match.group(2)}" for match in HOOK_REF.finditer(command)]
+    launcher = HOOK_LAUNCHER.search(command)
+    if launcher:
+        try:
+            words = shlex.split(command)
+        except ValueError:
+            words = []
+        found += [
+            f"{launcher.group(1)}/hooks/{word}"
+            for word in words[1:]
+            if HOOK_SCRIPT_NAME.fullmatch(word)
+        ]
+    return list(dict.fromkeys(found))
 
 
 def read_lines(path: Path) -> List[str]:
@@ -370,10 +400,14 @@ class Checker:
                 line = getattr(error, "lineno", None)
                 self.add("error", "hook-wiring", wiring_path, line, f"invalid JSON: {error}")
             for number, line in enumerate(text.splitlines(), 1):
-                for match in HOOK_REF.finditer(line):
-                    relative = f"{match.group(1)}/hooks/{match.group(2)}"
-                    wired.add(relative)
-                    self._check_hook_script(wiring_path, number, relative)
+                for value in COMMAND_VALUE.finditer(line):
+                    try:
+                        command = json.loads(value.group(1))
+                    except ValueError:
+                        continue
+                    for relative in wired_hook_scripts(command):
+                        wired.add(relative)
+                        self._check_hook_script(wiring_path, number, relative)
         for tool, directory, _ in TOOLS:
             hooks_dir = edition.root / directory / "hooks"
             if not hooks_dir.is_dir():

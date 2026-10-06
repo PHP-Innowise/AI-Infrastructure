@@ -37,9 +37,8 @@ Run: python3 -m unittest tests.test_file_modes
 from __future__ import annotations
 
 import json
-import re
-import shlex
 import subprocess
+import sys
 import unittest
 from pathlib import Path, PurePosixPath
 
@@ -49,28 +48,8 @@ WIRING = {
     ".cursor": "hooks.json",
     ".codex": "hooks.json",
 }
-HOOK_SCRIPT_REFERENCE = re.compile(r"\.(?:claude|cursor|codex)/hooks/[A-Za-z0-9_.-]+\.sh")
-# A launcher that takes the script name as its first argument:
-# sh -c '... exec "$d/.codex/hooks/$1"' sh local-context.sh
-HOOK_LAUNCHER = re.compile(r"\.(claude|cursor|codex)/hooks/\$(?:1|\{1\})")
-SCRIPT_NAME = re.compile(r"[A-Za-z0-9_.-]+\.sh")
-
-
-def scripts_named(command: str) -> list[str]:
-    """The tool-tree-relative hook scripts one wiring command runs."""
-    found = HOOK_SCRIPT_REFERENCE.findall(command)
-    launcher = HOOK_LAUNCHER.search(command)
-    if launcher:
-        try:
-            words = shlex.split(command)
-        except ValueError:
-            words = []
-        found += [
-            f".{launcher.group(1)}/hooks/{word}"
-            for word in words[1:]
-            if SCRIPT_NAME.fullmatch(word)
-        ]
-    return found
+sys.path.insert(0, str(ROOT / "scripts"))
+from check_routes import wired_hook_scripts as scripts_named  # noqa: E402
 
 
 def tracked_modes() -> dict[str, str] | None:
