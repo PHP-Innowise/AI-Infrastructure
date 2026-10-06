@@ -154,7 +154,7 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(self.snapshot(self.project), before)
         self.assertFalse(any(item.get("authenticated") is True for item in empty["providers"]))
         self.assertFalse(any("executable" in item for item in empty["providers"]))
-        self.assertTrue(any("authentication is not checked" in item for item in empty["diagnostics"]))
+        self.assertTrue(any("authentication is not checked" in item for item in empty["scope"]))
         preview = self.manager.preview(self.options(tools=["codex"]))
         self.manager.install({"preview_id": preview["preview_id"]})
         status = self.manager.status(self.project_id)
@@ -205,7 +205,7 @@ class SetupTests(unittest.TestCase):
             result = self.manager.status(self.project_id)
             self.assertTrue(result['git']['is_git'])
             self.assertIsNone(result['git']['dirty'])
-            self.assertTrue(any('not inspected' in message for message in result['diagnostics']))
+            self.assertTrue(any('not inspected' in message for message in result['scope']))
             self.assertFalse(marker.exists(), 'Setup executed a project clean filter')
             self.assertFalse(monitor_marker.exists(), 'Setup executed a project fsmonitor')
             # The fixture actually exercises the filter path. Workflow callers
@@ -256,14 +256,29 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(repeated["merged"], [])
         self.assertEqual(self.snapshot(self.project), installed)
 
+    def test_seed_only_runtime_state_is_kept_not_a_collision(self):
+        # The memory index is seeded once and rewritten by the project's own
+        # runtime afterwards; a reinstall keeps it instead of refusing.
+        index = self.project / "memory-bank/INDEX.md"
+        index.parent.mkdir()
+        index.write_text("My durable index\n")
+        preview = self.manager.preview(self.options())
+        self.assertTrue(preview["can_install"])
+        entry = next(item for item in preview["files"] if item["path"] == "memory-bank/INDEX.md")
+        self.assertEqual("kept", entry["action"])
+        self.assertIn("owned by the project", entry["reason"])
+        result = self.manager.install({"preview_id": preview["preview_id"]})
+        self.assertTrue(result["ok"])
+        self.assertEqual("My durable index\n", index.read_text())
+
     def test_conflicts_source_or_target_edits_invalidate_install_without_partial_project_writes(self):
-        collision = self.project / "memory-bank/INDEX.md"
+        collision = self.project / "project-brain/PROTOCOL.md"
         collision.parent.mkdir()
-        collision.write_text("My durable index\n")
+        collision.write_text("My own protocol\n")
         before = self.snapshot(self.project)
         blocked = self.manager.preview(self.options())
         self.assertFalse(blocked["can_install"])
-        self.assertTrue(any(item["path"] == "memory-bank/INDEX.md" for item in blocked["collisions"]))
+        self.assertTrue(any(item["path"] == "project-brain/PROTOCOL.md" for item in blocked["collisions"]))
         with self.assertRaises(sessions.SessionError):
             self.manager.install({"preview_id": blocked["preview_id"]})
         self.assertEqual(self.snapshot(self.project), before)
@@ -346,6 +361,81 @@ class SetupTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertTrue((self.project / "AGENTS.md").read_text().startswith(policy.rstrip()))
         self.assertTrue((self.project / ".cursor/skills/fixture/SKILL.md").is_file())
+
+    @unittest.skipIf(os.name == "nt", "the filesystem has no executable bit")
+    def test_identical_hook_without_its_bit_is_previewed_repaired_and_verified(self):
+        # A project installed before executable bits were enforced: the hook
+        # matches the source byte for byte but is 0644. The staged installer
+        # repairs it; Setup must show that, apply it, and never record 0644
+        # as the verified mode.
+        hook = ".codex/hooks/fixture.sh"
+        first = self.manager.preview(self.options(tools=["codex"]))
+        self.assertTrue(self.manager.install({"preview_id": first["preview_id"]})["ok"])
+        (self.project / hook).chmod(0o644)
+        content = (self.project / hook).read_bytes()
+        self.assertFalse(self.manager.status(self.project_id)["payload_verified"])
+
+        preview = self.manager.preview(self.options(tools=["codex"]))
+        self.assertTrue(preview["can_install"], preview)
+        self.assertEqual(preview["changed_count"], 1, preview["summary"])
+        entry = next(item for item in preview["files"] if item["path"] == hook)
+        self.assertEqual(entry["action"], "fix-mode")
+        self.assertIn("0644 -> 0755", entry["reason"])
+        self.assertEqual(entry["diff"], "")
+        self.assertEqual((self.project / hook).stat().st_mode & 0o777, 0o644, "preview wrote to the project")
+
+        result = self.manager.install({"preview_id": preview["preview_id"]})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["repaired"], [hook])
+        self.assertEqual(result["installed"], [])
+        self.assertNotIn(hook, result["unchanged"])
+        self.assertEqual((self.project / hook).stat().st_mode & 0o777, 0o755)
+        self.assertEqual((self.project / hook).read_bytes(), content)
+        self.assertEqual(self.manager._receipt(self.project_id)["files"][hook]["mode"] & 0o777, 0o755)
+        self.assertTrue(self.manager.status(self.project_id)["payload_verified"])
+        again = self.manager.preview(self.options(tools=["codex"]))
+        self.assertEqual(again["changed_count"], 0)
+        self.native.assert_not_called()
+
+    @unittest.skipIf(os.name == "nt", "the filesystem has no executable bit")
+    @unittest.skipUnless(shutil.which("git"), "Git is required for the source index")
+    def test_install_takes_executable_bits_from_the_source_index_like_the_cli(self):
+        # A source checkout without filesystem modes (core.fileMode=false, or
+        # made on Windows): a non-hook script is 100755 in the index, 0644 on
+        # disk. The CLI installs it 0755 from the index; the staged installer
+        # the Harness runs sees no index, so Setup has to carry the bit.
+        script = "memory-bank/scripts/context.py"
+        environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        environment.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+        for arguments in (("-c", "init.defaultBranch=main", "init", "-q"), ("config", "core.fileMode", "false"),
+                          ("add", "--", "."), ("update-index", "--chmod=+x", "--", "PHP Core/" + script)):
+            subprocess.run(["git", "-C", str(self.source), *arguments], env=environment, capture_output=True, check=True)
+        self.assertEqual((self.source / "PHP Core" / script).stat().st_mode & 0o777, 0o644)
+        tools = ["claude", "cursor", "codex"]
+        cli_target = self.root / "cli"
+        cli_target.mkdir()
+        command = [sys.executable, str(Path(__file__).resolve().parents[1] / "scripts/install_accelerator.py"),
+                   "--source-root", str(self.source), "--edition", "PHP Core", "--target", str(cli_target),
+                   "--merge-existing"]
+        for tool in tools:
+            command.extend(["--tool", tool])
+        cli = subprocess.run(command, env=environment, capture_output=True, text=True)
+        self.assertEqual(cli.returncode, 0, cli.stderr)
+
+        with patch.dict(os.environ, environment, clear=True):
+            preview = self.manager.preview(self.options(tools=tools))
+            result = self.manager.install({"preview_id": preview["preview_id"]})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual((self.project / script).stat().st_mode & 0o777, 0o755)
+
+        def modes(root):
+            return {name: mode for name, (_, mode) in self.snapshot(root).items()}
+
+        self.assertEqual(modes(self.project), modes(cli_target))
+        # The source fingerprint keeps the disk mode, so the reviewed source
+        # still verified at install time and the receipt holds.
+        self.assertTrue(self.manager.status(self.project_id)["payload_verified"])
+        self.native.assert_not_called()
 
     def test_unsafe_paths_and_active_sessions_block_setup_without_touching_referents(self):
         outside = self.root / "outside.md"

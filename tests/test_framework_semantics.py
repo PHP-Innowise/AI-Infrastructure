@@ -3,6 +3,12 @@
 
 from __future__ import annotations
 
+import json
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -266,8 +272,95 @@ class FrameworkSemanticPreservationTest(unittest.TestCase):
         self.assertIn('"Bash(wp:*)"', settings)
         self.assertIn('"Read(wp-config.php)"', settings)
         hook = (root / ".claude/hooks/bash-validator.sh").read_text(encoding="utf-8")
-        self.assertIn("wp[[:space:]]+db", hook)
+        self.assertIn('"argv|wp|db reset|', hook)
         self.assertIn("wp-config", hook)
+
+
+class ShippedContentIndexTest(unittest.TestCase):
+    """Every edition's own shipped documents stay retrievable.
+
+    The index refuses a document that matches a secret pattern, and a
+    refused skill is never retrieved again. An over-eager pattern once
+    excluded the Laravel architect skill - all three tool copies - over a
+    documented `php artisan down --secret=...` example, in every install.
+    """
+
+    def test_no_shipped_document_is_excluded_as_a_secret(self) -> None:
+        for framework, edition in FRAMEWORK_PATHS.items():
+            with self.subTest(edition=framework), tempfile.TemporaryDirectory(
+                prefix="index-screen-"
+            ) as temporary:
+                target = Path(temporary) / "edition"
+                listed = subprocess.run(
+                    ["git", "ls-files", "-z", "--", str(edition)],
+                    cwd=ROOT, capture_output=True, check=True,
+                ).stdout.decode("utf-8").split("\0")
+                for name in filter(None, listed):
+                    destination = target / Path(name).relative_to(edition)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(ROOT / name, destination)
+                subprocess.run(["git", "init", "--quiet"], cwd=target, check=True)
+                subprocess.run(["git", "add", "--all"], cwd=target, check=True)
+                result = subprocess.run(
+                    [sys.executable, "memory-bank/scripts/context.py", "index", "--json"],
+                    cwd=target, capture_output=True, text=True,
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                excluded = [
+                    item["path"] for item in json.loads(result.stdout)["excluded"]
+                    if item.get("reason") == "secret"
+                ]
+                self.assertEqual([], excluded)
+
+
+class FrameworkApiCurrencyTest(unittest.TestCase):
+    """Snippets that fatal or mislead on the framework versions an edition
+    declares. Each pattern was shipped once and found by an audit."""
+
+    PHP_FENCE = re.compile(r"^```php[^\n]*\n(.*?)^```", re.S | re.M)
+
+    def canon(self, edition: str) -> list:
+        root = ROOT / edition
+        paths = [*sorted((root / ".agents" / "skills").rglob("*.md"))]
+        examples = root / "examples"
+        if examples.is_dir():
+            paths += sorted(examples.rglob("*.md"))
+        return [(path, path.read_text(encoding="utf-8")) for path in paths]
+
+    def php_blocks(self, text: str) -> list:
+        return self.PHP_FENCE.findall(text)
+
+    def test_laravel_snippets_match_the_11_plus_skeleton(self) -> None:
+        offenders = []
+        for path, text in self.canon("Laravel"):
+            relative = path.relative_to(ROOT).as_posix()
+            for block in self.php_blocks(text):
+                # Filament v4+: `string|BackedEnum|null`; `?string` is a fatal
+                # property-type mismatch.
+                if "?string $navigationIcon" in block:
+                    offenders.append(f"{relative}: ?string $navigationIcon")
+                # The 11+ base Controller has no AuthorizesRequests.
+                if "$this->authorize(" in block and "AuthorizesRequests" not in text:
+                    offenders.append(f"{relative}: $this->authorize() without AuthorizesRequests")
+                # The skeleton defines local, public and s3 - no `private` disk.
+                if re.search(r"(?:disk|fake)\('private'\)|, 'private'\)", block) and "'private' =>" not in text:
+                    offenders.append(f"{relative}: undefined 'private' disk")
+        self.assertEqual([], offenders)
+
+    def test_laravel_never_claims_dispatch_is_deferred_by_default(self) -> None:
+        for path, text in self.canon("Laravel"):
+            with self.subTest(path=path.relative_to(ROOT).as_posix()):
+                self.assertNotRegex(text, r"which Laravel defers automatically")
+                self.assertNotIn("EventServiceProvider.php", text)
+                self.assertNotIn("#[AsListener]", text)
+
+    def test_symfony_voters_take_the_8x_vote_parameter(self) -> None:
+        offenders = []
+        for path, text in self.canon("Symfony"):
+            for signature in re.findall(r"function voteOnAttribute\([^)]*\)", text):
+                if "?Vote $vote = null" not in signature:
+                    offenders.append(f"{path.relative_to(ROOT).as_posix()}: {signature}")
+        self.assertEqual([], offenders)
 
 
 if __name__ == "__main__":

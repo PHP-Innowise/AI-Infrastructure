@@ -28,7 +28,16 @@ derived from the same MIRROR_RULES that generate the files, because no glob
 is correct: the tool directories also hold canonical files that must keep
 their diffs.
 
-Python 3 stdlib only.
+A mirror also carries its canonical file's executable bit. Cursor and Codex
+run their hook scripts as direct commands, so a mirror that lost the bit
+exits 126 in every installed project while its bytes still match. The bit is
+read from the Git index first and from the filesystem only for a path the
+index does not know (see file_modes.py), so a Windows checkout reads the same
+answer as Linux. --check reports "mode differs from canon"; --write sets the
+bit on disk and, for a tracked mirror, in the index - also when the bytes
+already match.
+
+Python 3 stdlib (plus Git for the executable bits).
 """
 
 from __future__ import annotations
@@ -39,6 +48,9 @@ import json
 import re
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from file_modes import FileModeError, FileModes  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 EDITION_PATHS = {
@@ -272,6 +284,7 @@ def process_edition(
     problems: list[str] = []
     written: list[str] = []
     label = edition_dir.name
+    modes = FileModes(edition_dir)
     for cls in rules["classes"]:
         canonical = edition_dir / cls["canonical"]
         if not canonical.is_dir():
@@ -296,17 +309,38 @@ def process_edition(
             for rel, blob in expected.items():
                 target = mirror / rel
                 actual = target.read_bytes() if target.is_file() else None
-                if actual == blob:
-                    continue
+                # None when nothing can tell (an untracked file on a
+                # filesystem without an executable bit): no mode verdict.
+                executable = modes.is_executable(canonical / rel)
                 if write:
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(blob)
-                    written.append(f"{label}/{mirror_rel}/{rel}")
-                else:
+                    content_changed = actual != blob
+                    if content_changed:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(blob)
+                    mode_changed = executable is not None and modes.set_executable(
+                        target, executable
+                    )
+                    if content_changed:
+                        written.append(f"{label}/{mirror_rel}/{rel}")
+                    elif mode_changed:
+                        written.append(
+                            f"{label}/{mirror_rel}/{rel} "
+                            f"(mode {'+x' if executable else '-x'})"
+                        )
+                    continue
+                if actual != blob:
                     state = "missing from mirror" if actual is None else "differs from canon"
                     problems.append(
                         f"{label}: [{cls['name']}] {mirror_rel}/{rel} {state} "
                         f"({cls['canonical']}/{rel})"
+                    )
+                    continue
+                mirrored = modes.is_executable(target)
+                if executable is not None and mirrored is not None and mirrored != executable:
+                    problems.append(
+                        f"{label}: [{cls['name']}] {mirror_rel}/{rel} mode differs "
+                        f"from canon ({cls['canonical']}/{rel} is "
+                        f"{'executable' if executable else 'not executable'})"
                     )
             if cls.get("only") is None and mirror.is_dir():
                 # Reverse pass: a file only the mirror carries is drift too.
@@ -338,6 +372,12 @@ def process_edition(
                             f"{label}: [{cls['name']}] {mirror_rel}/{rel} "
                             f"has no source in {cls['canonical']}"
                         )
+
+    if write:
+        try:
+            modes.flush()
+        except FileModeError as error:
+            problems.append(f"{label}: {error}")
 
     # The generated-file manifest is derived from the same rules, so it stays
     # correct as skills come and go without anyone maintaining a glob.

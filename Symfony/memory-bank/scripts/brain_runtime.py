@@ -4,19 +4,47 @@
 from __future__ import annotations
 
 import contextlib
-import fcntl
+import errno
 import hashlib
 import json
 import os
 import re
 import tempfile
 import threading
+import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
-from validate import FILENAME_PATTERN as BANK_FILENAME_PATTERN, validate_bank
+from validate import (
+    FILENAME_PATTERN as BANK_FILENAME_PATTERN,
+    ValidationError as BankValidationError,
+    display_path as bank_display_path,
+    parse_frontmatter as parse_bank_frontmatter,
+    SECRET_PATTERNS as BANK_SECRET_PATTERNS,
+    sensitive_label,
+    validate_bank,
+    validate_metadata as validate_bank_metadata,
+    validate_secret_patterns as validate_bank_secrets,
+)
+
+
+def _file_lock(handle, unlock=False):
+    if os.name != "nt":
+        import fcntl
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN if unlock else fcntl.LOCK_EX)
+        return
+    import msvcrt
+    while True:
+        handle.seek(0)
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK if unlock else msvcrt.LK_NBLCK, 1)
+            return
+        except OSError as error:
+            if unlock or error.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                raise
+            time.sleep(.05)
 
 
 SCHEMA_VERSION = 1
@@ -240,13 +268,13 @@ def mutation_lock(repository: Path) -> Iterator[None]:
                 depths[key] -= 1
             return
         with lock_path.open("a+", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            _file_lock(handle)
             depths[key] = 1
             try:
                 yield
             finally:
                 depths.pop(key, None)
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                _file_lock(handle, unlock=True)
 
 
 def atomic_write(path: Path, content: str) -> None:
@@ -254,7 +282,8 @@ def atomic_write(path: Path, content: str) -> None:
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
     temporary = Path(temporary_name)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        # newline="\n": Git-tracked records keep LF on Windows too.
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
@@ -455,8 +484,22 @@ def fingerprint(repository: Path, source: str) -> dict[str, str]:
         raise BrainError(f"Source escapes repository: {relative}") from error
     if not path.is_file() or path.is_symlink():
         raise BrainError(f"Source does not exist or is not a regular file: {relative}")
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    digest = hashlib.sha256(_line_ending_neutral(path.read_bytes())).hexdigest()
     return {"path": relative, "sha256": digest}
+
+
+def _line_ending_neutral(data: bytes) -> bytes:
+    """Text bytes with CRLF folded to LF; binary data unchanged.
+
+    A checkout with `core.autocrlf=true` holds the same commit as one without
+    it, yet a raw-byte digest differed, so every record citing a text file was
+    `stale` on a colleague's Windows clone while Git saw no change. Folding
+    leaves an LF file's digest exactly what it was, so stored fingerprints need
+    no migration. A NUL byte marks binary data, as Git's own heuristic does.
+    """
+    if b"\0" in data[:8192]:
+        return data
+    return data.replace(b"\r\n", b"\n")
 
 
 def source_fingerprints(repository: Path, sources: list[str]) -> list[dict[str, str]]:
@@ -829,6 +872,44 @@ def _handoff_body(handoff: dict[str, Any]) -> str:
     )
 
 
+def guard_shared_text(label: str, values: Any) -> None:
+    """Refuse a Project Brain write that would store a secret or personal data.
+
+    Records, handoffs and agent messages are Git-tracked and repeated into
+    Task Capsules, so the governed path holds the line the lightweight path
+    and the capsule gate already hold. Only the text the call introduces is
+    checked: a record written before this guard existed stays updatable. The
+    message names the kind of data, never the value.
+    """
+    text = "\n".join(value for value in values if isinstance(value, str) and value)
+    found = sensitive_label(text)
+    if found:
+        raise BrainError(
+            f"{label} contains {found}; replace it with a sanitized summary "
+            "- nothing was stored"
+        )
+
+
+def stored_secret_label(record: dict[str, Any]) -> Optional[str]:
+    """The kind of credential a stored record's free text carries, or None.
+
+    Validation reports secrets only. A record written before the write guard
+    may hold personal data, which promotion and the capsule already refuse to
+    spread; failing every validation over it would leave the operator a
+    repository they cannot get green without rewriting history.
+    """
+    fields = [
+        record.get("title"), record.get("goal"), record.get("progress"),
+        record.get("auto_checkpoint"), *record.get("next_steps", []),
+        *(item.get("reason") for item in record.get("transitions", []) if isinstance(item, dict)),
+    ]
+    text = "\n".join(value for value in fields if isinstance(value, str) and value)
+    for label, pattern in BANK_SECRET_PATTERNS.items():
+        if pattern.search(text):
+            return f"a possible {label}"
+    return None
+
+
 def _write_record(repository: Path, record: dict[str, Any], path: Path) -> None:
     validate_record(record)
     affected = [path, *index_paths(repository)]
@@ -872,6 +953,9 @@ def create_record(
 ) -> dict[str, Any]:
     if record_type not in RECORD_TYPES:
         raise BrainError(f"type must be one of: {', '.join(RECORD_TYPES)}")
+    guard_shared_text(
+        f"{record_type.capitalize()} record", [title, goal, *(conflicts or [])]
+    )
     try:
         find_record(repository, external_id)
     except BrainError as error:
@@ -963,6 +1047,7 @@ def update_record(
     auto_checkpoint: Optional[str] = None,
     reason: str = "Task updated",
     allow_phase_regression: bool = False,
+    replace_next_steps: bool = False,
 ) -> dict[str, Any]:
     """Mutate a record under the caller's compare-and-swap revision.
 
@@ -979,7 +1064,16 @@ def update_record(
     is the point — each flush supersedes the previous checkpoint — while
     ``progress`` stays reserved for the operator's narrative, so an automated
     caller passes ``progress=None`` and its checkpoint here.
+
+    ``next_steps`` are appended unless ``replace_next_steps`` makes them the
+    whole list: without it a step that was done could never leave, and the
+    handoff kept presenting finished work as what comes next. ``files`` keep
+    the newest touch last, which is the end the capsule projects from.
     """
+    guard_shared_text(
+        "Record update",
+        [progress, auto_checkpoint, reason, *next_steps, *(conflicts or [])],
+    )
     with mutation_lock(repository):
         path, record, _ = find_record(repository, identifier)
         validate_record(record)
@@ -992,7 +1086,7 @@ def update_record(
             raise BrainError(f"Owner is not authorized to mutate record: {actor}")
         if record["type"] == "event" and (
             progress is not None or next_steps or files or sources
-            or authority is not None
+            or authority is not None or replace_next_steps
         ):
             raise BrainError("Events are immutable; only lifecycle supersession is allowed")
         if auto_checkpoint is not None and record["type"] != "task":
@@ -1047,8 +1141,16 @@ def update_record(
             record["progress"] = progress
         if auto_checkpoint is not None:
             record["auto_checkpoint"] = auto_checkpoint
-        record["next_steps"] = list(dict.fromkeys([*record["next_steps"], *next_steps]))
-        record["files"] = list(dict.fromkeys([*record["files"], *files]))
+        record["next_steps"] = list(
+            dict.fromkeys(
+                next_steps if replace_next_steps else [*record["next_steps"], *next_steps]
+            )
+        )
+        touched = list(dict.fromkeys(files))
+        retouched = set(touched)
+        record["files"] = [
+            existing for existing in record["files"] if existing not in retouched
+        ] + touched
         record["sources"] = list(dict.fromkeys([*record["sources"], *sources]))
         if conflicts is not None:
             record["conflicts"] = list(
@@ -1227,6 +1329,7 @@ def append_message(
     terminal task refuses new messages - the channel exists for active
     coordination, not for post-mortem edits.
     """
+    guard_shared_text("Agent message", [body])
     with mutation_lock(repository):
         _, task, _ = find_task(repository, identifier)
         if task["status"] in LIFECYCLES["task"]["terminal"]:
@@ -1256,7 +1359,7 @@ def append_message(
         validate_message(record)
         validate_schema_file(repository, "message.schema.json", record)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
+        with path.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
@@ -1356,7 +1459,19 @@ def rebuild_indexes(repository: Path) -> None:
     atomic_json(archive_path, archived)
 
 
-def validate_repository(repository: Path) -> list[str]:
+def validate_repository(
+    repository: Path, *, check_freshness: bool = True
+) -> list[str]:
+    """Every problem with the governed records, journals, manifests and indexes.
+
+    ``check_freshness=False`` leaves out one rule: a record whose cited source
+    changed after it was written. That is the source moving on, not the record
+    breaking - retrieval already excludes such a record as `stale` and
+    promotion already refuses it - and no write can cause or cure it.
+    Compaction passes it: with the rule in, the first edit to any file a record
+    cites, such as the living spec behind an accepted decision, refused every
+    compaction from then on.
+    """
     errors: list[str] = []
     seen: set[str] = set()
     records: dict[str, tuple[Path, dict[str, Any]]] = {}
@@ -1379,8 +1494,14 @@ def validate_repository(repository: Path) -> list[str]:
                 raise BrainError(
                     f"record path must be {expected_path.relative_to(repository)}"
                 )
-            if not sources_are_fresh(repository, record):
+            if check_freshness and not sources_are_fresh(repository, record):
                 raise BrainError("source fingerprint is stale")
+            secret = stored_secret_label(record)
+            if secret is not None:
+                raise BrainError(
+                    f"record contains {secret}; remove it from the record and "
+                    "rotate the credential, since Git history keeps it"
+                )
             records[record["id"]] = (path, record)
         except BrainError as error:
             errors.append(f"{path}: {error}")
@@ -1545,6 +1666,49 @@ def validate_repository(repository: Path) -> list[str]:
     return errors
 
 
+def bank_write_errors(
+    repository: Path,
+    before: list[str],
+    attested: tuple[Path, ...] = (),
+) -> list[str]:
+    """What a Memory Bank write broke, as opposed to what the bank already had.
+
+    Every write used to validate the whole bank afterwards and roll back on any
+    error at all. A chunk that merely reached its review date therefore failed
+    every promotion, compaction, re-attestation and retirement in the
+    repository, and two overdue chunks each blocked the one command that would
+    have repaired the other. Time alone made the bank unwritable.
+
+    A write is now refused for errors it introduced, compared against the
+    bank as it stood before the write (``before``), and for any error in a
+    chunk it produced or attested (``attested``): a new chunk, or one an
+    operator just re-verified, meets the full contract whatever the rest of
+    the bank looks like. A problem that predates the write stays where it
+    always surfaces - `validate.py`, `bank-audit`, and retrieval exclusion -
+    instead of being charged to the next unrelated write.
+    """
+    bank = repository / "memory-bank"
+    baseline = set(before)
+    errors = [error for error in validate_bank(bank) if error not in baseline]
+    for path in attested:
+        try:
+            validate_bank_metadata(
+                path,
+                parse_bank_frontmatter(path),
+                repository,
+                # A sink, so an attested chunk that is now terminal gets the
+                # same treatment of a deleted citation as the full report.
+                [],
+                label=bank_display_path(path, bank),
+            )
+            validate_bank_secrets(path)
+        except (OSError, BankValidationError) as error:
+            message = f"{bank_display_path(path, bank)}: {error}"
+            if message not in errors:
+                errors.append(message)
+    return errors
+
+
 def promoted_source_rewrites(
     repository: Path, renames: dict[str, str]
 ) -> list[tuple[Path, str]]:
@@ -1600,9 +1764,15 @@ def promoted_source_rewrites(
 
 def compact(repository: Path) -> dict[str, int]:
     with mutation_lock(repository):
-        errors = validate_repository(repository)
+        # Without freshness: moving terminal records can neither cause nor
+        # cure a stale citation, and the documented contract is that
+        # compaction skips stale records, not that one refuses all of it.
+        errors = validate_repository(repository, check_freshness=False)
         if errors:
-            raise BrainError("Compaction refused because active records are invalid")
+            raise BrainError(
+                "Compaction refused because active records are invalid "
+                f"({len(errors)} problem(s); see `context.py validate`)"
+            )
         moves: list[tuple[Path, Path]] = []
         for path, record, _ in list(iter_records(repository)):
             if (
@@ -1629,6 +1799,8 @@ def compact(repository: Path) -> dict[str, int]:
             for source, destination in moves
         }
         rewrites = promoted_source_rewrites(repository, renames)
+        bank = repository / "memory-bank"
+        bank_before = validate_bank(bank) if bank.is_dir() else []
         snapshot = snapshot_files(
             [path for move in moves for path in move]
             + list(index_paths(repository))
@@ -1641,15 +1813,16 @@ def compact(repository: Path) -> dict[str, int]:
             for path, content in rewrites:
                 atomic_write(path, content)
             rebuild_indexes(repository)
-            post_errors = validate_repository(repository)
+            post_errors = validate_repository(repository, check_freshness=False)
             if post_errors:
                 raise BrainError(
                     "Archive validation failed after compaction: "
                     + "; ".join(post_errors)
                 )
-            bank = repository / "memory-bank"
             if bank.is_dir():
-                bank_errors = validate_bank(bank)
+                # Repointing a citation is mechanical, not an attestation:
+                # only what the move broke may stop it.
+                bank_errors = bank_write_errors(repository, bank_before)
                 if bank_errors:
                     raise BrainError(
                         "Memory Bank validation failed after compaction: "
@@ -1932,8 +2105,14 @@ def promotion_eligibility_error(
         return f"authority is {record['authority']}, not verified"
     if record["privacy"] not in config["allowed_privacy"]:
         return f"privacy {record['privacy']} is not allowed for retrieval"
-    if promotion_content(record) is None:
+    content = promotion_content(record)
+    if content is None:
         return "record carries no content beyond its own title"
+    found = sensitive_label(f"{record['title']}\n{content}")
+    if found:
+        # Durable memory is the widest audience a record can reach; a record
+        # that predates the write guard must not carry its data there.
+        return f"record content contains {found}"
     if sources_are_fresh(repository, record):
         return None
     stale = [
@@ -2402,6 +2581,7 @@ def retire_chunk(
             successor_path, successor, successor_body = _find_chunk(
                 bank, superseded_by
             )
+        before = validate_bank(bank)
         snapshot = snapshot_files(
             [p for p in (path, successor_path, index_path) if p is not None]
         )
@@ -2422,7 +2602,11 @@ def retire_chunk(
                 )
             index_text, chunk_count = render_bank_index(bank)
             atomic_write(index_path, index_text)
-            errors = validate_bank(bank)
+            errors = bank_write_errors(
+                repository,
+                before,
+                tuple(p for p in (path, successor_path) if p is not None),
+            )
             if errors:
                 raise BrainError(
                     "Memory Bank retire failed validation: " + "; ".join(errors)
@@ -2567,6 +2751,7 @@ def reverify_chunk(
                 f"Only an active chunk can be re-verified: {memory_id} is "
                 f"{metadata.get('status')}"
             )
+        before = validate_bank(bank)
         snapshot = snapshot_files([path, index_path])
         try:
             metadata["last_verified"] = today.isoformat()
@@ -2577,7 +2762,9 @@ def reverify_chunk(
             atomic_write(path, _render_chunk(metadata, body))
             index_text, chunk_count = render_bank_index(bank)
             atomic_write(index_path, index_text)
-            errors = validate_bank(bank)
+            # Re-verifying is an attestation, so this chunk meets the full
+            # contract; another chunk's overdue review is not its problem.
+            errors = bank_write_errors(repository, before, (path,))
             if errors:
                 raise BrainError(
                     "Memory Bank re-verify failed validation: " + "; ".join(errors)
@@ -2688,7 +2875,10 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
         slug = re.sub(r"[^a-z0-9]+", "-", proposal["title"].lower()).strip("-") or "promoted"
         destination = bank / "chunks" / f"{memory_id}-{slug}.md"
         if destination.exists():
-            raise BrainError(f"Promotion destination already exists: {destination}")
+            raise BrainError(
+                "Promotion destination already exists: "
+                + bank_display_path(destination, bank)
+            )
         # Tag the chunk so the bank itself shows which knowledge no human
         # approved; a reader must not have to open the promotion to find out.
         tags = ["project-brain", "promoted"] + (["auto-promoted"] if automatic else [])
@@ -2730,6 +2920,7 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
             metadata,
             content if content.startswith(heading) else f"{heading}\n\n{content}",
         )
+        before = validate_bank(bank)
         snapshot = snapshot_files([destination, index_path, promotion_path])
         try:
             atomic_write(destination, chunk)
@@ -2737,7 +2928,7 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
             # frontmatter instead of appending a row, so the same rendering
             # path serves promotions, manual capture, and post-merge repair.
             atomic_write(index_path, render_bank_index(bank)[0])
-            validation_errors = validate_bank(bank)
+            validation_errors = bank_write_errors(repository, before, (destination,))
             if validation_errors:
                 raise BrainError(
                     "Promoted Memory Bank chunk failed validation: "

@@ -9,9 +9,10 @@
 
 ### UserPromptSubmit: Working-Memory Read
 **Script:** `working-memory-read.sh`
-**Purpose:** Runs `context.py refresh`, which re-indexes procedural (AGENTS.md, CLAUDE.md, skills), semantic (README, docs, specs, active Memory Bank chunks, task documents) and episodic (CHANGELOG.md) memory in one incremental pass and reports each layer as `updated` or `failed`. With a task — from `CONTEXT_TASK_ID` or the current branch — the same process also assembles a bounded Task Capsule with `--ephemeral`, so the per-request manifest, which records the query text, stays in ignored local state rather than shared Git history. A capsule failure is reported as a warning; the layer refresh stands.
+**Purpose:** Runs `context.py refresh`, which re-indexes procedural (AGENTS.md, CLAUDE.md, skills), semantic (README, docs, specs, active Memory Bank chunks, task documents) and episodic (CHANGELOG.md) memory in one incremental pass and reports each layer as `updated` or `failed`. With a task — from `CONTEXT_TASK_ID` or the current branch — the same process also assembles a bounded Task Capsule with `--ephemeral`, so the per-request manifest, which records the query text, stays in ignored local state rather than shared Git history. Before the branch's governed task exists - the Stop hook creates it at the first checkpoint, after several file-changing turns, and a read-only session never gets one - the capsule still carries the retrieval layers and opens with `working: not recorded yet`. A capsule failure is reported as a warning; the layer refresh stands.
 **Return:** Always 0 (context tooling must never block a prompt)
 **Budget:** `CONTEXT_HOOK_BUDGET` seconds, default 5
+**Stands down:** when `CONTEXT_CAPSULE_DELIVERED=1`, set by a host that already put this turn's capsule into the prompt (the Harness does). The Stop hook still checkpoints the task.
 
 The capsule is retrieved context, not authority. It never outranks the source it summarizes.
 
@@ -32,7 +33,24 @@ Buffering is what keeps per-turn continuity affordable: without it, every turn w
 
 ### PreToolUse (Bash): Bash Validator
 **Script:** `bash-validator.sh`
-**Purpose:** Blocks destructive commands: force-push, hard reset, database drops/truncates, destructive migration resets/rollbacks, secret-writing Composer config, and `--no-verify`.
+**Purpose:** Blocks destructive and secret-exposing shell commands. One generic section, byte-identical in every edition and in Infrastructure-Creator (between the `bash-validator generic section` markers), blocks:
+- force push (`--force`, `-f` in any option cluster, `--force-with-lease`, `--mirror`, a `+refspec`), `git reset --hard`, `git clean -f`, `git branch -D`;
+- hook bypass: `--no-verify`, `git commit -n`, `git -c core.hooksPath=...` or `--config-env=core.hooksPath=...`, and writing or unsetting `core.hooksPath` with `git config`;
+- recursive `rm` of `/`, a top-level directory, `~`, `$HOME`, `.`, `..` or `*`, and `--no-preserve-root`;
+- destructive SQL (`DROP TABLE/DATABASE/SCHEMA`, `TRUNCATE TABLE`, `DELETE` with an always-true `WHERE` such as `1=1` or `1`), and `TRUNCATE` without `TABLE` or `DELETE` with no `WHERE` when the command runs SQL (`mysql`, `psql`, `sqlite3`, `wp db query`, `dbal:run-sql`, `artisan tinker`, ...), so a test name or PR title saying "delete from the cart" passes; never inside a read-only search (`grep`, `rg`, `git grep`, `git log -S`) or a commit message; `dropdb` and `mysqladmin drop`;
+- `gh repo delete/archive`, `gh issue/release delete`, `gh api -X DELETE`, and auth tokens written by `composer config`;
+- printing `.env`, `.env.local` or `.env.*.local` (`cat`, `head`, `tail`, `less`, `more`, `bat`, `sed` without `-i`, `awk`, `cut`, and `grep`/`rg`/`ag`/`ack` unless `-q`, `-l`, `-L` or `-c` keeps the lines out); `.env.example` and `.env.dist` stay readable, and a search whose pattern is `.env` (`grep -rn .env src/`) is not a read.
+
+**Console rules:** `migrate:fresh/refresh/reset/rollback` and `db:wipe` run through a PHP console runner (`artisan`, also as Sail `art`/`a`, `console`, `phinx`, `doctrine-migrations`, the Doctrine ORM CLI `doctrine`, or any `php <script>` for a namespaced command name, so `php vendor/bin/phpunit --filter rollback` is a test run), Doctrine ORM `orm:schema-tool:drop`, Phinx `rollback` and `migrate -t 0`, and Doctrine Migrations `migrate first|prev|0|current-N` and `execute --down`, including the abbreviations a Symfony Console application accepts.
+
+**How it matches:** the command is parsed once, in pure bash with no fork per rule. Line continuations are joined, quotes removed, and `;` `&&` `||` `|` `&`, subshells and newlines split it into simple commands; `$(...)`, backticks, `sh`/`bash -c` (also after `-euo pipefail`), `eval`, `git submodule foreach` and a heredoc or here-string fed to a shell (directly, through `docker exec -i app bash` or `ssh host bash -s`, or to `ssh host` with no remote command) are checked as commands of their own. Leading `VAR=value`, wrappers (`command`, `exec`, `sudo`, `env`, `nohup`, `time`, `timeout`, `xargs`, ...), a binary's directory (`/usr/bin/git`), git's global options (`-C`, `-c`, `--git-dir`, `--no-pager`) and launchers without rules of their own (`docker compose exec app`, `ddev`, `lando`, `ssh host`) are looked through, and so is a quoted command line given to one (`ssh host '...'`, `ddev exec "..."`, `vagrant ssh -c "..."`). Console options may stand before the command name (`bin/console --reveal secrets:list`), and an option's value (`--env production`) is not taken for the command's argument. Git and option rules are case-sensitive (`git branch -d` passes); SQL keywords are not. A heredoc written to a file or used as a commit message is data.
+
+**Limits:** the validator is a guard against accidental destruction, not a sandbox: a script written to disk and run later, or text piped into a shell, is not inspected. Nesting deeper than any real command (about a hundred levels of `(`, `$(` or backticks) is refused as `command too complex` instead of parsed, since bash would run out of stack and the hook would fail open. Parsing time grows linearly with the command: a 100 KB heredoc file write takes a fraction of a second, 100 KB of dense shell syntax about two seconds, inside the 5 s hook timeout.
+
+**Diagnostics:** a block prints its rule category, never the command body. Without `jq`, `php` or `python3` to decode the payload the hook warns once and fails open.
+
+**Tests:** the shared corpus `tests/fixtures/bash-validator-corpus.json` in the accelerator repository runs every case through every shipped copy (`.claude`, `.cursor`, `.codex`) and its host's payload shape.
+
 **Return:** 0 = safe command, 2 = block
 
 ### PreToolUse (Agent|Task): Subagent Gate
@@ -79,6 +97,10 @@ Safety hooks block only operations that are destructive, irreversible, or likely
 | `Stop` | Claude finishes responding |
 | `PreToolUse` | Before a tool executes |
 | `PostToolUse` | After a tool executes |
+
+## Wiring
+
+`.claude/settings.json` registers every script as `"${CLAUDE_PROJECT_DIR}"/.claude/hooks/<script>.sh`. Claude Code runs a hook in the session's current directory, and that directory follows every `cd` the agent makes. A bare `.claude/hooks/<script>.sh` would exit 127 from any subdirectory, and Claude Code treats every exit other than `2` as non-blocking: the Bash Validator would stop blocking without a word. `CLAUDE_PROJECT_DIR` is the project root Claude Code exports to every hook; it stays double-quoted, as Claude Code's shell form requires, so a project path containing spaces survives. Register any hook you add the same way.
 
 ## Personal Hooks
 

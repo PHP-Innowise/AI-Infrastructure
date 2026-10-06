@@ -6,6 +6,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -84,6 +87,44 @@ def source_status() -> str:
     return result.stdout
 
 
+# The files each client reads its hook wiring from, relative to a project root.
+HOOK_WIRING = (".claude/settings.json", ".cursor/hooks.json", ".codex/hooks.json")
+
+
+# The hook scripts one wiring command runs; the routes gate parses every form
+# the editions use (bare, "${CLAUDE_PROJECT_DIR}"-anchored, Codex launcher).
+sys.path.insert(0, str(ROOT / "scripts"))
+from check_routes import wired_hook_scripts as scripts_named  # noqa: E402
+
+
+def wired_hook_scripts(project: Path) -> list[str]:
+    """Every project-relative hook script a client's wiring runs."""
+    scripts: list[str] = []
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "command" and isinstance(value, str):
+                    for script in scripts_named(value):
+                        if script not in scripts:
+                            scripts.append(script)
+                else:
+                    walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    for wiring in HOOK_WIRING:
+        path = project / wiring
+        if path.is_file():
+            walk(json.loads(path.read_text(encoding="utf-8")).get("hooks", {}))
+    return scripts
+
+
+def is_executable(path: Path) -> bool:
+    return bool(path.stat().st_mode & stat.S_IXUSR) and os.access(path, os.X_OK)
+
+
 class InventoryTest(unittest.TestCase):
     def test_inventories_match_repository_distribution(self) -> None:
         result = run(sys.executable, str(INSTALLER), "--verify-inventories")
@@ -154,6 +195,7 @@ class InventoryTest(unittest.TestCase):
             # from a pristine source instead of the developer's working copy.
             self.assertEqual(
                 {
+                    ".gitattributes": ".install/gitattributes",
                     "memory-bank/INDEX.md": "memory-bank/.install/INDEX.md",
                     "project-brain/indexes/active.json": "project-brain/.install/active.json",
                     "project-brain/indexes/archive.json": "project-brain/.install/archive.json",
@@ -347,7 +389,10 @@ class InventoryTest(unittest.TestCase):
             self.assertIn("memory-bank/local/\n", gitignore)
             attributes = (target / ".gitattributes").read_text(encoding="utf-8")
             self.assertIn("*.lock binary\n", attributes)
-            self.assertIn(".cursor/skills/", attributes)
+            self.assertIn("*.sh text eol=lf\n", attributes)
+            # The monorepo's mirror marking stays home: a client reviewing an
+            # edited hook must see its diff, not "Binary files differ".
+            self.assertNotIn("-diff", attributes)
 
             merged_digests = {
                 path: hashlib.sha256((target / path).read_bytes()).hexdigest()
@@ -359,6 +404,100 @@ class InventoryTest(unittest.TestCase):
             self.assertIn("UNCHANGED\tshared\tREADME.md", repeated.stdout)
             for path, digest in merged_digests.items():
                 self.assertEqual(digest, hashlib.sha256((target / path).read_bytes()).hexdigest())
+
+    def test_claude_install_imports_the_policy_beside_a_project_claude_md(self) -> None:
+        """Claude Code reads AGENTS.md itself only while no CLAUDE.md exists;
+        a project with its own CLAUDE.md (Laravel Boost writes one) would
+        otherwise never load the policy."""
+        with tempfile.TemporaryDirectory(prefix="install claude md ") as raw:
+            target = Path(raw).resolve()
+            (target / "CLAUDE.md").write_text("# Team notes\n", encoding="utf-8")
+            (target / ".claude").mkdir()
+            existing = "# Existing Claude notes\n\nUse PHP 8.3.\n"
+            (target / ".claude" / "CLAUDE.md").write_text(existing, encoding="utf-8")
+            command = (
+                sys.executable, str(INSTALLER), "--edition", "Laravel",
+                "--target", str(target), "--tool", "claude",
+            )
+
+            refused = run(*command, "--dry-run")
+            self.assertEqual(2, refused.returncode)
+            self.assertIn("COLLISION\tclaude\t.claude/CLAUDE.md", refused.stderr)
+
+            installed = run(*command, "--merge-existing")
+            self.assertEqual(0, installed.returncode, installed.stderr)
+            self.assertIn("MERGE\tclaude\t.claude/CLAUDE.md", installed.stdout)
+            merged = (target / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+            self.assertTrue(merged.startswith(existing.rstrip()))
+            self.assertIn("\n@../AGENTS.md\n", merged)
+            self.assertEqual("# Team notes\n", (target / "CLAUDE.md").read_text(encoding="utf-8"))
+
+            repeated = run(*command, "--merge-existing")
+            self.assertEqual(0, repeated.returncode, repeated.stderr)
+            self.assertIn("UNCHANGED\tclaude\t.claude/CLAUDE.md", repeated.stdout)
+
+    def test_fresh_install_gitattributes_keeps_hooks_lf_and_diffable(self) -> None:
+        for edition in EDITION_PATHS:
+            with self.subTest(edition=edition), tempfile.TemporaryDirectory(
+                prefix="install attributes "
+            ) as raw:
+                target = Path(raw).resolve()
+                result = run(
+                    sys.executable, str(INSTALLER), "--edition", edition,
+                    "--target", str(target), "--tool", "claude",
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                attributes = (target / ".gitattributes").read_text(encoding="utf-8")
+                self.assertIn("*.sh text eol=lf\n", attributes)
+                self.assertNotIn("-diff", attributes)
+
+    def test_reinstall_keeps_runtime_state_the_project_owns(self) -> None:
+        """A reinstall over a project that has used the accelerator must not
+        collide on, or reset, the state its runtime and team own."""
+        with tempfile.TemporaryDirectory(prefix="install seed ") as raw:
+            target = Path(raw).resolve()
+            run("git", "init", "--quiet", str(target))
+            command = (
+                sys.executable, str(INSTALLER), "--edition", "Laravel",
+                "--target", str(target), "--tool", "codex",
+            )
+            first = run(*command)
+            self.assertEqual(0, first.returncode, first.stderr)
+            started = run(
+                sys.executable, "memory-bank/scripts/context.py", "start",
+                "--task-id", "seed-only-smoke", "--goal", "Prove reinstall keeps state",
+                "--source", "AGENTS.md", cwd=target,
+            )
+            self.assertEqual(0, started.returncode, started.stderr)
+            counter = target / "tasks" / ".task-counter"
+            counter.write_text("7\n", encoding="utf-8")
+            manifest = target / "specs" / "MANIFEST.md"
+            manifest.write_text(manifest.read_text(encoding="utf-8") + "| team spec |\n", encoding="utf-8")
+            state = {
+                path: (target / path).read_bytes()
+                for path in ("tasks/.task-counter", "specs/MANIFEST.md", "project-brain/indexes/active.json")
+            }
+
+            for mode in ("--merge-existing", "--overwrite"):
+                with self.subTest(mode=mode):
+                    again = run(*command, mode)
+                    self.assertEqual(0, again.returncode, again.stderr)
+                    self.assertIn("KEPT\tshared\ttasks/.task-counter", again.stdout)
+                    for path, content in state.items():
+                        self.assertEqual(content, (target / path).read_bytes(), path)
+                    validated = run(
+                        sys.executable, "project-brain/scripts/validate.py", "--root", ".", cwd=target
+                    )
+                    self.assertEqual(0, validated.returncode, validated.stdout + validated.stderr)
+
+    def test_every_claude_install_ships_the_policy_import(self) -> None:
+        for edition in EDITION_PATHS:
+            with self.subTest(edition=edition):
+                shipped = (ROOT / EDITION_PATHS[edition] / ".claude" / "CLAUDE.md").read_text(
+                    encoding="utf-8"
+                )
+                imports = [line for line in shipped.splitlines() if line.startswith("@")]
+                self.assertEqual(["@../AGENTS.md"], imports)
 
     def test_merge_existing_still_refuses_unsupported_collision_atomically(self) -> None:
         with tempfile.TemporaryDirectory(prefix="install unsupported merge ") as raw:
@@ -823,6 +962,10 @@ class CleanInstallTest(unittest.TestCase):
                     (*context_command, "status", "--json"),
                     (*context_command, "validate", "--json"),
                     (*context_command, "index", "--json"),
+                    # The project-brain skill tells agents to run parity, so
+                    # every tool selection must pass it, including the
+                    # single-tool installs that ship one skill tree.
+                    (*context_command, "parity"),
                 )
                 for command in commands:
                     smoke = run(*command, cwd=target, env=command_env)
@@ -905,6 +1048,266 @@ class CleanInstallTest(unittest.TestCase):
                 app_db_digest, hashlib.sha256(app_db.read_bytes()).hexdigest()
             )
 
+
+@unittest.skipIf(os.name == "nt", "the filesystem has no executable bit to assert")
+class ExecutableHookInstallTest(unittest.TestCase):
+    """Every hook a client runs directly must arrive executable.
+
+    Cursor wires `.cursor/hooks/subagent-dispatch.sh` (subagentStop) as a
+    direct command. It once shipped 100644 in Cursor and Codex mirrors of all
+    four editions, so every installed project got exit status 126 there and
+    the write-agent lock subagent-gate takes was never released: the next
+    write agent was refused until the lock's 30-minute TTL ran out.
+    """
+
+    def test_every_wired_hook_is_executable_after_install(self) -> None:
+        for edition in EDITIONS:
+            with self.subTest(edition=edition), tempfile.TemporaryDirectory(
+                prefix="executable hooks "
+            ) as raw:
+                target = Path(raw).resolve()
+                result = run(
+                    sys.executable,
+                    str(INSTALLER),
+                    "--edition",
+                    edition,
+                    "--target",
+                    str(target),
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                wired = wired_hook_scripts(target)
+                # Each tool wires several hooks; an empty list would mean the
+                # wiring moved and this test silently checked nothing.
+                for wiring in HOOK_WIRING:
+                    tool_dir = wiring.split("/", 1)[0] + "/"
+                    self.assertTrue(
+                        any(script.startswith(tool_dir) for script in wired),
+                        f"no hook wired in {wiring}",
+                    )
+                for script in wired:
+                    path = target / script
+                    self.assertTrue(path.is_file(), f"{script} is wired but not installed")
+                    self.assertTrue(is_executable(path), f"{script} is not executable")
+                installed_hooks = [
+                    path
+                    for path in target.rglob("*.sh")
+                    if "hooks" in path.relative_to(target).parts[:-1]
+                ]
+                self.assertTrue(installed_hooks)
+                for path in installed_hooks:
+                    self.assertTrue(
+                        is_executable(path),
+                        f"{path.relative_to(target).as_posix()} is not executable",
+                    )
+
+
+@unittest.skipIf(os.name == "nt", "the filesystem has no executable bit to assert")
+class ExecutableBitSourceTest(unittest.TestCase):
+    """The executable bit installs from the source index, not the working tree.
+
+    The synthetic source reproduces the shipped defect: the Cursor and Codex
+    hooks are 100644 in the index, and no file carries the bit on disk - the
+    state of a checkout made on Windows, or with `core.fileMode=false`.
+    """
+
+    HOOKS = (".claude/hooks/gate.sh", ".cursor/hooks/gate.sh", ".codex/hooks/gate.sh")
+    INDEX_EXECUTABLE = ".agents/skills/demo/scripts/run.py"
+    PLAIN_SCRIPT = ".agents/skills/demo/scripts/helper.py"
+
+    def _write_source(self, base: Path) -> None:
+        def command(path: str) -> dict:
+            return {"type": "command", "command": path}
+
+        for edition_path in EDITION_PATHS.values():
+            files = {
+                "VERSION": "0.0.0\n",
+                "AGENTS.md": "# policy\n",
+                ".claude/settings.json": json.dumps(
+                    {"hooks": {"Stop": [{"hooks": [command(self.HOOKS[0])]}]}}
+                ),
+                ".cursor/hooks.json": json.dumps(
+                    {"version": 1, "hooks": {"stop": [{"command": self.HOOKS[1]}]}}
+                ),
+                ".codex/hooks.json": json.dumps(
+                    {"hooks": {"Stop": [{"hooks": [command(self.HOOKS[2])]}]}}
+                ),
+                self.INDEX_EXECUTABLE: "#!/usr/bin/env python3\n",
+                self.PLAIN_SCRIPT: "#!/usr/bin/env python3\n",
+            }
+            for hook in self.HOOKS:
+                files[hook] = "#!/usr/bin/env bash\nexit 0\n"
+            for relative, text in files.items():
+                path = base / edition_path / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8")
+                path.chmod(0o644)
+
+    def _git_source(self, base: Path) -> None:
+        self._write_source(base)
+        for command in (
+            ("git", "-c", "init.defaultBranch=main", "init", "-q", str(base)),
+            ("git", "add", "--", *(path.as_posix() for path in EDITION_PATHS.values())),
+            (
+                "git",
+                "update-index",
+                "--chmod=+x",
+                "--",
+                *(
+                    f"{path.as_posix()}/{relative}"
+                    for path in EDITION_PATHS.values()
+                    for relative in (self.HOOKS[0], self.INDEX_EXECUTABLE)
+                ),
+            ),
+        ):
+            result = run(*command, cwd=base)
+            self.assertEqual(0, result.returncode, result.stderr)
+        generated = run(
+            sys.executable,
+            str(INSTALLER),
+            "--source-root",
+            str(base),
+            "--write-inventories",
+            cwd=base,
+        )
+        self.assertEqual(0, generated.returncode, generated.stderr)
+
+    def _install(self, base: Path, target: Path, *extra: str):
+        return run(
+            sys.executable,
+            str(INSTALLER),
+            "--source-root",
+            str(base),
+            "--edition",
+            "PHP Core",
+            "--target",
+            str(target),
+            *extra,
+            cwd=base,
+        )
+
+    def test_index_bit_wins_over_a_working_tree_without_it(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mode source ") as raw:
+            base = Path(raw).resolve() / "source"
+            target = Path(raw).resolve() / "target"
+            target.mkdir()
+            self._git_source(base)
+            listed = run("git", "ls-files", "--stage", "--", "PHP Core", cwd=base)
+            index_modes = {
+                line.split("\t", 1)[1]: line.split(" ", 1)[0]
+                for line in listed.stdout.splitlines()
+            }
+            self.assertEqual("100755", index_modes["PHP Core/" + self.HOOKS[0]])
+            self.assertEqual("100644", index_modes["PHP Core/" + self.HOOKS[1]])
+            self.assertEqual("100755", index_modes["PHP Core/" + self.INDEX_EXECUTABLE])
+            self.assertTrue(
+                all(
+                    not is_executable(path)
+                    for path in (base / "PHP Core").rglob("*")
+                    if path.is_file()
+                ),
+                "the synthetic source must carry no executable bit on disk",
+            )
+
+            result = self._install(base, target)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(sorted(self.HOOKS), sorted(wired_hook_scripts(target)))
+            for hook in self.HOOKS:
+                # The .claude hook is 100755 in the index; the other two are
+                # 100644 there, as on the commit that shipped the defect, and
+                # still install executable because they are hook scripts.
+                self.assertTrue(is_executable(target / hook), hook)
+            self.assertTrue(is_executable(target / self.INDEX_EXECUTABLE))
+            self.assertFalse(is_executable(target / self.PLAIN_SCRIPT))
+            self.assertFalse(is_executable(target / "AGENTS.md"))
+
+    def test_without_git_the_filesystem_bit_and_the_hook_rule_decide(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mode archive ") as raw:
+            base = Path(raw).resolve() / "source"
+            target = Path(raw).resolve() / "target"
+            target.mkdir()
+            self._git_source(base)
+            # An extracted archive: inventories, files, no index to ask.
+            shutil.rmtree(base / ".git")
+            (base / "PHP Core" / self.PLAIN_SCRIPT).chmod(0o755)
+
+            result = self._install(base, target)
+            self.assertEqual(0, result.returncode, result.stderr)
+            for hook in self.HOOKS:
+                self.assertTrue(is_executable(target / hook), hook)
+            self.assertTrue(is_executable(target / self.PLAIN_SCRIPT))
+            self.assertFalse(is_executable(target / self.INDEX_EXECUTABLE))
+
+    def test_identical_non_executable_hook_gets_only_its_bit_back(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mode reinstall ") as raw:
+            base = Path(raw).resolve() / "source"
+            target = Path(raw).resolve() / "target"
+            target.mkdir()
+            self._git_source(base)
+            first = self._install(base, target)
+            self.assertEqual(0, first.returncode, first.stderr)
+            # A project installed before the fix: identical bytes, no bit.
+            broken = target / self.HOOKS[1]
+            broken.chmod(0o644)
+            content, modified = broken.read_bytes(), broken.stat().st_mtime_ns
+
+            preview = self._install(base, target, "--merge-existing", "--dry-run")
+            self.assertEqual(0, preview.returncode, preview.stderr)
+            self.assertIn(
+                f"WOULD_FIX_MODE\tcursor\t{self.HOOKS[1]}\t{self.HOOKS[1]}",
+                preview.stdout.splitlines(),
+            )
+            self.assertEqual(0o644, stat.S_IMODE(broken.stat().st_mode))
+
+            repeated = self._install(base, target, "--merge-existing")
+            self.assertEqual(0, repeated.returncode, repeated.stderr)
+            lines = repeated.stdout.splitlines()
+            self.assertIn(f"FIX_MODE\tcursor\t{self.HOOKS[1]}\t{self.HOOKS[1]}", lines)
+            self.assertNotIn(f"UNCHANGED\tcursor\t{self.HOOKS[1]}", lines)
+            self.assertEqual(0o755, stat.S_IMODE(broken.stat().st_mode))
+            # Only the mode changed: the file was not rewritten.
+            self.assertEqual(content, broken.read_bytes())
+            self.assertEqual(modified, broken.stat().st_mtime_ns)
+            self.assertIn(f"UNCHANGED\tclaude\t{self.HOOKS[0]}", lines)
+            self.assertIn(f"UNCHANGED\tcodex\t{self.HOOKS[2]}", lines)
+            self.assertEqual("", repeated.stderr)
+
+            again = self._install(base, target, "--merge-existing")
+            self.assertEqual(0, again.returncode, again.stderr)
+            self.assertIn(f"UNCHANGED\tcursor\t{self.HOOKS[1]}", again.stdout.splitlines())
+            self.assertNotIn("FIX_MODE", again.stdout)
+
+    def test_install_from_an_earlier_release_gets_its_hook_bit_back(self) -> None:
+        # An install from the release before executable bits were enforced:
+        # the hook is byte-identical but 0644, and a file this release
+        # changed (here the Cursor wiring) now collides.
+        with tempfile.TemporaryDirectory(prefix="mode upgrade ") as raw:
+            base = Path(raw).resolve() / "source"
+            target = Path(raw).resolve() / "target"
+            target.mkdir()
+            self._git_source(base)
+            first = self._install(base, target)
+            self.assertEqual(0, first.returncode, first.stderr)
+            broken = target / self.HOOKS[1]
+            broken.chmod(0o644)
+            wiring = base / "PHP Core" / ".cursor/hooks.json"
+            wiring.write_text(wiring.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+
+            refused = self._install(base, target, "--merge-existing")
+            self.assertEqual(2, refused.returncode, refused.stdout)
+            self.assertIn(
+                "COLLISION\tcursor\t.cursor/hooks.json\texisting-file",
+                refused.stderr.splitlines(),
+            )
+            # A refused run writes nothing, modes included.
+            self.assertEqual(0o644, stat.S_IMODE(broken.stat().st_mode))
+
+            upgraded = self._install(base, target, "--overwrite")
+            self.assertEqual(0, upgraded.returncode, upgraded.stderr)
+            lines = upgraded.stdout.splitlines()
+            self.assertIn("OVERWRITE\tcursor\t.cursor/hooks.json", lines)
+            self.assertIn(f"FIX_MODE\tcursor\t{self.HOOKS[1]}\t{self.HOOKS[1]}", lines)
+            self.assertEqual(0o755, stat.S_IMODE(broken.stat().st_mode))
+            self.assertTrue(all(is_executable(target / hook) for hook in self.HOOKS))
 
 if __name__ == "__main__":
     unittest.main()

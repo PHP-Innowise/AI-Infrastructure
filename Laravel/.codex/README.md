@@ -7,7 +7,7 @@ The Codex edition of the accelerator, laid out the way OpenAI Codex actually dis
 | **Skills** | `.agents/skills/<name>/SKILL.md` | Codex discovers repo skills, including `project-brain` and `memory-bank`, from `.agents/skills`, not `.codex/`. |
 | **Policy** | root `AGENTS.md` | Read natively by Codex (walked root -> cwd, concatenated). Shared with Claude/Cursor. |
 | **Config** | `.codex/config.toml` | Project-scoped model/approval/sandbox/MCP + enables hooks. Loads only when the project is trusted. |
-| **Hooks** | `.codex/hooks.json` + `.codex/hooks/*.sh` | Lifecycle hooks (same event schema as Claude Code). |
+| **Hooks** | `.codex/hooks.json` + `.codex/hooks/*.sh` | Lifecycle hooks (same event schema as Claude Code), wired through a launcher that finds `.codex/hooks/` from any subdirectory. |
 | **Reference docs** | `.codex/DOD.md`, `.codex/GOLDEN-PRINCIPLES.md`, `.codex/STABILIZATION.md` | Definition of Done, principles, error-to-rule process. |
 
 ## Key differences from the Cursor/Claude editions
@@ -26,6 +26,7 @@ Use `memory-bank` only for durable retrieval/capture/audit/supersession and appl
 2. **Trust the project** when prompted (project-scoped `.codex/` config, hooks, and rules load only for trusted projects).
 3. Confirm skills are visible: type `/` (skills menu) or ask Codex to run one, e.g. "use the coder skill to ...".
 4. Hooks require `features.hooks = true` (already set in `.codex/config.toml`).
+5. Review and trust the hooks in `/hooks`. Codex records trust per hook definition, so a hook whose command changed in an update is skipped until it is trusted again.
 
 ## Relationship to `.claude/` and `.cursor/`
 

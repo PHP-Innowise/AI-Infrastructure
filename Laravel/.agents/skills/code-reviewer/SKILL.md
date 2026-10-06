@@ -20,7 +20,7 @@ Prioritize defects, regressions, security issues, missing tests, and operational
 ### HTTP Boundary
 
 - Is input validated via a Form Request (`app/Http/Requests/...`) rather than inline `$request->validate()` scattered in the controller, once the rules grow non-trivial?
-- Is authorization enforced through a Policy or Gate (`$this->authorize(...)`, `Gate::allows(...)`) rather than relying on hidden UI or ad-hoc `if` checks?
+- Is authorization enforced through a Policy or Gate (`Gate::authorize(...)`, `Gate::allows(...)`, `can:` middleware) rather than relying on hidden UI or ad-hoc `if` checks?
 - Do routes carry the correct middleware (`auth`, `verified`, `throttle`, `signed`) for their sensitivity?
 - Are controllers thin, delegating multi-step logic to Actions/Services rather than embedding business logic directly?
 - Do responses use API Resources (`JsonResource`/`ResourceCollection`) for a stable, versioned response contract instead of returning raw models/arrays?

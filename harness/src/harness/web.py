@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -19,15 +19,25 @@ from urllib.parse import parse_qs, urlsplit, quote
 from urllib.request import Request, build_opener, ProxyHandler
 
 ROOT = Path(__file__).resolve().parents[3]
+# The page's styles and scripts: an explicit list, read with the page so a running server serves one version.
+ASSETS = {name: 'text/css; charset=utf-8' if name.endswith('.css') else 'text/javascript; charset=utf-8'
+          for name in ('app.css', 'app-core.js', 'app-knowledge.js', 'memory-use.js', 'context-usage.js', 'app-setup.js', 'app-skills.js', 'app-creator.js',
+                       'agent-activity.js', 'system.js', 'system-editor.js', 'system-discovery.js', 'run-model.js', 'run-view.js', 'composer-commands.js')}
 sys.path.insert(0, str(ROOT / 'harness/src'))
 sys.path.insert(0, str(ROOT / 'scripts'))
-from harness.sessions import Sessions, SessionError, WORKFLOWS, MAX_AGENTS, DEFAULT_AGENT_COUNT, fleet_runtime
+from harness.filesystem import fs, secure_private_dir, default_state_dir, existing_directory
+from harness import process_runtime
+from harness.sessions import Sessions, SessionError, WORKFLOWS, MAX_AGENTS, DEFAULT_AGENT_COUNT, CONTEXT_EXCERPT_BYTES, fleet_runtime
 from harness import clash, sdd
 from harness.attachments import MAX_JSON_BYTES
 from harness.skills import SkillManager
-from harness.knowledge import KnowledgeManager
+from harness.knowledge import KnowledgeBusy, KnowledgeManager
+from harness import memory_use
+from harness.startup_context import startup_context
 from harness.setup import SetupManager
 from harness.creator import CreatorManager
+from harness.system_orchestration import SystemManager
+from harness.system_discovery import DiscoveryManager
 from harness.project_browser import browse_projects
 from build_kit3_catalog import build_site
 from install_accelerator import EDITIONS
@@ -46,11 +56,23 @@ class HarnessServer(ThreadingHTTPServer):
             self.sessions.knowledge = self.knowledge
             self.setup_manager = SetupManager(self.sessions)
             self.creator = CreatorManager(self.sessions)
+            self.systems = SystemManager(self.sessions)
+            self.discovery = DiscoveryManager(self.sessions, self.systems.editor)
             self.token = secrets.token_urlsafe(32)
             self.instance = secrets.token_hex(16)
             self.catalog_dir = tempfile.TemporaryDirectory(prefix='harness-catalog-')
             self.catalog = build_site(Path(self.catalog_dir.name)).read_bytes()
             self.page = (ROOT / 'harness/web/index.html').read_bytes()
+            self.assets = {'/' + name: ((ROOT / 'harness/web' / name).read_bytes(), content_type) for name, content_type in ASSETS.items()}
+            # The page names each style and script with its content hash, so a browser may keep them for good:
+            # a changed file is a new address, and an old page never pairs with a new script.
+            self.versions = {path: hashlib.sha256(body).hexdigest()[:16] for path, (body, _) in self.assets.items()}
+            for path, version in self.versions.items():
+                for attribute in (b'src', b'href'):
+                    self.page = self.page.replace(b'%s="%s"' % (attribute, path.encode()), b'%s="%s?v=%s"' % (attribute, path.encode(), version.encode()))
+            # The page itself is revalidated against its hash on every load.
+            self.tags = {path: '"' + hashlib.sha256(body).hexdigest()[:32] + '"' for path, body in (
+                ('/', self.page), ('/kit3/', self.catalog), *((name, body) for name, (body, _) in self.assets.items()))}
         except Exception:
             if hasattr(self, 'setup_manager'):
                 self.setup_manager.close()
@@ -75,15 +97,18 @@ class HarnessServer(ThreadingHTTPServer):
             'csrf': self.token,
             'projects': self.sessions.list_projects(),
             'providers': [{k: v for k, v in p.items() if k != 'executable'} for p in self.sessions.providers.values()],
-            'workflows': WORKFLOWS, 'sdd_phases': sdd.PHASES, 'sessions': self.sessions.list(),
+            'workflows': WORKFLOWS, 'sdd_phases': sdd.PHASES, 'sessions': self.sessions.summaries(),
             'clash': {'workflows': list(clash.WORKFLOWS), 'stages': clash.STAGES, 'max_rounds': clash.MAX_ROUNDS, 'default_rounds': clash.DEFAULT_ROUNDS},
             'accelerators': [
                 {'id': 'kit1', 'name': 'Kit 1 · Infrastructure Creator', 'description': 'Scan, review, generate and apply a bespoke accelerator; update manifest-owned files.'},
                 {'id': 'kit2', 'name': 'Kit 2 · Ready-made editions', 'description': 'Preview and install an edition through Projects & Setup.', 'editions': list(EDITIONS)},
                 {'id': 'kit3', 'name': 'Kit 3 · Open Source Kit', 'description': 'Discover community tools and their installation commands.'},
             ],
+            # Probed per page load so a host fix is visible after a reload.
             'runtime': {'timeout_seconds': self.sessions.timeout, 'max_active': 1,
+                        'discovery_sandbox': self.discovery.problem(),
                         'max_agents': MAX_AGENTS, 'default_agent_count': DEFAULT_AGENT_COUNT,
+                        'context_excerpt_bytes': CONTEXT_EXCERPT_BYTES,
                         'fleet': {key: value for key, value in fleet_runtime().items() if key != 'executable'}},
         }
 
@@ -98,7 +123,23 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass  # Prompts, session IDs and tokens do not belong in access logs.
 
-    def reply(self, status, payload, content_type='application/json; charset=utf-8', filename=None):
+    def static(self, path, body, content_type, version=None):
+        """A page file read at start. An asset asked for by its current hash is kept for good;
+        anything else is kept and revalidated against its hash on every load."""
+        if version is not None and version == self.server.versions.get(path):
+            self.reply(200, body, content_type, cache='private, max-age=31536000, immutable')
+            return
+        tag = self.server.tags[path]
+        offered = {value.strip() for value in self.headers.get('If-None-Match', '').split(',')}
+        if tag in offered or '*' in offered:
+            self.send_response(304)
+            self.send_header('ETag', tag)
+            self.send_header('Cache-Control', 'no-cache')
+            self.end_headers()
+            return
+        self.reply(200, body, content_type, etag=tag)
+
+    def reply(self, status, payload, content_type='application/json; charset=utf-8', filename=None, etag=None, cache=None):
         body = payload if isinstance(payload, bytes) else json.dumps(payload, ensure_ascii=False).encode()
         self.send_response(status)
         self.send_header('Content-Type', content_type)
@@ -109,7 +150,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header('Content-Disposition', 'attachment; filename="fleet-review.md"')
         elif content_type == 'application/zip':
             self.send_header('Content-Disposition', 'attachment; filename="project-knowledge.zip"')
-        self.send_header('Cache-Control', 'no-store')
+        # API answers and downloads are never stored; only the page files may be kept.
+        self.send_header('Cache-Control', cache or ('no-cache' if etag else 'no-store'))
+        if etag:
+            self.send_header('ETag', etag)
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('Referrer-Policy', 'no-referrer')
         self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-src 'self'; frame-ancestors 'self'; base-uri 'none'; object-src 'none'; form-action 'self'")
@@ -135,6 +179,15 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def token_ok(self):
+        # Listing commands starts the native CLIs, so it needs the page's token like a change does: another local
+        # page can send a same-site GET without an Origin header.
+        token = self.headers.get('X-Harness-Token', '')
+        if not token.isascii() or not secrets.compare_digest(token, self.server.token):
+            self.error(403, 'Reload the page to renew the session token.')
+            return False
+        return True
+
     def do_HEAD(self):
         self.do_GET()
 
@@ -143,18 +196,21 @@ class Handler(BaseHTTPRequestHandler):
             return
         parsed = urlsplit(self.path)
         path = parsed.path
+        query = parse_qs(parsed.query, keep_blank_values=True)
         store = self.server.sessions
         try:
             if path == '/':
-                self.reply(200, self.server.page, 'text/html; charset=utf-8')
+                self.static('/', self.server.page, 'text/html; charset=utf-8')
             elif path in ('/kit3/', '/kit3/index.html'):
-                self.reply(200, self.server.catalog, 'text/html; charset=utf-8')
+                self.static('/kit3/', self.server.catalog, 'text/html; charset=utf-8')
+            elif path in self.server.assets:
+                self.static(path, *self.server.assets[path], version=(query.get('v') or [None])[0])
             elif path == '/api/health':
                 self.reply(200, {'ok': True, 'instance': self.server.instance})
             elif path == '/api/bootstrap':
                 self.reply(200, self.server.bootstrap())
             elif path == '/api/sessions':
-                self.reply(200, {'sessions': store.list()})
+                self.reply(200, {'sessions': store.summaries()})
             elif path == '/api/projects':
                 if parsed.query:
                     raise SessionError('Invalid project listing request.')
@@ -163,6 +219,18 @@ class Handler(BaseHTTPRequestHandler):
                 if parsed.query:
                     raise SessionError('Invalid project setup request.')
                 self.reply(200, self.server.setup_manager.status(path.split('/')[3]))
+            elif path == '/api/system-runs':
+                if set(query) != {'project_id'} or len(query['project_id']) != 1:
+                    raise SessionError('Select a registered system project.')
+                self.reply(200, self.server.systems.list(query['project_id'][0]))
+            elif path.startswith('/api/system-discoveries/') and len(path.split('/')) == 4:
+                if query:
+                    raise SessionError('Invalid AI discovery request.')
+                self.reply(200, self.server.discovery.get(path.split('/')[3]))
+            elif path.startswith('/api/system-runs/') and len(path.split('/')) == 4:
+                if query:
+                    raise SessionError('Invalid system run request.')
+                self.reply(200, self.server.systems.get(path.split('/')[3]))
             elif path == '/api/creator':
                 query = parse_qs(parsed.query, keep_blank_values=True)
                 if set(query) != {'project_id'} or len(query['project_id']) != 1:
@@ -205,8 +273,10 @@ class Handler(BaseHTTPRequestHandler):
                                  'files': sdd.artifacts(store._workspace(session), session['sdd'])})
             elif path.startswith('/api/sessions/') and path.endswith('/results') and len(path.split('/')) == 5:
                 query=parse_qs(parsed.query,keep_blank_values=True)
-                if query not in ({},{'diff':['0']}): raise SessionError('Invalid result request.')
-                self.reply(200,store.results.get(path.split('/')[3],include_diff=not query))
+                # diff=0 leaves the workspace snapshot out; diff=names keeps its file list without the diff text.
+                include=next((mode for allowed,mode in (({},True),({'diff':['0']},False),({'diff':['names']},'names')) if query==allowed),None)
+                if include is None: raise SessionError('Invalid result request.')
+                self.reply(200,store.results.get(path.split('/')[3],include_diff=include))
             elif path.startswith('/api/sessions/') and path.endswith('/delivery') and len(path.split('/')) == 5:
                 if parsed.query: raise SessionError('Invalid delivery request.')
                 self.reply(200,store.delivery.get(path.split('/')[3]))
@@ -225,12 +295,40 @@ class Handler(BaseHTTPRequestHandler):
                 if parsed.query:
                     raise SessionError('Invalid Git status request.')
                 self.reply(200, store.git(path.split('/')[3]))
+            elif path.startswith('/api/projects/') and path.endswith('/commands') and len(path.split('/')) == 5:
+                if not self.token_ok():
+                    return
+                query = parse_qs(parsed.query, strict_parsing=True) if parsed.query else {}
+                if set(query) - {'provider', 'worktree'} or 'provider' not in query or any(len(values) != 1 for values in query.values()):
+                    raise SessionError('Invalid command list request.')
+                self.reply(200, store.command_listing(path.split('/')[3], query['provider'][0], query.get('worktree', [None])[0]))
+            elif path.startswith('/api/sessions/') and path.endswith('/commands') and len(path.split('/')) == 5:
+                if not self.token_ok():
+                    return
+                if parsed.query:
+                    raise SessionError('Invalid command list request.')
+                self.reply(200, store.session_commands(path.split('/')[3]))
+            elif path.startswith('/api/projects/') and path.endswith('/worktrees') and len(path.split('/')) == 5:
+                if parsed.query:
+                    raise SessionError('Invalid worktree listing request.')
+                self.reply(200, store.worktrees(path.split('/')[3]))
             elif path.startswith('/api/projects/') and path.endswith('/memory') and len(path.split('/')) == 5:
                 query = parse_qs(parsed.query, strict_parsing=True, keep_blank_values=True) if parsed.query else {}
                 if (set(query) - {'bank', 'path'} or any(len(values) != 1 or not values[0] for values in query.values())
                         or ('path' in query and 'bank' not in query)):
                     raise SessionError('Invalid memory request.')
                 self.reply(200, store.memory(path.split('/')[3], query.get('bank', [None])[0], query.get('path', [None])[0]))
+            elif path == '/api/accelerators/startup':
+                if parsed.query:
+                    raise SessionError('Invalid startup context request.')
+                self.reply(200, startup_context(EDITIONS))
+            elif path.startswith('/api/projects/') and path.endswith('/memory-use') and len(path.split('/')) == 5:
+                query = parse_qs(parsed.query, strict_parsing=True, keep_blank_values=True) if parsed.query else {}
+                if set(query) - {'bank'} or any(len(values) != 1 or not values[0] for values in query.values()):
+                    raise SessionError('Invalid memory use request.')
+                project_id = path.split('/')[3]
+                self.reply(200, memory_use.read(self.server.knowledge, project_id, query.get('bank', [None])[0],
+                                                store.linked_tasks(project_id)))
             elif path.startswith('/api/projects/') and path.split('/')[-1] in ('brain', 'knowledge') and len(path.split('/')) == 5:
                 query = parse_qs(parsed.query, strict_parsing=True, keep_blank_values=True) if parsed.query else {}
                 section = path.split('/')[-1]
@@ -280,19 +378,32 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.trusted_request():
             return
-        token = self.headers.get('X-Harness-Token', '')
-        if not token.isascii() or not secrets.compare_digest(token, self.server.token):
-            self.error(403, 'Reload the page to renew the session token.')
+        if not self.token_ok():
             return
         store = self.server.sessions
         try:
             path = urlsplit(self.path).path
             # Quoted Markdown at the creator's byte limit can double in its JSON envelope.
             upload = path == '/api/sessions' or path.startswith('/api/sessions/') and path.endswith('/messages') and len(path.split('/')) == 5
-            data = self.read_json(MAX_JSON_BYTES if upload else 131072 if path == '/api/skills/create-preview' else 65536)
+            data = self.read_json(MAX_JSON_BYTES if upload else 131072 if path == '/api/skills/create-preview' else 2 * 1024 * 1024 if path in ('/api/systems/preview', '/api/system-discoveries') else 65536)
             if path.startswith('/api/skills/') and urlsplit(self.path).query:
                 raise SessionError('Invalid skill request.')
-            if path == '/api/creator':
+            if path == '/api/system-discoveries':
+                if urlsplit(self.path).query:
+                    raise SessionError('Invalid AI discovery request.')
+                self.reply(201, self.server.discovery.start(data))
+            elif path in ('/api/systems/editor', '/api/systems/service', '/api/systems/preview', '/api/systems/apply'):
+                if urlsplit(self.path).query:
+                    raise SessionError('Invalid system editor request.')
+                action = {'editor': 'load', 'service': 'service', 'preview': 'preview', 'apply': 'apply'}[path.rsplit('/', 1)[1]]
+                self.reply(200, self.server.systems.edit(action, data))
+            elif path == '/api/systems/catalog':
+                self.reply(200, self.server.systems.catalog(data))
+            elif path == '/api/system-runs':
+                self.reply(201, self.server.systems.prepare(data))
+            elif path.startswith('/api/system-runs/') and len(path.split('/')) == 4:
+                self.reply(200, self.server.systems.act(path.split('/')[3], data))
+            elif path == '/api/creator':
                 if urlsplit(self.path).query: raise SessionError('Invalid Creator request.')
                 self.reply(201, self.server.creator.start(data))
             elif path.startswith('/api/creator/') and len(path.split('/')) == 4:
@@ -313,6 +424,10 @@ class Handler(BaseHTTPRequestHandler):
                 if urlsplit(self.path).query:
                     raise SessionError('Invalid project knowledge request.')
                 self.reply(200, self.server.knowledge.run(path.split('/')[3], data))
+            elif path.startswith('/api/projects/') and path.endswith('/memory-use/check') and len(path.split('/')) == 6:
+                if urlsplit(self.path).query or set(data) - {'bank'} or not isinstance(data.get('bank', ''), str):
+                    raise SessionError('Invalid eligibility check request.')
+                self.reply(200, memory_use.check(self.server.knowledge, path.split('/')[3], data.get('bank') or None))
             elif path == '/api/skills/discover' and 'source_id' in data and not set(data) - {'source_id', 'refresh'}:
                 self.reply(200, self.server.skills.discover(data['source_id'], data.get('refresh', False)))
             elif path == '/api/skills/change-preview':
@@ -331,6 +446,8 @@ class Handler(BaseHTTPRequestHandler):
                 if urlsplit(self.path).query:
                     raise SessionError('Invalid session action query.')
                 _, _, _, sid, action = path.split('/')
+                if store.get(sid).get('system_discovery') and action != 'cancel':
+                    raise SessionError('AI discovery sessions only support cancellation. Start a new scan in the system editor.')
                 if action == 'messages' and 'prompt' in data and not set(data) - {'prompt', 'model', 'thinking_effort', 'sdd', 'model_routing', 'mode', 'attachments', 'agents_enabled', 'agent_count', 'clash'}:
                     self.reply(200, {'session': store.send(sid, data['prompt'], {k: v for k, v in data.items() if k != 'prompt'})})
                 elif action == 'check':
@@ -351,6 +468,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.reply(200, {'session': store.run_context(sid, data['context_id'])})
                 elif action == 'brain':
                     self.reply(200, store.brain_action(sid, data))
+                elif action == 'memory':
+                    self.reply(200, store.save_memory(sid, data))
                 else:
                     raise SessionError('Invalid session action.')
             elif path == '/api/accelerators/preview':
@@ -366,6 +485,8 @@ class Handler(BaseHTTPRequestHandler):
                 threading.Thread(target=self.server.shutdown, daemon=True).start()
             else:
                 self.error(404, 'Not found.')
+        except KnowledgeBusy as error:
+            self.error(409, str(error))
         except (SessionError, ValueError, TypeError, RecursionError) as error:
             self.error(400, str(error) if isinstance(error, SessionError) else 'Invalid JSON request.')
         except subprocess.TimeoutExpired:
@@ -376,19 +497,17 @@ class Handler(BaseHTTPRequestHandler):
             self.error(500, 'The server could not complete this request.')
 
 
-def private_dir(path):
-    path = Path(path).expanduser().absolute()
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if path.is_symlink():
-        raise SessionError('State directory must not be a symbolic link.')
-    os.chmod(path, 0o700)
-    return path
+def private_dir(path, *, migrate=False):
+    try:
+        return secure_private_dir(path, migrate=migrate)
+    except OSError as error:
+        raise SessionError(str(error)) from error
 
 
 def metadata(state):
     path = state / 'server.json'
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        descriptor = fs.open(path, os.O_RDONLY | fs.O_NOFOLLOW)
         with os.fdopen(descriptor) as handle:
             data = json.load(handle)
         if (type(data.get('port')) is int and 0 < data['port'] < 65536
@@ -419,21 +538,24 @@ def running(state):
 
 
 def serve(args, state):
-    lock_fd = os.open(state / 'server.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        os.close(lock_fd)
-        raise SessionError('A server already owns this state directory.')
+        lock_fd = fs.open_lock(state / 'server.lock')
+    except OSError as error:
+        if isinstance(error, BlockingIOError) or getattr(error, 'winerror', None) == 32:
+            raise SessionError('A server already owns this state directory.') from error
+        raise
+    state_fd = None
     server = None
     try:
+        state_fd = fs.open_target_directory(state)
         overrides = {name: getattr(args, name + '_bin') for name in ('claude', 'codex', 'cursor') if getattr(args, name + '_bin')}
         server = HarnessServer(('127.0.0.1', args.port), state, args.project or [Path.cwd()], overrides, args.timeout)
         info = {'pid': os.getpid(), 'port': server.server_port, 'instance': server.instance, 'token': server.token}
-        descriptor, temporary = tempfile.mkstemp(prefix='server-', dir=state)
+        temporary = 'server-' + secrets.token_hex(16)
+        descriptor = fs.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | fs.O_NOFOLLOW, 0o600, dir_fd=state_fd)
         with os.fdopen(descriptor, 'w') as handle:
             json.dump(info, handle)
-        os.replace(temporary, state / 'server.json')
+        fs.replace(temporary, 'server.json', src_dir_fd=state_fd, dst_dir_fd=state_fd)
         def stop_signal(*_):
             threading.Thread(target=server.shutdown, daemon=True).start()
         signal.signal(signal.SIGTERM, stop_signal)
@@ -450,8 +572,13 @@ def serve(args, state):
             server.server_close()
             current = metadata(state)
             if current and current['instance'] == server.instance:
-                (state / 'server.json').unlink(missing_ok=True)
-        os.close(lock_fd)
+                try:
+                    fs.unlink('server.json', dir_fd=state_fd)
+                except FileNotFoundError:
+                    pass
+        if state_fd is not None:
+            fs.close(state_fd)
+        fs.close(lock_fd)
 
 
 def main():
@@ -459,7 +586,7 @@ def main():
     parser.add_argument('command', choices=('start', 'serve', 'status', 'stop'), nargs='?', default='start')
     parser.add_argument('--project', action='append', type=Path, help='Register an existing project; repeat for multiple projects (default: current directory).')
     parser.add_argument('--port', type=int, default=8766)
-    parser.add_argument('--state-dir', type=Path, default=Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local/state')) / 'ai-infrastructure-harness')
+    parser.add_argument('--state-dir', type=Path, default=default_state_dir())
     parser.add_argument('--timeout', type=int, default=900, help='Initial time budget for API requests without a budgets object (default: 900). Explicit null means no time limit.')
     for name in ('claude', 'codex', 'cursor'):
         parser.add_argument('--' + name + '-bin', help='Explicit native CLI executable path.')
@@ -467,11 +594,11 @@ def main():
     try:
         for name in ('claude', 'codex', 'cursor'):
             executable = getattr(args, name + '_bin')
-            if executable and ('/' in executable or executable.startswith('~')):
+            if executable and ('/' in executable or '\\' in executable or executable.startswith('~')):
                 setattr(args, name + '_bin', str(Path(executable).expanduser().resolve()))
         if not 0 <= args.port < 65536 or not 1 <= args.timeout <= 86400:
             raise SessionError('Invalid port or timeout (1–86400 seconds).')
-        state = private_dir(args.state_dir)
+        state = private_dir(args.state_dir, migrate=args.command == 'serve')
         if args.command == 'serve':
             serve(args, state)
             return 0
@@ -495,13 +622,13 @@ def main():
             return 0
         command = [sys.executable, str(Path(__file__).resolve()), 'serve', '--state-dir', str(state), '--port', str(args.port), '--timeout', str(args.timeout)]
         for project in args.project or [Path.cwd()]:
-            command.extend(['--project', str(project.expanduser().resolve(strict=True))])
+            command.extend(['--project', str(existing_directory(project))])
         for name in ('claude', 'codex', 'cursor'):
             if getattr(args, name + '_bin'):
                 command.extend(['--' + name + '-bin', getattr(args, name + '_bin')])
-        log_fd = os.open(state / 'server.log', os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        log_fd = fs.open(state / 'server.log', os.O_WRONLY | os.O_APPEND | os.O_CREAT | fs.O_NOFOLLOW, 0o600)
         with os.fdopen(log_fd, 'ab') as log:
-            process = subprocess.Popen(command, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+            process = subprocess.Popen(command, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=log, stderr=log, **process_runtime.daemon_kwargs())
         for _ in range(175):
             info = running(state)
             if info:

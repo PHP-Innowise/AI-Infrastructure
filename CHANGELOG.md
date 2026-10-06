@@ -26,6 +26,509 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- The edition policies and the `checkpoint`/`memory` skills describe the automatic memory as it runs (see each edition's CHANGELOG): `AGENTS.md` loses about 3.3 KB of contradictory memory rules per edition, `scripts/token_budget.json` tightens `agents_md_bytes` to the new sizes and raises PHP Core's `body_bytes` for the governed `checkpoint` workflow, and `memory-bank/tests/test_checkpoint.py`/`test_memory.py` assert the new contract.
+- **A reinstall keeps the state the project owns.** `tasks/.task-counter`, `specs/MANIFEST.md`, `memory-bank/INDEX.md`, `project-brain/indexes/active.json`/`archive.json` and `project-brain/config/runtime.json` shipped as ordinary installer files: after a single `context.py start` a `--merge-existing` reinstall refused with a collision, and `--overwrite` reset the task counter to 1, so TASK-NNN numbers repeated and `project-brain validate` broke. `install_accelerator.py` now treats them as `SEED_ONLY_PATHS`: an existing copy is kept under every mode and reported as `KEPT` (configuration keys a newer release adds fall back to the runtime defaults). Harness Setup previews them as `kept`, outside the change count. `tests/test_installation.py` reinstalls over a used project in both modes and validates it; `tests/test_harness_setup.py` covers the preview.
+- **`scripts/check_php_snippets.py` lints fragments, not only whole files.** It checked 93 of 363 fenced PHP blocks; the rest were skipped as fragments, and the Laravel and Symfony snippets that fatal on their declared versions were all among them. A fragment is now linted as statements behind an added `<?php` tag, then as class members, and raw only when it carries its own `<?php`/`<?=` tag (raw untagged text is inline HTML to `php -l`, which would pass anything). A block that is deliberately not valid PHP alone is fenced ` ```php fragment` and counted. 366 blocks are linted now, and the output gives counts per mode. New `tests/test_check_php_snippets.py`, run in CI's `lint` job, proves a broken untagged fragment fails. `tests/test_framework_semantics.py` adds `FrameworkApiCurrencyTest`, a denylist of the patterns the audit found (Filament `?string $navigationIcon`, `$this->authorize()` without `AuthorizesRequests`, an undefined `'private'` disk, claims that dispatch inside a transaction is deferred, `EventServiceProvider.php`/`#[AsListener]`, and Symfony voters without `?Vote $vote = null`).
+- CI's `lint` job runs the Symfony `skill-creator` adapter tests (`.agents` and `.cursor` copies), which are excluded from installs and ran nowhere; `scripts/check.py` mirrors the step.
+- **Prompt-time retrieval works before the branch's governed task exists.** In the default governed mode the task is created at the first checkpoint, after several file-changing turns, and a read-only session never gets one; until then every `UserPromptSubmit` capsule was a bare `Capsule unavailable: Working task not found` warning, although the runtime filters do not depend on a task. `retrieve()` now accepts no task: it keeps the privacy, owner, authority and freshness filters, excludes no own record, and writes its manifest to ignored local state only (the manifest schema's `task_id`/`task_revision` may be null; governed manifests still require a task). `refresh` uses it, and the capsule renders `working: not recorded yet (the task starts at the 5-turn checkpoint)` above the layers. An explicit `retrieve --task-id` still refuses a missing task. `msg-dispatch` provisions the branch task itself, so a subagent completion on a new branch is recorded instead of failing into `/dev/null` in `subagent-dispatch.sh`. The test that pinned `capsule is None` now asserts the layers.
+- **Project Brain fingerprints and writes are line-ending neutral.** `fingerprint()` hashed raw bytes, so a colleague's `core.autocrlf=true` checkout of the same commit marked every record citing a text file `source fingerprint is stale` while Git saw no change. Text is now hashed with CRLF folded to LF (an LF file's digest is unchanged, so stored fingerprints need no migration; a NUL byte keeps binary data raw). Record, handoff, message and telemetry writes pass `newline="\n"`, so the runtime no longer writes CRLF into Git-tracked files on Windows. `LineEndingFingerprintTest` covers a CRLF checkout, the LF digest and binary sources.
+- **LF everywhere, and a client `.gitattributes` that keeps hooks reviewable.** The repository had no line-ending policy: a clone with `core.autocrlf=true` got CRLF hooks, which bash refuses (`syntax error near unexpected token $'in\r'`), and the byte-comparing `build_mirrors --check` and `parity` reported 355 and 66 false drifts. A root `.gitattributes` pins `* text=auto eol=lf`, marks the binary types the repository tracks, and leaves client-supplied `*/Task/**` material as delivered (`-text`); every other tracked file was already LF. Installs no longer copy the edition's generated `.gitattributes`, which marks all 239 mirror paths `-diff` (13 hooks among them) and so showed an edited hook as "Binary files differ" in a client's review: `PRODUCTION_SOURCE_OVERRIDES` installs `<edition>/.install/gitattributes` instead, one `*.sh text eol=lf` directive merged additively into an existing file. `tests/test_file_modes.py` fails on any CRLF in the index outside `*/Task/`, and the installation tests assert the installed attributes. install/README.md says how to remove the old `-diff` lines from an earlier install.
+- **The policy loads in Claude Code even when the project has its own `CLAUDE.md`.** Claude Code reads `AGENTS.md` by itself only while no `CLAUDE.md`, `.claude/CLAUDE.md` or `CLAUDE.local.md` exists, and only from v2.1.277; a project with any of them (Laravel Boost writes one, and the Laravel README recommends Boost) never saw `AGENTS.md`. Every edition now ships `.claude/CLAUDE.md` importing `@../AGENTS.md` (installer `claude` component; inventories and policy locks regenerated, and `.claude/CLAUDE.md` joins the policy-lock surface). `install_accelerator.py --merge-existing` appends the import as a managed block to an existing `.claude/CLAUDE.md` (`MANAGED_POLICY_FILES`), and without the flag reports the collision. In the shared core, `host_loaded_paths()` knows all three Claude instruction files, follows `@` imports from each of them, and counts `AGENTS.md` as host-loaded when none exists, so the capsule stops spending a procedural slot on a policy the host already loaded. `docs/TOOL-INTEGRATIONS.md` adds the `/context` → **Memory files** check.
+- `context.py parity` passes on single-tool installs. `--tool claude` and `--tool cursor` ship no `.agents/skills/`, so every skill was reported as "absent from canonical" (85 paths in Laravel), and the `.cursor/README.md` and `.codex/README.md` that every install carries made those directories look like installed mirrors missing all their governance documents. The check the project-brain skill tells agents to run failed on every such install, and TROUBLESHOOTING forbade the obvious workaround of editing `canonical_edition`. `effective_canonical_edition()` in `context_retrieval.py` now compares against the first installed tree when the configured one is absent, and parity names the stand-in (`.claude canonical; configured .agents is not installed here`); `full_mirror_drift` skips a class for a mirror directory that holds none of its files, while a mirror that holds some of them still reports the rest. `tests/test_installation.py` runs `parity` in every tool selection's smoke test, and `memory-bank/tests/test_parity.py` covers both install shapes and that partial drift is still caught. ADOPTION §8 and TROUBLESHOOTING describe the single-tool case.
+- **Secrets and personal data are refused on the governed write path, and the secret patterns stop refusing ordinary PHP.** Project Brain records, handoffs and agent messages are Git-tracked and repeated into Task Capsules, yet only the lightweight path and the capsule query checked what was written: a governed `start` whose goal carried an email or a phone number stored it, `brain-create --goal 'ghp_...'` stored a token that `validate` passed and `retrieve` served to another task, and `promote-auto` (on by default) copied an email into a Memory Bank chunk and `INDEX.md`. `brain_runtime` now refuses, through one `guard_shared_text()`, the secrets and personal data a call introduces in `create_record` (title, goal, conflicts), `update_record` (progress, auto checkpoint, next steps, reason, conflicts) and `append_message`; the message names the kind (`a possible GitHub token`, `personal data (email address)`), never the value. Only new text is checked, so a record written before stays updatable. Promotion refuses a record whose content carries either kind, and `validate_repository` reports a stored secret (personal data in old records is not an error). The personal-data patterns moved from `context.py` to `validate.py` (`PRIVATE_PATTERNS`, `sensitive_label()`) so both paths share them. The `assigned credential` pattern missed the keys PHP projects actually use (`DB_PASSWORD=`, `MAIL_PASSWORD=`, `AWS_SECRET_ACCESS_KEY=`: the `\b` anchor failed after `_`) and flagged code and config (`$password = $request->validated(...)`, `secret: '%env(APP_SECRET)%'`), which refused capsule queries and dropped the Laravel architect skill from every Laravel index over `php artisan down --secret=...`. It now takes snake/UPPER_SNAKE prefixes, stays on one line, needs four value characters, and skips variables, env/config lookups, templates, placeholders, masks, validation rules, code expressions and bare numbers. New patterns: a Laravel `APP_KEY=base64:...` and credentials in a URL or DSN (`mysql://app:pw@db`, `redis://:pw@cache`, `https://user:token@host`), minus documentation placeholders such as Symfony's `!ChangeMe!`. Tests: a pattern table in `memory-bank/tests/test_validate.py`, `SharedTextGuardTest` in `project-brain/tests/test_runtime.py`, and `ShippedContentIndexTest` in `tests/test_framework_semantics.py`, which indexes each edition and fails on any document excluded as a secret.
+- Fix hooks failing open whenever the session's working directory is not the project root. Every edition wired its hooks as bare relative paths (`.claude/hooks/<script>.sh`, `.codex/hooks/<script>.sh`). Claude Code and Codex run a hook command in the session's current directory, so from a subdirectory the shell exited 127, and both hosts treat that as non-blocking: `bash-validator.sh` silently stopped blocking force-pushes and the other hooks stopped running. Claude Code wiring now uses the documented `"${CLAUDE_PROJECT_DIR}"/.claude/hooks/<script>.sh`. Codex wiring now uses a fixed `sh -c` launcher. It walks up from the session's directory to the nearest directory holding `.codex/hooks.json` (the project that declared the hook) and runs that project's `.codex/hooks/<script>.sh`. A script missing there exits 127 instead of running a same-named script from an ancestor such as `~/.codex/hooks/`. Codex exports no project-root variable and runs hooks through `$SHELL -lc`, so the launcher works from a subdirectory, without Git, inside a larger repository, and under bash, zsh or fish. Cursor wiring is unchanged because Cursor runs project hooks from the project root. The edition hook READMEs document the forms. New `tests/test_hook_wiring.py`, run in CI, runs every wired command from a nested directory of each edition and requires the force-push block (exit 2) through the wiring. Codex records hook trust per definition hash, so users must re-trust the changed hooks once in `/hooks`. `tests/test_hook_wiring.py` also proves the launcher never runs an ancestor's script, and that the generator's wiring gate accepts each ready-made edition's complete wiring.
+- Hook scripts keep their executable bit through mirroring and installation. The Cursor and Codex copies of `subagent-dispatch.sh` were 100644 in all four editions while their `.claude` canon was 100755. Cursor runs that hook as a direct command (`subagentStop`), so every installed project got exit status 126, and the write-agent lock taken by `subagent-gate` was never released until its 30-minute TTL. The eight files are now 100755.
+- `scripts/build_mirrors.py`: a mirror's executable bit now equals its canonical file's. The bit is read from the Git index first, and from the filesystem only for an untracked path, so a Windows or `core.fileMode=false` checkout gets the same answer. `--check` reports `mode differs from canon`. `--write` sets the bit on disk and, for a tracked mirror, in the index (mode only, never content), also when the bytes already match. This also removed a stale +x from Infrastructure-Creator's `.claude` and `.cursor` copies of `memory-seed/assets/scripts/validate.py`.
+- `scripts/install_accelerator.py`: every `hooks/*.sh`, and every file that is 100755 in the source Git index (or executable on disk without a Git checkout), is installed with mode 0755 whatever the working tree says. A file already identical in the target keeps its content. If it must be executable and isn't, the installer adds only the bit (`chmod +x`) and reports it as `FIX_MODE` (`WOULD_FIX_MODE` with `--dry-run`). This happens under every collision mode because it destroys nothing. A refused run still writes nothing, modes included.
+- `scripts/asset_parity.py`: compares the executable bit between the memory-seed asset and the canonical edition, and `--write` fixes it. Before, `copy2` copied the working-tree bit only.
+- `scripts/file_modes.py`: shared helper for executable bits, read from the Git index first and written to disk and to the index. Used by `build_mirrors.py` and `asset_parity.py`.
+- `tests/test_file_modes.py`, run by the CI `mirrors` job. These must be 100755 in the Git index: every tracked `*.sh` inside a `hooks/` directory, every hook script a tracked `.claude/settings.json`, `.cursor/hooks.json` or `.codex/hooks.json` runs, and every repository-root launcher with a shebang.
+- **bash-validator parses commands instead of grepping them, and a shared corpus proves it.** Destructive forms that agents actually emit got past the old combined regex: `git push origin +main`, `git -C . reset --hard`, a backslash-newline continuation, `rm -r -f /`, `git commit -n`, `bin/console d:d:d --force`, `php artisan migrate:fr`, `wp db clean`, `wp site empty`, `secrets:reveal`, `config:show database`. Read-only commands were blocked, including `git branch -d` (the old `grep -i` made `-D` case-insensitive) and `grep "DROP TABLE" migrations/`. Every edition's `.claude/hooks/bash-validator.sh` (and its generated `.cursor`/`.codex` copies) now carries one generic section, byte-identical between explicit markers and shared with Infrastructure-Creator. It is a pure-bash parser with no fork per rule. It joins continuations, removes quotes, splits on `;` `&&` `||` `|` `&`, subshells and newlines, recurses into `$(...)`, backticks, `sh`/`bash -c`, `su -c`, `eval` and heredocs fed to a shell, and strips `VAR=value`, wrappers (`command`, `exec`, `sudo`, `env`, `nohup`, `time`, `timeout`, `xargs`, ...) and binary paths. It also looks through launchers that have no rules of their own (`docker compose exec`, `ddev`, `lando`, `ssh`). The section holds case-sensitive git, rm, gh and composer rules (git rules accept global options and any flag order; force push includes clustered `-f`, `--mirror`, `+refspec` and, deliberately, `--force-with-lease`), case-insensitive SQL rules that skip read-only searches and commit messages, and `.env` read rules. Framework rules follow in `BV_FRAMEWORK_RULES`; console rules match every Symfony Console abbreviation of a dangerous command. New secret-printing rules, checked against the official docs: Laravel `env:decrypt` and `config:show` of credential-bearing config files, Symfony `secrets:reveal`, `secrets:list --reveal`/`-r`, `secrets:decrypt-to-local`, `debug:dotenv` and `debug:container --env-vars`, WP-CLI `wp config get`/`list` of credentials. A block names its rule category and never the command body. Fail-open without a JSON extractor is unchanged. `tests/fixtures/bash-validator-corpus.json` (323 cases) runs through all 15 shipped copies, each with its host's payload shape, in `tests/test_bash_validator_corpus.py`, which also asserts the generic section is identical everywhere. Latency on a typical command is unchanged in the editions (0.92-1.05x). Each hooks README now says the validator is a guard against accidental destruction, not a sandbox.
+- Add `scripts/check_routes.py`, a CI gate (run by the `mirrors` job) that proves every wiring and routing reference resolves in each edition and in Infrastructure-Creator. Hook wiring: every name under `(.claude|.cursor|.codex)/hooks/` in `.claude/settings.json`, `.cursor/hooks.json` or `.codex/hooks.json` (whatever the command prefix), and every Codex launcher `$1`, must be a `*.sh` script that exists, is tracked, and carries index mode 100755; a hook script no wiring file references is a warning. Routing: command `spawns`/`flow-next`/`flow-alternatives`/`stages[].agents`, `subagent_type`, `` `/x` `` spans, skill paths, agent `name`/`invokes`, every `SKILL FLOW.md`, and `AGENTS.md` references must resolve in their own tool (the Codex flow accepts skills only: Codex has no command layer). Reachability: every skill is named by a command, agent or flow. Deliberate exceptions live in `scripts/check_routes_allowlist.json`, each with a mandatory reason; stale entries warn. Regression tests: `tests/test_check_routes.py`.
+- Add `scripts/check.py`, one local entry point for what CI runs. It has one group per job in `.github/workflows/*.yml`, each the job's `run:` steps in order. Jobs and matrix legs run in parallel and the steps of one job or leg run in order. Every command reports PASS/FAIL/SKIP with its duration, each failure prints its last 60 lines and the path of its log, a summary table with wall times closes the run, and any failure exits 1. Shell steps run as GitHub runs them (`bash -eo pipefail`). `python3` inside every command, including interpreters the tests start, is the interpreter running the script, and `python3.9` runs the job pinned to it. A tool the runner provides but the machine lacks (shellcheck, php, pwsh, bwrap, python3.9, the harness venv) skips with the reason, or fails under `--strict`. `tests/test_check.py` reads the workflows with a stdlib YAML subset reader and fails when a CI command has no entry in `check.py` or an entry is no longer in CI. Runner provisioning (apt-get, sysctl, venv creation, pip install) is excluded through an explicit list. It replaces the documented copy-paste loops, which exited 0 when a test failed.
+- `scripts/check_routes.py` exposes `wired_hook_scripts()`, the one parser for every wiring form the editions ship (a bare or `"${CLAUDE_PROJECT_DIR}"`-anchored `.<tool>/hooks/<name>` (any name, so the caller can reject one that is not an existing `*.sh` script), and the Codex launcher that passes the script name as `$1`). The gate, `tests/test_file_modes.py` and `tests/test_installation.py` share it, so a Codex hook is checked for existence and mode like the others. CI now also runs `tests/test_bash_validator_corpus.py` (mirrors job) and `tests/test_check.py` (lint job).
+- **bash-validator: review fixes for bypasses, false positives and a fail-open crash.** Generic section, identical in all copies. Shell option clusters that take a value (`bash -euo pipefail -c ...`, `-oe pipefail`, `+eo pipefail`) no longer hide the `-c` string or the heredoc. A quoted command line given to a known launcher (`ssh host '...'`, `ddev exec "..."`, `vagrant ssh -c`/`lando ssh -c "..."`, `gcloud ... --command=`) is parsed as a command. So is a heredoc or here-string fed to a shell through a launcher (`docker exec -i app bash`, `kubectl exec -i pod -- bash`, `ssh host bash -s`) or to `ssh HOST` with no remote command, and so is `git submodule foreach`. A quoted argument of any other program is still text. DELETE with no WHERE, and TRUNCATE without TABLE, are refused only when the input runs SQL (`mysql`, `psql`, `sqlite3`, `wp db query`/`cli`, `dbal:run-sql`, `doctrine:query:sql`, `artisan tinker`/`db`): test names, issue and PR titles and bodies, `sed -i` and file-writing heredocs that say "delete from" pass again. DROP, TRUNCATE TABLE and an always-true WHERE (`1=1`, `true`, and now a bare `1`) are refused everywhere, as before. New: `dropdb`, `mysqladmin drop`, `git config` writing or unsetting `core.hooksPath`, and `git --config-env core.hooksPath=...`. `git log -S`/`git grep -e` searching for `--no-verify` passes. `.env` readers now include `grep`/`egrep`/`fgrep`/`rg`/`ag`/`ack`/`awk`/`cut`; a search's pattern operand (`grep -rn .env src/`) and `-q`/`-l`/`-L`/`-c` are not reads, and `sed -Ei`/`-ni` in-place edits pass. Console rules see options placed before the command name (`bin/console --reveal secrets:list`, `php artisan --force db:seed`). A `-x` item matches inside a short-option cluster. An option's value is not taken for the command's argument (`--env production database`, `--em customer prev`), using per-edition `BV_CONSOLE_VALUES`/`BV_CONSOLE_SHORT_VALUES`. Sail's `art`/`a` aliases count as artisan. A `php <script>` that is not a listed entry yields only namespaced command names, so `php vendor/bin/phpunit --filter rollback` is a test run. The parser reads through a 1 KB window and builds long words in two parts. Parse time is now linear: 100 KB of dense shell syntax takes about 2 s instead of 5-9 s, and a 127 KB heredoc write about 75 ms instead of 190 ms. Nesting deeper than any real command (`BV_MAX_NEST`) is refused as `command too complex`, where it used to crash bash with SIGSEGV, which every host treated as allow. Latency on a typical command is 5.7-6.2 ms, up from 5.1-5.5 ms. The corpus grows from 210 to 323 cases with new decisions (delete-from, core.hooksPath, launchers, nesting), and `tests/test_bash_validator_corpus.py` gains a parse-cost test that asserts linear growth.
+- Harness Setup repairs a hook whose content matches the source but lacks its executable bit. The preview shows it as `fix-mode`, counts it as a change and names the mode change. Install changes only the mode, in place, and the receipt records the repaired mode. Before, the preview reported 0 changes and the receipt recorded 0644 as verified, while the hook kept exiting 126.
+- Harness Setup stages every source file that is 100755 in the source Git index with its executable bit, so it installs the same modes as `scripts/install_accelerator.py`. Before, on a checkout without filesystem modes (`core.fileMode=false`, or a Windows-made checkout), skill scripts such as `skill-creator/scripts/init_skill.py` installed 0644 through the Harness but 0755 through the CLI.
+- `scripts/file_modes.py`: an intent-to-add index entry (`git add -N`) now counts as untracked. Before, `build_mirrors.py --write` and `asset_parity.py --write` repaired its mode through `update-index --index-info`, which staged the empty blob it records in place of the file and dropped the flag, so a plain `git commit` shipped a 0-byte mirror.
+- `scripts/check_routes.py` now resolves references the way the runtime does. `subagent_type`, `stages[].agents`, prose spawns in command bodies and `AGENTS.md` "`x` agent" must equal an agent's frontmatter `name` as the host and `subagent-gate.sh` read it; the file stem and the `<name>-agent` alias stay valid for `spawns` only, and an agent name the gate reads differently (quoted) is an error. Command bodies (Claude and Cursor) also check "spawn `x`", "Spawn the `x` agent", "Spawn `x` with", a line opening "Spawn x agent", and "invoke the x skill". `SKILL FLOW.md` checks also cover bare-name steps of fenced diagrams (a whole-step rule that does not read diagram prose as steps) and backticked names followed by `<arg>`/`[ctx]`. Hook wiring treats every name under `.<tool>/hooks/` and every launcher `$1` as a reference, and one that is not an existing `*.sh` script (for example a typo that drops `.sh`) is an error, not an unwired-script warning. A non-UTF-8 file is an error finding (exit 1, valid `--json`) instead of a traceback; a malformed allowlist entry is reported and silences nothing; `--json` prints `{"error": ...}` on an exit-2 failure.
+- `scripts/check.py`: SIGTERM and SIGHUP now stop a run the way Ctrl-C does. Every command runs in a session of its own, so `kill`, `timeout`, a closed terminal or an IDE stop button used to end check.py alone, leaving its commands running as orphans and `/tmp/check-py-*` behind. Now each running command's process group is terminated, the temporary directory is removed, and the run exits 130. A signal ignored at start (`nohup`) stays ignored, and a second signal no longer cuts the cleanup short.
+- `scripts/check.py`: a guard no longer hides a step CI runs. An entry whose guarded files are absent still skips as "not present" where its workflow has no such step. Where the workflow does run the step, the skip says CI fails there, and `--strict` fails it. `tests/test_check.py` fails on it in either mode. Before, renaming `docs/examples/ai-system/system.json` skipped all six system-orchestration commands, even under `--strict`, and the drift test stayed green.
+- `scripts/check.py`: the changelog group no longer passes when `check_core_changelog.sh` cannot resolve a merge base. The script then exits 0 without checking anything. An explicit `--base` that does not resolve (a typo, an unfetched branch) now fails. A missing default base (`origin/main`, or a local `main`) skips with the reason, or fails under `--strict`.
+- `tests/test_check.py` compares each job's `actions/setup-python` version, leg by leg, with the interpreter `scripts/check.py` pins for that leg. Moving a pin or adding or removing a matrix leg in `ci.yml` now fails the drift test. `UNMIRRORED_PYTHON` names the two pins check.py deliberately does not reproduce, with the reason for each: harness-fleet's 3.11 and windows-harness's 3.13.
+- `memory-bank/tests/test_hooks.py` (Laravel, Symfony, PHP Core, WordPress): `test_body_horizontal_rule_cannot_declare_writes` now writes its parser-trap agent into a throwaway repository with its own copy of `subagent-gate.sh`, not into the edition's `.claude/agents/`. `scripts/check.py` runs the tests beside the mirror, parity and route gates in one checkout, and those gates failed now and then on the unmirrored agent while it was briefly present. A run stopped at that moment left the file in the tree. The new `FixtureIsolationTest` fails if the fixture is written inside the edition again.
+
+- Harness: **Existing Git worktree** as a third workspace. A new session can run
+  in a checkout that Git lists for the project's repository: one made outside
+  the Harness, for example by a script that also prepares the task's
+  environment. The picker lists every other checkout except the project's own
+  folder and anything inside the runner's state, such as session and Delivery
+  check worktrees, and chooses none for you. The session uses the checkout as it
+  is, with its branch, uncommitted files and environment. An entry's ID covers
+  its path and branch, so a folder reused for another branch needs a refresh.
+  Follow-ups accept a switched branch, but refuse a checkout that Git no longer
+  lists, that became a link or that belongs to another repository. New:
+  `GET /api/projects/{id}/worktrees`, `workspace: "existing-worktree"` with a
+  listing `worktree_id` on session creation. The Creator still offers only the
+  project folder or a new worktree.
+
+- Harness: **slash commands** work as in the CLI behind the session.
+  - In a Workspace session, `/` at the start of a message lists the CLI's own commands, with keyboard
+    selection. Tab inserts the name; Enter inserts it and runs a command that needs no argument.
+  - Claude Code's list is the CLI's own, from an `initialize` control request to `claude -p` in the
+    workspace (no turn, no model call): built-ins that work in print mode, project, personal and plugin
+    commands and skills; the probe runs no hooks. A message that starts with one goes to Claude Code
+    exactly as typed, without Harness memory, task or instructions. Sessions with reviewed memory refuse
+    commands.
+  - `/clear` (`/reset`, `/new`), `/model` and `/effort` act on the page when typed alone or with one
+    value, and the API refuses them in a message.
+  - A Claude message that starts with `/` but is not one of the CLI's commands is marked as the user's
+    text, so the CLI does not run it.
+  - Codex reads messages as text, so the Harness does what the Codex app would. `$name` anywhere names
+    one of Codex's own skills (`codex app-server` `skills/list`) and gets an explicit request.
+    `/prompts:name` expands a custom prompt, `/init` asks for an AGENTS.md guide, and `/new`, `/model`,
+    `/diff` and `/status` act on the page.
+  - New: `harness/src/harness/commands.py`, `harness/web/composer-commands.js`,
+    `GET /api/projects/{id}/commands?provider=` (optional `worktree=`) and
+    `GET /api/sessions/{id}/commands`. Both need the page's token, and the page now sends it with
+    every request.
+
+- System Orchestration judges a memory chunk's `review_after` and `valid_to`
+  by the local calendar, the one the native Memory Bank contract it applies
+  uses. It read the UTC date, so west of UTC a chunk valid through today was
+  dropped from plans in the local evening while the Memory Bank still served
+  it. Two tests no longer fail around local midnight: the memory expiry test
+  (UTC date against the contract's local one) and the Memory use history test
+  (two retrievals an hour apart crossed into the previous day before 01:00).
+
+- Harness: **Run view**. While a Workspace, Plan, Review or SDD turn runs, a
+  strip above the composer shows what the agent is doing now: the tool, its
+  target and how long the call has been open, or *Model's turn*. It also shows
+  counts of files, plan items, checks and failed steps. A Harness check no
+  longer reads as "Claude is running". **Calm** is the default. **Detailed**
+  opens three tabs:
+  - **Files:** a map of the files named in tool calls.
+  - **Plan:** the agent's own todo list, with what was added or dropped.
+  - **Commands:** PHP checks as runs per target, a result marked unknown when a
+    pipe or a later command hides it, fixers, and **Run in Harness**.
+
+  Each step in the conversation names its target. A run receipt follows each
+  turn, a compaction leaves a divider, and the tab title and icon carry the
+  state. Notifications are opt-in and private.
+
+  For native launches `providers.normalize_event(..., targets=True)` attaches
+  each tool's canonical name, call ID, state, project-relative path (a file
+  outside the project keeps only its name), redacted detail (a command's first
+  line without a heredoc body; an MCP tool's name, never its arguments), `not_run`
+  outcome, Codex exit code and file changes, and Claude helper parent. These
+  targets live in `harness/src/harness/run_activity.py` (`Enricher`,
+  `RunLedger`, `redact_command`), along with plan events, compaction dividers
+  and one limited notice. They sit outside the launch's 5000-event / 4 MiB
+  failure limit and under caps of their own, so recording them never changes
+  whether a launch fails.
+
+  Other server changes:
+  - Every stored event gets a millisecond `at`.
+  - The closing status carries `outcome`.
+  - `GET /api/sessions/<id>` returns the newest `launch` of any kind.
+  - `launches.receipt` is also saved when a launch hits its output limit, is
+    cancelled or cannot start.
+  - `/results?diff=names` lists changed files without the diff.
+  - System runs' agent panels use the same relative paths and redaction.
+
+  File contents, diffs, tool output and reasoning are never stored.
+  `tests.test_harness_run_activity` joins the CI Harness job.
+
+- Harness: project memory runs by itself. Every new session uses it and
+  nothing waits for a person: the first message names a new Brain task, every
+  message is the retrieval query for its own turn (`context.py refresh` with
+  the provider as host, manifest in the ignored local store), the capsule goes
+  straight into the launch, and when a run completes its `memory-draft` is
+  saved — progress, next steps, and each learning written as observed and
+  raised to verified with the reason "agent-attested, not reviewed by a
+  person", then `promote-auto` once. Learnings citing no file in the workspace
+  or already saved from the session are left out; a retrieval or save failure
+  costs the turn its memory, never the turn, and the conversation shows a line
+  for what each turn carried and saved. Review by hand (prepare, approve, Save
+  to memory) is an opt-in, and sessions linked before this keep it. A project
+  without a governed runtime starts its sessions with its reference files
+  instead of refusing them. Memory use names these retrievals Harness, and the Claude and
+  Codex read hooks, which call `refresh`, by their host instead of CLI.
+
+- Harness: the **Project context** chip and the **Use project memory** checkbox
+  are gone. Project memory is always on and also decides what the project
+  contributes: a turn whose prompt carries a memory capsule no longer also gets
+  the reference-file excerpts; without a capsule (no governed
+  runtime, or retrieval failed) they stand in, sent once per native
+  conversation instead of on every resume, and leave out the instruction file
+  the provider loads by itself (`CLAUDE.md` for Claude, `AGENTS.md` for Codex).
+
+- The Claude and Codex read hooks (`working-memory-read.sh`) stand down when
+  `CONTEXT_CAPSULE_DELIVERED=1`. The Harness sets it when it has already put
+  the turn's capsule into the prompt, retrieved for the message alone; the hook
+  would otherwise distill a second capsule from that whole prompt and spend the
+  turn's memory budget twice. The Stop hook still checkpoints the task.
+
+- Harness: **Save to memory** after a linked run. Agents left to policy almost
+  never record what a run established — 0 memory commands in ~1,850 prompts on
+  four real installations — so a linked launch's prompt now asks the agent to
+  close its final reply with a `memory-draft` block (progress, up to three next
+  steps, up to three learnings with source files). Nothing is written from it:
+  the session page shows the draft as an editable form, and only on Save, with
+  the person confirming each kept learning against its sources, does the
+  Harness run the runtime's own commands — `brain-update` on the task (next
+  steps replaced), `brain-create` + `brain-update` for each learning as a
+  verified, resolved finding or accepted decision, then `promote-auto` once.
+  Sources must be regular files in the session workspace; a failed command
+  reports what was already saved. `harness/src/harness/memory_draft.py`,
+  `POST /api/sessions/<id>/memory`; `brain_info` carries `memory_draft`.
+
+- `context.py promote-auto` runs automatic promotion now, under the same rules
+  as a turn boundary, and does nothing unless `automatic_promotion` is enabled.
+  Knowledge recorded deliberately no longer waits for `--flush-after` turns.
+
+- The automatic checkpoint says what the work was. It listed only how many
+  turns and files a flush covered, and agents almost never write progress
+  themselves — on four real installations 23 of 24 tasks held nothing else. A
+  flush now appends the branch's newest commit subjects, newest first (at most
+  five, 80 characters each, `(+N more)`), counted from the merge base with the
+  default branch; merges and any subject a secret or privacy gate would refuse
+  are left out, never failing the flush. A turn whose HEAD moved also counts
+  as work even with a clean tree: a turn that ended in a commit used to read as
+  a turn with nothing in it, so committed work never reached the buffer. The
+  HEAD each task last saw is kept in local state (`turn-heads`, bounded).
+
+- A Memory Bank write is refused only for what it introduces. Promotion,
+  compaction, `bank-reverify` and `bank-retire` validated the whole bank
+  afterwards and rolled back on any error, so one chunk passing its review
+  date failed every later write in the repository, and two overdue chunks each
+  blocked the one command that would repair the other — reproduced: neither
+  could be re-verified and only hand-editing got out. Writes now compare the
+  bank with itself before the write (`brain_runtime.bank_write_errors`) and
+  still hold the chunk they produce or attest to the full contract, so a
+  re-verify of a chunk whose source is gone is refused as before. An overdue
+  chunk still leaves retrieval and `validate.py` still reports it; `refresh`
+  now says so on every turn (`memory review: N chunk(s) overdue…`,
+  `overdue_review` in `--json`). Validator messages name paths from the
+  bank's parent instead of the machine's absolute path, which had reached the
+  Task Capsule through a refused promotion's reason. The Harness memory demo
+  no longer stalls its two late automatic promotions.
+
+- Compaction no longer waits for every cited file to stand still. It validated
+  the Brain with source freshness included, so one record whose cited file
+  changed — an accepted decision citing a living spec, a finding citing the
+  code it was about — refused every later compaction, manual and automatic,
+  with `Compaction refused because active records are invalid`. Freshness is
+  now left out of both of compaction's validations
+  (`validate_repository(..., check_freshness=False)`): moving terminal records
+  can neither cause nor cure it, and the documented contract was already that
+  compaction skips stale records. `validate` still reports them, retrieval and
+  promotion still skip them, and the refusal now says how many problems it
+  found.
+
+- The rendered capsule says where the work stopped. Claude Code, Codex and
+  Cursor read the plain capsule, which printed only `working: <task> — <goal>`:
+  progress and next steps never reached the model, and "continue where we left
+  off" retrieved skill pointers instead. It now adds bounded `phase:`,
+  `progress:`, `next:`, `recent files:` and `task record:` lines. The capsule
+  keeps the three newest next steps and the newest eight files (it kept the
+  oldest eight), a file touched again moves to the end of the task's list,
+  and `update`/`brain-update --replace-next-steps` lets a finished step leave
+  the list — it was append-only.
+
+- Capsule slots no longer point at what the model already has. The task's own
+  record and handoff leave as `working-task`; with `--host claude` or
+  `--host codex` the instruction files that host loads itself leave as
+  `host-loaded` (`CLAUDE.md` and its `@path` imports, `AGENTS.md`). On real
+  installations `CLAUDE.md` held a procedural slot on 88 of 114 and 150 of 158
+  Claude Code turns, and the task's own record a semantic slot on 13–20%.
+
+- Run System Orchestration on native Windows:
+  - System files, run journals and editor saves go through the portable
+    filesystem layer, whose rooted handles refuse junctions. Windows refuses to
+    replace a file another program holds open, for example while the Harness
+    reads a run, so a save retries for up to 2 seconds.
+  - Every worker and Brain call starts under the Harness process guard, whose
+    Windows job ends the whole process tree. A worker CLI installed by npm
+    starts through Node.js directly, never through its `.cmd` launcher.
+  - Run and workspace locks are share-deny opens. The workspace lock folder
+    gets an ACL that admits only the current user and SYSTEM.
+  - Brain calls, the System runner and `scripts/ai_system.py` exchange UTF-8,
+    so a task written in Russian also works on Windows.
+  - AI discovery (**Fill with AI**) runs in Codex's elevated sandbox, as Creator
+    phases do. Its permission profile is an allow-list: the platform minimum,
+    the CLI runtime, Python, the run folder and the provider's account state,
+    with every selected service folder denied outright. Codex denies a folder
+    with an inherited Windows ACE, which a file with its own allow entry
+    escapes. So before every scan a probe inside the same sandbox opens each
+    original file and folder, up to 100,000, and the scan starts only if none
+    is readable. A Codex agent inside drops its own nested sandbox, as Creator's
+    does.
+  - The new `tests.test_ai_system_portable` runs on Linux and in the
+    `windows-harness` job, including a run with an npm-installed Codex fixture.
+    `tests.test_harness_system_discovery` checks the scan profile, and with a
+    local Codex CLI enforces it through Codex's Linux sandbox. The new
+    `tests.test_windows_discovery` runs it in the real elevated sandbox, in the
+    manual Windows sandbox workflow.
+- Join the native Windows Harness (PR #35) with the redesigned page and System
+  Orchestration (PR #36):
+  - The redesigned page keeps its split scripts. Creator names the missing
+    isolation as the server reports it.
+  - Memory use and the live Codex fill read files through the portable
+    filesystem layer.
+  - `scripts/ai_system_execution.py` imported `fcntl`, which kept the server
+    from starting on native Windows. It no longer does.
+- Let the browser keep the Harness page files. The page names each style and
+  script by its content hash, so a repeat visit loads none of them again (83 KB
+  instead of 651 KB here). That address is served `immutable`; any other request
+  for a page file revalidates by ETag (304), and API answers stay `no-store`. The
+  session list in `/api/bootstrap` and `/api/sessions` now carries summaries
+  (`Sessions.summaries()`, one query), so 200 sessions with capsules weigh 71 KB
+  instead of 1.96 MB. Opening a session takes its settings from the full record
+  the first poll brings.
+
+- Finish the Harness memory views:
+  - **Retrieval history.** Memory use keeps a numbers-only daily rollup of
+    retrievals in the Harness database (`retrieval_days`, with
+    `retrieval_seen` so each manifest counts once). Retrieval history therefore
+    outlives the newest manifests a project keeps. The rollup is folded when
+    the view reads or a session launch ends, and is shown in the Selected
+    breakdown and the chunk card.
+  - **Live Codex fill.** A running Codex launch's fill is read from its rollout
+    as it grows (`context_usage.CodexLive`, every two seconds; the rollout path
+    comes from `providers.codex_rollout`).
+  - **Startup context per edition.** Accelerators › Kit 2 lists the exact
+    startup bytes per edition against their CI ceilings
+    (`GET /api/accelerators/startup`, measured by `scripts/context_budget.py`).
+  - **Calibration citation.** The citation in `context_budget.py` (and in the
+    CI comment) points at `docs/TOKEN-ECONOMY-RESEARCH.md` as of `9435dfc1^`.
+    `9435dfc1` removed the file, which left it dangling.
+
+- Add **Sessions › Usage › Context** to the Harness: how full each turn left the
+  agent's context window, how much of it was memory the Harness sent, how the
+  turn grew it and when compaction cleared it. Each launch now records a
+  numbers-only `context` column in `launches` (migrated in place; older launches
+  read as not recorded). The column holds the prompt ledger built in
+  `Sessions._prompt` (capsule by memory kind, project excerpts sent of their
+  full size, attachments, instructions and the message) and the fill that
+  `context_usage.ContextTracker` reads from the provider's own usage. Claude
+  calls are counted once per message ID, subagents are left out, and compaction
+  comes from `compact_boundary`; Codex fill is read from the thread's rollout at
+  the end of the launch, and Cursor reports none. Session launches of Claude add
+  `--include-hook-events`, and only the character counts of hook output are
+  kept. Fleet and Clash launch rows name the memory prefix and how many agents
+  received it. `Sessions.get` adds `context_last` for a composer meter that
+  appears once the latest turn fills half its window or compacts.
+
+- Add **Knowledge › Memory use** to the Harness. The new first Knowledge tab
+  follows one knowledge root through Project Brain, promotion, the Memory bank
+  and the last 200 retrievals, in fixed-step bands for a 7-, 30- or 90-day
+  window or all time. Rows flag chunks past their review date, chunks whose
+  cited files changed, and stalled automatic promotions. A retrieval strip and a
+  review horizon each have a keyboard-navigable detail card and a table twin. On
+  a return visit the tab shows and replays only what changed since the last one,
+  and reduced motion shows a `+N` mark instead.
+  `harness/src/harness/memory_use.py` reads project files in process, without
+  the knowledge lock and without running project code. Only counts, dates, chunk
+  IDs and chunk titles leave the server; Brain titles and bodies, queries and
+  non-chunk paths do not. A Harness freshness re-check counts with its
+  retrieval. `POST …/memory-use/check` runs the installed runtime's
+  `promotable_records` and `memory_eligibility` on a click and returns 409 while
+  the lock is busy; the knowledge lock's busy error is now `KnowledgeBusy`
+  (HTTP 409). `tests/harness_memory_demo.py` builds a year of history through the
+  copied runtime's own API.
+
+- Show what memory adds where a Harness launch is decided. The linked Brain
+  task card shows the capsule against its 8,000-character cap as one bar split
+  into Project Brain, Memory bank and Rules & docs, with the items the runtime
+  dropped to fit and the characters repeated by the capsule's selected and
+  category views; the note beside **Run with this context** estimates what the
+  capsule adds to the turn. The counts come from `sessions.capsule_meter`,
+  measured on the server the way the runtime measures the cap: the browser
+  writes a float such as `4e-06` as `0.000004`, so its own count would drift.
+  `task_context` checks the cap against the same `CAPSULE_LIMIT`. The
+  **Project context** chip shows what its excerpts add to each launch, with the
+  3,000-byte excerpt size from `bootstrap.runtime.context_excerpt_bytes`.
+
+- Count each Harness launch's own Claude spend. From Claude Code 2.1.277 a
+  resumed session's result reports the session's whole spend in
+  `total_cost_usd`, and the Harness added those totals launch by launch: a
+  resumed Claude session's Usage totals, its "Usage · $" label and the launch
+  USD cap counted earlier launches again, and Clash turns did the same.
+  `providers.RunCost` now keeps each launch's and each Clash turn's growth over
+  the native session's last reported total (`sessions.cost_totals`), read per
+  run from the CLI version in the init event; older CLIs keep their per-run
+  cost. When the share cannot be told the cost stays unknown, never 0, and the
+  launch records the raw report as `cost_usd_reported`. Launches recorded before
+  this change keep their totals. The agents panel no longer turns an unreported
+  token count or cost into 0.
+
+- Lay the motion and number foundation for the memory views. Motion tokens
+  (fast, base, slow, travel, stagger, pulse and three easings) replace the
+  literal durations, the two pulses share one keyframe, and a guard rejects
+  literal durations and `cubic-bezier()` in rules on both themed pages. Reduced
+  motion now also stops `::before` and `::after` animations (the agents panel's
+  live dot kept pulsing), and scripted scrolls follow it through
+  `scrollMotion()`. Six memory and context colour tokens join both themes,
+  guarded at 3:1 on both surfaces. `fmt` gives numbers one grammar (exact, ≈,
+  ≤ / ≥ / +, —) and the Usage totals use it: unknown totals read — and costs
+  read as the CLIs' estimates. `keyedRender` keeps launch and check details open
+  across result polls; before, every poll collapsed them.
+
+- Bring System Orchestration (PR #36) onto the Harness design. It is a sidebar
+  section with two tabs: **Services** (system file, contract map, service cards
+  and the editor with **Fill with AI**) and **Changes** (a change selector, the
+  new-change form with starting services as chips, and the selected change as
+  **Plan · Review · Run · Receipts** steps with its launch, recovery, agents and
+  receipts). It follows the sidebar **Project** instead of its own project
+  select; **Choose system folder…** adds a folder and makes it the working
+  project in every view. The map is drawn at its natural size in theme colors,
+  so it reads the same in the dark theme. Available services and completed
+  receipts carry no label; native task references and the runner log sit behind
+  toggles. Saving the system closes the editor onto the updated map. The launch
+  note names edit mode's writes in each service's current checkout, recovery
+  names the provider that resumes, starting services carry their dependency
+  warnings and the plan lists its warnings. Runner transcripts of system changes
+  and AI scans in **Sessions** point back to System Orchestration. The
+  screenshots in `docs/AI-SYSTEM-ORCHESTRATION.md` show the new layout.
+
+- Split the Harness page: markup stays in `harness/web/index.html`, styles move
+  to `app.css` and the script to five classic files (`app-core.js`,
+  `app-knowledge.js`, `app-setup.js`, `app-skills.js`, `app-creator.js`) that
+  load in order with no build step. The code moved unchanged apart from
+  indentation. The server serves only the files named in `ASSETS`, read at
+  start with the page; a test checks that the page and the list agree.
+
+- Finish the Harness redesign plan. One **Project** selector in the sidebar
+  drives every view (the per-view project selects are gone from the screen); an
+  open session of another project yields to a new draft. Results splits into
+  **Changes · Checks · Usage** tabs next to Conversation, with counts, and shows
+  Worktree delivery only for worktree sessions. The Creator shows a run's phase
+  as five steps and keeps the new-run form behind **New run**. Skills lists one
+  row per installed skill with tool chips (36 rows instead of 108 for the demo
+  project), compacts the catalog, and keeps the selection and **Preview
+  installation** in a bar at the bottom.
+
+- Regroup the Harness into five sections: Sessions, Knowledge (Project Brain,
+  Memory bank, Context files), Skills (Library, Create skill), Accelerators
+  (Overview, Infrastructure Creator, Open Source Kit) and Projects & Setup.
+  Tabs replace the separate entries, every view has its own `#/view` address,
+  and Results & verification becomes a tab of the open session. Slogan headings
+  give way to one title per view, and the embedded Kit 3 catalog drops its own
+  header, hero and footer. Setup readiness now separates the constant `scope`
+  notes from real `diagnostics`, so only problems are highlighted. Copy across
+  Setup, Creator, Skills, Knowledge and Results is cut to the decision point;
+  the README gains interface copy rules. Fixes: Creator no longer posts a
+  `null` thinking effort when a run's provider differs from the form; Setup
+  hides a used preview after installing and no longer preselects an edition;
+  Create skill shows what is missing when clicked; Recent sessions keeps focus
+  while a session runs; Memory documents open on their text, with front matter
+  under Metadata.
+
+- Calm the Harness Sessions screen. The launch fields sit in one row, and Mode
+  appears only when the workflow leaves it open. Optional settings (helpers,
+  Clash, workspace, Brain task, budgets, separate models) become chips that
+  show their current value and open one panel at a time. An open session
+  collapses to a single summary line with **Next-turn settings**. Fleet review
+  ticks its helpers itself, the SDD slug waits for input before showing an
+  error, and hints, budget, Clash and composer copy keep only what matters at
+  the moment of decision. Consecutive activity steps fold into one row, and a
+  failed run shows one error card. Both Harness pages now take font size,
+  weight, line height and radius from scale tokens, with spacing on a 4px grid;
+  `tests.test_harness_web` enforces this. One field style replaces seven
+  copies, and muted text and focus rings gain contrast.
+
+- Add a dark theme to the Harness browser workspace: a System / Light / Dark
+  switch at the bottom of the sidebar, stored in the browser and applied before
+  first paint, so a dark page never flashes white; **System** follows the OS
+  setting live. The Kit 3 catalog follows the same choice inside the Harness and
+  the OS theme when served alone. Both stylesheets now take every color from
+  paired light/dark tokens, enforced by `tests.test_harness_web`; the Setup
+  preview's collision label uses the error color instead of an undefined
+  `--red`.
+
+- Show a live **Agents** panel for System Orchestration runs and AI scans: one
+  card per contract, service, verification or discovery agent with state, time,
+  granted folders, tool calls, tokens and changed files, plus a timeline of its
+  messages, reasoning summaries, plans and tool targets. Workers stream native
+  output line by line; Claude workers now use `stream-json` with the same
+  `--json-schema` terminal `structured_output`. Activity is display-only,
+  redacted, bounded per agent and launch, and never stores file contents, diffs,
+  command output or prompts. Run details list each launch; runner status no
+  longer disappears behind the first page of events.
+- Add `--access all` (browser default: **All selected services**) so every
+  system worker can read all selected service folders and, in edit mode, change
+  files in any of them; the system folder stays read-only. Claude receives the
+  folders through `--add-dir`, Codex through writable roots; Cursor is limited to
+  the own-service scope. Cross-service changes are reported as
+  `<service-id>/<path>` and adopted only when reported. Contract and verification
+  workers now read every selected service under Claude in both scopes. The scope
+  is pinned in the journal; older journals resume with the own-service scope.
+- Fix intermittent HTTP 400 responses while polling a live system run: a journal
+  file being published by link-then-unlink is read on the next poll instead.
+- Replace the opaque `Native AI discovery CLI failed` with the actual cause: an
+  expired or missing CLI login (with `claude auth login`, `codex login` or
+  `cursor-agent login`), a sandbox that cannot start (with AppArmor and
+  user-namespace hints), a CLI that cannot start inside the sandbox, a timeout or
+  a rate limit. Blocked system dispatches show the same CLI reason on the agent
+  card and in the run log. Probe bubblewrap before queueing a scan and warn in the
+  editor. Document troubleshooting, including an AppArmor profile for bubblewrap,
+  and enable user namespaces for the discovery tests on GitHub's Ubuntu runners.
+
+- Automatically fill Harness system/service forms through Codex, Claude or
+  Cursor from bounded, filtered evidence snapshots. Show sources/uncertainties,
+  validate every service and contract, retain unknown ownership and incomplete
+  dependency coverage, and require fresh evidence at preview and final save.
+  Use the existing serialized queue/watchdog for cancellation/restart; isolate
+  source reads from original projects while allowing native CLI runtime/account
+  state. Cover real subprocess adapters and the visible browser form flow.
+
+- Create and edit system orchestration in Harness through a folder browser and
+  forms for service ownership, capabilities, contracts, dependencies and context
+  sources. Register selected folders and generate metadata without JSON input.
+  Validate the full graph before saving, reject stale forms/files, preserve file
+  permissions and recover interrupted multi-file saves with a durable journal.
+  Block metadata writes/recovery during active sessions; retain detected external
+  edits as conflicts. Cover localhost API, persistence and failure paths.
+
+- Support Claude Code and Cursor Agent for system workers in the CLI and Harness
+  UI alongside Codex. Share native permission/delegation flags, validate Claude
+  structured output and Cursor terminal reports, bound Cursor prompt bytes,
+  and pin provider/executable across recovery. Preserve legacy Codex requests.
+  Cover native reports, modes, retry and cancellation with deterministic CLIs.
+
+- Integrate system orchestration into Harness UI: declared service graphs,
+  capabilities and memory ownership, reviewed context/impact plans, sequential
+  Codex execution through the shared queue, live receipts/native task references,
+  cancellation and explicit recovery. Derive filesystem access from registered
+  projects; preserve pending launch identity across crashes and stop detached
+  worker trees through nested watchdogs. Cover real HTTP/native Brain paths on
+  Python 3.9 and current Python using deterministic provider fixtures.
+
+- Add an optional stack-neutral system planner (`scripts/ai_system.py`) for
+  service passports, declared contract impact, globally budgeted context,
+  Mermaid maps and cross-service plans. Preserve local Brain/Memory ownership,
+  require explicit access to external roots, fingerprint sources/commits and
+  detect changed or newly available inputs. Include a synthetic three-service
+  example and stdlib regression coverage. Add explicit sequential Codex/custom
+  adapter execution, native system/service Brain tasks, structured terminal
+  receipts, source checkpoints and crash-safe reconciliation. Require explicit
+  retries for ambiguous writes; complete tasks only after reported cross-service
+  verification and preserve knowledge handoff without promoting raw context.
+
+- Fix native Windows Harness guard shutdown and private-state ownership on
+  elevated runners. Reject non-UTF-8 Creator plans with a controlled error and
+  make pipe and plan fixtures independent of Windows newline/encoding defaults.
+
+- Add native Windows/Git Bash Harness runtime support: working Python fallback,
+  Job Object process cleanup, threaded bounded pipe reads, retained admission
+  locks, rooted no-reparse filesystem operations and private state ACLs.
+  Launch supported npm CLI shims directly through Node.js, support Windows
+  Fleet venv paths and Project Brain process locks, and add a native Windows
+  acceptance CI job. Creator also supports native Windows through Codex elevated
+  permission profiles, with read-only project/control roots, per-phase boundary
+  probes and disposable installed-runtime validation copies.
+
 - Run Harness Creator phases on macOS through the built-in `sandbox-exec`
   (Seatbelt) profile when bubblewrap is absent: writes are allowed only in the
   run workspace, a private temporary directory, the per-user temporary space and

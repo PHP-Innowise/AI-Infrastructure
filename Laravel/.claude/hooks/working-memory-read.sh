@@ -14,6 +14,12 @@
 
 set -u
 
+# A host that puts this turn's Task Capsule into the prompt itself sets
+# CONTEXT_CAPSULE_DELIVERED=1; the Harness does, retrieved for the message
+# alone. A second capsule here would be distilled from that whole prompt and
+# spend the turn's memory budget twice. The write half still runs on Stop.
+[ "${CONTEXT_CAPSULE_DELIVERED:-}" = "1" ] && exit 0
+
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 CONTEXT_CLI="$ROOT_DIR/memory-bank/scripts/context.py"
 BUDGET_SECONDS="${CONTEXT_HOOK_BUDGET:-5}"

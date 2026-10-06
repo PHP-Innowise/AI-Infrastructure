@@ -11,8 +11,8 @@
     "id": {"type": "string", "format": "uuid"},
     "created_at": {"type": "string", "format": "date-time"},
     "query": {"type": "string", "minLength": 1},
-    "task_id": {"type": "string", "format": "uuid"},
-    "task_revision": {"type": "integer", "minimum": 1},
+    "task_id": {"type": ["string", "null"], "format": "uuid"},
+    "task_revision": {"type": ["integer", "null"], "minimum": 1},
     "local_episode_count": {"type": "integer", "minimum": 0},
     "filters": {
       "type": "object",

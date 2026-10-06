@@ -53,7 +53,7 @@ All Standard items, plus:
 - [ ] Public documentation updated for user-facing changes.
 - [ ] Durable reusable context was added to `memory-bank/` only when source-backed, non-sensitive, indexed, and not already authoritative in a spec.
 - [ ] Promotion proposals were not self-approved; any applied promotion has explicit human review plus source and destination revisions.
-- [ ] Session hooks remain metadata-only and do not index, retrieve, inject, or print Project Brain or Memory Bank records.
+- [ ] The SessionStart hook stays metadata-only and never prints Project Brain or Memory Bank records; the prompt hook's Task Capsule stays bounded and carries pointers and working state, never record bodies.
 - [ ] Cron/worker/queue, cache, and migration impacts are documented when applicable.
 
 ## Command Selection

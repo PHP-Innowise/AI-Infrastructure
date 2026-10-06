@@ -24,6 +24,7 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest import mock
 
 EDITION_ROOT = Path(__file__).resolve().parents[2]
 BASH = shutil.which("bash") or "/bin/bash"
@@ -609,6 +610,52 @@ class WorkingMemoryRuleTest(unittest.TestCase):
                     self.assertNotIn("--json", line)
 
 
+class HostDeliveredCapsuleTest(unittest.TestCase):
+    """A host that put the turn's capsule into the prompt silences the read hook.
+
+    The Harness retrieves for the message alone and sets
+    CONTEXT_CAPSULE_DELIVERED=1. A second capsule, distilled from the whole
+    prompt the host assembled, would spend the turn's memory budget twice.
+    """
+
+    def test_read_hook_stands_down_only_when_the_host_delivered_the_capsule(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hook-tests-") as directory:
+            for tool in ("claude", "codex"):
+                with self.subTest(tool=tool):
+                    root = Path(directory) / tool
+                    hooks = root / MIRRORS[tool][0]
+                    hooks.mkdir(parents=True)
+                    shutil.copy(hook_path(tool, "working-memory-read.sh"), hooks)
+                    marker = root / "cli-ran"
+                    cli = root / "memory-bank/scripts/context.py"
+                    cli.parent.mkdir(parents=True)
+                    cli.write_text(
+                        "import pathlib\n"
+                        f"pathlib.Path({str(marker)!r}).write_text('ran')\n"
+                        "print('working: TASK-HOST')\n",
+                        encoding="utf-8",
+                    )
+
+                    def run(delivered: str):
+                        return subprocess.run(
+                            [BASH, str(hooks / "working-memory-read.sh")],
+                            input=json.dumps({"prompt": "cobalt allocation"}),
+                            capture_output=True,
+                            text=True,
+                            env={**os.environ, "CONTEXT_TASK_ID": "TASK-HOST",
+                                 "CONTEXT_CAPSULE_DELIVERED": delivered},
+                            timeout=HOOK_TIMEOUT,
+                        )
+
+                    stood_down = run("1")
+                    self.assertEqual((0, ""), (stood_down.returncode, stood_down.stdout))
+                    self.assertFalse(marker.exists())
+                    ordinary = run("0")
+                    self.assertEqual(0, ordinary.returncode)
+                    self.assertIn("working: TASK-HOST", ordinary.stdout)
+                    self.assertTrue(marker.exists())
+
+
 class CursorCapsuleRenderTest(unittest.TestCase):
     """Functional render tests against a throwaway edition tree.
 
@@ -1159,20 +1206,74 @@ class SubagentWriteLockTest(WriteLockMixin, unittest.TestCase):
         A `---`-delimited section in an agent's body used to re-open the
         sed range, so a body line reading `writes: true` marked a read-only
         agent as write-capable.
+
+        The fixture agent lives in a throwaway repository with its own copy
+        of the gate. Written into this edition's `.claude/agents/`, it was for
+        a moment an unmirrored agent of the real tree: a mirror, parity or
+        route gate reading the tree at that moment failed, and a run stopped
+        at that moment left the file behind.
         """
-        trap = EDITION_ROOT / ".claude" / "agents" / "zz-parser-trap-agent.md"
-        trap.write_text(
-            "---\nname: zz-parser-trap\ndescription: read-only fixture\n"
-            "phase: understanding\n---\n\n# Trap\n\nProse.\n\n---\n"
-            "writes: true\n---\n\nMore prose.\n",
-            encoding="utf-8",
-        )
-        self.addCleanup(trap.unlink)
-        result = self.spawn("claude", "zz-parser-trap")
+        with tempfile.TemporaryDirectory(prefix="parser-trap-") as temp:
+            repo = Path(temp)
+            subprocess.run(
+                ["git", "-c", "init.defaultBranch=main", "init", "-q", str(repo)],
+                check=True,
+                capture_output=True,
+                timeout=HOOK_TIMEOUT,
+            )
+            (repo / ".claude" / "agents").mkdir(parents=True)
+            (repo / ".claude" / "agents" / "zz-parser-trap-agent.md").write_text(
+                "---\nname: zz-parser-trap\ndescription: read-only fixture\n"
+                "phase: understanding\n---\n\n# Trap\n\nProse.\n\n---\n"
+                "writes: true\n---\n\nMore prose.\n",
+                encoding="utf-8",
+            )
+            (repo / ".claude" / "hooks").mkdir()
+            gate = repo / ".claude" / "hooks" / "subagent-gate.sh"
+            shutil.copy(hook_path("claude", "subagent-gate.sh"), gate)
+            result = subprocess.run(
+                [BASH, str(gate)],
+                input=json.dumps(
+                    {"tool_name": "Agent", "tool_input": {"subagent_type": "zz-parser-trap"}}
+                ),
+                capture_output=True,
+                text=True,
+                cwd=str(repo),
+                env={**os.environ, **self.lock_env},
+                timeout=HOOK_TIMEOUT,
+            )
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertFalse(
-            self.lock_path("claude").exists(),
+        self.assertEqual(
+            [],
+            sorted(self.lock_dir.glob("claude-write-agent-lock-*")),
             "a body horizontal rule must not make an agent write-capable",
+        )
+
+
+class FixtureIsolationTest(unittest.TestCase):
+    """Agent fixtures are written outside the edition tree.
+
+    scripts/check.py runs this suite beside the mirror, parity and route
+    gates in one checkout, and those read `.claude/agents/` from disk.
+    """
+
+    def test_parser_trap_fixture_is_written_outside_the_edition(self) -> None:
+        written: list[Path] = []
+        write_text = Path.write_text
+
+        def recording(path: Path, *args, **kwargs):
+            written.append(Path(os.path.abspath(path)))
+            return write_text(path, *args, **kwargs)
+
+        outcome = unittest.TestResult()
+        with mock.patch.object(Path, "write_text", recording):
+            SubagentWriteLockTest(
+                "test_body_horizontal_rule_cannot_declare_writes"
+            ).run(outcome)
+        self.assertEqual([], outcome.failures + outcome.errors)
+        self.assertTrue(written)
+        self.assertEqual(
+            [], [path for path in written if EDITION_ROOT in path.parents]
         )
 
 

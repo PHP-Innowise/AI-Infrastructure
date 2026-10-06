@@ -68,7 +68,9 @@ around them. frontmatter_bytes is the exception on purpose - it is a file
 fact, keys included, and is gated as one.
 
 Token estimates use per-class bytes-per-token ratios measured with
-cl100k on this repository's own files (docs/TOKEN-ECONOMY-RESEARCH.md),
+cl100k on this repository's own files (docs/TOKEN-ECONOMY-RESEARCH.md as of
+9435dfc1^; that commit removed it, so read it with
+`git show 9435dfc1^:docs/TOKEN-ECONOMY-RESEARCH.md`),
 not the flat bytes / 4 this script used to apply — that heuristic runs
 19-25 % high on exactly these files, which is the difference between a
 gate that reflects spend and one that does not. The ratios are estimates
@@ -120,7 +122,9 @@ STARTUP_CATEGORIES = ("agents_md_bytes", "descriptor_bytes", "command_bytes",
                       "agent_bytes")
 
 # Bytes per cl100k token, measured on this repository's own files
-# (docs/TOKEN-ECONOMY-RESEARCH.md, all figures marked [M] there). Each class
+# (docs/TOKEN-ECONOMY-RESEARCH.md as of 9435dfc1^, all figures marked [M]
+# there; read it with `git show 9435dfc1^:docs/TOKEN-ECONOMY-RESEARCH.md`,
+# because 9435dfc1 removed it from the tree). Each class
 # tokenizes differently, and one flat divisor cannot represent them: prose
 # packs more bytes per token than YAML, and skill bodies - which carry code
 # blocks, command lines and tables - pack the least.

@@ -10,7 +10,7 @@ its native discovery model. Do not make one tool load another tool's adapters.
 | --- | --- | --- |
 | `AGENTS.md` | Shared | Enforceable project/stack policy used across tools |
 | `.agents/skills/` | Canonical skill edition | Skill workflows declared canonical by `project-brain/config/runtime.json`; Codex discovers them directly |
-| `.claude/` | Claude Code | Commands, agent wrappers, skill mirrors, `settings.json`, hooks, and reference documents |
+| `.claude/` | Claude Code | `CLAUDE.md` (the `@../AGENTS.md` import), commands, agent wrappers, skill mirrors, `settings.json`, hooks, and reference documents |
 | `.cursor/` | Cursor | Commands, agents, skill mirrors, `.mdc` rules, `hooks.json`, hooks, and reference documents |
 | `.codex/` | Codex | Trusted project config, hook wiring/scripts, and reference documents; not skills, commands, or agent wrappers |
 | `memory-bank/` | Shared | Reviewed durable knowledge plus the ignored local context database |
@@ -162,22 +162,44 @@ where supported, and `2` to block. Timeouts are seconds in both Cursor's
 field. Preserve the native values and schemas when synchronizing hooks.
 
 Claude Code delivers the tool-input JSON to a hook on stdin, so a hook command
-is the bare script path. Wrapping it as `echo '$TOOL_INPUT' | <script>` feeds
+is the script path itself. Wrapping it as `echo '$TOOL_INPUT' | <script>` feeds
 the hook the literal string `$TOOL_INPUT`, which every validator treats as an
 empty payload and passes.
+
+Each host runs a hook command from a different directory, so each wiring file
+anchors the script path its own way:
+
+| Host | Command form | Why |
+| --- | --- | --- |
+| Claude Code | `"${CLAUDE_PROJECT_DIR}"/.claude/hooks/<script>.sh` | Hooks run in the session's current directory, which follows every `cd`; Claude Code exports the project root as `CLAUDE_PROJECT_DIR` and asks for the placeholder double-quoted in shell form. |
+| Codex | `sh -c '...' sh <script>.sh` - a fixed launcher (spelled out in `.codex/hooks/README.md`) that walks up from the session's directory to the nearest directory holding `.codex/hooks.json` and execs that project's `.codex/hooks/<script>.sh` | Codex runs hooks in the session cwd through `$SHELL -lc` and exports no project-root variable. The walk works from a subdirectory, without Git, and for a project nested in a larger repository, and `sh` keeps it independent of the login shell. It stops at the project that declared the hook, so a missing script exits 127 instead of running a same-named script from an ancestor such as `~/.codex/hooks/`. |
+| Cursor | `.cursor/hooks/<script>.sh` | Cursor runs project hooks from the project root. |
+
+A bare relative path on Claude Code or Codex exits 127 as soon as the
+session's directory is not the project root, and both hosts treat every exit
+other than 2 as non-blocking, so a safety hook would stop guarding without an
+error. `tests/test_hook_wiring.py` runs every wired command from a nested
+directory to keep it that way.
 
 ## Claude Code Activation
 
 1. Open the consuming project root, not the parent accelerator repository.
-2. Confirm `AGENTS.md`, `.claude/settings.json`, `.claude/commands/`,
-   `.claude/agents/`, `.claude/skills/`, and executable hook scripts are
-   present.
-3. Start a new Claude Code session. The session-start output should identify
+2. Confirm `AGENTS.md`, `.claude/CLAUDE.md`, `.claude/settings.json`,
+   `.claude/commands/`, `.claude/agents/`, `.claude/skills/`, and executable
+   hook scripts are present.
+3. Run `/context` and confirm `AGENTS.md` is listed under **Memory files**.
+   Claude Code reads `AGENTS.md` by itself only while the project has no
+   `CLAUDE.md`, `.claude/CLAUDE.md` or `CLAUDE.local.md`; the shipped
+   `.claude/CLAUDE.md` imports `@../AGENTS.md`, so the policy loads beside a
+   project's own `CLAUDE.md` (Laravel Boost writes one) and on Claude Code
+   versions that do not read `AGENTS.md` directly. An existing
+   `.claude/CLAUDE.md` gets the import appended by `--merge-existing`.
+4. Start a new Claude Code session. The session-start output should identify
    project/tooling markers and context validation status without printing
    record contents.
-4. Type `/` and confirm installed commands such as `/verify`, `/memory`, and
+5. Type `/` and confirm installed commands such as `/verify`, `/memory`, and
    `/project-brain` are visible.
-5. Inspect any permission or hook error rather than weakening the safety
+6. Inspect any permission or hook error rather than weakening the safety
    configuration globally.
 
 Use `.claude/settings.local.json` for personal hooks or overrides that should
@@ -223,7 +245,10 @@ project.
    are present.
 4. Open the skills menu or ask Codex to use a known skill such as `verify`,
    `memory`, or `project-brain`.
-5. Start a new session and confirm the metadata-only session hook runs.
+5. Review and trust the hooks in `/hooks`. Codex records trust against each
+   hook definition's hash, so a hook whose command changed in an update is
+   skipped until it is trusted again.
+6. Start a new session and confirm the metadata-only session hook runs.
 
 The shipped config does not require an MCP server. Do not add the commented
 MCP example unless a real workflow needs that server and the team has reviewed

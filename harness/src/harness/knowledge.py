@@ -19,6 +19,8 @@ import time
 import uuid
 import zipfile
 
+from .filesystem import fs
+from . import process_runtime
 from .sessions import SessionError, open_project_path, read_context
 
 RECORD_TYPES = ('task', 'finding', 'bug', 'incident', 'decision', 'event')
@@ -40,11 +42,13 @@ ACTION_FIELDS = {
     'bank-retire': ('memory_id', 'valid_to', 'superseded_by', 'reason'),
     'start': ('task_id', 'goal', 'files', 'sources'),
     'brain-create': ('record_type', 'external_id', 'title', 'goal', 'files', 'sources', 'privacy', 'authority'),
-    'brain-update': ('record_id', 'revision', 'progress', 'next_steps', 'phase', 'transition', 'reason', 'authority'),
+    'brain-update': ('record_id', 'revision', 'progress', 'next_steps', 'replace_next_steps', 'phase', 'transition',
+                     'reason', 'authority'),
     'complete': ('task_id', 'revision', 'outcome', 'verification', 'sources'),
     'promote-propose': ('source_ids', 'title', 'content'),
     'promote-review': ('promotion_id', 'reviewer', 'reject'),
     'promote-apply': ('promotion_id',),
+    'promote-auto': (),
     'export': ('include_archive', 'include_superseded'),
 }
 
@@ -103,6 +107,32 @@ else:
         'automatic_promotion': bool(config.get('automatic_promotion'))}, ensure_ascii=False))
 '''
 
+# Check eligibility (Knowledge › Memory use) asks the installed runtime's own rules
+# which resolved records a rule held back and which chunks retrieval skips, so the
+# page never re-implements policy. It runs only on a user action.
+MEMORY_USE_CHECK = r'''
+import json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / 'memory-bank/scripts'))
+from brain_runtime import load_config, promotable_records
+from context import memory_eligibility
+request = json.loads(sys.argv[2])
+held, eligible = None, None
+if request.get('brain'):
+    candidates, blocked = promotable_records(root, load_config(root))
+    held, eligible = [item.get('reason') for item in blocked], len(candidates)
+skips = {}
+chunks = root / 'memory-bank' / 'chunks'
+for path in sorted(chunks.glob('*.md')) if chunks.is_dir() and not chunks.is_symlink() else []:
+    if path.is_symlink() or not path.is_file():
+        continue
+    reason = memory_eligibility(path, root)[1]
+    if reason is not None:
+        skips[path.name] = reason
+print(json.dumps({'held_back': held, 'eligible': eligible, 'skips': skips}))
+'''
+
 
 def _text(value, label, limit=16000):
     try:
@@ -153,6 +183,10 @@ def _entry(path, size, content):
     return result, metadata
 
 
+class KnowledgeBusy(SessionError):
+    """The non-blocking knowledge lock is held by another operation."""
+
+
 class KnowledgeManager:
     def __init__(self, sessions):
         self.sessions = sessions
@@ -165,7 +199,7 @@ class KnowledgeManager:
     @contextmanager
     def _operation(self):
         if not self.lock.acquire(blocking=False):
-            raise SessionError('Another knowledge operation is running. Wait for it to finish.')
+            raise KnowledgeBusy('Another knowledge operation is running. Wait for it to finish.')
         try:
             yield
         finally:
@@ -183,7 +217,7 @@ class KnowledgeManager:
         if selected is not None:
             try:
                 descriptor = open_project_path(project, prefix + 'project-brain', directory=True)
-                os.close(descriptor)
+                fs.close(descriptor)
                 brain_available = True
             except OSError:
                 pass
@@ -224,7 +258,7 @@ class KnowledgeManager:
                 except OSError:
                     continue
                 try:
-                    with os.scandir(descriptor) as names:
+                    with fs.scandir(descriptor) as names:
                         for item in names:
                             scanned += 1
                             if scanned > 5000 or len(entries) >= 500 or consumed >= 8 * 1024 * 1024:
@@ -239,7 +273,7 @@ class KnowledgeManager:
                             consumed += min(content[0], 65536)
                             entries.append(_entry(relative, *content)[0])
                 finally:
-                    os.close(descriptor)
+                    fs.close(descriptor)
                 if truncated:
                     break
         entries.sort(key=lambda item: (item['category'], item['title'].casefold(), item['path']))
@@ -260,23 +294,23 @@ class KnowledgeManager:
                 while pending:
                     current = pending.pop()
                     try:
-                        with os.scandir(current) as names:
+                        with fs.scandir(current) as names:
                             for item in names:
                                 scanned += 1
                                 if scanned > 20000:
                                     raise SessionError('Knowledge storage exceeds the supported file count.')
                                 metadata = item.stat(follow_symlinks=False)
                                 if stat.S_ISDIR(metadata.st_mode):
-                                    pending.append(os.open(item.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=current))
+                                    pending.append(fs.open(item.name, os.O_RDONLY | fs.O_DIRECTORY | fs.O_NOFOLLOW, dir_fd=current))
                                 elif not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
                                     raise SessionError('Knowledge storage contains links or unsupported file types.')
                     finally:
-                        os.close(current)
+                        fs.close(current)
             except OSError as error:
                 raise SessionError('Knowledge storage changed or contains unsafe paths.') from error
             finally:
                 for descriptor in pending:
-                    os.close(descriptor)
+                    fs.close(descriptor)
 
     def _arguments(self, action, data):
         arguments = [action]
@@ -313,7 +347,7 @@ class KnowledgeManager:
             if field not in data or field in ('record_type', 'layer') or (field == 'query' and query is not None):
                 continue
             value = data[field]
-            if field in ('include_archive', 'include_superseded', 'reject'):
+            if field in ('include_archive', 'include_superseded', 'reject', 'replace_next_steps'):
                 if type(value) is not bool:
                     raise SessionError('Operation options must be booleans.')
                 if value:
@@ -361,7 +395,7 @@ class KnowledgeManager:
                     except ValueError as error:
                         raise SessionError('Use a date in YYYY-MM-DD format.') from error
                 arguments.append('--' + names.get(field, field.replace('_', '-')) + '=' + value)
-        if action == 'brain-update' and not any(field in data for field in ('progress', 'next_steps', 'phase', 'transition', 'authority')):
+        if action == 'brain-update' and not any(field in data for field in ('progress', 'next_steps', 'replace_next_steps', 'phase', 'transition', 'authority')):
             raise SessionError('Choose a record field or lifecycle transition to update.')
         if query is not None:
             # Positional queries follow --, so leading hyphens stay literal.
@@ -371,17 +405,15 @@ class KnowledgeManager:
     def _execute(self, command, root):
         read_fd, write_fd = os.pipe()
         process = None
-        selector = selectors.DefaultSelector()
+        selector = process_runtime.PipeSelector()
         output = [bytearray(), bytearray()]
         try:
-            guarded = [sys.executable, str(Path(__file__).with_name('process_guard.py')), str(read_fd), '--', *command]
             environment = {key: value for key, value in os.environ.items() if key not in ('PYTHONPATH', 'PYTHONHOME')}
             environment['PYTHONDONTWRITEBYTECODE'] = '1'
-            process = subprocess.Popen(guarded, cwd=root, env=environment, stdin=subprocess.DEVNULL,
-                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
-                                       pass_fds=(read_fd, self.sessions.runner_lock))
+            process = process_runtime.launch_guarded(command, read_fd, lock_fd=self.sessions.runner_lock, cwd=root, env=environment, stdin=subprocess.DEVNULL,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             self.process = process
-            os.close(read_fd)
+            fs.close(read_fd)
             read_fd = None
             selector.register(process.stdout, selectors.EVENT_READ, 0)
             selector.register(process.stderr, selectors.EVENT_READ, 1)
@@ -392,10 +424,10 @@ class KnowledgeManager:
                 if time.monotonic() - started > EXECUTION_TIMEOUT:
                     raise SessionError('Knowledge operation timed out. Refresh the records before retrying; changes may have been applied.')
                 ready = selector.select(.1)
-                if not ready and process.poll() is not None:
+                if not ready and process.poll() is not None and not process_runtime.WINDOWS:
                     break
                 for key, _ in ready:
-                    chunk = os.read(key.fileobj.fileno(), 65536)
+                    chunk = selector.read(key.fileobj, 65536)
                     if not chunk:
                         selector.unregister(key.fileobj)
                         continue
@@ -405,15 +437,14 @@ class KnowledgeManager:
             return process.wait(timeout=3), bytes(output[0]), bytes(output[1])
         finally:
             if read_fd is not None:
-                os.close(read_fd)
-            os.close(write_fd)
+                fs.close(read_fd)
+            fs.close(write_fd)
             if process is not None:
                 try:
                     process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
                     pass
-                self.sessions._signal(process, signal.SIGKILL)
-                process.wait(timeout=3)
+                process_runtime.reap_tree(process, owner=self.sessions)
                 process.stdout.close()
                 process.stderr.close()
             self.process = None
@@ -431,7 +462,7 @@ class KnowledgeManager:
                     relative = _path(path.relative_to(destination).as_posix())
                     descriptor = open_project_path(destination, relative)
                     try:
-                        metadata = os.fstat(descriptor)
+                        metadata = fs.fstat(descriptor)
                         count += 1
                         total += metadata.st_size
                         if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
@@ -447,7 +478,7 @@ class KnowledgeManager:
                             raise SessionError('Export changed while it was being read.')
                         archive.writestr(relative, data)
                     finally:
-                        os.close(descriptor)
+                        fs.close(descriptor)
         return stream.getvalue()
 
     def _inspect_runtime(self, root, request):
@@ -473,7 +504,27 @@ class KnowledgeManager:
             self._preflight(root)
             return {**info, **self._inspect_runtime(root, {'task_id': task_id, 'task_only': task_only})}
 
-    def run(self, project_id, data, *, _root=None, _ephemeral=False, _gate=None):
+    def memory_use_check(self, project_id, bank=None):
+        """Run the runtime's eligibility rules for Memory use, under the non-blocking knowledge lock."""
+        with self._operation():
+            if self.closed.is_set() or self.sessions.stopping.is_set():
+                raise SessionError('The knowledge manager is stopping.')
+            info = self.info(project_id, bank)
+            if not info['runtime_available']:
+                raise SessionError('The selected Memory Bank does not have an installed context runtime.')
+            root = Path(self.sessions.project(project_id)['path']) / info['root']
+            self._preflight(root)
+            brain = info['brain_available'] and info['mode'] == 'governed'
+            code, stdout, _ = self._execute([sys.executable, '-c', MEMORY_USE_CHECK, str(root), json.dumps({'brain': brain})], root)
+            try:
+                result = json.loads(stdout)
+            except ValueError as error:
+                raise SessionError('The installed runtime could not check eligibility.') from error
+            if code != 0 or not isinstance(result, dict):
+                raise SessionError('The installed runtime could not check eligibility. Check record validity and source paths.')
+            return {**info, **result}
+
+    def run(self, project_id, data, *, _root=None, _ephemeral=False, _gate=None, _host=None):
         if not isinstance(data, dict) or not isinstance(data.get('action'), str) or data['action'] not in ACTION_FIELDS:
             raise SessionError('Select a supported knowledge operation.')
         action = data['action']
@@ -487,7 +538,7 @@ class KnowledgeManager:
             if not info['runtime_available']:
                 raise SessionError('The selected Memory Bank does not have an installed context runtime.')
             if action in ('start', 'brain-create', 'brain-update', 'complete', 'rebind',
-                          'promote-propose', 'promote-review', 'promote-apply') and info['mode'] != 'governed':
+                          'promote-propose', 'promote-review', 'promote-apply', 'promote-auto') and info['mode'] != 'governed':
                 raise SessionError('Project Brain editing requires the project to use governed mode.')
             project = Path(_root) if _root is not None else Path(self.sessions.project(project_id)['path'])
             root = project / info['root']
@@ -500,6 +551,12 @@ class KnowledgeManager:
                     if _gate not in ('off', 'shadow', 'enforce'):
                         raise SessionError('Invalid internal retrieval gate.')
                     options.append('--gate=' + _gate)
+                if _host is not None:
+                    # The provider the capsule is for: recorded in the manifest, and
+                    # it decides which instruction files the runtime leaves out.
+                    if _host not in ('claude', 'codex', 'cursor', 'cli'):
+                        raise SessionError('Invalid internal retrieval host.')
+                    options.append('--host=' + _host)
                 arguments[1:1] = options
             export_id, destination = None, None
             if action == 'export':
@@ -537,6 +594,8 @@ class KnowledgeManager:
                     message = 'This lifecycle transition is not allowed from the current record state.'
                 elif 'secret' in detail.lower():
                     message = 'The runtime refused content matching its secret-protection rules.'
+                elif 'unrecognized arguments' in detail or 'invalid choice' in detail:
+                    message = 'The installed context runtime is older than this operation. Update the accelerator in this project first.'
                 response['error'] = message
             elif result is None:
                 response.update(ok=False, error='The context runtime did not return a valid JSON result. Refresh before retrying; changes may have been applied.')

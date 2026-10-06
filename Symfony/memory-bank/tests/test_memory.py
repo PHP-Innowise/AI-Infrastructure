@@ -54,7 +54,7 @@ class MemoryIntegrationTest(unittest.TestCase):
             "Project Brain as the only authority",
             "context.py validate",
             "working: governed",
-            ".agents/skills/checkpoint/SKILL.md",
+            "../checkpoint/SKILL.md",
             "explicitly configured lightweight mode",
             "does not invoke or chain another skill",
             "context.py refresh --json",

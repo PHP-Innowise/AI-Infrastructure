@@ -382,6 +382,9 @@ composer analyse
 php bin/console lint:container
 php bin/console debug:router
 php bin/console doctrine:schema:validate --skip-sync
+php bin/console doctrine:migrations:migrate -n --env=test
+php bin/console doctrine:schema:validate --env=test
+php bin/console doctrine:migrations:up-to-date --env=test
 ```
 
 Frontend work also runs configured template, JavaScript, CSS, test, and production-build checks. Missing tooling is reported as `N/A - tooling not configured`; it is never installed or silently treated as passing.

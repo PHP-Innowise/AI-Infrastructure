@@ -6,6 +6,32 @@ on:
   pull_request:
 
 jobs:
+  system-orchestration:
+    name: "system orchestration (Python ${{ matrix.python }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.x"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Test universal system planning and execution
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y bubblewrap
+          # Ubuntu 24.04 runners block unprivileged user namespaces through AppArmor,
+          # which the AI discovery sandbox (bubblewrap) needs.
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --unshare-pid --ro-bind / / --proc /proc --dev /dev true
+          python3 -m unittest tests.test_ai_system tests.test_ai_system_providers tests.test_ai_system_execution tests.test_ai_system_portable tests.test_harness_system_orchestration tests.test_harness_system_editor tests.test_harness_system_discovery tests.test_harness_agent_activity
+      - name: Validate synthetic service catalog
+        run: python3 scripts/ai_system.py validate --system docs/examples/ai-system/system.json
+
   tests:
     name: "tests (${{ matrix.suite }})"
     runs-on: ubuntu-latest
@@ -83,6 +109,22 @@ jobs:
         run: python3 scripts/build_mirrors.py --check
       - name: Mirror executor regression tests
         run: python3 -m unittest tests.test_build_mirrors
+      # Hooks run as direct commands; a script that lost its executable bit in
+      # the index exits 126 in every installed project.
+      - name: Executable bits recorded in the Git index
+        run: python3 -m unittest tests.test_file_modes
+      # Every shipped bash-validator copy (4 editions + Infrastructure-Creator,
+      # all three tool trees) against the shared block/pass corpus.
+      - name: Bash validator corpus
+        run: python3 -m unittest tests.test_bash_validator_corpus
+      # Mirrors prove the copies agree with canon; this proves canon points at
+      # things that exist: every wired hook script is tracked as 100755, every
+      # command/agent/flow/AGENTS.md reference resolves in its own tool, and
+      # every skill is reachable or allowlisted with a reason.
+      - name: Wiring and routing references resolve
+        run: |
+          python3 scripts/check_routes.py
+          python3 -m unittest tests.test_check_routes
 
   infrastructure-creator-reliability:
     # Pinned to the 3.9 floor on purpose: a 3.x leg would only repeat the
@@ -124,6 +166,10 @@ jobs:
         run: python3 -m unittest tests.test_installation
       - name: Preserve framework-specific skill semantics
         run: python3 -m unittest tests.test_framework_semantics
+      - name: Hook wiring runs from any working directory
+        # A bare relative hook path exits 127 from a subdirectory, which
+        # Claude Code and Codex treat as non-blocking: the guard fails open.
+        run: python3 -m unittest tests.test_hook_wiring
       - name: Optional developer tooling stays out of the editions
         # The live code2prompt checks skip themselves here (no Rust toolchain);
         # what runs is the containment contract and the argv/exclude pins.
@@ -135,7 +181,33 @@ jobs:
       - name: Kit 3 registry and catalog regression tests
         run: python3 -m unittest tests.test_registry tests.test_open_source_kit tests.test_kit_fetcher tests.test_kit3 tests.test_kit3_catalog
       - name: Native browser harness regression tests
-        run: python3 -m unittest tests.test_harness_providers tests.test_harness_sessions tests.test_harness_web tests.test_harness_process_guard tests.test_harness_skills tests.test_harness_fleet tests.test_harness_knowledge tests.test_harness_task_context tests.test_harness_setup tests.test_harness_creator tests.test_harness_results tests.test_harness_delivery tests.test_harness_clash
+        run: python3 -m unittest tests.test_harness_providers tests.test_harness_run_activity tests.test_harness_commands tests.test_harness_sessions tests.test_harness_web tests.test_harness_process_guard tests.test_harness_process_runtime tests.test_harness_launcher tests.test_harness_skills tests.test_harness_fleet tests.test_harness_knowledge tests.test_harness_memory_use tests.test_harness_context_usage tests.test_harness_task_context tests.test_harness_memory_draft tests.test_harness_setup tests.test_harness_creator tests.test_harness_results tests.test_harness_delivery tests.test_harness_clash tests.test_portable_fs tests.test_windows_security tests.test_windows_commands tests.test_windows_creator
+
+  windows-harness:
+    name: "Windows Harness (Python 3.13)"
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Native Windows Harness acceptance and boundary tests
+        shell: pwsh
+        run: >-
+          python -m unittest
+          tests.test_harness_windows
+          tests.test_harness_launcher
+          tests.test_harness_process_runtime
+          tests.test_portable_fs
+          tests.test_windows_security
+          tests.test_windows_commands
+          tests.test_windows_creator
+          tests.test_windows_discovery
+          tests.test_ai_system_portable
 
   harness-fleet:
     name: Offline Fleet runtime
@@ -181,7 +253,7 @@ jobs:
           # .cursor/rules/working-memory.mdc is alwaysApply: it is re-sent on
           # every prompt, so a clock or a per-call identifier inside it makes
           # each turn's prefix unique and is billed on a T^2/2 curve
-          # (docs/TOKEN-ECONOMY-RESEARCH.md). The behavioural guard is
+          # (docs/TOKEN-ECONOMY-RESEARCH.md as of 9435dfc1^). The behavioural guard is
           # test_render_carries_no_per_turn_invalidator in each edition's
           # test_hooks.py; this is the cheap textual net in front of it.
           if git ls-files -z -- '*/.cursor/hooks/working-memory-write.sh' \
@@ -196,6 +268,8 @@ jobs:
         # copies when it writes code. --require-php makes a runner that loses
         # its preinstalled php fail rather than report a silent pass.
         run: python3 scripts/check_php_snippets.py --require-php
+      - name: PHP snippet gate regression tests
+        run: python3 -m unittest tests.test_check_php_snippets
       - name: Context budget
         run: python3 scripts/context_budget.py --check
       # Stdlib policy check, following the context-budget precedent above: the
@@ -217,6 +291,16 @@ jobs:
       # scoring and its fixtures are ordinary code and are gated here.
       - name: Routing eval scoring and fixtures
         run: python3 -m unittest tests.test_routing_eval
+      # Symfony's skill-creator adapts the upstream eval scripts to the Codex
+      # and Cursor CLIs; its tests are excluded from installs and ran nowhere.
+      - name: Symfony skill-creator adapter tests
+        run: |
+          (cd "Symfony/.agents/skills/skill-creator" && python3 -m unittest discover -s tests)
+          (cd "Symfony/.cursor/skills/skill-creator" && python3 -m unittest discover -s tests)
+      # scripts/check.py is the local twin of this workflow; the test fails
+      # when a gate here has no entry there, or an entry there left CI.
+      - name: check.py mirrors the workflows
+        run: python3 -m unittest tests.test_check
 
   changelog:
     name: core-changelog

@@ -16,6 +16,8 @@ import threading
 import time
 import uuid
 
+from .filesystem import fs
+from . import process_runtime
 from .sessions import SessionError, git_details
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -58,28 +60,28 @@ def _read(root_fd, name, directories=None, required=False):
     """Read from retained directory descriptors; every ancestor must be a directory."""
     if not _safe_path(name):
         raise SessionError('The accelerator inventory contains an unsupported path.')
-    parent = os.dup(root_fd)
+    parent = fs.dup(root_fd)
     parts = name.split('/')
     try:
         for index, part in enumerate(parts[:-1]):
             try:
-                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                child = fs.open(part, os.O_RDONLY | fs.O_DIRECTORY | fs.O_NOFOLLOW, dir_fd=parent)
             except FileNotFoundError:
                 if required:
                     raise SessionError('A selected accelerator source file is missing: ' + name)
                 return None
-            os.close(parent)
+            fs.close(parent)
             parent = child
             if directories is not None:
-                directories['/'.join(parts[:index + 1])] = _identity(os.fstat(parent))
+                directories['/'.join(parts[:index + 1])] = _identity(fs.fstat(parent))
         try:
-            descriptor = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            descriptor = fs.open(parts[-1], os.O_RDONLY | fs.O_NOFOLLOW | fs.O_NONBLOCK, dir_fd=parent)
         except FileNotFoundError:
             if required:
                 raise SessionError('A selected accelerator source file is missing: ' + name)
             return None
         try:
-            before = os.fstat(descriptor)
+            before = fs.fstat(descriptor)
             if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
                 raise SessionError('Only regular files without hard links are supported: ' + name)
             if before.st_size > MAX_FILE_BYTES:
@@ -90,7 +92,7 @@ def _read(root_fd, name, directories=None, required=False):
                 if not chunk:
                     break
                 body.extend(chunk)
-            after = os.fstat(descriptor)
+            after = fs.fstat(descriptor)
             if (len(body) > MAX_FILE_BYTES or _identity(before) != _identity(after)
                     or before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns
                     or before.st_ctime_ns != after.st_ctime_ns or after.st_nlink != 1):
@@ -98,11 +100,11 @@ def _read(root_fd, name, directories=None, required=False):
             value = bytes(body)
             return {**_fingerprint(after, value), 'body': value}
         finally:
-            os.close(descriptor)
+            fs.close(descriptor)
     except OSError as error:
         raise SessionError('A selected path is unsafe or obstructed: ' + name) from error
     finally:
-        os.close(parent)
+        fs.close(parent)
 
 
 def _metadata(value):
@@ -182,14 +184,12 @@ class SetupManager:
         process = None
         try:
             environment = {**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'}
-            guarded = [sys.executable, str(Path(__file__).with_name('process_guard.py')), str(read_fd), '--', *command]
-            process = subprocess.Popen(guarded, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, env=environment, start_new_session=True,
-                pass_fds=(read_fd, self.sessions.runner_lock))
+            process = process_runtime.launch_guarded(command, read_fd, lock_fd=self.sessions.runner_lock, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, env=environment)
             self.process = process
             if self.closed.is_set() or self.sessions.stopping.is_set():
                 self.sessions._signal(process, signal.SIGTERM)
-            os.close(read_fd)
+            fs.close(read_fd)
             read_fd = None
             try:
                 output, errors = process.communicate(timeout=30)
@@ -200,11 +200,10 @@ class SetupManager:
             return process.returncode, output.decode('utf-8', errors='replace'), errors.decode('utf-8', errors='replace')
         finally:
             if read_fd is not None:
-                os.close(read_fd)
-            os.close(write_fd)
+                fs.close(read_fd)
+            fs.close(write_fd)
             if process is not None:
-                self.sessions._signal(process, signal.SIGKILL)
-                process.wait(timeout=3)
+                process_runtime.reap_tree(process, owner=self.sessions)
                 process.stdout.close()
                 process.stderr.close()
             self.process = None
@@ -245,12 +244,21 @@ class SetupManager:
                         raise SessionError('The selected accelerator exceeds the 5000-file limit.')
                     total = len(inventory['body']) + len(code['body'])
                     prefix = installer.edition_path(edition).as_posix() + '/'
+                    # The staged source is no Git checkout, so the staged
+                    # installer sees only disk modes. A file the source index
+                    # records as executable is staged with the bit, and the
+                    # installer's disk fallback then decides as a direct run
+                    # of the CLI does (core.fileMode=false, Windows-made
+                    # checkouts). The source fingerprint keeps the disk mode.
+                    executable_bits = installer.source_executable_bits(self.source_root, edition) or {}
                     for _, name in selected:
-                        source_name = prefix + catalog['source_overrides'].get(name, name)
+                        source_path = catalog['source_overrides'].get(name, name)
+                        source_name = prefix + source_path
                         source = _read(source_fd, source_name, source_dirs, required=True)
                         sources[source_name] = source
                         total += source['bytes']
-                        _write_stage(staged_source, source_name, source)
+                        _write_stage(staged_source, source_name,
+                                     {**source, 'mode': source['mode'] | 0o111} if executable_bits.get(source_path) else source)
                         before[name] = _read(target_fd, name, target_dirs)
                         if before[name] is not None:
                             total += before[name]['bytes']
@@ -288,7 +296,11 @@ class SetupManager:
                     actions = {}
                     for line in output.splitlines():
                         fields = line.split('\t')
-                        if len(fields) >= 3 and fields[0] in ('COPY', 'MERGE', 'COPY_AS', 'UNCHANGED'):
+                        # FIX_MODE: identical bytes, and the staged installer
+                        # gave the staged copy the executable bit it lacked.
+                        # KEPT: a seed-only file (runtime state, team configuration)
+                        # the project already has; its content stays.
+                        if len(fields) >= 3 and fields[0] in ('COPY', 'MERGE', 'COPY_AS', 'UNCHANGED', 'FIX_MODE', 'KEPT'):
                             actions[fields[2]] = (fields[0].lower().replace('_', '-'), fields[3] if len(fields) > 3 else fields[2])
                     if set(actions) != {name for _, name in selected}:
                         raise SessionError('The staged installer returned an incomplete file plan.')
@@ -308,10 +320,18 @@ class SetupManager:
                                      'diff': change, 'diff_truncated': truncated}
                             if name in collisions:
                                 entry['reason'] = collisions[name]
+                            elif action == 'kept':
+                                entry['reason'] = ('Seeded once, then owned by the project (runtime state or team '
+                                                   'configuration). The existing file is kept as it is.')
+                            elif action == 'fix-mode':
+                                if previous is None or previous['hash'] != value['hash']:
+                                    raise SessionError('The staged installer returned an inconsistent file plan.')
+                                entry['reason'] = (f"Mode {previous['mode'] & 0o777:04o} -> {value['mode'] & 0o777:04o}: "
+                                                   'this file must be executable. Its content is unchanged.')
                             files.append(entry)
                             payloads[destination] = value
                     finally:
-                        os.close(stage_fd)
+                        fs.close(stage_fd)
                     if sum(value['bytes'] for value in payloads.values()) > MAX_BYTES:
                         raise SessionError('The merged accelerator payload exceeds the 64 MiB preview limit.')
                 self.previews = {key: item for key, item in self.previews.items() if time.monotonic() - item['created'] < PREVIEW_TTL}
@@ -319,12 +339,12 @@ class SetupManager:
                     self.previews.pop(next(iter(self.previews)))
                 preview_id = uuid.uuid4().hex
                 self.previews[preview_id] = {'created': time.monotonic(), 'project_id': project['id'], 'root': root,
-                    'identity': _identity(os.fstat(target_fd)), 'source_identity': _identity(os.fstat(source_fd)),
+                    'identity': _identity(fs.fstat(target_fd)), 'source_identity': _identity(fs.fstat(source_fd)),
                     'source_dirs': source_dirs, 'target_dirs': target_dirs, 'edition': edition, 'tools': list(tools),
                     'release': catalog['release'], 'before': {key: _metadata(value) for key, value in before.items()},
                     'sources': {key: _metadata(value) for key, value in sources.items()}, 'code': _metadata(code),
                     'payloads': payloads, 'files': files, 'can_install': not collisions}
-                changed = sum(item['action'] != 'unchanged' for item in files)
+                changed = sum(item['action'] not in ('unchanged', 'kept') for item in files)
                 return {'preview_id': preview_id, 'project_id': project['id'], 'edition': edition, 'tools': list(tools),
                     'expires_at': time.time() + PREVIEW_TTL, 'files': [dict(item) for item in files], 'file_count': len(files), 'changed_count': changed,
                     'collisions': [{'path': item['path'], 'reason': item['reason']} for item in files if item['action'] == 'collision'],
@@ -333,23 +353,23 @@ class SetupManager:
             finally:
                 for descriptor in (target_fd, source_fd, code_fd):
                     if descriptor is not None:
-                        os.close(descriptor)
+                        fs.close(descriptor)
 
     @staticmethod
     def _check_directories(root_fd, expected):
         for name, identity in expected.items():
-            descriptor = os.dup(root_fd)
+            descriptor = fs.dup(root_fd)
             try:
                 for part in name.split('/'):
-                    child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
-                    os.close(descriptor)
+                    child = fs.open(part, os.O_RDONLY | fs.O_DIRECTORY | fs.O_NOFOLLOW, dir_fd=descriptor)
+                    fs.close(descriptor)
                     descriptor = child
-                if _identity(os.fstat(descriptor)) != identity:
+                if _identity(fs.fstat(descriptor)) != identity:
                     raise SessionError('A selected directory changed. Preview again.')
             except OSError as error:
                 raise SessionError('A selected directory changed or became unsafe. Preview again.') from error
             finally:
-                os.close(descriptor)
+                fs.close(descriptor)
 
     def _receipt(self, project_id, value=None):
         descriptor = _root_fd(self.sessions.state_dir)
@@ -359,20 +379,20 @@ class SetupManager:
                 snapshot = _read(descriptor, name)
                 return json.loads(snapshot['body']) if snapshot else None
             temporary = '.setup-' + uuid.uuid4().hex
-            output = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=descriptor)
+            output = fs.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | fs.O_NOFOLLOW, 0o600, dir_fd=descriptor)
             try:
                 with os.fdopen(output, 'wb') as handle:
                     handle.write(json.dumps(value, ensure_ascii=False).encode('utf-8'))
                     handle.flush(); os.fsync(handle.fileno())
                 _read(descriptor, name)  # Refuse an unexpected link/nonregular prior receipt.
-                os.replace(temporary, name, src_dir_fd=descriptor, dst_dir_fd=descriptor)
+                fs.replace(temporary, name, src_dir_fd=descriptor, dst_dir_fd=descriptor)
             finally:
                 try:
-                    os.unlink(temporary, dir_fd=descriptor)
+                    fs.unlink(temporary, dir_fd=descriptor)
                 except FileNotFoundError:
                     pass
         finally:
-            os.close(descriptor)
+            fs.close(descriptor)
 
     def install(self, data):
         if not isinstance(data, dict) or set(data) != {'preview_id'} or not isinstance(data['preview_id'], str):
@@ -388,13 +408,13 @@ class SetupManager:
                 raise SessionError('Wait for active sessions to finish before installing the accelerator.')
             _, root, target_fd = self._project(preview['project_id'])
             source_fd, code_fd = None, None
-            installed, merged, unchanged = [], [], []
+            installed, merged, unchanged, repaired = [], [], [], []
             writing = False
             try:
                 self._check_overlap(root)
                 source_fd, code_fd = _root_fd(self.source_root), _root_fd(ROOT)
-                if (root != preview['root'] or _identity(os.fstat(target_fd)) != preview['identity']
-                        or _identity(os.fstat(source_fd)) != preview['source_identity']):
+                if (root != preview['root'] or _identity(fs.fstat(target_fd)) != preview['identity']
+                        or _identity(fs.fstat(source_fd)) != preview['source_identity']):
                     raise SessionError('The project or source directory changed. Preview again.')
                 self._check_directories(source_fd, preview['source_dirs'])
                 self._check_directories(target_fd, preview['target_dirs'])
@@ -410,42 +430,54 @@ class SetupManager:
                     if self.closed.is_set() or self.sessions.stopping.is_set():
                         raise SessionError('Accelerator setup stopped during installation.')
                     name, action = entry['path'], entry['action']
-                    if action == 'unchanged':
+                    if action in ('unchanged', 'kept'):
                         unchanged.append(name)
                         continue
                     writing = True
                     self._check_directories(target_fd, preview['target_dirs'])
                     current_root = _root_fd(root)
                     try:
-                        if _identity(os.fstat(current_root)) != preview['identity']:
+                        if _identity(fs.fstat(current_root)) != preview['identity']:
                             raise SessionError('The project directory changed during installation.')
                     finally:
-                        os.close(current_root)
-                    parent = os.dup(target_fd)
+                        fs.close(current_root)
+                    parent = fs.dup(target_fd)
                     temporary = None
                     try:
                         parts = name.split('/')
                         for index, part in enumerate(parts[:-1]):
                             try:
-                                os.mkdir(part, mode=0o755, dir_fd=parent)
+                                fs.mkdir(part, mode=0o755, dir_fd=parent)
                             except FileExistsError:
                                 pass
-                            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
-                            os.close(parent); parent = child
+                            child = fs.open(part, os.O_RDONLY | fs.O_DIRECTORY | fs.O_NOFOLLOW, dir_fd=parent)
+                            fs.close(parent); parent = child
                             prefix = '/'.join(parts[:index + 1])
-                            identity = _identity(os.fstat(parent))
+                            identity = _identity(fs.fstat(parent))
                             if prefix in preview['target_dirs'] and preview['target_dirs'][prefix] != identity:
                                 raise SessionError('An installation directory changed.')
                             preview['target_dirs'][prefix] = identity
                         if _metadata(_read(target_fd, name)) != preview['before'].get(name):
                             raise SessionError('An installation file changed after preflight.')
                         value = preview['payloads'][name]
+                        if action == 'fix-mode':
+                            # The bytes were just verified identical; only the
+                            # reviewed mode is applied, in place, to that file.
+                            descriptor = fs.open(parts[-1], os.O_RDONLY | fs.O_NOFOLLOW | fs.O_NONBLOCK, dir_fd=parent)
+                            try:
+                                if _identity(fs.fstat(descriptor)) != preview['before'][name]['identity']:
+                                    raise SessionError('An installation file changed after preflight.')
+                                fs.fchmod(descriptor, value['mode'] & 0o777)
+                            finally:
+                                fs.close(descriptor)
+                            repaired.append(name)
+                            continue
                         temporary = '.harness-setup-' + uuid.uuid4().hex
-                        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        descriptor = fs.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | fs.O_NOFOLLOW,
                                              value['mode'] & 0o777, dir_fd=parent)
                         with os.fdopen(descriptor, 'wb') as handle:
                             handle.write(value['body'])
-                            os.fchmod(handle.fileno(), value['mode'] & 0o777)
+                            fs.fchmod(handle.fileno(), value['mode'] & 0o777)
                             handle.flush(); os.fsync(handle.fileno())
                         self._check_directories(target_fd, preview['target_dirs'])
                         if action == 'merge':
@@ -453,26 +485,26 @@ class SetupManager:
                                 raise SessionError('The installer proposed an unsupported merge.')
                             if _metadata(_read(target_fd, name)) != preview['before'].get(name):
                                 raise SessionError('A supported merge target changed after preflight.')
-                            os.replace(temporary, parts[-1], src_dir_fd=parent, dst_dir_fd=parent)
+                            fs.replace(temporary, parts[-1], src_dir_fd=parent, dst_dir_fd=parent)
                             merged.append(name)
                         else:
-                            os.link(temporary, parts[-1], src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
+                            fs.link(temporary, parts[-1], src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
                             installed.append(name)
                     finally:
                         if temporary is not None:
                             try:
-                                os.unlink(temporary, dir_fd=parent)
+                                fs.unlink(temporary, dir_fd=parent)
                             except FileNotFoundError:
                                 pass
-                        os.close(parent)
+                        fs.close(parent)
                 fingerprints = {}
                 self._check_directories(target_fd, preview['target_dirs'])
                 current_root = _root_fd(root)
                 try:
-                    if _identity(os.fstat(current_root)) != preview['identity']:
+                    if _identity(fs.fstat(current_root)) != preview['identity']:
                         raise SessionError('The project directory changed during installation.')
                 finally:
-                    os.close(current_root)
+                    fs.close(current_root)
                 for name, value in preview['payloads'].items():
                     actual = _read(target_fd, name, required=True)
                     if actual['hash'] != value['hash'] or actual['mode'] & 0o777 != value['mode'] & 0o777:
@@ -484,18 +516,21 @@ class SetupManager:
                     'tools': preview['tools'], 'root': str(root), 'identity': list(preview['identity']), 'files': fingerprints})
             except (OSError, SessionError) as error:
                 if writing:
-                    return {'ok': False, 'installed': installed, 'merged': merged, 'unchanged': unchanged,
+                    return {'ok': False, 'installed': installed, 'merged': merged, 'unchanged': unchanged, 'repaired': repaired,
                             'error': 'Installation stopped and may be partial. Refresh the project and preview again.',
-                            'summary': f'{len(installed)} files added and {len(merged)} merged before installation stopped.'}
+                            'summary': f'{len(installed)} files added and {len(merged)} merged'
+                            + (f', {len(repaired)} made executable' if repaired else '') + ' before installation stopped.'}
                 if isinstance(error, SessionError):
                     raise
                 raise SessionError('Installation preflight failed. No project files were written; preview again.') from error
             finally:
                 for descriptor in (target_fd, source_fd, code_fd):
                     if descriptor is not None:
-                        os.close(descriptor)
-            return {'ok': True, 'installed': installed, 'merged': merged, 'unchanged': unchanged,
-                    'summary': f'{len(installed)} files installed, {len(merged)} merged, {len(unchanged)} unchanged. Reviewed payload hashes verified.'}
+                        fs.close(descriptor)
+            return {'ok': True, 'installed': installed, 'merged': merged, 'unchanged': unchanged, 'repaired': repaired,
+                    'summary': f'{len(installed)} files installed, {len(merged)} merged, '
+                    + (f'{len(repaired)} made executable, ' if repaired else '')
+                    + f'{len(unchanged)} unchanged. Reviewed payload hashes and modes verified.'}
 
     def status(self, project_id):
         project = self.sessions.project(project_id)
@@ -506,7 +541,7 @@ class SetupManager:
             'payload_verified': False, 'git': {'is_git': False},
             'providers': [{key: value for key, value in provider.items() if key in ('id', 'name', 'available', 'detail')}
                           for provider in self.sessions.providers.values()],
-            'diagnostics': ['Provider availability means the CLI was found; authentication is not checked.']}
+            'scope': ['A found CLI may not be signed in; authentication is not checked.'], 'diagnostics': []}
         source_fd = None
         try:
             source_fd = _root_fd(self.source_root)
@@ -520,7 +555,7 @@ class SetupManager:
             result['diagnostics'].append('Some accelerator release metadata is unavailable.')
         finally:
             if source_fd is not None:
-                os.close(source_fd)
+                fs.close(source_fd)
         descriptor = None
         try:
             descriptor = _root_fd(Path(project['path']))
@@ -542,7 +577,7 @@ class SetupManager:
                 item['installed'] = any(present(name) for name in names)
             receipt = self._receipt(project_id)
             if isinstance(receipt, dict) and receipt.get('edition') in installer.EDITIONS:
-                if receipt.get('root') == project['path'] and receipt.get('identity') == list(_identity(os.fstat(descriptor))):
+                if receipt.get('root') == project['path'] and receipt.get('identity') == list(_identity(fs.fstat(descriptor))):
                     result['installed_edition'] = receipt['edition']
                     fingerprints = receipt.get('files')
                     if isinstance(fingerprints, dict) and len(fingerprints) <= MAX_FILES:
@@ -562,15 +597,15 @@ class SetupManager:
                             result['diagnostics'].append('Installed files differ from the last successful Setup receipt.')
             try:
                 result['git'] = git_details(Path(project['path']), include_status=False)
-                result['diagnostics'].append('Git branch metadata only; working-tree changes were not inspected.')
+                result['scope'].append('Git branch only; the working tree was not inspected.')
             except SessionError:
                 result['diagnostics'].append('Git metadata is unavailable. Project execution can still use local files.')
-            result['diagnostics'].append('Readiness is a static file check; project scripts and hooks were not executed.')
+            result['scope'].append('Static file check; no project scripts or hooks ran.')
         except (SessionError, ValueError, TypeError, AttributeError):
             result['diagnostics'].append('The project is missing, unsafe, or contains invalid setup metadata. Restore it before setup.')
         finally:
             if descriptor is not None:
-                os.close(descriptor)
+                fs.close(descriptor)
         return result
 
     def close(self):

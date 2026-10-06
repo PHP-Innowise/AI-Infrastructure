@@ -43,11 +43,18 @@ if provider == "codex":
     emit({"type": "item.completed", "item": {"type": "agent_message", "text": text}})
     emit({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}})
 else:
-    emit({"type": "system", "subtype": "init", "session_id": native})
+    init = {"type": "system", "subtype": "init", "session_id": native}
+    if config.get("version"):
+        init["claude_code_version"] = config["version"]
+    emit(init)
     emit({"type": "assistant", "message": {"role": "assistant", "content": [
         {"type": "tool_use", "name": "Read", "id": "tool-1"}, {"type": "text", "text": text}]}})
+    # "totals" lists the session total each call reports, as resumed Claude Code 2.1.277+ does.
+    calls = sum(1 for line in open(config["log"], encoding="utf-8") if json.loads(line)["provider"] == provider)
+    totals = config.get("totals")
     emit({"type": "result", "subtype": "success", "is_error": False, "result": text, "session_id": native,
-          "total_cost_usd": config.get("cost", 0.05), "usage": {"input_tokens": 20, "output_tokens": 7}})
+          "total_cost_usd": totals[min(calls, len(totals)) - 1] if totals else config.get("cost", 0.05),
+          "usage": {"input_tokens": 20, "output_tokens": 7}})
 sys.exit(0)
 '''
 
@@ -278,6 +285,35 @@ class ClashCycleTests(unittest.TestCase):
                 "prompt": "Add a greeting to app.py", "clash": {"challenger": "codex", "rounds": 2}, **changes}
 
     @unittest.skipUnless(shutil.which("git"), "Git workspace tests require git")
+    def test_resumed_claude_turns_count_only_their_own_spend(self):
+        self.git("init", "-q", "-b", "main")
+        (self.project / "app.py").write_text("print('hi')\n")
+        self.git("add", "."); self.git("commit", "-q", "-m", "Base")
+        objection = {"verdict": "reject", "objections": [{"id": 1, "severity": "high", "file": "app.py", "line": 1,
+                     "claim": "Greeting is never called", "evidence": "app.py defines greet() without calling it"}], "resolved": []}
+        self.configure("claude", version="2.1.278", totals=[0.05, 0.12, 0.2, 0.26],
+                       script={"opening": "Implemented greet() in app.py.",
+                               "response:1": fenced({"responses": [{"id": 1, "action": "fixed", "note": "Called greet() at import"}]})})
+        self.configure("codex", script={"challenger:1": "Found a defect.\n" + fenced(objection),
+                                        "challenger:2": fenced({"verdict": "accept", "objections": [], "resolved": [1]})})
+        manager = self.manager()
+        sid = manager.create(self.options(manager))["id"]
+        session = self.settled(manager, sid)
+        self.assertEqual(session["status"], "completed", manager.events(sid))
+        claude_costs = lambda result: [turn["cost_usd"] for turn in result["turns"] if turn["provider"] == "claude"]
+        # Each resumed turn reports the session total so far; the ledger and the launch keep each turn's own spend.
+        self.assertEqual(claude_costs(session["clash_result"]), [0.05, 0.07])
+        self.assertAlmostEqual(session["budget_usage"]["cost_usd"], 0.12)
+        self.assertEqual(session["cost_totals"], {"fixture-claude": 0.12})
+        # The next cycle starts from the remembered total of the same native session.
+        manager.send(sid, "Also add tests")
+        session = self.settled(manager, sid)
+        self.assertEqual(session["status"], "completed", manager.events(sid))
+        self.assertEqual(claude_costs(session["clash_result"])[-2:], [0.08, 0.06])
+        self.assertAlmostEqual(session["budget_usage"]["cost_usd"], 0.14)
+        self.assertAlmostEqual(manager.results.history(sid)["totals"]["cost_usd"]["reported"], 0.26)
+
+    @unittest.skipUnless(shutil.which("git"), "Git workspace tests require git")
     def test_implementation_clash_converges_resumes_both_participants_and_continues(self):
         self.git("init", "-q", "-b", "main")
         (self.project / "app.py").write_text("print('hi')\n")
@@ -338,6 +374,9 @@ class ClashCycleTests(unittest.TestCase):
         history = manager.results.history(sid)
         self.assertEqual([launch["kind"] for launch in history["launches"]], ["clash"])
         self.assertEqual(history["launches"][0]["settings"]["clash"], session["clash"])
+        # Both participants receive the same context prefix; Usage names it once with the count.
+        context = history["launches"][0]["context"]
+        self.assertEqual((2, 0, None), (context["agents"], context["ledger"]["message"], context["fill"]))
         self.assertEqual(session["budget_usage"]["tokens"], 84)
         self.assertEqual(session["budget_usage"]["cost_usd"], 0.1)
         snapshot = manager.results.snapshot(sid)

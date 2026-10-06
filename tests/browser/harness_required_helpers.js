@@ -30,6 +30,7 @@ async (page) => {
   });
   try {
     await tab.goto('http://127.0.0.1:8766/');
+    await tab.locator('#option-helpers').click();
     await tab.locator('#agents-enabled:not(:disabled)').waitFor();
     check(await tab.locator('#session-budgets-seconds').getAttribute('placeholder') === 'No time limit', 'Empty time must mean no limit');
     check(await tab.locator('#agent-count-label').innerText() === 'Required helpers', 'Native label must require helpers');
@@ -40,17 +41,19 @@ async (page) => {
     check(requests[0].agent_count===10 && requests[0].agents_enabled, 'Required count must reach the API');
     check(requests[0].budgets.seconds===null, 'Empty time must send an explicit unlimited budget');
     check(await tab.locator('#agent-count').isEnabled(), 'Completed session must allow editing helpers');
+    // An open session keeps its settings behind one toggle; each option opens its own panel.
+    await tab.locator('#session-settings-toggle').click(); await tab.locator('#option-helpers').click();
     await tab.locator('#agent-count').fill('3');
-    await tab.locator('#session-budgets > details > summary').click();
+    await tab.locator('#option-budgets').click();
     await tab.locator('#session-budgets-tokens').fill('4000');
     await tab.locator('#session-budgets-seconds').fill('60');
     await tab.locator('#session-budgets-save').click();
-    await tab.locator('#agents-enabled:not(:disabled)').waitFor();
+    await tab.locator('#agents-enabled:not(:disabled)').waitFor({state:'attached'});
     check(await tab.locator('#agent-count').inputValue() === '3', 'Saving budgets must preserve the pending helper count');
     check(session.budgets.seconds===60, 'Explicit time cap must be saved');
     await tab.locator('#session-budgets-seconds').fill('');
     await tab.locator('#session-budgets-save').click();
-    await tab.locator('#agents-enabled:not(:disabled)').waitFor();
+    await tab.locator('#agents-enabled:not(:disabled)').waitFor({state:'attached'});
     check(session.budgets.seconds===null, 'Clearing time must remove the cap');
     check((await tab.locator('#session-budgets-agent-summary').innerText()).includes('no time limit'), 'Budget summary must show unlimited time');
     await tab.locator('#prompt').fill('Fixture follow-up'); await tab.locator('#send').click();
@@ -61,11 +64,12 @@ async (page) => {
     check((await tab.locator('#events').innerText()).includes('3/3'), 'Full count must be visible');
     session.status = 'running'; await tab.reload(); await tab.locator('#waiting').waitFor({state:'visible'});
     check(await tab.locator('#agent-count').isDisabled() && await tab.locator('#agents-enabled').isDisabled(), 'Active launch settings must be locked');
-    session.status = 'completed'; await tab.reload(); await tab.locator('#agents-enabled:not(:disabled)').waitFor();
+    session.status = 'completed'; await tab.reload(); await tab.locator('#agents-enabled:not(:disabled)').waitFor({state:'attached'});
+    await tab.locator('#session-settings-toggle').click(); await tab.locator('#option-helpers').click();
     await tab.locator('#agents-enabled').uncheck();
     check(await tab.locator('#agent-count').isDisabled(), 'Disabled helpers must disable count input');
     await tab.locator('#prompt').fill('Continue alone'); await tab.locator('#send').click();
-    await tab.locator('#agents-enabled:not(:disabled)').waitFor();
+    await tab.locator('#agents-enabled:not(:disabled)').waitFor({state:'attached'});
     check(requests[2].agents_enabled===false && requests[2].agent_count===3, 'Follow-up must support turning helpers off');
     check(errors.length === 0, errors.join('; '));
     return {ok:true,checks:['unlimited time','save and clear time cap','required label','count sent','shortfall shown','budget save preserves helper edits','change count on follow-up','exact count confirmed','reload','active lock','turn helpers off','no JavaScript errors']};

@@ -4,7 +4,57 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Changed
+
+- **The generator's own `bash-validator.sh` shares the editions' parser.** It now carries the same byte-identical generic section as the four editions' validators. Chains, `$(...)`, `sh -c`, `eval`, wrappers, launchers, git global options and Symfony Console abbreviations no longer hide a destructive command, and read-only searches and commit messages that merely mention one now pass (`.env.example` reads too). Its framework rules are the union of the editions' rules (Artisan, Symfony console, PHP console runners, WP-CLI), plus the existing block on writing `.env`, now limited to redirection and `tee`. Blocks still print `[bash-validator] BLOCKED` with a rule category and never the command body. Latency is about 5 ms per call, up from about 3.3 ms, the same as the editions. The hooks README is updated, including that `bash-validator.sh` needs `jq`/`php`/`python3` (it fails open without one) and that it is not a sandbox. Generated targets are unaffected: hook-forge still authors their validators.
+- The generator's own `bash-validator.sh` takes the same review fixes, both in the shared generic section and in the union of framework rules. It adds Laravel `config:show` of every credential-bearing config file, `queue:flush`/`queue:clear`/`horizon:clear` and `.env.*` reads; Symfony `secrets:list -r`, `secrets:decrypt-to-local`, `debug:dotenv`, `debug:container --env-var(s)` and Doctrine `migrate 0|current-N`; Doctrine ORM `orm:schema-tool:drop`; Phinx `migrate -t 0`; and `rg`/`ag`/`ack` reads of `wp-config.php`. `schema:drop` is removed. The hooks README mentions quoted launcher command lines and the nesting refusal.
+- **`hook-forge` read hook stands down when the host delivered the capsule.**
+  A generated `working-memory-read.sh` exits silently when
+  `CONTEXT_CAPSULE_DELIVERED` is `1`, as the editions' hooks now do: the
+  Harness puts each turn's capsule into the prompt itself, retrieved for the
+  message alone, and a second one distilled from that whole prompt would spend
+  the turn's memory budget twice. The `.claude`/`.cursor` mirrors and the
+  policy lock are regenerated.
+
 ### Fixed
+
+- **The command analyzer refuses console actions it cannot vouch for, and Phase 1 baselines run in a copy.** `analyze_commands.py` classified every `php artisan`/`bin/console`/`symfony console` action as non-mutating unless its name mentioned a database operation, so `doctrine:fixtures:load`, `tinker --execute="User::truncate()"`, `queue:flush`, `cache:clear`, generators and secret printers such as `debug:dotenv` and `config:show` passed the verification gate, as did `find -delete` and `psalm --alter`. Console actions are now refused with `CONSOLE_ACTION_UNATTESTED` unless they are on a curated read-only list (`list`, `about`, `test`, `route:list`, `debug:*` and `lint:*` except secret printers, `*:status`, `doctrine:schema:validate`, ...); `find` actions (`-delete`, `-exec`, `-ok`, `-fprint`) are `FIND_ACTION`, and analyzer rewrites (`--alter`, `--generate-baseline`, `--set-baseline`, `--update-baseline`, `--migrate-configuration`) are write flags. `profile-synthesizer` ran every verification command against the unmodified target to record its baseline although `infra-scan` promises Phase 1 is read-only there; it now runs only commands the analyzer reports safe, in a throwaway `cp -a` copy, comparing `git status` before and after. `tests/test_command_safety.py` covers both directions.
+- **`memory-seed` asset: prompt-time retrieval before the branch task exists.** A generated project's capsule carries the retrieval layers from the first prompt on a new branch and in read-only sessions, and `msg-dispatch` provisions the branch task (see the root `CHANGELOG.md`).
+- **`memory-seed` asset: line-ending neutral fingerprints and LF writes.** A generated project's Project Brain no longer marks records stale in a CRLF checkout and writes its records with LF on Windows (see the root `CHANGELOG.md`).
+- **Generated Claude editions import the policy from `.claude/CLAUDE.md`.** `policy-forge` now writes `.claude/CLAUDE.md` with `@../AGENTS.md` whenever `.claude` is selected (appending to an existing file, never replacing it), because Claude Code reads `AGENTS.md` by itself only while the target has no `CLAUDE.md`, `.claude/CLAUDE.md` or `CLAUDE.local.md`. bootstrap-verifier's new `validate_claude_policy_import` fails a Claude edition whose `.claude/CLAUDE.md` is missing or lacks the import on a line of its own outside a code block; `tests/test_hook_wiring_gate.py` covers it.
+- **`memory-seed` asset: the capsule knows which Claude instruction files the host loads.** It counts `.claude/CLAUDE.md` and `CLAUDE.local.md` beside `CLAUDE.md`, follows their `@` imports, and treats `AGENTS.md` as host-loaded when none exists (see the root `CHANGELOG.md`).
+- **`memory-seed` asset: parity passes on a target that carries one tool's tree.** The seeded `context.py parity` compares against the installed skill tree when `.agents/skills` is absent, and does not read a tool directory holding only a README as an installed mirror (see the root `CHANGELOG.md`).
+- **`memory-seed` asset carries the governed write guard and the new secret patterns.** Every generated project's Project Brain now refuses secrets and personal data in new record text and agent messages, and its secret patterns catch `*_PASSWORD=`, `APP_KEY=base64:` and URL credentials without refusing PHP code or Symfony `%env()%` config (see the root `CHANGELOG.md`). Mirrors and policy lock regenerated.
+- **Hooks failed open from a subdirectory, in this edition and in every generated target.** Claude Code and Codex run hooks in the session's current directory, so bare `.claude/hooks/<script>.sh` and `.codex/hooks/<script>.sh` wiring exited 127 there, which both hosts treat as non-blocking.
+  - `hook-forge` now wires Claude hooks as `"${CLAUDE_PROJECT_DIR}"/.claude/hooks/<script>.sh` and Codex hooks through one fixed root-finding `sh -c` launcher, which stops at the nearest directory holding `.codex/hooks.json`. Cursor stays bare, because it runs project hooks from the project root.
+  - bootstrap-verifier's `validate_generated.py` matches every hook command against hook-forge's form for its edition in full and rejects anything else: bare Claude/Codex paths, tampered launchers, wrappers, trailing `|| true`/`; exit 0`, and quoted paths. It also rejects dead or unowned hooks and requires every hook hook-forge registers to be wired.
+  - This edition's own `.claude/settings.json` and `.codex/hooks.json` use the same forms. The launcher matters here: Infrastructure-Creator sits below the monorepo's Git root, where a git-toplevel path would miss it.
+  - New `tests/test_hook_wiring_gate.py`; mirrors and policy lock regenerated.
+  - Targets generated earlier keep bare wiring until `infra-update` rewires it. A team-edited `settings.json`/`hooks.json` with bare wiring cannot be kept as-is: `infra-update` offers take-staged or a re-wire merge that replaces only the hook commands, and the gate's error names the exact command to write. Codex users must re-trust the changed hooks once in `/hooks`.
+- The `.claude` and `.cursor` copies of `skills/memory-seed/assets/scripts/validate.py` lose a stale executable bit (100755 -> 100644). They now match their `.agents` canon, which has been 100644 since the H1-H4 roadmap commit. `scripts/build_mirrors.py` now enforces the canon's executable bit on every mirror.
+- **The wiring gate matches hook-forge's forms exactly.** `bootstrap-verifier`'s `validate_generated.py` used to resolve only whitespace tokens that end in `.sh` and skipped any command without one. So `"${CLAUDE_PROJECT_DIR}"/.claude/hooks/bash-validator.sh || true`, `...; exit 0`, a fully quoted typo path, `bash -c ".claude/hooks/x.sh"`, a bare path followed by `;`, and the Codex launcher with a name without `.sh` all passed, and each one fails open. Every command that names a hook must now equal hook-forge step 9's form for its edition, and anything else is an error. A bare Claude/Codex path error ends with `rewire it as: <command>`. A new `validate_required_wiring` also requires every hook that step 9 registers to be wired in that form. `hook-forge` and `bootstrap-verifier` document the rule, and `tests/test_hook_wiring_gate.py` covers the Claude, Codex and Cursor bypasses.
+- **The Codex launcher stays inside its project.** It used to walk to `/` and exec the first `.codex/hooks/<script>.sh` it found, so a script missing from the project ran a same-named script from an ancestor such as `~/.codex/hooks/` or a world-writable `/tmp`. It now stops at the nearest directory holding `.codex/hooks.json` and runs only that project's script. A missing script exits 127 and names the path it expected. This changes `hook-forge` step 9, the gate's launcher constant and this edition's own `.codex/hooks.json`. Codex users must re-trust the changed hooks once in `/hooks`.
+- **`infra-update` gives kept hook wiring a way through the gate.** Step 6 no longer offers plain keep for a team-edited `.claude/settings.json`, `.codex/hooks.json` or `.cursor/hooks.json` whose hook commands differ from the staged ones. That covers the bare wiring of earlier generations. The choices are take-staged, or a re-wire merge that replaces only the hook `command` strings and keeps the team's other edits. If that decision is left unanswered, the run stops before publication, so the update is not rolled back after the bootstrap gate fails.
+- `SKILL FLOW.md`: the Codex flow (`.agents/skills`, mirrored byte-identically to `.claude` and `.cursor`) told Codex to run `infra-adapt <target>`, a Claude/Cursor command with no Codex skill. The main-flow diagram and the non-PHP shortcut now name the `stack-adapter` skill (`stack-adapter <target>`), as `.codex/README.md` already does; Claude Code and Cursor users can still use `/infra-adapt`. Policy lock regenerated.
+- **`memory-seed` asset carries the memory-core fixes.** Every generated project
+  gets the same core as the editions (see the root `CHANGELOG.md`): a Memory
+  Bank write is refused only for what it introduces, so a chunk past its review
+  date no longer stops promotions, compaction, re-attestation and retirement;
+  a stale source fingerprint on a Brain record no longer refuses compaction;
+  the automatic checkpoint lists the branch's commit subjects and counts a
+  turn that ended in a commit; `promote-auto` runs automatic promotion on
+  demand; the rendered capsule carries the task's working state; and the task's own
+  record and host-loaded instruction files no longer take capsule slots. The
+  `.claude`/`.cursor` mirrors and the policy lock are regenerated.
+
+- Reject Windows ADS, device names and ambiguous paths in publication/manifest
+  plans. Validate shell hook syntax through Bash on Windows, where NTFS lacks
+  Unix executable permission bits. Harness Creator now has an elevated Codex
+  sandbox backend and validates installed runtime files in a disposable copy.
+
+- Keep generated Project Brain mutation locks portable on native Windows using
+  a serialized CRT byte-range lock, while retaining POSIX flock and nested
+  thread reentrancy. Regenerate memory-seed mirrors and the policy lock.
 
 - **`memory-seed` asset `context.py` counted promotion iterator records instead of
   applied promotions in memory status.** The generator copies the shared

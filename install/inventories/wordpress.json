@@ -64,6 +64,7 @@
       "tasks/README.md"
     ],
     "claude": [
+      ".claude/CLAUDE.md",
       ".claude/DOD.md",
       ".claude/GOLDEN-PRINCIPLES.md",
       ".claude/STABILIZATION.md",
@@ -612,6 +613,7 @@
     ]
   },
   "excluded_tracked_paths": [
+    ".install/gitattributes",
     "CHANGELOG.md",
     "Task/Epics/Epic-01_Content_Platform_SPEC.md",
     "Task/designs/.gitkeep",
@@ -637,6 +639,7 @@
     "project-brain/tests/test_runtime.py"
   ],
   "source_overrides": {
+    ".gitattributes": ".install/gitattributes",
     "memory-bank/INDEX.md": "memory-bank/.install/INDEX.md",
     "project-brain/indexes/active.json": "project-brain/.install/active.json",
     "project-brain/indexes/archive.json": "project-brain/.install/archive.json"

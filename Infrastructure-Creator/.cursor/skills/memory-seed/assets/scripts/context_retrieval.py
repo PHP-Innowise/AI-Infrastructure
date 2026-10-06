@@ -18,7 +18,8 @@ from brain_runtime import (
     LIFECYCLES,
     atomic_json,
     brain_root,
-    get_task,
+    find_task,
+    handoff_path,
     iter_records,
     load_config,
     mutation_lock,
@@ -558,6 +559,26 @@ MANIFEST_SCHEMA_VERSION = 3
 QUERY_SOURCES = ("prompt", "task", "task-id", "explicit")
 RETRIEVAL_HOSTS = ("cli", "claude", "codex", "cursor")
 RETRIEVAL_ENTRY_POINTS = ("context", "retrieve", "refresh", "hook-context")
+# Instruction files a host loads into the model's context by itself, before
+# any hook runs. A capsule slot pointing at one asks the agent to read what it
+# already has: on two real installations CLAUDE.md took a procedural slot on
+# 88 of 114 and 150 of 158 Claude Code turns. Cursor is absent on purpose -
+# what it loads unprompted is its own `.cursor/rules`, which is not indexed.
+HOST_LOADED_INSTRUCTIONS = {
+    "claude": ("CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md"),
+    "codex": ("AGENTS.md",),
+}
+# Claude Code (v2.1.277+) reads AGENTS.md itself only while none of these
+# exists; any one of them makes it read the CLAUDE.md files instead, and
+# AGENTS.md then loads only through an `@` import - which is why every
+# edition ships `.claude/CLAUDE.md` importing `@../AGENTS.md`.
+CLAUDE_INSTRUCTION_FILES = ("CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md")
+# Claude Code also loads what CLAUDE.md imports with `@path`, recursively and
+# at most five hops deep; an import inside a code span or block is not one.
+CLAUDE_IMPORT_DEPTH = 5
+CLAUDE_IMPORT_PATTERN = re.compile(r"(?<![\w@])@((?:\.{1,2}/)?[\w-][\w./-]*)")
+CODE_FENCE_PATTERN = re.compile(r"^\s*(```|~~~)")
+CODE_SPAN_PATTERN = re.compile(r"`+[^`]*`+")
 # Whether a turn retrieves at all. `off` never decides; `shadow` decides and
 # records the decision but always retrieves; `enforce` acts on it. The default
 # is `shadow` on purpose: the project rejected an embedding similarity floor on
@@ -889,7 +910,27 @@ def reusable_source_state(
     }, fingerprints
 
 
+def effective_canonical_edition(repository: Path, configured: str) -> str:
+    """The skill tree parity compares against in this checkout.
+
+    The configured canonical tree (`.agents`) is absent from a single-tool
+    install: `--tool claude` ships only `.claude/skills`, `--tool cursor` only
+    `.cursor/skills`. Measuring those against a tree that is not there
+    reported every skill as "absent from canonical", so the parity check the
+    project-brain skill tells agents to run failed on every such install. The
+    first tree present, in SKILL_EDITIONS order, stands in for it; the
+    configuration itself is left alone.
+    """
+    if (repository / configured / "skills").is_dir():
+        return configured
+    for edition in SKILL_EDITIONS:
+        if (repository / edition / "skills").is_dir():
+            return edition
+    return configured
+
+
 def skill_mirror_drift(repository: Path, canonical_edition: str) -> list[dict[str, object]]:
+    canonical_edition = effective_canonical_edition(repository, canonical_edition)
     logical: dict[str, dict[str, Path]] = {}
     for edition in SKILL_EDITIONS:
         root = repository / edition / "skills"
@@ -1094,6 +1135,12 @@ def full_mirror_drift(repository: Path) -> list[dict[str, str]]:
     rule the light skills checker applies. Once a mirror directory exists,
     every derived file in it must match, and a mirror file with no canonical
     source is drift too.
+
+    A mirror directory that holds none of a class's files did not receive
+    that class. A `--tool claude` install carries `.cursor/README.md` and
+    `.codex/README.md` and nothing else of those tools, and reading those
+    directories as installed mirrors reported every governance document as
+    missing from them.
     """
     framework = str(load_config(repository).get("framework") or "")
     drift: list[dict[str, str]] = []
@@ -1107,10 +1154,15 @@ def full_mirror_drift(repository: Path) -> list[dict[str, str]]:
                 continue
             transform = _MIRROR_TRANSFORMS[mirror_spec.get("transform", "copy")]
             skips = _mirror_class_skips(cls, mirror_spec, framework)
+            sources = [
+                (rel, path)
+                for rel, path in _mirror_iter_canonical(canonical, cls.get("only"))
+                if not _mirror_is_skipped(rel, skips)
+            ]
+            if sources and not any((mirror / rel).is_file() for rel, _ in sources):
+                continue
             expected: set[str] = set()
-            for rel, path in _mirror_iter_canonical(canonical, cls.get("only")):
-                if _mirror_is_skipped(rel, skips):
-                    continue
+            for rel, path in sources:
                 expected.add(rel)
                 raw = path.read_bytes()
                 try:
@@ -2383,6 +2435,55 @@ _PUBLIC_ITEM_KEYS = (
 )
 
 
+def _claude_imports(repository: Path) -> set[str]:
+    """Repository files CLAUDE.md pulls into Claude Code's context with `@path`.
+
+    Followed the way Claude Code follows them: relative to the importing file,
+    recursively up to CLAUDE_IMPORT_DEPTH hops, and never inside a fenced
+    block or a code span, where `@` is only a character. A target outside the
+    repository cannot be an indexed document, so it cannot take a slot either.
+    """
+    root = repository.resolve()
+    loaded: set[str] = set()
+    pending = [(root / name, 0) for name in CLAUDE_INSTRUCTION_FILES]
+    while pending:
+        path, depth = pending.pop()
+        if depth >= CLAUDE_IMPORT_DEPTH:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        fenced = False
+        for line in text.splitlines():
+            if CODE_FENCE_PATTERN.match(line):
+                fenced = not fenced
+                continue
+            if fenced:
+                continue
+            for match in CLAUDE_IMPORT_PATTERN.finditer(CODE_SPAN_PATTERN.sub("", line)):
+                target = (path.parent / match.group(1).rstrip(".,;:")).resolve()
+                try:
+                    relative = target.relative_to(root).as_posix()
+                except ValueError:
+                    continue
+                if relative in loaded or not target.is_file():
+                    continue
+                loaded.add(relative)
+                pending.append((target, depth + 1))
+    return loaded
+
+
+def host_loaded_paths(repository: Path, host: str) -> set[str]:
+    """Repository paths the host has already put in front of the model."""
+    loaded = set(HOST_LOADED_INSTRUCTIONS.get(host, ()))
+    if host == "claude":
+        if not any((repository / name).is_file() for name in CLAUDE_INSTRUCTION_FILES):
+            loaded.add("AGENTS.md")
+        loaded |= _claude_imports(repository)
+    return loaded
+
+
 def _public_item(item: dict[str, Any]) -> dict[str, Any]:
     public = {key: item[key] for key in _PUBLIC_ITEM_KEYS}
     if item.get("match") not in (None, "covered"):
@@ -2399,7 +2500,7 @@ def retrieve(
     connection: sqlite3.Connection,
     repository: Path,
     query: str,
-    task_identifier: str,
+    task_identifier: Optional[str],
     *,
     limit: int,
     provider: Optional[str] = None,
@@ -2419,6 +2520,14 @@ def retrieve(
     a branch name or an operator, and how long the index phases that fed it
     took. They are written into the manifest because a retrieval decision
     cannot be reviewed later from the selection alone.
+
+    ``task_identifier=None`` retrieves for a branch whose governed task does
+    not exist yet. The task is provisioned at the first checkpoint, after
+    several file-changing turns, and a read-only session never gets one; the
+    capsule was empty for all of that time although the runtime filters do
+    not depend on a task. Without a task there is no working state and no
+    own record to exclude, and the manifest stays in ignored local state:
+    governed history is kept per task.
     """
     retrieval_started = time.monotonic()
     if limit < 1:
@@ -2444,7 +2553,12 @@ def retrieve(
             "Retrieval entry point must be one of "
             f"{', '.join(RETRIEVAL_ENTRY_POINTS)}"
         )
-    task = get_task(repository, task_identifier)
+    if task_identifier is None:
+        task_path, task = None, None
+        manifest_scope = "local"
+    else:
+        task_path, task, _ = find_task(repository, task_identifier)
+        validate_record(task)
     config = load_config(repository)
     local_episodes = list(local_episodes or [])
     candidates, diagnostics = _candidates(connection, query, max(20, limit * 10))
@@ -2520,6 +2634,30 @@ def retrieve(
             for conflict_id in item["conflicts"]
             if conflict_id not in known_ids
         }
+    # The task's own record and handoff are the working state the capsule
+    # already leads with, and a host-loaded instruction file is already in the
+    # model's context: a slot spent pointing at either is taken from memory.
+    # On real installations the task's own record held a semantic slot on
+    # 13-20% of turns. They leave as named exclusions, after `no_match`, which
+    # stays a claim about what the query matched rather than what survived.
+    own_id = task["id"] if task is not None else None
+    own_handoff = (
+        handoff_path(repository, own_id).relative_to(repository).as_posix()
+        if own_id is not None
+        else None
+    )
+    loaded = host_loaded_paths(repository, host)
+    kept = []
+    for item in filtered:
+        if own_id is not None and (
+            item.get("record_id") == own_id or item["path"] == own_handoff
+        ):
+            filter_excluded.append({"path": item["path"], "reason": "working-task"})
+        elif item["path"] in loaded:
+            filter_excluded.append({"path": item["path"], "reason": "host-loaded"})
+        else:
+            kept.append(item)
+    filtered = kept
     selected, budget_excluded, usage, escalation_reason = _apply_budgets(filtered)
     procedural_ranked = [
         item for item in selected if item["category"] == "policy"
@@ -2587,9 +2725,11 @@ def retrieve(
             *((item["path"], item["source_hash"]) for item in selected),
             *(_episode_signature(episode) for episode in local_episode_selected),
         ],
-        task["revision"],
+        task["revision"] if task is not None else 0,
     )
-    baseline_key = _retrieval_baseline_key(task["id"], host, entry_point)
+    baseline_key = _retrieval_baseline_key(
+        own_id if own_id is not None else "no-task", host, entry_point
+    )
     previous = _load_last_retrievals(connection).get(baseline_key)
     gate = gate_decision(
         gate_mode,
@@ -2628,8 +2768,8 @@ def retrieve(
         "id": manifest_id,
         "created_at": utc_now(),
         "query": query,
-        "task_id": task["id"],
-        "task_revision": task["revision"],
+        "task_id": own_id,
+        "task_revision": task["revision"] if task is not None else None,
         "local_episode_count": len(local_episode_selected),
         "filters": {
             "privacy": config["allowed_privacy"],
@@ -2712,10 +2852,18 @@ def retrieve(
     ][:CAPSULE_SEMANTIC_LIMIT]
     return {
         "query": query,
-        "task_id": task["external_id"],
-        "task_uuid": task["id"],
-        "task_revision": task["revision"],
-        "working": {
+        "task_id": task["external_id"] if task is not None else None,
+        "task_uuid": own_id,
+        "task_revision": task["revision"] if task is not None else None,
+        # Where the full working state lives. The capsule carries a bounded
+        # projection of it, and the record no longer competes for a semantic
+        # slot, so this is how an agent that needs the rest finds it.
+        "task_record": (
+            task_path.relative_to(repository).as_posix()
+            if task_path is not None
+            else None
+        ),
+        "working": None if task is None else {
             "task_id": task["external_id"], "goal": task["goal"],
             "phase": task.get("phase"),
             # Manual progress first, the automatic checkpoint as a labelled

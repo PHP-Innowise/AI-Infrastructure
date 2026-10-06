@@ -101,11 +101,21 @@ re-add source-only files excluded from the production payload.
 `--merge-existing` handles the standard root files commonly present in an
 existing project:
 
-- identical files are reported as `UNCHANGED`;
+- identical files are reported as `UNCHANGED`, except that one which must be
+  executable and is not (a hook from an install made before executable bits
+  were enforced) keeps its content, gets the bit, and is reported as
+  `FIX_MODE` (`WOULD_FIX_MODE` in a dry run);
+- the files the project owns after the first install - `tasks/.task-counter`, `specs/MANIFEST.md`, `memory-bank/INDEX.md`, the Project Brain indexes and `project-brain/config/runtime.json` - are kept as they are under every mode and reported as `KEPT`, so a reinstall neither collides on them nor resets the task counter; configuration keys a newer release adds fall back to the runtime defaults;
 - `.gitignore` and `.gitattributes` retain project entries and receive only
-  missing accelerator directives in an installer-managed block;
+  missing accelerator directives in an installer-managed block; the installed
+  `.gitattributes` directive is `*.sh text eol=lf`, so hooks keep LF in a
+  Windows clone. Installs made before this release received the edition's
+  mirror list with `-diff` on every path, which shows an edited hook as
+  "Binary files differ" in review; delete those lines by hand;
 - existing `AGENTS.md` retains project policy first and receives a marked,
   replaceable accelerator policy block;
+- existing `.claude/CLAUDE.md` keeps its content and receives the managed
+  `@../AGENTS.md` import block;
 - existing `README.md` remains untouched and the accelerator documentation is
   installed as `ACCELERATOR.md`.
 
@@ -420,7 +430,8 @@ Use the saved transcript, the pre-install recovery point, and Git diff:
   required. Removing only an installer-managed block is safe only after review:
   additive merges can omit accelerator directives that already existed in the
   project, and those project-owned lines must remain;
-- do nothing for `UNCHANGED` records.
+- do nothing for `UNCHANGED` records; a `FIX_MODE` record only added an
+  executable bit, which `chmod -x` takes away again.
 
 The installer has no automatic rollback command. A transcript records what the
 successful run reported, but it does not contain previous file contents.

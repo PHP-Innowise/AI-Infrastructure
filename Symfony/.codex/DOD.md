@@ -31,7 +31,7 @@ All Minimum items, plus:
 - [ ] Static analysis passes: PHPStan or Psalm when configured.
 - [ ] Symfony container/routes are coherent when relevant: `php bin/console lint:container`, `php bin/console debug:router`.
 - [ ] Changed Symfony configuration/templates/translations are valid when relevant: `php bin/console lint:yaml config`, `php bin/console lint:twig templates`, and `php bin/console lint:xliff translations`.
-- [ ] Doctrine changes include migrations and schema validation when relevant: `php bin/console doctrine:migrations:diff --check-database-platform` or project equivalent, and `php bin/console doctrine:schema:validate --skip-sync`.
+- [ ] Doctrine changes include a migration, and the schema checks pass when relevant: `php bin/console doctrine:schema:validate --skip-sync` for the mapping; against the test database, `php bin/console doctrine:migrations:migrate -n --env=test`, then `php bin/console doctrine:schema:validate --env=test` (the mapping matches the migrated schema) and `php bin/console doctrine:migrations:up-to-date --env=test`. `doctrine:migrations:diff` is not a check: it writes a new migration when the schema drifted and fails when it did not.
 - [ ] New behavior has focused tests covering the happy path and highest-risk failure path.
 - [ ] Tests own the rows they assert on: shared fixture records are treated as read-only, and any test that mutates state (sign-in, password change, deletion, counters) creates its own subject. A test that reads a fixture another test can write passes or fails by suite order.
 - [ ] Project Brain mutations use legal transitions, expected revisions, and the shared mutation lock; no duplicate authoritative task state was introduced.
@@ -57,7 +57,7 @@ All Standard items, plus:
 - [ ] Public documentation updated for user-facing changes.
 - [ ] Durable reusable context was added to `memory-bank/` only when source-backed, non-sensitive, indexed, and not already authoritative in a spec.
 - [ ] Promotion proposals were not self-approved; any applied promotion has explicit human review plus source and destination revisions.
-- [ ] Session hooks remain metadata-only and do not index, retrieve, inject, or print Project Brain or Memory Bank records.
+- [ ] The SessionStart hook stays metadata-only and never prints Project Brain or Memory Bank records; the prompt hook's Task Capsule stays bounded and carries pointers and working state, never record bodies.
 - [ ] Messenger workers, cron jobs, cache, migrations, and rollout impacts are documented when applicable.
 - [ ] Production cache warmup/build succeeds when deployment configuration changed.
 - [ ] New Symfony/PHP deprecations are absent or explicitly triaged when deprecation tooling is configured.

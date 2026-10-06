@@ -75,6 +75,7 @@ from context_retrieval import (
     cross_edition_drift,
     format_cross_edition_drift,
     format_full_mirror_drift,
+    effective_canonical_edition,
     format_skill_mirror_drift,
     full_mirror_drift,
     skill_mirror_drift,
@@ -97,6 +98,7 @@ from context_retrieval import (
     token_coverage,
 )
 from validate import (
+    PRIVATE_PATTERNS,
     SECRET_PATTERNS,
     ValidationError,
     parse_frontmatter,
@@ -144,17 +146,17 @@ CAPSULE_PROMPT_TERM_LIMIT = 24
 CAPSULE_CHARACTER_LIMIT = 8000
 CAPSULE_WORKING_FILE_LIMIT = 8
 CAPSULE_WORKING_SOURCE_LIMIT = 4
-CAPSULE_PRIVATE_PATTERNS = (
-    re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE),
-    re.compile(
-        r"(?<!\w)(?:\+\d(?:[\d ().-]{6,}\d)|\(?\d{3}\)?[ .-]\d{3}[ .-]\d{4})(?!\w)"
-    ),
-    re.compile(
-        r"\b(?:(?:customer|patient)\s+(?:name|address|id)|"
-        r"client\s+(?:name|address))\s*[:=]\s*\S+",
-        re.IGNORECASE,
-    ),
-)
+# The newest next steps a capsule carries. One was too few to say what comes
+# after the current step, and older steps can now be replaced, not only kept.
+CAPSULE_WORKING_NEXT_STEP_LIMIT = 3
+# The rendered capsule is what Claude Code, Codex and Cursor actually read, and
+# it repeats on every turn, so the working state is bounded tighter there than
+# in the JSON a caller can inspect at leisure.
+RENDERED_PROGRESS_LIMIT = 400
+RENDERED_FILE_LIMIT = 5
+# Defined beside SECRET_PATTERNS in validate.py, so the Project Brain write
+# path (brain_runtime) refuses the same personal data the capsule does.
+CAPSULE_PRIVATE_PATTERNS = tuple(PRIVATE_PATTERNS.values())
 CAPSULE_RAW_TEXT_PATTERN = re.compile(
     r"^\s*(?:user|assistant|system|developer|tool|prompt|response|reasoning|"
     r"stdout|stderr|log)\s*:",
@@ -174,6 +176,17 @@ SUMMARY_CHARACTERS = 400
 AUTO_REVISION = "auto"
 DEFAULT_TURN_FLUSH_AFTER = 5
 DEFAULT_TURN_FILE_LIMIT = 20
+# What a checkpoint says about committed work: the branch's newest commit
+# subjects. A subject is already shared history and already a person's summary
+# of a change, which a list of touched paths never is.
+CHECKPOINT_COMMIT_LIMIT = 5
+CHECKPOINT_SUBJECT_CHARACTERS = 80
+CHECKPOINT_LOG_LIMIT = 500
+# The HEAD each task last saw, so a turn that ends in a commit - and so leaves
+# a clean tree - still counts as work. One map under one key, bounded, because
+# nothing prunes index_state.
+TURN_HEADS_KEY = "turn-heads"
+TURN_HEADS_RETENTION = 200
 LAST_TURN_REPORT_FILENAME = "last-turn-report.json"
 # The report describes one Stop-hook turn, so it is only meaningful for the
 # session that produced it. A day bounds any plausible gap between two working
@@ -1039,7 +1052,9 @@ def project_working_task(
     omitted["working_files"] = max(
         0, len(files) - CAPSULE_WORKING_FILE_LIMIT
     )
-    omitted["working_next_steps"] = max(0, len(normalized_steps) - 1)
+    omitted["working_next_steps"] = max(
+        0, len(normalized_steps) - CAPSULE_WORKING_NEXT_STEP_LIMIT
+    )
     omitted["working_sources"] = max(
         0, len(sources) - CAPSULE_WORKING_SOURCE_LIMIT
     )
@@ -1047,8 +1062,9 @@ def project_working_task(
         "task_id": validate_task_id(task_id),
         "goal": " ".join(goal.split()),
         "progress": " ".join(displayed.split()),
-        "next_steps": normalized_steps[-1:],
-        "files": files[:CAPSULE_WORKING_FILE_LIMIT],
+        "next_steps": normalized_steps[-CAPSULE_WORKING_NEXT_STEP_LIMIT:],
+        # Newest last, so the tail is the work in hand.
+        "files": files[-CAPSULE_WORKING_FILE_LIMIT:],
         "sources": sources[:CAPSULE_WORKING_SOURCE_LIMIT],
     }, omitted
 
@@ -1234,7 +1250,8 @@ def enforce_capsule_budget(capsule: dict[str, object]) -> dict[str, object]:
             omitted["working_sources"] += 1
             continue
         if working is not None and len(working["files"]) > 1:
-            working["files"].pop()
+            # Oldest first: the newest file is the work in hand.
+            working["files"].pop(0)
             omitted["working_files"] += 1
             continue
         if working is not None and working["progress"]:
@@ -1290,9 +1307,13 @@ def enforce_governed_capsule_contract(
 
     working = compacted.get("working")
     if isinstance(working, dict):
-        working["next_steps"] = list(working.get("next_steps", []))[-1:]
+        working["next_steps"] = list(working.get("next_steps", []))[
+            -CAPSULE_WORKING_NEXT_STEP_LIMIT:
+        ]
+        # A task's files are kept newest last; the head of the list is the
+        # first thing the branch ever touched, not the work in hand.
         working["files"] = list(working.get("files", []))[
-            :CAPSULE_WORKING_FILE_LIMIT
+            -CAPSULE_WORKING_FILE_LIMIT:
         ]
         working["sources"] = list(working.get("sources", []))[
             :CAPSULE_WORKING_SOURCE_LIMIT
@@ -1389,6 +1410,18 @@ def validate_paths(label: str, values: list[str]) -> list[str]:
 
 def merge_unique(existing: list[str], additions: list[str]) -> list[str]:
     return list(dict.fromkeys((*existing, *additions)))
+
+
+def merge_recent(existing: list[str], additions: list[str]) -> list[str]:
+    """Merge with re-touched values moved to the end, so the tail is newest.
+
+    The capsule projects a task's newest files. Under `merge_unique` a file
+    edited all along kept the position of its first touch, so the file being
+    worked on now fell out of the projection while long-finished ones stayed.
+    """
+    added = list(dict.fromkeys(additions))
+    seen = set(added)
+    return [value for value in existing if value not in seen] + added
 
 
 def reject_secrets(record_type: str, values: list[str]) -> None:
@@ -1586,20 +1619,22 @@ def update_working_task(
     sources: list[str],
     *,
     auto_checkpoint: Optional[str] = None,
+    replace_next_steps: bool = False,
 ) -> dict[str, object]:
     """Merge an update into the lightweight working task.
 
     ``progress`` is the operator's narrative; ``auto_checkpoint`` is the
     automated turn flush's own field, replaced wholesale on every flush. They
     are separate parameters so automation can checkpoint without ever
-    overwriting what the operator wrote.
+    overwriting what the operator wrote. ``replace_next_steps`` makes
+    ``next_steps`` the whole list, so a step that is done can leave it.
     """
     task_id = validate_task_id(task_id)
     next_steps = normalize_values("Working task next step", next_steps)
     files = validate_paths("Working task file", files)
     sources = normalize_values("Working task source", sources)
     if progress is None and auto_checkpoint is None and not (
-        next_steps or files or sources
+        next_steps or files or sources or replace_next_steps
     ):
         raise ContextError("Working task update requires a changed field")
     if progress is not None:
@@ -1646,10 +1681,12 @@ def update_working_task(
                     else auto_checkpoint
                 ),
                 json.dumps(
-                    merge_unique(json.loads(row["next_steps"]), next_steps),
+                    next_steps
+                    if replace_next_steps
+                    else merge_unique(json.loads(row["next_steps"]), next_steps),
                     ensure_ascii=False,
                 ),
-                json.dumps(merge_unique(json.loads(row["files"]), files), ensure_ascii=False),
+                json.dumps(merge_recent(json.loads(row["files"]), files), ensure_ascii=False),
                 json.dumps(
                     merge_unique(json.loads(row["sources"]), sources), ensure_ascii=False
                 ),
@@ -2081,6 +2118,7 @@ def assemble_capsule(
     paths: Optional[list[str]] = None,
     host: str = "cli",
     entry_point: str = "retrieve",
+    allow_unprovisioned: bool = False,
 ) -> dict[str, object]:
     """Build the layered capsule for one request.
 
@@ -2092,6 +2130,12 @@ def assemble_capsule(
     knows - where the query came from, and what the index phases cost - and
     are recorded in the governed manifest. A caller that refreshed elsewhere
     passes its own timings; one that refreshes here has them measured for it.
+
+    ``allow_unprovisioned`` lets the prompt-time refresh retrieve for a branch
+    whose governed task does not exist yet - every read-only session, and the
+    first turns of every branch until the checkpoint provisions it. The
+    capsule then carries the retrieval layers with no working state, instead
+    of nothing but a warning.
     """
     warnings: list[str] = []
     if refresh_index:
@@ -2122,7 +2166,12 @@ def assemble_capsule(
     # guards build_context_packet would have applied.
     reject_secrets("Task Capsule", [query])
     reject_capsule_privacy("Task Capsule request", [query])
-    binding = governed_binding(connection, task_id)
+    try:
+        binding = governed_binding(connection, task_id)
+    except ContextError as error:
+        if not allow_unprovisioned or "Working task not found" not in str(error):
+            raise
+        binding = None
     request_query = build_capsule_query(query, None)
     local_episodes = search_episodes(
         connection, request_query, CAPSULE_LAYER_LIMITS["episodic"]
@@ -2131,7 +2180,7 @@ def assemble_capsule(
         connection,
         repository,
         request_query,
-        binding["task_uuid"],
+        binding["task_uuid"] if binding is not None else None,
         limit=limit,
         manifest_scope="local" if ephemeral else "governed",
         query_source=query_source,
@@ -2147,6 +2196,12 @@ def assemble_capsule(
     # The print tail dereferences result["warnings"]; retrieve() has no such key.
     result["warnings"] = warnings
     result["last_turn"] = last_turn
+    if binding is None:
+        # Rendered as "working: not recorded yet" plus how far the first
+        # checkpoint is, by the same fields the Cursor warming capsule uses.
+        result["kind"] = "warming"
+        result["task_id"] = task_id
+        result["pending_turns"] = len(pending_turn_deltas(connection, task_id))
     return enforce_governed_capsule_contract(result)
 
 
@@ -2270,15 +2325,61 @@ def assemble_hook_context(
     }
 
 
+def _bounded(text: object, limit: int) -> str:
+    collapsed = " ".join(str(text or "").split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[: limit - 1].rstrip() + "…"
+
+
+def working_state_lines(capsule: dict[str, object]) -> list[str]:
+    """The task's state as the rendered capsule shows it, under `working:`.
+
+    The JSON capsule always carried progress, next steps and files, but the
+    rendered capsule - the only form Claude Code, Codex and Cursor read -
+    printed the goal alone. "Continue where we left off" then retrieved skill
+    pointers and never the place the work stopped. Every line is bounded and
+    left out when empty, because the rendered capsule repeats on every turn.
+    """
+    working = capsule.get("working")
+    if not isinstance(working, dict):
+        return []
+    lines: list[str] = []
+    if working.get("phase"):
+        lines.append(f"phase: {working['phase']}")
+    progress = _bounded(working.get("progress"), RENDERED_PROGRESS_LIMIT)
+    if progress:
+        lines.append(f"progress: {progress}")
+    for step in working.get("next_steps") or []:
+        lines.append(f"next: {_bounded(step, RENDERED_PROGRESS_LIMIT // 2)}")
+    files = [str(path) for path in working.get("files") or []]
+    if files:
+        # Newest last in the task, so the tail is the work in hand.
+        lines.append("recent files: " + ", ".join(files[-RENDERED_FILE_LIMIT:]))
+    record = capsule.get("task_record")
+    if isinstance(record, str) and record:
+        lines.append(f"task record: {record}")
+    return lines
+
+
 def print_capsule(capsule: dict[str, object]) -> None:
     # The first line is the render marker: the Cursor hooks accept a capsule
     # only if it starts with "working:", which is how a broken render is kept
     # from replacing a good rule now that they no longer parse JSON.
     working = capsule["working"]
-    if working is None:
+    if working is None and capsule.get("kind") == "warming":
+        # A branch whose task the first checkpoint has not created yet: the
+        # layers below are still this turn's retrieval.
+        print(
+            "working: not recorded yet (the task starts at the "
+            f"{DEFAULT_TURN_FLUSH_AFTER}-turn checkpoint)"
+        )
+    elif working is None:
         print("working: unavailable")
     else:
         print(f"working: {working['task_id']} — {working['goal']}")
+        for line in working_state_lines(capsule):
+            print(line)
     if capsule.get("kind") == "warming":
         # Pre-provision progress is the one field the serialized form carried
         # that the warning text does not: how far along the boundary is.
@@ -2377,6 +2478,7 @@ def apply_governed_update(
     phase: Optional[str] = None,
     auto_checkpoint: Optional[str] = None,
     allow_phase_regression: bool = False,
+    replace_next_steps: bool = False,
 ) -> dict[str, object]:
     """Update the authoritative Brain task and its local compatibility binding."""
     with mutation_lock(repository):
@@ -2397,6 +2499,7 @@ def apply_governed_update(
                 phase=phase,
                 auto_checkpoint=auto_checkpoint,
                 allow_phase_regression=allow_phase_regression,
+                replace_next_steps=replace_next_steps,
             )
             refresh_governed_binding(
                 connection,
@@ -3555,6 +3658,114 @@ def changed_paths(repository: Path) -> tuple[list[str], list[str]]:
     return allowed, excluded
 
 
+def head_commit(repository: Path) -> Optional[str]:
+    try:
+        head = os.fsdecode(
+            git_output(
+                repository,
+                ["rev-parse", "--verify", "--quiet", "HEAD"],
+                "Git HEAD probe",
+            )
+        ).strip()
+    except ContextError:
+        return None
+    return head or None
+
+
+def head_advanced(
+    connection: sqlite3.Connection, repository: Path, task_id: str
+) -> bool:
+    """Whether HEAD moved since this task's previous turn; remember it now.
+
+    A turn that ends in a commit leaves a clean tree, and a clean tree was read
+    as a turn with nothing in it, so committed work - the work that mattered
+    most - never reached the buffer or the checkpoint. The first turn a task
+    sees only records the commit, so visiting a branch still mints nothing.
+    Best-effort: losing the record costs one uncounted turn.
+    """
+    head = head_commit(repository)
+    if head is None:
+        return False
+    try:
+        stored = json.loads(load_index_state(connection).get(TURN_HEADS_KEY) or "{}")
+    except (ValueError, sqlite3.Error):
+        stored = {}
+    if not isinstance(stored, dict):
+        stored = {}
+    previous = stored.pop(task_id, None)
+    stored[task_id] = head
+    for stale in list(stored)[: max(0, len(stored) - TURN_HEADS_RETENTION)]:
+        stored.pop(stale, None)
+    try:
+        with connection:
+            store_index_state(
+                connection,
+                {TURN_HEADS_KEY: json.dumps(stored, separators=(",", ":"))},
+            )
+    except sqlite3.Error:
+        pass
+    return isinstance(previous, str) and previous != head
+
+
+def checkpoint_safe(text: str) -> bool:
+    """Whether text may enter a checkpoint without tripping a privacy gate.
+
+    The same gates every working-task write applies. A commit subject that
+    fails one is left out rather than refused: a checkpoint must never fail
+    on what someone once typed into a commit.
+    """
+    return not (
+        any(pattern.search(text) for pattern in SECRET_PATTERNS.values())
+        or any(pattern.search(text) for pattern in CAPSULE_PRIVATE_PATTERNS)
+        or CAPSULE_RAW_TEXT_PATTERN.search(text)
+    )
+
+
+def branch_commit_subjects(
+    connection: sqlite3.Connection, repository: Path
+) -> tuple[list[str], int]:
+    """This branch's newest commit subjects, and how many commits it has.
+
+    Measured from the merge base with the default branch, so the list is the
+    branch's own story rather than the project's history. On the default
+    branch itself, or without one, there is no branch story and the list is
+    empty. Merges are left out, and so is any subject `checkpoint_safe`
+    rejects; both still count toward the total.
+    """
+    target = cached_default_branch(connection, repository)
+    head = head_commit(repository)
+    if target is None or head is None:
+        return [], 0
+    try:
+        base = os.fsdecode(
+            git_output(repository, ["merge-base", "HEAD", target], "Git merge-base probe")
+        ).strip()
+        if not base or base == head:
+            return [], 0
+        listing = git_output(
+            repository,
+            [
+                "log", "--no-merges", "-z", "--format=%s",
+                f"--max-count={CHECKPOINT_LOG_LIMIT}", f"{base}..HEAD", "--", ".",
+            ],
+            "Git log probe",
+        )
+    except ContextError:
+        return [], 0
+    subjects = [
+        " ".join(os.fsdecode(item).split()) for item in listing.split(b"\0")
+    ]
+    subjects = [subject for subject in subjects if subject]
+    shown = [
+        subject
+        if len(subject) <= CHECKPOINT_SUBJECT_CHARACTERS
+        else subject[: CHECKPOINT_SUBJECT_CHARACTERS - 1].rstrip() + "…"
+        for subject in subjects
+        if checkpoint_safe(subject)
+    ]
+    return shown[:CHECKPOINT_COMMIT_LIMIT], len(subjects)
+
+
 def append_turn_delta(
     connection: sqlite3.Connection, task_id: str, files: list[str]
 ) -> int:
@@ -3616,6 +3827,16 @@ def flush_turn_deltas(
     )
     if omitted:
         checkpoint += f" {omitted} path(s) beyond the per-flush limit are not listed."
+    # Paths say where work happened; commit subjects say what it was. They
+    # follow the counts so the checkpoint still opens the way readers expect.
+    subjects, commits = branch_commit_subjects(connection, repository)
+    if subjects:
+        checkpoint += " Branch commits, newest first: " + "; ".join(subjects)
+        if commits > len(subjects):
+            checkpoint += f" (+{commits - len(subjects)} more)"
+        checkpoint += "."
+    elif commits:
+        checkpoint += f" {commits} commit(s) on this branch."
     files = files[:file_limit]
     ensured = ensure_working_task(connection, repository, task_id, mode, owner)
     if mode == "lightweight":
@@ -3658,8 +3879,12 @@ def run_turn(
         raise ContextError("--max-files must be a positive integer")
     task_id = validate_task_id(arguments.task_id)
     files, path_excluded = changed_paths(repository)
+    # A turn that ended in a commit leaves a clean tree and is still work.
+    committed = head_advanced(connection, repository, task_id)
     delta_id = (
-        append_turn_delta(connection, task_id, files) if files else None
+        append_turn_delta(connection, task_id, files)
+        if files or committed
+        else None
     )
     buffered = len(pending_turn_deltas(connection, task_id))
     flushed = None
@@ -3674,9 +3899,9 @@ def run_turn(
         )
     # Maintenance runs only on the boundary where a flush actually
     # happened. The Stop hook drives this command under a hard
-    # timeout on every turn, so an ordinary turn must stay at one
-    # git status probe plus a local buffer write — a SIGTERM there
-    # interrupts nothing mid-mutation.
+    # timeout on every turn, so an ordinary turn must stay at a git
+    # status probe, a HEAD probe and local state writes — a SIGTERM
+    # there interrupts nothing mid-mutation.
     completion_candidates: list[dict[str, object]] = []
     promotion = {
         "enabled": False, "promoted": [], "failed": [],
@@ -4172,6 +4397,14 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--task-id", required=True)
     update.add_argument("--progress")
     update.add_argument("--next-step", action="append", default=[])
+    update.add_argument(
+        "--replace-next-steps",
+        action="store_true",
+        help=(
+            "make this call's --next-step values the whole list instead of "
+            "appending them; with none given, clear it"
+        ),
+    )
     update.add_argument("--file", action="append", default=[])
     update.add_argument("--source", action="append", default=[])
     update.add_argument(
@@ -4314,6 +4547,14 @@ def build_parser() -> argparse.ArgumentParser:
     update_brain.add_argument("--revision", type=revision_argument, required=True)
     update_brain.add_argument("--progress")
     update_brain.add_argument("--next-step", action="append", default=[])
+    update_brain.add_argument(
+        "--replace-next-steps",
+        action="store_true",
+        help=(
+            "make this call's --next-step values the whole list instead of "
+            "appending them; with none given, clear it"
+        ),
+    )
     update_brain.add_argument("--file", action="append", default=[])
     update_brain.add_argument("--source", action="append", default=[])
     update_brain.add_argument("--conflict", action="append", default=[])
@@ -4473,6 +4714,15 @@ def build_parser() -> argparse.ArgumentParser:
     apply.add_argument("--promotion-id", required=True)
     apply.add_argument("--json", action="store_true")
 
+    promote_auto = commands.add_parser(
+        "promote-auto",
+        help=(
+            "run automatic promotion now, under the same rules as a turn "
+            "boundary; does nothing unless automatic_promotion is enabled"
+        ),
+    )
+    promote_auto.add_argument("--json", action="store_true")
+
     export = commands.add_parser(
         "export",
         help="write a privacy-filtered bundle of Brain records and Memory Bank chunks",
@@ -4602,6 +4852,7 @@ def main() -> int:
                         arguments.next_step,
                         arguments.file,
                         arguments.source,
+                        replace_next_steps=arguments.replace_next_steps,
                     )
                 else:
                     binding = governed_binding(connection, arguments.task_id)
@@ -4611,6 +4862,7 @@ def main() -> int:
                         or arguments.file
                         or arguments.source
                         or arguments.phase
+                        or arguments.replace_next_steps
                     ):
                         raise ContextError("Working task update requires a changed field")
                     if progress is not None and not progress.strip():
@@ -4641,6 +4893,7 @@ def main() -> int:
                         owner=owner,
                         phase=arguments.phase,
                         allow_phase_regression=arguments.allow_phase_regression,
+                        replace_next_steps=arguments.replace_next_steps,
                     )
                 if arguments.json:
                     print(json.dumps(result, ensure_ascii=False))
@@ -4738,6 +4991,19 @@ def main() -> int:
                     raise ContextError(
                         "Agent messages require governed mode"
                     )
+                if arguments.command == "msg-dispatch":
+                    # A subagent that finishes on a branch the first
+                    # checkpoint has not provisioned yet would otherwise
+                    # lose its record: subagent-dispatch.sh sends the error
+                    # to /dev/null. A completion is real work, which is what
+                    # provisioning waits for. Any refusal (a terminal task)
+                    # is left to the lookup below to report as it always did.
+                    try:
+                        ensure_working_task(
+                            connection, repository, arguments.task_id, mode, owner
+                        )
+                    except (ContextError, BrainError):
+                        pass
                 # The audit trail outlives the local binding: a completed or
                 # archived task has no binding, but its journal must stay
                 # readable (and refuse writes with the honest terminal error),
@@ -4917,6 +5183,7 @@ def main() -> int:
                     and arguments.transition is None
                     and arguments.phase is None
                     and arguments.authority is None
+                    and not arguments.replace_next_steps
                 ):
                     raise ContextError("Brain record update requires a changed field")
                 reject_secrets(
@@ -4944,6 +5211,7 @@ def main() -> int:
                         phase=arguments.phase,
                         authority=arguments.authority,
                         reason=arguments.reason,
+                        replace_next_steps=arguments.replace_next_steps,
                     )
                 if arguments.json:
                     print(json.dumps(result, ensure_ascii=False))
@@ -5302,6 +5570,7 @@ def main() -> int:
                             gate_mode=gate_mode,
                             host=arguments.host,
                             entry_point="refresh",
+                            allow_unprovisioned=True,
                         )
                     except (ContextError, BrainError, RetrievalError) as error:
                         # A capsule needs an active task; the layer refresh
@@ -5327,6 +5596,16 @@ def main() -> int:
                     ),
                     "reused": index_result.get("reused", 0),
                     "counts": index_result.get("layers", {}),
+                    # Writes no longer fail on a chunk past its review date,
+                    # which was the only place that ever said so out loud.
+                    # The chunk still leaves retrieval; this keeps the loss
+                    # visible on every turn until someone re-verifies it.
+                    "overdue_review": sum(
+                        1
+                        for item in index_result.get("excluded", [])
+                        if isinstance(item, dict)
+                        and item.get("reason") == "overdue-review"
+                    ),
                     "parity_drift": index_result.get("parity_drift", []),
                     # Wall-clock seconds per phase, so an operator can see
                     # which side of the work approaches the hook budget.
@@ -5366,6 +5645,11 @@ def main() -> int:
                             f" ({counts[layer]} documents)" if layer in counts else ""
                         )
                         print(f"{layer}: {result[layer]}{suffix}")
+                    if result["overdue_review"]:
+                        print(
+                            f"memory review: {result['overdue_review']} chunk(s) "
+                            "overdue, not served until re-verified (bank-audit)"
+                        )
                     for item in codebase:
                         behind = item["commits_behind"]
                         print(
@@ -5481,7 +5765,8 @@ def main() -> int:
                     else:
                         print("Cross-edition core parity passed.")
                     return 0 if not cross else 1
-                canonical = str(load_config(repository)["canonical_edition"])
+                configured = str(load_config(repository)["canonical_edition"])
+                canonical = effective_canonical_edition(repository, configured)
                 # Report through the result path rather than an exception, so
                 # --json produces a machine-readable drift list on failure too.
                 # Raising first made the --json branch unreachable, and a caller
@@ -5493,6 +5778,8 @@ def main() -> int:
                     "canonical_edition": canonical,
                     "drift": drift,
                 }
+                if canonical != configured:
+                    result["configured_canonical_edition"] = configured
                 if not arguments.skills_only:
                     # Full mode adds the MIRROR_RULES contract: every mirrored
                     # class (skills including non-markdown files, hooks,
@@ -5512,7 +5799,12 @@ def main() -> int:
                         print(format_full_mirror_drift(mirror_drift), file=sys.stderr)
                     if result["valid"]:
                         scope = "Skill mirror" if arguments.skills_only else "Mirror"
-                        print(f"{scope} parity passed ({canonical} canonical).")
+                        stand_in = (
+                            f"; configured {configured} is not installed here"
+                            if canonical != configured
+                            else ""
+                        )
+                        print(f"{scope} parity passed ({canonical} canonical{stand_in}).")
                 return 0 if result["valid"] else 1
 
             if arguments.command == "compact":
@@ -5668,6 +5960,24 @@ def main() -> int:
                 else:
                     print(
                         f"Promotion applied: {result['destination_memory_id']}."
+                    )
+                return 0
+
+            if arguments.command == "promote-auto":
+                # The turn boundary is the only other caller, and it waits for
+                # `--flush-after` turns. Knowledge recorded deliberately, as a
+                # reviewed session result is, should not wait for a counter.
+                result = auto_promote(repository, owner=owner)
+                if arguments.json:
+                    print(json.dumps(result, ensure_ascii=False))
+                elif not result["enabled"]:
+                    print("Automatic promotion is disabled in runtime.json.")
+                else:
+                    print(
+                        f"Promoted {len(result['promoted'])} record(s); "
+                        f"{len(result['blocked'])} blocked, "
+                        f"{len(result['failed'])} failed, "
+                        f"{result['skipped']} deferred."
                     )
                 return 0
 

@@ -7,14 +7,16 @@ import json
 import os
 from pathlib import Path
 import selectors
-import shlex
 import signal
 import subprocess
 import sys
 import time
 import uuid
 
+from .filesystem import fs
+from . import process_runtime
 from .sessions import ACTIVE, SessionError, git_details, now, read_context
+from .windows_commands import split_command
 
 OUTPUT_LIMIT = 512 * 1024
 
@@ -27,11 +29,16 @@ class Results:
                 CREATE TABLE IF NOT EXISTS launches (
                     id TEXT PRIMARY KEY, session_id TEXT NOT NULL, kind TEXT NOT NULL,
                     status TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT,
-                    settings TEXT NOT NULL, usage TEXT);
+                    settings TEXT NOT NULL, usage TEXT, context TEXT, receipt TEXT);
                 CREATE INDEX IF NOT EXISTS launches_session ON launches(session_id,started_at);
                 CREATE TABLE IF NOT EXISTS checks (
                     id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL);
             ''')
+            # Context ledgers and receipts arrived after launches did; older rows keep NULL and read as not recorded.
+            columns={row['name'] for row in sessions.db.execute('PRAGMA table_info(launches)')}
+            for name in ('context','receipt'):
+                if name not in columns:
+                    sessions.db.execute(f'ALTER TABLE launches ADD COLUMN {name} TEXT')
             # Old sessions do not contain enough information to reconstruct every turn.
             sessions.db.execute("UPDATE launches SET status='interrupted',finished_at=? WHERE status='running'", (now(),))
             rows=sessions.db.execute('SELECT id,data FROM checks').fetchall()
@@ -55,13 +62,36 @@ class Results:
                                      (json.dumps(value),session['id']))
             self.sessions.db.commit()
 
-    def start_launch(self, sid, generation):
+    def start_launch(self, sid, generation, context=None):
         session=self.sessions.get(sid)
         settings={k:session[k] for k in ('provider','model','thinking_effort','agents_enabled','agent_count','budgets','agent_budget_plan','sdd','mode','model_routing','clash')}
         kind='fleet' if session['fleet'] else 'clash' if session['clash'] else 'creator-'+session['creator']['phase'] if session['creator'] else 'native'
         with self.sessions.lock:
-            self.sessions.db.execute('INSERT INTO launches VALUES (?,?,?,?,?,?,?,NULL)',
-                (generation,sid,kind,'running',now(),None,json.dumps(settings)))
+            self.sessions.db.execute('INSERT INTO launches (id,session_id,kind,status,started_at,finished_at,settings,usage,context) VALUES (?,?,?,?,?,?,?,NULL,?)',
+                (generation,sid,kind,'running',now(),None,json.dumps(settings),json.dumps(context) if context else None))
+            self.sessions.db.commit()
+
+    def last_window(self, sid, model):
+        """The context window an earlier native turn of this session reported for the same model, or None."""
+        with self.sessions.lock:
+            rows = self.sessions.db.execute("SELECT settings,context FROM launches WHERE session_id=? AND kind='native' AND context IS NOT NULL "
+                                            "ORDER BY started_at DESC,rowid DESC LIMIT 20", (sid,)).fetchall()
+        for row in rows:
+            window = ((json.loads(row['context']) or {}).get('fill') or {}).get('window')
+            if json.loads(row['settings']).get('model') == model and type(window) is int and window > 0:
+                return window
+        return None
+
+    def update_context(self, generation, context):
+        """Replace a launch's context record: the prompt ledger plus the fill observed so far, integers only."""
+        with self.sessions.lock:
+            self.sessions.db.execute('UPDATE launches SET context=? WHERE id=?',(json.dumps(context),generation))
+            self.sessions.db.commit()
+
+    def save_receipt(self, generation, receipt):
+        """A native launch's receipt: counts and bounded lists of what its tools reported (run_activity.RunLedger)."""
+        with self.sessions.lock:
+            self.sessions.db.execute('UPDATE launches SET receipt=? WHERE id=?',(json.dumps(receipt,ensure_ascii=False),generation))
             self.sessions.db.commit()
 
     def finish_launch(self, generation, status):
@@ -78,7 +108,9 @@ class Results:
                      if json.loads(row['creator'])['run_id']==session['creator']['run_id']]
             placeholders=','.join('?' for _ in ids)
             rows=self.sessions.db.execute(f'SELECT * FROM launches WHERE session_id IN ({placeholders}) ORDER BY started_at,rowid',ids).fetchall()
-            records=[{**dict(row),'settings':json.loads(row['settings']),'usage':json.loads(row['usage']) if row['usage'] else None} for row in rows]
+            records=[{**dict(row),'settings':json.loads(row['settings']),'usage':json.loads(row['usage']) if row['usage'] else None,
+                      'context':json.loads(row['context']) if row['context'] else None,
+                      'receipt':json.loads(row['receipt']) if row['receipt'] else None} for row in rows]
             checks=[json.loads(row[0]) for row in self.sessions.db.execute('SELECT data FROM checks WHERE session_id=? ORDER BY rowid DESC LIMIT 50',(sid,))]
         totals={}
         for key in ('tokens','cost_usd','seconds'):
@@ -92,16 +124,16 @@ class Results:
         store=self.sessions
         if not cleanup and (store.stopping.is_set() or sid in store.cancelled):
             return {'output':'','exit_code':None,'reason':'interrupted' if store.stopping.is_set() else 'cancelled','seconds':0}
-        read_fd,write_fd=os.pipe(); process=None; selector=selectors.DefaultSelector()
+        read_fd,write_fd=os.pipe(); process=None; selector=process_runtime.PipeSelector()
         output=bytearray(); reason=None; started=time.monotonic()
         try:
             env={k:v for k,v in os.environ.items() if not k.startswith('GIT_')}
             env.update(GIT_TERMINAL_PROMPT='0',PYTHONDONTWRITEBYTECODE='1')
             if env_extra: env.update(env_extra)
-            process=subprocess.Popen([sys.executable,str(Path(__file__).with_name('process_guard.py')),str(read_fd),'--',*command],
+            process=process_runtime.launch_guarded(command,read_fd,lock_fd=store.runner_lock,
                 cwd=root,env=env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
-                start_new_session=True,pass_fds=(read_fd,store.runner_lock))
-            os.close(read_fd); read_fd=None
+                )
+            fs.close(read_fd); read_fd=None
             if sid:
                 with store.lock: store.active[sid]=process
             selector.register(process.stdout,selectors.EVENT_READ)
@@ -110,7 +142,7 @@ class Results:
                     reason='interrupted' if store.stopping.is_set() else 'cancelled'; break
                 if time.monotonic()-started > timeout: reason='timed_out'; break
                 for key,_ in selector.select(.1):
-                    chunk=os.read(key.fileobj.fileno(),65536)
+                    chunk=selector.read(key.fileobj,65536)
                     if not chunk: selector.unregister(key.fileobj); continue
                     output.extend(chunk[:OUTPUT_LIMIT-len(output)])
                     if update: update(output.decode('utf-8',errors='replace'))
@@ -122,11 +154,10 @@ class Results:
                 try: process.wait(timeout=max(.1,timeout-(time.monotonic()-started)))
                 except subprocess.TimeoutExpired: reason='timed_out'
         finally:
-            if read_fd is not None: os.close(read_fd)
-            os.close(write_fd)
+            if read_fd is not None: fs.close(read_fd)
+            fs.close(write_fd)
             if process:
-                store._signal(process,signal.SIGKILL)
-                process.wait(timeout=3); process.stdout.close()
+                process_runtime.reap_tree(process, owner=store); process.stdout.close()
             selector.close()
             if sid:
                 with store.lock: store.active.pop(sid,None)
@@ -139,7 +170,7 @@ class Results:
         if not info['is_git'] or not info['head']:
             return {'available':False,'id':None,'complete':False,'message':'A Git repository with a commit is required for a diff. Checks can still run in this workspace.'}
         base=session.get('result_base') or {}; head=base.get('head') or info['head']
-        command=['git','--no-optional-locks','-c','core.hooksPath=/dev/null','-c','core.fsmonitor=false','-c','color.ui=false']
+        command=['git','--no-optional-locks','-c','core.hooksPath=' + os.devnull,'-c','core.fsmonitor=false','-c','color.ui=false']
         def git(*args):
             value=self.capture(command+list(args),root)
             if value['exit_code'] and not value['reason']: raise SessionError('Could not read the workspace diff; its original commit may be unavailable.')
@@ -166,10 +197,13 @@ class Results:
                 'baseline_recorded':bool(base.get('head')),'message':'Current workspace versus the launch baseline. Includes pre-existing and external edits; this is not proof of agent authorship.'}
 
     def get(self, sid, include_diff=True):
+        """History with the workspace snapshot; include_diff='names' keeps its file names and drops the diff text."""
         session=self.sessions.get(sid)
         result={'session_id':sid,**self.history(sid),'workspace':session['project_path']}
         if include_diff:
-            result['snapshot']=self.snapshot(sid) if session['status'] not in ACTIVE else None
+            snapshot=self.snapshot(sid) if session['status'] not in ACTIVE else None
+            if snapshot and include_diff=='names': snapshot.pop('diff',None)
+            result['snapshot']=snapshot
         return result
 
     def save_check(self, check):
@@ -184,7 +218,7 @@ class Results:
         command=data['command']; timeout=data['timeout']
         if not isinstance(command,str) or not command.strip() or len(command.encode())>4000 or any(ord(c)<32 for c in command):
             raise SessionError('Enter one command of at most 4000 bytes.')
-        try: argv=shlex.split(command)
+        try: argv=split_command(command)
         except ValueError: raise SessionError('Check command quoting.') from None
         if not argv or len(argv)>100 or any(arg in ('|','||','&&',';','>','>>','<') for arg in argv):
             raise SessionError('Run one command at a time; shell operators are not expanded.')
