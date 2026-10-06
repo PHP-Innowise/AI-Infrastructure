@@ -56,6 +56,14 @@ class Accelerators:
     def state(self, project_id) -> Path:
         return self.sessions.state_dir / 'attached' / project_id
 
+    def summary(self, project_id) -> dict[str, Optional[str]]:
+        """Mode and edition only, for project lists: no file is parsed."""
+        path = Path(self.sessions.project(project_id)['path'])
+        if path.is_dir() and self.installed(path):
+            return {'mode': 'installed', 'edition': self._edition(project_id)}
+        edition = self._edition(project_id)
+        return {'mode': 'attached' if edition else None, 'edition': edition}
+
     def get(self, project_id) -> dict[str, Any]:
         project = self.sessions.project(project_id)
         path = Path(project['path'])

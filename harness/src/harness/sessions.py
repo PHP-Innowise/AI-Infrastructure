@@ -699,8 +699,7 @@ class Sessions:
             except SessionError:
                 project['available'] = False
             try:
-                accelerator = self.accelerators.get(project['id'])
-                project['accelerator'] = {key: accelerator[key] for key in ('mode', 'edition')}
+                project['accelerator'] = self.accelerators.summary(project['id'])
             except (SessionError, OSError):
                 project['accelerator'] = {'mode': None, 'edition': None}
         return projects
