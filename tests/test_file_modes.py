@@ -37,8 +37,12 @@ Run: python3 -m unittest tests.test_file_modes
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path, PurePosixPath
 
@@ -50,6 +54,7 @@ WIRING = {
 }
 sys.path.insert(0, str(ROOT / "scripts"))
 from check_routes import wired_hook_scripts as scripts_named  # noqa: E402
+from file_modes import FileModes  # noqa: E402
 
 
 def tracked_modes() -> dict[str, str] | None:
@@ -159,6 +164,60 @@ class FileModeTest(unittest.TestCase):
                     launchers.append(path)
         self.assertIn("collect", launchers)
         self.assert_executable(sorted(launchers), "3 (root launchers)")
+
+
+@unittest.skipIf(os.name == "nt", "the filesystem has no executable bit")
+@unittest.skipUnless(shutil.which("git"), "Git is required for an index")
+class IntentToAddTest(unittest.TestCase):
+    """`scripts/file_modes.py` leaves an intent-to-add entry alone.
+
+    Regression: `git add -N` records the empty blob with the intent-to-add
+    flag. FileModes read it as an ordinary entry, and repairing its mode
+    through `update-index --index-info` staged that empty blob and dropped
+    the flag, so a plain `git commit` recorded a 0-byte mirror.
+    """
+
+    def git(self, *args: str) -> str:
+        result = subprocess.run(
+            ["git", *args], cwd=str(self.repo), capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory(prefix="file-modes-ita-")
+        self.addCleanup(temporary.cleanup)
+        self.repo = Path(temporary.name)
+        self.git("-c", "init.defaultBranch=main", "init", "-q")
+        # One directory down, as "PHP Core" and "Cms/wordpress" sit.
+        self.base = self.repo / "Synthetic Edition"
+        self.path = self.base / "hooks" / "new-hook.sh"
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        self.path.chmod(0o644)
+        self.git("add", "-N", "--", "Synthetic Edition/hooks/new-hook.sh")
+
+    def status(self) -> str:
+        return self.git("status", "--porcelain=v1", "-z", "--", "Synthetic Edition")
+
+    def test_setting_the_bit_keeps_the_entry_intent_to_add(self) -> None:
+        self.assertEqual(self.status(), " A Synthetic Edition/hooks/new-hook.sh\0")
+        modes = FileModes(self.base)
+        # Untracked for mode purposes: the disk decides.
+        self.assertIs(modes.is_executable(self.path), False)
+        self.assertTrue(modes.set_executable(self.path, True))
+        modes.flush()
+        self.assertTrue(self.path.stat().st_mode & stat.S_IXUSR)
+        # Before the fix: "AM", an empty 100755 blob staged in its place.
+        self.assertEqual(self.status(), " A Synthetic Edition/hooks/new-hook.sh\0")
+
+    def test_untrusted_filesystem_gives_no_verdict_and_writes_nothing(self) -> None:
+        self.git("config", "core.fileMode", "false")
+        modes = FileModes(self.base)
+        self.assertIsNone(modes.is_executable(self.path))
+        self.assertFalse(modes.set_executable(self.path, True))
+        modes.flush()
+        self.assertEqual(self.status(), " A Synthetic Edition/hooks/new-hook.sh\0")
 
 
 if __name__ == "__main__":

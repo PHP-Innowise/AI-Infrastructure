@@ -1135,7 +1135,7 @@ class ExecutableBitSourceTest(unittest.TestCase):
             self.assertTrue(is_executable(target / self.PLAIN_SCRIPT))
             self.assertFalse(is_executable(target / self.INDEX_EXECUTABLE))
 
-    def test_identical_non_executable_hook_is_reported_not_rewritten(self) -> None:
+    def test_identical_non_executable_hook_gets_only_its_bit_back(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mode reinstall ") as raw:
             base = Path(raw).resolve() / "source"
             target = Path(raw).resolve() / "target"
@@ -1146,18 +1146,66 @@ class ExecutableBitSourceTest(unittest.TestCase):
             # A project installed before the fix: identical bytes, no bit.
             broken = target / self.HOOKS[1]
             broken.chmod(0o644)
+            content, modified = broken.read_bytes(), broken.stat().st_mtime_ns
+
+            preview = self._install(base, target, "--merge-existing", "--dry-run")
+            self.assertEqual(0, preview.returncode, preview.stderr)
+            self.assertIn(
+                f"WOULD_FIX_MODE\tcursor\t{self.HOOKS[1]}\t{self.HOOKS[1]}",
+                preview.stdout.splitlines(),
+            )
+            self.assertEqual(0o644, stat.S_IMODE(broken.stat().st_mode))
 
             repeated = self._install(base, target, "--merge-existing")
             self.assertEqual(0, repeated.returncode, repeated.stderr)
-            self.assertIn(f"UNCHANGED\tcursor\t{self.HOOKS[1]}", repeated.stdout.splitlines())
-            self.assertIn(
-                f"NOT_EXECUTABLE\tcursor\t{self.HOOKS[1]}\t{self.HOOKS[1]}",
-                repeated.stderr.splitlines(),
-            )
-            self.assertEqual(0o644, stat.S_IMODE(broken.stat().st_mode))
-            for hook in (self.HOOKS[0], self.HOOKS[2]):
-                self.assertNotIn(hook, repeated.stderr)
+            lines = repeated.stdout.splitlines()
+            self.assertIn(f"FIX_MODE\tcursor\t{self.HOOKS[1]}\t{self.HOOKS[1]}", lines)
+            self.assertNotIn(f"UNCHANGED\tcursor\t{self.HOOKS[1]}", lines)
+            self.assertEqual(0o755, stat.S_IMODE(broken.stat().st_mode))
+            # Only the mode changed: the file was not rewritten.
+            self.assertEqual(content, broken.read_bytes())
+            self.assertEqual(modified, broken.stat().st_mtime_ns)
+            self.assertIn(f"UNCHANGED\tclaude\t{self.HOOKS[0]}", lines)
+            self.assertIn(f"UNCHANGED\tcodex\t{self.HOOKS[2]}", lines)
+            self.assertEqual("", repeated.stderr)
 
+            again = self._install(base, target, "--merge-existing")
+            self.assertEqual(0, again.returncode, again.stderr)
+            self.assertIn(f"UNCHANGED\tcursor\t{self.HOOKS[1]}", again.stdout.splitlines())
+            self.assertNotIn("FIX_MODE", again.stdout)
+
+    def test_install_from_an_earlier_release_gets_its_hook_bit_back(self) -> None:
+        # An install from the release before executable bits were enforced:
+        # the hook is byte-identical but 0644, and a file this release
+        # changed (here the Cursor wiring) now collides.
+        with tempfile.TemporaryDirectory(prefix="mode upgrade ") as raw:
+            base = Path(raw).resolve() / "source"
+            target = Path(raw).resolve() / "target"
+            target.mkdir()
+            self._git_source(base)
+            first = self._install(base, target)
+            self.assertEqual(0, first.returncode, first.stderr)
+            broken = target / self.HOOKS[1]
+            broken.chmod(0o644)
+            wiring = base / "PHP Core" / ".cursor/hooks.json"
+            wiring.write_text(wiring.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+
+            refused = self._install(base, target, "--merge-existing")
+            self.assertEqual(2, refused.returncode, refused.stdout)
+            self.assertIn(
+                "COLLISION\tcursor\t.cursor/hooks.json\texisting-file",
+                refused.stderr.splitlines(),
+            )
+            # A refused run writes nothing, modes included.
+            self.assertEqual(0o644, stat.S_IMODE(broken.stat().st_mode))
+
+            upgraded = self._install(base, target, "--overwrite")
+            self.assertEqual(0, upgraded.returncode, upgraded.stderr)
+            lines = upgraded.stdout.splitlines()
+            self.assertIn("OVERWRITE\tcursor\t.cursor/hooks.json", lines)
+            self.assertIn(f"FIX_MODE\tcursor\t{self.HOOKS[1]}\t{self.HOOKS[1]}", lines)
+            self.assertEqual(0o755, stat.S_IMODE(broken.stat().st_mode))
+            self.assertTrue(all(is_executable(target / hook) for hook in self.HOOKS))
 
 if __name__ == "__main__":
     unittest.main()

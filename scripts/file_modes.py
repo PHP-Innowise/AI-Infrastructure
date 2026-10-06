@@ -92,6 +92,17 @@ class FileModes:
                 fields[0].decode("ascii"),
                 fields[1].decode("ascii"),
             )
+        # An intent-to-add entry (`git add -N`) records the empty blob, not
+        # the file, and `--index-info` would stage that empty blob and drop
+        # the flag. Such a path counts as untracked. `diff-files` reports
+        # exactly these entries as added: a real index entry can be modified
+        # or deleted against the working tree, never added.
+        added = _git(base, "diff-files", "-z", "--name-only", "--diff-filter=A", "--", ".")
+        if added is not None and added.returncode == 0:
+            for raw in added.stdout.split(b"\0"):
+                full = raw.decode("utf-8", "surrogateescape")
+                if full and full.startswith(self.prefix):
+                    self.index.pop(full[len(self.prefix) :], None)
         config = _git(base, "config", "--bool", "core.fileMode")
         if (
             config is not None

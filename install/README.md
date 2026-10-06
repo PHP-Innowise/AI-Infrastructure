@@ -101,7 +101,10 @@ re-add source-only files excluded from the production payload.
 `--merge-existing` handles the standard root files commonly present in an
 existing project:
 
-- identical files are reported as `UNCHANGED`;
+- identical files are reported as `UNCHANGED`, except that one which must be
+  executable and is not (a hook from an install made before executable bits
+  were enforced) keeps its content, gets the bit, and is reported as
+  `FIX_MODE` (`WOULD_FIX_MODE` in a dry run);
 - `.gitignore` and `.gitattributes` retain project entries and receive only
   missing accelerator directives in an installer-managed block;
 - existing `AGENTS.md` retains project policy first and receives a marked,
@@ -420,7 +423,8 @@ Use the saved transcript, the pre-install recovery point, and Git diff:
   required. Removing only an installer-managed block is safe only after review:
   additive merges can omit accelerator directives that already existed in the
   project, and those project-owned lines must remain;
-- do nothing for `UNCHANGED` records.
+- do nothing for `UNCHANGED` records; a `FIX_MODE` record only added an
+  executable bit, which `chmod -x` takes away again.
 
 The installer has no automatic rollback command. A transcript records what the
 successful run reported, but it does not contain previous file contents.

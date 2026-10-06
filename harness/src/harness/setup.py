@@ -244,12 +244,21 @@ class SetupManager:
                         raise SessionError('The selected accelerator exceeds the 5000-file limit.')
                     total = len(inventory['body']) + len(code['body'])
                     prefix = installer.edition_path(edition).as_posix() + '/'
+                    # The staged source is no Git checkout, so the staged
+                    # installer sees only disk modes. A file the source index
+                    # records as executable is staged with the bit, and the
+                    # installer's disk fallback then decides as a direct run
+                    # of the CLI does (core.fileMode=false, Windows-made
+                    # checkouts). The source fingerprint keeps the disk mode.
+                    executable_bits = installer.source_executable_bits(self.source_root, edition) or {}
                     for _, name in selected:
-                        source_name = prefix + catalog['source_overrides'].get(name, name)
+                        source_path = catalog['source_overrides'].get(name, name)
+                        source_name = prefix + source_path
                         source = _read(source_fd, source_name, source_dirs, required=True)
                         sources[source_name] = source
                         total += source['bytes']
-                        _write_stage(staged_source, source_name, source)
+                        _write_stage(staged_source, source_name,
+                                     {**source, 'mode': source['mode'] | 0o111} if executable_bits.get(source_path) else source)
                         before[name] = _read(target_fd, name, target_dirs)
                         if before[name] is not None:
                             total += before[name]['bytes']
@@ -287,7 +296,9 @@ class SetupManager:
                     actions = {}
                     for line in output.splitlines():
                         fields = line.split('\t')
-                        if len(fields) >= 3 and fields[0] in ('COPY', 'MERGE', 'COPY_AS', 'UNCHANGED'):
+                        # FIX_MODE: identical bytes, and the staged installer
+                        # gave the staged copy the executable bit it lacked.
+                        if len(fields) >= 3 and fields[0] in ('COPY', 'MERGE', 'COPY_AS', 'UNCHANGED', 'FIX_MODE'):
                             actions[fields[2]] = (fields[0].lower().replace('_', '-'), fields[3] if len(fields) > 3 else fields[2])
                     if set(actions) != {name for _, name in selected}:
                         raise SessionError('The staged installer returned an incomplete file plan.')
@@ -307,6 +318,11 @@ class SetupManager:
                                      'diff': change, 'diff_truncated': truncated}
                             if name in collisions:
                                 entry['reason'] = collisions[name]
+                            elif action == 'fix-mode':
+                                if previous is None or previous['hash'] != value['hash']:
+                                    raise SessionError('The staged installer returned an inconsistent file plan.')
+                                entry['reason'] = (f"Mode {previous['mode'] & 0o777:04o} -> {value['mode'] & 0o777:04o}: "
+                                                   'this file must be executable. Its content is unchanged.')
                             files.append(entry)
                             payloads[destination] = value
                     finally:
@@ -387,7 +403,7 @@ class SetupManager:
                 raise SessionError('Wait for active sessions to finish before installing the accelerator.')
             _, root, target_fd = self._project(preview['project_id'])
             source_fd, code_fd = None, None
-            installed, merged, unchanged = [], [], []
+            installed, merged, unchanged, repaired = [], [], [], []
             writing = False
             try:
                 self._check_overlap(root)
@@ -439,6 +455,18 @@ class SetupManager:
                         if _metadata(_read(target_fd, name)) != preview['before'].get(name):
                             raise SessionError('An installation file changed after preflight.')
                         value = preview['payloads'][name]
+                        if action == 'fix-mode':
+                            # The bytes were just verified identical; only the
+                            # reviewed mode is applied, in place, to that file.
+                            descriptor = fs.open(parts[-1], os.O_RDONLY | fs.O_NOFOLLOW | fs.O_NONBLOCK, dir_fd=parent)
+                            try:
+                                if _identity(fs.fstat(descriptor)) != preview['before'][name]['identity']:
+                                    raise SessionError('An installation file changed after preflight.')
+                                fs.fchmod(descriptor, value['mode'] & 0o777)
+                            finally:
+                                fs.close(descriptor)
+                            repaired.append(name)
+                            continue
                         temporary = '.harness-setup-' + uuid.uuid4().hex
                         descriptor = fs.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | fs.O_NOFOLLOW,
                                              value['mode'] & 0o777, dir_fd=parent)
@@ -483,9 +511,10 @@ class SetupManager:
                     'tools': preview['tools'], 'root': str(root), 'identity': list(preview['identity']), 'files': fingerprints})
             except (OSError, SessionError) as error:
                 if writing:
-                    return {'ok': False, 'installed': installed, 'merged': merged, 'unchanged': unchanged,
+                    return {'ok': False, 'installed': installed, 'merged': merged, 'unchanged': unchanged, 'repaired': repaired,
                             'error': 'Installation stopped and may be partial. Refresh the project and preview again.',
-                            'summary': f'{len(installed)} files added and {len(merged)} merged before installation stopped.'}
+                            'summary': f'{len(installed)} files added and {len(merged)} merged'
+                            + (f', {len(repaired)} made executable' if repaired else '') + ' before installation stopped.'}
                 if isinstance(error, SessionError):
                     raise
                 raise SessionError('Installation preflight failed. No project files were written; preview again.') from error
@@ -493,8 +522,10 @@ class SetupManager:
                 for descriptor in (target_fd, source_fd, code_fd):
                     if descriptor is not None:
                         fs.close(descriptor)
-            return {'ok': True, 'installed': installed, 'merged': merged, 'unchanged': unchanged,
-                    'summary': f'{len(installed)} files installed, {len(merged)} merged, {len(unchanged)} unchanged. Reviewed payload hashes verified.'}
+            return {'ok': True, 'installed': installed, 'merged': merged, 'unchanged': unchanged, 'repaired': repaired,
+                    'summary': f'{len(installed)} files installed, {len(merged)} merged, '
+                    + (f'{len(repaired)} made executable, ' if repaired else '')
+                    + f'{len(unchanged)} unchanged. Reviewed payload hashes and modes verified.'}
 
     def status(self, project_id):
         project = self.sessions.project(project_id)

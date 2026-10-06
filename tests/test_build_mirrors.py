@@ -376,6 +376,42 @@ class TestMirrorExecutableBitFromGitIndex(unittest.TestCase):
             index_modes(self.repo)[f"Synthetic Edition/.cursor/hooks/{HOOK}"], "100755"
         )
 
+    def test_write_leaves_intent_to_add_mirrors_unstaged(self):
+        # A new canonical hook, its fresh mirrors marked with `git add -N`
+        # while still 0644. --write repairs their bit on disk; it must not
+        # stage the empty blob an intent-to-add entry records, which a plain
+        # `git commit` would then ship as a 0-byte hook.
+        new_hook = "new-hook.sh"
+        canonical = self.edition / ".claude" / "hooks" / new_hook
+        canonical.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        canonical.chmod(0o755)
+        git(self.repo, "add", "--", f"Synthetic Edition/.claude/hooks/{new_hook}")
+        bm.process_edition(self.edition, HOOK_RULES, None, write=True)
+        mirrors = [f"Synthetic Edition/{mirror}/{new_hook}" for mirror in MIRRORS]
+        for mirror in MIRRORS:
+            (self.edition / mirror / new_hook).chmod(0o644)
+        git(self.repo, "add", "-N", "--", *mirrors)
+
+        problems, written = bm.process_edition(self.edition, HOOK_RULES, None, write=True)
+        self.assertEqual(problems, [])
+        for mirror, path in zip(MIRRORS, mirrors):
+            self.assertIn(f"Synthetic Edition/{mirror}/{new_hook} (mode +x)", written)
+            self.assertTrue(executable_on_disk(self.edition / mirror / new_hook))
+            self.assertEqual(
+                git(self.repo, "status", "--porcelain=v1", "-z", "--", path), f" A {path}\0"
+            )
+        # Staged for real, each mirror records its content and the bit.
+        git(self.repo, "add", "--", *mirrors)
+        modes = index_modes(self.repo)
+        for path in mirrors:
+            self.assertEqual(modes[path], "100755")
+            self.assertEqual(
+                git(self.repo, "cat-file", "-p", f":{path}"), "#!/usr/bin/env bash\nexit 0\n"
+            )
+        self.assertEqual(
+            bm.process_edition(self.edition, HOOK_RULES, None, write=False), ([], [])
+        )
+
     def test_untrusted_filesystem_reads_the_index_only(self):
         # core.fileMode=false: the disk bit says nothing, the index decides.
         git(self.repo, "config", "core.fileMode", "false")

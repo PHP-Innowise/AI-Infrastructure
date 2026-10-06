@@ -300,6 +300,25 @@ class ExecutableBitTests(AssetParityFixture):
         self.assertEqual(self.asset_index_mode(), "100755")
         self.assertTrue(os.access(self.asset / self.ASSET_SCRIPT, os.X_OK))
 
+    def test_write_leaves_an_intent_to_add_asset_unstaged(self) -> None:
+        # A new asset marked with `git add -N`: its index entry holds the
+        # empty blob. Repairing its bit must not stage that blob in place of
+        # the file and drop the flag.
+        self.index_executable_checkout()
+        asset_path = (
+            f"Infrastructure-Creator/.agents/skills/memory-seed/assets/{self.ASSET_SCRIPT}"
+        )
+        self.git("rm", "-q", "--cached", "--", asset_path)
+        self.git("add", "-N", "--", asset_path)
+        self.assertIn("mode differs", self.reasons())
+        asset_parity.sync(self.repo, self.asset, self.findings())
+        self.assertEqual(self.findings(), [], self.reasons())
+        self.assertTrue(os.access(self.asset / self.ASSET_SCRIPT, os.X_OK))
+        self.assertEqual(
+            self.git("status", "--porcelain=v1", "-z", "--", asset_path),
+            f" A {asset_path}\0",
+        )
+
     def test_copied_content_takes_the_index_bit_not_the_disk_bit(self) -> None:
         self.index_executable_checkout()
         # copy2 alone would carry the disk's 0644 into the asset.

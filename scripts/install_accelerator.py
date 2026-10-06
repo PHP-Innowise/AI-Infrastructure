@@ -313,7 +313,9 @@ def source_executable_bits(root: Path, edition: str) -> dict[str, bool] | None:
     every hook non-executable. Returns None without a Git checkout - a
     source extracted from an archive, or the standalone copy of this script
     the Harness runs against a staged source - and the caller then falls
-    back to the filesystem bit.
+    back to the filesystem bit. The Harness calls this on its real source
+    and stages every index-executable file with the bit, so that fallback
+    reaches the same decision as a direct run.
 
     Deliberately self-contained rather than shared with
     `scripts/file_modes.py`: the Harness copies this one file on its own.
@@ -357,6 +359,13 @@ def installs_executable(
 
 def lacks_executable_bit(path: Path) -> bool:
     return os.name != "nt" and not path.stat().st_mode & stat.S_IXUSR
+
+
+def add_executable_bit(path: Path) -> None:
+    """`chmod +x` on a file already in place: execute for the owner, and for
+    group and others wherever they may read it. Nothing else changes."""
+    current = stat.S_IMODE(path.stat().st_mode)
+    os.chmod(path, current | stat.S_IXUSR | ((current & 0o044) >> 2))
 
 
 def build_inventory(root: Path, edition: str) -> dict:
@@ -589,17 +598,20 @@ def install(
         if path in resolutions:
             resolution, resolved_destination, content = resolutions[path]
             if resolution == "unchanged":
-                print(f"UNCHANGED\t{component}\t{path}")
-                # An identical file is never touched - the Harness verifies
-                # every unchanged file against the mode it previewed - so a
-                # hook a previous install left non-executable is named here
-                # for the operator to repair.
                 if executable and lacks_executable_bit(resolved_destination):
+                    # Identical bytes without the bit - typically a hook from
+                    # an install made before executable bits were enforced.
+                    # The content stays untouched and only the bit is added,
+                    # which destroys nothing, so this happens under every
+                    # collision mode. The Harness reads the repaired mode
+                    # from its staged run and applies exactly that.
+                    if not dry_run:
+                        add_executable_bit(resolved_destination)
                     relative = resolved_destination.relative_to(target).as_posix()
-                    print(
-                        f"NOT_EXECUTABLE\t{component}\t{path}\t{relative}",
-                        file=sys.stderr,
-                    )
+                    label = "WOULD_FIX_MODE" if dry_run else "FIX_MODE"
+                    print(f"{label}\t{component}\t{path}\t{relative}")
+                    continue
+                print(f"UNCHANGED\t{component}\t{path}")
                 continue
             label = {
                 "merge": "WOULD_MERGE" if dry_run else "MERGE",

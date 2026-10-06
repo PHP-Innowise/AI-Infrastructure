@@ -117,7 +117,8 @@ python3 scripts/build_mirrors.py --write --edition Laravel \
   `.gitattributes`. For a tracked mirror the bit is also recorded in the Git
   index - the mode only, never the content - because a checkout without
   filesystem modes (Windows, `core.fileMode=false`) has nowhere else to keep
-  it.
+  it. An intent-to-add entry (`git add -N`) counts as untracked and is left
+  as it is: its index entry holds the empty blob, not the file.
 - **CI relationship:** the `mirrors` job runs `--check`. Edition parity jobs
   also execute the same mirror contract through
   `memory-bank/scripts/context.py parity`.
@@ -185,12 +186,17 @@ python3 scripts/install_accelerator.py \
   production-specific selection are resolved there without requiring
   documentation to depend on a particular future schema field name.
 - **Outputs:** tab-separated `VERIFIED`, `COLLISION`, `WOULD_*`, `COPY`,
-  `MERGE`, `COPY_AS`, `UNCHANGED`, and `COMPLETE` records; meaningful nonzero
-  exit status on inventory errors or refused collisions. A
-  `NOT_EXECUTABLE\t<component>\t<path>\t<destination>` record on stderr names
-  an identical, therefore untouched, file in the target that should be
-  executable and is not - typically a hook from an install made before
-  executable bits were enforced; repair it with `chmod +x <destination>`.
+  `MERGE`, `COPY_AS`, `UNCHANGED`, `FIX_MODE`, and `COMPLETE` records;
+  meaningful nonzero exit status on inventory errors or refused collisions. A
+  `FIX_MODE\t<component>\t<path>\t<destination>` record (`WOULD_FIX_MODE`
+  with `--dry-run`) names a file already identical in the target that should
+  be executable and was not - typically a hook from an install made before
+  executable bits were enforced. Its content is left untouched and only the
+  bit is added, under every collision mode, since that destroys nothing. A
+  refused run changes nothing, modes included: an install from an earlier
+  release collides first on the files that release changed, and its modes
+  are repaired by the run that resolves those collisions (or by
+  `chmod +x <destination>`).
 - **Dependencies:** Python 3 standard library and Git. Inventory discovery for
   verification/writing is `git ls-files --cached`, so the payload is exactly
   what the index holds. Untracked working-tree content - a client application
@@ -219,7 +225,8 @@ install hooks that exit 126. The installer reads the index itself rather than
 through `file_modes.py`, because the Harness runs a standalone copy of it.
 
 Collision preflight is completed before normal copies begin. With
-`--merge-existing`, identical files remain `UNCHANGED`; `.gitignore` and
+`--merge-existing`, identical files remain `UNCHANGED` (or `FIX_MODE`, when
+only a required executable bit is missing); `.gitignore` and
 `.gitattributes` receive only missing directives in a marked block;
 `AGENTS.md` preserves project policy before one replaceable accelerator block;
 and an existing root `README.md` is preserved while accelerator documentation

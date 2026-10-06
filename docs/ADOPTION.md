@@ -116,7 +116,8 @@ select more than one, or omit it to install all three integrations. Codex
 selects both `.agents/` and `.codex/`. Shared cross-tool layout READMEs are
 included as distribution documentation and do not activate an unselected tool.
 
-With `--merge-existing`, identical files are `UNCHANGED`; `.gitignore`,
+With `--merge-existing`, identical files are `UNCHANGED` (`WOULD_FIX_MODE`
+when only a required executable bit is missing); `.gitignore`,
 `.gitattributes`, and `AGENTS.md` use marked conservative merges; and an
 existing root `README.md` is preserved while accelerator documentation is
 written as `ACCELERATOR.md`. Review every `WOULD_COPY`, `WOULD_MERGE`, and
