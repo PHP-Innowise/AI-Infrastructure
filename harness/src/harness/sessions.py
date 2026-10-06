@@ -1278,8 +1278,9 @@ class Sessions:
             return self._task_context().run(session, data)
 
     def save_memory(self, sid, data):
-        """Save a reviewed memory draft. Several runtime commands run in turn, so the
-        store lock covers only the state check; each command takes the knowledge lock."""
+        """Save a memory draft a person checked (API only: the page saves each run's draft by itself).
+        Several runtime commands run in turn, so the store lock covers only the state check; each
+        command takes the knowledge lock."""
         with self.lock:
             session = self.get(sid)
             if session['status'] in ACTIVE:
@@ -1423,7 +1424,7 @@ class Sessions:
             # Only a run with a message of its own: Fleet and Clash build their context
             # from an empty prompt, and their reviewers do not own the linked task.
             from .memory_draft import instruction
-            prompt += '\n\n' + instruction(reviewed(session['brain']))
+            prompt += '\n\n' + instruction()
         text = prefix + prompt + '\n\nHarness session delegation requirement:\n' + delegation
         if session['provider'] == 'claude' and text.startswith('/'):
             # Nothing came before the message, and Claude Code would read a leading slash as one of its commands.
@@ -1491,7 +1492,7 @@ class Sessions:
             return self.get(sid)
 
     def _remember(self, sid):
-        """Save what a completed unattended run drafted, and say in the conversation what was saved."""
+        """Save what a completed linked run drafted, and say in the conversation what was saved."""
         from . import memory_draft
         latest = memory_draft.latest(self, sid)
         if latest['state'] == 'none':
@@ -1958,8 +1959,9 @@ class Sessions:
                             break
                 tracker.update(context_usage.codex_fill(providers.codex_rollout_tail(native_id, project), launch_started_at, time.time()))
             save_context()
-        # A command asked for no memory draft, so there is nothing to save.
-        if outcome == 'completed' and native_launch and session['brain'] and not reviewed(session['brain']) and not native_command:
+        # A command asked for no memory draft, so there is nothing to save. A session opened for review
+        # reviews its context before each turn; its draft is saved like any other.
+        if outcome == 'completed' and native_launch and session['brain'] and not native_command:
             self._remember(sid)
         # Record the closing event before the terminal status: readers that wait for
         # the status to settle must see the complete event history.

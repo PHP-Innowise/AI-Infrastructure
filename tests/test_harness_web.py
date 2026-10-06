@@ -292,50 +292,24 @@ assert.equal(fields['brain-op-progress'].scrolled,true);
 """
         subprocess.run([shutil.which('node'), '-e', script], check=True, capture_output=True, text=True)
 
-    @unittest.skipUnless(shutil.which('node'), 'Save to memory check requires Node')
-    def test_save_to_memory_keeps_edits_until_a_new_draft_and_reports_what_was_saved(self):
-        page = ui_script()
-        notes = page[page.index('\nconst memorySaveNotes'):page.index('\nfunction memoryField(')]
-        render = page[page.index('\nfunction renderMemorySave('):page.index('\nfunction updateMemorySaveControls(')]
-        summary = page[page.index('\nfunction memorySaveSummary('):page.index('\nasync function submitMemorySave(')]
-        shown = page[page.index('\nconst MEMORY_DRAFT_BLOCK'):page.index('\nfunction appendEvent(')]
-        script = """const assert = require('node:assert/strict');
-const fields = {'memory-save-progress':{value:''}, 'memory-save-next':{value:''}, 'memory-save-verified':{checked:true},
-  'memory-save-note':{textContent:''}, 'memory-save-learnings':{children:[], replaceChildren(...rows){ this.children = rows; }}};
-const $ = id => fields[id]; const showError = () => {}; const updateMemorySaveControls = () => {};
-const memoryLearningRow = learning => ({learning}); const el = (tag, className, text) => ({className, textContent:text});
-const linkedBrain = {sid:'s1', memoryKey:null, data:{memory_draft:{state:'drafted', event_id:9,
-  draft:{progress:'P', next_steps:['A','B'], learnings:[{type:'finding', title:'T', consequence:'C', sources:['x']}]}}}};
-""" + notes + render + summary + shown + """
-// The reply points at the form instead of repeating the draft's JSON.
+    @unittest.skipUnless(shutil.which('node'), 'Memory draft check requires Node')
+    def test_each_run_saves_its_memory_draft_and_no_record_result_panel_remains(self):
+        # Record result & durable memory is gone from the conversation: no markup, no code that drives it.
+        page = (WEB / "index.html").read_text(encoding="utf-8")
+        script = ui_script()
+        for name in ("linked-result", "Record result", "memory-save", "linked-record", "linked-promotion", "linked-brain"):
+            with self.subTest(name=name):
+                self.assertNotIn(name, page)
+                self.assertNotIn(name, script)
+        shown = script[script.index('\nconst MEMORY_DRAFT_BLOCK'):script.index('\n// Consecutive steps share one collapsed row.')]
+        check = """const assert = require('node:assert/strict');
+""" + shown + """
+// The reply says where its draft went instead of repeating the JSON, in a reviewed session too.
 assert.equal(withoutMemoryDraft('Done.\\n\\n```memory-draft\\n{"progress": "P"}\\n```\\n'),
-  'Done.\\n\\n[Memory draft: review it under Save to memory below.]');
+  'Done.\\n\\n[Memory draft: saved to project memory when the run completes.]');
 assert.equal(withoutMemoryDraft('No draft here.'),'No draft here.');
-renderMemorySave();
-assert.equal(fields['memory-save-progress'].value,'P');
-assert.equal(fields['memory-save-next'].value,'A\\nB');
-assert.equal(fields['memory-save-learnings'].children.length,1);
-assert.equal(fields['memory-save-verified'].checked,false);
-assert.match(fields['memory-save-note'].textContent,/Drafted by the agent/);
-// A refresh of the same draft keeps what the person edited.
-fields['memory-save-progress'].value = 'Edited'; renderMemorySave();
-assert.equal(fields['memory-save-progress'].value,'Edited');
-// A new run's draft replaces the form.
-linkedBrain.data.memory_draft = {state:'missing', event_id:null, draft:null}; renderMemorySave();
-assert.equal(fields['memory-save-progress'].value,'');
-assert.equal(fields['memory-save-learnings'].children.length,0);
-assert.match(fields['memory-save-note'].textContent,/left no memory draft/);
-const text = data => memorySaveSummary(data).map(line => line.textContent);
-assert.deepEqual(text({ok:true, saved:{task:{revision:4}, records:[{type:'finding', title:'Cobalt', status:'resolved'}],
-  promotion:{enabled:true, promoted:[{memory_id:'MEM-20261004-aaaaaaaa'}], blocked:[], failed:[]}}}),
-  ['Task updated to revision 4.', 'Saved finding “Cobalt” as resolved.', 'Promoted to durable memory as MEM-20261004-aaaaaaaa.']);
-assert.match(text({ok:true, saved:{task:null, records:[{type:'decision', title:'D', status:'accepted'}],
-  promotion:{enabled:false, promoted:[], blocked:[], failed:[]}}}).at(-1), /Automatic promotion is off/);
-const stopped = memorySaveSummary({ok:false, error:'Stale revision.', saved:{task:{revision:5}, records:[], promotion:null}});
-assert.equal(stopped.at(-1).className,'error-text');
-assert.equal(stopped.at(-1).textContent,'Stopped: Stale revision. What is listed above was saved.');
 """
-        subprocess.run([shutil.which('node'), '-e', script], check=True, capture_output=True, text=True)
+        subprocess.run([shutil.which('node'), '-e', check], check=True, capture_output=True, text=True)
 
     @unittest.skipUnless(shutil.which('node'), 'Project memory composer check requires Node')
     def test_project_memory_is_always_on_and_never_blocks_a_project_without_it(self):

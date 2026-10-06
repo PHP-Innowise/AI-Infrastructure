@@ -3,7 +3,7 @@
 By default memory works unattended: each message is the retrieval query, the
 context goes straight into the launch, and what the run established is saved
 when it finishes. `review` restores the approved-snapshot flow, where a person
-reviews each capsule and saves memory by hand.
+reviews each capsule before its turn; the run's draft is saved the same way.
 """
 from __future__ import annotations
 

@@ -254,7 +254,7 @@ $('brain-project').addEventListener('change',() => loadBrain());
 $('brain-bank').addEventListener('change',() => { $('brain-filter').value = ''; $('brain-category').value = ''; loadBrain({bank:$('brain-bank').value,preserve:false}); });
 $('brain-filter').addEventListener('input',renderBrainFiles); $('brain-category').addEventListener('change',renderBrainFiles); $('refresh-brain').addEventListener('click',() => loadBrain());
 // Project memory is always on and needs nothing from a person: each message is the retrieval query, and the
-// run's own memory draft is saved when it completes. Review restores the prepare, approve and Save to memory steps.
+// run's own memory draft is saved when it completes. Review adds the prepare and approve steps before each turn.
 // It is also the project context: where a project has no memory runtime, its reference files stand in.
 function brainLinkConfig() {
   const kind = $('brain-link-kind').value; const review = $('brain-link-review').checked; const task = brainLinkDraft.tasks.find(item => item.id === $('brain-link-task').value);
@@ -279,7 +279,7 @@ function updateBrainLinkControls() {
   const quiet = !strict && (dryRun || brainLinkLoaded() && !brainLinkUsable());
   $('brain-link-config').hidden = hasSession;
   $('brain-link-summary').textContent = quiet ? dryRun ? 'Off for dry-run' : 'Project files' : (existing ? brainLinkDraft.tasks.find(item => item.id === $('brain-link-task').value)?.external_id || 'Choose a task' : creating ? $('brain-link-task-id').value.trim() || 'New task' : review ? 'Review' : 'Automatic') + (review && kind !== 'auto' ? ' · review' : '');
-  $('brain-link-mode-note').textContent = review ? 'You review the retrieved context before each turn and save memory yourself. The task stays fixed for this session.' : 'Each message retrieves project memory for the agent, and what the run establishes is saved to the task when it completes. Nothing to approve.';
+  $('brain-link-mode-note').textContent = review ? 'You review the retrieved context before each turn; what the run establishes is saved to the task when it completes. The task stays fixed for this session.' : 'Each message retrieves project memory for the agent, and what the run establishes is saved to the task when it completes. Nothing to approve.';
   for (const id of ['brain-link-bank','brain-link-kind','brain-link-task','brain-link-task-id','brain-link-goal','brain-link-review','brain-link-query','brain-link-refresh']) $(id).disabled = locked || brainLinkDraft.loading;
   $('brain-link-bank').disabled ||= !brainLinkDraft.banks.length; $('brain-link-task').disabled ||= !existing || !brainLinkDraft.tasks.length;
   $('brain-link-existing-field').hidden = !existing; $('brain-link-id-field').hidden = !creating; $('brain-link-goal-field').hidden = !creating; $('brain-link-query-field').hidden = !review; $('brain-link-refresh').hidden = !existing;
@@ -309,60 +309,11 @@ async function loadBrainLinkTasks(reset = false) {
   } catch (error) { if (error.name !== 'AbortError' && epoch === brainLinkDraft.epoch) brainLinkDraft.error = textError(error); }
   finally { if (epoch === brainLinkDraft.epoch) { brainLinkDraft.loading = false; brainLinkDraft.controller = null; updateControls(); } }
 }
-const linkedRecordDefinitions = {
-  complete:{label:'Complete linked task',note:'Write a concise outcome and verification evidence after the provider run completes. This changes the linked Brain task; process completion alone does not verify the result.',fields:knowledgeActions.complete.fields.filter(field => field[0] !== 'task_id').map(field => field[0] === 'verification' ? [...field.slice(0,3),true,field[4]] : field)},
-  'brain-update':{label:'Update linked task',note:'Progress replaces its current text; next steps are appended. Use the latest displayed task revision.',fields:knowledgeActions['brain-update'].fields.filter(field => field[0] !== 'record_id')},
-  'source-update':{label:'Update evidence record',note:'Update a finding or decision from this session workspace by its UUID and current revision. Verified authority is your explicit attestation. A finding must be resolved or a decision accepted before it can qualify for promotion.',fields:[['record_id','Evidence record ID','text',true],['revision','Current record revision','number',true],['progress','Evidence / progress (optional)','textarea'],['authority','Evidence authority','select',false,[['','Keep current authority'],['verified','Verified — I checked the evidence']]],['transition','Lifecycle transition','select',false,[['','Keep current state'],['investigating','Investigating (finding)'],['resolved','Resolved (finding)'],['accepted','Accepted (decision)'],['rejected','Rejected (decision)']]],['reason','Reason (optional)','textarea']]},
-  'brain-create':{label:'Create evidence record',note:'Write an evidence-backed finding or decision. This is a new source record in the actual session workspace. Use Update evidence record to record a verified authority and resolved/accepted state when justified.',fields:[['record_type','Record type','select',true,[['finding','Finding'],['decision','Decision']]],['external_id','External ID','text',true],['title','Title','text',true],['goal','Finding or decision','textarea',true],['authority','Evidence authority','select',true,[['observed','Observed'],['verified','Verified — I checked the evidence']]],['files','Files','lines',false,'One project-relative path per line'],['sources','Evidence sources','lines',true,'One source reference per line']]},
-  rebind:{label:'Rebind linked task',note:'Restore the local task binding from the session’s fixed task record. This does not create another task.',fields:[]}
-};
 function linkedTask() { const data = linkedBrain.sid === state.selectedId ? linkedBrain.data : null; return data?.task?.record || data?.task || state.selected?.brain?.task?.record || state.selected?.brain?.task || null; }
 function linkedSessionTarget() { const session = state.selected; return session ? `${projectFor(session.project_id)?.name || session.project_id} · ${session.project_path || 'workspace pending'} · ${session.brain?.bank || ''}` : ''; }
-function linkedSessionReady() { return Boolean(state.selected?.brain && state.bootstrap && !state.authFailed && !state.loading && !state.pending && !active(state.selected) && !linkedBrain.loading && linkedBrain.sid === state.selectedId && linkedBrain.data); }
-function buildLinkedRecordTools() {
-  const details = el('details','knowledge-tools'); details.id = 'linked-record-details'; details.append(el('summary','','Result & evidence record tools')); const form = el('form'); form.id = 'linked-record-form'; const label = el('label','field'); label.append(el('span','','Operation')); const select = el('select'); select.id = 'linked-record-action';
-  for (const [key,definition] of Object.entries(linkedRecordDefinitions)) { const option = el('option','',definition.label); option.value = key; select.append(option); } label.append(select); form.append(label); const evidenceLabel = el('label','field'); evidenceLabel.id = 'linked-evidence-field'; evidenceLabel.append(el('span','','Evidence record in this workspace')); const evidenceSelect = el('select'); evidenceSelect.id = 'linked-evidence-select'; evidenceLabel.append(evidenceSelect); form.append(evidenceLabel); const evidencePreview = el('details'); evidencePreview.id = 'linked-evidence-details'; evidencePreview.append(el('summary','','Selected evidence record')); const evidenceText = el('pre','knowledge-result'); evidenceText.id = 'linked-evidence-preview'; evidenceText.tabIndex = 0; evidencePreview.append(evidenceText); form.append(evidencePreview); evidenceSelect.addEventListener('change',renderLinkedEvidence); const note = el('p','knowledge-note'); note.id = 'linked-record-note'; form.append(note); const fields = el('div','knowledge-form-grid'); fields.id = 'linked-record-fields'; form.append(fields);
-  const actions = el('div','knowledge-actions'); const fill = el('button','button','Use current task revision'); fill.id = 'linked-record-fill'; fill.type = 'button'; const submit = el('button','button'); submit.id = 'linked-record-submit'; submit.type = 'submit'; actions.append(fill,submit); form.append(actions); const error = el('p','error-text'); error.id = 'linked-record-error'; error.setAttribute('role','alert'); error.hidden = true; form.append(error); details.append(form); $('linked-record-tools').append(details);
-  select.addEventListener('change',renderLinkedRecordFields); fill.addEventListener('click',fillLinkedRecordFields); form.addEventListener('submit',event => { event.preventDefault(); submitLinkedRecord(); }); renderLinkedRecordFields();
-}
-function renderLinkedRecordFields() { const action = $('linked-record-action').value; const definition = linkedRecordDefinitions[action]; $('linked-record-fields').replaceChildren(); for (const field of definition.fields) $('linked-record-fields').append(makeKnowledgeField('linked',field)); $('linked-record-note').textContent = definition.note; $('linked-record-submit').textContent = definition.label; showError('linked-record-error',''); renderLinkedEvidence(); updateLinkedRecordControls(); }
-function fillLinkedRecordFields() { if (!linkedSessionReady()) return; const action = $('linked-record-action').value; const record = action === 'source-update' ? selectedLinkedEvidence() : linkedTask(); if (!record) return; if ($('linked-op-record_id')) $('linked-op-record_id').value = record.id || ''; if ($('linked-op-revision')) $('linked-op-revision').value = Number.isInteger(record.revision) ? record.revision : ''; }
-function updateLinkedRecordControls() {
-  if (!$('linked-record-form')) return; const ready = linkedSessionReady(); const action = $('linked-record-action').value; const allowed = ready && (action !== 'complete' || state.selected.status === 'completed' && !['completed','cancelled'].includes(linkedTask()?.status));
-  for (const input of $('linked-record-form').querySelectorAll('input,textarea,select,button')) input.disabled = !allowed; $('linked-record-action').disabled = !ready;
-  $('linked-record-fill').hidden = !['complete','brain-update','source-update'].includes(action); $('linked-record-fill').textContent = action === 'source-update' ? 'Use selected evidence revision' : 'Use current task revision'; $('linked-record-fill').disabled = !allowed || !Number.isInteger((action === 'source-update' ? selectedLinkedEvidence() : linkedTask())?.revision);
-  $('linked-record-note').textContent = linkedRecordDefinitions[action].note + (action === 'complete' && state.selected?.status !== 'completed' ? ' Complete becomes available after the provider run finishes with completed status.' : action === 'complete' && ['completed','cancelled'].includes(linkedTask()?.status) ? ' This task is already terminal; its outcome cannot be completed again.' : '');
-  $('linked-evidence-field').hidden = action !== 'source-update'; $('linked-evidence-details').hidden = action !== 'source-update' || !selectedLinkedEvidence();
-  for (const input of $('linked-proposal-form').querySelectorAll('input,textarea,button')) input.disabled = !ready; $('linked-propose').disabled = !ready || !linkedBrain.sourceIds.size || linkedBrain.sourceIds.size > 20 || !$('linked-proposal-title').value.trim() || !$('linked-proposal-content').value.trim();
-  $('linked-promotion-select').disabled = !ready || !(linkedBrain.data?.promotions || []).length; const proposal = selectedLinkedPromotion(); const proposed = proposal?.status === 'proposed' && proposal.review_mode !== 'automatic'; const approved = proposal?.status === 'reviewed' && proposal.outcome === 'approved';
-  $('linked-reviewer-field').hidden = !proposed; $('linked-reviewer-note').hidden = !proposed; $('linked-promotion-reviewer').disabled = !ready || !proposed; const reviewer = $('linked-promotion-reviewer').value.trim();
-  $('linked-promotion-approve').hidden = !proposed; $('linked-promotion-reject').hidden = !proposed; $('linked-promotion-apply').hidden = !approved;
-  $('linked-promotion-approve').disabled = $('linked-promotion-reject').disabled = !ready || !proposed || !reviewer || reviewer === proposal?.proposer;
-  $('linked-promotion-apply').disabled = !ready || !approved;
-  $('linked-brain-refresh').disabled = !state.bootstrap || Boolean(state.pending) || linkedBrain.loading || !state.selected?.brain;
-  updateMemorySaveControls();
-}
-function submitLinkedRecord() {
-  if (!linkedSessionReady() || $('linked-record-submit').disabled || !$('linked-record-form').reportValidity()) return; const action = $('linked-record-action').value; const fields = {}; let error = '';
-  for (const [name,label,type,required] of linkedRecordDefinitions[action].fields) { const value = $(`linked-op-${name}`).value.trim(); if (required && !value) { error = `${label} is required.`; break; } if (type === 'number') { const number = Number(value); if (!Number.isInteger(number) || number < 1 || number > 2147483647) { error = 'Use a positive current revision from the displayed record.'; break; } fields[name] = number; } else if (type === 'lines') { if (value) fields[name] = value.split(/\r?\n/).map(line => line.trim()).filter(Boolean); if ((fields[name] || []).length > 50) { error = `Use at most 50 lines for ${label.toLowerCase()}.`; break; } } else if (value) fields[name] = value; }
-  if (!error && ['brain-update','source-update'].includes(action) && !['progress','next_steps','phase','transition','authority'].some(key => fields[key]?.length)) error = 'Choose an explicit change to the record.';
-  showError('linked-record-error',error); if (!error) { if (action === 'brain-update') fields.record_id = linkedTask()?.id; runLinkedBrainOperation(action === 'source-update' ? 'brain-update' : action,fields); }
-}
-function selectedLinkedEvidence() { return (linkedBrain.data?.records || []).find(item => item.id === $('linked-evidence-select').value && ['finding','decision'].includes(item.type)) || linkedBrain.lastRecord; }
-function renderLinkedEvidence() { const record = selectedLinkedEvidence(); $('linked-evidence-preview').textContent = record ? JSON.stringify(record,null,2) : ''; updateLinkedRecordControls(); }
-function selectedLinkedPromotion() { return (linkedBrain.data?.promotions || []).find(item => item.id === linkedBrain.promotionId); }
-function renderLinkedPromotions() {
-  const data = linkedBrain.data || {}; const records = (data.records || []).filter(item => ['finding','decision'].includes(item.type)); setOptions($('linked-evidence-select'),records,item => `${item.title || item.external_id || item.id} · ${item.status} · revision ${item.revision}`,item => item.id,$('linked-evidence-select').value || linkedBrain.lastRecord?.id); renderLinkedEvidence(); const eligible = (data.eligible_sources || []).filter(item => ['finding','decision'].includes(item.type) && typeof item.id === 'string'); const ids = new Set(eligible.map(item => item.id)); linkedBrain.sourceIds = new Set([...linkedBrain.sourceIds].filter(id => ids.has(id))); $('linked-source-list').replaceChildren();
-  for (const source of eligible) { const label = el('label','linked-source'); const input = el('input'); input.type = 'checkbox'; input.value = source.id; input.checked = linkedBrain.sourceIds.has(source.id); const text = el('span','',source.title || source.external_id || source.id); text.append(el('small','',[source.id,source.type,source.status,source.authority,Number.isInteger(source.revision) ? `revision ${source.revision}` : ''].filter(Boolean).join(' · '))); label.append(input,text); input.addEventListener('change',() => { if (input.checked) linkedBrain.sourceIds.add(source.id); else linkedBrain.sourceIds.delete(source.id); updateLinkedRecordControls(); }); $('linked-source-list').append(label); }
-  if (!eligible.length) $('linked-source-list').append(el('p','knowledge-note','No eligible finding or decision is available. Create an evidence record, verify it, and resolve or accept it before proposing memory.'));
-  $('linked-promotion-note').textContent = `Choose 1–20 eligible evidence records and write reusable knowledge. Tasks and raw transcripts are never source records.${data.automatic_promotion === true ? ' This root has automatic promotion enabled; inspect existing proposals and applied memory before creating a duplicate.' : ''}`;
-  const proposals = data.promotions || []; setOptions($('linked-promotion-select'),proposals,item => `${item.title || item.id} · ${item.status || 'unknown'}`,item => item.id,linkedBrain.promotionId); linkedBrain.promotionId = $('linked-promotion-select').value || null; renderLinkedPromotionPreview();
-}
-function renderLinkedPromotionPreview() { const proposal = selectedLinkedPromotion(); $('linked-promotion-preview').hidden = !proposal; $('linked-promotion-preview').textContent = proposal ? JSON.stringify(proposal,null,2) : ''; $('linked-promotion-state').textContent = proposal ? `${humanLabel(proposal.status)}${proposal.outcome ? ` · ${proposal.outcome}` : ''}${proposal.destination_memory_id ? ` · Memory ${proposal.destination_memory_id}` : ''}` : 'No saved proposals in this workspace.'; updateLinkedRecordControls(); }
 function resetLinkedSelection(session) {
-  linkedBrain.epoch++; linkedBrain.controller?.abort(); Object.assign(linkedBrain,{sid:session?.id || null,data:null,loading:false,fetchKey:null,contextKey:null,memoryKey:null,stale:false,sourceIds:new Set(),promotionId:null,lastRecord:null,records:new Map()});
-  $('memory-save-result').hidden = true; $('memory-save-result').replaceChildren(); $('memory-save-learnings').replaceChildren(); $('memory-save-progress').value = ''; $('memory-save-next').value = ''; showError('memory-save-error','');
-  $('linked-context-query').value = session?.brain?.query || ''; $('linked-proposal-title').value = ''; $('linked-proposal-content').value = ''; $('linked-promotion-reviewer').value = ''; $('linked-brain-output').hidden = true; $('linked-brain-output').replaceChildren(); $('linked-record-action').value = 'complete'; renderLinkedRecordFields(); showError('linked-brain-error',''); showError('linked-context-error','');
+  linkedBrain.epoch++; linkedBrain.controller?.abort(); Object.assign(linkedBrain,{sid:session?.id || null,data:null,loading:false,fetchKey:null,contextKey:null,stale:false});
+  $('linked-context-query').value = session?.brain?.query || ''; showError('linked-context-error','');
 }
 // The capsule meter at the approval decision: how much of the 8,000-character capsule each kind of memory takes,
 // what repeats, what was dropped to fit, and what the capsule adds to every prepared turn.
@@ -387,8 +338,6 @@ function renderCapsuleMeter(meter) {
 }
 function renderLinkedSession() {
   const session = state.selected; const linked = Boolean(session?.brain); $('linked-context').hidden = !linked;
-  // Record result & durable memory is for a finished turn: hidden while one is queued, running or waiting for its context or approval.
-  $('linked-result').hidden = !linked || active(session) || ['awaiting_context','awaiting_approval'].includes(session.status);
   if (!linked) { if (linkedBrain.sid) resetLinkedSelection(null); return; }
   if (linkedBrain.sid !== session.id) resetLinkedSelection(session); const brain = session.brain; const waiting = session.status === 'awaiting_context'; const capsule = brain.capsule; const contextId = brain.context_id || null; const key = `${session.id}:${contextId || ''}`; const reviewed = brainReviewed(brain); const busy = ['queued','running'].includes(session.status);
   if (linkedBrain.contextKey !== key) { linkedBrain.contextKey = key; linkedBrain.stale = false; $('linked-capsule').textContent = contextId && capsule ? typeof capsule === 'string' ? capsule : JSON.stringify(capsule,null,2) : reviewed ? 'Context is being prepared. The provider has not started this prepared turn.' : busy ? 'Retrieving project memory for this message.' : 'No project memory was retrieved for the last message. The conversation says why.'; if (waiting) $('linked-capsule-details').open = true; }
@@ -400,14 +349,13 @@ function renderLinkedSession() {
   // Unattended memory has no query to edit and nothing to approve: each message is the query.
   $('linked-context-form').hidden = !reviewed;
   $('linked-context-query').disabled = !canRefresh; $('linked-context-refresh').disabled = !canRefresh || !$('linked-context-query').value.trim(); $('linked-context-run').hidden = !waiting; $('linked-context-cost').hidden = !waiting || $('capsule-meter').hidden; $('linked-context-run').disabled = !ready || !contextId || !capsule || linkedBrain.stale || dirtyQuery || budgetsDirty();
-  $('linked-brain-target').textContent = linkedSessionTarget(); $('linked-brain-task').textContent = task ? JSON.stringify(task,null,2) : 'Task metadata is not yet available.'; $('linked-brain-status').textContent = linkedBrain.loading ? 'Reading task and evidence records from this session workspace…' : linkedBrain.data ? 'Record operations below use this session workspace. Review evidence before saving an outcome or promoting knowledge.' : 'Prepare context before editing linked records.';
   const fetchKey = `${session.id}:${session.status}:${contextId || ''}`; if (!active(session) && !state.loading && !state.pending && linkedBrain.fetchKey !== fetchKey) { linkedBrain.fetchKey = fetchKey; loadLinkedBrain(); }
-  updateLinkedRecordControls();
 }
 async function loadLinkedBrain() {
-  const session = state.selected; if (!session?.brain || state.pending) return; const sid = session.id; linkedBrain.controller?.abort(); const controller = new AbortController(); linkedBrain.controller = controller; const epoch = ++linkedBrain.epoch; linkedBrain.loading = true; showError('linked-brain-error',''); updateLinkedRecordControls();
-  try { const data = await api(`/api/sessions/${encodeURIComponent(sid)}/brain`,{signal:controller.signal}); if (epoch !== linkedBrain.epoch || sid !== state.selectedId) return; linkedBrain.data = data; renderLinkedPromotions(); renderMemorySave(); }
-  catch (error) { if (error.name !== 'AbortError' && epoch === linkedBrain.epoch && sid === state.selectedId) { linkedBrain.data = null; showError('linked-brain-error',textError(error)); } }
+  // The linked task as the runtime holds it: the Project memory card names its current revision.
+  const session = state.selected; if (!session?.brain || state.pending) return; const sid = session.id; linkedBrain.controller?.abort(); const controller = new AbortController(); linkedBrain.controller = controller; const epoch = ++linkedBrain.epoch; linkedBrain.loading = true;
+  try { const data = await api(`/api/sessions/${encodeURIComponent(sid)}/brain`,{signal:controller.signal}); if (epoch !== linkedBrain.epoch || sid !== state.selectedId) return; linkedBrain.data = data; }
+  catch (error) { if (error.name !== 'AbortError' && epoch === linkedBrain.epoch && sid === state.selectedId) linkedBrain.data = null; }
   finally { if (epoch === linkedBrain.epoch && sid === state.selectedId) { linkedBrain.loading = false; linkedBrain.controller = null; updateControls(); } }
 }
 async function linkedContextAction(action) {
@@ -417,74 +365,6 @@ async function linkedContextAction(action) {
   catch (error) { if (epoch === state.epoch && sid === state.selectedId) { if (run) linkedBrain.stale = true; showError('linked-context-error',textError(error)); } }
   finally { state.pending = null; updateControls(); }
 }
-async function runLinkedBrainOperation(action,fields) {
-  if (!linkedSessionReady()) return; const session = state.selected; const sid = session.id; const epoch = state.epoch; const output = $('linked-brain-output'); const target = linkedSessionTarget(); state.pending = `brain-${action}`; output.hidden = false; output.replaceChildren(el('h3','',humanLabel(action)),el('p','knowledge-note',target)); const status = el('p','knowledge-note','Running in the session workspace… You can visit another section; this command will continue.'); status.setAttribute('role','status'); output.append(status); updateControls();
-  try { const data = await api(`/api/sessions/${encodeURIComponent(sid)}/brain`,{method:'POST',body:{action,...fields}}); if (sid !== state.selectedId || epoch !== state.epoch) return; status.textContent = data.ok ? 'Operation complete.' : 'Operation failed.'; if (data.error) output.append(el('p','error-text',typeof data.error === 'string' ? data.error : JSON.stringify(data.error))); if (data.result !== undefined) output.append(el('pre','knowledge-result',typeof data.result === 'string' ? data.result : JSON.stringify(data.result,null,2)));
-    if (data.ok && action === 'rebind') {
-      linkedBrain.stale = true; $('linked-capsule').textContent = 'The task was rebound. Refresh context before running.';
-      try { const current = await api(`/api/sessions/${encodeURIComponent(sid)}`); if (sid !== state.selectedId || epoch !== state.epoch) return; if (current.session?.id !== sid) throw new Error('The runner did not return the current session.'); upsert(current.session); applySessionSettings(current.session,false); }
-      catch (error) { if (sid === state.selectedId && epoch === state.epoch) { status.textContent = 'Task rebound; session refresh is needed.'; output.append(el('p','error-text',`${textError(error)} Refresh the session before running with context.`)); } }
-    }
-    if (data.ok && ['brain-create','brain-update'].includes(action)) { const record = data.result?.record || data.result; if (record?.id && ['finding','decision'].includes(record.type)) { linkedBrain.lastRecord = record; linkedBrain.records.set(record.id,record); } }
-    if (data.ok && ['promote-propose','promote-review','promote-apply'].includes(action) && data.result?.id) linkedBrain.promotionId = data.result.id;
-  } catch (error) { if (sid === state.selectedId && epoch === state.epoch) { status.textContent = 'Operation did not complete successfully.'; output.append(el('p','error-text',`${textError(error)}${error.status === 0 ? ' Refresh task records before retrying; changes may have been applied.' : ''}`)); } }
-  finally { state.pending = null; if (sid === state.selectedId && epoch === state.epoch) { await loadLinkedBrain(); updateControls(); } }
-}
-// Save to memory: the draft a linked run's agent leaves at its end, edited and confirmed here. Nothing is written until Save.
-const memorySaveNotes = {drafted:'Drafted by the agent at the end of its last run. Nothing is saved until you choose Save to memory.',unreadable:'The last run left a memory draft that could not be read. Write one here, or leave it.',missing:'The last run left no memory draft. Write one here, or leave it.',none:'When a run finishes, its agent drafts what to remember here.'};
-function memoryField(text,control,wide) { const label = el('label',wide ? 'field wide' : 'field'); label.append(el('span','',text),control); return label; }
-function memoryLearningRow(learning = {type:'finding',title:'',consequence:'',sources:[]}) {
-  const row = el('div','memory-learning'); const head = el('div','memory-learning-head'); const keep = el('label','checkbox'); const keepInput = el('input'); keepInput.type = 'checkbox'; keepInput.checked = true; keepInput.dataset.role = 'keep'; keep.append(keepInput,'Keep');
-  const type = el('select'); type.dataset.role = 'type'; for (const [value,text] of [['finding','Finding'],['decision','Decision']]) { const option = el('option','',text); option.value = value; type.append(option); } type.value = learning.type === 'decision' ? 'decision' : 'finding';
-  const remove = el('button','button','Remove'); remove.type = 'button'; remove.addEventListener('click',() => { row.remove(); updateMemorySaveControls(); }); head.append(keep,memoryField('Type',type),remove);
-  const title = el('input'); title.type = 'text'; title.maxLength = 200; title.value = learning.title || ''; title.dataset.role = 'title';
-  const consequence = el('textarea'); consequence.rows = 2; consequence.maxLength = 1000; consequence.value = learning.consequence || ''; consequence.dataset.role = 'consequence';
-  const sources = el('textarea'); sources.rows = 2; sources.placeholder = 'One project file per line, for example src/Billing/Totals.php'; sources.value = (learning.sources || []).join('\n'); sources.dataset.role = 'sources';
-  row.append(head,memoryField('Title',title,true),memoryField('Rule or decision',consequence,true),memoryField('Sources',sources,true));
-  for (const control of [keepInput,type,title,consequence,sources]) control.addEventListener('input',updateMemorySaveControls); return row;
-}
-function renderMemorySave() {
-  const draft = linkedBrain.data?.memory_draft || {state:'none',draft:null,event_id:null}; const key = `${linkedBrain.sid}:${draft.state}:${draft.event_id ?? ''}`;
-  if (linkedBrain.memoryKey !== key) { linkedBrain.memoryKey = key; const value = draft.draft || {progress:'',next_steps:[],learnings:[]}; $('memory-save-progress').value = value.progress || ''; $('memory-save-next').value = (value.next_steps || []).join('\n'); $('memory-save-learnings').replaceChildren(...(value.learnings || []).map(memoryLearningRow)); $('memory-save-verified').checked = false; showError('memory-save-error',''); }
-  $('memory-save-note').textContent = memorySaveNotes[draft.state] || memorySaveNotes.none; updateMemorySaveControls();
-}
-function updateMemorySaveControls() {
-  // Unattended sessions save the agent's draft themselves when a run completes; the conversation reports what was saved.
-  const session = state.selected; const finished = ['completed','cancelled'].includes(linkedTask()?.status); $('memory-save').hidden = !session?.brain || isFleetSession(session) || !brainReviewed(session.brain);
-  const ready = linkedSessionReady() && !finished; for (const control of $('memory-save-form').querySelectorAll('input,textarea,select,button')) control.disabled = !ready;
-  const rows = [...$('memory-save-learnings').children]; const kept = rows.filter(row => row.querySelector('[data-role="keep"]').checked);
-  $('memory-save-add').disabled = !ready || rows.length >= 3; $('memory-save-verified-field').hidden = !kept.length; $('memory-save-submit').disabled = !ready || Boolean(kept.length && !$('memory-save-verified').checked);
-  if (finished) $('memory-save-note').textContent = 'The linked task is finished. Link an active task to save more.';
-}
-function memorySaveSummary(data) {
-  const lines = [], saved = data.saved || {}, promotion = saved.promotion;
-  if (saved.task) lines.push(el('p','knowledge-note',`Task updated to revision ${saved.task.revision}.`));
-  for (const record of saved.records || []) lines.push(el('p','knowledge-note',`Saved ${record.type} “${record.title}” as ${record.status}.`));
-  if (promotion?.error) lines.push(el('p','knowledge-note',`Not promoted yet: ${promotion.error} The records stay eligible; propose them under Durable memory below.`));
-  else if (promotion?.enabled === false) lines.push(el('p','knowledge-note','Automatic promotion is off for this project. Propose the saved records under Durable memory below.'));
-  else if (promotion) { for (const item of promotion.promoted || []) lines.push(el('p','knowledge-note',`Promoted to durable memory as ${item.memory_id}.`)); for (const item of [...(promotion.blocked || []),...(promotion.failed || [])]) lines.push(el('p','knowledge-note',`Held back from durable memory: ${item.reason}`)); }
-  if (!data.ok) lines.push(el('p','error-text',`Stopped: ${data.error}${lines.length ? ' What is listed above was saved.' : ''}`));
-  return lines.length ? lines : [el('p','knowledge-note','Saved.')];
-}
-async function submitMemorySave() {
-  if ($('memory-save-submit').disabled || !linkedSessionReady()) return; const sid = state.selectedId; const epoch = state.epoch; const lines = value => value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
-  const progress = $('memory-save-progress').value.trim(); const nextSteps = lines($('memory-save-next').value); const kept = [...$('memory-save-learnings').children].filter(row => row.querySelector('[data-role="keep"]').checked);
-  const learnings = kept.map(row => ({type:row.querySelector('[data-role="type"]').value,title:row.querySelector('[data-role="title"]').value.trim(),consequence:row.querySelector('[data-role="consequence"]').value.trim(),sources:lines(row.querySelector('[data-role="sources"]').value)}));
-  const error = nextSteps.length > 3 ? 'Keep at most three next steps.' : nextSteps.some(step => step.length > 300) ? 'Write each next step in at most 300 characters.' : learnings.some(item => !item.title || !item.consequence || !item.sources.length) ? 'Each kept learning needs a title, a rule or decision, and at least one source file.' : !progress && !nextSteps.length && !learnings.length ? 'Nothing to save: write progress, a next step or a learning.' : '';
-  showError('memory-save-error',error); if (error) return; const result = $('memory-save-result'); result.hidden = false; result.replaceChildren(el('p','knowledge-note','Saving in the session workspace…')); state.pending = 'memory-save'; updateControls();
-  try { const data = await api(`/api/sessions/${encodeURIComponent(sid)}/memory`,{method:'POST',body:{progress,next_steps:nextSteps,learnings,verified:$('memory-save-verified').checked}}); if (sid !== state.selectedId || epoch !== state.epoch) return; result.replaceChildren(...memorySaveSummary(data)); const saved = data.saved?.records?.length || 0; kept.slice(0,saved).forEach(row => row.remove()); if (saved) $('memory-save-verified').checked = false; }
-  catch (failure) { if (sid === state.selectedId && epoch === state.epoch) result.replaceChildren(el('p','error-text',`${textError(failure)}${failure.status === 0 ? ' Refresh task records before retrying; changes may have been applied.' : ''}`)); }
-  finally { state.pending = null; if (sid === state.selectedId && epoch === state.epoch) { await loadLinkedBrain(); updateControls(); } }
-}
-buildLinkedRecordTools();
-$('memory-save-form').addEventListener('submit',event => { event.preventDefault(); submitMemorySave(); });
-$('memory-save-add').addEventListener('click',() => { if ($('memory-save-learnings').children.length < 3) { $('memory-save-learnings').append(memoryLearningRow()); updateMemorySaveControls(); } });
-for (const id of ['memory-save-progress','memory-save-next','memory-save-verified']) $(id).addEventListener('input',updateMemorySaveControls);
 $('brain-link-bank').addEventListener('change',() => loadBrainLinkTasks()); $('brain-link-refresh').addEventListener('click',() => loadBrainLinkTasks());
 for (const id of ['brain-link-kind','brain-link-task','brain-link-review']) $(id).addEventListener('change',updateControls); for (const id of ['brain-link-task-id','brain-link-goal','brain-link-query']) $(id).addEventListener('input',updateControls);
-$('linked-context-form').addEventListener('submit',event => { event.preventDefault(); if ($('linked-context-form').reportValidity()) linkedContextAction('refresh'); }); $('linked-context-run').addEventListener('click',() => linkedContextAction('run')); $('linked-context-query').addEventListener('input',renderLinkedSession); $('linked-brain-refresh').addEventListener('click',() => loadLinkedBrain());
-$('linked-proposal-form').addEventListener('submit',event => { event.preventDefault(); if ($('linked-propose').disabled || !$('linked-proposal-form').reportValidity()) return; runLinkedBrainOperation('promote-propose',{source_ids:[...linkedBrain.sourceIds],title:$('linked-proposal-title').value.trim(),content:$('linked-proposal-content').value.trim()}); });
-for (const id of ['linked-proposal-title','linked-proposal-content','linked-promotion-reviewer']) $(id).addEventListener('input',updateLinkedRecordControls);
-$('linked-promotion-select').addEventListener('change',() => { linkedBrain.promotionId = $('linked-promotion-select').value || null; $('linked-promotion-reviewer').value = ''; renderLinkedPromotionPreview(); });
-for (const [id,reject] of [['linked-promotion-approve',false],['linked-promotion-reject',true]]) $(id).addEventListener('click',() => { if (!$(id).disabled) runLinkedBrainOperation('promote-review',{promotion_id:linkedBrain.promotionId,reviewer:$('linked-promotion-reviewer').value.trim(),reject}); });
-$('linked-promotion-apply').addEventListener('click',() => { if (!$('linked-promotion-apply').disabled) runLinkedBrainOperation('promote-apply',{promotion_id:linkedBrain.promotionId}); });
+$('linked-context-form').addEventListener('submit',event => { event.preventDefault(); if ($('linked-context-form').reportValidity()) linkedContextAction('refresh'); }); $('linked-context-run').addEventListener('click',() => linkedContextAction('run')); $('linked-context-query').addEventListener('input',renderLinkedSession);

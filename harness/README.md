@@ -1195,50 +1195,38 @@ memory still runs by itself for it. In a project without a governed context
 runtime, sessions start with excerpts of the project's reference files instead of
 retrieved memory, unless a task was chosen explicitly.
 
-#### Review by hand
+#### Review context by hand
 
-Tick **Review context and memory by hand** to restore the reviewed flow. It needs a
-context query. **Prepare session** creates the workspace first, binds the task there
-and retrieves a bounded context capsule. Inspect the capsule before choosing **Run
-with this context**. A bar above it shows how much of the 8,000-character cap the
-capsule uses, split into Project Brain, Memory bank and Rules & docs, and names the
-items the runtime dropped to fit and the characters repeated across the capsule's
-views. These counts are exact, measured on the server the way the runtime measures
-the cap. The note beside the button estimates what the capsule adds to the turn at
-3.6 characters per token. The provider receives that saved capsule; the server
-checks the task revision and source contents again before launching it. Changed
-context requires a fresh preview. Each chat follow-up also prepares a new capsule.
-These explicit retrievals disable the runtime's repeat-query heuristic while
-retaining its privacy and source eligibility rules. Sessions linked before memory
-ran by itself keep this flow.
+Tick **Review context by hand** to review each turn's context before it runs. It
+needs a context query. **Prepare session** creates the workspace first, binds the
+task there and retrieves a bounded context capsule. Inspect the capsule before
+choosing **Run with this context**. A bar above it shows how much of the
+8,000-character cap the capsule uses, split into Project Brain, Memory bank and
+Rules & docs, and names the items the runtime dropped to fit and the characters
+repeated across the capsule's views. These counts are exact, measured on the
+server the way the runtime measures the cap. The note beside the button estimates
+what the capsule adds to the turn at 3.6 characters per token. The provider
+receives that saved capsule; the server checks the task revision and source
+contents again before launching it. Changed context requires a fresh preview. Each
+chat follow-up also prepares a new capsule. These explicit retrievals disable the
+runtime's repeat-query heuristic while retaining its privacy and source eligibility
+rules. Sessions linked before memory ran by itself keep this flow.
 
-Task actions stay in the session's original workspace and bank, including when a
-worktree is used. A committed task can be rebound to a rebuilt local index without
-creating a second task. The reviewed capsule survives server restarts in session
-history; canonical task and knowledge records remain owned by the project runtime.
-Offline Fleet demonstrations cannot link a real task.
+A reviewed run's memory draft is saved when the run completes, as in any other
+session, and the conversation says what was saved. Task actions stay in the
+session's original workspace and bank, including when a worktree is used. The
+reviewed capsule survives server restarts in session history; canonical task and
+knowledge records remain owned by the project runtime. Offline Fleet demonstrations
+cannot link a real task.
 
-**Save to memory.** A reviewed run's draft is not saved by itself (762 characters
-of instruction per launch). When the run finishes, **Save to memory** under
-**Record result & durable memory** shows the draft as a form. That section stays
-hidden while a turn is queued, running, or waiting for its context or approval. Edit it, uncheck what
-should not be kept, and confirm that you checked each kept learning against its
-sources. Saving does what the automatic save does, with the learnings recorded as
-verified by you; if automatic promotion is off, propose them under **Durable
-memory** below. The commands run in turn; if one fails, the result lists what was
-already saved. A run that left no draft, or one that could not be read, leaves the
-form empty to fill by hand.
-
-After a successful run, explicitly enter the task outcome and verification to
-complete it at its current revision. Process success never completes the task
-automatically. To retain reusable knowledge by hand, create and verify a separate
-finding or decision, resolve or accept it, then propose its content for Memory Bank
-review. Only eligible verified records with fresh sources and allowed privacy can be
-proposed or applied. Task records cannot be promoted. Manual proposals require an
-independent reviewer and retain the runtime's source revision checks. The project's
-automatic promotion setting is displayed and remains unchanged. Prompts,
-transcripts and free assistant output never reach durable memory; only the fields
-of a memory draft do.
+The conversation has no record or promotion tools. To complete a task with its
+outcome and verification, or to create and verify a finding or decision by hand,
+use **Knowledge › Project Brain**. Process success never completes a task
+automatically. A Memory Bank proposal by hand goes through the project's runtime:
+`context.py promote-propose`, `promote-review` and `promote-apply`. Manual proposals
+require an independent reviewer and keep the runtime's source revision checks.
+Prompts, transcripts and free assistant output never reach durable memory; only the
+fields of a memory draft do.
 
 ### Fleet review setup and use
 

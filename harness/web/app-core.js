@@ -134,7 +134,7 @@ const memoryState = {projectId:null,bankId:null,path:null,banks:[],entries:[],tr
 const brainState = {projectId:null,bankId:null,path:null,banks:[],entries:[],selected:null,truncated:false,listEpoch:0,fileEpoch:0,listController:null,fileController:null};
 const knowledgeState = {pending:null,memory:{meta:null,epoch:0,controller:null,pending:false},brain:{meta:null,epoch:0,controller:null,pending:false}};
 const brainLinkDraft = {projectId:null,bankId:null,banks:[],tasks:[],meta:null,epoch:0,controller:null,loading:false,error:''};
-const linkedBrain = {sid:null,data:null,epoch:0,controller:null,loading:false,fetchKey:null,contextKey:null,stale:false,sourceIds:new Set(),promotionId:null,lastRecord:null,records:new Map()};
+const linkedBrain = {sid:null,data:null,epoch:0,controller:null,loading:false,fetchKey:null,contextKey:null,stale:false};
 const setupState = {pending:null,registerPending:false,projectsPending:false,projectId:null,data:null,loading:false,epoch:0,controller:null,tools:new Set(),toolsInitialized:false,preferredEdition:null,preview:null,previewEpoch:0,expiryTimer:null};
 const skillsState = {catalog:null,catalogPending:false,catalogEpoch:0,catalogError:false,sourceId:null,discoveredSourceId:null,skills:[],selectedSkills:new Set(),selectedAgents:new Set(),agentsInitialized:false,pending:null,actionEpoch:0,preview:null,installed:[],installedProjectId:null,installedEpoch:0,installedController:null,installedPending:false,installedError:false,changePreview:null,changeTimer:null};
 const createSkillState = {selectedAgents:new Set(),agentsInitialized:false,touched:new Set(),pending:null,epoch:0,preview:null,resultProjectId:null};
@@ -1325,9 +1325,9 @@ async function fleetAction(action) {
 }
 $('fleet-approve').addEventListener('click',() => fleetAction('approve')); $('fleet-reject').addEventListener('click',() => fleetAction('reject')); $('fleet-resume').addEventListener('click',() => fleetAction('resume'));
 const MEMORY_DRAFT_BLOCK = /```memory-draft[^\S\n]*\n[\s\S]*?\n[^\S\n]*```/g;
-// The reply points at where the draft went instead of repeating its JSON: the Save to memory form when a person
-// reviews it, or the project memory line the run adds once it has saved the draft itself.
-function withoutMemoryDraft(text,reviewed = true) { return text.replace(MEMORY_DRAFT_BLOCK,reviewed ? '[Memory draft: review it under Save to memory below.]' : '[Memory draft: saved to project memory when the run completes.]').trim(); }
+// The reply points at where the draft went instead of repeating its JSON: the project memory line the run adds
+// once it has saved the draft itself.
+function withoutMemoryDraft(text) { return text.replace(MEMORY_DRAFT_BLOCK,'[Memory draft: saved to project memory when the run completes.]').trim(); }
 // Consecutive steps share one collapsed row. Its summary counts are kept as steps arrive, never recounted from the rows.
 function stepGroup() {
   let group = $('events').lastElementChild;
@@ -1404,7 +1404,7 @@ function appendEvent(event) {
     const type = kind === 'text' ? 'assistant' : kind; const block = el('article',`message ${type}`); block.dataset.provider = String(event.provider || ''); block.dataset.eventId = event.id; const heading = el('div','message-label');
     const tagged = typeof event.provider === 'string' && event.provider ? `${providerFor(event.provider)?.name || event.provider}${typeof event.role === 'string' && event.role ? ` · ${humanLabel(event.role)}` : ''}${Number.isInteger(event.round) && event.round > 0 ? ` · round ${event.round}` : ''}` : '';
     const label = kind === 'user' ? 'You' : kind === 'error' ? `Session error${tagged ? ` · ${tagged}` : ''}` : kind === 'result' ? 'Result' : tagged || providerFor(state.selected?.provider)?.name || 'Assistant';
-    heading.append(el('span','avatar',kind === 'user' ? 'Y' : kind === 'error' ? '!' : 'AI'),document.createTextNode(label)); block.append(heading,el('pre','message-body',['text','assistant','result'].includes(kind) ? withoutMemoryDraft(text,!state.selected?.brain || brainReviewed(state.selected.brain)) : text));
+    heading.append(el('span','avatar',kind === 'user' ? 'Y' : kind === 'error' ? '!' : 'AI'),document.createTextNode(label)); block.append(heading,el('pre','message-body',['text','assistant','result'].includes(kind) ? withoutMemoryDraft(text) : text));
     if (kind === 'user' && Array.isArray(event.attachments)) {
       const files = el('div','attachment-list');
       for (const file of event.attachments) {
