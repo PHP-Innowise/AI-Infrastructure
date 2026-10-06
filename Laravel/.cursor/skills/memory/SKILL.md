@@ -24,7 +24,8 @@ and stops. It never completes, promotes, or invents task state.
    - set `working: governed` and do not derive a branch task, checkpoint
      progress, or write SQLite working state.
 4. In explicitly configured lightweight mode, read
-   `.agents/skills/checkpoint/SKILL.md` as the canonical referenced procedure
+   `../checkpoint/SKILL.md` (the checkpoint skill beside this one, in every
+   tool's skill tree) as the canonical referenced procedure
    and execute its lightweight workflow inside this selected skill. This
    does not invoke or chain another skill. Set `working: updated`, `skipped`, or
    `failed`, retain safe warnings, and continue.

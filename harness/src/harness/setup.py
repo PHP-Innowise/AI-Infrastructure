@@ -298,7 +298,9 @@ class SetupManager:
                         fields = line.split('\t')
                         # FIX_MODE: identical bytes, and the staged installer
                         # gave the staged copy the executable bit it lacked.
-                        if len(fields) >= 3 and fields[0] in ('COPY', 'MERGE', 'COPY_AS', 'UNCHANGED', 'FIX_MODE'):
+                        # KEPT: a seed-only file (runtime state, team configuration)
+                        # the project already has; its content stays.
+                        if len(fields) >= 3 and fields[0] in ('COPY', 'MERGE', 'COPY_AS', 'UNCHANGED', 'FIX_MODE', 'KEPT'):
                             actions[fields[2]] = (fields[0].lower().replace('_', '-'), fields[3] if len(fields) > 3 else fields[2])
                     if set(actions) != {name for _, name in selected}:
                         raise SessionError('The staged installer returned an incomplete file plan.')
@@ -318,6 +320,9 @@ class SetupManager:
                                      'diff': change, 'diff_truncated': truncated}
                             if name in collisions:
                                 entry['reason'] = collisions[name]
+                            elif action == 'kept':
+                                entry['reason'] = ('Seeded once, then owned by the project (runtime state or team '
+                                                   'configuration). The existing file is kept as it is.')
                             elif action == 'fix-mode':
                                 if previous is None or previous['hash'] != value['hash']:
                                     raise SessionError('The staged installer returned an inconsistent file plan.')
@@ -339,7 +344,7 @@ class SetupManager:
                     'release': catalog['release'], 'before': {key: _metadata(value) for key, value in before.items()},
                     'sources': {key: _metadata(value) for key, value in sources.items()}, 'code': _metadata(code),
                     'payloads': payloads, 'files': files, 'can_install': not collisions}
-                changed = sum(item['action'] != 'unchanged' for item in files)
+                changed = sum(item['action'] not in ('unchanged', 'kept') for item in files)
                 return {'preview_id': preview_id, 'project_id': project['id'], 'edition': edition, 'tools': list(tools),
                     'expires_at': time.time() + PREVIEW_TTL, 'files': [dict(item) for item in files], 'file_count': len(files), 'changed_count': changed,
                     'collisions': [{'path': item['path'], 'reason': item['reason']} for item in files if item['action'] == 'collision'],
@@ -425,7 +430,7 @@ class SetupManager:
                     if self.closed.is_set() or self.sessions.stopping.is_set():
                         raise SessionError('Accelerator setup stopped during installation.')
                     name, action = entry['path'], entry['action']
-                    if action == 'unchanged':
+                    if action in ('unchanged', 'kept'):
                         unchanged.append(name)
                         continue
                     writing = True

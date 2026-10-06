@@ -32,7 +32,7 @@
     ".agents/skills/agent-forge/SKILL.md": "6898b3b4a4d8a796a76546724cc820b1d644c7cfaef4aca1a231f92bc78cb4df",
     ".agents/skills/architecture-scanner/SKILL.md": "88319360ec53cc237b7ff2fd7ab52c790952347d319c8fbdc0cca2a6c6e19cec",
     ".agents/skills/bootstrap-verifier/SKILL.md": "8d6a547f336c8ac5ac9efe46a91b16db42afdda19912c476df108bfc70c817ee",
-    ".agents/skills/bootstrap-verifier/scripts/analyze_commands.py": "c43ea711ebdd329de77da21bfb1561155c7d2280a7582dcff0996767c875f08b",
+    ".agents/skills/bootstrap-verifier/scripts/analyze_commands.py": "98a100eff2dffdf121e2535badf33358fd5612fa914160d4684ae1d5a1822fa8",
     ".agents/skills/bootstrap-verifier/scripts/infra_ownership.py": "a599696f9c457cbf9f867561a84d5c497ff4c3910aafdccb9664e72470affdca",
     ".agents/skills/bootstrap-verifier/scripts/merge_gitignore.py": "8c0f14d68748bcc16a01101f77d305646a4d014cf6c3c9a1e794f4e4d4a034c2",
     ".agents/skills/bootstrap-verifier/scripts/publish_staging.py": "f3d6fe428803bf9cd4987d9fe68af20d0429a509714921befb90d4daa78cff02",
@@ -54,7 +54,7 @@
     ".agents/skills/infra-build/SKILL.md": "8f9b505b3bf22b742e83a897de2b12457371e8cec9f90551ce487351d11e8856",
     ".agents/skills/infra-generate/SKILL.md": "ce862c37391a5a27d4c8d5f43306465f687d25b888bfe9583c6cfbe9ae5fb559",
     ".agents/skills/infra-ops-scanner/SKILL.md": "1248ce50011d346ed1c05ddaf5493550b8146619ac151849d0702ab89c55fe93",
-    ".agents/skills/infra-scan/SKILL.md": "f0b7b2e4652584d16646e500044fa5209365bc45f77f3688c8e3cf11e2dbefc3",
+    ".agents/skills/infra-scan/SKILL.md": "96d24a9307055638fd3a10d357d41749a41cc72b050a08070d3a7c896f3b587b",
     ".agents/skills/infra-update/SKILL.md": "b981afa285efcd63fc9414b41fc17a8b3d90f078aa628e242375456110e8936d",
     ".agents/skills/infra-validate/SKILL.md": "e5f8f21ea4d3a2fbd2dbe1f14789702f9f2678e26e28106a225ae2992705b5b8",
     ".agents/skills/integration-scanner/SKILL.md": "b3b8c5a0b417c12990402cddaa98d81b8f37068dfa6e5a033171952565eecff0",
@@ -104,7 +104,7 @@
     ".agents/skills/memory-seed/assets/scripts/workspace_roots.py": "db4bf1c626d29896b36fc4d397a4ac5430172d914502fc3007233fd89e2009c1",
     ".agents/skills/memory-seed/assets/templates/chunk.md": "172c3300e6c5f3ed7fd22a673f7681ec7649338bb50e64f178fe5792b49295ea",
     ".agents/skills/policy-forge/SKILL.md": "b762db8f1091ab9898e2d478d758ba73255d9ae5db4988b2a23a2202cb4137d1",
-    ".agents/skills/profile-synthesizer/SKILL.md": "76f4705fc5a2f0184aaa65c150b9706edc674f0e292657d8dc5f8d041ae3029b",
+    ".agents/skills/profile-synthesizer/SKILL.md": "2d28fe8ed040852855fd56a8b0d1543b743cf1f2f8110b5c87a9ca68cd44327b",
     ".agents/skills/profile-synthesizer/references/project-profile-schema.md": "95f05519ffa4293615423d8f0067db411bf1bc90d0c7d2947577cca266078500",
     ".agents/skills/security-compliance-scanner/SKILL.md": "8a2426f9fdac1516f9a6f0167b1af62ba9d185acac913c57f3a28040ce839519",
     ".agents/skills/skill-flow-composer/SKILL.md": "0125a0d83d3b76957768011997d889a428e5a5afb3ed798618272293f7172242",
@@ -165,7 +165,7 @@
     ".cursor/rules/subagent-policy.mdc": "b2200867b3141faedb982cb12cc58158015ef5d9294c0f8b193bb8b70f61f201",
     "AGENTS.md": "4a87c3ba8c45a3d89f8018e043b7a0736b624b3bb1b481612b9ac064ae010634"
   },
-  "policy_digest": "70e28393ac9ce45464e0ecdbc393d50d151c5d0bec783d0bfe141aedfcb3344c",
+  "policy_digest": "f194f166b9e4649a51e87f69d9acd74c2d28839121dfe33adfdbd73ea3fa0ac7",
   "release": "2.5.0",
   "schema_version": 1
 }

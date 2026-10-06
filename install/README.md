@@ -109,6 +109,7 @@ existing project:
   executable and is not (a hook from an install made before executable bits
   were enforced) keeps its content, gets the bit, and is reported as
   `FIX_MODE` (`WOULD_FIX_MODE` in a dry run);
+- the files the project owns after the first install - `tasks/.task-counter`, `specs/MANIFEST.md`, `memory-bank/INDEX.md`, the Project Brain indexes and `project-brain/config/runtime.json` - are kept as they are under every mode and reported as `KEPT`, so a reinstall neither collides on them nor resets the task counter; configuration keys a newer release adds fall back to the runtime defaults;
 - `.gitignore` and `.gitattributes` retain project entries and receive only
   missing accelerator directives in an installer-managed block; the installed
   `.gitattributes` directive is `*.sh text eol=lf`, so hooks keep LF in a

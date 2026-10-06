@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -310,6 +311,56 @@ class ShippedContentIndexTest(unittest.TestCase):
                     if item.get("reason") == "secret"
                 ]
                 self.assertEqual([], excluded)
+
+
+class FrameworkApiCurrencyTest(unittest.TestCase):
+    """Snippets that fatal or mislead on the framework versions an edition
+    declares. Each pattern was shipped once and found by an audit."""
+
+    PHP_FENCE = re.compile(r"^```php[^\n]*\n(.*?)^```", re.S | re.M)
+
+    def canon(self, edition: str) -> list:
+        root = ROOT / edition
+        paths = [*sorted((root / ".agents" / "skills").rglob("*.md"))]
+        examples = root / "examples"
+        if examples.is_dir():
+            paths += sorted(examples.rglob("*.md"))
+        return [(path, path.read_text(encoding="utf-8")) for path in paths]
+
+    def php_blocks(self, text: str) -> list:
+        return self.PHP_FENCE.findall(text)
+
+    def test_laravel_snippets_match_the_11_plus_skeleton(self) -> None:
+        offenders = []
+        for path, text in self.canon("Laravel"):
+            relative = path.relative_to(ROOT).as_posix()
+            for block in self.php_blocks(text):
+                # Filament v4+: `string|BackedEnum|null`; `?string` is a fatal
+                # property-type mismatch.
+                if "?string $navigationIcon" in block:
+                    offenders.append(f"{relative}: ?string $navigationIcon")
+                # The 11+ base Controller has no AuthorizesRequests.
+                if "$this->authorize(" in block and "AuthorizesRequests" not in text:
+                    offenders.append(f"{relative}: $this->authorize() without AuthorizesRequests")
+                # The skeleton defines local, public and s3 - no `private` disk.
+                if re.search(r"(?:disk|fake)\('private'\)|, 'private'\)", block) and "'private' =>" not in text:
+                    offenders.append(f"{relative}: undefined 'private' disk")
+        self.assertEqual([], offenders)
+
+    def test_laravel_never_claims_dispatch_is_deferred_by_default(self) -> None:
+        for path, text in self.canon("Laravel"):
+            with self.subTest(path=path.relative_to(ROOT).as_posix()):
+                self.assertNotRegex(text, r"which Laravel defers automatically")
+                self.assertNotIn("EventServiceProvider.php", text)
+                self.assertNotIn("#[AsListener]", text)
+
+    def test_symfony_voters_take_the_8x_vote_parameter(self) -> None:
+        offenders = []
+        for path, text in self.canon("Symfony"):
+            for signature in re.findall(r"function voteOnAttribute\([^)]*\)", text):
+                if "?Vote $vote = null" not in signature:
+                    offenders.append(f"{path.relative_to(ROOT).as_posix()}: {signature}")
+        self.assertEqual([], offenders)
 
 
 if __name__ == "__main__":

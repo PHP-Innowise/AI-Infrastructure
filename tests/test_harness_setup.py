@@ -256,14 +256,29 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(repeated["merged"], [])
         self.assertEqual(self.snapshot(self.project), installed)
 
+    def test_seed_only_runtime_state_is_kept_not_a_collision(self):
+        # The memory index is seeded once and rewritten by the project's own
+        # runtime afterwards; a reinstall keeps it instead of refusing.
+        index = self.project / "memory-bank/INDEX.md"
+        index.parent.mkdir()
+        index.write_text("My durable index\n")
+        preview = self.manager.preview(self.options())
+        self.assertTrue(preview["can_install"])
+        entry = next(item for item in preview["files"] if item["path"] == "memory-bank/INDEX.md")
+        self.assertEqual("kept", entry["action"])
+        self.assertIn("owned by the project", entry["reason"])
+        result = self.manager.install({"preview_id": preview["preview_id"]})
+        self.assertTrue(result["ok"])
+        self.assertEqual("My durable index\n", index.read_text())
+
     def test_conflicts_source_or_target_edits_invalidate_install_without_partial_project_writes(self):
-        collision = self.project / "memory-bank/INDEX.md"
+        collision = self.project / "project-brain/PROTOCOL.md"
         collision.parent.mkdir()
-        collision.write_text("My durable index\n")
+        collision.write_text("My own protocol\n")
         before = self.snapshot(self.project)
         blocked = self.manager.preview(self.options())
         self.assertFalse(blocked["can_install"])
-        self.assertTrue(any(item["path"] == "memory-bank/INDEX.md" for item in blocked["collisions"]))
+        self.assertTrue(any(item["path"] == "project-brain/PROTOCOL.md" for item in blocked["collisions"]))
         with self.assertRaises(sessions.SessionError):
             self.manager.install({"preview_id": blocked["preview_id"]})
         self.assertEqual(self.snapshot(self.project), before)

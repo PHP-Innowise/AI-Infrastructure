@@ -32,6 +32,21 @@ ADDITIVE_FILES = {".gitattributes", ".gitignore"}
 # has its own CLAUDE.md, and an existing `.claude/CLAUDE.md` keeps its
 # content with the import appended.
 MANAGED_POLICY_FILES = {"AGENTS.md", ".claude/CLAUDE.md"}
+# Files the accelerator seeds once and the project owns from then on: the
+# runtime rewrites the indexes and the task counter, and the team edits the
+# spec manifest and the runtime configuration. A reinstall over a project that
+# had used the accelerator collided on them, and `--overwrite` reset the task
+# counter to 1, so TASK-NNN numbers repeated and `project-brain validate`
+# broke. An existing copy is kept under every mode and reported as KEPT;
+# configuration keys a newer release adds fall back to the runtime defaults.
+SEED_ONLY_PATHS = {
+    "memory-bank/INDEX.md",
+    "project-brain/config/runtime.json",
+    "project-brain/indexes/active.json",
+    "project-brain/indexes/archive.json",
+    "specs/MANIFEST.md",
+    "tasks/.task-counter",
+}
 # Files the accelerator's own runtime rewrites in this repository, which must
 # still install in their pristine state. A developer who has run a task here
 # carries a Brain index listing that task's records; those records are this
@@ -542,6 +557,9 @@ def install(
             if source.read_bytes() == destination.read_bytes():
                 resolutions[path] = ("unchanged", destination, None)
                 continue
+            if path in SEED_ONLY_PATHS:
+                resolutions[path] = ("kept", destination, None)
+                continue
             if merge_existing and path in ADDITIVE_FILES:
                 try:
                     merged = merge_additive_file(
@@ -629,6 +647,9 @@ def install(
                     print(f"{label}\t{component}\t{path}\t{relative}")
                     continue
                 print(f"UNCHANGED\t{component}\t{path}")
+                continue
+            if resolution == "kept":
+                print(f"KEPT\t{component}\t{path}")
                 continue
             label = {
                 "merge": "WOULD_MERGE" if dry_run else "MERGE",

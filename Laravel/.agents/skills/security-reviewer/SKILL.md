@@ -28,7 +28,7 @@ Identify the attack surface of the change: which inputs cross a trust boundary (
 ## OWASP Top 10 Checklist (Laravel)
 
 ### A01 Broken Access Control
-- Every state-changing/sensitive action authorized via a Policy or Gate (`$this->authorize()`, `can:` middleware), not just hidden UI?
+- Every state-changing/sensitive action authorized via a Policy or Gate (`Gate::authorize()`, `can:` middleware), not just hidden UI?
 - Object ownership checked (no IDOR: `/orders/{id}` reachable by other users) — does the Policy compare the resource owner to the authenticated user?
 - Route model binding scoped correctly; no auth logic relying solely on client-controlled route params?
 - Sanctum token abilities/scopes (`tokenCan('...')`) checked where a token should not have full account access?

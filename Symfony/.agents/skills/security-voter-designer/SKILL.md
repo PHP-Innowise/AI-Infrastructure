@@ -28,7 +28,7 @@ Never rely on hidden UI as authorization.
 5. Decide whether denial is `403`, authentication is `401`/redirect, and sensitive resource existence should be hidden as `404`.
 6. Align route rules, firewall configuration, access rules, controller attributes, API Platform expressions, and voter calls. Avoid contradictory layers.
 
-Compare server-side voter and collection-scoping responsibilities with [Symfony clean-code patterns](../../../examples/symfony-clean-code-patterns.md). Keep voters cohesive and deterministic; do not inject the request, entity manager, or broad service locator.
+Match the installed `symfony/security-core`: from 8.0 `Voter::voteOnAttribute()` takes a fourth parameter, `?Vote $vote = null` (optional since 7.3), and an override without it is a fatal error; use `$vote?->addReason()` to explain a denial. Compare server-side voter and collection-scoping responsibilities with [Symfony clean-code patterns](../../../examples/symfony-clean-code-patterns.md). Keep voters cohesive and deterministic; do not inject the request, entity manager, or broad service locator.
 
 ## Tests
 
