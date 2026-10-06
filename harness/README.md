@@ -1220,7 +1220,8 @@ Offline Fleet demonstrations cannot link a real task.
 
 **Save to memory.** A reviewed run's draft is not saved by itself (762 characters
 of instruction per launch). When the run finishes, **Save to memory** under
-**Record result & durable memory** shows the draft as a form. Edit it, uncheck what
+**Record result & durable memory** shows the draft as a form. That section stays
+hidden while a turn is queued, running, or waiting for its context or approval. Edit it, uncheck what
 should not be kept, and confirm that you checked each kept learning against its
 sources. Saving does what the automatic save does, with the learnings recorded as
 verified by you; if automatic promotion is off, propose them under **Durable
