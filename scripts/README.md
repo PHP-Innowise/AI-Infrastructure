@@ -42,6 +42,48 @@ python3 scripts/ai_system.py plan --system docs/examples/ai-system/system.json \
 - Tests: `python3 -m unittest tests.test_ai_system tests.test_ai_system_providers tests.test_ai_system_execution`, also in the dedicated CI job.
 - Full contract and sample: [System-level AI Coordination](../docs/AI-SYSTEM-ORCHESTRATION.md).
 
+### `check.py`
+
+**Purpose and status.** The local entry point for what CI runs; source-only
+and not installed. One group per job in `.github/workflows/*.yml`, each the
+job's `run:` steps in order.
+
+```bash
+python3 scripts/check.py                    # every group; exit 1 if anything failed
+python3 scripts/check.py --group lint --group links
+python3 scripts/check.py --list             # groups, commands, and what would skip here
+python3 scripts/check.py --fail-fast --jobs 4
+python3 scripts/check.py --strict           # a missing tool fails instead of skipping
+```
+
+- **Options:** repeatable `--group`; `--list`; `--fail-fast`; `--jobs N`
+  (jobs or matrix legs at once; default half the CPUs, at least 2);
+  `--strict`; `--base REF` for the changelog group.
+- **Execution:** jobs run in parallel, and so do the legs of a matrix job,
+  which CI also runs as separate jobs; the steps of one job or leg run in
+  order (`--jobs 1` runs everything one after another). A step that needs a
+  shell runs as GitHub runs it (`bash --noprofile --norc -eo pipefail -c`),
+  so a loop stops at its first failure. `python3`/`python` inside every
+  command — and inside the processes tests spawn — is the interpreter running
+  `check.py`; the job CI pins to 3.9 runs under `python3.9`. The `tests` job's
+  file loop becomes one command per file, so a failure names its file.
+- **Outputs:** one PASS/FAIL/SKIP line per command with its duration, the last
+  60 lines of each failing command's output with the path of its full log, and
+  a per-group summary table with wall times. A job or leg that took longer
+  than CI's `timeout-minutes` is flagged, not failed. Exit 0 when nothing
+  failed, 1 on a failure, 2 on a usage error, 130 when interrupted.
+- **Skips:** a tool the CI runner provides but this machine lacks (shellcheck,
+  php, pwsh, bwrap, `python3.9`, `harness/.venv`) skips with the reason;
+  `--strict` fails it. An entry whose files are not in the checkout skips as
+  "not present" either way. Windows-only jobs are listed and skip elsewhere;
+  the runner itself supports Linux and macOS. Runner provisioning (apt-get,
+  sysctl, venv creation, pip install) is not repeated.
+- **Writes:** nothing in the repository. Logs and interpreter shims go to a
+  temporary directory that is removed unless something failed.
+- **CI relationship:** `tests/test_check.py` reads the workflows and fails when
+  a CI command has no entry here, or an entry here is no longer in CI. Gates
+  CI does not run yet are marked `local_only` with the reason.
+
 ### `build_mirrors.py`
 
 **Purpose and status.** Maintainer build tool; source-only and not installed.
@@ -584,6 +626,9 @@ python3 scripts/context_budget.py --check
 python3 scripts/install_accelerator.py --verify-inventories
 python3 scripts/check_links.py
 ```
+
+Before pushing, run everything CI runs in one go, `python3 scripts/check.py`,
+or the affected groups only (`--group mirrors --group parity`).
 
 Inventory regeneration is appropriate only when intentionally changing the
 production payload contract. Review source exclusions and production
