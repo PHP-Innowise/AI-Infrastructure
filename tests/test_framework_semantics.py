@@ -3,6 +3,11 @@
 
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -268,6 +273,43 @@ class FrameworkSemanticPreservationTest(unittest.TestCase):
         hook = (root / ".claude/hooks/bash-validator.sh").read_text(encoding="utf-8")
         self.assertIn('"argv|wp|db reset|', hook)
         self.assertIn("wp-config", hook)
+
+
+class ShippedContentIndexTest(unittest.TestCase):
+    """Every edition's own shipped documents stay retrievable.
+
+    The index refuses a document that matches a secret pattern, and a
+    refused skill is never retrieved again. An over-eager pattern once
+    excluded the Laravel architect skill - all three tool copies - over a
+    documented `php artisan down --secret=...` example, in every install.
+    """
+
+    def test_no_shipped_document_is_excluded_as_a_secret(self) -> None:
+        for framework, edition in FRAMEWORK_PATHS.items():
+            with self.subTest(edition=framework), tempfile.TemporaryDirectory(
+                prefix="index-screen-"
+            ) as temporary:
+                target = Path(temporary) / "edition"
+                listed = subprocess.run(
+                    ["git", "ls-files", "-z", "--", str(edition)],
+                    cwd=ROOT, capture_output=True, check=True,
+                ).stdout.decode("utf-8").split("\0")
+                for name in filter(None, listed):
+                    destination = target / Path(name).relative_to(edition)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(ROOT / name, destination)
+                subprocess.run(["git", "init", "--quiet"], cwd=target, check=True)
+                subprocess.run(["git", "add", "--all"], cwd=target, check=True)
+                result = subprocess.run(
+                    [sys.executable, "memory-bank/scripts/context.py", "index", "--json"],
+                    cwd=target, capture_output=True, text=True,
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                excluded = [
+                    item["path"] for item in json.loads(result.stdout)["excluded"]
+                    if item.get("reason") == "secret"
+                ]
+                self.assertEqual([], excluded)
 
 
 if __name__ == "__main__":

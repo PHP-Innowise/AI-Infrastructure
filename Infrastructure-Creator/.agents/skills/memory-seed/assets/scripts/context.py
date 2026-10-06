@@ -97,6 +97,7 @@ from context_retrieval import (
     token_coverage,
 )
 from validate import (
+    PRIVATE_PATTERNS,
     SECRET_PATTERNS,
     ValidationError,
     parse_frontmatter,
@@ -152,17 +153,9 @@ CAPSULE_WORKING_NEXT_STEP_LIMIT = 3
 # in the JSON a caller can inspect at leisure.
 RENDERED_PROGRESS_LIMIT = 400
 RENDERED_FILE_LIMIT = 5
-CAPSULE_PRIVATE_PATTERNS = (
-    re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE),
-    re.compile(
-        r"(?<!\w)(?:\+\d(?:[\d ().-]{6,}\d)|\(?\d{3}\)?[ .-]\d{3}[ .-]\d{4})(?!\w)"
-    ),
-    re.compile(
-        r"\b(?:(?:customer|patient)\s+(?:name|address|id)|"
-        r"client\s+(?:name|address))\s*[:=]\s*\S+",
-        re.IGNORECASE,
-    ),
-)
+# Defined beside SECRET_PATTERNS in validate.py, so the Project Brain write
+# path (brain_runtime) refuses the same personal data the capsule does.
+CAPSULE_PRIVATE_PATTERNS = tuple(PRIVATE_PATTERNS.values())
 CAPSULE_RAW_TEXT_PATTERN = re.compile(
     r"^\s*(?:user|assistant|system|developer|tool|prompt|response|reasoning|"
     r"stdout|stderr|log)\s*:",

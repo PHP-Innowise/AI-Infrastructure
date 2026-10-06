@@ -22,6 +22,8 @@ from validate import (
     ValidationError as BankValidationError,
     display_path as bank_display_path,
     parse_frontmatter as parse_bank_frontmatter,
+    SECRET_PATTERNS as BANK_SECRET_PATTERNS,
+    sensitive_label,
     validate_bank,
     validate_metadata as validate_bank_metadata,
     validate_secret_patterns as validate_bank_secrets,
@@ -855,6 +857,44 @@ def _handoff_body(handoff: dict[str, Any]) -> str:
     )
 
 
+def guard_shared_text(label: str, values: Any) -> None:
+    """Refuse a Project Brain write that would store a secret or personal data.
+
+    Records, handoffs and agent messages are Git-tracked and repeated into
+    Task Capsules, so the governed path holds the line the lightweight path
+    and the capsule gate already hold. Only the text the call introduces is
+    checked: a record written before this guard existed stays updatable. The
+    message names the kind of data, never the value.
+    """
+    text = "\n".join(value for value in values if isinstance(value, str) and value)
+    found = sensitive_label(text)
+    if found:
+        raise BrainError(
+            f"{label} contains {found}; replace it with a sanitized summary "
+            "- nothing was stored"
+        )
+
+
+def stored_secret_label(record: dict[str, Any]) -> Optional[str]:
+    """The kind of credential a stored record's free text carries, or None.
+
+    Validation reports secrets only. A record written before the write guard
+    may hold personal data, which promotion and the capsule already refuse to
+    spread; failing every validation over it would leave the operator a
+    repository they cannot get green without rewriting history.
+    """
+    fields = [
+        record.get("title"), record.get("goal"), record.get("progress"),
+        record.get("auto_checkpoint"), *record.get("next_steps", []),
+        *(item.get("reason") for item in record.get("transitions", []) if isinstance(item, dict)),
+    ]
+    text = "\n".join(value for value in fields if isinstance(value, str) and value)
+    for label, pattern in BANK_SECRET_PATTERNS.items():
+        if pattern.search(text):
+            return f"a possible {label}"
+    return None
+
+
 def _write_record(repository: Path, record: dict[str, Any], path: Path) -> None:
     validate_record(record)
     affected = [path, *index_paths(repository)]
@@ -898,6 +938,9 @@ def create_record(
 ) -> dict[str, Any]:
     if record_type not in RECORD_TYPES:
         raise BrainError(f"type must be one of: {', '.join(RECORD_TYPES)}")
+    guard_shared_text(
+        f"{record_type.capitalize()} record", [title, goal, *(conflicts or [])]
+    )
     try:
         find_record(repository, external_id)
     except BrainError as error:
@@ -1012,6 +1055,10 @@ def update_record(
     handoff kept presenting finished work as what comes next. ``files`` keep
     the newest touch last, which is the end the capsule projects from.
     """
+    guard_shared_text(
+        "Record update",
+        [progress, auto_checkpoint, reason, *next_steps, *(conflicts or [])],
+    )
     with mutation_lock(repository):
         path, record, _ = find_record(repository, identifier)
         validate_record(record)
@@ -1267,6 +1314,7 @@ def append_message(
     terminal task refuses new messages - the channel exists for active
     coordination, not for post-mortem edits.
     """
+    guard_shared_text("Agent message", [body])
     with mutation_lock(repository):
         _, task, _ = find_task(repository, identifier)
         if task["status"] in LIFECYCLES["task"]["terminal"]:
@@ -1433,6 +1481,12 @@ def validate_repository(
                 )
             if check_freshness and not sources_are_fresh(repository, record):
                 raise BrainError("source fingerprint is stale")
+            secret = stored_secret_label(record)
+            if secret is not None:
+                raise BrainError(
+                    f"record contains {secret}; remove it from the record and "
+                    "rotate the credential, since Git history keeps it"
+                )
             records[record["id"]] = (path, record)
         except BrainError as error:
             errors.append(f"{path}: {error}")
@@ -2036,8 +2090,14 @@ def promotion_eligibility_error(
         return f"authority is {record['authority']}, not verified"
     if record["privacy"] not in config["allowed_privacy"]:
         return f"privacy {record['privacy']} is not allowed for retrieval"
-    if promotion_content(record) is None:
+    content = promotion_content(record)
+    if content is None:
         return "record carries no content beyond its own title"
+    found = sensitive_label(f"{record['title']}\n{content}")
+    if found:
+        # Durable memory is the widest audience a record can reach; a record
+        # that predates the write guard must not carry its data there.
+        return f"record content contains {found}"
     if sources_are_fresh(repository, record):
         return None
     stale = [

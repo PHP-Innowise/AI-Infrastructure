@@ -18,6 +18,7 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Fixed
 
+- **`memory-seed` asset carries the governed write guard and the new secret patterns.** Every generated project's Project Brain now refuses secrets and personal data in new record text and agent messages, and its secret patterns catch `*_PASSWORD=`, `APP_KEY=base64:` and URL credentials without refusing PHP code or Symfony `%env()%` config (see the root `CHANGELOG.md`). Mirrors and policy lock regenerated.
 - **Hooks failed open from a subdirectory, in this edition and in every generated target.** Claude Code and Codex run hooks in the session's current directory, so bare `.claude/hooks/<script>.sh` and `.codex/hooks/<script>.sh` wiring exited 127 there, which both hosts treat as non-blocking.
   - `hook-forge` now wires Claude hooks as `"${CLAUDE_PROJECT_DIR}"/.claude/hooks/<script>.sh` and Codex hooks through one fixed root-finding `sh -c` launcher, which stops at the nearest directory holding `.codex/hooks.json`. Cursor stays bare, because it runs project hooks from the project root.
   - bootstrap-verifier's `validate_generated.py` matches every hook command against hook-forge's form for its edition in full and rejects anything else: bare Claude/Codex paths, tampered launchers, wrappers, trailing `|| true`/`; exit 0`, and quoted paths. It also rejects dead or unowned hooks and requires every hook hook-forge registers to be wired.

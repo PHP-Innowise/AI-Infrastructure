@@ -7248,6 +7248,148 @@ class ExportBundleTest(RuntimeHarness):
         self.assertIn("authorized owner", readme)
 
 
+class SharedTextGuardTest(RuntimeHarness):
+    """Governed writes refuse the secrets and personal data they introduce.
+
+    Records, handoffs and agent messages are Git-tracked and travel into Task
+    Capsules, so the governed path holds the same line the lightweight path
+    already held. A refusal names the kind of data and never the value.
+    """
+
+    TOKEN = "ghp_" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
+    UNSAFE = (
+        ("email", "Fix login for person@example.test", "person@example.test"),
+        ("token", f"Use {TOKEN} for the deploy", "ABCDEFGHIJ"),
+        ("env credential", "Works locally with DB_PASSWORD=SuperS3cret!", "SuperS3cret"),
+        ("phone", "Call the owner at +370 600 12345", "600 12345"),
+    )
+
+    def task(self, external_id: str = "TASK-GUARD") -> dict:
+        return brain.create_task(
+            self.repository,
+            external_id,
+            "Apply the cobalt authority rule.",
+            [],
+            ["specs/authority.md"],
+            owner="alice",
+        )
+
+    def records_on_disk(self) -> list:
+        return sorted(self.repository.glob("project-brain/dynamic/**/*.md"))
+
+    def write_bypassing_guard(self, record: dict) -> None:
+        """A record as one written before the guard existed would look."""
+        brain._write_record(
+            self.repository, record, brain.dynamic_path(self.repository, record)
+        )
+
+    def test_create_refuses_unsafe_goal_and_stores_nothing(self) -> None:
+        for kind, goal, value in self.UNSAFE:
+            with self.subTest(kind=kind):
+                with self.assertRaises(brain.BrainError) as caught:
+                    brain.create_task(
+                        self.repository, "TASK-GUARD", goal, [],
+                        ["specs/authority.md"], owner="alice",
+                    )
+                message = str(caught.exception)
+                self.assertIn("nothing was stored", message)
+                self.assertNotIn(value, message)
+                self.assertEqual([], self.records_on_disk())
+
+    def test_update_refuses_unsafe_text_and_leaves_the_record_unchanged(self) -> None:
+        task = self.task()
+        for kind, text, value in self.UNSAFE:
+            for field in ("progress", "next_steps", "reason"):
+                with self.subTest(kind=kind, field=field):
+                    changes = {
+                        "progress": None, "next_steps": [], "reason": "Task updated",
+                    }
+                    changes[field] = [text] if field == "next_steps" else text
+                    with self.assertRaises(brain.BrainError) as caught:
+                        brain.update_record(
+                            self.repository, task["id"],
+                            expected_revision=task["revision"],
+                            files=[], sources=[], actor="alice", **changes,
+                        )
+                    self.assertNotIn(value, str(caught.exception))
+        stored = brain.get_record(self.repository, task["id"])
+        self.assertEqual(task["revision"], stored["revision"])
+        self.assertEqual("", stored["progress"])
+
+    def test_record_written_before_the_guard_stays_updatable(self) -> None:
+        task = self.task()
+        legacy = brain.get_record(self.repository, task["id"])
+        legacy["progress"] = "Reported by person@example.test"
+        self.write_bypassing_guard(legacy)
+
+        updated = brain.update_record(
+            self.repository, task["id"],
+            expected_revision=legacy["revision"],
+            progress=None, next_steps=["Confirm the cobalt rule."],
+            files=[], sources=[], actor="alice",
+        )
+
+        self.assertEqual(legacy["revision"] + 1, updated["revision"])
+
+    def test_agent_message_refuses_personal_data(self) -> None:
+        task = self.task()
+        with self.assertRaises(brain.BrainError) as caught:
+            brain.append_message(
+                self.repository, task["id"],
+                from_actor="coder", to_actor="orchestrator",
+                message_type="finding", body="Ask person@example.test for access",
+            )
+        self.assertNotIn("person@example.test", str(caught.exception))
+        self.assertFalse(brain.messages_path(self.repository, task["id"]).exists())
+
+    def test_promotion_refuses_a_legacy_record_carrying_personal_data(self) -> None:
+        finding = brain.create_record(
+            self.repository, "finding", "FIND-GUARD",
+            "Cobalt authority finding", [], ["specs/authority.md"], owner="alice",
+        )
+        resolved = self.resolve_verified_finding(finding)
+        config = brain.load_config(self.repository)
+        self.assertIsNone(
+            brain.promotion_eligibility_error(self.repository, resolved, config)
+        )
+        resolved["progress"] = "Verified with person@example.test"
+        self.write_bypassing_guard(resolved)
+
+        self.assertEqual(
+            "record content contains personal data (email address)",
+            brain.promotion_eligibility_error(self.repository, resolved, config),
+        )
+
+    def test_validation_reports_a_stored_secret_without_echoing_it(self) -> None:
+        task = self.task()
+        legacy = brain.get_record(self.repository, task["id"])
+        legacy["progress"] = f"Deploy token {self.TOKEN}"
+        self.write_bypassing_guard(legacy)
+
+        errors = brain.validate_repository(self.repository)
+
+        self.assertTrue(any("possible GitHub token" in error for error in errors), errors)
+        self.assertFalse(any("ABCDEFGHIJ" in error for error in errors))
+
+    def test_validation_does_not_fail_on_legacy_personal_data(self) -> None:
+        task = self.task()
+        legacy = brain.get_record(self.repository, task["id"])
+        legacy["progress"] = "Reported by person@example.test"
+        self.write_bypassing_guard(legacy)
+
+        self.assertEqual([], brain.validate_repository(self.repository))
+
+    def test_governed_cli_start_refuses_personal_data(self) -> None:
+        result = self.run_cli(
+            "--mode", "governed", "start", "--task-id", "TASK-CLI-GUARD",
+            "--goal", "Fix login for person@example.test",
+            "--source", "specs/authority.md",
+        )
+        self.assertNotEqual(0, result.returncode)
+        self.assertNotIn("person@example.test", result.stdout + result.stderr)
+        self.assertEqual([], self.records_on_disk())
+
+
 class ShippedRuntimeConfigTest(unittest.TestCase):
     """Assert the config this edition actually ships, not a fixture's rewrite.
 

@@ -64,6 +64,25 @@ OPTIONAL_KEYS = {
     # `valid_from`/`valid_to` are optional.
     "source_digests",
 }
+# What follows a credential key when the value is not a literal credential: a
+# variable or expression, an env/config lookup, a template, a placeholder, a
+# validation rule, a mask, or a bare number. Without it the pattern refused
+# ordinary PHP and Symfony text (`$password = $request->validated(...)`,
+# `secret: '%env(APP_SECRET)%'`) and dropped whole skills from the index over
+# a documented `--secret=...` example.
+_NOT_A_LITERAL = (
+    r"(?!"
+    r"[$%{<\[(=]"
+    r"|(?:get)?env\(|config\(|secret\(|process\.env|os\.environ|vault:"
+    r"|\*{2,}|x{3,}|\.{2,}|\u2026"
+    r"|\d+(?![^\s'\"`,;])"
+    r"|[A-Za-z_\\][\w\\.]*(?:::|->|\()"
+    r"|[a-z_]\w*\.[a-z_][\w.]*(?![^\s'\"`,;])"
+    r"|(?:required|nullable|sometimes|confirmed|hashed|string|null|none|true|false"
+    r"|secret|password|passw(?:or)?d|pass|root|test|example|placeholder|redacted"
+    r"|!?change[-_]?me!?|your[-_ ][^\s]*)(?![A-Za-z0-9])"
+    r")"
+)
 SECRET_PATTERNS = {
     "private key": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
     "GitHub token": re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
@@ -71,11 +90,58 @@ SECRET_PATTERNS = {
     "OpenAI-style token": re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b"),
     "Stripe secret key": re.compile(r"\bsk_(?:live|test)_[A-Za-z0-9]{16,}\b"),
     "JWT": re.compile(r"\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"),
+    "Laravel application key": re.compile(
+        r"\bAPP_KEY[ \t]*=[ \t]*['\"]?base64:[A-Za-z0-9+/]{20,}={0,2}"
+    ),
+    # user:password@ in a URL or DSN (mysql://, postgres://, redis://:pw@,
+    # https://user:token@), minus the placeholders documentation uses.
+    "credential in URL": re.compile(
+        r"\b[a-z][a-z0-9+.-]*://[^\s:/@]*:"
+        r"(?!(?:password|pass|secret|root|test|!?change[-_]?me!?|x{3,}|\*+|\.{2,})@"
+        r"|[<${%])"
+        r"[^\s@/]{3,}@",
+        re.IGNORECASE,
+    ),
+    # A credential key assigned a literal value. The key may carry a snake or
+    # UPPER_SNAKE prefix (DB_PASSWORD=, MAIL_PASSWORD=, AWS_SECRET_ACCESS_KEY=),
+    # which the old `\b` anchor missed; separators stay on one line.
     "assigned credential": re.compile(
-        r"\b(?:password|passwd|secret|api[_-]?key|access[_-]?token)\s*[:=]\s*[^\s<{][^\s]*",
+        r"(?<![A-Za-z0-9])(?:[A-Za-z0-9]+_)*"
+        r"(?:password|passwd|secret(?:_access)?(?:_key|_token)?|api[_-]?key"
+        r"|access[_-]?token|auth[_-]?token)"
+        r"[ \t]*[:=][ \t]*['\"`]?" + _NOT_A_LITERAL + r"[^\s'\"`]{4,}",
         re.IGNORECASE,
     ),
 }
+# Personal data that must not enter shared memory: Project Brain records are
+# Git-tracked, and the Task Capsule repeats them into every prompt. The
+# capsule gate used these first; the Brain write path applies them too.
+PRIVATE_PATTERNS = {
+    "email address": re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE),
+    "phone number": re.compile(
+        r"(?<!\w)(?:\+\d(?:[\d ().-]{6,}\d)|\(?\d{3}\)?[ .-]\d{3}[ .-]\d{4})(?!\w)"
+    ),
+    "customer identifier": re.compile(
+        r"\b(?:(?:customer|patient)\s+(?:name|address|id)|"
+        r"client\s+(?:name|address))\s*[:=]\s*\S+",
+        re.IGNORECASE,
+    ),
+}
+
+
+def sensitive_label(text: str) -> Optional[str]:
+    """What sensitive data `text` appears to carry, or None.
+
+    Names the kind only - never the matched value - so the message can be
+    shown, logged and put into a capsule without repeating what it refuses.
+    """
+    for label, pattern in SECRET_PATTERNS.items():
+        if pattern.search(text):
+            return f"a possible {label}"
+    for label, pattern in PRIVATE_PATTERNS.items():
+        if pattern.search(text):
+            return f"personal data ({label})"
+    return None
 
 
 class ValidationError(Exception):

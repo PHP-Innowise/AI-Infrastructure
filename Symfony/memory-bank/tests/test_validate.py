@@ -472,5 +472,88 @@ class MemoryBankValidatorTest(unittest.TestCase):
         self.assertTrue(any("must include this ID in supersedes" in error for error in errors))
 
 
+class SecretPatternTableTest(unittest.TestCase):
+    """What the shared secret patterns catch and what they must leave alone.
+
+    The same patterns gate Brain writes, capsule queries and the index, where
+    a false positive drops a whole skill from retrieval: the Laravel
+    architect skill was excluded over a documented `--secret=...` flag.
+    """
+
+    CREDENTIALS = (
+        "DB_PASSWORD=SuperS3cret!",
+        "MAIL_PASSWORD=abc123xyz",
+        "db_password=x7Gq9",
+        "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        "CLIENT_SECRET=abcdef123456",
+        "password: hunter2",
+        'api_key="sk12345abc"',
+        "secret = s3cr3tvalue",
+        "access_token=abcd1234efgh",
+        "mysql -u root --password=hunter22 app",
+        "APP_KEY=base64:2fl+Ktvkfl+Fuz4Qp/A75G2RTiWVA/ZoKZvp6fiiM10=",
+        "mysql://app:hunter2@db:3306/app",
+        "postgres://admin:P%40ssw0rd@localhost/db",
+        "redis://:mypassword@cache:6379",
+        "https://user:ghs_token123@github.com/org/repo.git",
+    )
+    NOT_CREDENTIALS = (
+        "secret: '%env(APP_SECRET)%'",
+        "password: '%env(DATABASE_PASSWORD)%'",
+        '$password = $request->validated("password")',
+        "$this->password = Hash::make($value);",
+        "'password' => env('DB_PASSWORD')",
+        "'password' => 'hashed'",
+        'password = getenv("DB_PASSWORD")',
+        'api_key = config("services.x.key")',
+        "password: required|min:12|confirmed",
+        "php artisan down --secret=...",
+        "DB_PASSWORD=${DB_PASSWORD}",
+        "secret_key: ${{ secrets.KEY }}",
+        "DB_PASSWORD=",
+        "DB_PASSWORD=null",
+        "DB_PASSWORD=secret",
+        "DB_PASSWORD=password",
+        "secret=your-secret-here",
+        "api_key: <your-api-key>",
+        "password: ********",
+        "password_timeout=10800",
+        "APP_KEY=base64:...",
+        'DATABASE_URL="postgresql://app:!ChangeMe!@127.0.0.1:5432/app?serverVersion=16"',
+        "mysql://user:password@localhost/db",
+        "mysql://root:root@db/app",
+        "see http://localhost:8000/login",
+        "ssh://git@github.com:22/org/repo",
+    )
+
+    @staticmethod
+    def hits(text: str) -> list:
+        return [
+            label for label, pattern in VALIDATOR.SECRET_PATTERNS.items()
+            if pattern.search(text)
+        ]
+
+    def test_literal_credentials_are_caught(self) -> None:
+        for text in self.CREDENTIALS:
+            with self.subTest(text=text):
+                self.assertTrue(self.hits(text))
+
+    def test_code_config_and_placeholders_are_not_credentials(self) -> None:
+        for text in self.NOT_CREDENTIALS:
+            with self.subTest(text=text):
+                self.assertEqual([], self.hits(text))
+
+    def test_sensitive_label_names_the_kind_never_the_value(self) -> None:
+        self.assertEqual(
+            "a possible assigned credential",
+            VALIDATOR.sensitive_label("DB_PASSWORD=SuperS3cret!"),
+        )
+        self.assertEqual(
+            "personal data (email address)",
+            VALIDATOR.sensitive_label("Ask person@example.test"),
+        )
+        self.assertIsNone(VALIDATOR.sensitive_label("Apply the cobalt rule."))
+
+
 if __name__ == "__main__":
     unittest.main()
