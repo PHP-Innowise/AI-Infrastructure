@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'd=$(pwd); until [ -z \"$d\" ] || [ -f \"$d/.codex/hooks/$1\" ]; do d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh local-context.sh"
+            "command": "sh -c 'd=$(pwd); until [ -f \"$d/.codex/hooks.json\" ]; do [ -n \"$d\" ] || { echo \"$1: no .codex/hooks.json at or above the working directory\" >&2; exit 127; }; d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh local-context.sh"
           }
         ]
       }
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'd=$(pwd); until [ -z \"$d\" ] || [ -f \"$d/.codex/hooks/$1\" ]; do d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh working-memory-read.sh",
+            "command": "sh -c 'd=$(pwd); until [ -f \"$d/.codex/hooks.json\" ]; do [ -n \"$d\" ] || { echo \"$1: no .codex/hooks.json at or above the working directory\" >&2; exit 127; }; d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh working-memory-read.sh",
             "additionalContextLimit": 4000
           }
         ]
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'd=$(pwd); until [ -z \"$d\" ] || [ -f \"$d/.codex/hooks/$1\" ]; do d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh working-memory-write.sh"
+            "command": "sh -c 'd=$(pwd); until [ -f \"$d/.codex/hooks.json\" ]; do [ -n \"$d\" ] || { echo \"$1: no .codex/hooks.json at or above the working directory\" >&2; exit 127; }; d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh working-memory-write.sh"
           }
         ]
       }
@@ -36,15 +36,15 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'd=$(pwd); until [ -z \"$d\" ] || [ -f \"$d/.codex/hooks/$1\" ]; do d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh bash-validator.sh"
+            "command": "sh -c 'd=$(pwd); until [ -f \"$d/.codex/hooks.json\" ]; do [ -n \"$d\" ] || { echo \"$1: no .codex/hooks.json at or above the working directory\" >&2; exit 127; }; d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh bash-validator.sh"
           },
           {
             "type": "command",
-            "command": "sh -c 'd=$(pwd); until [ -z \"$d\" ] || [ -f \"$d/.codex/hooks/$1\" ]; do d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh file-naming-validator.sh"
+            "command": "sh -c 'd=$(pwd); until [ -f \"$d/.codex/hooks.json\" ]; do [ -n \"$d\" ] || { echo \"$1: no .codex/hooks.json at or above the working directory\" >&2; exit 127; }; d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh file-naming-validator.sh"
           },
           {
             "type": "command",
-            "command": "sh -c 'd=$(pwd); until [ -z \"$d\" ] || [ -f \"$d/.codex/hooks/$1\" ]; do d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh subagent-gate.sh"
+            "command": "sh -c 'd=$(pwd); until [ -f \"$d/.codex/hooks.json\" ]; do [ -n \"$d\" ] || { echo \"$1: no .codex/hooks.json at or above the working directory\" >&2; exit 127; }; d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh subagent-gate.sh"
           }
         ]
       }
@@ -54,7 +54,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'd=$(pwd); until [ -z \"$d\" ] || [ -f \"$d/.codex/hooks/$1\" ]; do d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh loop-detection.sh"
+            "command": "sh -c 'd=$(pwd); until [ -f \"$d/.codex/hooks.json\" ]; do [ -n \"$d\" ] || { echo \"$1: no .codex/hooks.json at or above the working directory\" >&2; exit 127; }; d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh loop-detection.sh"
           }
         ]
       }

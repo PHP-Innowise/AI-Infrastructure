@@ -172,7 +172,7 @@ anchors the script path its own way:
 | Host | Command form | Why |
 | --- | --- | --- |
 | Claude Code | `"${CLAUDE_PROJECT_DIR}"/.claude/hooks/<script>.sh` | Hooks run in the session's current directory, which follows every `cd`; Claude Code exports the project root as `CLAUDE_PROJECT_DIR` and asks for the placeholder double-quoted in shell form. |
-| Codex | `sh -c '...' sh <script>.sh` - a fixed launcher (spelled out in `.codex/hooks/README.md`) that execs the nearest `.codex/hooks/<script>.sh` at or above the session's directory | Codex runs hooks in the session cwd through `$SHELL -lc` and exports no project-root variable. The walk works from a subdirectory, without Git, and for a project nested in a larger repository, and `sh` keeps it independent of the login shell. |
+| Codex | `sh -c '...' sh <script>.sh` - a fixed launcher (spelled out in `.codex/hooks/README.md`) that walks up from the session's directory to the nearest directory holding `.codex/hooks.json` and execs that project's `.codex/hooks/<script>.sh` | Codex runs hooks in the session cwd through `$SHELL -lc` and exports no project-root variable. The walk works from a subdirectory, without Git, and for a project nested in a larger repository, and `sh` keeps it independent of the login shell. It stops at the project that declared the hook, so a missing script exits 127 instead of running a same-named script from an ancestor such as `~/.codex/hooks/`. |
 | Cursor | `.cursor/hooks/<script>.sh` | Cursor runs project hooks from the project root. |
 
 A bare relative path on Claude Code or Codex exits 127 as soon as the

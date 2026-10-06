@@ -16,7 +16,12 @@ checked here in a temporary copy of its hook layer:
   through the wiring, not by calling the script directly;
 - the Codex launcher also works without Git and when the project is nested
   inside a larger repository (Infrastructure-Creator's real layout), and under
-  every login shell available here, because Codex runs it with `$SHELL -lc`.
+  every login shell available here, because Codex runs it with `$SHELL -lc`;
+- the Codex launcher stays inside the project that declared the hook (the
+  nearest directory holding `.codex/hooks.json`): a script missing there exits
+  127, and a same-named script in an ancestor's `.codex/hooks/` never runs;
+- the generator's own wiring gate accepts each ready-made edition's complete
+  wiring, so editions and generated targets share one contract.
 
 Cursor is out of scope: it runs project hooks from the project root, so its
 bare `.cursor/hooks/<script>.sh` wiring is correct as is.
@@ -57,8 +62,9 @@ TIMEOUT = 20
 
 CLAUDE_ROOT = '"${CLAUDE_PROJECT_DIR}"/'
 CODEX_LAUNCHER = (
-    "sh -c 'd=$(pwd); until [ -z \"$d\" ] || [ -f \"$d/.codex/hooks/$1\" ]; "
-    "do d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh "
+    "sh -c 'd=$(pwd); until [ -f \"$d/.codex/hooks.json\" ]; do [ -n \"$d\" ] || "
+    "{ echo \"$1: no .codex/hooks.json at or above the working directory\" >&2; "
+    "exit 127; }; d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh "
 )
 SCRIPT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\.sh")
 # A hooks path that starts a shell word: bare, "./"-prefixed, or behind an
@@ -223,6 +229,31 @@ class HookWiringTest(unittest.TestCase):
                     self.assertEqual(unanchored, [])
                     self.assertEqual(scripts, [script_of(tool, command)])
 
+    def test_generator_gate_passes_each_ready_made_editions_complete_wiring(self) -> None:
+        """Every hook hook-forge registers is wired, in its exact form, on all tools.
+
+        Infrastructure-Creator is not a generated target: its own wiring runs
+        the guards it needs and leaves the memory hooks out, so only the forms
+        are held to the gate for it (Infrastructure-Creator/tests/
+        test_hook_wiring_gate.py).
+        """
+        validator = load_generator_validator()
+        tools = list(validator.EDITION_HOOK_WIRING)
+        for edition in EDITIONS:
+            if edition == "Infrastructure-Creator":
+                continue
+            root = ROOT / edition
+            files = {".codex/config.toml": {}}
+            for hooks_rel, wiring_rel in validator.EDITION_HOOK_WIRING.values():
+                files[wiring_rel] = {}
+                for script in (root / hooks_rel).glob("*.sh"):
+                    files[f"{hooks_rel}/{script.name}"] = {}
+            with self.subTest(edition=edition):
+                errors: list = []
+                validator.validate_hook_wiring(root, tools, files, errors)
+                validator.validate_required_wiring(root, tools, files, errors)
+                self.assertEqual(errors, [])
+
     # -- behaviour ----------------------------------------------------------
 
     def test_every_wired_hook_runs_from_a_nested_directory(self) -> None:
@@ -282,6 +313,42 @@ class HookWiringTest(unittest.TestCase):
                 with self.subTest(edition=edition, layout=label):
                     result = self.run_command(command, cwd, FORCE_PUSH)
                     self.assertEqual(result.returncode, 2, result.stderr)
+
+    def test_codex_launcher_never_runs_an_ancestors_script(self) -> None:
+        """A script missing from the project exits 127; an ancestor's never runs.
+
+        `~/.codex/hooks/` is Codex's own user-hook directory and /tmp is
+        world-writable, so a walk that went past the project that declared the
+        hook would let whatever sits there decide block or allow.
+        """
+        marker = self.tmp / "ancestor-ran"
+        planted = self.base / ".codex" / "hooks" / "bash-validator.sh"
+        planted.parent.mkdir(parents=True)
+        planted.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 0\n", encoding="utf-8")
+        planted.chmod(0o755)
+        for edition in EDITIONS:
+            parent = self.base / edition.replace("/", "-")
+            parent.mkdir()
+            project, nested = self.edition_copy(edition, parent, git=False)
+            (project / ".codex/hooks/bash-validator.sh").unlink()
+            for cwd in (nested, project):
+                with self.subTest(edition=edition, cwd=cwd.name):
+                    result = self.run_command(
+                        self.bash_validator(edition, "codex"), cwd, FORCE_PUSH
+                    )
+                    self.assertEqual(result.returncode, 127, result.stderr)
+                    self.assertIn("bash-validator.sh", result.stderr)
+                    self.assertFalse(marker.exists(), "an ancestor's hook ran")
+
+    def test_codex_launcher_without_a_hooks_json_runs_nothing(self) -> None:
+        """No declaring project above the cwd: say so, exit 127, run nothing."""
+        stray = self.base / "stray" / "dir"
+        stray.mkdir(parents=True)
+        if any((parent / ".codex/hooks.json").is_file() for parent in stray.parents):
+            self.skipTest("the temporary directory sits inside a project with Codex hooks")
+        result =self.run_command(self.bash_validator("Laravel", "codex"), stray, FORCE_PUSH)
+        self.assertEqual(result.returncode, 127, result.stderr)
+        self.assertIn("no .codex/hooks.json", result.stderr)
 
     def test_codex_launcher_is_independent_of_the_login_shell(self) -> None:
         """Codex runs hooks with `$SHELL -lc`; any common shell must work."""

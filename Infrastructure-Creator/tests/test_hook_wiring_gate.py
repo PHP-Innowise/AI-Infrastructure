@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The bootstrap-verifier wiring gate accepts only root-anchored hook wiring.
+"""The bootstrap-verifier wiring gate accepts only hook-forge's exact forms.
 
 Claude Code and Codex run a hook command in the session's current directory.
 A bare ".claude/hooks/x.sh" therefore exits 127 as soon as that directory is a
@@ -9,6 +9,12 @@ guardrail silently stops. hook-forge wires Claude hooks through the
 launcher; these tests hold the verifier, the forge's instructions and this
 edition's own wiring to that one contract, and prove the forms actually run
 from a nested directory.
+
+The gate matches each command that names a hook against the whole form, not
+token by token: `|| true` or `; exit 0` swallows the blocking exit 2, and a
+quoted typo, a `bash -c` wrapper or a launcher given a name without `.sh` hides
+a dead hook from any token-level check. Each must be an error, never a skip,
+and every hook hook-forge registers must be wired in that form.
 
 Run from this directory: python3 test_hook_wiring_gate.py
 """
@@ -159,8 +165,103 @@ class RootAnchoredWiringTest(WiringFixture):
                 self.wire(edition, [command])
                 self.assertNotEqual(self.wiring_errors(edition), [])
 
+    def test_commands_outside_hook_forges_form_are_errors_not_skips(self) -> None:
+        """Every one of these fails open, and none ends in a clean `.sh` token."""
+        for edition in ("claude", "codex", "cursor"):
+            self.hook(f"{validator.EDITION_HOOK_WIRING[edition][0]}/{SCRIPT}")
+        toplevel = '"$(git rev-parse --show-toplevel)'
+        cases = [
+            # Exit 2 becomes 0: the guard runs and never blocks.
+            ("claude", claude_command(SCRIPT) + " || true"),
+            # Dead and neutralised.
+            ("claude", claude_command("missing.sh") + "; exit 0"),
+            # The whole path quoted, with a typo: the token ends in `"`.
+            ("claude", '"${CLAUDE_PROJECT_DIR}/.claude/hooks/bash-validato.sh"'),
+            # The whole path quoted, correct name: still not hook-forge's form.
+            ("claude", f'"$CLAUDE_PROJECT_DIR/.claude/hooks/{SCRIPT}"'),
+            # Bare and unanchored; the token ends in `;`.
+            ("claude", ".claude/hooks/missing.sh;"),
+            ("claude", f".claude/hooks/{SCRIPT};"),
+            # An interpreter wrapper around a dead hook.
+            ("claude", 'bash -c ".claude/hooks/missing.sh"'),
+            # hook-forge names this wrapper as one that silently disables a hook.
+            ("claude", "echo '$TOOL_INPUT' | " + claude_command(SCRIPT)),
+            # The launcher handed a name without .sh: 127 from every directory.
+            ("codex", codex_command("bash-validator")),
+            ("codex", codex_command("missing")),
+            ("codex", codex_command(SCRIPT) + ";true"),
+            ("codex", codex_command(SCRIPT) + " || true"),
+            # The repository top level is the wrong root for a nested project.
+            ("codex", toplevel + '/.codex/hooks/missing.sh"'),
+            ("codex", toplevel + f'"/.codex/hooks/{SCRIPT}'),
+            ("codex", ".codex/hooks/missing.sh;"),
+            ("codex", '".codex/hooks/missing.sh"'),
+            ("cursor", f".cursor/hooks/{SCRIPT} || true"),
+            ("cursor", ".cursor/hooks/missing.sh;"),
+            ("cursor", f"bash .cursor/hooks/{SCRIPT}"),
+        ]
+        for edition, command in cases:
+            with self.subTest(edition=edition, command=command):
+                self.wire(edition, [command])
+                self.assertNotEqual(self.wiring_errors(edition), [])
+
+    def test_a_non_hook_command_is_still_skipped(self) -> None:
+        """The editions' Notification snippet names no hook and is not judged."""
+        self.hook(f".claude/hooks/{SCRIPT}")
+        self.wire("claude", [
+            claude_command(SCRIPT),
+            "notify-send 'Claude Code' 'Claude needs your attention' 2>/dev/null || true",
+        ])
+        self.assertEqual(self.wiring_errors("claude"), [])
+
+    def test_a_bare_path_error_names_the_anchored_rewrite(self) -> None:
+        """infra-update's migration path: the gate says what to write instead."""
+        for edition, expected in (
+            ("claude", claude_command(SCRIPT)),
+            ("codex", codex_command(SCRIPT)),
+        ):
+            with self.subTest(edition=edition):
+                hooks_rel = validator.EDITION_HOOK_WIRING[edition][0]
+                self.hook(f"{hooks_rel}/{SCRIPT}")
+                self.wire(edition, [f"{hooks_rel}/{SCRIPT}"])
+                errors = self.wiring_errors(edition)
+                self.assertEqual(len(errors), 1, errors)
+                self.assertTrue(errors[0].endswith(f"rewire it as: {expected}"), errors[0])
+
+    def test_every_hook_hook_forge_registers_must_be_wired(self) -> None:
+        forms = {
+            "claude": claude_command,
+            "codex": codex_command,
+            "cursor": lambda script: f".cursor/hooks/{script}",
+        }
+        for edition, (hooks_rel, _wiring_rel) in validator.EDITION_HOOK_WIRING.items():
+            required = validator.WIRED_HOOKS[edition]
+            form = forms[edition]
+            with self.subTest(edition=edition):
+                self.assertIn(SCRIPT, required)
+                for script in required:
+                    self.hook(f"{hooks_rel}/{script}")
+                self.wire(edition, [form(script) for script in required])
+                errors: list = []
+                validator.validate_required_wiring(self.target, [edition], self.files, errors)
+                self.assertEqual(errors, [])
+                # Wired only in a form the gate rejects counts as not wired.
+                self.wire(edition, [form(script) for script in required if script != SCRIPT]
+                          + [form(SCRIPT) + " || true"])
+                errors = []
+                validator.validate_required_wiring(self.target, [edition], self.files, errors)
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn(f"does not wire {SCRIPT}", errors[0])
+        # hook-forge step 9's two documented gaps.
+        self.assertNotIn("subagent-dispatch.sh", validator.WIRED_HOOKS["codex"])
+        self.assertNotIn("working-memory-read.sh", validator.WIRED_HOOKS["cursor"])
+
     def test_this_editions_own_wiring_passes_the_gate(self) -> None:
-        """The generator ships the same forms it requires of a target."""
+        """The generator ships the same forms it requires of a target.
+
+        Its own wiring is not a generated target's - it carries no memory
+        hooks - so the forms and the bash-validator guard are what it owes.
+        """
         files = {}
         for edition, (hooks_rel, wiring_rel) in validator.EDITION_HOOK_WIRING.items():
             files[wiring_rel] = {}
@@ -170,6 +271,13 @@ class RootAnchoredWiringTest(WiringFixture):
         errors: list = []
         validator.validate_hook_wiring(ROOT, ["claude", "cursor", "codex"], files, errors)
         self.assertEqual(errors, [])
+        for edition, (hooks_rel, wiring_rel) in validator.EDITION_HOOK_WIRING.items():
+            document = json.loads((ROOT / wiring_rel).read_text(encoding="utf-8"))
+            wired = {
+                validator.hook_forge_script(edition, command)
+                for command in validator.collect_wired_commands(document)
+            }
+            self.assertIn(f"{hooks_rel}/{SCRIPT}", wired, edition)
 
     def test_hook_forge_spells_out_the_exact_forms_the_gate_accepts(self) -> None:
         text = HOOK_FORGE.read_text(encoding="utf-8")
@@ -208,10 +316,24 @@ class RootAnchoredWiringRunsTest(WiringFixture):
 
     def test_codex_launcher_runs_from_a_subdirectory_with_and_without_git(self) -> None:
         self.hook(f".codex/hooks/{SCRIPT}", "#!/bin/sh\ncat >/dev/null\nexit 2\n")
+        # The launcher stops at the project that declared the hook.
+        self.wire("codex", [codex_command(SCRIPT)])
         for git in (False, True):
             with self.subTest(git=git):
                 result = self.run_from_nested(codex_command(SCRIPT), git=git)
                 self.assertEqual(result.returncode, 2, result.stderr)
+
+    def test_codex_launcher_never_runs_an_ancestors_script(self) -> None:
+        """A script missing from the project exits 127; an ancestor's never runs."""
+        marker = self.target.parent / "ancestor-ran"
+        planted = self.target.parent / ".codex/hooks" / SCRIPT
+        planted.parent.mkdir(parents=True)
+        planted.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 0\n", encoding="utf-8")
+        planted.chmod(0o755)
+        self.wire("codex", [codex_command(SCRIPT)])
+        result = self.run_from_nested(codex_command(SCRIPT), git=False)
+        self.assertEqual(result.returncode, 127, result.stderr)
+        self.assertFalse(marker.exists(), "an ancestor's hook ran")
 
     def test_bare_relative_path_is_what_failed_open(self) -> None:
         """The regression the gate exists for: 127 is non-blocking."""

@@ -482,8 +482,10 @@ blocked, or a hook times out.
    `5000` is a millisecond leftover and is not a valid Claude timeout.
 7. Check that hook commands reach the script from any directory. Claude
    commands read `"${CLAUDE_PROJECT_DIR}"/.claude/hooks/<script>.sh`, and
-   Codex commands use the `sh -c` launcher that finds `.codex/hooks/` from
-   the session's directory; Cursor keeps bare `.cursor/hooks/<script>.sh`
+   Codex commands use the `sh -c` launcher that walks up from the session's
+   directory to the project holding `.codex/hooks.json` and runs its
+   `.codex/hooks/<script>.sh` (a missing script there exits 127 and names
+   the path); Cursor keeps bare `.cursor/hooks/<script>.sh`
    because it runs project hooks from the project root. A bare relative path
    on Claude Code or Codex exits 127 once the session is in a subdirectory,
    and both hosts treat that as non-blocking: the guard silently stops. An
