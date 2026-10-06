@@ -11,6 +11,10 @@ it at the top of every session.
 
 ## Unreleased
 
+### Added
+
+- `.cursor-plugin/plugin.json` loads this edition in place for an attached Cursor Agent session (`--plugin-dir`), pointing at the edition's own `.cursor` rules, skills, agents, commands and `hooks.json`; it is excluded from installs. The SessionStart banner (`local-context.sh`) names the clone and the state directory when the edition is attached, and describes the project rather than the hook's working directory. See [docs/ATTACHED-MODE.md](../docs/ATTACHED-MODE.md).
+
 ### Fixed
 
 - `skill-creator`'s Codex and Cursor eval adapter hands each probe worker the caller's environment. Python 3.14 starts pool workers from a forkserver whose environment is the one it was started with, so a worker could read a CLI path that had since changed or no longer existed; the adapter's own tests failed that way. The tests now run in CI (`lint` job).

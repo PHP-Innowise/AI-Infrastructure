@@ -170,6 +170,8 @@ jobs:
         # A bare relative hook path exits 127 from a subdirectory, which
         # Claude Code and Codex treat as non-blocking: the guard fails open.
         run: python3 -m unittest tests.test_hook_wiring
+      - name: Attach an edition without copying it
+        run: python3 -m unittest tests.test_accelerator_attach
       - name: Optional developer tooling stays out of the editions
         # The live code2prompt checks skip themselves here (no Rust toolchain);
         # what runs is the containment contract and the argv/exclude pins.

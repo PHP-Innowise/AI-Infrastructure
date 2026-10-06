@@ -54,8 +54,21 @@ router, or dependency-injection container.
 
 ## How to Add an Accelerator to a Project
 
-For a real project, use the
-[inventory-driven installer](install/README.md) from this repository root.
+The quickest way copies nothing into the project. Clone this repository once,
+run `./harness-server start`, open **Projects & Setup** in the browser, pick the
+project folder with **Browse…** and choose **Add project**. The Harness detects
+the edition from `composer.json` (`laravel/framework` → Laravel,
+`symfony/framework-bundle` → Symfony, WordPress → WordPress, otherwise PHP Core)
+and attaches it from the clone: every Claude Code, Codex or Cursor session gets
+the edition's policy, skills, agents, commands and hooks, and the project's
+memory (Project Brain, Memory Bank, index) is kept in the Harness state, not in
+the project. `git pull` in the clone updates every attached project at once.
+From a terminal, `python3 <clone>/scripts/accelerator_attach.py run
+claude|codex|cursor` run in the project folder does the same. Details and
+limits: [docs/ATTACHED-MODE.md](docs/ATTACHED-MODE.md).
+
+When a team wants the accelerator's files in the project's own Git history, use
+the [inventory-driven installer](install/README.md) from this repository root.
 Start with `--dry-run`, select only the required AI integrations, resolve every
 reported collision manually, and then repeat the command without `--dry-run`.
 The installer refuses collisions before copying and does not install project

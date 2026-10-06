@@ -5,6 +5,10 @@ Core, or WordPress accelerator into an existing project from a versioned product
 inventory. It copies the selected production payload into the target root and
 refuses unsupported collisions before writing anything.
 
+To use an edition without copying anything into the project, attach it from
+this clone instead: [docs/ATTACHED-MODE.md](../docs/ATTACHED-MODE.md). Install
+when the team wants the accelerator's files in the project's own Git history.
+
 Use this installer for ready-made editions. For projects with substantial
 custom architecture, integrations, or internal conventions, use
 [Infrastructure-Creator](../Infrastructure-Creator/README.md). For a non-PHP

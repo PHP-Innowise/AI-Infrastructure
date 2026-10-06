@@ -168,5 +168,33 @@ class AttachedAcceleratorTests(unittest.TestCase):
         self.assert_project_untouched()
 
 
+    def test_capsule_paths_may_name_the_attached_edition_only(self):
+        from harness.task_context import TaskContext
+        skill = (LARAVEL / ".agents/skills/eloquent/SKILL.md").as_posix()
+        self.assertEqual(skill, TaskContext._visible_path(skill, LARAVEL))
+        self.assertEqual("app/Order.php", TaskContext._visible_path("app/Order.php", LARAVEL))
+        for path in ("/etc/passwd", LARAVEL.as_posix() + "/../secrets.txt"):
+            with self.assertRaises(sessions.SessionError):
+                TaskContext._visible_path(path, LARAVEL)
+        with self.assertRaises(sessions.SessionError):
+            TaskContext._visible_path(skill, None)
+
+
+    def test_runners_receive_the_overlays_as_request_data(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import accelerator_attach
+        overlays = self.store.accelerators.overlays(self.project_id, ["claude", "codex", "claude"], self.project)
+        self.assertEqual(["claude", "codex"], list(overlays))
+        overlays = json.loads(json.dumps(overlays))  # what the runner reads back from its request file
+        command = provider_commands.build_command("codex", "/never-executed/codex", self.project, "Review", mode="plan",
+                                                  session_id="thread-1")
+        launched = accelerator_attach.apply_overlay("codex", command, overlays["codex"], first_turn=False)
+        self.assertLess(launched.index("--add-dir"), launched.index("exec"))
+        claude = provider_commands.build_command("claude", "/never-executed/claude", self.project, "Review", mode="plan")
+        launched = accelerator_attach.apply_overlay("claude", claude, overlays["claude"])
+        self.assertIn("hooks", json.loads(launched[launched.index("--settings") + 1]))
+        self.assertEqual(str(self.project), overlays["codex"]["environment"]["ACCELERATOR_PROJECT_DIR"])
+
+
 if __name__ == "__main__":
     unittest.main()

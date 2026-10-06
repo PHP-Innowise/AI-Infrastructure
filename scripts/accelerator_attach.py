@@ -501,6 +501,32 @@ def cursor_overlay(edition: str, project: Path, state: Path, repository: Path = 
                    prompt_prefix=prefix)
 
 
+def apply_overlay(tool: str, command: list[str], overlay: Any, first_turn: bool = True) -> list[str]:
+    """Merge an overlay - an Overlay or its dataclasses.asdict form - into argv
+    built the Harness way: Claude with one `--settings`, Codex global flags
+    before `exec`, Cursor's prompt after `--`."""
+    if isinstance(overlay, Overlay):
+        overlay = {"arguments": overlay.arguments, "settings": overlay.settings, "prompt_prefix": overlay.prompt_prefix}
+    command = list(command)
+    arguments = list(overlay.get("arguments") or [])
+    if tool == "claude":
+        index = command.index("--settings")
+        settings = merge_claude_settings(json.loads(command[index + 1]), overlay.get("settings") or {})
+        command[index + 1] = json.dumps(settings, separators=(",", ":"))
+        command[index + 2:index + 2] = arguments
+    elif tool == "codex":
+        index = command.index("exec")
+        command[index:index] = arguments
+    elif tool == "cursor":
+        index = command.index("--")
+        command[index:index] = arguments
+        if first_turn and overlay.get("prompt_prefix"):
+            command[-1] = overlay["prompt_prefix"] + command[-1]
+    else:
+        raise AttachError(f"Unknown tool {tool!r}; choose one of: {', '.join(TOOLS)}")
+    return command
+
+
 def overlay(tool: str, edition: str, project: Path, state: Path, repository: Path = REPOSITORY) -> Overlay:
     if tool == "claude":
         return claude_overlay(edition, project, state, repository)
@@ -529,6 +555,12 @@ def _executable(tool: str) -> str:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # Everything after `--` belongs to the launched CLI, untouched.
+    passthrough: list[str] = []
+    if "--" in argv:
+        index = argv.index("--")
+        argv, passthrough = argv[:index], argv[index + 1:]
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("detect", "env", "trust-codex-hooks"):
@@ -542,10 +574,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     run.add_argument("--edition", choices=list(EDITIONS))
     run.add_argument("--state-base", type=Path)
     run.add_argument("--executable")
-    run.add_argument("arguments", nargs=argparse.REMAINDER)
     for command in (commands.choices["trust-codex-hooks"],):
         command.add_argument("--executable", default="codex")
     options = parser.parse_args(argv)
+    if passthrough and options.command != "run":
+        parser.error("arguments after -- are passed only to `run`")
     try:
         project = resolve_project(options.project)
         if options.command == "detect":
@@ -563,7 +596,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 print(f"{entry['status']:9} {entry['key']}")
             return 0
         attached = overlay(options.tool, edition, project, state)
-        extra = options.arguments[1:] if options.arguments[:1] == ["--"] else options.arguments
+        extra = passthrough
         command = [options.executable or _executable(options.tool)]
         if options.tool == "claude":
             command += [*attached.arguments, "--settings", json.dumps(attached.settings), *extra]

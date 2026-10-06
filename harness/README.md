@@ -314,9 +314,11 @@ tabs) and **Projects & Setup**. Every view has its own address, such as
 The **Project** selector at the top of the sidebar applies to every view; choosing
 another project while a session is open starts a new session draft for it.
 
-- **Projects & Setup:** add an existing project, inspect its Git state and
-  accelerator readiness, select an edition and target tools, then preview and
-  install the reviewed files. The resulting project is available in the session,
+- **Projects & Setup:** add an existing project - a PHP project gets its
+  accelerator edition attached from this clone, with nothing written into it -
+  inspect its Git state and accelerator readiness, switch or detach the attached
+  edition, or select an edition and target tools, then preview and install the
+  reviewed files. The resulting project is available in the session,
   skills and knowledge selectors immediately.
 - **Sessions:** registered project, Claude/Codex/Cursor, model and thinking effort,
   Workspace/Plan/Review workflow, Plan/Edit mode, project memory (on by
@@ -851,6 +853,23 @@ list opens. Command lists start the native CLIs, so their routes need the page's
 
 ### Connect and prepare a project
 
+A registered PHP project gets its accelerator edition **attached** from this
+clone; nothing is written into the project. The edition comes from the
+project's own files (`laravel/framework` or `artisan` → Laravel,
+`symfony/framework-bundle` or `bin/console` with `config/bundles.php` → Symfony,
+WordPress packages, `wp-config.php` or a theme/plugin header → WordPress, any
+other Composer or PHP project → PHP Core). Sessions launch the native CLI with
+the edition from the clone - Claude Code through `--add-dir`,
+`--append-system-prompt-file` and merged `--settings`, Codex through
+`developer_instructions` and session hooks, Cursor Agent through `--plugin-dir` -
+and Knowledge, Memory use and session memory work on the accelerator's state for
+the project in this server's state directory (`attached/<project id>`).
+**Use the accelerator without installing** shows the clone and the state
+directory, switches or detaches the edition, and for Codex records the one-time
+hook approval (**Trust accelerator hooks in Codex**). A project with an
+installed accelerator keeps using its own files. See
+[docs/ATTACHED-MODE.md](../docs/ATTACHED-MODE.md).
+
 Open **Projects & Setup** and choose **Browse…** to navigate local folders, or
 enter an absolute path directly. The folder picker provides Home, Parent folder,
 hidden folders, and a case-insensitive name search through subfolders. Choose
@@ -866,7 +885,9 @@ provider CLIs and installed policy/context files; CLI presence does not establis
 authentication. Setup does not inspect working-tree changes or run project Git
 filters; the session workspace controls retain their full Git status check.
 
-Choose an edition and one or more tools. Preview runs the existing accelerator
+To put the accelerator's files into the project instead - for a team that
+wants them in its own Git history - choose an edition and one or more tools
+under **Or install the accelerator into the project**. Preview runs the existing accelerator
 installer in private staging, using its versioned inventory and merge rules.
 Review the file actions, diffs and any collisions before installing. Supported
 root-file merges retain project policy and ignore entries; an existing project

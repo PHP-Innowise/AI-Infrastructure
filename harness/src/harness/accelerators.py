@@ -12,6 +12,7 @@ its own files; attaching is for every other project.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import shutil
@@ -140,21 +141,17 @@ class Accelerators:
     @staticmethod
     def apply(provider, command, overlay, first_turn) -> list[str]:
         """Merge an overlay into argv built by providers.build_command."""
-        command = list(command)
-        if provider == 'claude':
-            index = command.index('--settings')
-            settings = attach.merge_claude_settings(json.loads(command[index + 1]), overlay.settings)
-            command[index + 1] = json.dumps(settings, separators=(',', ':'))
-            command[index + 2:index + 2] = overlay.arguments
-        elif provider == 'codex':
-            index = command.index('exec')
-            command[index:index] = overlay.arguments
-        elif provider == 'cursor':
-            index = command.index('--')
-            command[index:index] = overlay.arguments
-            if first_turn and overlay.prompt_prefix:
-                command[-1] = overlay.prompt_prefix + command[-1]
-        return command
+        return attach.apply_overlay(provider, command, overlay, first_turn)
+
+    def overlays(self, project_id, providers, cwd) -> dict[str, dict[str, Any]]:
+        """Overlays for runners that launch the CLIs themselves (Fleet, Clash),
+        as plain data for their request file."""
+        result = {}
+        for provider in dict.fromkeys(providers):
+            overlay = self.overlay(project_id, provider, cwd)
+            if overlay is not None:
+                result[provider] = dataclasses.asdict(overlay)
+        return result
 
     # -- knowledge -------------------------------------------------------------
 

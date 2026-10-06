@@ -1587,6 +1587,7 @@ class Sessions:
                                  'state_dir': str(self.state_dir / 'fleet' / sid),
                                  'executable': self.providers[provider]['executable'],
                                  'attachment_dirs': self.attachments.directories(sid),
+                                 'accelerators': self.accelerators.overlays(session['project_id'], [provider], project),
                                  'context': self._prompt({**session, 'agents_enabled': False}, '', ledger := {})}, ensure_ascii=False)
             agents = len(session['fleet']['lenses'])
             command = [fleet_runtime()['executable'], str(Path(__file__).with_name('fleet_runner.py')),
@@ -1603,6 +1604,7 @@ class Sessions:
                                  'action': 'continue' if session['clash_result'] else 'start',
                                  'executables': {name: self.providers.get(name, {}).get('executable') for name in (provider, challenger)},
                                  'attachment_dirs': self.attachments.directories(sid), 'baseline': base.get('head'),
+                                 'accelerators': self.accelerators.overlays(session['project_id'], [provider, challenger], project),
                                  'context': self._prompt({**session, 'agents_enabled': False, 'workflow': 'native', 'sdd': None}, '', ledger := {})}, ensure_ascii=False)
             agents = 2
             command = [sys.executable, str(Path(__file__).with_name('clash_runner.py'))]

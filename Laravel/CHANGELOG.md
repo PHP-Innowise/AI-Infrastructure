@@ -11,6 +11,10 @@ it at the top of every session.
 
 ## Unreleased
 
+### Added
+
+- `.cursor-plugin/plugin.json` loads this edition in place for an attached Cursor Agent session (`--plugin-dir`), pointing at the edition's own `.cursor` rules, skills, agents, commands and `hooks.json`; it is excluded from installs. The SessionStart banner (`local-context.sh`) names the clone and the state directory when the edition is attached, and describes the project rather than the hook's working directory. See [docs/ATTACHED-MODE.md](../docs/ATTACHED-MODE.md).
+
 ### Fixed
 
 - `skill-creator` scripts import on Python 3.9, the supported floor (the default `python3` on macOS): four scripts in each of the `.agents`, `.claude` and `.cursor` copies used `X | None` annotations without `from __future__ import annotations` and raised `TypeError` at import.
