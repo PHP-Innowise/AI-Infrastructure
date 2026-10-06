@@ -31,14 +31,24 @@ Fidelity, and its deliberate limits:
   install) are not repeated; `tests/test_check.py` lists them explicitly.
 * A tool CI's runner provides but this machine lacks (shellcheck, php, pwsh,
   bwrap, python3.9, the harness venv) skips with the reason; `--strict` makes
-  it a failure. An entry whose files are not in this checkout skips as
-  "not present" in either mode: there is nothing to run, and CI does not run it
-  either.
+  it a failure. So does a base ref the changelog gate cannot resolve a merge
+  base with: CI fetches the PR base, a local clone may not have it. A `--base`
+  given explicitly that does not resolve (a typo, an unfetched branch) fails
+  in either mode.
+* An entry whose files are not in this checkout skips as "not present" when
+  its workflow has no such step: there is nothing to run, and CI does not run
+  it either. When the workflow does run it, CI fails there: the skip names
+  that, and `--strict` makes it a failure (`tests/test_check.py` fails on it
+  in either mode).
 * Windows-only jobs are listed and skip elsewhere. The runner supports Linux
   and macOS for now.
 * Jobs run in parallel, and so do the legs of a matrix job, which CI also runs
   as separate jobs; the steps of one job (or leg) run in order. `--jobs 1`
   runs everything one after another.
+* Unlike CI, every job runs in this one checkout. A test that writes into the
+  tree, even for a moment, can therefore be seen by a gate that reads it from
+  another job (mirrors, parity, routes), so a test must write into a
+  temporary copy, never into the checkout.
 * The `tests` job's file loop is expanded into one command per test file, so a
   failure names its file. Unlike CI, a failing command does not cancel the rest
   of its job: one run shows every failure. `--fail-fast` stops everything at
@@ -46,10 +56,18 @@ Fidelity, and its deliberate limits:
 * CI's per-job `timeout-minutes` is reported, not enforced: a busy laptop
   running every group at once is not the runner it was sized for.
 
+Each command runs in a session of its own, out of reach of a signal sent to
+this process or its group. Ctrl-C, SIGTERM and SIGHUP (`kill`, `timeout`, a
+closed terminal, an IDE's stop button) therefore stop the run the same way:
+every running command's process group is terminated and the temporary
+directory removed. A signal already ignored when the run starts (`nohup`)
+stays ignored.
+
 Exit status: 0 when nothing failed (skips allowed), 1 on any failure, 2 on a
-usage error or an unsupported platform, 130 when interrupted. Standard library
-only; it writes nothing in the repository (logs and interpreter shims live in a
-temporary directory, kept only when something failed).
+usage error or an unsupported platform, 130 when interrupted (Ctrl-C, SIGTERM,
+SIGHUP). Standard library only; it writes nothing in the repository (logs and
+interpreter shims live in a temporary directory, kept only when something
+failed).
 """
 
 from __future__ import annotations
@@ -57,6 +75,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -74,6 +93,9 @@ ROOT = Path(__file__).resolve().parent.parent
 
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
 TAIL_LINES = 60
+
+# Signals that stop a run the way Ctrl-C does (see the module docstring).
+STOP_SIGNALS = tuple(getattr(signal, name) for name in ("SIGINT", "SIGTERM", "SIGHUP") if hasattr(signal, name))
 
 # How GitHub Actions invokes a `run:` step: `bash --noprofile --norc -eo
 # pipefail {0}` on Linux/macOS runners, and for `shell: pwsh` steps PowerShell.
@@ -97,11 +119,14 @@ class Command:
 
     `ci` is the command text as the workflow writes it; tests/test_check.py
     matches it against the workflow. `paths` are repository files the command
-    needs: when one is absent the command skips as "not present". `tools` are
-    executables beyond argv[0] (a bare name is looked up on PATH, a path is
-    taken relative to the repository root). `python` pins an interpreter
-    version ("" is the one running this script). `local_only` gives the reason
-    for a gate CI does not run (yet); every other command must exist in CI.
+    needs: when one is absent the command skips as "not present" (or fails
+    under --strict, when its workflow still runs it). `tools` are executables
+    beyond argv[0] (a bare name is looked up on PATH, a path is taken relative
+    to the repository root). `python` pins an interpreter version ("" is the
+    one running this script). `base_ref` is a ref the command needs a merge
+    base with (the changelog gate), `base_explicit` whether it came from
+    --base. `local_only` gives the reason for a gate CI does not run (yet);
+    every other command must exist in CI.
     """
 
     name: str
@@ -117,6 +142,8 @@ class Command:
     local_only: str = ""
     # What actually runs, for output, when that differs from `ci`.
     shown: str = ""
+    base_ref: str = ""
+    base_explicit: bool = False
 
     @property
     def label(self) -> str:
@@ -231,6 +258,8 @@ HARNESS_TESTS = (
 # the files they need: where the files are absent they skip as "not present"
 # (and CI has no such step); where they exist CI runs them, and
 # tests/test_check.py then holds them to that workflow like every other entry.
+# A guard never hides a step CI runs: the drift test fails on it, and here it
+# fails under --strict.
 HARNESS_TESTS_NEWER = (
     "tests.test_harness_run_activity",
     "tests.test_harness_commands",
@@ -255,6 +284,10 @@ SYSTEM_TESTS = (
     "tests.test_harness_agent_activity",
 )
 SYSTEM_CATALOG = "docs/examples/ai-system/system.json"
+# Interpreter pins as ci.yml writes them ("3.x" is the interpreter running this
+# script); tests/test_check.py compares them with every setup-python step.
+SYSTEM_PYTHONS = ("3.9", "3.x")
+RELIABILITY_PYTHON = "3.9"
 WINDOWS_HARNESS_TESTS = (
     "tests.test_harness_windows",
     "tests.test_harness_launcher",
@@ -300,8 +333,9 @@ def _parity_commands(edition: str) -> List[Command]:
     return commands
 
 
-def _system_commands(python: str) -> List[Command]:
-    leg = f"Python {python or '3.x'}"
+def _system_commands(version: str) -> List[Command]:
+    leg = f"Python {version}"
+    python = "" if version == "3.x" else version
     needs = guarded(SYSTEM_TESTS, "scripts/ai_system.py", SYSTEM_CATALOG)
     return [
         step(
@@ -326,6 +360,12 @@ def _system_commands(python: str) -> List[Command]:
             paths=needs,
         ),
     ]
+
+
+def default_base_ref() -> str:
+    """The base check_core_changelog.sh diffs against when given none."""
+    github_base = os.environ.get("GITHUB_BASE_REF", "")
+    return f"origin/{github_base}" if github_base else "origin/main"
 
 
 def build_groups(root: Path = ROOT, base_ref: Optional[str] = None) -> List[Group]:
@@ -367,7 +407,7 @@ def build_groups(root: Path = ROOT, base_ref: Optional[str] = None) -> List[Grou
         ),
         Group(
             name="infrastructure-creator-reliability",
-            title="Infrastructure-Creator reliability (Python 3.9)",
+            title=f"Infrastructure-Creator reliability (Python {RELIABILITY_PYTHON})",
             job="infrastructure-creator-reliability",
             timeout_minutes=15,
             weight=80,
@@ -375,7 +415,7 @@ def build_groups(root: Path = ROOT, base_ref: Optional[str] = None) -> List[Grou
                 step(
                     "Run complete reliability suite",
                     'python3 -m unittest discover -s Infrastructure-Creator/tests -p "test_*.py"',
-                    python="3.9",
+                    python=RELIABILITY_PYTHON,
                 ),
                 step(
                     "Validate canonical reference contracts",
@@ -383,12 +423,12 @@ def build_groups(root: Path = ROOT, base_ref: Optional[str] = None) -> List[Grou
                     " Infrastructure-Creator/.agents/skills/bootstrap-verifier/scripts/validate_reference_catalogs.py"
                     " --references-dir"
                     " Infrastructure-Creator/.agents/skills/skill-forge/references",
-                    python="3.9",
+                    python=RELIABILITY_PYTHON,
                 ),
                 step(
                     "Verify Infrastructure-Creator mirrors",
                     "python3 scripts/build_mirrors.py --check --edition Infrastructure-Creator",
-                    python="3.9",
+                    python=RELIABILITY_PYTHON,
                 ),
             ),
         ),
@@ -491,6 +531,10 @@ def build_groups(root: Path = ROOT, base_ref: Optional[str] = None) -> List[Grou
                     argv=changelog_argv,
                     ci='bash scripts/check_core_changelog.sh "origin/${{ github.base_ref }}"',
                     shown=" ".join(shlex.quote(part) for part in changelog_argv),
+                    # The script passes (exit 0) when it cannot resolve a
+                    # merge base: preflight makes that visible instead.
+                    base_ref=base_ref or default_base_ref(),
+                    base_explicit=bool(base_ref),
                 ),
             ),
         ),
@@ -505,12 +549,12 @@ def build_groups(root: Path = ROOT, base_ref: Optional[str] = None) -> List[Grou
         Group(
             name="system-orchestration",
             matrix=True,
-            title="system orchestration (matrix: Python 3.9, 3.x)",
+            title=f"system orchestration (matrix: Python {', '.join(SYSTEM_PYTHONS)})",
             job="system-orchestration",
             timeout_minutes=10,
             weight=50,
             note="CI installs bubblewrap and lifts the AppArmor userns restriction first",
-            commands=tuple(_system_commands("3.9") + _system_commands("")),
+            commands=tuple(command for version in SYSTEM_PYTHONS for command in _system_commands(version)),
         ),
         Group(
             name="windows-harness",
@@ -597,6 +641,49 @@ def platform_matches(name: str) -> bool:
     return True
 
 
+def ci_unittest_modules(text: str) -> List[str]:
+    """The modules of a one-line `python -m unittest a b ...` ([] otherwise)."""
+    try:
+        words = shlex.split(text)
+    except ValueError:
+        return []
+    if "\n" in text or len(words) < 4 or words[1:3] != ["-m", "unittest"] or words[3] == "discover":
+        return []
+    return [word for word in words[3:] if not word.startswith("-")]
+
+
+def workflow_job_text(path: Path, job: str) -> str:
+    """One job of a workflow file as flat text: comment lines dropped and
+    whitespace runs collapsed; "" when the file or the job is absent. A text
+    match is all preflight needs to tell a guarded entry CI no longer has from
+    one it still runs; tests/test_check.py holds both to the parsed workflow."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    body: List[str] = []
+    in_jobs, inside = False, False
+    level: Optional[int] = None
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        depth = len(line) - len(line.lstrip(" "))
+        if depth == 0:
+            in_jobs, inside = stripped.split("#", 1)[0].strip() == "jobs:", False
+            continue
+        if not in_jobs:
+            continue
+        if level is None:
+            level = depth
+        if depth <= level:
+            inside = stripped.split(" #", 1)[0].strip() == f"{job}:"
+            continue
+        if inside:
+            body.append(stripped)
+    return " ".join(" ".join(body).split())
+
+
 def default_jobs(lanes: int) -> int:
     cpus = os.cpu_count() or 2
     return max(1, min(lanes, max(2, cpus // 2)))
@@ -640,6 +727,11 @@ class Runner:
         self._killed: Set[int] = set()
         self._shims: Dict[str, Path] = {}
         self._work: Optional[Path] = None
+        self._job_texts: Dict[Tuple[str, str], str] = {}
+        # The stop signal received during a run, if any. Set by the handler
+        # and acted on by the main loop, so the handler itself does nothing a
+        # second signal could interrupt halfway.
+        self._signalled: Optional[int] = None
 
     # -- preflight ---------------------------------------------------------
 
@@ -647,6 +739,42 @@ class Runner:
         if "/" in tool:
             return os.access(str(self.root / tool), os.X_OK)
         return shutil.which(tool) is not None
+
+    def ci_runs(self, group: Group, command: Command) -> bool:
+        """Whether the group's job in its workflow still carries the command:
+        every module of a unittest command, or the command's text, is there."""
+        key = (group.workflow, group.job)
+        with self._lock:
+            if key not in self._job_texts:
+                path = self.root / ".github" / "workflows" / group.workflow
+                self._job_texts[key] = workflow_job_text(path, group.job)
+            text = self._job_texts[key]
+        if not text:
+            return False
+        modules = ci_unittest_modules(command.ci)
+        if modules:
+            return all(re.search(r"(?<![\w.])" + re.escape(module) + r"(?![\w.])", text) for module in modules)
+        return re.search(r"(?<!\S)" + re.escape(" ".join(command.ci.split())) + r"(?!\S)", text) is not None
+
+    def _merge_base_resolves(self, ref: str) -> bool:
+        """What check_core_changelog.sh resolves before it judges anything: a
+        merge base of the ref and HEAD (for origin/main, else of a local main).
+        When it finds none the script passes without checking."""
+        for candidate in (ref, "main") if ref == "origin/main" else (ref,):
+            try:
+                found = subprocess.run(
+                    ["git", "merge-base", candidate, "HEAD"],
+                    cwd=str(self.root),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=60,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                return False
+            if found.returncode == 0:
+                return True
+        return False
 
     def preflight(self, group: Group, command: Command) -> Optional[Tuple[str, str]]:
         """(status, reason) when the command cannot run here, else None."""
@@ -656,7 +784,15 @@ class Runner:
         missing = [path for path in command.paths if not (self.root / path).exists()]
         if missing:
             more = f" (+{len(missing) - 1} more)" if len(missing) > 1 else ""
-            return SKIP, f"not present: {missing[0]}{more}"
+            reason = f"not present: {missing[0]}{more}"
+            if not self.ci_runs(group, command):
+                return SKIP, reason  # nothing to run, and CI has no such step either
+            # The guard is for branches whose CI lacks the step; this one has
+            # it, so the missing file is a breakage CI will report.
+            reason += f", yet {group.workflow} > {group.job} runs this step and fails there"
+            if self.strict:
+                return FAIL, reason + " [--strict]"
+            return SKIP, reason
         absent: List[str] = []
         if find_python(command.python) is None:
             absent.append("python" + command.python)
@@ -671,6 +807,16 @@ class Runner:
             if self.strict:
                 return FAIL, reason + " [--strict]"
             return SKIP, reason
+        if command.base_ref and not self._merge_base_resolves(command.base_ref):
+            reason = f"cannot resolve a merge base with {command.base_ref}, so the gate cannot judge this diff"
+            if command.base_explicit:
+                # A ref the user named that does not resolve is a mistake (a
+                # typo, a branch not fetched), not a missing prerequisite.
+                return FAIL, reason + " (check --base, or fetch that ref)"
+            hint = " (fetch origin, or pass --base REF)"
+            if self.strict:
+                return FAIL, reason + hint + " [--strict]"
+            return SKIP, reason + hint
         return None
 
     # -- execution ---------------------------------------------------------
@@ -792,14 +938,46 @@ class Runner:
                 self._stop_reason = reason
                 self._stop.set()
 
-    def interrupt(self) -> None:
-        self.stop("interrupted")
+    def interrupt(self, reason: str = "interrupted") -> None:
+        self.stop(reason)
         with self._lock:
             processes = list(self._running.values())
         for process in processes:
             self._terminate(process)
 
+    def _on_signal(self, signum: int, frame: object) -> None:
+        self._signalled = signum
+
+    def _trap_signals(self) -> Dict[int, object]:
+        """Route Ctrl-C, SIGTERM and SIGHUP to _on_signal for the run; the
+        handlers they replace, to restore. A signal ignored when the run
+        starts (`nohup`, a background job) stays ignored."""
+        previous: Dict[int, object] = {}
+        if threading.current_thread() is not threading.main_thread():
+            return previous  # only the main thread may install handlers
+        for signum in STOP_SIGNALS:
+            current = signal.getsignal(signum)
+            if current is signal.SIG_IGN or current is None:
+                continue
+            previous[signum] = signal.signal(signum, self._on_signal)
+        return previous
+
     def run(self, groups: Sequence[Group]) -> Report:
+        self._signalled = None
+        self._work = None
+        previous = self._trap_signals()
+        try:
+            return self._run(groups)
+        except BaseException:
+            # Nothing reports the logs of a run that did not finish.
+            if self._work is not None:
+                shutil.rmtree(self._work, ignore_errors=True)
+            raise
+        finally:
+            for signum, handler in previous.items():
+                signal.signal(signum, handler)
+
+    def _run(self, groups: Sequence[Group]) -> Report:
         report = Report()
         self._work = Path(tempfile.mkdtemp(prefix="check-py-"))
         (self._work / "logs").mkdir()
@@ -815,14 +993,19 @@ class Runner:
         )
         started = time.monotonic()
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=jobs)
-        futures = {executor.submit(self._run_lane, group, lane): group for group, lane in ordered}
+        futures: Dict[concurrent.futures.Future, Group] = {}
         try:
+            for group, lane in ordered:
+                futures[executor.submit(self._run_lane, group, lane)] = group
             pending = set(futures)
-            while pending:
-                _, pending = concurrent.futures.wait(pending, timeout=0.5)
+            while pending and self._signalled is None:
+                _, pending = concurrent.futures.wait(pending, timeout=0.2)
+            if self._signalled is not None:
+                raise KeyboardInterrupt
         except KeyboardInterrupt:
             report.interrupted = True
-            self.interrupt()
+            name = signal.Signals(self._signalled).name if self._signalled is not None else "SIGINT"
+            self.interrupt(f"interrupted ({name})")
         finally:
             executor.shutdown(wait=True)
         report.wall_seconds = time.monotonic() - started

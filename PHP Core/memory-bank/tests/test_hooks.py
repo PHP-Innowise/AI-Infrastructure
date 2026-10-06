@@ -24,6 +24,7 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest import mock
 
 EDITION_ROOT = Path(__file__).resolve().parents[2]
 BASH = shutil.which("bash") or "/bin/bash"
@@ -1205,20 +1206,74 @@ class SubagentWriteLockTest(WriteLockMixin, unittest.TestCase):
         A `---`-delimited section in an agent's body used to re-open the
         sed range, so a body line reading `writes: true` marked a read-only
         agent as write-capable.
+
+        The fixture agent lives in a throwaway repository with its own copy
+        of the gate. Written into this edition's `.claude/agents/`, it was for
+        a moment an unmirrored agent of the real tree: a mirror, parity or
+        route gate reading the tree at that moment failed, and a run stopped
+        at that moment left the file behind.
         """
-        trap = EDITION_ROOT / ".claude" / "agents" / "zz-parser-trap-agent.md"
-        trap.write_text(
-            "---\nname: zz-parser-trap\ndescription: read-only fixture\n"
-            "phase: understanding\n---\n\n# Trap\n\nProse.\n\n---\n"
-            "writes: true\n---\n\nMore prose.\n",
-            encoding="utf-8",
-        )
-        self.addCleanup(trap.unlink)
-        result = self.spawn("claude", "zz-parser-trap")
+        with tempfile.TemporaryDirectory(prefix="parser-trap-") as temp:
+            repo = Path(temp)
+            subprocess.run(
+                ["git", "-c", "init.defaultBranch=main", "init", "-q", str(repo)],
+                check=True,
+                capture_output=True,
+                timeout=HOOK_TIMEOUT,
+            )
+            (repo / ".claude" / "agents").mkdir(parents=True)
+            (repo / ".claude" / "agents" / "zz-parser-trap-agent.md").write_text(
+                "---\nname: zz-parser-trap\ndescription: read-only fixture\n"
+                "phase: understanding\n---\n\n# Trap\n\nProse.\n\n---\n"
+                "writes: true\n---\n\nMore prose.\n",
+                encoding="utf-8",
+            )
+            (repo / ".claude" / "hooks").mkdir()
+            gate = repo / ".claude" / "hooks" / "subagent-gate.sh"
+            shutil.copy(hook_path("claude", "subagent-gate.sh"), gate)
+            result = subprocess.run(
+                [BASH, str(gate)],
+                input=json.dumps(
+                    {"tool_name": "Agent", "tool_input": {"subagent_type": "zz-parser-trap"}}
+                ),
+                capture_output=True,
+                text=True,
+                cwd=str(repo),
+                env={**os.environ, **self.lock_env},
+                timeout=HOOK_TIMEOUT,
+            )
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertFalse(
-            self.lock_path("claude").exists(),
+        self.assertEqual(
+            [],
+            sorted(self.lock_dir.glob("claude-write-agent-lock-*")),
             "a body horizontal rule must not make an agent write-capable",
+        )
+
+
+class FixtureIsolationTest(unittest.TestCase):
+    """Agent fixtures are written outside the edition tree.
+
+    scripts/check.py runs this suite beside the mirror, parity and route
+    gates in one checkout, and those read `.claude/agents/` from disk.
+    """
+
+    def test_parser_trap_fixture_is_written_outside_the_edition(self) -> None:
+        written: list[Path] = []
+        write_text = Path.write_text
+
+        def recording(path: Path, *args, **kwargs):
+            written.append(Path(os.path.abspath(path)))
+            return write_text(path, *args, **kwargs)
+
+        outcome = unittest.TestResult()
+        with mock.patch.object(Path, "write_text", recording):
+            SubagentWriteLockTest(
+                "test_body_horizontal_rule_cannot_declare_writes"
+            ).run(outcome)
+        self.assertEqual([], outcome.failures + outcome.errors)
+        self.assertTrue(written)
+        self.assertEqual(
+            [], [path for path in written if EDITION_ROOT in path.parents]
         )
 
 

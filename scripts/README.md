@@ -71,18 +71,27 @@ python3 scripts/check.py --strict           # a missing tool fails instead of sk
   60 lines of each failing command's output with the path of its full log, and
   a per-group summary table with wall times. A job or leg that took longer
   than CI's `timeout-minutes` is flagged, not failed. Exit 0 when nothing
-  failed, 1 on a failure, 2 on a usage error, 130 when interrupted.
+  failed, 1 on a failure, 2 on a usage error, 130 when interrupted. Ctrl-C,
+  SIGTERM and SIGHUP (`kill`, `timeout`, a closed terminal) all stop the run
+  the same way: each running command's process group is terminated and the
+  temporary directory removed.
 - **Skips:** a tool the CI runner provides but this machine lacks (shellcheck,
   php, pwsh, bwrap, `python3.9`, `harness/.venv`) skips with the reason;
-  `--strict` fails it. An entry whose files are not in the checkout skips as
-  "not present" either way. Windows-only jobs are listed and skip elsewhere;
-  the runner itself supports Linux and macOS. Runner provisioning (apt-get,
-  sysctl, venv creation, pip install) is not repeated.
+  `--strict` fails it. So does a changelog base with no merge base here (no
+  `origin/main` and no local `main`); a `--base` that does not resolve fails
+  either way. An entry whose files are not in the checkout skips as "not
+  present" when its workflow has no such step; when the workflow runs it, the
+  skip says CI fails there and `--strict` fails it. Windows-only jobs are
+  listed and skip elsewhere; the runner itself supports Linux and macOS.
+  Runner provisioning (apt-get, sysctl, venv creation, pip install) is not
+  repeated.
 - **Writes:** nothing in the repository. Logs and interpreter shims go to a
   temporary directory that is removed unless something failed.
 - **CI relationship:** `tests/test_check.py` reads the workflows and fails when
-  a CI command has no entry here, or an entry here is no longer in CI. Gates
-  CI does not run yet are marked `local_only` with the reason.
+  a CI command has no entry here, an entry here is no longer in CI, a
+  guarded entry hides a step CI runs, or a job's setup-python versions (leg by
+  leg) differ from the interpreters pinned here. Gates CI does not run yet are
+  marked `local_only` with the reason.
 
 ### `build_mirrors.py`
 

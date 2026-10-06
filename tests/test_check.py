@@ -8,13 +8,16 @@ Two halves:
   and raises on anything else rather than guessing), and each `run:` step is
   split into its shell commands. Every command that checks the repository must
   have an entry in check.py's group for that job; every entry there must still
-  be in CI, unless the files it needs are absent from this checkout or it is
-  declared local-only with a reason. Runner provisioning is excluded by the
-  explicit CI_ONLY_SETUP list below, never by omission.
+  be in CI, unless the files it needs are absent from this checkout (and CI has
+  no such step: a guard that hides a step CI runs fails here) or it is declared
+  local-only with a reason. Runner provisioning is excluded by the explicit
+  CI_ONLY_SETUP list below, never by omission. Each job's setup-python
+  version, leg by leg, must match the interpreter check.py pins for that leg.
 * Runner. Fake groups made of tiny `python3 -c` commands exercise PASS, FAIL,
-  SKIP (missing tool, absent file, other platform, unavailable interpreter),
-  --strict, --fail-fast, exit codes, the failure tail and the summary table.
-  Nothing here runs a real gate.
+  SKIP (missing tool, absent file, other platform, unavailable interpreter,
+  unresolvable changelog base), --strict, --fail-fast, exit codes, stop
+  signals, the failure tail and the summary table. Nothing here runs a real
+  gate.
 
 Run: python3 -m unittest tests.test_check
 """
@@ -28,6 +31,8 @@ import os
 import re
 import shlex
 import shutil
+import signal
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -36,6 +41,7 @@ import unittest
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -403,6 +409,32 @@ def ci_gates(workflows: Dict[str, dict]) -> Dict[Tuple[str, str], List[Gate]]:
     return gates
 
 
+# setup-python pins scripts/check.py deliberately does not reproduce, and why.
+UNMIRRORED_PYTHON = {
+    ("ci.yml", "harness-fleet", "3.11"): (
+        "the graph tests run on harness/.venv's own interpreter; the Fleet step on the one running check.py"
+    ),
+    ("ci.yml", "windows-harness", "3.13"): "Windows-only: it skips wherever check.py runs",
+}
+
+
+def ci_python_legs(workflows: Dict[str, dict]) -> Dict[Tuple[str, str], List[Optional[str]]]:
+    """Each job's setup-python version, one per leg (matrix values resolved);
+    None for a leg with no setup-python step."""
+    legs: Dict[Tuple[str, str], List[Optional[str]]] = {}
+    for workflow, document in workflows.items():
+        for job_id, job in (document.get("jobs") or {}).items():
+            found = legs.setdefault((workflow, job_id), [])
+            for leg in _legs(job):
+                versions = [
+                    _substitute(str((step.get("with") or {}).get("python-version") or ""), leg)
+                    for step in job.get("steps") or []
+                    if str(step.get("uses") or "").startswith("actions/setup-python@") and _applies(step.get("if"), leg)
+                ]
+                found.append(versions[-1] if versions else None)
+    return legs
+
+
 def entry_text(command: check.Command) -> str:
     return "\n".join(split_commands(command.ci))
 
@@ -455,29 +487,74 @@ class DriftTest(unittest.TestCase):
             "or, for pure runner setup, to CI_ONLY_SETUP in tests/test_check.py",
         )
 
+    def in_ci(self, group: check.Group, command: check.Command) -> bool:
+        keys = {(gate.cwd, gate.text) for gate in self.gates.get((group.workflow, group.job), [])}
+        text = entry_text(command)
+        wanted = unittest_modules(text)
+        if wanted:
+            modules = _modules_by_cwd(keys)
+            return all(module in modules.get(command.cwd, set()) for module in wanted)
+        return (command.cwd, text) in keys
+
     def test_every_entry_is_in_ci(self) -> None:
         problems = []
         for group in self.groups:
-            gates = self.gates.get((group.workflow, group.job), [])
-            keys = {(gate.cwd, gate.text) for gate in gates}
-            modules = _modules_by_cwd(keys)
             for command in group.commands:
                 text = entry_text(command)
-                wanted = unittest_modules(text)
-                if wanted:
-                    in_ci = all(module in modules.get(command.cwd, set()) for module in wanted)
-                else:
-                    in_ci = (command.cwd, text) in keys
+                in_ci = self.in_ci(group, command)
                 where = f"{group.name} > {command.label}"
                 if command.local_only:
                     if in_ci:
                         problems.append(f"{where}: CI runs it now - drop local_only")
                     continue
-                if any(not (ROOT / path).exists() for path in command.paths):
-                    continue  # not in this checkout: it skips as "not present", and CI has no such step
+                absent = [path for path in command.paths if not (ROOT / path).exists()]
+                if absent:
+                    # The guard is for a branch whose CI has no such step.
+                    # Where CI runs it, the missing file fails CI while the
+                    # entry skips here as "not present".
+                    if in_ci:
+                        problems.append(f"{where}: CI runs it, but {absent} is absent - it skips here and fails there")
+                    continue
                 if not in_ci:
                     problems.append(f"{where}: {text!r} is not in {group.workflow} > {group.job}")
-        self.assertEqual(problems, [], "scripts/check.py runs these and CI does not")
+        self.assertEqual(problems, [], "scripts/check.py runs these and CI does not, or hides what CI runs")
+
+    def test_preflight_knows_which_entries_ci_runs(self) -> None:
+        # check.py decides "absent here, but CI runs it" (fail under
+        # --strict) by a text match on the job; this holds that match to the
+        # parsed workflow.
+        runner = check.Runner(root=ROOT, out=io.StringIO())
+        for group in self.groups:
+            for command in group.commands:
+                with self.subTest(group=group.name, command=command.label):
+                    self.assertEqual(runner.ci_runs(group, command), self.in_ci(group, command))
+
+    def test_python_pins_match_ci(self) -> None:
+        legs = ci_python_legs(load_workflows())
+        problems = []
+        for (workflow, job, version), reason in UNMIRRORED_PYTHON.items():
+            if version not in (legs.get((workflow, job)) or []):
+                problems.append(f"UNMIRRORED_PYTHON {workflow} > {job} {version}: CI no longer pins it ({reason})")
+        for (workflow, job), versions in legs.items():
+            group = self.by_job.get((workflow, job))
+            if group is None:
+                continue  # reported by test_every_workflow_job_has_a_group
+            # check.py's pin per leg: "" is the interpreter running check.py,
+            # the stand-in for `3.x` and for a job with no setup-python.
+            wanted = sorted(
+                "" if version in (None, "3.x") or (workflow, job, version) in UNMIRRORED_PYTHON else version
+                for version in versions
+            )
+            pinned = sorted(
+                ",".join(sorted({command.python for _, command in lane if command.python}))
+                for lane in check.lanes_of(group)
+            )
+            if pinned != wanted:
+                shown = lambda pins: [pin or "3.x" for pin in pins]  # noqa: E731
+                problems.append(
+                    f"{workflow} > {job}: CI runs Python {shown(wanted)} (one per leg), check.py {shown(pinned)}"
+                )
+        self.assertEqual(problems, [], "setup-python versions and check.py `python=` pins differ")
 
     def test_modules_ci_names_exist(self) -> None:
         # A guarded entry skips when its file is absent; CI would fail
@@ -647,6 +724,60 @@ def fake(name: str, code: str, **options) -> check.Command:
 OK = "pass"
 BOOM = "import sys\nfor i in range(100): print('boom', i)\nsys.exit(3)"
 
+# A command that starts a child of its own, records both pids, and sleeps.
+SLEEPER = textwrap_dedent(
+    """
+    import os, subprocess, sys, time
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    with open("pids.tmp", "w") as handle:
+        handle.write("%d %d" % (os.getpid(), child.pid))
+    os.replace("pids.tmp", "pids")
+    time.sleep(120)
+    """
+)
+# check.main() over one sleeper group, in a process of its own to signal.
+DRIVER = textwrap_dedent(
+    """
+    import signal, sys
+    from pathlib import Path
+    # Whatever the test runner inherited (a background job ignores SIGINT,
+    # nohup SIGHUP), start from the defaults an interactive run has.
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    signal.signal(signal.SIGHUP, signal.SIG_DFL)
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    sys.path.insert(0, sys.argv[1])
+    import check
+    sleeper = check.Command(name="sleeper", argv=("python3", "sleeper.py"), ci="python3 sleeper.py")
+    group = check.Group("g", "g", "g", commands=(sleeper,))
+    sys.exit(check.main([], groups=[group], root=Path(sys.argv[2])))
+    """
+)
+
+
+def alive(pid: int) -> bool:
+    """Whether the process exists and is not a zombie awaiting its reaper."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    if Path("/proc/self/stat").exists():
+        try:
+            return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+        except (OSError, IndexError):
+            return False
+    state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    return bool(state) and not state.startswith("Z")
+
+
+def kill_all(pids: List[int]) -> None:
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
 
 @unittest.skipIf(os.name == "nt", "check.py runs on Linux and macOS")
 class RunnerTest(unittest.TestCase):
@@ -708,6 +839,125 @@ class RunnerTest(unittest.TestCase):
             self.assertEqual(report.results[0].reason, "not present: scripts/check_routes.py")
             self.assertEqual(report.exit_code, 0)
 
+    def write_workflow(self, text: str) -> None:
+        workflows = self.root / ".github" / "workflows"
+        workflows.mkdir(parents=True, exist_ok=True)
+        (workflows / "ci.yml").write_text(textwrap_dedent(text), encoding="utf-8")
+
+    def test_absent_file_of_a_step_ci_runs_fails_under_strict(self) -> None:
+        # On a branch whose CI runs the guarded step, a missing file is a
+        # breakage CI reports, not a feature this branch lacks.
+        self.write_workflow(
+            """
+            jobs:
+              other:
+                steps:
+                  - run: python3 -m unittest tests.test_gone
+              g:
+                steps:
+                  # python3 -m unittest tests.test_commented
+                  - run: python3 -m unittest tests.test_gone tests.test_kept
+                  - run: python3 tool.py --check
+            """
+        )
+        guarded = check.unittests("gone", ["tests.test_gone", "tests.test_kept"], paths=("tests/test_gone.py",))
+        tool = check.step("tool", "python3 tool.py --check", paths=("tool.py",))
+        report, _ = self.run_groups([check.Group("g", "g", "g", commands=(guarded, tool))])
+        self.assertEqual([result.status for result in report.results], [SKIP, SKIP])
+        self.assertIn("ci.yml > g runs this step and fails there", report.results[0].reason)
+        self.assertIn("ci.yml > g runs this step and fails there", report.results[1].reason)
+        report, _ = self.run_groups([check.Group("g", "g", "g", commands=(guarded, tool))], strict=True)
+        self.assertEqual([result.status for result in report.results], [FAIL, FAIL])
+        self.assertEqual(report.exit_code, 1)
+        # A job that does not carry the step - here, only another job or a
+        # comment names the module - keeps the plain skip, --strict or not.
+        for name, modules in (("other", ["tests.test_gone", "tests.test_kept"]), ("g", ["tests.test_commented"])):
+            with self.subTest(job=name, modules=modules):
+                command = check.unittests("x", modules, paths=("tests/test_gone.py",))
+                report, _ = self.run_groups([check.Group(name, name, name, commands=(command,))], strict=True)
+                self.assertEqual((report.results[0].status, report.results[0].reason), (SKIP, "not present: tests/test_gone.py"))
+
+    def test_workflow_job_text(self) -> None:
+        self.write_workflow(
+            """
+            on:
+              push:
+            jobs:
+              a:
+                steps:
+                  - name: A  # trailing comment
+                    run: |
+                      # a comment line
+                      python3   one.py
+                      --flag
+              b:
+                steps:
+                  - run: python3 two.py
+            """
+        )
+        path = self.root / ".github" / "workflows" / "ci.yml"
+        self.assertEqual(check.workflow_job_text(path, "a"), "steps: - name: A # trailing comment run: | python3 one.py --flag")
+        self.assertEqual(check.workflow_job_text(path, "b"), "steps: - run: python3 two.py")
+        self.assertEqual(check.workflow_job_text(path, "push"), "")
+        self.assertEqual(check.workflow_job_text(self.root / "missing.yml", "a"), "")
+        runner = check.Runner(root=self.root, out=io.StringIO())
+        group = check.Group("a", "a", "a")
+        self.assertTrue(runner.ci_runs(group, check.step("one", "python3 one.py --flag")))
+        self.assertFalse(runner.ci_runs(group, check.step("one", "python3 one.p")))  # whole words only
+        self.assertFalse(runner.ci_runs(group, check.step("two", "python3 two.py")))  # job b's, not a's
+
+    def git(self, *arguments: str) -> None:
+        subprocess.run(
+            ["git", "-c", "user.name=check", "-c", "user.email=check@example.invalid", "-c", "commit.gpgsign=false", *arguments],
+            cwd=str(self.root), check=True, capture_output=True,
+        )
+
+    def test_unresolvable_changelog_base_never_passes(self) -> None:
+        # check_core_changelog.sh exits 0 when it cannot resolve a merge base;
+        # check.py must not report that as PASS.
+        self.git("-c", "init.defaultBranch=trunk", "init", "-q")
+        self.git("commit", "-q", "--allow-empty", "-m", "base")
+
+        def changelog(base_ref: str, explicit: bool) -> check.Group:
+            command = fake("changelog", OK, base_ref=base_ref, base_explicit=explicit)
+            return check.Group("changelog", "changelog", "changelog", commands=(command,))
+
+        cases = (
+            # (base, explicit, strict) -> status
+            (("origin/main", False, False), SKIP),  # neither origin/main nor a local main
+            (("origin/main", False, True), FAIL),
+            (("feature/x", True, False), FAIL),  # a typo or an unfetched branch
+            (("feature/x", True, True), FAIL),
+            (("trunk", True, False), PASS),
+        )
+        for (base, explicit, strict), status in cases:
+            with self.subTest(base=base, explicit=explicit, strict=strict):
+                report, _ = self.run_groups([changelog(base, explicit)], strict=strict)
+                self.assertEqual(report.results[0].status, status, report.results[0].reason)
+                if status != PASS:
+                    self.assertIn(f"cannot resolve a merge base with {base}", report.results[0].reason)
+        self.git("branch", "main")  # the script falls back to a local main for origin/main
+        self.assertEqual(self.run_groups([changelog("origin/main", False)], strict=True)[0].results[0].status, PASS)
+
+    def test_changelog_base_comes_from_base_or_the_scripts_default(self) -> None:
+        def command(groups: List[check.Group]) -> check.Command:
+            return next(group for group in groups if group.name == "changelog").commands[0]
+
+        with mock.patch.dict(os.environ, {"GITHUB_BASE_REF": ""}):
+            default = command(check.build_groups(self.root))
+            self.assertEqual((default.base_ref, default.base_explicit, default.argv[-1]), ("origin/main", False, "scripts/check_core_changelog.sh"))
+            explicit = command(check.build_groups(self.root, base_ref="feature/x"))
+            self.assertEqual((explicit.base_ref, explicit.base_explicit, explicit.argv[-1]), ("feature/x", True, "feature/x"))
+        with mock.patch.dict(os.environ, {"GITHUB_BASE_REF": "release"}):
+            self.assertEqual(command(check.build_groups(self.root)).base_ref, "origin/release")
+        # End to end: an explicit base that does not resolve fails the run.
+        self.git("-c", "init.defaultBranch=trunk", "init", "-q")
+        self.git("commit", "-q", "--allow-empty", "-m", "base")
+        out = io.StringIO()
+        code = check.main(["--group", "changelog", "--base", "origin/no-such-branch"], root=self.root, out=out)
+        self.assertEqual(code, 1, out.getvalue())
+        self.assertIn("cannot resolve a merge base with origin/no-such-branch", out.getvalue())
+
     def test_other_platform_skips(self) -> None:
         windows = check.Group("w", "w", "w", platform="windows", commands=(fake("a", OK),))
         one = check.Group("o", "o", "o", commands=(fake("b", OK, platform="windows"),))
@@ -756,6 +1006,63 @@ class RunnerTest(unittest.TestCase):
         self.assertIn("--fail-fast", reasons["next"])
         self.assertIn("--fail-fast", reasons["slow"])
         self.assertEqual(report.exit_code, 1)
+
+    def test_stop_signals_end_every_command_and_remove_the_work_dir(self) -> None:
+        # Every command runs in a session of its own, so a signal that ends
+        # check.py alone (kill, timeout, a closed terminal) used to leave the
+        # commands running as orphans, and /tmp/check-py-* behind.
+        (self.root / "sleeper.py").write_text(SLEEPER, encoding="utf-8")
+        (self.root / "driver.py").write_text(DRIVER, encoding="utf-8")
+        for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+            with self.subTest(signal=signum.name):
+                tmp = Path(tempfile.mkdtemp(prefix="test-check-tmp-"))
+                self.addCleanup(shutil.rmtree, tmp, True)
+                pids_file = self.root / "pids"
+                if pids_file.exists():
+                    pids_file.unlink()
+                process = subprocess.Popen(
+                    [sys.executable, str(self.root / "driver.py"), str(ROOT / "scripts"), str(self.root)],
+                    cwd=str(self.root),
+                    env=dict(os.environ, TMPDIR=str(tmp)),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+                self.addCleanup(lambda p=process: p.poll() is None and p.kill())
+                deadline = time.monotonic() + 60
+                while not pids_file.exists() and process.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertTrue(pids_file.exists(), process.communicate(timeout=30)[0] if process.poll() is not None else "no pids")
+                pids = [int(pid) for pid in pids_file.read_text().split()]
+                self.addCleanup(kill_all, pids)
+                process.send_signal(signum)
+                out, _ = process.communicate(timeout=60)
+                self.assertEqual(process.returncode, 130, out)
+                self.assertIn("INTERRUPTED", out)
+                self.assertIn(f"cancelled: interrupted ({signum.name})", out)
+                deadline = time.monotonic() + 15
+                while any(alive(pid) for pid in pids) and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertEqual([pid for pid in pids if alive(pid)], [], "a command outlived check.py")
+                self.assertEqual(sorted(path.name for path in tmp.glob("check-py-*")), [])
+
+    def test_signal_handlers_are_restored_and_an_ignored_signal_stays_ignored(self) -> None:
+        before = {signum: signal.getsignal(signum) for signum in check.STOP_SIGNALS}
+        self.addCleanup(lambda: [signal.signal(signum, handler) for signum, handler in before.items()])
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)  # as under nohup
+        runner = check.Runner(root=self.root, out=io.StringIO())
+        previous = runner._trap_signals()
+        try:
+            self.assertIs(signal.getsignal(signal.SIGHUP), signal.SIG_IGN)
+            self.assertEqual(signal.getsignal(signal.SIGTERM), runner._on_signal)
+            self.assertNotIn(signal.SIGHUP, previous)
+        finally:
+            for signum, handler in previous.items():
+                signal.signal(signum, handler)
+        signal.signal(signal.SIGHUP, before[signal.SIGHUP])
+        report, _ = self.run_groups([check.Group("g", "g", "g", commands=(fake("ok", OK),))])
+        self.assertEqual(report.exit_code, 0)
+        self.assertEqual({signum: signal.getsignal(signum) for signum in check.STOP_SIGNALS}, before)
 
     def test_matrix_legs_run_in_parallel_and_jobs_in_order(self) -> None:
         stamp = (
