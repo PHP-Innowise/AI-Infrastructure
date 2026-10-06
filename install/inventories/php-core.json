@@ -544,6 +544,7 @@
     ]
   },
   "excluded_tracked_paths": [
+    ".install/gitattributes",
     "CHANGELOG.md",
     "Task/Epics/Epic-01_User_Management_Authentication_SPEC.md",
     "Task/Epics/Epic-02_Event_Management_Scheduling_SPEC.md",
@@ -586,6 +587,7 @@
     "project-brain/tests/test_runtime.py"
   ],
   "source_overrides": {
+    ".gitattributes": ".install/gitattributes",
     "memory-bank/INDEX.md": "memory-bank/.install/INDEX.md",
     "project-brain/indexes/active.json": "project-brain/.install/active.json",
     "project-brain/indexes/archive.json": "project-brain/.install/archive.json"

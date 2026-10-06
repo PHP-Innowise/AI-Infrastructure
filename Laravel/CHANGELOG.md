@@ -13,6 +13,7 @@ it at the top of every session.
 
 ### Fixed
 
+- The installed `.gitattributes` is now `.install/gitattributes` (`*.sh text eol=lf`) instead of this repository's generated mirror list, which marked every mirror - hooks included - `-diff` in the client's reviews. Remove the old `-diff` lines from an earlier install by hand.
 - New `.claude/CLAUDE.md` imports `@../AGENTS.md`, so Claude Code loads the policy in projects that have their own `CLAUDE.md` or `CLAUDE.local.md` (Claude Code reads `AGENTS.md` directly only when none exists). `--merge-existing` appends the import to an existing `.claude/CLAUDE.md`.
 - The `architect` skill is retrievable again. The shared secret pattern read the documented `php artisan down --secret=...` as a credential, so `index` excluded all three tool copies of the skill in every Laravel install. See the root CHANGELOG for the pattern change.
 - Hooks are wired through the project root: `"${CLAUDE_PROJECT_DIR}"/.claude/hooks/<script>.sh` in `.claude/settings.json`, and a root-finding `sh` launcher in `.codex/hooks.json`. The safety hooks now keep running when the session's directory is a subdirectory; before, they exited 127 and failed open. Policy lock regenerated. Codex users must re-trust the changed hooks once in `/hooks`.

@@ -1,0 +1,4 @@
+# Installed by the PHP AI accelerator. Hook scripts run under bash, which
+# fails on a carriage return, so they keep LF on every platform, including
+# a Windows clone with core.autocrlf=true.
+*.sh text eol=lf

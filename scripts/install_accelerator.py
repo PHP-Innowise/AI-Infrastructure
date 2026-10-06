@@ -40,11 +40,18 @@ MANAGED_POLICY_FILES = {"AGENTS.md", ".claude/CLAUDE.md"}
 # validator then reports as stale. The memory index has the same shape of
 # problem and set the precedent.
 PRODUCTION_SOURCE_OVERRIDES = {
+    # The edition's own .gitattributes marks every generated mirror `-diff`
+    # for this repository's reviews. In a client project nothing regenerates
+    # those mirrors, and the same marking showed an edited hook - a safety
+    # control - as "Binary files differ" in review. The client gets the one
+    # attribute it needs: LF for the hook scripts bash runs.
+    ".gitattributes": ".install/gitattributes",
     "memory-bank/INDEX.md": "memory-bank/.install/INDEX.md",
     "project-brain/indexes/active.json": "project-brain/.install/active.json",
     "project-brain/indexes/archive.json": "project-brain/.install/archive.json",
 }
 EXCLUDED_EXACT_PATHS = {
+    ".install/gitattributes",
     "CHANGELOG.md",
     "examples/context-summary.md",
     "examples/pr-description.md",

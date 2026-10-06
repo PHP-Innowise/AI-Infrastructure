@@ -106,9 +106,15 @@ existing project:
   were enforced) keeps its content, gets the bit, and is reported as
   `FIX_MODE` (`WOULD_FIX_MODE` in a dry run);
 - `.gitignore` and `.gitattributes` retain project entries and receive only
-  missing accelerator directives in an installer-managed block;
+  missing accelerator directives in an installer-managed block; the installed
+  `.gitattributes` directive is `*.sh text eol=lf`, so hooks keep LF in a
+  Windows clone. Installs made before this release received the edition's
+  mirror list with `-diff` on every path, which shows an edited hook as
+  "Binary files differ" in review; delete those lines by hand;
 - existing `AGENTS.md` retains project policy first and receives a marked,
   replaceable accelerator policy block;
+- existing `.claude/CLAUDE.md` keeps its content and receives the managed
+  `@../AGENTS.md` import block;
 - existing `README.md` remains untouched and the accelerator documentation is
   installed as `ACCELERATOR.md`.
 

@@ -282,7 +282,8 @@ def atomic_write(path: Path, content: str) -> None:
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
     temporary = Path(temporary_name)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        # newline="\n": Git-tracked records keep LF on Windows too.
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
@@ -483,8 +484,22 @@ def fingerprint(repository: Path, source: str) -> dict[str, str]:
         raise BrainError(f"Source escapes repository: {relative}") from error
     if not path.is_file() or path.is_symlink():
         raise BrainError(f"Source does not exist or is not a regular file: {relative}")
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    digest = hashlib.sha256(_line_ending_neutral(path.read_bytes())).hexdigest()
     return {"path": relative, "sha256": digest}
+
+
+def _line_ending_neutral(data: bytes) -> bytes:
+    """Text bytes with CRLF folded to LF; binary data unchanged.
+
+    A checkout with `core.autocrlf=true` holds the same commit as one without
+    it, yet a raw-byte digest differed, so every record citing a text file was
+    `stale` on a colleague's Windows clone while Git saw no change. Folding
+    leaves an LF file's digest exactly what it was, so stored fingerprints need
+    no migration. A NUL byte marks binary data, as Git's own heuristic does.
+    """
+    if b"\0" in data[:8192]:
+        return data
+    return data.replace(b"\r\n", b"\n")
 
 
 def source_fingerprints(repository: Path, sources: list[str]) -> list[dict[str, str]]:
@@ -1344,7 +1359,7 @@ def append_message(
         validate_message(record)
         validate_schema_file(repository, "message.schema.json", record)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
+        with path.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
             handle.flush()
             os.fsync(handle.fileno())

@@ -195,6 +195,7 @@ class InventoryTest(unittest.TestCase):
             # from a pristine source instead of the developer's working copy.
             self.assertEqual(
                 {
+                    ".gitattributes": ".install/gitattributes",
                     "memory-bank/INDEX.md": "memory-bank/.install/INDEX.md",
                     "project-brain/indexes/active.json": "project-brain/.install/active.json",
                     "project-brain/indexes/archive.json": "project-brain/.install/archive.json",
@@ -388,7 +389,10 @@ class InventoryTest(unittest.TestCase):
             self.assertIn("memory-bank/local/\n", gitignore)
             attributes = (target / ".gitattributes").read_text(encoding="utf-8")
             self.assertIn("*.lock binary\n", attributes)
-            self.assertIn(".cursor/skills/", attributes)
+            self.assertIn("*.sh text eol=lf\n", attributes)
+            # The monorepo's mirror marking stays home: a client reviewing an
+            # edited hook must see its diff, not "Binary files differ".
+            self.assertNotIn("-diff", attributes)
 
             merged_digests = {
                 path: hashlib.sha256((target / path).read_bytes()).hexdigest()
@@ -431,6 +435,21 @@ class InventoryTest(unittest.TestCase):
             repeated = run(*command, "--merge-existing")
             self.assertEqual(0, repeated.returncode, repeated.stderr)
             self.assertIn("UNCHANGED\tclaude\t.claude/CLAUDE.md", repeated.stdout)
+
+    def test_fresh_install_gitattributes_keeps_hooks_lf_and_diffable(self) -> None:
+        for edition in EDITION_PATHS:
+            with self.subTest(edition=edition), tempfile.TemporaryDirectory(
+                prefix="install attributes "
+            ) as raw:
+                target = Path(raw).resolve()
+                result = run(
+                    sys.executable, str(INSTALLER), "--edition", edition,
+                    "--target", str(target), "--tool", "claude",
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                attributes = (target / ".gitattributes").read_text(encoding="utf-8")
+                self.assertIn("*.sh text eol=lf\n", attributes)
+                self.assertNotIn("-diff", attributes)
 
     def test_every_claude_install_ships_the_policy_import(self) -> None:
         for edition in EDITION_PATHS:

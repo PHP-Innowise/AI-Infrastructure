@@ -157,7 +157,14 @@ class SessionTests(unittest.TestCase):
         self.fail("Timed out waiting for the fixture process/session")
 
     def settled(self, manager, sid):
-        self.wait_for(lambda: manager.get(sid)["status"] not in sessions.ACTIVE)
+        # The session's status turns final a moment before its launch row is
+        # finished; a snapshot taken in between differs from the state a
+        # restart reads back, so wait for both.
+        def done():
+            state = manager.get(sid)
+            launch = state.get("launch") or {}
+            return state["status"] not in sessions.ACTIVE and launch.get("status") != "running"
+        self.wait_for(done)
         return manager.get(sid)
 
     def assert_process_gone(self, call):

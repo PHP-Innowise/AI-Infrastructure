@@ -220,5 +220,34 @@ class IntentToAddTest(unittest.TestCase):
         self.assertEqual(self.status(), " A Synthetic Edition/hooks/new-hook.sh\0")
 
 
+
+class LineEndingTest(unittest.TestCase):
+    """Tracked text keeps LF in the index, so every checkout gets LF.
+
+    bash fails on a carriage return in a hook, and the byte-comparing mirror,
+    parity and policy-lock gates reported hundreds of false drifts in a CRLF
+    clone. Client-supplied task material under */Task/ is exempt
+    (`.gitattributes`: `*/Task/** -text`).
+    """
+
+    def test_no_tracked_text_file_carries_crlf_in_the_index(self) -> None:
+        result = subprocess.run(
+            ["git", "ls-files", "--eol", "-z"],
+            cwd=str(ROOT), capture_output=True, check=True,
+        )
+        offenders = []
+        for record in result.stdout.split(b"\0"):
+            if not record:
+                continue
+            info, _, path = record.decode("utf-8", "replace").partition("\t")
+            index_eol = info.split()[0]
+            if "crlf" in index_eol and "/Task/" not in f"/{path}":
+                offenders.append(path)
+        self.assertEqual([], offenders)
+
+    def test_root_attributes_pin_lf(self) -> None:
+        attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+        self.assertIn("* text=auto eol=lf\n", attributes)
+
 if __name__ == "__main__":
     unittest.main()

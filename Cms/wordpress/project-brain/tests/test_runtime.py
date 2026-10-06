@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import contextlib
 import io
@@ -7267,6 +7268,39 @@ class ExportBundleTest(RuntimeHarness):
         self.assertIn("not authoritative", readme)
         self.assertIn("auto-promoted", readme)
         self.assertIn("authorized owner", readme)
+
+
+class LineEndingFingerprintTest(RuntimeHarness):
+    """A CRLF checkout of the same commit keeps every record fresh."""
+
+    def test_crlf_checkout_of_a_cited_source_stays_fresh(self) -> None:
+        record = brain.create_record(
+            self.repository, "finding", "FIND-CRLF", "Cobalt rule finding",
+            [], ["specs/authority.md"], owner="alice",
+        )
+        source = self.repository / "specs" / "authority.md"
+        source.write_bytes(source.read_bytes().replace(b"\n", b"\r\n"))
+
+        self.assertTrue(brain.sources_are_fresh(self.repository, record))
+        self.assertEqual([], brain.validate_repository(self.repository))
+
+        source.write_bytes(b"# Authority\r\n\r\nA different rule.\r\n")
+        self.assertFalse(brain.sources_are_fresh(self.repository, record))
+
+    def test_lf_digest_is_the_plain_file_digest(self) -> None:
+        source = self.repository / "specs" / "authority.md"
+        self.assertEqual(
+            hashlib.sha256(source.read_bytes()).hexdigest(),
+            brain.fingerprint(self.repository, "specs/authority.md")["sha256"],
+        )
+
+    def test_binary_source_is_digested_as_is(self) -> None:
+        binary = self.repository / "specs" / "logo.bin"
+        binary.write_bytes(b"\x89PNG\0\r\n\x1a\n")
+        self.assertEqual(
+            hashlib.sha256(binary.read_bytes()).hexdigest(),
+            brain.fingerprint(self.repository, "specs/logo.bin")["sha256"],
+        )
 
 
 class SharedTextGuardTest(RuntimeHarness):
