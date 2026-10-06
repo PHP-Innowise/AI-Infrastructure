@@ -4809,17 +4809,56 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
             ),
         )
 
-    def test_refresh_still_updates_layers_when_the_capsule_is_unavailable(self) -> None:
+    def test_refresh_retrieves_before_the_branch_task_exists(self) -> None:
+        """A read-only session, and the first turns of every branch, have no
+        governed task yet. The capsule used to be a bare warning then; it now
+        carries the retrieval layers and no working state."""
         result = self.run_cli(
-            "refresh", "--query", "cobalt", "--task-id", "TASK-ABSENT", "--json"
+            "refresh", "--query", "cobalt authority", "--task-id", "TASK-ABSENT",
+            "--ephemeral", "--json",
         )
         self.assertEqual(0, result.returncode, result.stderr)
         report = json.loads(result.stdout)
         self.assertEqual("updated", report["semantic"])
-        self.assertIsNone(report["capsule"])
-        self.assertTrue(
+        capsule = report["capsule"]
+        self.assertIsNotNone(capsule, report["warnings"])
+        self.assertIsNone(capsule["working"])
+        self.assertEqual("warming", capsule["kind"])
+        self.assertIn(
+            "specs/authority.md",
+            [item["path"] for item in capsule["semantic"]],
+        )
+        self.assertFalse(
             any("Capsule unavailable" in item for item in report["warnings"]),
             report["warnings"],
+        )
+        # No governed history is written for a task that does not exist.
+        governed = self.repository / "project-brain" / "control" / "retrieval-manifests"
+        self.assertEqual([], sorted(governed.glob("*.json")) if governed.is_dir() else [])
+
+    def test_unprovisioned_capsule_renders_its_state(self) -> None:
+        result = self.run_cli(
+            "refresh", "--query", "cobalt authority", "--task-id", "TASK-ABSENT",
+            "--ephemeral",
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("working: not recorded yet", result.stdout)
+
+    def test_explicit_retrieve_still_requires_the_task(self) -> None:
+        result = self.run_cli("retrieve", "cobalt", "--task-id", "TASK-ABSENT")
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("Working task not found", result.stderr)
+
+    def test_subagent_completion_provisions_the_branch_task(self) -> None:
+        result = self.run_cli(
+            "msg-dispatch", "--task-id", "feature/new-branch",
+            "--agent", "coder-agent", "--event", "complete",
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        listed = self.run_cli("msg-read", "--task-id", "feature/new-branch", "--json")
+        self.assertEqual(0, listed.returncode, listed.stderr)
+        self.assertEqual(
+            ["completion"], [message["type"] for message in json.loads(listed.stdout)]
         )
 
     def test_refresh_reports_failed_layers_instead_of_silently_serving_stale(

@@ -2500,7 +2500,7 @@ def retrieve(
     connection: sqlite3.Connection,
     repository: Path,
     query: str,
-    task_identifier: str,
+    task_identifier: Optional[str],
     *,
     limit: int,
     provider: Optional[str] = None,
@@ -2520,6 +2520,14 @@ def retrieve(
     a branch name or an operator, and how long the index phases that fed it
     took. They are written into the manifest because a retrieval decision
     cannot be reviewed later from the selection alone.
+
+    ``task_identifier=None`` retrieves for a branch whose governed task does
+    not exist yet. The task is provisioned at the first checkpoint, after
+    several file-changing turns, and a read-only session never gets one; the
+    capsule was empty for all of that time although the runtime filters do
+    not depend on a task. Without a task there is no working state and no
+    own record to exclude, and the manifest stays in ignored local state:
+    governed history is kept per task.
     """
     retrieval_started = time.monotonic()
     if limit < 1:
@@ -2545,8 +2553,12 @@ def retrieve(
             "Retrieval entry point must be one of "
             f"{', '.join(RETRIEVAL_ENTRY_POINTS)}"
         )
-    task_path, task, _ = find_task(repository, task_identifier)
-    validate_record(task)
+    if task_identifier is None:
+        task_path, task = None, None
+        manifest_scope = "local"
+    else:
+        task_path, task, _ = find_task(repository, task_identifier)
+        validate_record(task)
     config = load_config(repository)
     local_episodes = list(local_episodes or [])
     candidates, diagnostics = _candidates(connection, query, max(20, limit * 10))
@@ -2628,11 +2640,18 @@ def retrieve(
     # On real installations the task's own record held a semantic slot on
     # 13-20% of turns. They leave as named exclusions, after `no_match`, which
     # stays a claim about what the query matched rather than what survived.
-    own_handoff = handoff_path(repository, task["id"]).relative_to(repository).as_posix()
+    own_id = task["id"] if task is not None else None
+    own_handoff = (
+        handoff_path(repository, own_id).relative_to(repository).as_posix()
+        if own_id is not None
+        else None
+    )
     loaded = host_loaded_paths(repository, host)
     kept = []
     for item in filtered:
-        if item.get("record_id") == task["id"] or item["path"] == own_handoff:
+        if own_id is not None and (
+            item.get("record_id") == own_id or item["path"] == own_handoff
+        ):
             filter_excluded.append({"path": item["path"], "reason": "working-task"})
         elif item["path"] in loaded:
             filter_excluded.append({"path": item["path"], "reason": "host-loaded"})
@@ -2706,9 +2725,11 @@ def retrieve(
             *((item["path"], item["source_hash"]) for item in selected),
             *(_episode_signature(episode) for episode in local_episode_selected),
         ],
-        task["revision"],
+        task["revision"] if task is not None else 0,
     )
-    baseline_key = _retrieval_baseline_key(task["id"], host, entry_point)
+    baseline_key = _retrieval_baseline_key(
+        own_id if own_id is not None else "no-task", host, entry_point
+    )
     previous = _load_last_retrievals(connection).get(baseline_key)
     gate = gate_decision(
         gate_mode,
@@ -2747,8 +2768,8 @@ def retrieve(
         "id": manifest_id,
         "created_at": utc_now(),
         "query": query,
-        "task_id": task["id"],
-        "task_revision": task["revision"],
+        "task_id": own_id,
+        "task_revision": task["revision"] if task is not None else None,
         "local_episode_count": len(local_episode_selected),
         "filters": {
             "privacy": config["allowed_privacy"],
@@ -2831,14 +2852,18 @@ def retrieve(
     ][:CAPSULE_SEMANTIC_LIMIT]
     return {
         "query": query,
-        "task_id": task["external_id"],
-        "task_uuid": task["id"],
-        "task_revision": task["revision"],
+        "task_id": task["external_id"] if task is not None else None,
+        "task_uuid": own_id,
+        "task_revision": task["revision"] if task is not None else None,
         # Where the full working state lives. The capsule carries a bounded
         # projection of it, and the record no longer competes for a semantic
         # slot, so this is how an agent that needs the rest finds it.
-        "task_record": task_path.relative_to(repository).as_posix(),
-        "working": {
+        "task_record": (
+            task_path.relative_to(repository).as_posix()
+            if task_path is not None
+            else None
+        ),
+        "working": None if task is None else {
             "task_id": task["external_id"], "goal": task["goal"],
             "phase": task.get("phase"),
             # Manual progress first, the automatic checkpoint as a labelled

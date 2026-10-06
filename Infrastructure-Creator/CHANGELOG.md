@@ -18,6 +18,7 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Fixed
 
+- **`memory-seed` asset: prompt-time retrieval before the branch task exists.** A generated project's capsule carries the retrieval layers from the first prompt on a new branch and in read-only sessions, and `msg-dispatch` provisions the branch task (see the root `CHANGELOG.md`).
 - **`memory-seed` asset: line-ending neutral fingerprints and LF writes.** A generated project's Project Brain no longer marks records stale in a CRLF checkout and writes its records with LF on Windows (see the root `CHANGELOG.md`).
 - **Generated Claude editions import the policy from `.claude/CLAUDE.md`.** `policy-forge` now writes `.claude/CLAUDE.md` with `@../AGENTS.md` whenever `.claude` is selected (appending to an existing file, never replacing it), because Claude Code reads `AGENTS.md` by itself only while the target has no `CLAUDE.md`, `.claude/CLAUDE.md` or `CLAUDE.local.md`. bootstrap-verifier's new `validate_claude_policy_import` fails a Claude edition whose `.claude/CLAUDE.md` is missing or lacks the import on a line of its own outside a code block; `tests/test_hook_wiring_gate.py` covers it.
 - **`memory-seed` asset: the capsule knows which Claude instruction files the host loads.** It counts `.claude/CLAUDE.md` and `CLAUDE.local.md` beside `CLAUDE.md`, follows their `@` imports, and treats `AGENTS.md` as host-loaded when none exists (see the root `CHANGELOG.md`).

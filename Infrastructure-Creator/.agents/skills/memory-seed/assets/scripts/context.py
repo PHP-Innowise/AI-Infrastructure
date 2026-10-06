@@ -2118,6 +2118,7 @@ def assemble_capsule(
     paths: Optional[list[str]] = None,
     host: str = "cli",
     entry_point: str = "retrieve",
+    allow_unprovisioned: bool = False,
 ) -> dict[str, object]:
     """Build the layered capsule for one request.
 
@@ -2129,6 +2130,12 @@ def assemble_capsule(
     knows - where the query came from, and what the index phases cost - and
     are recorded in the governed manifest. A caller that refreshed elsewhere
     passes its own timings; one that refreshes here has them measured for it.
+
+    ``allow_unprovisioned`` lets the prompt-time refresh retrieve for a branch
+    whose governed task does not exist yet - every read-only session, and the
+    first turns of every branch until the checkpoint provisions it. The
+    capsule then carries the retrieval layers with no working state, instead
+    of nothing but a warning.
     """
     warnings: list[str] = []
     if refresh_index:
@@ -2159,7 +2166,12 @@ def assemble_capsule(
     # guards build_context_packet would have applied.
     reject_secrets("Task Capsule", [query])
     reject_capsule_privacy("Task Capsule request", [query])
-    binding = governed_binding(connection, task_id)
+    try:
+        binding = governed_binding(connection, task_id)
+    except ContextError as error:
+        if not allow_unprovisioned or "Working task not found" not in str(error):
+            raise
+        binding = None
     request_query = build_capsule_query(query, None)
     local_episodes = search_episodes(
         connection, request_query, CAPSULE_LAYER_LIMITS["episodic"]
@@ -2168,7 +2180,7 @@ def assemble_capsule(
         connection,
         repository,
         request_query,
-        binding["task_uuid"],
+        binding["task_uuid"] if binding is not None else None,
         limit=limit,
         manifest_scope="local" if ephemeral else "governed",
         query_source=query_source,
@@ -2184,6 +2196,12 @@ def assemble_capsule(
     # The print tail dereferences result["warnings"]; retrieve() has no such key.
     result["warnings"] = warnings
     result["last_turn"] = last_turn
+    if binding is None:
+        # Rendered as "working: not recorded yet" plus how far the first
+        # checkpoint is, by the same fields the Cursor warming capsule uses.
+        result["kind"] = "warming"
+        result["task_id"] = task_id
+        result["pending_turns"] = len(pending_turn_deltas(connection, task_id))
     return enforce_governed_capsule_contract(result)
 
 
@@ -2349,7 +2367,14 @@ def print_capsule(capsule: dict[str, object]) -> None:
     # only if it starts with "working:", which is how a broken render is kept
     # from replacing a good rule now that they no longer parse JSON.
     working = capsule["working"]
-    if working is None:
+    if working is None and capsule.get("kind") == "warming":
+        # A branch whose task the first checkpoint has not created yet: the
+        # layers below are still this turn's retrieval.
+        print(
+            "working: not recorded yet (the task starts at the "
+            f"{DEFAULT_TURN_FLUSH_AFTER}-turn checkpoint)"
+        )
+    elif working is None:
         print("working: unavailable")
     else:
         print(f"working: {working['task_id']} — {working['goal']}")
@@ -4966,6 +4991,19 @@ def main() -> int:
                     raise ContextError(
                         "Agent messages require governed mode"
                     )
+                if arguments.command == "msg-dispatch":
+                    # A subagent that finishes on a branch the first
+                    # checkpoint has not provisioned yet would otherwise
+                    # lose its record: subagent-dispatch.sh sends the error
+                    # to /dev/null. A completion is real work, which is what
+                    # provisioning waits for. Any refusal (a terminal task)
+                    # is left to the lookup below to report as it always did.
+                    try:
+                        ensure_working_task(
+                            connection, repository, arguments.task_id, mode, owner
+                        )
+                    except (ContextError, BrainError):
+                        pass
                 # The audit trail outlives the local binding: a completed or
                 # archived task has no binding, but its journal must stay
                 # readable (and refuse writes with the honest terminal error),
@@ -5532,6 +5570,7 @@ def main() -> int:
                             gate_mode=gate_mode,
                             host=arguments.host,
                             entry_point="refresh",
+                            allow_unprovisioned=True,
                         )
                     except (ContextError, BrainError, RetrievalError) as error:
                         # A capsule needs an active task; the layer refresh
