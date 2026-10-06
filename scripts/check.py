@@ -684,7 +684,15 @@ class Runner:
                 directory.mkdir(parents=True)
                 for name in ("python3", "python"):
                     shim = directory / name
-                    shim.write_text(f'#!/bin/sh\nexec {shlex.quote(interpreter)} "$@"\n', encoding="utf-8")
+                    # A sandbox that hides $HOME (the Harness discovery
+                    # sandbox does) cannot see an interpreter installed there,
+                    # e.g. a uv-managed python3.9; its children then run the
+                    # system interpreter, as they would on a CI runner whose
+                    # pinned Python lives outside $HOME and stays visible.
+                    fallback = shutil.which(name)
+                    body = f'if [ -x {shlex.quote(interpreter)} ]; then exec {shlex.quote(interpreter)} "$@"; fi\n'
+                    body += f'exec {shlex.quote(fallback)} "$@"\n' if fallback else 'exit 127\n'
+                    shim.write_text("#!/bin/sh\n" + body, encoding="utf-8")
                     shim.chmod(0o755)
                 self._shims[interpreter] = directory
             return self._shims[interpreter]
