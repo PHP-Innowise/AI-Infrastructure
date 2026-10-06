@@ -567,10 +567,11 @@ document.addEventListener('keydown',event => {
   if (sessionOptions.open && ($('panel-'+sessionOptions.open).contains(document.activeElement) || document.activeElement === $('option-'+sessionOptions.open))) { const chip = $('option-'+sessionOptions.open); sessionOptions.open = null; renderSessionOptions(); chip.focus(); }
 });
 document.querySelector('.skip').addEventListener('click',event => { event.preventDefault(); $('main').focus(); });
-// Six sections; each groups related views behind tabs. Every view has its own #/view address.
+// Five sections; each groups related views behind tabs. Every view has its own #/view address. The project is
+// chosen in Sessions (the sidebar Project selector and the Project chip), as DeepSeek Harness chooses a workspace.
 const resultViews = ['changes','checks','usage'], isResultView = view => resultViews.includes(view);
-const viewGroups = {sessions:['sessions',...resultViews],systems:['systems','system-changes'],knowledge:['memory-use','brain','memory','context'],skills:['skills','create-skill'],accelerators:['accelerators','creator','kit3'],setup:['setup']};
-const viewLabels = {sessions:'Conversation',systems:'Services','system-changes':'Changes',changes:'Changes',checks:'Checks',usage:'Usage','memory-use':'Memory use',brain:'Project Brain',memory:'Memory bank',context:'Context files',skills:'Library','create-skill':'Create skill',accelerators:'Overview',creator:'Infrastructure Creator',kit3:'Open Source Kit',setup:'Projects & Setup'};
+const viewGroups = {sessions:['sessions',...resultViews],systems:['systems','system-changes'],knowledge:['memory-use','brain','memory','context'],skills:['skills','create-skill'],accelerators:['accelerators','creator','kit3','setup']};
+const viewLabels = {sessions:'Conversation',systems:'Services','system-changes':'Changes',changes:'Changes',checks:'Checks',usage:'Usage','memory-use':'Memory use',brain:'Project Brain',memory:'Memory bank',context:'Context files',skills:'Library','create-skill':'Create skill',accelerators:'Overview',creator:'Infrastructure Creator',kit3:'Open Source Kit',setup:'Install into project'};
 const groupOf = view => Object.keys(viewGroups).find(group => viewGroups[group].includes(view));
 const lastViewInGroup = {};
 function viewFromHash() { let view = ''; try { view = decodeURIComponent(location.hash.replace(/^#\/?/,'')); } catch (_) { return null; } if (view === 'results') view = 'changes'; return groupOf(view) ? view : null; }
@@ -643,6 +644,7 @@ const projectSelects = {sessions:'project',changes:'project',checks:'project',us
 const currentProject = () => groupOf(state.view) === 'sessions' ? state.selected?.project_id || $('project').value : projectSelects[state.view] ? $(projectSelects[state.view]).value : $('project-switcher').value;
 // Every view follows the sidebar project; views in the middle of an operation keep theirs until it ends.
 function switchProject(id) {
+  if (id === CHOOSE_FOLDER) { $('project-switcher').value = currentProject(); if (!state.pending) chooseSessionProject($('project-switcher')); return; }
   if (!projectFor(id) || state.pending) { $('project-switcher').value = currentProject(); return; }
   if (state.selectedId && state.selected?.project_id !== id) newSession('',id,groupOf(state.view) === 'sessions');
   else if ($('project').value !== id) { $('project').value = id; $('project').dispatchEvent(new Event('change')); }
@@ -823,7 +825,7 @@ function updateHeader() {
   // While an opened session loads, its list entry names it, so the header does not flash 'New session'.
   const session = state.selected || (state.loading && state.selectedId ? state.sessions.find(item => item.id === state.selectedId) || null : null);
   const sessionLine = session ? `${projectFor(session.project_id)?.name || 'Project'} · ${isFleetSession(session) ? 'Fleet review · ' : isClashSession(session) ? `Clash vs ${providerFor(session.clash?.challenger)?.name || session.clash?.challenger || 'challenger'} · ` : ''}${providerFor(session.provider)?.name || session.provider}` : '';
-  $('page-title').textContent = groupOf(state.view) === 'sessions' ? session?.title || 'New session' : {systems:'System Orchestration',knowledge:'Knowledge',skills:'Skills',accelerators:'Accelerators',setup:'Projects & Setup'}[groupOf(state.view)];
+  $('page-title').textContent = groupOf(state.view) === 'sessions' ? session?.title || 'New session' : {systems:'System Orchestration',knowledge:'Knowledge',skills:'Skills',accelerators:'Accelerators'}[groupOf(state.view)];
   $('page-subtitle').textContent = groupOf(state.view) === 'sessions' ? session ? sessionLine : [projectFor($('project').value)?.name,providerFor($('provider').value)?.name].filter(Boolean).join(' · ') : [state.view === 'kit3' ? '' : projectFor(currentProject())?.name,groupOf(state.view) === 'systems' ? $('system-config').value.trim() : ({brain:'Browsing runs no commands.',memory:'Browsing runs no commands.',context:'Files added to a session when Project context is on.'})[state.view]].filter(Boolean).join(' · ');
   $('page-subtitle').hidden = !$('page-subtitle').textContent;
   $('open-kit3').hidden = state.view !== 'kit3';
@@ -1075,10 +1077,12 @@ const sessionOptions = {open:null};
 function renderSessionOptions() {
   const hasSession = Boolean(state.selectedId), session = state.selected, fleet = fleetSelected(), clashMode = clashSelected();
   for (const id of ['project','provider','workflow']) $(id).closest('label').hidden = hasSession;
-  const shown = {helpers:!clashMode && !session?.creator, clash:clashAvailable() && !fleet && !isFleetSession(session) && !session?.creator, workspace:!hasSession, brain:!hasSession, budgets:!session?.creator, models:!fleet && !clashMode && !fleetDryRun()};
-  const valid = sessionOptions.validity || {}, invalid = {helpers:valid.helpers === false, clash:valid.clash === false, workspace:valid.workspace === false, brain:valid.brain === false, budgets:valid.budgets === false || !$('session-budgets-agent-error').hidden, models:valid.models === false};
-  const on = {helpers:fleet || $('agents-enabled').checked, clash:clashMode, workspace:$('workspace').value !== 'project', brain:brainLinkActive(), budgets:budgetSummary(sessionBudgets()) !== 'No limits', models:Boolean(modelRouting())};
+  const shown = {project:!hasSession, helpers:!clashMode && !session?.creator, clash:clashAvailable() && !fleet && !isFleetSession(session) && !session?.creator, workspace:!hasSession, brain:!hasSession, budgets:!session?.creator, models:!fleet && !clashMode && !fleetDryRun()};
+  const valid = sessionOptions.validity || {}, invalid = {project:!projectFor($('project').value), helpers:valid.helpers === false, clash:valid.clash === false, workspace:valid.workspace === false, brain:valid.brain === false, budgets:valid.budgets === false || !$('session-budgets-agent-error').hidden, models:valid.models === false};
+  const on = {project:Boolean(projectFor($('project').value)?.accelerator?.mode), helpers:fleet || $('agents-enabled').checked, clash:clashMode, workspace:$('workspace').value !== 'project', brain:brainLinkActive(), budgets:budgetSummary(sessionBudgets()) !== 'No limits', models:Boolean(modelRouting())};
   const count = $('agent-count').valueAsNumber, git = projectGitState.projectId === $('project').value ? projectGitState.data : null, branch = $('worktree-branch').value.trim();
+  const chosenProject = projectFor($('project').value), accelerator = chosenProject?.accelerator;
+  $('option-project-value').textContent = chosenProject ? `${chosenProject.name}${accelerator?.mode === 'attached' ? ` · ${accelerator.edition}` : accelerator?.mode === 'installed' ? ' · accelerator installed' : ''}` : 'choose a folder';
   $('option-helpers-label').textContent = fleet ? 'Reviewers at once' : 'Helpers';
   $('option-helpers-value').textContent = on.helpers ? (Number.isInteger(count) ? String(count) : '') : $('provider').value === 'cursor' ? 'Off · not enforced' : 'Off';
   $('option-clash-value').textContent = clashMode ? `${providerFor($('clash-challenger').value)?.name || 'challenger'} · ${$('clash-rounds').value} ${$('clash-rounds').value === '1' ? 'round' : 'rounds'}` : 'Off';
@@ -1094,7 +1098,7 @@ function renderSessionOptions() {
     $('panel-'+name).hidden = !open;
   }
 }
-for (const chip of document.querySelectorAll('.option-bar button.chip')) chip.addEventListener('click',() => { const name = chip.id.slice('option-'.length); sessionOptions.open = sessionOptions.open === name ? null : name; renderSessionOptions(); if (sessionOptions.open) { $('panel-'+name).tabIndex = -1; $('panel-'+name).focus(); } });
+for (const chip of document.querySelectorAll('.option-bar button.chip')) chip.addEventListener('click',() => { const name = chip.id.slice('option-'.length); sessionOptions.open = sessionOptions.open === name ? null : name; renderSessionOptions(); if (sessionOptions.open === 'project') loadProjectAccelerator(); if (sessionOptions.open) { $('panel-'+name).tabIndex = -1; $('panel-'+name).focus(); } });
 // An open session shows one summary line; its next-turn settings expand on request.
 function renderSessionSummary() {
   const session = state.selected, toggle = $('session-settings-toggle');
@@ -1207,7 +1211,7 @@ $('fleet-dry-run').addEventListener('change',() => { if (!fleetBudgetSupported()
 $('fleet-budget').addEventListener('input',updateControls); $('fleet-worker-timeout').addEventListener('input',updateControls);
 $('model-choice').addEventListener('change',() => { refreshEffortChoices(); updateControls(); if ($('model-choice').value === CUSTOM_MODEL) $('model').focus(); });
 $('model').addEventListener('input',() => { refreshEffortChoices(); updateControls(); });
-$('project').addEventListener('change',() => { clearAttachments(); saveSessionPreferences(); $('context-project').value = $('project').value; if (!knowledgeState.pending) { $('memory-project').value = $('project').value; $('brain-project').value = $('project').value; } $('accelerator-project').value = $('project').value; restoreProjectPreferences($('project').value); });
+$('project').addEventListener('change',() => { clearAttachments(); saveSessionPreferences(); $('context-project').value = $('project').value; if (!knowledgeState.pending) { $('memory-project').value = $('project').value; $('brain-project').value = $('project').value; } $('accelerator-project').value = $('project').value; restoreProjectPreferences($('project').value); if (sessionOptions.open === 'project') loadProjectAccelerator(); renderSessionOptions(); });
 $('workspace').addEventListener('change',() => { if ($('workspace').value !== 'project') loadProjectGit(true); updateControls(); });
 $('existing-worktree').addEventListener('change',() => { projectWorktreeState.preferred = $('existing-worktree').value; updateControls(); });
 $('worktree-branch').addEventListener('input',updateControls);

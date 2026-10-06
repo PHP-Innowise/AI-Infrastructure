@@ -54,9 +54,9 @@ DI-контейнер.
 ## Как подключить акселератор к проекту
 
 Быстрее всего — ничего не копировать в проект. Склонируйте этот репозиторий
-один раз, запустите `./harness-server start`, откройте в браузере
-**Projects & Setup**, выберите папку проекта через **Browse…** и нажмите
-**Add project**. Harness сам определит редакцию по `composer.json`
+один раз, запустите `./harness-server start`, откройте адрес в браузере и в
+**Sessions** нажмите **Choose a project folder** — как выбор workspace в
+DeepSeek Harness. Harness сам определит редакцию по `composer.json`
 (`laravel/framework` → Laravel, `symfony/framework-bundle` → Symfony,
 WordPress → WordPress, иначе PHP Core) и подключит её из клона: каждая сессия
 Claude Code, Codex или Cursor получает политику, навыки, агентов, команды и

@@ -25,7 +25,7 @@ ASSETS = {name: 'text/css; charset=utf-8' if name.endswith('.css') else 'text/ja
                        'agent-activity.js', 'system.js', 'system-editor.js', 'system-discovery.js', 'run-model.js', 'run-view.js', 'composer-commands.js')}
 sys.path.insert(0, str(ROOT / 'harness/src'))
 sys.path.insert(0, str(ROOT / 'scripts'))
-from harness.filesystem import fs, secure_private_dir, default_state_dir, existing_directory
+from harness.filesystem import fs, secure_private_dir, default_state_dir, existing_directory, same_path
 from harness import process_runtime
 from harness.sessions import Sessions, SessionError, WORKFLOWS, MAX_AGENTS, DEFAULT_AGENT_COUNT, CONTEXT_EXCERPT_BYTES, fleet_runtime
 from harness import clash, sdd
@@ -101,7 +101,7 @@ class HarnessServer(ThreadingHTTPServer):
             'clash': {'workflows': list(clash.WORKFLOWS), 'stages': clash.STAGES, 'max_rounds': clash.MAX_ROUNDS, 'default_rounds': clash.DEFAULT_ROUNDS},
             'accelerators': [
                 {'id': 'kit1', 'name': 'Kit 1 · Infrastructure Creator', 'description': 'Scan, review, generate and apply a bespoke accelerator; update manifest-owned files.'},
-                {'id': 'kit2', 'name': 'Kit 2 · Ready-made editions', 'description': 'Preview and install an edition through Projects & Setup.', 'editions': list(EDITIONS)},
+                {'id': 'kit2', 'name': 'Kit 2 · Ready-made editions', 'description': 'Lent to every session from this clone: choose the project in Sessions. Install an edition into a project only when its files belong in the project Git history.', 'editions': list(EDITIONS)},
                 {'id': 'kit3', 'name': 'Kit 3 · Open Source Kit', 'description': 'Discover community tools and their installation commands.'},
             ],
             # Probed per page load so a host fix is visible after a reload.
@@ -572,7 +572,7 @@ def serve(args, state):
     try:
         state_fd = fs.open_target_directory(state)
         overrides = {name: getattr(args, name + '_bin') for name in ('claude', 'codex', 'cursor') if getattr(args, name + '_bin')}
-        server = HarnessServer(('127.0.0.1', args.port), state, args.project or [Path.cwd()], overrides, args.timeout)
+        server = HarnessServer(('127.0.0.1', args.port), state, args.project or default_projects(), overrides, args.timeout)
         info = {'pid': os.getpid(), 'port': server.server_port, 'instance': server.instance, 'token': server.token}
         temporary = 'server-' + secrets.token_hex(16)
         descriptor = fs.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | fs.O_NOFOLLOW, 0o600, dir_fd=state_fd)
@@ -604,10 +604,17 @@ def serve(args, state):
         fs.close(lock_fd)
 
 
+def default_projects():
+    """`start` without --project registers the folder it runs in - unless that is this clone, which is not a
+    project to work on: the browser then asks for a project folder, as DeepSeek Harness asks for a workspace."""
+    folder = Path.cwd()
+    return [] if same_path(folder, ROOT) else [folder]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=('start', 'serve', 'status', 'stop'), nargs='?', default='start')
-    parser.add_argument('--project', action='append', type=Path, help='Register an existing project; repeat for multiple projects (default: current directory).')
+    parser.add_argument('--project', action='append', type=Path, help='Register an existing project; repeat for multiple projects (default: the current directory, unless it is this clone).')
     parser.add_argument('--port', type=int, default=8766)
     parser.add_argument('--state-dir', type=Path, default=default_state_dir())
     parser.add_argument('--timeout', type=int, default=900, help='Initial time budget for API requests without a budgets object (default: 900). Explicit null means no time limit.')
@@ -644,7 +651,7 @@ def main():
             print(f"Already running: http://127.0.0.1:{info['port']} (stop before changing projects or options)")
             return 0
         command = [sys.executable, str(Path(__file__).resolve()), 'serve', '--state-dir', str(state), '--port', str(args.port), '--timeout', str(args.timeout)]
-        for project in args.project or [Path.cwd()]:
+        for project in args.project or default_projects():
             command.extend(['--project', str(existing_directory(project))])
         for name in ('claude', 'codex', 'cursor'):
             if getattr(args, name + '_bin'):

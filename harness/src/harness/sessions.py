@@ -481,8 +481,6 @@ class Sessions:
                 raise SessionError("Each project must be an existing directory.")
             key = hashlib.sha256(os.path.normcase(str(path)).encode()).hexdigest()[:16]
             self.projects[key] = {"id": key, "name": path.name, "path": str(path)}
-        if not self.projects:
-            raise SessionError("Register at least one project when starting the server.")
         self.providers = {p["id"]: p for p in providers.discover_providers(overrides)}
         self.timeout = timeout
         self.lock = threading.RLock()

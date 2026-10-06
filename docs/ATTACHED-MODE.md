@@ -6,10 +6,10 @@ accelerator edition - policy, skills, agents, commands, hooks and memory - from
 the clone, and **nothing is copied into the project**. `git pull` in the clone
 updates every attached project at once.
 
-This is the default for a project registered in the Harness. Installing the
-edition into the project ([install/README.md](../install/README.md)) remains
-available for a team that wants the accelerator's files in its own Git
-history.
+This is the default for every project chosen in the Harness. Installing the
+edition into the project (**Accelerators › Install into project**, or
+[install/README.md](../install/README.md)) remains available for a team that
+wants the accelerator's files in its own Git history.
 
 ## Use it from the browser (Harness)
 
@@ -19,10 +19,13 @@ cd ~/ai-accelerator
 ./harness-server start
 ```
 
-Open the printed address (`http://127.0.0.1:8766`), go to **Projects & Setup**,
-choose **Browse…**, select the project folder, **Use this folder**, then
-**Add project**. The project is registered and the edition its own files point
-to is attached:
+Open the printed address (`http://127.0.0.1:8766`). Started from the clone with
+no `--project`, the Harness opens on an empty session that asks for a project,
+as DeepSeek Harness asks for a workspace: choose **Choose a project folder** (or
+the **Project** chip, or **＋ Choose a project folder…** in the sidebar
+**Project** selector), browse to the folder and choose **Use this folder**. The
+folder is registered and opened in a new session draft, and the edition its own
+files point to is attached:
 
 | Evidence in the project | Edition |
 | --- | --- |
@@ -31,11 +34,11 @@ to is attached:
 | WordPress packages or package type, `wp-config.php`, `wp-content/`, a theme or plugin header | WordPress |
 | any other `composer.json` or PHP file at the root | PHP Core |
 
-The project list shows `· Laravel attached`. **Use the accelerator without
-installing** on the same page names the clone it is attached from and the
-directory that holds its memory, and lets you switch the edition or detach it.
-A project without PHP evidence is listed without an edition; choose one there.
-A project that already has an installed accelerator keeps using its own files.
+The sidebar shows `shop · Laravel attached` and the **Project** chip
+`shop · Laravel`. The chip's panel names the clone the edition is attached from
+and the directory that holds its memory, and switches or detaches the edition.
+A project without PHP evidence gets no edition; choose one in that panel. A
+project that already has an installed accelerator keeps using its own files.
 
 Start a session as usual. The `/` menu (Claude Code, Cursor) and the `$` menu
 (Codex) include the edition's commands and skills, and **Memory** works on the
@@ -82,7 +85,7 @@ project.
 Codex runs a hook only after its definition was approved once; the approval is
 a hash under `hooks.state` in `~/.codex/config.toml`, the same record Codex's own
 `/hooks` review writes. A session-flag hook has no `/hooks` entry to review, so
-**Projects & Setup › Trust accelerator hooks in Codex** (or
+**Sessions › Project › Trust accelerator hooks in Codex** (or
 `accelerator_attach.py trust-codex-hooks`) records the edition's seven hooks.
 Moving the clone changes the commands and needs a new approval; a `git pull`
 that edits only hook scripts does not. Without the approval Codex still gets the

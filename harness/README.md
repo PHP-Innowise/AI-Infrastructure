@@ -87,7 +87,7 @@ recovery requires an explicit resume and an explicit dispatch retry after an
 ambiguous interruption. Inspect partial edits before accepting changed sources.
 Completed dispatches are skipped, and server restart never automatically resumes
 work. The folder picker registers external service roots; existing manifests
-can also use roots registered in **Projects & Setup**. The manifest
+can also use project folders chosen in **Sessions**. The manifest
 cannot grant host filesystem access. See the [system orchestration guide](../docs/AI-SYSTEM-ORCHESTRATION.md#harness-ui).
 
 ## Infrastructure Creator in the browser
@@ -285,8 +285,10 @@ From the repository root:
 
 `start` detaches the server from the terminal. `serve` keeps it in the
 foreground. Repeat `--project` to register more directories; without it,
-the current directory is registered. **Projects & Setup** can register additional
-existing directories while the server is running. UI registrations persist across
+the current directory is registered - unless it is this clone, in which case the
+browser starts by asking for a project folder, as DeepSeek Harness asks for a
+workspace. **Sessions** registers additional folders while the server is running
+(**Choose a project folder**). UI registrations persist across
 restarts alongside the command-line projects. Stop and start again to change
 server options such as its port or provider executable:
 
@@ -306,21 +308,18 @@ executable does **not** prove that its account is logged in.
 
 ### Workspace options
 
-The sidebar has six sections: **Sessions**, **System Orchestration**, **Knowledge** (Memory use,
+The sidebar has five sections: **Sessions**, **System Orchestration**, **Knowledge** (Memory use,
 Project Brain, Memory bank and Context files tabs), **Skills** (Library and Create skill
-tabs), **Accelerators** (Overview, Infrastructure Creator and Open Source Kit
-tabs) and **Projects & Setup**. Every view has its own address, such as
+tabs) and **Accelerators** (Overview, Infrastructure Creator, Open Source Kit and
+Install into project tabs). Every view has its own address, such as
 `#/brain` or `#/creator`, so a reload or the browser's Back button returns to it.
 The **Project** selector at the top of the sidebar applies to every view; choosing
-another project while a session is open starts a new session draft for it.
+another project while a session is open starts a new session draft for it, and its
+last entry, **＋ Choose a project folder…**, adds a folder the way the Sessions
+**Project** chip does.
 
-- **Projects & Setup:** add an existing project - a PHP project gets its
-  accelerator edition attached from this clone, with nothing written into it -
-  inspect its Git state and accelerator readiness, switch or detach the attached
-  edition, or select an edition and target tools, then preview and install the
-  reviewed files. The resulting project is available in the session,
-  skills and knowledge selectors immediately.
-- **Sessions:** registered project, Claude/Codex/Cursor, model and thinking effort,
+- **Sessions:** the project folder (**Project** chip: choose a folder, see and switch
+  its attached accelerator edition, approve its Codex hooks), Claude/Codex/Cursor, model and thinking effort,
   Workspace/Plan/Review workflow, Plan/Edit mode, project memory (on by
   default), additional-agent switch and a concurrent helper limit (1–40, default 3).
   Shows the selected project's Git branch and changes, with a refresh control.
@@ -381,8 +380,9 @@ another project while a session is open starts a new session draft for it.
   **Infrastructure Creator** tab for the full Scan → Review → Generate → Apply
   workflow and manifest-aware updates. A selected run shows its phase as five
   steps (Scan, Review profile, Generate, Review files, Apply); **New run** opens
-  the form for another one. Kit 2 opens the **Projects & Setup**
-  installer for Laravel, Symfony, PHP Core or WordPress. Its **Startup context
+  the form for another one. Kit 2 opens **Install into project**, the
+  installer for Laravel, Symfony, PHP Core or WordPress, for a team that wants
+  an edition's files in the project's Git (sessions already use it attached). Its **Startup context
   per edition** table lists the exact bytes each edition puts in front of the
   model before any work: AGENTS.md and the skill, command and agent listings.
   The table sets them against the ceilings `scripts/context_budget.py --check`
@@ -853,25 +853,28 @@ list opens. Command lists start the native CLIs, so their routes need the page's
 
 ### Connect and prepare a project
 
-A registered PHP project gets its accelerator edition **attached** from this
-clone; nothing is written into the project. The edition comes from the
-project's own files (`laravel/framework` or `artisan` → Laravel,
-`symfony/framework-bundle` or `bin/console` with `config/bundles.php` → Symfony,
-WordPress packages, `wp-config.php` or a theme/plugin header → WordPress, any
-other Composer or PHP project → PHP Core). Sessions launch the native CLI with
-the edition from the clone - Claude Code through `--add-dir`,
-`--append-system-prompt-file` and merged `--settings`, Codex through
-`developer_instructions` and session hooks, Cursor Agent through `--plugin-dir` -
-and Knowledge, Memory use and session memory work on the accelerator's state for
-the project in this server's state directory (`attached/<project id>`).
-**Use the accelerator without installing** shows the clone and the state
-directory, switches or detaches the edition, and for Codex records the one-time
-hook approval (**Trust accelerator hooks in Codex**). A project with an
-installed accelerator keeps using its own files. See
+Choose the project in **Sessions**, as DeepSeek Harness chooses a workspace: the
+**Project** chip (or **Choose a project folder** on the empty session, or the last
+entry of the sidebar **Project** selector) opens a folder browser. The chosen
+folder is registered and opened in a new session draft, and a PHP project gets its
+accelerator edition **attached** from this clone; nothing is written into the
+project. The edition comes from the project's own files (`laravel/framework` or
+`artisan` → Laravel, `symfony/framework-bundle` or `bin/console` with
+`config/bundles.php` → Symfony, WordPress packages, `wp-config.php` or a
+theme/plugin header → WordPress, any other Composer or PHP project → PHP Core).
+Sessions launch the native CLI with the edition from the clone - Claude Code
+through `--add-dir`, `--append-system-prompt-file` and merged `--settings`, Codex
+through `developer_instructions` and session hooks, Cursor Agent through
+`--plugin-dir` - and Knowledge, Memory use and session memory work on the
+accelerator's state for the project in this server's state directory
+(`attached/<project id>`). The **Project** chip's panel shows the folder, the clone
+and the state directory, switches or detaches the edition, and for Codex records
+the one-time hook approval (**Trust accelerator hooks in Codex**). A project with
+an installed accelerator keeps using its own files. See
 [docs/ATTACHED-MODE.md](../docs/ATTACHED-MODE.md).
 
-Open **Projects & Setup** and choose **Browse…** to navigate local folders, or
-enter an absolute path directly. The folder picker provides Home, Parent folder,
+The folder browser navigates local folders, or takes an absolute path
+directly. The folder picker provides Home, Parent folder,
 hidden folders, and a case-insensitive name search through subfolders. Choose
 **Use this folder**, then **Add project**. It browses the computer running the
 server; no project files are uploaded or read. Recursive search skips dependency
@@ -886,8 +889,8 @@ authentication. Setup does not inspect working-tree changes or run project Git
 filters; the session workspace controls retain their full Git status check.
 
 To put the accelerator's files into the project instead - for a team that
-wants them in its own Git history - choose an edition and one or more tools
-under **Or install the accelerator into the project**. Preview runs the existing accelerator
+wants them in its own Git history - open **Accelerators › Install into project**,
+choose an edition and one or more tools. Preview runs the existing accelerator
 installer in private staging, using its versioned inventory and merge rules.
 Review the file actions, diffs and any collisions before installing. Supported
 root-file merges retain project policy and ignore entries; an existing project

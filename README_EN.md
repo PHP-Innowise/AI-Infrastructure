@@ -55,8 +55,8 @@ router, or dependency-injection container.
 ## How to Add an Accelerator to a Project
 
 The quickest way copies nothing into the project. Clone this repository once,
-run `./harness-server start`, open **Projects & Setup** in the browser, pick the
-project folder with **Browse…** and choose **Add project**. The Harness detects
+run `./harness-server start`, open the printed address and, in **Sessions**,
+choose **Choose a project folder** - as DeepSeek Harness chooses a workspace. The Harness detects
 the edition from `composer.json` (`laravel/framework` → Laravel,
 `symfony/framework-bundle` → Symfony, WordPress → WordPress, otherwise PHP Core)
 and attaches it from the clone: every Claude Code, Codex or Cursor session gets
