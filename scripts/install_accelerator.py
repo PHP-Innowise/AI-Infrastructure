@@ -67,6 +67,9 @@ EXCLUDED_PATH_PATTERNS = (
     "memory-bank/tests/**",
     "project-brain/tests/**",
     "*/skills/skill-creator/tests/**",
+    # Loads the edition in place for an attached Cursor session; an installed
+    # project has its own .cursor tree and no use for it.
+    ".cursor-plugin/**",
 )
 AGENTS_BEGIN = "<!-- BEGIN ACCELERATOR MANAGED POLICY -->"
 AGENTS_END = "<!-- END ACCELERATOR MANAGED POLICY -->"

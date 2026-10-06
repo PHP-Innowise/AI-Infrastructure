@@ -536,7 +536,8 @@ class SetupManager:
             'payload_verified': False, 'git': {'is_git': False},
             'providers': [{key: value for key, value in provider.items() if key in ('id', 'name', 'available', 'detail')}
                           for provider in self.sessions.providers.values()],
-            'scope': ['A found CLI may not be signed in; authentication is not checked.'], 'diagnostics': []}
+            'scope': ['A found CLI may not be signed in; authentication is not checked.'], 'diagnostics': [],
+            'accelerator': None}
         source_fd = None
         try:
             source_fd = _root_fd(self.source_root)
@@ -596,6 +597,10 @@ class SetupManager:
             except SessionError:
                 result['diagnostics'].append('Git metadata is unavailable. Project execution can still use local files.')
             result['scope'].append('Static file check; no project scripts or hooks ran.')
+            try:
+                result['accelerator'] = self.sessions.accelerators.get(project_id)
+            except (SessionError, OSError):
+                result['diagnostics'].append('The attached accelerator could not be inspected.')
         except (SessionError, ValueError, TypeError, AttributeError):
             result['diagnostics'].append('The project is missing, unsafe, or contains invalid setup metadata. Restore it before setup.')
         finally:

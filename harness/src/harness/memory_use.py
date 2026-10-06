@@ -195,7 +195,7 @@ def _sources_changed(project, prefix, metadata):
     return None if unknown else False
 
 
-def _chunks(project, prefix):
+def _chunks(project, prefix, sources=None):
     listing = _files(project, prefix + 'memory-bank/chunks', '.md', CHUNK_LIMIT)
     if listing is None:
         return None
@@ -220,7 +220,8 @@ def _chunks(project, prefix):
             'review_after': _day(metadata.get('review_after')), 'valid_to': _day(metadata.get('valid_to')),
             'promoted': 'promoted' in tags, 'auto': 'auto-promoted' in tags, 'bytes': size,
             'sources': len(metadata['sources']) if isinstance(metadata.get('sources'), list) else 0,
-            'sources_changed': _sources_changed(project, prefix, metadata),
+            # Attached, the chunk lives in the state and its sources in the project.
+            'sources_changed': _sources_changed(sources, '', metadata) if sources is not None else _sources_changed(project, prefix, metadata),
             'path': 'chunks/' + name,
         })
     return {'items': items, 'truncated': truncated, 'bytes': total}
@@ -435,7 +436,7 @@ def fold(store, project_id, bank_id, rows):
 def fold_project(knowledge, project_id):
     """Fold every bank of a project; a session launch calls this so its retrievals outlive pruning."""
     info = knowledge.info(project_id)
-    project = knowledge.sessions.project(project_id)['path']
+    project = knowledge.layout(project_id)['folder']
     tasks = knowledge.sessions.linked_tasks(project_id)
     for bank in info['banks']:
         bank_info = knowledge.info(project_id, bank['id'])
@@ -500,7 +501,9 @@ def _runtime_check_available(project, prefix):
 def read(knowledge, project_id, bank=None, harness_tasks=frozenset()):
     """The Memory use payload for one knowledge root of a registered project."""
     info = knowledge.info(project_id, bank)
-    project = knowledge.sessions.project(project_id)['path']
+    layout = knowledge.layout(project_id)
+    project = layout['folder']
+    attached = layout['scripts'] is not None
     payload = {'project_id': project_id, 'banks': info['banks'], 'bank_id': info['bank_id'], 'root': info['root'],
                'mode': info['mode'], 'brain_available': info['brain_available'], 'check_available': False,
                # Review state follows the local date, the clock the runtime's eligibility uses.
@@ -509,7 +512,7 @@ def read(knowledge, project_id, bank=None, harness_tasks=frozenset()):
     if info['bank_id'] is None:
         return payload
     prefix = info['root'] + '/' if info['root'] else ''
-    chunks = _chunks(project, prefix)
+    chunks = _chunks(project, prefix, layout['sources'] if attached else None)
     payload['chunks'] = chunks
     chunk_paths = {item['path']: item['id'] for item in chunks['items']} if chunks else {}
     if info['brain_available'] and info['mode'] == 'governed':
@@ -523,16 +526,18 @@ def read(knowledge, project_id, bank=None, harness_tasks=frozenset()):
                              'found': len(rows), 'merged': merged, 'limit': RETRIEVAL_LIMIT}
     payload['history'] = {'days': history, 'horizon': HISTORY_DAYS}
     payload['health'] = _health(project, prefix)
+    runtime = (layout['scripts'].parents[1], '') if attached else (project, prefix)
     payload['check_available'] = bool(info['runtime_available'] and chunks is not None
-                                      and _runtime_check_available(project, prefix))
+                                      and _runtime_check_available(*runtime))
     return payload
 
 
 def check(knowledge, project_id, bank=None):
     """Check eligibility: the runtime's verdicts, shaped for the page without paths or record IDs."""
     raw = knowledge.memory_use_check(project_id, bank)
-    project = knowledge.sessions.project(project_id)['path']
-    chunks = _chunks(project, raw['root'] + '/' if raw['root'] else '')
+    layout = knowledge.layout(project_id)
+    chunks = _chunks(layout['folder'], raw['root'] + '/' if raw['root'] else '',
+                     layout['sources'] if layout['scripts'] is not None else None)
     paths = {item['path']: item['id'] for item in chunks['items']} if chunks else {}
     return {'project_id': project_id, 'bank_id': raw['bank_id'], **check_result(raw, paths)}
 

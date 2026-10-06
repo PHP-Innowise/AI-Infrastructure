@@ -930,7 +930,8 @@ assert.match(renderExistingWorktrees().error,/could not list/);
         status, boot, headers = self.request("/api/bootstrap")
         self.assertEqual(status, 200)
         self.assertEqual(boot["csrf"], self.token)
-        self.assertEqual(boot["projects"], [{"id": self.project_id, "name": "project", "path": str(self.project), "available": True}])
+        self.assertEqual(boot["projects"], [{"id": self.project_id, "name": "project", "path": str(self.project), "available": True,
+                                             "accelerator": {"mode": None, "edition": None}}])
         self.assertFalse(boot["providers"][0]["available"])
         self.assertNotIn("executable", boot["providers"][0])
         self.assertEqual({kit["id"] for kit in boot["accelerators"]}, {"kit1", "kit2", "kit3"})

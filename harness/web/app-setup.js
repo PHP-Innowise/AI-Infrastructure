@@ -1,8 +1,9 @@
 // Projects & Setup: project registration, the folder picker, readiness and edition installation.
 // Classic script loaded in order by index.html; top-level names are shared with the other app-*.js files.
 'use strict';
+function projectChoiceLabel(item,projects) { const project = projects.find(candidate => candidate.id === item.id); return `${item.name}${project?.available === false ? ' · unavailable' : ''}${project?.accelerator?.mode === 'attached' ? ` · ${project.accelerator.edition} attached` : ''}`; }
 function setProjectChoices(select,projects,previous,allowUnavailable = false) {
-  setOptions(select,projects.map(project => ({...project,...(allowUnavailable ? {available:true} : {})})),item => `${item.name}${projects.find(project => project.id === item.id)?.available === false ? ' · unavailable' : ''}`,item => item.id,previous);
+  setOptions(select,projects.map(project => ({...project,...(allowUnavailable ? {available:true} : {})})),item => projectChoiceLabel(item,projects),item => item.id,previous);
   if (previous && projects.some(project => project.id === previous)) select.value = previous;
 }
 const folderPicker = {path:null,parent:null,valid:false,controller:null,epoch:0,onSelect:null,opener:null};
@@ -84,6 +85,46 @@ function renderSetupReadiness() {
   if (data.scope?.length) $('setup-diagnostics').append(el('p','knowledge-note',data.scope.map(String).join(' ')));
   for (const diagnostic of data.diagnostics || []) $('setup-diagnostics').append(el('p','memory-notice',String(diagnostic)));
 }
+const attachState = {pending:null,codexEpoch:0};
+function renderSetupAttach() {
+  const info = setupState.data?.accelerator; $('setup-attach').hidden = !info; showError('setup-attach-error',''); $('setup-attach-codex').hidden = true; if (!info) return;
+  const editions = (info.editions || []).map(id => ({id,name:id})); const selected = info.edition || info.detected || ''; setOptions($('setup-attach-edition'),[{id:'',name:'Choose an edition…'},...editions],item => item.name,item => item.id,selected);
+  if (info.mode === 'installed') $('setup-attach-summary').textContent = 'This project has its own installed accelerator; sessions use those files and nothing is attached.';
+  else if (info.mode === 'attached') $('setup-attach-summary').textContent = `${info.edition} is attached from ${info.home}. Nothing is installed in this project. Project Brain, Memory Bank and the index for it are kept in ${info.state}.`;
+  else $('setup-attach-summary').textContent = info.detected ? `Nothing is attached yet. The project points to ${info.detected} (${info.evidence}).` : `Nothing is attached. No edition fits automatically (${info.evidence}); choose one to attach.`;
+  updateAttachControls();
+  const codex = state.bootstrap?.providers?.find(provider => provider.id === 'codex');
+  if (info.mode === 'attached' && codex?.available) loadCodexHooks(setupState.projectId);
+}
+function updateAttachControls() {
+  const info = setupState.data?.accelerator; const busy = Boolean(attachState.pending) || Boolean(setupState.pending); const installed = info?.mode === 'installed'; const edition = $('setup-attach-edition').value;
+  $('setup-attach-edition').disabled = busy || installed; $('setup-attach-button').disabled = busy || installed || !edition || (info?.mode === 'attached' && info.edition === edition);
+  $('setup-attach-button').textContent = attachState.pending === 'attach' ? 'Attaching…' : info?.mode === 'attached' ? 'Switch edition' : 'Attach';
+  $('setup-detach-button').hidden = info?.mode !== 'attached'; $('setup-detach-button').disabled = busy; $('setup-detach-button').textContent = attachState.pending === 'detach' ? 'Detaching…' : 'Detach';
+  $('setup-attach-codex-trust').disabled = busy; $('setup-attach-codex-trust').textContent = attachState.pending === 'trust' ? 'Recording approvals…' : 'Trust accelerator hooks in Codex';
+}
+function renderCodexHooks(data) {
+  $('setup-attach-codex').hidden = false; const missing = data.total - data.trusted;
+  $('setup-attach-codex-status').textContent = missing ? `Codex runs the accelerator's hooks only after they are trusted once: ${data.trusted} of ${data.total} trusted. Trusting records their hashes in your Codex configuration, as its /hooks review does.` : `Codex trusts all ${data.total} accelerator hooks.`;
+  $('setup-attach-codex-trust').hidden = !missing;
+}
+async function loadCodexHooks(projectId) {
+  const epoch = ++attachState.codexEpoch; $('setup-attach-codex').hidden = false; $('setup-attach-codex-status').textContent = 'Checking the accelerator hooks Codex trusts…'; $('setup-attach-codex-trust').hidden = true;
+  try { const data = await api(`/api/projects/${encodeURIComponent(projectId)}/accelerator/codex-hooks`); if (epoch === attachState.codexEpoch && projectId === setupState.projectId) renderCodexHooks(data); }
+  catch (error) { if (epoch === attachState.codexEpoch) $('setup-attach-codex-status').textContent = `Codex hook approval could not be checked: ${textError(error)}`; }
+}
+async function changeAttachment(action) {
+  const projectId = setupState.projectId; if (!projectId || attachState.pending) return; attachState.pending = action; showError('setup-attach-error',''); updateAttachControls();
+  try { const data = await api(`/api/projects/${encodeURIComponent(projectId)}/accelerator`,{method:'POST',body:action === 'attach' ? {action,edition:$('setup-attach-edition').value} : {action}}); if (Array.isArray(data.projects)) updateRegisteredProjects(data.projects,projectId); attachState.pending = null; await loadSetup({preservePreview:true}); }
+  catch (error) { showError('setup-attach-error',textError(error)); }
+  finally { attachState.pending = null; updateAttachControls(); }
+}
+async function trustCodexHooks() {
+  const projectId = setupState.projectId; if (!projectId || attachState.pending) return; attachState.pending = 'trust'; showError('setup-attach-error',''); updateAttachControls();
+  try { renderCodexHooks(await api(`/api/projects/${encodeURIComponent(projectId)}/accelerator/codex-hooks`,{method:'POST',body:{}})); }
+  catch (error) { showError('setup-attach-error',textError(error)); }
+  finally { attachState.pending = null; updateAttachControls(); }
+}
 function renderSetupTools() {
   const tools = setupState.data?.tools || []; const allowed = new Set(tools.map(tool => tool.id)); setupState.tools = new Set([...setupState.tools].filter(id => allowed.has(id)));
   if (!setupState.toolsInitialized && tools.length) { const initial = allowed.has($('provider').value) ? $('provider').value : allowed.has('codex') ? 'codex' : tools[0].id; setupState.tools.add(initial); setupState.toolsInitialized = true; }
@@ -93,12 +134,12 @@ function renderSetupTools() {
 async function loadSetup({preservePreview = false} = {}) {
   if (!state.bootstrap || setupState.pending) return; const projectId = $('setup-project').value; const changed = projectId !== setupState.projectId; if (changed || !preservePreview) invalidateSetupPreview(); setupState.controller?.abort(); const controller = new AbortController(); setupState.controller = controller; const epoch = ++setupState.epoch;
   if (changed) { $('setup-result').hidden = true; setupState.preferredEdition ||= $('setup-edition').value || null; setOptions($('setup-edition'),[],item => item.name,item => item.id); $('setup-tools').replaceChildren(); }
-  setupState.projectId = projectId; setupState.loading = true; setupState.data = null; $('setup-readiness-status').textContent = projectId ? 'Inspecting the selected project…' : 'Add an existing local project to get started.'; $('setup-project-location').textContent = projectFor(projectId)?.path || ''; showError('setup-readiness-error',''); renderSetupReadiness(); updateSetupControls();
+  setupState.projectId = projectId; setupState.loading = true; setupState.data = null; $('setup-attach').hidden = true; $('setup-readiness-status').textContent = projectId ? 'Inspecting the selected project…' : 'Add an existing local project to get started.'; $('setup-project-location').textContent = projectFor(projectId)?.path || ''; showError('setup-readiness-error',''); renderSetupReadiness(); updateSetupControls();
   if (!projectId) { setupState.loading = false; setupState.controller = null; updateSetupControls(); return; }
   try { const data = await api(`/api/projects/${encodeURIComponent(projectId)}/setup`,{signal:controller.signal}); if (epoch !== setupState.epoch || projectId !== $('setup-project').value) return;
     if (data.project_id !== projectId || !Array.isArray(data.editions) || !Array.isArray(data.tools)) throw new Error('The runner returned incomplete project setup information. Refresh to try again.');
     setupState.data = data; if (typeof data.available === 'boolean' && projectFor(projectId)) projectFor(projectId).available = data.available; $('setup-project-location').textContent = data.path || projectFor(projectId)?.path || ''; $('setup-readiness-status').textContent = projectFor(projectId)?.available === false ? 'This registered project is currently unavailable. Its path is kept in the project list.' : '';
-    const preferred = setupState.preferredEdition || $('setup-edition').value || data.installed_edition; setOptions($('setup-edition'),[{id:'',name:'Choose an edition…'},...data.editions],item => item.name,item => item.id,preferred || ''); setupState.preferredEdition = null; renderSetupReadiness(); renderSetupTools();
+    const preferred = setupState.preferredEdition || $('setup-edition').value || data.installed_edition; setOptions($('setup-edition'),[{id:'',name:'Choose an edition…'},...data.editions],item => item.name,item => item.id,preferred || ''); setupState.preferredEdition = null; renderSetupReadiness(); renderSetupAttach(); renderSetupTools();
   } catch (error) { if (error.name !== 'AbortError' && epoch === setupState.epoch) { $('setup-readiness-status').textContent = projectFor(projectId)?.available === false ? 'The registered folder is unavailable. Restore its path or add an existing folder.' : 'Project inspection could not finish.'; showError('setup-readiness-error',textError(error)); } }
   finally { if (epoch === setupState.epoch) { setupState.loading = false; setupState.controller = null; updateSetupControls(); } }
 }
@@ -143,6 +184,7 @@ async function installSetup() {
   finally { if (epoch === setupState.previewEpoch) { setupState.pending = null; $('setup-preview').hidden = true; $('setup-preview-files').replaceChildren(); updateSetupControls(); if ($('setup-project').value === selection.project_id) await loadSetup({preservePreview:true}); if (confirmed) $('setup-action-status').textContent = setupState.data ? 'Installation complete. Project readiness refreshed.' : 'Installation complete. Refresh to inspect the project.'; } }
 }
 $('setup-register-form').addEventListener('submit',registerProject); $('setup-refresh-projects').addEventListener('click',refreshProjects); $('setup-project').addEventListener('change',() => loadSetup()); $('setup-edition').addEventListener('change',() => invalidateSetupPreview('Edition changed. Prepare a new preview.'));
+$('setup-attach-edition').addEventListener('change',updateAttachControls); $('setup-attach-button').addEventListener('click',() => changeAttachment('attach')); $('setup-detach-button').addEventListener('click',() => changeAttachment('detach')); $('setup-attach-codex-trust').addEventListener('click',trustCodexHooks);
 $('setup-preview-button').addEventListener('click',previewSetup); $('setup-install-button').addEventListener('click',installSetup); $('setup-preview-actions').addEventListener('change',renderSetupPreviewFiles); $('setup-preview-path').addEventListener('input',renderSetupPreviewFiles);
 $('setup-start-session').addEventListener('click',() => { if (!$('setup-start-session').disabled) newSession('',$('setup-project').value); });
 $('setup-result-start').addEventListener('click',() => { const projectId = setupState.resultProjectId; if (projectId && projectFor(projectId) && !state.pending) newSession('',projectId); });

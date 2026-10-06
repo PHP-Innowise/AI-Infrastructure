@@ -552,6 +552,12 @@ class Sessions:
         self.attachments = Attachments(self)
         from .commands import Catalog
         self.catalog = Catalog(self)
+        from .accelerators import Accelerators
+        self.accelerators = Accelerators(self)
+        # A project with no accelerator of its own gets the edition its files
+        # point to, lent from this clone; nothing is written into it.
+        for key in list(self.projects):
+            self.accelerators.auto_attach(key)
         self.launch_ids = {}
         from .results import Results
         self.results = Results(self)
@@ -692,6 +698,11 @@ class Sessions:
                 project['available'] = True
             except SessionError:
                 project['available'] = False
+            try:
+                accelerator = self.accelerators.get(project['id'])
+                project['accelerator'] = {key: accelerator[key] for key in ('mode', 'edition')}
+            except (SessionError, OSError):
+                project['accelerator'] = {'mode': None, 'edition': None}
         return projects
 
     def add_project(self, data):
@@ -711,6 +722,7 @@ class Sessions:
             self.db.execute('INSERT OR IGNORE INTO registered_projects(id,path) VALUES (?,?)', (key, str(path)))
             self.db.commit()
             self.projects[key] = project
+        self.accelerators.auto_attach(key)
         return {**project, 'available': True}
 
     def git(self, key):
@@ -766,7 +778,7 @@ class Sessions:
         if provider not in self.providers:
             raise SessionError('Choose a provider.')
         root = Path(project['path']) if worktree is None else self._existing_workspace(project, {'worktree_id': worktree})[0]
-        return {'project_id': key, **self.catalog.listing(provider, root)}
+        return {'project_id': key, **self.catalog.listing(provider, root, project_id=key)}
 
     def session_commands(self, sid):
         """The composer's commands for an open session: its CLI's, in its own workspace, with its launch settings.
@@ -776,7 +788,8 @@ class Sessions:
         if session['workflow'] != 'native' or any(session.get(name) for name in ('creator', 'system_run', 'system_discovery', 'fleet', 'clash')):
             return {'session_id': sid, 'provider': session['provider'], 'commands': [], 'skills': [], 'error': None}
         settings = claude_settings(session['agents_enabled'], session['agent_count'], session['thinking_effort'])
-        return {'session_id': sid, **self.catalog.listing(session['provider'], self._workspace(session), settings)}
+        return {'session_id': sid, **self.catalog.listing(session['provider'], self._workspace(session), settings,
+                                                          project_id=session['project_id'])}
 
     def _existing_workspace(self, project, data):
         """The listed worktree a new session runs in, chosen by its ID: the agent works in that checkout as it is."""
@@ -914,6 +927,11 @@ class Sessions:
 
     def memory(self, key, bank=None, path=None, *, _root=None):
         root = Path(_root if _root is not None else self.project(key)['path'])
+        if _root is None:
+            # An attached accelerator keeps the project's bank in the state.
+            attached = self.accelerators.knowledge(key, root)
+            if attached:
+                root = attached['state']
         banks = []
         for candidate, label in MEMORY_BANKS:
             try:
@@ -1558,6 +1576,7 @@ class Sessions:
                     self._save_brain(sid, {**session['brain'], 'approved': False})
         # Integers for Usage › Context: what this launch's prompt carries, and to how many agents.
         ledger, agents = None, 1
+        accelerator = None
         if fleet:
             scope = next(event['text'] for event in self.events(sid) if event['kind'] == 'user')
             settings = {key: session[key] for key in ('id', 'project_path', 'provider', 'model', 'thinking_effort', 'agent_count', 'fleet')}
@@ -1607,6 +1626,11 @@ class Sessions:
                 attachment_dirs = self.attachments.directories(sid)
                 if attachment_dirs:
                     command.extend(['--add-dir', *attachment_dirs])
+            # An attached accelerator rides on this launch from the clone.
+            accelerator = self.accelerators.overlay(session['project_id'], provider, project)
+            if accelerator:
+                command = self.accelerators.apply(provider, command, accelerator,
+                                                  first_turn=not session['native_session_id'])
         self.results.baseline(session)
         context_record = {'version': 1, 'provider': provider, 'agents': agents, 'ledger': ledger, 'fill': None} if ledger is not None else None
         native_launch = context_record is not None and not fleet and not clash_settings
@@ -1627,6 +1651,8 @@ class Sessions:
             if enricher:
                 self.results.save_receipt(generation, enricher.ledger.receipt())
         environment = {**os.environ, **providers.agent_environment(provider, session['agents_enabled'], session['agent_count'])}
+        if accelerator:
+            environment.update(accelerator.environment)
         # Only this launch can say its capsule is in the prompt; never inherit the claim.
         environment.pop('CONTEXT_CAPSULE_DELIVERED', None)
         if native_command:

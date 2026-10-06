@@ -219,6 +219,14 @@ class Handler(BaseHTTPRequestHandler):
                 if parsed.query:
                     raise SessionError('Invalid project setup request.')
                 self.reply(200, self.server.setup_manager.status(path.split('/')[3]))
+            elif path.startswith('/api/projects/') and path.endswith('/accelerator') and len(path.split('/')) == 5:
+                if parsed.query:
+                    raise SessionError('Invalid accelerator request.')
+                self.reply(200, store.accelerators.get(path.split('/')[3]))
+            elif path.startswith('/api/projects/') and path.endswith('/accelerator/codex-hooks') and len(path.split('/')) == 6:
+                if parsed.query:
+                    raise SessionError('Invalid Codex hook request.')
+                self.reply(200, store.accelerators.codex_hooks(path.split('/')[3]))
             elif path == '/api/system-runs':
                 if set(query) != {'project_id'} or len(query['project_id']) != 1:
                     raise SessionError('Select a registered system project.')
@@ -420,6 +428,21 @@ class Handler(BaseHTTPRequestHandler):
                 if urlsplit(self.path).query:
                     raise SessionError('Invalid folder browsing request.')
                 self.reply(200, browse_projects(data))
+            elif path.startswith('/api/projects/') and path.endswith('/accelerator') and len(path.split('/')) == 5:
+                if urlsplit(self.path).query or not isinstance(data, dict) or data.get('action') not in ('attach', 'detach') \
+                        or set(data) - {'action', 'edition'} or (data['action'] == 'detach' and 'edition' in data) \
+                        or not isinstance(data.get('edition', ''), str):
+                    raise SessionError('Invalid accelerator request.')
+                project_id = path.split('/')[3]
+                if data['action'] == 'attach':
+                    result = store.accelerators.attach(project_id, data.get('edition') or None)
+                else:
+                    result = store.accelerators.detach(project_id)
+                self.reply(200, {**result, 'projects': store.list_projects()})
+            elif path.startswith('/api/projects/') and path.endswith('/accelerator/codex-hooks') and len(path.split('/')) == 6:
+                if urlsplit(self.path).query or data:
+                    raise SessionError('Invalid Codex hook request.')
+                self.reply(200, store.accelerators.trust_codex_hooks(path.split('/')[3]))
             elif path.startswith('/api/projects/') and path.endswith('/knowledge') and len(path.split('/')) == 5:
                 if urlsplit(self.path).query:
                     raise SessionError('Invalid project knowledge request.')
