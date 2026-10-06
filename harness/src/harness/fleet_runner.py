@@ -23,6 +23,9 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 from harness import process_runtime
 from harness import providers
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'scripts'))
+import accelerator_attach  # noqa: E402
 from harness.blackboard import Blackboard, NullBlackboard
 from harness.config import HarnessConfig
 from harness.graphs.fleet_review import build_graph, dedupe, render_report, resume_command
@@ -89,12 +92,17 @@ class NativeReviewer:
                                           thinking_effort=config.thinking_effort)
         if provider == 'claude' and self.request.get('attachment_dirs'):
             command.extend(['--add-dir', *self.request['attachment_dirs']])
+        overlay = (self.request.get('accelerators') or {}).get(provider)
+        if overlay:
+            command = accelerator_attach.apply_overlay(provider, command, overlay)
         reservation, allowance = self.reserve_budget(config.lenses[0])
         if allowance is not None:
             if provider != 'claude':
                 raise ValueError('This provider cannot enforce a native USD limit.')
             command.extend(['--max-budget-usd', str(allowance)])
         environment = {**os.environ, **providers.agent_environment(provider, False, 1)}
+        if overlay:
+            environment.update(overlay['environment'])
         read_fd, write_fd = os.pipe()
         process = None
         selector = process_runtime.PipeSelector()

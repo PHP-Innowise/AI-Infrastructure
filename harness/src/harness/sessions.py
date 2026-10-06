@@ -481,11 +481,10 @@ class Sessions:
                 raise SessionError("Each project must be an existing directory.")
             key = hashlib.sha256(os.path.normcase(str(path)).encode()).hexdigest()[:16]
             self.projects[key] = {"id": key, "name": path.name, "path": str(path)}
-        if not self.projects:
-            raise SessionError("Register at least one project when starting the server.")
         self.providers = {p["id"]: p for p in providers.discover_providers(overrides)}
         self.timeout = timeout
         self.lock = threading.RLock()
+        self.sign_in_cache = None
         database = self.state_dir / "sessions.sqlite3"
         if database.is_symlink():
             raise SessionError("Session database must not be a symbolic link.")
@@ -552,6 +551,12 @@ class Sessions:
         self.attachments = Attachments(self)
         from .commands import Catalog
         self.catalog = Catalog(self)
+        from .accelerators import Accelerators
+        self.accelerators = Accelerators(self)
+        # A project with no accelerator of its own gets the edition its files
+        # point to, lent from this clone; nothing is written into it.
+        for key in list(self.projects):
+            self.accelerators.auto_attach(key)
         self.launch_ids = {}
         from .results import Results
         self.results = Results(self)
@@ -616,6 +621,30 @@ class Sessions:
             return None
         return {'fill': fill['end'], 'window': fill.get('window'), 'compacted': bool(fill.get('compactions')),
                 'at': row['started_at'], 'running': row['status'] == 'running'}
+
+    SIGN_IN_TTL = 30  # seconds a sign-in answer is reused; the page asks again when it regains focus
+    SIGN_IN_MIN_INTERVAL = 3  # even a forced check reuses an answer this fresh
+
+    def sign_in(self, refresh=False):
+        """Whether each available provider's CLI is signed in, asked of the CLIs without a model call."""
+        with self.lock:
+            cached = self.sign_in_cache
+            if cached and time.monotonic() - cached[0] < (self.SIGN_IN_MIN_INTERVAL if refresh else self.SIGN_IN_TTL):
+                return cached[1]
+        available = [provider for provider in self.providers.values() if provider.get('available')]
+        answers = {}
+
+        def ask(provider):
+            answers[provider['id']] = providers.sign_in_status(provider['id'], provider['executable'])
+        workers = [threading.Thread(target=ask, args=(provider,), daemon=True) for provider in available]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(providers.SIGN_IN_TIMEOUT + 5)
+        result = {'providers': [answers[provider['id']] for provider in available if provider['id'] in answers]}
+        with self.lock:
+            self.sign_in_cache = (time.monotonic(), result)
+        return result
 
     # What the sidebar shows of a session: which one, where it stands and how it runs. No capsules, results or fill.
     SUMMARY_FIELDS = ('id', 'title', 'project_id', 'status', 'created_at', 'updated_at', 'provider', 'model',
@@ -692,6 +721,10 @@ class Sessions:
                 project['available'] = True
             except SessionError:
                 project['available'] = False
+            try:
+                project['accelerator'] = self.accelerators.summary(project['id'])
+            except (SessionError, OSError):
+                project['accelerator'] = {'mode': None, 'edition': None}
         return projects
 
     def add_project(self, data):
@@ -711,6 +744,7 @@ class Sessions:
             self.db.execute('INSERT OR IGNORE INTO registered_projects(id,path) VALUES (?,?)', (key, str(path)))
             self.db.commit()
             self.projects[key] = project
+        self.accelerators.auto_attach(key)
         return {**project, 'available': True}
 
     def git(self, key):
@@ -766,7 +800,7 @@ class Sessions:
         if provider not in self.providers:
             raise SessionError('Choose a provider.')
         root = Path(project['path']) if worktree is None else self._existing_workspace(project, {'worktree_id': worktree})[0]
-        return {'project_id': key, **self.catalog.listing(provider, root)}
+        return {'project_id': key, **self.catalog.listing(provider, root, project_id=key)}
 
     def session_commands(self, sid):
         """The composer's commands for an open session: its CLI's, in its own workspace, with its launch settings.
@@ -776,7 +810,8 @@ class Sessions:
         if session['workflow'] != 'native' or any(session.get(name) for name in ('creator', 'system_run', 'system_discovery', 'fleet', 'clash')):
             return {'session_id': sid, 'provider': session['provider'], 'commands': [], 'skills': [], 'error': None}
         settings = claude_settings(session['agents_enabled'], session['agent_count'], session['thinking_effort'])
-        return {'session_id': sid, **self.catalog.listing(session['provider'], self._workspace(session), settings)}
+        return {'session_id': sid, **self.catalog.listing(session['provider'], self._workspace(session), settings,
+                                                          project_id=session['project_id'])}
 
     def _existing_workspace(self, project, data):
         """The listed worktree a new session runs in, chosen by its ID: the agent works in that checkout as it is."""
@@ -914,6 +949,11 @@ class Sessions:
 
     def memory(self, key, bank=None, path=None, *, _root=None):
         root = Path(_root if _root is not None else self.project(key)['path'])
+        if _root is None:
+            # An attached accelerator keeps the project's bank in the state.
+            attached = self.accelerators.knowledge(key, root)
+            if attached:
+                root = attached['state']
         banks = []
         for candidate, label in MEMORY_BANKS:
             try:
@@ -1238,8 +1278,9 @@ class Sessions:
             return self._task_context().run(session, data)
 
     def save_memory(self, sid, data):
-        """Save a reviewed memory draft. Several runtime commands run in turn, so the
-        store lock covers only the state check; each command takes the knowledge lock."""
+        """Save a memory draft a person checked (API only: the page saves each run's draft by itself).
+        Several runtime commands run in turn, so the store lock covers only the state check; each
+        command takes the knowledge lock."""
         with self.lock:
             session = self.get(sid)
             if session['status'] in ACTIVE:
@@ -1383,7 +1424,7 @@ class Sessions:
             # Only a run with a message of its own: Fleet and Clash build their context
             # from an empty prompt, and their reviewers do not own the linked task.
             from .memory_draft import instruction
-            prompt += '\n\n' + instruction(reviewed(session['brain']))
+            prompt += '\n\n' + instruction()
         text = prefix + prompt + '\n\nHarness session delegation requirement:\n' + delegation
         if session['provider'] == 'claude' and text.startswith('/'):
             # Nothing came before the message, and Claude Code would read a leading slash as one of its commands.
@@ -1451,7 +1492,7 @@ class Sessions:
             return self.get(sid)
 
     def _remember(self, sid):
-        """Save what a completed unattended run drafted, and say in the conversation what was saved."""
+        """Save what a completed linked run drafted, and say in the conversation what was saved."""
         from . import memory_draft
         latest = memory_draft.latest(self, sid)
         if latest['state'] == 'none':
@@ -1558,6 +1599,7 @@ class Sessions:
                     self._save_brain(sid, {**session['brain'], 'approved': False})
         # Integers for Usage › Context: what this launch's prompt carries, and to how many agents.
         ledger, agents = None, 1
+        accelerator = None
         if fleet:
             scope = next(event['text'] for event in self.events(sid) if event['kind'] == 'user')
             settings = {key: session[key] for key in ('id', 'project_path', 'provider', 'model', 'thinking_effort', 'agent_count', 'fleet')}
@@ -1568,6 +1610,7 @@ class Sessions:
                                  'state_dir': str(self.state_dir / 'fleet' / sid),
                                  'executable': self.providers[provider]['executable'],
                                  'attachment_dirs': self.attachments.directories(sid),
+                                 'accelerators': self.accelerators.overlays(session['project_id'], [provider], project),
                                  'context': self._prompt({**session, 'agents_enabled': False}, '', ledger := {})}, ensure_ascii=False)
             agents = len(session['fleet']['lenses'])
             command = [fleet_runtime()['executable'], str(Path(__file__).with_name('fleet_runner.py')),
@@ -1584,6 +1627,7 @@ class Sessions:
                                  'action': 'continue' if session['clash_result'] else 'start',
                                  'executables': {name: self.providers.get(name, {}).get('executable') for name in (provider, challenger)},
                                  'attachment_dirs': self.attachments.directories(sid), 'baseline': base.get('head'),
+                                 'accelerators': self.accelerators.overlays(session['project_id'], [provider, challenger], project),
                                  'context': self._prompt({**session, 'agents_enabled': False, 'workflow': 'native', 'sdd': None}, '', ledger := {})}, ensure_ascii=False)
             agents = 2
             command = [sys.executable, str(Path(__file__).with_name('clash_runner.py'))]
@@ -1607,6 +1651,11 @@ class Sessions:
                 attachment_dirs = self.attachments.directories(sid)
                 if attachment_dirs:
                     command.extend(['--add-dir', *attachment_dirs])
+            # An attached accelerator rides on this launch from the clone.
+            accelerator = self.accelerators.overlay(session['project_id'], provider, project)
+            if accelerator:
+                command = self.accelerators.apply(provider, command, accelerator,
+                                                  first_turn=not session['native_session_id'])
         self.results.baseline(session)
         context_record = {'version': 1, 'provider': provider, 'agents': agents, 'ledger': ledger, 'fill': None} if ledger is not None else None
         native_launch = context_record is not None and not fleet and not clash_settings
@@ -1627,6 +1676,8 @@ class Sessions:
             if enricher:
                 self.results.save_receipt(generation, enricher.ledger.receipt())
         environment = {**os.environ, **providers.agent_environment(provider, session['agents_enabled'], session['agent_count'])}
+        if accelerator:
+            environment.update(accelerator.environment)
         # Only this launch can say its capsule is in the prompt; never inherit the claim.
         environment.pop('CONTEXT_CAPSULE_DELIVERED', None)
         if native_command:
@@ -1685,6 +1736,7 @@ class Sessions:
         buffer = b''
         count, output_bytes = 0, 0
         outcome, terminal, saw_error, fleet_outcome = None, False, False, None
+        auth_failed = None  # the provider whose CLI refused its account
         native_id = session['native_session_id']
         # A resumed Claude launch may report its session's whole spend; the launch keeps only its own.
         run_cost = None if fleet or clash_settings or creator or system_run or discovery else providers.RunCost(
@@ -1840,6 +1892,9 @@ class Sessions:
                         if clean.get('kind') == 'result':
                             terminal = True
                             saw_error = saw_error or clean.get('ok') is not True
+                        if ((clean.get('kind') == 'error' or clean.get('kind') == 'result' and clean.get('ok') is not True)
+                                and providers.AUTH_FAILURE.search(str(clean.get('text') or ''))):
+                            auth_failed = clean.get('provider') if clean.get('provider') in providers.PROVIDERS else provider
                         if display:
                             clean.update(display)
                         elif enricher and clean.get('kind') == 'tool' and (limited := enricher.notice()):
@@ -1863,7 +1918,11 @@ class Sessions:
                 outcome = 'completed' if code == 0 and terminal and not saw_error else 'failed'
                 if fleet and outcome == 'completed':
                     outcome = fleet_outcome or 'failed'
-                if outcome == 'failed':
+                if outcome == 'failed' and auth_failed:
+                    self.sign_in_cache = None  # the page asks again and marks the provider
+                    self._event(sid, {"kind": "error", "sign_in": auth_failed, "text": providers.sign_in_failure(
+                        auth_failed, self.providers.get(auth_failed, {}).get('executable'))})
+                elif outcome == 'failed':
                     self._event(sid, {"kind": "error", "text": "Provider did not complete successfully. Check CLI authentication, permissions and the reported events."})
         finally:
             fs.close(watchdog_write)
@@ -1900,8 +1959,9 @@ class Sessions:
                             break
                 tracker.update(context_usage.codex_fill(providers.codex_rollout_tail(native_id, project), launch_started_at, time.time()))
             save_context()
-        # A command asked for no memory draft, so there is nothing to save.
-        if outcome == 'completed' and native_launch and session['brain'] and not reviewed(session['brain']) and not native_command:
+        # A command asked for no memory draft, so there is nothing to save. A session opened for review
+        # reviews its context before each turn; its draft is saved like any other.
+        if outcome == 'completed' and native_launch and session['brain'] and not native_command:
             self._remember(sid)
         # Record the closing event before the terminal status: readers that wait for
         # the status to settle must see the complete event history.

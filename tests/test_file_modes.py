@@ -15,7 +15,8 @@ The rule is deliberately small. A tracked file must be 100755 when it is
    also be tracked (an inline shell snippet, such as the Notification hook's
    `case ... esac`, names no script and is skipped); or
 3. a file at the repository root that starts with a `#!` shebang - the
-   launchers people run as `./collect`, `./kit3`, `./harness-server`.
+   launchers people run as `./collect`, `./kit3`, `./harness-server`,
+   `./accelerator-app`.
 
 Any other script is invoked through an interpreter (`python3 x.py`,
 `bash x.sh`) and keeps whatever bit it has. The index, not the disk, is read

@@ -16,6 +16,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import sqlite3
 import stat
@@ -113,7 +114,7 @@ def discover_providers(overrides: Optional[dict[str, str]] = None) -> list[dict]
             if _probe(path, provider):
                 executable = os.path.abspath(path)
                 break
-        detail = ("CLI identity verified; login is checked when a run starts."
+        detail = ("CLI identity verified; Sessions asks the CLI whether it is signed in."
                   if executable else "CLI not found or identity/required flags could not be verified.")
         if provider == "cursor" and not executable:
             detail += " Set --cursor-bin to a Cursor Agent executable; another tool named agent is not Cursor."
@@ -122,6 +123,84 @@ def discover_providers(overrides: Optional[dict[str, str]] = None) -> list[dict]
                       "agent_control_detail": AGENT_CONTROL_DETAILS[provider],
                       "model_options": model_options(provider)})
     return found
+
+
+# provider: (the program's name, the subcommand that signs in, the arguments that report the sign-in)
+SIGN_IN = {"claude": ("claude", "auth login", ["auth", "status", "--json"]),
+           "codex": ("codex", "login", ["login", "status"]),
+           "cursor": ("cursor-agent", "login", ["--disable-auto-update", "status", "--format", "json"])}
+# Credentials a CLI can take from the environment instead of its own sign-in.
+SIGN_IN_ENVIRONMENT = {"claude": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"),
+                       "codex": ("OPENAI_API_KEY", "CODEX_API_KEY"), "cursor": ("CURSOR_API_KEY",)}
+SIGN_IN_TIMEOUT = 10
+# What a CLI reports when its account is signed out, expired or revoked. Matched against the provider's own
+# error and failed-result events only, never against the model's text.
+AUTH_FAILURE = re.compile(
+    r"authentication_failed|failed to authenticate|authentication required|not (?:logged|signed) in"
+    r"|log ?in again|\B/login\b|oauth (?:session|token)|refresh token|invalid (?:api|x-api)[ -]key"
+    r"|unauthori[sz]ed|\b401\b", re.IGNORECASE)
+
+
+def sign_in_command(provider: str, executable: Optional[str] = None) -> str:
+    """The command that signs a CLI in, as typed in a terminal: the program's name when that name finds this
+    executable, else its path (the Harness may run a Cursor Agent that is not on PATH)."""
+    name, subcommand, _ = SIGN_IN[provider]
+    found = shutil.which(name)
+    if executable and not (found and os.path.realpath(found) == os.path.realpath(executable)):
+        name = shlex.quote(executable)
+    return f"{name} {subcommand}"
+
+
+def sign_in_status(provider: str, executable: Optional[str]) -> dict:
+    """Ask a CLI whether its own account is signed in: no model call, well under a second.
+
+    Advisory. `signed_out` means the CLI said so about its own sign-in; a CLI set up for another backend
+    (Bedrock, Vertex, a key in the environment, a custom Codex provider) or one that cannot be asked is
+    `unknown`, and no run is refused on it.
+    """
+    status = {"id": provider, "state": "unknown", "detail": "",
+              "login": sign_in_command(provider, executable) if provider in SIGN_IN else ""}
+    if not executable or provider not in SIGN_IN:
+        return status
+    try:
+        completed = subprocess.run(command_argv([executable], provider) + SIGN_IN[provider][2], stdin=subprocess.DEVNULL,
+                                   capture_output=True, text=True, errors="replace", timeout=SIGN_IN_TIMEOUT,
+                                   check=False)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return status
+    keyed = any(os.environ.get(name) for name in SIGN_IN_ENVIRONMENT[provider])
+    name = PROVIDERS[provider]
+    if provider == "codex":
+        # `codex login status` exits 0 with "Logged in using ...", or 1 with "Not logged in".
+        output = completed.stdout + completed.stderr
+        if completed.returncode == 0 and re.search(r"\blogged in\b", output, re.IGNORECASE):
+            status.update(state="signed_in", detail=f"{name} is signed in.")
+        elif completed.returncode != 0 and re.search(r"\bnot logged in\b", output, re.IGNORECASE) and not keyed:
+            status.update(state="signed_out", detail=f"{name} reports that it is not signed in.")
+        return status
+    # `claude auth status --json` reports loggedIn and apiProvider; `cursor-agent status --format json`, isAuthenticated.
+    try:
+        reported = json.loads(completed.stdout)
+    except ValueError:
+        return status
+    if not isinstance(reported, dict):
+        return status
+    signed = reported.get("loggedIn" if provider == "claude" else "isAuthenticated")
+    own = provider == "cursor" or reported.get("apiProvider") in (None, "firstParty")
+    if signed is True:
+        status.update(state="signed_in", detail=f"{name} is signed in.")
+    elif signed is False and own and not keyed:
+        status.update(state="signed_out", detail=f"{name} reports that it is not signed in.")
+    return status
+
+
+def sign_in_failure(provider: str, executable: Optional[str] = None) -> str:
+    """The run error for a provider that refused the account: what to run instead of a generic failure."""
+    name = PROVIDERS.get(provider, "The provider")
+    how = (f"Sign in from a terminal with `{sign_in_command(provider, executable)}`"
+           + (" (or run `claude` and type /login)" if provider == "claude" else "")) if provider in SIGN_IN else "Sign in with its CLI"
+    return (f"{name} is not signed in, or its sign-in expired. {how}, "
+            "then send the message again; or start a new session with a provider that is signed in.")
 
 
 def _catalog_rows(data) -> list[dict]:

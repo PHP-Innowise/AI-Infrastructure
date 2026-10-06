@@ -227,7 +227,7 @@ EDITION_TEST_SUITES = (
 PARITY_EDITIONS = ("Laravel", "Symfony", "PHP Core", "Cms/wordpress")
 TESTS_LOOP = 'for test_file in test_*.py; do\n  python3 "$test_file"\ndone'
 
-SHELL_FILES = "git ls-files -z -- '*.sh' 'collect' 'kit3' 'harness-server'"
+SHELL_FILES = "git ls-files -z -- '*.sh' 'collect' 'kit3' 'harness-server' 'accelerator-app'"
 
 KIT3_TESTS = (
     "tests.test_registry",
@@ -250,6 +250,8 @@ HARNESS_TESTS = (
     "tests.test_harness_results",
     "tests.test_harness_delivery",
     "tests.test_harness_clash",
+    "tests.test_harness_accelerators",
+    "tests.test_desktop_app",
 )
 
 # Branches that carry the native-Windows and System-orchestration work run
@@ -298,6 +300,7 @@ WINDOWS_HARNESS_TESTS = (
     "tests.test_windows_creator",
     "tests.test_windows_discovery",
     "tests.test_ai_system_portable",
+    "tests.test_desktop_app",
 )
 WINDOWS_CREATOR_TESTS = ("tests.test_windows_creator", "tests.test_windows_discovery")
 
@@ -445,6 +448,7 @@ def build_groups(root: Path = ROOT, base_ref: Optional[str] = None) -> List[Grou
                 ),
                 unittests("Test selected-tool clean installations", ["tests.test_installation"]),
                 unittests("Hook wiring runs from any working directory", ["tests.test_hook_wiring"]),
+                unittests("Attach an edition without copying it", ["tests.test_accelerator_attach"]),
                 unittests("Preserve framework-specific skill semantics", ["tests.test_framework_semantics"]),
                 unittests("Optional developer tooling stays out of the editions", ["tests.test_collect_context"]),
                 step("Kit 3 admission registry is well-formed", "python3 scripts/validate_registry.py --check"),

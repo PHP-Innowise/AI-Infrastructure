@@ -3,12 +3,12 @@
 By default memory works unattended: each message is the retrieval query, the
 context goes straight into the launch, and what the run established is saved
 when it finishes. `review` restores the approved-snapshot flow, where a person
-reviews each capsule and saves memory by hand.
+reviews each capsule before its turn; the run's draft is saved the same way.
 """
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import time
 import uuid
@@ -168,7 +168,17 @@ class TaskContext:
         )})
 
     @staticmethod
-    def _source_hashes(root, capsule):
+    def _visible_path(value, home=None):
+        """A capsule path: relative to the project, or - for an attached
+        accelerator - an absolute path into its edition in the clone."""
+        if home is not None and isinstance(value, str) and value.startswith('/'):
+            path = PurePosixPath(value)
+            if '..' not in path.parts and path.is_relative_to(PurePosixPath(Path(home).as_posix())):
+                return value
+        return _path(value)
+
+    @staticmethod
+    def _source_hashes(root, capsule, home=None):
         manifest = capsule.get('manifest')
         if not isinstance(manifest, str) or not re.fullmatch(
             r'(?:project-brain/control|memory-bank/local)/retrieval-manifests/'
@@ -192,7 +202,7 @@ class TaskContext:
         for layer in ('procedural', 'semantic', 'episodic', 'selected'):
             for item in capsule.get(layer, []):
                 if isinstance(item, dict) and isinstance(item.get('path'), str):
-                    visible.add(_path(item['path']))
+                    visible.add(TaskContext._visible_path(item['path'], home))
         hashes = {}
         for item in metadata['selected']:
             if not isinstance(item, dict) or item.get('path') not in visible:
@@ -227,7 +237,11 @@ class TaskContext:
                 warnings = [item for item in result.get('warnings') or [] if isinstance(item, str)]
                 raise SessionError('; '.join(warnings)[:500] or 'Task context could not be retrieved.')
         self._validate_capsule(capsule, task)
-        hashes = self._source_hashes(Path(workspace) / info['root'], capsule)
+        # Attached, the manifest is in the accelerator's state and tooling sources
+        # are absolute paths into the clone.
+        layout = self.knowledge.layout(session['project_id'], workspace)
+        home = layout['attached']['home'] if layout['attached'] else None
+        hashes = self._source_hashes(layout['folder'] / info['root'], capsule, home)
         return capsule, hashes
 
     def prepare(self, session):

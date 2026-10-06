@@ -170,6 +170,8 @@ jobs:
         # A bare relative hook path exits 127 from a subdirectory, which
         # Claude Code and Codex treat as non-blocking: the guard fails open.
         run: python3 -m unittest tests.test_hook_wiring
+      - name: Attach an edition without copying it
+        run: python3 -m unittest tests.test_accelerator_attach
       - name: Optional developer tooling stays out of the editions
         # The live code2prompt checks skip themselves here (no Rust toolchain);
         # what runs is the containment contract and the argv/exclude pins.
@@ -181,7 +183,7 @@ jobs:
       - name: Kit 3 registry and catalog regression tests
         run: python3 -m unittest tests.test_registry tests.test_open_source_kit tests.test_kit_fetcher tests.test_kit3 tests.test_kit3_catalog
       - name: Native browser harness regression tests
-        run: python3 -m unittest tests.test_harness_providers tests.test_harness_run_activity tests.test_harness_commands tests.test_harness_sessions tests.test_harness_web tests.test_harness_process_guard tests.test_harness_process_runtime tests.test_harness_launcher tests.test_harness_skills tests.test_harness_fleet tests.test_harness_knowledge tests.test_harness_memory_use tests.test_harness_context_usage tests.test_harness_task_context tests.test_harness_memory_draft tests.test_harness_setup tests.test_harness_creator tests.test_harness_results tests.test_harness_delivery tests.test_harness_clash tests.test_portable_fs tests.test_windows_security tests.test_windows_commands tests.test_windows_creator
+        run: python3 -m unittest tests.test_harness_providers tests.test_harness_run_activity tests.test_harness_commands tests.test_harness_sessions tests.test_harness_web tests.test_harness_process_guard tests.test_harness_process_runtime tests.test_harness_launcher tests.test_harness_skills tests.test_harness_fleet tests.test_harness_knowledge tests.test_harness_memory_use tests.test_harness_context_usage tests.test_harness_task_context tests.test_harness_memory_draft tests.test_harness_setup tests.test_harness_creator tests.test_harness_results tests.test_harness_delivery tests.test_harness_clash tests.test_harness_accelerators tests.test_desktop_app tests.test_portable_fs tests.test_windows_security tests.test_windows_commands tests.test_windows_creator
 
   windows-harness:
     name: "Windows Harness (Python 3.13)"
@@ -208,6 +210,7 @@ jobs:
           tests.test_windows_creator
           tests.test_windows_discovery
           tests.test_ai_system_portable
+          tests.test_desktop_app
 
   harness-fleet:
     name: Offline Fleet runtime
@@ -238,11 +241,11 @@ jobs:
           python-version: "3.x"
       - name: Bash syntax check (bash -n)
         # These launchers carry no .sh extension; include them in shell checks.
-        run: git ls-files -z -- '*.sh' 'collect' 'kit3' 'harness-server' | xargs -0 -r -n1 bash -n
+        run: git ls-files -z -- '*.sh' 'collect' 'kit3' 'harness-server' 'accelerator-app' | xargs -0 -r -n1 bash -n
       - name: ShellCheck (severity gate error)
         run: |
           shellcheck --version
-          git ls-files -z -- '*.sh' 'collect' 'kit3' 'harness-server' | xargs -0 -r shellcheck -S error
+          git ls-files -z -- '*.sh' 'collect' 'kit3' 'harness-server' 'accelerator-app' | xargs -0 -r shellcheck -S error
       - name: Validate JSON
         run: |
           git ls-files -z -- '*.json' | while IFS= read -r -d '' f; do

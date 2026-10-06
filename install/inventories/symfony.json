@@ -23,6 +23,7 @@
       "memory-bank/scripts/context_retrieval.py",
       "memory-bank/scripts/telemetry.py",
       "memory-bank/scripts/validate.py",
+      "memory-bank/scripts/workspace_roots.py",
       "memory-bank/templates/chunk.md",
       "project-brain/.gitignore",
       "project-brain/PROTOCOL.md",
@@ -633,6 +634,7 @@
   "excluded_tracked_paths": [
     ".agents/skills/skill-creator/tests/test_platform_cli.py",
     ".agents/skills/skill-creator/tests/test_reports.py",
+    ".cursor-plugin/plugin.json",
     ".cursor/skills/skill-creator/tests/test_platform_cli.py",
     ".cursor/skills/skill-creator/tests/test_reports.py",
     ".install/gitattributes",
@@ -662,6 +664,7 @@
     "memory-bank/.install/INDEX.md",
     "memory-bank/.memory-counter",
     "memory-bank/chunks/MEM-0001-cross-edition-sync.md",
+    "memory-bank/tests/test_attached.py",
     "memory-bank/tests/test_channel.py",
     "memory-bank/tests/test_checkpoint.py",
     "memory-bank/tests/test_context.py",

@@ -59,6 +59,7 @@
       "memory-bank/scripts/context_retrieval.py",
       "memory-bank/scripts/validate.py",
       "memory-bank/scripts/telemetry.py",
+      "memory-bank/scripts/workspace_roots.py",
       "memory-bank/local/",
       "memory-bank/chunks/",
       "project-brain/PROTOCOL.md",

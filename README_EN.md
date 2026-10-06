@@ -54,8 +54,33 @@ router, or dependency-injection container.
 
 ## How to Add an Accelerator to a Project
 
-For a real project, use the
-[inventory-driven installer](install/README.md) from this repository root.
+The quickest way copies nothing into the project. Clone this repository once,
+run `./harness-server start`, open the printed address and, in **Sessions**,
+choose **Choose a project folder** - as DeepSeek Harness chooses a workspace. The Harness detects
+the edition from `composer.json` (`laravel/framework` → Laravel,
+`symfony/framework-bundle` → Symfony, WordPress → WordPress, otherwise PHP Core)
+and attaches it from the clone: every Claude Code, Codex or Cursor session gets
+the edition's policy, skills, agents, commands and hooks, and the project's
+memory (Project Brain, Memory Bank, index) is kept in the Harness state, not in
+the project. `git pull` in the clone updates every attached project at once.
+From a terminal, `python3 <clone>/scripts/accelerator_attach.py run
+claude|codex|cursor` run in the project folder does the same. Details and
+limits: [docs/ATTACHED-MODE.md](docs/ATTACHED-MODE.md).
+
+To start the accelerator like any other application, run
+`./accelerator-app install` once in the clone (in Git Bash on Windows).
+**AI Accelerator**, with the hare logo, then appears among the installed
+applications: in the application menu of GNOME, KDE and other XDG desktops on
+Linux, in Launchpad and Spotlight on macOS, and in the Start menu and
+**Settings › Apps** on Windows. A click starts the Harness from the clone if it
+is not running and opens it in the browser. Only a shortcut and an icon are
+written to the system, so `git pull` in the clone updates the application too.
+`./accelerator-app uninstall` removes the application; projects and their
+memory stay. Details:
+[harness/README.md](harness/README.md#desktop-application).
+
+When a team wants the accelerator's files in the project's own Git history, use
+the [inventory-driven installer](install/README.md) from this repository root.
 Start with `--dry-run`, select only the required AI integrations, resolve every
 reported collision manually, and then repeat the command without `--dry-run`.
 The installer refuses collisions before copying and does not install project

@@ -12,6 +12,30 @@ from pathlib import Path
 from typing import Optional
 
 
+
+def _workspace_roots():
+    """The attached-layout helper beside this file, or None.
+
+    The validator also runs copied on its own - a staged bank's check - and
+    then knows only the installed layout, which is all such a bank has.
+    """
+    try:
+        import workspace_roots
+    except ImportError:
+        directory = str(Path(__file__).resolve().parent)
+        sys.path.insert(0, directory)
+        try:
+            import workspace_roots
+        except ImportError:
+            return None
+        finally:
+            sys.path.remove(directory)
+    return workspace_roots
+
+
+workspace_roots = _workspace_roots()
+
+
 # Chunk identifiers come in two accepted formats:
 # - MEM-YYYYMMDD-xxxxxxxx (current): the allocation date plus eight hex
 #   characters of the source Brain record's UUID. Needing no shared counter,
@@ -321,11 +345,14 @@ def validate_metadata(
         if source.startswith(("https://", "http://")):
             continue
         source_path = source.split("#", 1)[0]
-        resolved_source = (repository_root / source_path).resolve()
-        try:
-            resolved_source.relative_to(repository_root.resolve())
-        except ValueError as error:
-            raise ValidationError(f"source path escapes the repository: {source_path}") from error
+        if workspace_roots is not None:
+            resolved_source = workspace_roots.resolve(repository_root, source_path).resolve()
+            inside = workspace_roots.contains(repository_root, resolved_source)
+        else:
+            resolved_source = (repository_root / source_path).resolve()
+            inside = resolved_source.is_relative_to(repository_root.resolve())
+        if not inside:
+            raise ValidationError(f"source path escapes the repository: {source_path}")
         if not resolved_source.exists():
             # The containment check above stays fatal in every status: it is a
             # boundary guarantee, not a freshness one.

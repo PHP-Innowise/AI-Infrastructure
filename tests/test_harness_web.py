@@ -292,50 +292,24 @@ assert.equal(fields['brain-op-progress'].scrolled,true);
 """
         subprocess.run([shutil.which('node'), '-e', script], check=True, capture_output=True, text=True)
 
-    @unittest.skipUnless(shutil.which('node'), 'Save to memory check requires Node')
-    def test_save_to_memory_keeps_edits_until_a_new_draft_and_reports_what_was_saved(self):
-        page = ui_script()
-        notes = page[page.index('\nconst memorySaveNotes'):page.index('\nfunction memoryField(')]
-        render = page[page.index('\nfunction renderMemorySave('):page.index('\nfunction updateMemorySaveControls(')]
-        summary = page[page.index('\nfunction memorySaveSummary('):page.index('\nasync function submitMemorySave(')]
-        shown = page[page.index('\nconst MEMORY_DRAFT_BLOCK'):page.index('\nfunction appendEvent(')]
-        script = """const assert = require('node:assert/strict');
-const fields = {'memory-save-progress':{value:''}, 'memory-save-next':{value:''}, 'memory-save-verified':{checked:true},
-  'memory-save-note':{textContent:''}, 'memory-save-learnings':{children:[], replaceChildren(...rows){ this.children = rows; }}};
-const $ = id => fields[id]; const showError = () => {}; const updateMemorySaveControls = () => {};
-const memoryLearningRow = learning => ({learning}); const el = (tag, className, text) => ({className, textContent:text});
-const linkedBrain = {sid:'s1', memoryKey:null, data:{memory_draft:{state:'drafted', event_id:9,
-  draft:{progress:'P', next_steps:['A','B'], learnings:[{type:'finding', title:'T', consequence:'C', sources:['x']}]}}}};
-""" + notes + render + summary + shown + """
-// The reply points at the form instead of repeating the draft's JSON.
+    @unittest.skipUnless(shutil.which('node'), 'Memory draft check requires Node')
+    def test_each_run_saves_its_memory_draft_and_no_record_result_panel_remains(self):
+        # Record result & durable memory is gone from the conversation: no markup, no code that drives it.
+        page = (WEB / "index.html").read_text(encoding="utf-8")
+        script = ui_script()
+        for name in ("linked-result", "Record result", "memory-save", "linked-record", "linked-promotion", "linked-brain"):
+            with self.subTest(name=name):
+                self.assertNotIn(name, page)
+                self.assertNotIn(name, script)
+        shown = script[script.index('\nconst MEMORY_DRAFT_BLOCK'):script.index('\n// Consecutive steps share one collapsed row.')]
+        check = """const assert = require('node:assert/strict');
+""" + shown + """
+// The reply says where its draft went instead of repeating the JSON, in a reviewed session too.
 assert.equal(withoutMemoryDraft('Done.\\n\\n```memory-draft\\n{"progress": "P"}\\n```\\n'),
-  'Done.\\n\\n[Memory draft: review it under Save to memory below.]');
+  'Done.\\n\\n[Memory draft: saved to project memory when the run completes.]');
 assert.equal(withoutMemoryDraft('No draft here.'),'No draft here.');
-renderMemorySave();
-assert.equal(fields['memory-save-progress'].value,'P');
-assert.equal(fields['memory-save-next'].value,'A\\nB');
-assert.equal(fields['memory-save-learnings'].children.length,1);
-assert.equal(fields['memory-save-verified'].checked,false);
-assert.match(fields['memory-save-note'].textContent,/Drafted by the agent/);
-// A refresh of the same draft keeps what the person edited.
-fields['memory-save-progress'].value = 'Edited'; renderMemorySave();
-assert.equal(fields['memory-save-progress'].value,'Edited');
-// A new run's draft replaces the form.
-linkedBrain.data.memory_draft = {state:'missing', event_id:null, draft:null}; renderMemorySave();
-assert.equal(fields['memory-save-progress'].value,'');
-assert.equal(fields['memory-save-learnings'].children.length,0);
-assert.match(fields['memory-save-note'].textContent,/left no memory draft/);
-const text = data => memorySaveSummary(data).map(line => line.textContent);
-assert.deepEqual(text({ok:true, saved:{task:{revision:4}, records:[{type:'finding', title:'Cobalt', status:'resolved'}],
-  promotion:{enabled:true, promoted:[{memory_id:'MEM-20261004-aaaaaaaa'}], blocked:[], failed:[]}}}),
-  ['Task updated to revision 4.', 'Saved finding “Cobalt” as resolved.', 'Promoted to durable memory as MEM-20261004-aaaaaaaa.']);
-assert.match(text({ok:true, saved:{task:null, records:[{type:'decision', title:'D', status:'accepted'}],
-  promotion:{enabled:false, promoted:[], blocked:[], failed:[]}}}).at(-1), /Automatic promotion is off/);
-const stopped = memorySaveSummary({ok:false, error:'Stale revision.', saved:{task:{revision:5}, records:[], promotion:null}});
-assert.equal(stopped.at(-1).className,'error-text');
-assert.equal(stopped.at(-1).textContent,'Stopped: Stale revision. What is listed above was saved.');
 """
-        subprocess.run([shutil.which('node'), '-e', script], check=True, capture_output=True, text=True)
+        subprocess.run([shutil.which('node'), '-e', check], check=True, capture_output=True, text=True)
 
     @unittest.skipUnless(shutil.which('node'), 'Project memory composer check requires Node')
     def test_project_memory_is_always_on_and_never_blocks_a_project_without_it(self):
@@ -926,11 +900,24 @@ assert.match(renderExistingWorktrees().error,/could not list/);
         self.assertEqual(self.request("/api/sessions/unregistered/report")[0], 400)
         self.assertEqual(list(self.project.iterdir()), [])
 
+    def test_sign_in_needs_the_page_token_and_asks_available_clis_only(self):
+        # Asking starts native CLIs, so a page without the token gets nothing.
+        self.assertEqual(self.request("/api/providers/sign-in")[0], 403)
+        token = {"X-Harness-Token": self.token}
+        answer = {"id": "claude", "state": "signed_out", "detail": "Claude Code reports that it is not signed in.",
+                  "login": "claude auth login"}
+        with patch.object(providers, "sign_in_status", return_value=answer) as ask:
+            self.assertEqual(self.request("/api/providers/sign-in", headers=token)[:2], (200, {"providers": [answer]}))
+            self.assertEqual(self.request("/api/providers/sign-in?refresh=yes", headers=token)[0], 400)
+        # The fixture Codex is unavailable: only Claude's CLI is asked.
+        self.assertEqual([("claude", "/never-launched/fixture-claude")], [call.args for call in ask.call_args_list])
+
     def test_bootstrap_and_only_explicit_static_routes_are_served(self):
         status, boot, headers = self.request("/api/bootstrap")
         self.assertEqual(status, 200)
         self.assertEqual(boot["csrf"], self.token)
-        self.assertEqual(boot["projects"], [{"id": self.project_id, "name": "project", "path": str(self.project), "available": True}])
+        self.assertEqual(boot["projects"], [{"id": self.project_id, "name": "project", "path": str(self.project), "available": True,
+                                             "accelerator": {"mode": None, "edition": None}}])
         self.assertFalse(boot["providers"][0]["available"])
         self.assertNotIn("executable", boot["providers"][0])
         self.assertEqual({kit["id"] for kit in boot["accelerators"]}, {"kit1", "kit2", "kit3"})
@@ -941,9 +928,12 @@ assert.match(renderExistingWorktrees().error,/could not list/);
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
         self.assertIn("frame-ancestors 'self'", headers["Content-Security-Policy"])
         page_html = (WEB / "index.html").read_text(encoding="utf-8")
-        self.assertEqual(set(re.findall(r'(?:src|href)="/([^"/]+)"', page_html)), set(web.ASSETS))
+        # Every file the page loads is a listed asset; /kit3/ is the catalog page, which has a route of its own.
+        references = [name for name in re.findall(r'(?:src|href)="/([^"]*)"', page_html) if name != "kit3/"]
+        self.assertEqual(set(references), set(web.ASSETS))
         served = self.request("/")[1]
-        self.assertEqual(len(web.ASSETS), len(re.findall(rb'(?:src|href)="/[^"/?]+\?v=[0-9a-f]{16}"', served)))
+        # Each reference is versioned, the hare's three (tab, sidebar, welcome) among them.
+        self.assertEqual(len(references), len(re.findall(rb'(?:src|href)="/[^"?]+\?v=[0-9a-f]{16}"', served)))
         for name, content_type in web.ASSETS.items():
             with self.subTest(asset=name):
                 status, body, asset_headers = self.request("/" + name)

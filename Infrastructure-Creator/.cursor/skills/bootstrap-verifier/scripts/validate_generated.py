@@ -112,6 +112,7 @@ RUNTIME_SCRIPTS = (
     "brain_runtime.py",
     "context_retrieval.py",
     "validate.py",
+    "workspace_roots.py",
 )
 
 # Hook contract per edition. Cursor deliberately lacks working-memory-read.sh:

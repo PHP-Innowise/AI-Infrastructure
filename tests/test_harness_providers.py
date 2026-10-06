@@ -92,6 +92,95 @@ class DiscoveryTests(unittest.TestCase):
             self.assertNotIn("PRIVATE", json.dumps(found))
 
 
+class SignInTests(unittest.TestCase):
+    """What `claude auth status --json` and `codex login status` print (Claude Code 2.1.278, Codex 0.160.0)."""
+
+    def status(self, provider, completed=None, failure=None, environment=None):
+        run = patch.object(providers.subprocess, "run", side_effect=failure, return_value=completed)
+        keys = {name: "" for names in providers.SIGN_IN_ENVIRONMENT.values() for name in names}
+        # The CLI is the one its name finds on PATH, so the sign-in command is that name.
+        with run as called, patch.dict(providers.os.environ, {**keys, **(environment or {})}), \
+                patch.object(providers.shutil, "which", return_value="/fake/" + provider):
+            answer = providers.sign_in_status(provider, "/fake/" + provider)
+        return answer, called
+
+    def test_claude_reports_its_own_sign_in(self):
+        signed_out = json.dumps({"loggedIn": False, "authMethod": "none", "apiProvider": "firstParty"})
+        answer, run = self.status("claude", subprocess.CompletedProcess([], 1, signed_out, ""))
+        self.assertEqual(("signed_out", "claude auth login"), (answer["state"], answer["login"]))
+        self.assertEqual(["/fake/claude", "auth", "status", "--json"], run.call_args.args[0])
+        self.assertEqual((subprocess.DEVNULL, providers.SIGN_IN_TIMEOUT), (run.call_args.kwargs["stdin"], run.call_args.kwargs["timeout"]))
+        signed_in = json.dumps({"loggedIn": True, "authMethod": "claude.ai", "apiProvider": "firstParty", "email": "PRIVATE"})
+        answer, _ = self.status("claude", subprocess.CompletedProcess([], 0, signed_in, ""))
+        self.assertEqual("signed_in", answer["state"])
+        self.assertNotIn("PRIVATE", json.dumps(answer))
+
+    def test_another_backend_or_an_unreadable_answer_is_unknown(self):
+        for label, completed, environment in (
+                ("Bedrock", subprocess.CompletedProcess([], 1, json.dumps({"loggedIn": False, "apiProvider": "bedrock"}), ""), None),
+                ("key in the environment", subprocess.CompletedProcess([], 1, json.dumps({"loggedIn": False, "apiProvider": "firstParty"}), ""),
+                 {"ANTHROPIC_API_KEY": "set"}),
+                ("not JSON", subprocess.CompletedProcess([], 0, "Logged in", ""), None)):
+            with self.subTest(label):
+                self.assertEqual("unknown", self.status("claude", completed, environment=environment)[0]["state"])
+        for failure in (OSError("PRIVATE"), subprocess.TimeoutExpired("PRIVATE", 10)):
+            with self.subTest(failure=failure):
+                answer = self.status("claude", failure=failure)[0]
+                self.assertEqual("unknown", answer["state"])
+                self.assertNotIn("PRIVATE", json.dumps(answer))
+
+    def test_codex_reports_its_login_by_exit_status(self):
+        answer, run = self.status("codex", subprocess.CompletedProcess([], 0, "", "Logged in using ChatGPT\n"))
+        self.assertEqual(("signed_in", "codex login"), (answer["state"], answer["login"]))
+        self.assertEqual(["/fake/codex", "login", "status"], run.call_args.args[0])
+        self.assertEqual("signed_out", self.status("codex", subprocess.CompletedProcess([], 1, "", "Not logged in\n"))[0]["state"])
+        self.assertEqual("unknown", self.status("codex", subprocess.CompletedProcess([], 1, "", "Error checking login status: PRIVATE\n"))[0]["state"])
+        self.assertEqual("unknown", self.status("codex", subprocess.CompletedProcess([], 1, "", "Not logged in\n"),
+                                                environment={"CODEX_API_KEY": "set"})[0]["state"])
+
+    def test_cursor_reports_its_authentication(self):
+        unauthenticated = json.dumps({"status": "unauthenticated", "isAuthenticated": False, "message": "Not logged in"})
+        answer, run = self.status("cursor", subprocess.CompletedProcess([], 0, unauthenticated, ""))
+        self.assertEqual("signed_out", answer["state"])
+        # Every Harness call to Cursor disables its auto-update, which could replace another tool's launcher.
+        self.assertEqual(["/fake/cursor", "--disable-auto-update", "status", "--format", "json"], run.call_args.args[0])
+        authenticated = json.dumps({"status": "authenticated", "isAuthenticated": True, "email": "PRIVATE"})
+        answer, _ = self.status("cursor", subprocess.CompletedProcess([], 0, authenticated, ""))
+        self.assertEqual("signed_in", answer["state"])
+        self.assertNotIn("PRIVATE", json.dumps(answer))
+        self.assertEqual("unknown", self.status("cursor", subprocess.CompletedProcess([], 0, unauthenticated, ""),
+                                                 environment={"CURSOR_API_KEY": "set"})[0]["state"])
+
+    def test_the_sign_in_command_names_an_executable_that_is_not_on_path(self):
+        with patch.object(providers.shutil, "which", return_value="/usr/local/bin/claude"), \
+                patch.object(providers.os.path, "realpath", side_effect=lambda value: value):
+            self.assertEqual("claude auth login", providers.sign_in_command("claude", "/usr/local/bin/claude"))
+        with patch.object(providers.shutil, "which", return_value=None):
+            self.assertEqual("'/home/u/Cursor Agent/cursor-agent' login",
+                             providers.sign_in_command("cursor", "/home/u/Cursor Agent/cursor-agent"))
+            self.assertIn("`'/home/u/Cursor Agent/cursor-agent' login`",
+                          providers.sign_in_failure("cursor", "/home/u/Cursor Agent/cursor-agent"))
+
+    def test_a_missing_cli_is_not_asked(self):
+        with patch.object(providers.subprocess, "run") as run:
+            self.assertEqual("unknown", providers.sign_in_status("claude", None)["state"])
+        run.assert_not_called()
+
+    def test_refused_sign_ins_are_recognised_and_other_failures_are_not(self):
+        for text in ("Failed to authenticate: OAuth session expired and could not be refreshed", "authentication_failed",
+                     "Not logged in. Please run /login", "unexpected status 401 Unauthorized", "Invalid API key · Please run /login",
+                     "Authentication required. Please run 'cursor-agent login' first"):
+            with self.subTest(text=text):
+                self.assertTrue(providers.AUTH_FAILURE.search(text))
+        for text in ("Fixture failure", "Provider run failed", "Tool call failed: file not found", "Process exited with code 1",
+                     "Rate limit reached", "src/login/LoginController.php could not be parsed"):
+            with self.subTest(text=text):
+                self.assertIsNone(providers.AUTH_FAILURE.search(text))
+        with patch.object(providers.shutil, "which", return_value=None):
+            self.assertIn("`codex login`", providers.sign_in_failure("codex"))
+            self.assertIn("`claude auth login` (or run `claude` and type /login)", providers.sign_in_failure("claude"))
+
+
 class CommandTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

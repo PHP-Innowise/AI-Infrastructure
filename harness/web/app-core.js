@@ -134,7 +134,7 @@ const memoryState = {projectId:null,bankId:null,path:null,banks:[],entries:[],tr
 const brainState = {projectId:null,bankId:null,path:null,banks:[],entries:[],selected:null,truncated:false,listEpoch:0,fileEpoch:0,listController:null,fileController:null};
 const knowledgeState = {pending:null,memory:{meta:null,epoch:0,controller:null,pending:false},brain:{meta:null,epoch:0,controller:null,pending:false}};
 const brainLinkDraft = {projectId:null,bankId:null,banks:[],tasks:[],meta:null,epoch:0,controller:null,loading:false,error:''};
-const linkedBrain = {sid:null,data:null,epoch:0,controller:null,loading:false,fetchKey:null,contextKey:null,stale:false,sourceIds:new Set(),promotionId:null,lastRecord:null,records:new Map()};
+const linkedBrain = {sid:null,data:null,epoch:0,controller:null,loading:false,fetchKey:null,contextKey:null,stale:false};
 const setupState = {pending:null,registerPending:false,projectsPending:false,projectId:null,data:null,loading:false,epoch:0,controller:null,tools:new Set(),toolsInitialized:false,preferredEdition:null,preview:null,previewEpoch:0,expiryTimer:null};
 const skillsState = {catalog:null,catalogPending:false,catalogEpoch:0,catalogError:false,sourceId:null,discoveredSourceId:null,skills:[],selectedSkills:new Set(),selectedAgents:new Set(),agentsInitialized:false,pending:null,actionEpoch:0,preview:null,installed:[],installedProjectId:null,installedEpoch:0,installedController:null,installedPending:false,installedError:false,changePreview:null,changeTimer:null};
 const createSkillState = {selectedAgents:new Set(),agentsInitialized:false,touched:new Set(),pending:null,epoch:0,preview:null,resultProjectId:null};
@@ -148,6 +148,24 @@ const statusLabel = value => ({queued:'Queued',running:'Running',completed:'Proc
 const sessionStatusLabel = session => isFleetSession(session) && session.status === 'completed' ? 'Report saved' : statusLabel(session.status);
 const projectFor = id => state.bootstrap?.projects.find(project => project.id === id);
 const providerFor = id => state.bootstrap?.providers.find(provider => provider.id === id);
+// What each CLI says about its own sign-in, asked without a model call. Advisory: a run is never refused on it.
+const signIn = {states:{}, pending:null};
+const signedOut = id => signIn.states[id]?.state === 'signed_out';
+const providerLabel = item => `${item.name}${!item.available ? ' · unavailable' : signedOut(item.id) ? ' · not signed in' : ''}`;
+async function loadSignIn(refresh = false) {
+  if (!state.bootstrap || state.authFailed || signIn.pending) return;
+  signIn.pending = true;
+  try {
+    const data = await api('/api/providers/sign-in' + (refresh ? '?refresh=1' : ''));
+    signIn.states = Object.fromEntries((Array.isArray(data.providers) ? data.providers : []).filter(item => typeof item?.id === 'string').map(item => [item.id,item]));
+    for (const option of $('provider').options) { const item = providerFor(option.value); if (item) option.textContent = providerLabel(item); }
+    updateControls();
+  } catch (_) { /* Without an answer a run still reports a refused sign-in itself. */ }
+  finally { signIn.pending = null; }
+}
+// Signing in happens in a terminal: ask again when the person comes back to this page.
+window.addEventListener('focus',() => loadSignIn(true));
+document.addEventListener('visibilitychange',() => { if (document.visibilityState === 'visible') loadSignIn(true); });
 const CUSTOM_MODEL = '--custom--';
 const modelMetadata = (providerId = $('provider').value) => providerFor(providerId)?.model_options || {models:[],efforts:[],detail:''};
 const pickerProvider = prefix => prefix === 'clash-' ? $('clash-challenger').value : $('provider').value;
@@ -567,10 +585,11 @@ document.addEventListener('keydown',event => {
   if (sessionOptions.open && ($('panel-'+sessionOptions.open).contains(document.activeElement) || document.activeElement === $('option-'+sessionOptions.open))) { const chip = $('option-'+sessionOptions.open); sessionOptions.open = null; renderSessionOptions(); chip.focus(); }
 });
 document.querySelector('.skip').addEventListener('click',event => { event.preventDefault(); $('main').focus(); });
-// Six sections; each groups related views behind tabs. Every view has its own #/view address.
+// Five sections; each groups related views behind tabs. Every view has its own #/view address. The project is
+// chosen in Sessions (the sidebar Project selector and the Project chip), as DeepSeek Harness chooses a workspace.
 const resultViews = ['changes','checks','usage'], isResultView = view => resultViews.includes(view);
-const viewGroups = {sessions:['sessions',...resultViews],systems:['systems','system-changes'],knowledge:['memory-use','brain','memory','context'],skills:['skills','create-skill'],accelerators:['accelerators','creator','kit3'],setup:['setup']};
-const viewLabels = {sessions:'Conversation',systems:'Services','system-changes':'Changes',changes:'Changes',checks:'Checks',usage:'Usage','memory-use':'Memory use',brain:'Project Brain',memory:'Memory bank',context:'Context files',skills:'Library','create-skill':'Create skill',accelerators:'Overview',creator:'Infrastructure Creator',kit3:'Open Source Kit',setup:'Projects & Setup'};
+const viewGroups = {sessions:['sessions',...resultViews],systems:['systems','system-changes'],knowledge:['memory-use','brain','memory','context'],skills:['skills','create-skill'],accelerators:['accelerators','creator','kit3','setup']};
+const viewLabels = {sessions:'Conversation',systems:'Services','system-changes':'Changes',changes:'Changes',checks:'Checks',usage:'Usage','memory-use':'Memory use',brain:'Project Brain',memory:'Memory bank',context:'Context files',skills:'Library','create-skill':'Create skill',accelerators:'Overview',creator:'Infrastructure Creator',kit3:'Open Source Kit',setup:'Install into project'};
 const groupOf = view => Object.keys(viewGroups).find(group => viewGroups[group].includes(view));
 const lastViewInGroup = {};
 function viewFromHash() { let view = ''; try { view = decodeURIComponent(location.hash.replace(/^#\/?/,'')); } catch (_) { return null; } if (view === 'results') view = 'changes'; return groupOf(view) ? view : null; }
@@ -643,6 +662,7 @@ const projectSelects = {sessions:'project',changes:'project',checks:'project',us
 const currentProject = () => groupOf(state.view) === 'sessions' ? state.selected?.project_id || $('project').value : projectSelects[state.view] ? $(projectSelects[state.view]).value : $('project-switcher').value;
 // Every view follows the sidebar project; views in the middle of an operation keep theirs until it ends.
 function switchProject(id) {
+  if (id === CHOOSE_FOLDER) { $('project-switcher').value = currentProject(); if (!state.pending) chooseSessionProject($('project-switcher')); return; }
   if (!projectFor(id) || state.pending) { $('project-switcher').value = currentProject(); return; }
   if (state.selectedId && state.selected?.project_id !== id) newSession('',id,groupOf(state.view) === 'sessions');
   else if ($('project').value !== id) { $('project').value = id; $('project').dispatchEvent(new Event('change')); }
@@ -668,7 +688,7 @@ function populateSettings() {
   for (const scope of ['memory','brain']) if (!knowledgeState.pending) setProjectChoices($(`${scope}-project`),boot.projects,$(`${scope}-project`).value || $('project').value);
   setProjectChoices($('memory-use-project'),boot.projects,$('memory-use-project').value || $('project').value);
   if (!setupState.pending && !setupState.registerPending) setProjectChoices($('setup-project'),boot.projects,$('setup-project').value || $('project').value,true);
-  setOptions($('provider'),boot.providers,item => `${item.name}${item.available ? '' : ' · unavailable'}`,item => item.id,$('provider').value);
+  setOptions($('provider'),boot.providers,providerLabel,item => item.id,$('provider').value);
   if (!skillsState.pending) { const previousProject = $('skills-project').value; setProjectChoices($('skills-project'),boot.projects,previousProject || $('project').value); if (previousProject && previousProject !== $('skills-project').value) invalidateSkillsPreview(); }
   if (!createSkillState.pending) { const previousProject = $('create-skill-project').value; setProjectChoices($('create-skill-project'),boot.projects,previousProject || $('project').value); if (previousProject && previousProject !== $('create-skill-project').value) invalidateCreateSkillPreview(); }
   setOptions($('workflow'),boot.workflows,item => item.name,item => item.id,$('workflow').value);
@@ -692,7 +712,7 @@ async function bootstrap() {
     const boot = await api('/api/bootstrap');
     if (!boot.csrf || !Array.isArray(boot.projects) || !Array.isArray(boot.providers)) throw new Error('The runner returned an incomplete workspace configuration.');
     state.bootstrap = boot; state.authFailed = false; state.sessions = boot.sessions || []; boot.workflows = boot.workflows || []; boot.accelerators = boot.accelerators || [];
-    $('connection-banner').hidden = true; populateSettings(); renderHistory();
+    $('connection-banner').hidden = true; populateSettings(); renderHistory(); loadSignIn();
     if (!sessionPreferencesReady) await restoreSessionPreferences();
     else if (state.selectedId) { stopPolling(); await pollSession(state.epoch); }
     let routed = false;
@@ -823,7 +843,7 @@ function updateHeader() {
   // While an opened session loads, its list entry names it, so the header does not flash 'New session'.
   const session = state.selected || (state.loading && state.selectedId ? state.sessions.find(item => item.id === state.selectedId) || null : null);
   const sessionLine = session ? `${projectFor(session.project_id)?.name || 'Project'} · ${isFleetSession(session) ? 'Fleet review · ' : isClashSession(session) ? `Clash vs ${providerFor(session.clash?.challenger)?.name || session.clash?.challenger || 'challenger'} · ` : ''}${providerFor(session.provider)?.name || session.provider}` : '';
-  $('page-title').textContent = groupOf(state.view) === 'sessions' ? session?.title || 'New session' : {systems:'System Orchestration',knowledge:'Knowledge',skills:'Skills',accelerators:'Accelerators',setup:'Projects & Setup'}[groupOf(state.view)];
+  $('page-title').textContent = groupOf(state.view) === 'sessions' ? session?.title || 'New session' : {systems:'System Orchestration',knowledge:'Knowledge',skills:'Skills',accelerators:'Accelerators'}[groupOf(state.view)];
   $('page-subtitle').textContent = groupOf(state.view) === 'sessions' ? session ? sessionLine : [projectFor($('project').value)?.name,providerFor($('provider').value)?.name].filter(Boolean).join(' · ') : [state.view === 'kit3' ? '' : projectFor(currentProject())?.name,groupOf(state.view) === 'systems' ? $('system-config').value.trim() : ({brain:'Browsing runs no commands.',memory:'Browsing runs no commands.',context:'Files added to a session when Project context is on.'})[state.view]].filter(Boolean).join(' · ');
   $('page-subtitle').hidden = !$('page-subtitle').textContent;
   $('open-kit3').hidden = state.view !== 'kit3';
@@ -1075,10 +1095,12 @@ const sessionOptions = {open:null};
 function renderSessionOptions() {
   const hasSession = Boolean(state.selectedId), session = state.selected, fleet = fleetSelected(), clashMode = clashSelected();
   for (const id of ['project','provider','workflow']) $(id).closest('label').hidden = hasSession;
-  const shown = {helpers:!clashMode && !session?.creator, clash:clashAvailable() && !fleet && !isFleetSession(session) && !session?.creator, workspace:!hasSession, brain:!hasSession, budgets:!session?.creator, models:!fleet && !clashMode && !fleetDryRun()};
-  const valid = sessionOptions.validity || {}, invalid = {helpers:valid.helpers === false, clash:valid.clash === false, workspace:valid.workspace === false, brain:valid.brain === false, budgets:valid.budgets === false || !$('session-budgets-agent-error').hidden, models:valid.models === false};
-  const on = {helpers:fleet || $('agents-enabled').checked, clash:clashMode, workspace:$('workspace').value !== 'project', brain:brainLinkActive(), budgets:budgetSummary(sessionBudgets()) !== 'No limits', models:Boolean(modelRouting())};
+  const shown = {project:!hasSession, helpers:!clashMode && !session?.creator, clash:clashAvailable() && !fleet && !isFleetSession(session) && !session?.creator, workspace:!hasSession, brain:!hasSession, budgets:!session?.creator, models:!fleet && !clashMode && !fleetDryRun()};
+  const valid = sessionOptions.validity || {}, invalid = {project:!projectFor($('project').value), helpers:valid.helpers === false, clash:valid.clash === false, workspace:valid.workspace === false, brain:valid.brain === false, budgets:valid.budgets === false || !$('session-budgets-agent-error').hidden, models:valid.models === false};
+  const on = {project:Boolean(projectFor($('project').value)?.accelerator?.mode), helpers:fleet || $('agents-enabled').checked, clash:clashMode, workspace:$('workspace').value !== 'project', brain:brainLinkActive(), budgets:budgetSummary(sessionBudgets()) !== 'No limits', models:Boolean(modelRouting())};
   const count = $('agent-count').valueAsNumber, git = projectGitState.projectId === $('project').value ? projectGitState.data : null, branch = $('worktree-branch').value.trim();
+  const chosenProject = projectFor($('project').value), accelerator = chosenProject?.accelerator;
+  $('option-project-value').textContent = chosenProject ? `${chosenProject.name}${accelerator?.mode === 'attached' ? ` · ${accelerator.edition}` : accelerator?.mode === 'installed' ? ' · accelerator installed' : ''}` : 'choose a folder';
   $('option-helpers-label').textContent = fleet ? 'Reviewers at once' : 'Helpers';
   $('option-helpers-value').textContent = on.helpers ? (Number.isInteger(count) ? String(count) : '') : $('provider').value === 'cursor' ? 'Off · not enforced' : 'Off';
   $('option-clash-value').textContent = clashMode ? `${providerFor($('clash-challenger').value)?.name || 'challenger'} · ${$('clash-rounds').value} ${$('clash-rounds').value === '1' ? 'round' : 'rounds'}` : 'Off';
@@ -1094,7 +1116,7 @@ function renderSessionOptions() {
     $('panel-'+name).hidden = !open;
   }
 }
-for (const chip of document.querySelectorAll('.option-bar button.chip')) chip.addEventListener('click',() => { const name = chip.id.slice('option-'.length); sessionOptions.open = sessionOptions.open === name ? null : name; renderSessionOptions(); if (sessionOptions.open) { $('panel-'+name).tabIndex = -1; $('panel-'+name).focus(); } });
+for (const chip of document.querySelectorAll('.option-bar button.chip')) chip.addEventListener('click',() => { const name = chip.id.slice('option-'.length); sessionOptions.open = sessionOptions.open === name ? null : name; renderSessionOptions(); if (sessionOptions.open === 'project') loadProjectAccelerator(); if (sessionOptions.open) { $('panel-'+name).tabIndex = -1; $('panel-'+name).focus(); } });
 // An open session shows one summary line; its next-turn settings expand on request.
 function renderSessionSummary() {
   const session = state.selected, toggle = $('session-settings-toggle');
@@ -1192,8 +1214,18 @@ function updateControls() {
   $('composer-note').classList.toggle('shortcut',$('composer-note').textContent === 'Ctrl / ⌘ + Enter to send');
   const caption = terminalLinkedTask ? 'The linked Brain task is completed or cancelled. Start a new session with an active or new task to continue.' : reviewing && !noResume ? 'You review the prepared workspace and context before the agent runs.' : remembering && !noResume && !clashMode && !fleet ? 'Project memory is retrieved for each message and saved when the run completes.' : clashMode && !hasSession ? 'Both participants share the session budgets.' : clashMode && !noResume ? 'A follow-up starts the next cycle; both native sessions resume. Untick Clash for a normal follow-up.' : fleet && !hasSession ? 'Scope and reviewers are fixed once the review starts.' : noResume ? systemOwned === 'run' ? 'This launch belongs to a system change. Resume, cancel or review it under System Orchestration › Changes.' : systemOwned === 'scan' ? 'This is an AI scan of service folders. Start a new scan from the system editor.' : state.selected.status === 'cancelled' ? 'Cancelled before a resumable native session was created.' : 'No resumable native session was returned. Start a new session to continue.' : '';
   $('composer-caption').textContent = caption; $('composer-caption').hidden = !caption;
-  const providerNote = dryRun ? 'Offline dry-run can use any provider selection; no native CLI is launched.' : ready && !provider?.available ? 'No provider is ready. Install and sign in with a native CLI, then restart the Harness server.' : provider?.id === 'cursor' ? 'Cursor can’t disable or cap helpers; helper settings are instructions only.' : '';
-  if ($('provider-hint').textContent !== providerNote) $('provider-hint').textContent = providerNote; $('provider-hint').hidden = !providerNote;
+  const signInNote = !dryRun && provider?.available && signedOut(provider.id) ? `${provider.name} is not signed in. Sign in from a terminal with ${signIn.states[provider.id].login || 'its CLI'}${hasSession ? ', then send again' : ''}; this page checks again when you come back to it.` : '';
+  const providerNote = dryRun ? 'Offline dry-run can use any provider selection; no native CLI is launched.' : ready && !provider?.available ? 'No provider is ready. Install and sign in with a native CLI, then restart the Harness server.' : signInNote || (provider?.id === 'cursor' ? 'Cursor can’t disable or cap helpers; helper settings are instructions only.' : '');
+  const switchTo = signInNote && !hasSession ? (state.bootstrap?.providers || []).find(item => item.available && signIn.states[item.id]?.state === 'signed_in') : null;
+  const hintKey = `${providerNote}|${switchTo?.id || ''}`;
+  if ($('provider-hint').dataset.key !== hintKey) {
+    $('provider-hint').dataset.key = hintKey;
+    // The sign-in command as code, ready to copy into a terminal.
+    const login = signInNote ? signIn.states[provider.id].login : '', at = login ? providerNote.indexOf(login) : -1;
+    $('provider-hint').replaceChildren(...(at < 0 ? [providerNote] : [providerNote.slice(0,at),el('code','',login),providerNote.slice(at + login.length)]));
+    if (switchTo) { const use = el('button','button compact',`Use ${switchTo.name}`); use.type = 'button'; use.addEventListener('click',() => { $('provider').value = switchTo.id; $('provider').dispatchEvent(new Event('change')); }); $('provider-hint').append(' ',use); }
+  }
+  $('provider-hint').hidden = !providerNote;
   $('agent-hint').textContent = helperHint(fleet,clashMode,ultracode,provider);
   // A Harness check sets the session running without a launch; the Run strip follows the newest launch instead.
   const waitingText = runView.phase(state.selected) === 'check' ? 'A Harness check is running. Its result appears in Checks.' : linked && brainReviewed(state.selected.brain) && !state.selected.brain.context_id ? 'Preparing workspace and context. The provider has not started this turn.' : state.selected?.status === 'queued' ? 'Queued — waiting for an available runner.' : existingFleet ? 'Fleet review is running. Stage and reviewer updates appear above.' : isClashSession(state.selected) ? `${providerFor(state.selected.provider)?.name || state.selected.provider} and ${providerFor(state.selected.clash?.challenger)?.name || 'the challenger'} are clashing. Turn events appear above.` : `${providerFor(state.selected?.provider)?.name || 'Agent'} is running. New events will appear here.`;
@@ -1207,7 +1239,7 @@ $('fleet-dry-run').addEventListener('change',() => { if (!fleetBudgetSupported()
 $('fleet-budget').addEventListener('input',updateControls); $('fleet-worker-timeout').addEventListener('input',updateControls);
 $('model-choice').addEventListener('change',() => { refreshEffortChoices(); updateControls(); if ($('model-choice').value === CUSTOM_MODEL) $('model').focus(); });
 $('model').addEventListener('input',() => { refreshEffortChoices(); updateControls(); });
-$('project').addEventListener('change',() => { clearAttachments(); saveSessionPreferences(); $('context-project').value = $('project').value; if (!knowledgeState.pending) { $('memory-project').value = $('project').value; $('brain-project').value = $('project').value; } $('accelerator-project').value = $('project').value; restoreProjectPreferences($('project').value); });
+$('project').addEventListener('change',() => { clearAttachments(); saveSessionPreferences(); $('context-project').value = $('project').value; if (!knowledgeState.pending) { $('memory-project').value = $('project').value; $('brain-project').value = $('project').value; } $('accelerator-project').value = $('project').value; restoreProjectPreferences($('project').value); if (sessionOptions.open === 'project') loadProjectAccelerator(); renderSessionOptions(); });
 $('workspace').addEventListener('change',() => { if ($('workspace').value !== 'project') loadProjectGit(true); updateControls(); });
 $('existing-worktree').addEventListener('change',() => { projectWorktreeState.preferred = $('existing-worktree').value; updateControls(); });
 $('worktree-branch').addEventListener('input',updateControls);
@@ -1293,9 +1325,9 @@ async function fleetAction(action) {
 }
 $('fleet-approve').addEventListener('click',() => fleetAction('approve')); $('fleet-reject').addEventListener('click',() => fleetAction('reject')); $('fleet-resume').addEventListener('click',() => fleetAction('resume'));
 const MEMORY_DRAFT_BLOCK = /```memory-draft[^\S\n]*\n[\s\S]*?\n[^\S\n]*```/g;
-// The reply points at where the draft went instead of repeating its JSON: the Save to memory form when a person
-// reviews it, or the project memory line the run adds once it has saved the draft itself.
-function withoutMemoryDraft(text,reviewed = true) { return text.replace(MEMORY_DRAFT_BLOCK,reviewed ? '[Memory draft: review it under Save to memory below.]' : '[Memory draft: saved to project memory when the run completes.]').trim(); }
+// The reply points at where the draft went instead of repeating its JSON: the project memory line the run adds
+// once it has saved the draft itself.
+function withoutMemoryDraft(text) { return text.replace(MEMORY_DRAFT_BLOCK,'[Memory draft: saved to project memory when the run completes.]').trim(); }
 // Consecutive steps share one collapsed row. Its summary counts are kept as steps arrive, never recounted from the rows.
 function stepGroup() {
   let group = $('events').lastElementChild;
@@ -1340,6 +1372,7 @@ function closeAborted(event) { if (!RunModel.aborted(event)) return; closeSteps(
 function appendEvent(event) {
   if (event.id === undefined || event.id === null || state.eventIds.has(String(event.id))) return;
   state.eventIds.add(String(event.id)); runView.observe(event); let text = typeof event.text === 'string' ? event.text : '';
+  if (event.kind === 'error' && typeof event.sign_in === 'string') loadSignIn(true);  // a run was refused for its sign-in
   const kind = event.kind === 'result' && event.ok === false ? 'error' : event.kind;
   if (kind === 'fleet_stage') {
     observeFleetEvent(event); text = [fleetStageName(event.stage),humanLabel(event.status)].filter(Boolean).join(' · ');
@@ -1371,7 +1404,7 @@ function appendEvent(event) {
     const type = kind === 'text' ? 'assistant' : kind; const block = el('article',`message ${type}`); block.dataset.provider = String(event.provider || ''); block.dataset.eventId = event.id; const heading = el('div','message-label');
     const tagged = typeof event.provider === 'string' && event.provider ? `${providerFor(event.provider)?.name || event.provider}${typeof event.role === 'string' && event.role ? ` · ${humanLabel(event.role)}` : ''}${Number.isInteger(event.round) && event.round > 0 ? ` · round ${event.round}` : ''}` : '';
     const label = kind === 'user' ? 'You' : kind === 'error' ? `Session error${tagged ? ` · ${tagged}` : ''}` : kind === 'result' ? 'Result' : tagged || providerFor(state.selected?.provider)?.name || 'Assistant';
-    heading.append(el('span','avatar',kind === 'user' ? 'Y' : kind === 'error' ? '!' : 'AI'),document.createTextNode(label)); block.append(heading,el('pre','message-body',['text','assistant','result'].includes(kind) ? withoutMemoryDraft(text,!state.selected?.brain || brainReviewed(state.selected.brain)) : text));
+    heading.append(el('span','avatar',kind === 'user' ? 'Y' : kind === 'error' ? '!' : 'AI'),document.createTextNode(label)); block.append(heading,el('pre','message-body',['text','assistant','result'].includes(kind) ? withoutMemoryDraft(text) : text));
     if (kind === 'user' && Array.isArray(event.attachments)) {
       const files = el('div','attachment-list');
       for (const file of event.attachments) {

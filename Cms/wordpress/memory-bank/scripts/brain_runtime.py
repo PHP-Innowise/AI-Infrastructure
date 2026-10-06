@@ -17,6 +17,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
+import workspace_roots
 from validate import (
     FILENAME_PATTERN as BANK_FILENAME_PATTERN,
     ValidationError as BankValidationError,
@@ -192,6 +193,66 @@ def is_uuid4(value: object) -> bool:
 
 def brain_root(repository: Path) -> Path:
     return repository / "project-brain"
+
+
+# What an installed accelerator's state looks like, for a state directory an
+# attached project starts without. Tooling - schemas, templates, scripts,
+# PROTOCOL.md - is never copied: it is read from the clone, so `git pull`
+# updates it everywhere at once.
+ATTACHED_STATE_DIRECTORIES = (
+    "project-brain/archive",
+    "project-brain/control/handoffs",
+    "project-brain/control/messages",
+    "project-brain/control/promotions",
+    "project-brain/control/retrieval-manifests",
+    "project-brain/dynamic/bugs",
+    "project-brain/dynamic/decisions",
+    "project-brain/dynamic/events",
+    "project-brain/dynamic/findings",
+    "project-brain/dynamic/incidents",
+    "project-brain/dynamic/tasks",
+    "project-brain/indexes",
+    "project-brain/local",
+    "memory-bank/chunks",
+    "memory-bank/local",
+)
+# The state file and where the accelerator keeps its starting content. The
+# configuration is copied because it is per-project policy (mode, owners,
+# retention) that a team may change; the rest is the installer's own seed.
+ATTACHED_STATE_SEEDS = (
+    ("project-brain/config/runtime.json", "project-brain/config/runtime.json"),
+    ("project-brain/config/telemetry.json", "project-brain/config/telemetry.json"),
+    ("project-brain/config/providers.json", "project-brain/config/providers.json"),
+    ("project-brain/indexes/active.json", "project-brain/.install/active.json"),
+    ("project-brain/indexes/archive.json", "project-brain/.install/archive.json"),
+    ("memory-bank/INDEX.md", "memory-bank/.install/INDEX.md"),
+)
+
+
+def ensure_attached_state(repository: Path) -> list[str]:
+    """Give an attached project's state directory an installed layout.
+
+    Creates only what is missing and never overwrites, so it is safe on every
+    run; returns the state paths it created. Installed, it does nothing.
+    """
+    if not workspace_roots.is_attached(repository):
+        return []
+    tooling = workspace_roots.tooling_root(repository)
+    created: list[str] = []
+    for directory in ATTACHED_STATE_DIRECTORIES:
+        path = repository / directory
+        if not path.is_dir():
+            path.mkdir(parents=True, exist_ok=True)
+            created.append(directory + "/")
+    for target, source in ATTACHED_STATE_SEEDS:
+        path = repository / target
+        origin = tooling / source
+        if path.exists() or not origin.is_file():
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(origin.read_bytes())
+        created.append(target)
+    return created
 
 
 def load_config(repository: Path) -> dict[str, Any]:
@@ -467,6 +528,9 @@ def validate_schema_value(
 def validate_schema_file(repository: Path, name: str, value: Any) -> None:
     path = brain_root(repository) / "schemas" / name
     if not path.is_file():
+        # Attached, schemas ship with the accelerator rather than the state.
+        path = brain_root(workspace_roots.tooling_root(repository)) / "schemas" / name
+    if not path.is_file():
         return
     try:
         schema = json.loads(path.read_text(encoding="utf-8"))
@@ -477,11 +541,9 @@ def validate_schema_file(repository: Path, name: str, value: Any) -> None:
 
 def fingerprint(repository: Path, source: str) -> dict[str, str]:
     relative = source.split("#", 1)[0]
-    path = (repository / relative).resolve()
-    try:
-        path.relative_to(repository.resolve())
-    except ValueError as error:
-        raise BrainError(f"Source escapes repository: {relative}") from error
+    path = workspace_roots.resolve(repository, relative).resolve()
+    if not workspace_roots.contains(repository, path):
+        raise BrainError(f"Source escapes repository: {relative}")
     if not path.is_file() or path.is_symlink():
         raise BrainError(f"Source does not exist or is not a regular file: {relative}")
     digest = hashlib.sha256(_line_ending_neutral(path.read_bytes())).hexdigest()
@@ -506,11 +568,9 @@ def source_fingerprints(repository: Path, sources: list[str]) -> list[dict[str, 
     fingerprints = []
     for source in sorted(set(sources)):
         relative = source.split("#", 1)[0]
-        path = (repository / relative).resolve()
-        try:
-            path.relative_to(repository.resolve())
-        except ValueError as error:
-            raise BrainError(f"Source escapes repository: {relative}") from error
+        path = workspace_roots.resolve(repository, relative).resolve()
+        if not workspace_roots.contains(repository, path):
+            raise BrainError(f"Source escapes repository: {relative}")
         if not path.is_file() or path.is_symlink():
             raise BrainError(
                 f"Source does not exist or is not a regular file: {relative}"
@@ -2859,7 +2919,7 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
                 # A citation whose file is already gone is not carried: the
                 # chunk would fail `validate_metadata` at birth and block a
                 # promotion that has nothing to do with that file.
-                if (repository / cited.split("#", 1)[0]).is_file():
+                if workspace_roots.resolve(repository, cited).is_file():
                     inherited.append(cited)
         today = datetime.now(timezone.utc).date()
         # Conflict-free identifier: the promotion date plus eight hex

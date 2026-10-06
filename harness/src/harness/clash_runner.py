@@ -22,6 +22,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from harness import process_runtime
 from harness import clash, providers
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'scripts'))
+import accelerator_attach  # noqa: E402
 from harness.sessions import SessionError, run_git
 
 TOOL_EVENT_LIMIT = 300
@@ -221,6 +224,11 @@ class Cycle:
         if provider == 'claude' and self.request.get('attachment_dirs'):
             command.extend(['--add-dir', *self.request['attachment_dirs']])
         environment = {**os.environ, **providers.agent_environment(provider, False, 1)}
+        # An accelerator attached to the project rides on both participants' turns.
+        overlay = (self.request.get('accelerators') or {}).get(provider)
+        if overlay:
+            command = accelerator_attach.apply_overlay(provider, command, overlay, first_turn=not self.native[slot])
+            environment.update(overlay['environment'])
         label = f"Cycle {self.state['cycle']}{f' · round {round_}' if round_ else ''} · {clash._name(provider)} ({role})"
         emit({'kind': 'clash_turn', 'status': 'running', 'text': label + ' is running.', **tags})
         resumed = self.native[slot]

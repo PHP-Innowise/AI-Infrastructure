@@ -137,9 +137,10 @@ class UnattendedSaveTests(unittest.TestCase):
     """What a run's draft keeps when nobody reviews it, and what the conversation says."""
 
     def test_the_instruction_tells_the_agent_who_reads_its_draft_next(self):
-        self.assertTrue(memory_draft.instruction(True).endswith("A person reviews the draft before anything is saved."))
-        self.assertIn("with no review, so leave out anything you did not verify", memory_draft.instruction(False))
-        self.assertTrue(memory_draft.instruction(False).startswith(memory_draft.REQUEST))
+        # Every linked run's draft is saved when it completes, a reviewed session's too.
+        self.assertTrue(memory_draft.instruction().endswith("with no review, so leave out anything you did not verify."))
+        self.assertTrue(memory_draft.instruction().startswith(memory_draft.REQUEST))
+        self.assertNotIn("A person reviews the draft", memory_draft.instruction())
 
     def test_a_learning_the_workspace_cannot_back_is_left_out_rather_than_failing_the_save(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -177,7 +178,7 @@ class UnattendedSaveTests(unittest.TestCase):
                          "1 learning(s) were already saved from this session. "
                          "Left out 1 learning(s) citing no file in the workspace. "
                          "Promoted to the Memory Bank as MEM-20261004-aaaaaaaa. "
-                         "1 held back from the Memory Bank; see Durable memory.",
+                         "1 held back from the Memory Bank; they stay in Project Brain.",
                          memory_draft.summary("drafted", result))
         self.assertEqual("Nothing new to save to project memory from this run. "
                          "Automatic promotion is off for this project, so it stays in Project Brain.",

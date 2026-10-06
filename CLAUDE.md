@@ -188,8 +188,8 @@ entries have no registry file yet and report `NOT REVIEWED` — see
 
 ```bash
 python3 scripts/check.py --group lint                  # the whole lint job, including the Cursor render grep and the regression tests
-git ls-files -z -- '*.sh' 'collect' 'kit3' 'harness-server' | xargs -0 -r -n1 bash -n
-git ls-files -z -- '*.sh' 'collect' 'kit3' 'harness-server' | xargs -0 -r shellcheck -S error
+git ls-files -z -- '*.sh' 'collect' 'kit3' 'harness-server' 'accelerator-app' | xargs -0 -r -n1 bash -n
+git ls-files -z -- '*.sh' 'collect' 'kit3' 'harness-server' 'accelerator-app' | xargs -0 -r shellcheck -S error
 (git ls-files -z -- '*.json' | while IFS= read -r -d '' f; do python3 -m json.tool "$f" > /dev/null || { echo "Invalid JSON: $f" >&2; exit 1; }; done)
 python3 scripts/check_php_snippets.py --require-php   # lints every complete ```<?php``` block in tracked Markdown
 python3 scripts/context_budget.py --check              # startup context-price ceilings per edition (scripts/token_budget.json)

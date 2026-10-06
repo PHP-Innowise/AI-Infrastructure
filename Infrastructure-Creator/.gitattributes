@@ -85,6 +85,7 @@
 .claude/skills/memory-seed/assets/scripts/context_retrieval.py -diff linguist-generated=true
 .claude/skills/memory-seed/assets/scripts/telemetry.py -diff linguist-generated=true
 .claude/skills/memory-seed/assets/scripts/validate.py -diff linguist-generated=true
+.claude/skills/memory-seed/assets/scripts/workspace_roots.py -diff linguist-generated=true
 .claude/skills/memory-seed/assets/templates/chunk.md -diff linguist-generated=true
 .claude/skills/policy-forge/SKILL.md -diff linguist-generated=true
 .claude/skills/profile-synthesizer/SKILL.md -diff linguist-generated=true
@@ -223,6 +224,7 @@
 .cursor/skills/memory-seed/assets/scripts/context_retrieval.py -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/scripts/telemetry.py -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/scripts/validate.py -diff linguist-generated=true
+.cursor/skills/memory-seed/assets/scripts/workspace_roots.py -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/templates/chunk.md -diff linguist-generated=true
 .cursor/skills/policy-forge/SKILL.md -diff linguist-generated=true
 .cursor/skills/profile-synthesizer/SKILL.md -diff linguist-generated=true

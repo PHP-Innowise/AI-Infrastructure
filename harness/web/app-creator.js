@@ -9,7 +9,7 @@ function renderAccelerators() {
     const actions = el('div','accelerator-actions'); const identity = `${kit.id} ${kit.name}`.toLowerCase();
     if (Array.isArray(kit.editions)) {
       const label = el('label','field','Edition'); const select = el('select'); select.id = 'preview-edition'; for (const edition of kit.editions) { const option = el('option','',typeof edition === 'string' ? edition : edition.name); option.value = typeof edition === 'string' ? edition : edition.id; select.append(option); } label.append(select);
-      const button = el('button','button','Open project setup'); button.type = 'button'; button.addEventListener('click',() => openProjectSetup($('accelerator-project').value,select.value)); actions.append(label,button); content.append(actions,el('p','small-note','Choose target tools, review file changes, then install from Projects & Setup.')); content.append(startupContextBlock());
+      const button = el('button','button','Install into the project'); button.type = 'button'; button.addEventListener('click',() => openProjectSetup($('accelerator-project').value,select.value)); actions.append(label,button); content.append(actions,el('p','small-note','Sessions already use this edition without installing it. Install only to put its files in the project\'s Git: choose target tools and review file changes under Install into project.')); content.append(startupContextBlock());
     } else if (identity.includes('kit3') || identity.includes('open-source') || identity.includes('open source')) {
       const button = el('button','button','Explore the catalog'); button.type = 'button'; button.addEventListener('click',() => setView('kit3')); actions.append(button); content.append(actions);
     } else {

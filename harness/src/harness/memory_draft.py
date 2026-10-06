@@ -1,14 +1,14 @@
-"""Save to memory: the draft a linked run leaves, and the checks before saving it.
+"""Project memory drafts: what a linked run leaves, and the checks before saving it.
 
 A session linked to a Brain task asks its agent to close each run with a
 `memory-draft` block. The agent is the one party that knows what the run
 established, and agents left to policy alone almost never record it: on four
 real installations 23 of 24 tasks held nothing but the automatic checkpoint.
 
-By default the Harness saves the draft itself when the run completes, keeping
-what the workspace can back and saying in every record that no person reviewed
-it. A session opened for review shows the draft instead, and a person edits and
-confirms it before the Harness runs the runtime's own commands.
+The Harness saves the draft itself when the run completes, keeping what the
+workspace can back and saying in every record that no person reviewed it. A
+session opened for review reviews its retrieved context before each turn; its
+draft is saved the same way.
 """
 from __future__ import annotations
 
@@ -43,16 +43,15 @@ REQUEST = (
     "guess; use [] when there is none. Never include secrets, personal data, logs or "
     "transcripts. "
 )
-REVIEWED = "A person reviews the draft before anything is saved."
 AUTOMATIC = ("The Harness saves the draft to project memory as written, with no review, "
              "so leave out anything you did not verify.")
 # Every record an unattended save writes says so, next to the runtime's own audit trail.
 AUTOMATIC_REASON = "Saved automatically when a Harness run completed; agent-attested, not reviewed by a person"
 
 
-def instruction(review):
-    """What a linked run's agent is asked to end with, and who reads it next."""
-    return REQUEST + (REVIEWED if review else AUTOMATIC)
+def instruction():
+    """What a linked run's agent is asked to end with, and what happens to it."""
+    return REQUEST + AUTOMATIC
 
 
 def _clip(value, limit):
@@ -100,7 +99,7 @@ def parse(text):
 
 
 def latest(sessions, sid):
-    """What the session's last run left for the Save to memory form.
+    """What the session's last run left as its memory draft.
 
     `drafted` carries the draft; `unreadable` means a block was there but did
     not parse; `missing` means the run replied without one; `none` means no run
@@ -269,7 +268,7 @@ def summary(state, result=None):
         if promoted:
             text += " Promoted to the Memory Bank as " + ", ".join(promoted) + "."
         if held:
-            text += f" {held} held back from the Memory Bank; see Durable memory."
+            text += f" {held} held back from the Memory Bank; they stay in Project Brain."
     if not result.get("ok"):
         text += " Stopped: " + (result.get("error") or "the runtime did not finish.")
         if parts:

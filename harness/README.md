@@ -87,7 +87,7 @@ recovery requires an explicit resume and an explicit dispatch retry after an
 ambiguous interruption. Inspect partial edits before accepting changed sources.
 Completed dispatches are skipped, and server restart never automatically resumes
 work. The folder picker registers external service roots; existing manifests
-can also use roots registered in **Projects & Setup**. The manifest
+can also use project folders chosen in **Sessions**. The manifest
 cannot grant host filesystem access. See the [system orchestration guide](../docs/AI-SYSTEM-ORCHESTRATION.md#harness-ui).
 
 ## Infrastructure Creator in the browser
@@ -285,8 +285,10 @@ From the repository root:
 
 `start` detaches the server from the terminal. `serve` keeps it in the
 foreground. Repeat `--project` to register more directories; without it,
-the current directory is registered. **Projects & Setup** can register additional
-existing directories while the server is running. UI registrations persist across
+the current directory is registered - unless it is this clone, in which case the
+browser starts by asking for a project folder, as DeepSeek Harness asks for a
+workspace. **Sessions** registers additional folders while the server is running
+(**Choose a project folder**). UI registrations persist across
 restarts alongside the command-line projects. Stop and start again to change
 server options such as its port or provider executable:
 
@@ -304,21 +306,89 @@ Authenticate using each native CLI in a terminal before running browser
 tasks. Existing native credentials remain managed by that CLI. A detected
 executable does **not** prove that its account is logged in.
 
+**Sessions** therefore asks each found CLI whether it is signed in. These
+commands make no model call and take well under a second:
+
+| Provider | Asked with | Sign in with |
+| --- | --- | --- |
+| Claude Code | `claude auth status --json` (`loggedIn`) | `claude auth login`, or `/login` inside `claude` |
+| Codex | `codex login status` (exit status) | `codex login` |
+| Cursor Agent | `cursor-agent status --format json` (`isAuthenticated`) | `cursor-agent login` |
+
+A provider whose CLI says it is not signed in is listed as
+`Claude Code · not signed in`. A note names the sign-in command and, for a new
+session, offers a provider that is signed in (**Use Codex**). The page asks
+again when it regains focus, so signing in from a terminal clears the note.
+The check is advisory and never refuses a run. A CLI set up for another backend
+reports `unknown` and gets no note: Bedrock, Vertex, a key in the environment
+(`ANTHROPIC_API_KEY`, `CODEX_API_KEY`, `CURSOR_API_KEY`, and so on) or a custom
+Codex provider. When a run fails because the CLI refused its account, as with
+an expired Claude OAuth sign-in, the session error names the provider and the
+command that signs it in, instead of the general failure. The command shows the
+executable's path when the Harness found the CLI outside `PATH`.
+
+### Desktop application
+
+To start the accelerator like any installed application, run once from the
+clone (in Git Bash on Windows):
+
+```bash
+./accelerator-app install
+```
+
+**AI Accelerator**, with the hare icon, then appears among the installed
+applications:
+
+| Platform | Where it appears | What is written |
+| --- | --- | --- |
+| Linux (GNOME, KDE and other XDG desktops) | the application menu and search | `~/.local/share/applications/ai-accelerator.desktop`, `~/.local/share/icons/hicolor/*/apps/ai-accelerator.*` |
+| macOS | Launchpad, Spotlight, `~/Applications` | `~/Applications/AI Accelerator.app` |
+| Windows | the Start menu, and **Settings › Apps › Installed apps** with **Uninstall** | a Start menu shortcut, `%APPDATA%\ai-infrastructure-harness\ai-accelerator.ico`, an Uninstall entry under `HKEY_CURRENT_USER` |
+
+A click runs `./accelerator-app open`. If the server is not running, it starts
+it from the clone, as `./harness-server start` does, so the browser asks for a
+project folder. Then it opens the server in the default browser. The entry runs
+the clone itself, so `git pull` updates the application, and nothing else is
+copied. On Linux, the icon's menu also has **Stop the accelerator server**.
+
+A desktop launch lacks the `PATH` additions of a shell profile, such as
+`~/.local/bin`, nvm or Homebrew, where the Claude, Codex and Cursor CLIs, and
+often Python itself, usually live. The application entry therefore names the
+Python that ran `install` (`ACCELERATOR_APP_PYTHON`; the launcher falls back to
+`python3` and `python`). `install` also records the installing shell's `PATH` in
+`app.json`, and `open` puts it in front of the desktop's own. The file is in
+`~/.config/ai-infrastructure-harness/` on Linux,
+`~/Library/Application Support/ai-infrastructure-harness/` on macOS and
+`%APPDATA%\ai-infrastructure-harness\` on Windows. Run `install` again after
+moving the clone or installing a new CLI. When the server cannot start, the
+reason appears as a desktop notification (a message box on Windows) and in
+`launcher.log` beside `app.json`.
+
+```bash
+./accelerator-app status     # is the application installed, is the server running
+./accelerator-app stop       # stop the server
+./accelerator-app uninstall  # remove the application; projects, sessions and memory stay
+```
+
+`harness/web/icons/ai-accelerator.svg` is the icon's source. The PNG sizes next
+to it are rendered from it with `rsvg-convert -w N -h N`, and the Windows ICO
+and macOS ICNS are built from those PNGs at install time. The browser tab shows
+the same hare, with a badge while a run is active, needs you or has ended.
+
 ### Workspace options
 
-The sidebar has six sections: **Sessions**, **System Orchestration**, **Knowledge** (Memory use,
+The sidebar has five sections: **Sessions**, **System Orchestration**, **Knowledge** (Memory use,
 Project Brain, Memory bank and Context files tabs), **Skills** (Library and Create skill
-tabs), **Accelerators** (Overview, Infrastructure Creator and Open Source Kit
-tabs) and **Projects & Setup**. Every view has its own address, such as
+tabs) and **Accelerators** (Overview, Infrastructure Creator, Open Source Kit and
+Install into project tabs). Every view has its own address, such as
 `#/brain` or `#/creator`, so a reload or the browser's Back button returns to it.
 The **Project** selector at the top of the sidebar applies to every view; choosing
-another project while a session is open starts a new session draft for it.
+another project while a session is open starts a new session draft for it, and its
+last entry, **＋ Choose a project folder…**, adds a folder the way the Sessions
+**Project** chip does.
 
-- **Projects & Setup:** add an existing project, inspect its Git state and
-  accelerator readiness, select an edition and target tools, then preview and
-  install the reviewed files. The resulting project is available in the session,
-  skills and knowledge selectors immediately.
-- **Sessions:** registered project, Claude/Codex/Cursor, model and thinking effort,
+- **Sessions:** the project folder (**Project** chip: choose a folder, see and switch
+  its attached accelerator edition, approve its Codex hooks), Claude/Codex/Cursor, model and thinking effort,
   Workspace/Plan/Review workflow, Plan/Edit mode, project memory (on by
   default), additional-agent switch and a concurrent helper limit (1–40, default 3).
   Shows the selected project's Git branch and changes, with a refresh control.
@@ -379,8 +449,9 @@ another project while a session is open starts a new session draft for it.
   **Infrastructure Creator** tab for the full Scan → Review → Generate → Apply
   workflow and manifest-aware updates. A selected run shows its phase as five
   steps (Scan, Review profile, Generate, Review files, Apply); **New run** opens
-  the form for another one. Kit 2 opens the **Projects & Setup**
-  installer for Laravel, Symfony, PHP Core or WordPress. Its **Startup context
+  the form for another one. Kit 2 opens **Install into project**, the
+  installer for Laravel, Symfony, PHP Core or WordPress, for a team that wants
+  an edition's files in the project's Git (sessions already use it attached). Its **Startup context
   per edition** table lists the exact bytes each edition puts in front of the
   model before any work: AGENTS.md and the skill, command and agent listings.
   The table sets them against the ceilings `scripts/context_budget.py --check`
@@ -851,8 +922,28 @@ list opens. Command lists start the native CLIs, so their routes need the page's
 
 ### Connect and prepare a project
 
-Open **Projects & Setup** and choose **Browse…** to navigate local folders, or
-enter an absolute path directly. The folder picker provides Home, Parent folder,
+Choose the project in **Sessions**, as DeepSeek Harness chooses a workspace: the
+**Project** chip (or **Choose a project folder** on the empty session, or the last
+entry of the sidebar **Project** selector) opens a folder browser. The chosen
+folder is registered and opened in a new session draft, and a PHP project gets its
+accelerator edition **attached** from this clone; nothing is written into the
+project. The edition comes from the project's own files (`laravel/framework` or
+`artisan` → Laravel, `symfony/framework-bundle` or `bin/console` with
+`config/bundles.php` → Symfony, WordPress packages, `wp-config.php` or a
+theme/plugin header → WordPress, any other Composer or PHP project → PHP Core).
+Sessions launch the native CLI with the edition from the clone - Claude Code
+through `--add-dir`, `--append-system-prompt-file` and merged `--settings`, Codex
+through `developer_instructions` and session hooks, Cursor Agent through
+`--plugin-dir` - and Knowledge, Memory use and session memory work on the
+accelerator's state for the project in this server's state directory
+(`attached/<project id>`). The **Project** chip's panel shows the folder, the clone
+and the state directory, switches or detaches the edition, and for Codex records
+the one-time hook approval (**Trust accelerator hooks in Codex**). A project with
+an installed accelerator keeps using its own files. See
+[docs/ATTACHED-MODE.md](../docs/ATTACHED-MODE.md).
+
+The folder browser navigates local folders, or takes an absolute path
+directly. The folder picker provides Home, Parent folder,
 hidden folders, and a case-insensitive name search through subfolders. Choose
 **Use this folder**, then **Add project**. It browses the computer running the
 server; no project files are uploaded or read. Recursive search skips dependency
@@ -866,7 +957,9 @@ provider CLIs and installed policy/context files; CLI presence does not establis
 authentication. Setup does not inspect working-tree changes or run project Git
 filters; the session workspace controls retain their full Git status check.
 
-Choose an edition and one or more tools. Preview runs the existing accelerator
+To put the accelerator's files into the project instead - for a team that
+wants them in its own Git history - open **Accelerators › Install into project**,
+choose an edition and one or more tools. Preview runs the existing accelerator
 installer in private staging, using its versioned inventory and merge rules.
 Review the file actions, diffs and any collisions before installing. Supported
 root-file merges retain project policy and ignore entries; an existing project
@@ -1102,49 +1195,38 @@ memory still runs by itself for it. In a project without a governed context
 runtime, sessions start with excerpts of the project's reference files instead of
 retrieved memory, unless a task was chosen explicitly.
 
-#### Review by hand
+#### Review context by hand
 
-Tick **Review context and memory by hand** to restore the reviewed flow. It needs a
-context query. **Prepare session** creates the workspace first, binds the task there
-and retrieves a bounded context capsule. Inspect the capsule before choosing **Run
-with this context**. A bar above it shows how much of the 8,000-character cap the
-capsule uses, split into Project Brain, Memory bank and Rules & docs, and names the
-items the runtime dropped to fit and the characters repeated across the capsule's
-views. These counts are exact, measured on the server the way the runtime measures
-the cap. The note beside the button estimates what the capsule adds to the turn at
-3.6 characters per token. The provider receives that saved capsule; the server
-checks the task revision and source contents again before launching it. Changed
-context requires a fresh preview. Each chat follow-up also prepares a new capsule.
-These explicit retrievals disable the runtime's repeat-query heuristic while
-retaining its privacy and source eligibility rules. Sessions linked before memory
-ran by itself keep this flow.
+Tick **Review context by hand** to review each turn's context before it runs. It
+needs a context query. **Prepare session** creates the workspace first, binds the
+task there and retrieves a bounded context capsule. Inspect the capsule before
+choosing **Run with this context**. A bar above it shows how much of the
+8,000-character cap the capsule uses, split into Project Brain, Memory bank and
+Rules & docs, and names the items the runtime dropped to fit and the characters
+repeated across the capsule's views. These counts are exact, measured on the
+server the way the runtime measures the cap. The note beside the button estimates
+what the capsule adds to the turn at 3.6 characters per token. The provider
+receives that saved capsule; the server checks the task revision and source
+contents again before launching it. Changed context requires a fresh preview. Each
+chat follow-up also prepares a new capsule. These explicit retrievals disable the
+runtime's repeat-query heuristic while retaining its privacy and source eligibility
+rules. Sessions linked before memory ran by itself keep this flow.
 
-Task actions stay in the session's original workspace and bank, including when a
-worktree is used. A committed task can be rebound to a rebuilt local index without
-creating a second task. The reviewed capsule survives server restarts in session
-history; canonical task and knowledge records remain owned by the project runtime.
-Offline Fleet demonstrations cannot link a real task.
+A reviewed run's memory draft is saved when the run completes, as in any other
+session, and the conversation says what was saved. Task actions stay in the
+session's original workspace and bank, including when a worktree is used. The
+reviewed capsule survives server restarts in session history; canonical task and
+knowledge records remain owned by the project runtime. Offline Fleet demonstrations
+cannot link a real task.
 
-**Save to memory.** A reviewed run's draft is not saved by itself (762 characters
-of instruction per launch). When the run finishes, **Save to memory** under
-**Record result & durable memory** shows the draft as a form. Edit it, uncheck what
-should not be kept, and confirm that you checked each kept learning against its
-sources. Saving does what the automatic save does, with the learnings recorded as
-verified by you; if automatic promotion is off, propose them under **Durable
-memory** below. The commands run in turn; if one fails, the result lists what was
-already saved. A run that left no draft, or one that could not be read, leaves the
-form empty to fill by hand.
-
-After a successful run, explicitly enter the task outcome and verification to
-complete it at its current revision. Process success never completes the task
-automatically. To retain reusable knowledge by hand, create and verify a separate
-finding or decision, resolve or accept it, then propose its content for Memory Bank
-review. Only eligible verified records with fresh sources and allowed privacy can be
-proposed or applied. Task records cannot be promoted. Manual proposals require an
-independent reviewer and retain the runtime's source revision checks. The project's
-automatic promotion setting is displayed and remains unchanged. Prompts,
-transcripts and free assistant output never reach durable memory; only the fields
-of a memory draft do.
+The conversation has no record or promotion tools. To complete a task with its
+outcome and verification, or to create and verify a finding or decision by hand,
+use **Knowledge › Project Brain**. Process success never completes a task
+automatically. A Memory Bank proposal by hand goes through the project's runtime:
+`context.py promote-propose`, `promote-review` and `promote-apply`. Manual proposals
+require an independent reviewer and keep the runtime's source revision checks.
+Prompts, transcripts and free assistant output never reach durable memory; only the
+fields of a memory draft do.
 
 ### Fleet review setup and use
 

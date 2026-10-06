@@ -203,12 +203,14 @@ def claude_settings(agents_enabled=False, agent_count=3, effort=None):
     return json.dumps(settings, separators=(',', ':'))
 
 
-def claude_commands(executable, cwd, settings, lock_fd=None, owner=None):
+def claude_commands(executable, cwd, settings, lock_fd=None, owner=None, extra=()):
     """Claude Code's own command list for print mode in cwd: name, description, argument hint, aliases, built-in.
-    The probe runs no hooks: SessionStart hooks would act on the checkout (and on sessions running in it)."""
+    The probe runs no hooks: SessionStart hooks would act on the checkout (and on sessions running in it).
+    `extra` carries an attached accelerator's `--add-dir`, whose commands and skills then appear as well."""
     settings = json.dumps({**json.loads(settings), 'disableAllHooks': True}, separators=(',', ':'))
     command = providers.command_argv([executable], 'claude') + [
-        '--print', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--settings', settings]
+        '--print', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--settings', settings,
+        *extra]
     env = {**os.environ}
     env.pop('CONTEXT_CAPSULE_DELIVERED', None)
     def answer(message, write):
@@ -366,13 +368,14 @@ class Catalog:
             raise SessionError('This provider CLI is unavailable.')
         return found['executable']
 
-    def claude(self, cwd, settings, newer_than=None):
+    def claude(self, cwd, settings, newer_than=None, extra=()):
         try:
             executable = self._executable('claude')
         except SessionError as error:
             return [], str(error)
-        return self._cached(('claude', executable, os.path.normcase(str(cwd)), settings),
-                            lambda: claude_commands(executable, cwd, settings, self.sessions.runner_lock, self.sessions), newer_than)
+        return self._cached(('claude', executable, os.path.normcase(str(cwd)), settings, tuple(extra)),
+                            lambda: claude_commands(executable, cwd, settings, self.sessions.runner_lock, self.sessions, extra),
+                            newer_than)
 
     def codex(self, cwd):
         try:
@@ -382,10 +385,14 @@ class Catalog:
         return self._cached(('codex', executable, os.path.normcase(str(cwd))),
                             lambda: codex_skills(executable, cwd, self.sessions.runner_lock, self.sessions))
 
-    def listing(self, provider, cwd, settings=None):
-        """What the composer offers: `commands` after a leading `/`, `skills` after `$` (Codex)."""
+    def listing(self, provider, cwd, settings=None, project_id=None):
+        """What the composer offers: `commands` after a leading `/`, `skills` after `$` (Codex).
+        An accelerator attached to `project_id` adds its own, as the launch will."""
+        home = self.sessions.accelerators.home(project_id, cwd) if project_id else None
+        attached = self.sessions.accelerators.skills(project_id, provider) if home else []
         if provider == 'claude':
-            native, error = self.claude(cwd, settings or claude_settings())
+            extra = ('--add-dir', str(home)) if home else ()
+            native, error = self.claude(cwd, settings or claude_settings(), extra=extra)
             commands = [{**item, 'kind': 'page' if item['name'] in CLAUDE_PAGE else 'native',
                          'action': CLAUDE_PAGE.get(item['name'])} for item in native]
             return {'provider': provider, 'commands': commands, 'skills': [], 'error': error}
@@ -395,12 +402,17 @@ class Catalog:
                          'kind': 'page' if item['action'] else 'prompt', 'action': item['action']} for item in CODEX_COMMANDS]
             commands += [{'name': item['name'], 'description': item['description'], 'hint': item['hint'], 'aliases': [],
                           'kind': 'prompt', 'action': None} for item in codex_prompts()]
-            return {'provider': provider, 'commands': commands,
-                    'skills': [{key: item[key] for key in ('name', 'description', 'path')} for item in skills], 'error': error}
+            listed = [{key: item[key] for key in ('name', 'description', 'path')} for item in skills]
+            names = {item['name'] for item in listed}
+            listed += [item for item in attached if item['name'] not in names]
+            return {'provider': provider, 'commands': commands, 'skills': listed, 'error': error}
         if provider == 'cursor':
             skills, _ = workspace_skills(cwd, provider)
             commands = [{'name': item['name'], 'description': item['description'], 'hint': item['hint'], 'aliases': [],
                          'kind': 'skill', 'action': None} for item in skills if item['user']]
+            names = {item['name'] for item in commands}
+            commands += [{'name': item['name'], 'description': item['description'], 'hint': '', 'aliases': [],
+                          'kind': 'skill', 'action': None} for item in attached if item['name'] not in names]
             return {'provider': provider, 'commands': commands, 'skills': [], 'error': None}
         raise SessionError('Choose a provider.')
 

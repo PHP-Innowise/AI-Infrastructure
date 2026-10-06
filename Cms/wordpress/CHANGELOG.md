@@ -5,6 +5,10 @@ context-runtime changes are also recorded in the repository-root changelog.
 
 ## Unreleased
 
+### Added
+
+- `.cursor-plugin/plugin.json` loads this edition in place for an attached Cursor Agent session (`--plugin-dir`), pointing at the edition's own `.cursor` rules, skills, agents, commands and `hooks.json`; it is excluded from installs. The SessionStart banner (`local-context.sh`) names the clone and the state directory when the edition is attached, and describes the project rather than the hook's working directory. See [docs/ATTACHED-MODE.md](../../docs/ATTACHED-MODE.md).
+
 ### Fixed
 
 - `AGENTS.md` describes the memory the hooks actually run. Its Agent Behavior, Memory Bank and Project Brain sections demanded a caller-supplied task ID and `start` before work, forbade saying that hooks index or inject anything, and told `checkpoint` not to derive a task from the branch - while the shipped hooks take the task from `CONTEXT_TASK_ID` or the branch, inject a Task Capsule on every prompt and checkpoint the branch task on Stop, so one piece of work ended up with two tasks. A new Working Memory section states the hook behaviour and what an agent adds (`retrieve` before material decisions, `update --revision auto` for what a checkpoint cannot see, explicit `complete` after verification), and one Memory Bank And Project Brain section replaces the two old ones. The file shrinks 17993 -> 14925 bytes (`agents_md_bytes` ceiling tightened). The `checkpoint` skill gains a governed workflow (`turn --flush`, then a revision-checked `update`) instead of declining, the `memory` skill points at `../checkpoint/SKILL.md` so the path resolves in every tool's tree, and DOD.md scopes the metadata-only rule to the SessionStart hook.

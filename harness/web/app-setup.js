@@ -1,8 +1,15 @@
-// Projects & Setup: project registration, the folder picker, readiness and edition installation.
+// Choosing the project folder (Sessions, like DeepSeek Harness's workspace), its attached accelerator,
+// the folder picker, and Accelerators › Install into project: readiness and edition installation.
 // Classic script loaded in order by index.html; top-level names are shared with the other app-*.js files.
 'use strict';
+function projectChoiceLabel(item,projects) { const project = projects.find(candidate => candidate.id === item.id); return `${item.name}${project?.available === false ? ' · unavailable' : ''}${project?.accelerator?.mode === 'attached' ? ` · ${project.accelerator.edition} attached` : ''}`; }
+const CHOOSE_FOLDER = '__choose-folder__';
 function setProjectChoices(select,projects,previous,allowUnavailable = false) {
-  setOptions(select,projects.map(project => ({...project,...(allowUnavailable ? {available:true} : {})})),item => `${item.name}${projects.find(project => project.id === item.id)?.available === false ? ' · unavailable' : ''}`,item => item.id,previous);
+  setOptions(select,projects.map(project => ({...project,...(allowUnavailable ? {available:true} : {})})),item => projectChoiceLabel(item,projects),item => item.id,previous);
+  if (select.id === 'project-switcher') {
+    if (!projects.length) select.replaceChildren(Object.assign(el('option','','No project folder yet'),{value:''}));
+    const choose = el('option','','＋ Choose a project folder…'); choose.value = CHOOSE_FOLDER; select.append(choose);
+  }
   if (previous && projects.some(project => project.id === previous)) select.value = previous;
 }
 const folderPicker = {path:null,parent:null,valid:false,controller:null,epoch:0,onSelect:null,opener:null};
@@ -33,7 +40,26 @@ async function loadFolderPicker(path,query = '') {
     if (epoch === folderPicker.epoch) { folderPicker.controller = null; $('folder-picker-location').disabled = false; $('folder-picker-location-form').querySelector('button').disabled = false; $('folder-picker-list').setAttribute('aria-busy','false'); $('folder-picker-use').disabled = !folderPicker.valid; $('folder-picker-search').disabled = !folderPicker.valid; $('folder-picker-parent').disabled = !folderPicker.valid || !folderPicker.parent; }
   }
 }
-$('setup-browse').addEventListener('click',() => { if ($('setup-browse').disabled) return; chooseProjectFolder($('setup-project-path').value.trim(),folder=>{ $('setup-project-path').value=folder; showError('setup-register-error',''); $('setup-register-status').hidden=true; $('setup-register').focus(); },$('setup-browse')); });
+// Sessions pick their project the way DeepSeek Harness picks a workspace: choose a folder, and it is
+// registered, given the accelerator edition its files point to (attached from this clone, nothing written
+// into it), and opened in a new session draft.
+async function addProjectFolder(path) {
+  if (setupState.registerPending) return; setupState.registerPending = true; showError('project-choose-error',''); updateControls();
+  try {
+    const data = await api('/api/projects',{method:'POST',body:{path}});
+    if (!data.project?.id || !Array.isArray(data.projects)) throw new Error('The runner returned an incomplete registration result. Choose the folder again.');
+    updateRegisteredProjects(data.projects,data.project.id); setupState.registerPending = false;
+    if (state.selectedId || $('project').value !== data.project.id) newSession('',data.project.id,true);
+    switchProject(data.project.id); loadProjectAccelerator(true);
+  } catch (error) { showError('project-choose-error',textError(error)); sessionOptions.open = 'project'; renderSessionOptions(); }
+  finally { setupState.registerPending = false; updateControls(); }
+}
+function chooseSessionProject(opener) {
+  if (!state.bootstrap || state.authFailed || setupState.registerPending) return;
+  chooseProjectFolder(projectFor($('project').value)?.path || '',addProjectFolder,opener,'Choose a project folder','Pick the folder of the project to work on. It is added to your projects; a PHP project gets its accelerator edition from this clone, and nothing is written into the folder.');
+}
+$('project-choose-folder').addEventListener('click',() => chooseSessionProject($('project-choose-folder')));
+$('welcome-choose-folder').addEventListener('click',() => chooseSessionProject($('welcome-choose-folder')));
 $('folder-picker-close').addEventListener('click',() => $('folder-picker').close());
 $('folder-picker').addEventListener('close',() => { folderPicker.controller?.abort(); folderPicker.epoch++; folderPicker.opener?.focus(); });
 $('folder-picker-location-form').addEventListener('submit',event => { event.preventDefault(); loadFolderPicker($('folder-picker-location').value.trim()); });
@@ -60,8 +86,6 @@ function setupTargetLabel(selection) { const project = projectFor(selection.proj
 function invalidateSetupPreview(message = '') { setupState.previewEpoch++; setupState.preview = null; clearTimeout(setupState.expiryTimer); setupState.expiryTimer = null; $('setup-preview').hidden = true; $('setup-preview-files').replaceChildren(); if (!setupState.pending) { $('setup-action-status').textContent = message; $('setup-action-status').hidden = !message; showError('setup-action-error',''); } updateSetupControls(); }
 function updateSetupControls() {
   const ready = Boolean(state.bootstrap) && !state.authFailed; const busy = Boolean(setupState.pending); const locked = busy || setupState.registerPending || setupState.projectsPending; const project = projectFor($('setup-project').value); const available = project && project.available !== false && (setupState.projectId !== project.id || setupState.data?.available !== false);
-  $('setup-project-path').disabled = !ready || locked; $('setup-register').disabled = !ready || locked; $('setup-register').textContent = setupState.registerPending ? 'Adding project…' : 'Add project';
-  $('setup-browse').disabled = !ready || locked;
   $('setup-project').disabled = !state.bootstrap || locked; $('setup-refresh-projects').disabled = !ready || locked;
   $('setup-edition').disabled = !ready || locked || setupState.loading || !available || !setupState.data?.editions?.length;
   for (const input of $('setup-tools').querySelectorAll('input')) input.disabled = !ready || locked || setupState.loading || !available;
@@ -84,6 +108,57 @@ function renderSetupReadiness() {
   if (data.scope?.length) $('setup-diagnostics').append(el('p','knowledge-note',data.scope.map(String).join(' ')));
   for (const diagnostic of data.diagnostics || []) $('setup-diagnostics').append(el('p','memory-notice',String(diagnostic)));
 }
+const attachState = {pending:null,codexEpoch:0,epoch:0,projectId:null,data:null};
+// The Project chip's panel: the session's folder and the accelerator lent to it.
+async function loadProjectAccelerator(force = false) {
+  const projectId = $('project').value; const project = projectFor(projectId);
+  $('project-panel-path').textContent = project ? project.path : 'No project folder is chosen yet. Choose one to start a session.';
+  if (!project) { attachState.projectId = null; attachState.data = null; renderProjectAccelerator(); return; }
+  if (!force && attachState.projectId === projectId && attachState.data) { renderProjectAccelerator(); return; }
+  const epoch = ++attachState.epoch; attachState.projectId = projectId; attachState.data = null; renderProjectAccelerator();
+  try { const data = await api(`/api/projects/${encodeURIComponent(projectId)}/accelerator`); if (epoch === attachState.epoch && projectId === $('project').value) { attachState.data = data; renderProjectAccelerator(); } }
+  catch (error) { if (epoch === attachState.epoch) showError('setup-attach-error',textError(error)); }
+}
+function renderProjectAccelerator() {
+  const info = attachState.data; $('setup-attach').hidden = !attachState.projectId; showError('setup-attach-error',''); $('setup-attach-codex').hidden = true;
+  if (!info) { $('setup-attach-summary').textContent = attachState.projectId ? 'Checking the accelerator for this project…' : ''; updateAttachControls(); return; }
+  const editions = (info.editions || []).map(id => ({id,name:id})); const selected = info.edition || info.detected || ''; setOptions($('setup-attach-edition'),[{id:'',name:'Choose an edition…'},...editions],item => item.name,item => item.id,selected);
+  if (info.mode === 'installed') $('setup-attach-summary').textContent = 'This project has its own installed accelerator; sessions use those files and nothing is attached.';
+  else if (info.mode === 'attached') $('setup-attach-summary').textContent = `${info.edition} is attached from ${info.home}. Nothing is installed in this project. Project Brain, Memory Bank and the index for it are kept in ${info.state}.`;
+  else $('setup-attach-summary').textContent = info.detected ? `Nothing is attached yet. The project points to ${info.detected} (${info.evidence}).` : `Nothing is attached. No edition fits automatically (${info.evidence}); choose one to attach.`;
+  updateAttachControls();
+  const codex = state.bootstrap?.providers?.find(provider => provider.id === 'codex');
+  if (info.mode === 'attached' && codex?.available && sessionOptions.open === 'project') loadCodexHooks(attachState.projectId);
+}
+function updateAttachControls() {
+  const info = attachState.data; const busy = Boolean(attachState.pending) || !info; const installed = info?.mode === 'installed'; const edition = $('setup-attach-edition').value;
+  $('setup-attach-edition').disabled = busy || installed; $('setup-attach-button').disabled = busy || installed || !edition || (info?.mode === 'attached' && info.edition === edition);
+  $('setup-attach-button').textContent = attachState.pending === 'attach' ? 'Attaching…' : info?.mode === 'attached' ? 'Switch edition' : 'Attach';
+  $('setup-detach-button').hidden = info?.mode !== 'attached'; $('setup-detach-button').disabled = busy; $('setup-detach-button').textContent = attachState.pending === 'detach' ? 'Detaching…' : 'Detach';
+  $('setup-attach-codex-trust').disabled = busy; $('setup-attach-codex-trust').textContent = attachState.pending === 'trust' ? 'Recording approvals…' : 'Trust accelerator hooks in Codex';
+}
+function renderCodexHooks(data) {
+  $('setup-attach-codex').hidden = false; const missing = data.total - data.trusted;
+  $('setup-attach-codex-status').textContent = missing ? `Codex runs the accelerator's hooks only after they are trusted once: ${data.trusted} of ${data.total} trusted. Trusting records their hashes in your Codex configuration, as its /hooks review does.` : `Codex trusts all ${data.total} accelerator hooks.`;
+  $('setup-attach-codex-trust').hidden = !missing;
+}
+async function loadCodexHooks(projectId) {
+  const epoch = ++attachState.codexEpoch; $('setup-attach-codex').hidden = false; $('setup-attach-codex-status').textContent = 'Checking the accelerator hooks Codex trusts…'; $('setup-attach-codex-trust').hidden = true;
+  try { const data = await api(`/api/projects/${encodeURIComponent(projectId)}/accelerator/codex-hooks`); if (epoch === attachState.codexEpoch && projectId === attachState.projectId) renderCodexHooks(data); }
+  catch (error) { if (epoch === attachState.codexEpoch) $('setup-attach-codex-status').textContent = `Codex hook approval could not be checked: ${textError(error)}`; }
+}
+async function changeAttachment(action) {
+  const projectId = attachState.projectId; if (!projectId || attachState.pending) return; attachState.pending = action; showError('setup-attach-error',''); updateAttachControls();
+  try { const data = await api(`/api/projects/${encodeURIComponent(projectId)}/accelerator`,{method:'POST',body:action === 'attach' ? {action,edition:$('setup-attach-edition').value} : {action}}); if (Array.isArray(data.projects)) updateRegisteredProjects(data.projects); attachState.pending = null; attachState.data = data; renderProjectAccelerator(); renderSessionOptions(); }
+  catch (error) { showError('setup-attach-error',textError(error)); }
+  finally { attachState.pending = null; updateAttachControls(); }
+}
+async function trustCodexHooks() {
+  const projectId = attachState.projectId; if (!projectId || attachState.pending) return; attachState.pending = 'trust'; showError('setup-attach-error',''); updateAttachControls();
+  try { renderCodexHooks(await api(`/api/projects/${encodeURIComponent(projectId)}/accelerator/codex-hooks`,{method:'POST',body:{}})); }
+  catch (error) { showError('setup-attach-error',textError(error)); }
+  finally { attachState.pending = null; updateAttachControls(); }
+}
 function renderSetupTools() {
   const tools = setupState.data?.tools || []; const allowed = new Set(tools.map(tool => tool.id)); setupState.tools = new Set([...setupState.tools].filter(id => allowed.has(id)));
   if (!setupState.toolsInitialized && tools.length) { const initial = allowed.has($('provider').value) ? $('provider').value : allowed.has('codex') ? 'codex' : tools[0].id; setupState.tools.add(initial); setupState.toolsInitialized = true; }
@@ -105,17 +180,10 @@ async function loadSetup({preservePreview = false} = {}) {
 function openSetup(refresh = false) { if (!state.bootstrap) { updateSetupControls(); return; } if (!setupState.pending && (refresh || !setupState.data || setupState.projectId !== $('setup-project').value || setupState.preferredEdition)) loadSetup({preservePreview:!refresh}); else updateSetupControls(); }
 function openProjectSetup(projectId,edition) { if (!setupState.pending && !setupState.registerPending) { if (projectId && projectFor(projectId)) $('setup-project').value = projectId; setupState.preferredEdition = edition || null; invalidateSetupPreview(); } setView('setup'); }
 async function refreshProjects() {
-  if (!state.bootstrap || setupState.projectsPending || setupState.registerPending || setupState.pending) return; setupState.projectsPending = true; updateSetupControls(); showError('setup-register-error','');
+  if (!state.bootstrap || setupState.projectsPending || setupState.registerPending || setupState.pending) return; setupState.projectsPending = true; updateSetupControls(); showError('setup-readiness-error','');
   try { const data = await api('/api/projects'); updateRegisteredProjects(data.projects); if (state.view === 'setup') await loadSetup(); }
-  catch (error) { showError('setup-register-error',textError(error)); }
+  catch (error) { showError('setup-readiness-error',textError(error)); }
   finally { setupState.projectsPending = false; updateSetupControls(); }
-}
-async function registerProject(event) {
-  event.preventDefault(); if ($('setup-register').disabled || !$('setup-register-form').reportValidity()) return; const path = $('setup-project-path').value.trim(); if (!path.startsWith('/') || /[\x00-\x1f\x7f]/.test(path)) { showError('setup-register-error','Enter an absolute path to an existing local project folder.'); return; }
-  setupState.registerPending = true; showError('setup-register-error',''); $('setup-register-status').textContent = 'Registering this local folder…'; $('setup-register-status').hidden = false; updateSetupControls();
-  try { const data = await api('/api/projects',{method:'POST',body:{path}}); if (!data.project?.id || !Array.isArray(data.projects)) throw new Error('The runner returned an incomplete registration result. Refresh projects before retrying.'); updateRegisteredProjects(data.projects,data.project.id); $('setup-register-status').textContent = `Registered ${data.project.name || path}. The project is available without restarting the runner.`; $('setup-project-path').value = ''; invalidateSetupPreview(); await loadSetup(); }
-  catch (error) { $('setup-register-status').hidden = true; showError('setup-register-error',(error.status === 0 ? 'The registration result is uncertain. Refresh projects before trying again. ' : '') + textError(error)); }
-  finally { setupState.registerPending = false; updateSetupControls(); }
 }
 function renderSetupPreviewFiles() {
   const preview = setupState.preview; $('setup-preview-files').replaceChildren(); if (!preview) return; const filter = $('setup-preview-actions').value; const query = $('setup-preview-path').value.trim().toLowerCase(); const files = preview.files.filter(file => (filter === 'all' || filter === 'collision' ? filter === 'all' || file.action === 'collision' : file.action !== 'unchanged' && file.action !== 'kept') && file.path.toLowerCase().includes(query));
@@ -142,7 +210,8 @@ async function installSetup() {
   } catch (error) { if (epoch === setupState.previewEpoch) { $('setup-action-status').textContent = 'Installation was not confirmed.'; showError('setup-action-error',`${textError(error)} The preview is consumed. Refresh and generate a new preview before retrying.${error.status === 0 ? ' The connection was lost; some files may have been installed.' : ''}`); } }
   finally { if (epoch === setupState.previewEpoch) { setupState.pending = null; $('setup-preview').hidden = true; $('setup-preview-files').replaceChildren(); updateSetupControls(); if ($('setup-project').value === selection.project_id) await loadSetup({preservePreview:true}); if (confirmed) $('setup-action-status').textContent = setupState.data ? 'Installation complete. Project readiness refreshed.' : 'Installation complete. Refresh to inspect the project.'; } }
 }
-$('setup-register-form').addEventListener('submit',registerProject); $('setup-refresh-projects').addEventListener('click',refreshProjects); $('setup-project').addEventListener('change',() => loadSetup()); $('setup-edition').addEventListener('change',() => invalidateSetupPreview('Edition changed. Prepare a new preview.'));
+$('setup-refresh-projects').addEventListener('click',refreshProjects); $('setup-project').addEventListener('change',() => loadSetup()); $('setup-edition').addEventListener('change',() => invalidateSetupPreview('Edition changed. Prepare a new preview.'));
+$('setup-attach-edition').addEventListener('change',updateAttachControls); $('setup-attach-button').addEventListener('click',() => changeAttachment('attach')); $('setup-detach-button').addEventListener('click',() => changeAttachment('detach')); $('setup-attach-codex-trust').addEventListener('click',trustCodexHooks);
 $('setup-preview-button').addEventListener('click',previewSetup); $('setup-install-button').addEventListener('click',installSetup); $('setup-preview-actions').addEventListener('change',renderSetupPreviewFiles); $('setup-preview-path').addEventListener('input',renderSetupPreviewFiles);
 $('setup-start-session').addEventListener('click',() => { if (!$('setup-start-session').disabled) newSession('',$('setup-project').value); });
 $('setup-result-start').addEventListener('click',() => { const projectId = setupState.resultProjectId; if (projectId && projectFor(projectId) && !state.pending) newSession('',projectId); });

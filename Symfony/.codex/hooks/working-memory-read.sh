@@ -21,6 +21,18 @@ set -u
 [ "${CONTEXT_CAPSULE_DELIVERED:-}" = "1" ] && exit 0
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+# Installed, the accelerator, the project and its state are all ROOT_DIR.
+# Attached - a launcher lends this clone's edition to a project and names it
+# in ACCELERATOR_HOME - the project and the state directory are the
+# launcher's, so nothing is written into the clone or the project.
+PROJECT_DIR=$ROOT_DIR
+STATE_DIR=$ROOT_DIR
+accelerator_absolute() { case "$1" in /*|[A-Za-z]:[\\/]*) return 0 ;; esac; return 1; }
+if accelerator_absolute "${ACCELERATOR_STATE_DIR:-}" && accelerator_absolute "${ACCELERATOR_PROJECT_DIR:-}" \
+  && [ "$(cd "${ACCELERATOR_HOME:-/nonexistent}" 2>/dev/null && pwd -P)" = "$(cd "$ROOT_DIR" && pwd -P)" ]; then
+  PROJECT_DIR=$ACCELERATOR_PROJECT_DIR
+  STATE_DIR=$ACCELERATOR_STATE_DIR
+fi
 CONTEXT_CLI="$ROOT_DIR/memory-bank/scripts/context.py"
 BUDGET_SECONDS="${CONTEXT_HOOK_BUDGET:-5}"
 
@@ -53,7 +65,7 @@ if not isinstance(prompt, str):
 print(prompt)
 ' 2>/dev/null)
 
-TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$ROOT_DIR" branch --show-current 2>/dev/null)}"
+TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$PROJECT_DIR" branch --show-current 2>/dev/null)}"
 
 # One process refreshes all three layers and assembles the capsule. Splitting
 # them would index twice, because retrieval refreshes the index itself.
@@ -72,10 +84,10 @@ HOOK_STATUS=$?
 # the Python process was killed before it could append anything itself, so
 # the shell has to write this line or the turn leaves no trace at all. The
 # record carries a status and nothing else — no query, no paths.
-if [ -d "$ROOT_DIR/memory-bank/local" ] || mkdir -p "$ROOT_DIR/memory-bank/local" 2>/dev/null; then
+if [ -d "$STATE_DIR/memory-bank/local" ] || mkdir -p "$STATE_DIR/memory-bank/local" 2>/dev/null; then
   printf '{"at":"%s","hook_status":%s,"source":"hook"}\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$HOOK_STATUS" \
-    >> "$ROOT_DIR/memory-bank/local/refresh-health.ndjson" 2>/dev/null || true
+    >> "$STATE_DIR/memory-bank/local/refresh-health.ndjson" 2>/dev/null || true
 fi
 
 [ -n "$REPORT" ] || exit 0

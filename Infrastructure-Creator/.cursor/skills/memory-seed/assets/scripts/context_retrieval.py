@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+import workspace_roots
 from brain_runtime import (
     BrainError,
     LIFECYCLES,
@@ -169,6 +170,10 @@ _WM_DELIVERY_STOP_CURSOR = r'''# Capsule delivery: Cursor has no UserPromptSubmi
 # is rendered into an alwaysApply Cursor rule, which Cursor attaches to
 # every prompt of the next turn. The file is ignored local state, one turn
 # stale by design, and replaced only when a fresh render succeeds.
+# Attached, .cursor/rules is the shared clone's own rule folder, which every
+# project using the clone reads; the attaching launcher delivers the capsule
+# in the prompt instead.
+[ "$STATE_DIR" = "$ROOT_DIR" ] || exit 0
 RULES_DIR="$ROOT_DIR/.cursor/rules"
 RULE_FILE="$RULES_DIR/working-memory.mdc"
 CAPSULE_STATUS=1
@@ -227,7 +232,9 @@ _WM_DELIVERY_SESSION_CURSOR = r'''# Capsule delivery: Cursor has no UserPromptSu
 # branch switch does not serve the previous session's capsule. Nothing is
 # printed: the rule file is the only output.
 CAPSULE_BUDGET_SECONDS="${CONTEXT_HOOK_BUDGET:-5}"
-CAPSULE_TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$ROOT_DIR" branch --show-current 2>/dev/null)}"
+CAPSULE_TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$PROJECT_DIR" branch --show-current 2>/dev/null)}"
+# Attached, the rule folder is the shared clone's; see the stop hook.
+[ "$STATE_DIR" = "$ROOT_DIR" ] || exit 0
 RULES_DIR="$ROOT_DIR/.cursor/rules"
 RULE_FILE="$RULES_DIR/working-memory.mdc"
 CAPSULE=""
@@ -783,7 +790,7 @@ def codebase_map_drift(repository: Path, content: str) -> Optional[int]:
     if recorded is None:
         return None
     arguments = [
-        "git", "-C", str(repository), "rev-list", "--count",
+        "git", "-C", str(workspace_roots.project_root(repository)), "rev-list", "--count",
         f"{recorded.group(1)}..HEAD",
     ]
     scope = MAPPED_SCOPE_PATTERN.search(content)
@@ -850,8 +857,14 @@ def skill_tree_fingerprint(
     """
     if skill_stats is None:
         entries: list[SkillStat] = []
-        for edition in SKILL_EDITIONS:
-            root = repository / edition / "skills"
+        layout = workspace_roots.roots(repository)
+        trees = [
+            base / edition / "skills"
+            for base in dict.fromkeys((layout.tooling, layout.project))
+            for edition in SKILL_EDITIONS
+        ]
+        for root in trees:
+            edition = root.parent.name
             if not root.is_dir():
                 continue
             for path in sorted(root.glob("**/*.md")):
@@ -1510,7 +1523,9 @@ def index_documents(
         # SessionStart/prompt hot path (working-memory-read.sh -> refresh),
         # and it is fingerprint-cached above. The full MIRROR_RULES check
         # (full_mirror_drift) runs from `context.py parity` for CLI/CI.
-        parity_drift = skill_mirror_drift(repository, str(config["canonical_edition"]))
+        parity_drift = skill_mirror_drift(
+            workspace_roots.tooling_root(repository), str(config["canonical_edition"])
+        )
     brain_documents, brain_metadata, excluded, brain_links = _brain_documents(
         repository, config
     )
@@ -2160,7 +2175,7 @@ def _runtime_filter(
                 reason = "lifecycle"
         content: Optional[str] = None
         if reason is None:
-            path = repository / candidate["path"]
+            path = workspace_roots.resolve(repository, candidate["path"])
             try:
                 content = path.read_text(encoding="utf-8") if path.is_file() else None
             except OSError:
@@ -2476,11 +2491,16 @@ def _claude_imports(repository: Path) -> set[str]:
 
 def host_loaded_paths(repository: Path, host: str) -> set[str]:
     """Repository paths the host has already put in front of the model."""
+    project = workspace_roots.project_root(repository)
     loaded = set(HOST_LOADED_INSTRUCTIONS.get(host, ()))
     if host == "claude":
-        if not any((repository / name).is_file() for name in CLAUDE_INSTRUCTION_FILES):
+        if not any((project / name).is_file() for name in CLAUDE_INSTRUCTION_FILES):
             loaded.add("AGENTS.md")
-        loaded |= _claude_imports(repository)
+        loaded |= _claude_imports(project)
+    if workspace_roots.is_attached(repository):
+        # The attaching launcher hands the accelerator's policy to every host
+        # itself, so it never needs a capsule slot.
+        loaded.add((workspace_roots.tooling_root(repository) / "AGENTS.md").as_posix())
     return loaded
 
 

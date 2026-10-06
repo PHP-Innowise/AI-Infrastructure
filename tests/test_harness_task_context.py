@@ -145,23 +145,43 @@ class TaskContextTests(unittest.TestCase):
         from harness import memory_draft
         store = self.manager()
         self.linked_run(store)
-        self.assertIn(memory_draft.instruction(True), self.calls[-1]["prompt"])
+        self.assertIn(memory_draft.instruction(), self.calls[-1]["prompt"])
         unlinked = {key: value for key, value in self.options(store).items() if key != "brain"}
         sid = store.create(unlinked)["id"]
         self.wait_status(store, sid, "completed")
         self.assertNotIn("memory-draft", self.calls[-1]["prompt"])
 
-    def test_the_draft_a_run_leaves_reads_back_and_saves_through_the_runtime(self):
+    def test_a_reviewed_run_saves_its_draft_when_it_completes(self):
+        # Review covers the context before each turn; the run's draft is saved like any other, with no form to fill.
+        from harness import memory_draft
         self.fake.write_text(FAKE_DRAFT)
         store = self.manager()
         sid = self.linked_run(store)
+        info = store.brain_info(sid)
+        self.assertEqual("drafted", info["memory_draft"]["state"])
+        self.assertEqual(("The cobalt rule is checked at allocation.", ["Cover the release path."]),
+                         (info["task"]["progress"], info["task"]["next_steps"]))
+        findings = [record for record in info["records"] if record["type"] == "finding"]
+        self.assertEqual([("Cobalt allocation needs one owner", "resolved", "verified")],
+                         [(record["title"], record["status"], record["authority"]) for record in findings])
+        self.assertEqual({memory_draft.AUTOMATIC_REASON}, {item["reason"] for item in findings[0]["transitions"][-2:]})
+        saved = self.memory_events(store, sid)[-1]
+        self.assertTrue(saved["ok"], saved)
+        self.assertIn("Saved to project memory: the task's progress and next steps; "
+                      "finding “Cobalt allocation needs one owner”.", saved["text"])
+        chunk = next((self.project / "memory-bank/chunks").glob("MEM-*-*.md"), None)
+        self.assertIsNotNone(chunk)
+        self.assertIn("auto-promoted", chunk.read_text(encoding="utf-8"))
+
+    def test_the_save_api_records_a_checked_draft_through_the_runtime(self):
+        # The page no longer saves by hand; the API that records a person-checked draft still does.
+        store = self.manager()
+        sid = self.linked_run(store)
         before = store.brain_info(sid)
-        self.assertEqual("drafted", before["memory_draft"]["state"])
-        draft = before["memory_draft"]["draft"]
-        self.assertEqual("The cobalt rule is checked at allocation.", draft["progress"])
-
-        result = store.save_memory(sid, {**draft, "verified": True})
-
+        learning = {"type": "finding", "title": "Cobalt allocation needs one owner",
+                    "consequence": "Every cobalt allocation names exactly one owner.", "sources": ["specs/authority.md"]}
+        result = store.save_memory(sid, {"progress": "The cobalt rule is checked at allocation.",
+                                         "next_steps": ["Cover the release path."], "learnings": [learning], "verified": True})
         self.assertTrue(result["ok"], result)
         saved = result["saved"]
         self.assertGreater(saved["task"]["revision"], before["task"]["revision"])
@@ -176,8 +196,6 @@ class TaskContextTests(unittest.TestCase):
         promotion = saved["promotion"]
         self.assertTrue(promotion["enabled"], promotion)
         self.assertEqual(1, len(promotion["promoted"]), promotion)
-        chunk = next((self.project / "memory-bank/chunks").glob(promotion["promoted"][0]["memory_id"] + "-*.md"))
-        self.assertIn("auto-promoted", chunk.read_text(encoding="utf-8"))
 
     def test_saving_refuses_unconfirmed_or_unsourced_learnings_and_a_finished_task(self):
         store = self.manager()
@@ -225,7 +243,7 @@ class TaskContextTests(unittest.TestCase):
         self.assertIn(sessions.BRAIN_CONTEXT_HEADER + json.dumps(brain["capsule"], ensure_ascii=False) + "\n\n",
                       received["prompt"])
         self.assertIn("requires one owner.", received["prompt"])
-        self.assertIn(memory_draft.instruction(False), received["prompt"])
+        self.assertIn(memory_draft.instruction(), received["prompt"])
         # The project's own read hook stands down for a turn whose capsule is already in the prompt.
         self.assertEqual((brain["task_id"], "1"), (received["task_id"], received["delivered"]))
         # A turn's own retrieval stays in ignored local state, out of the project's history.

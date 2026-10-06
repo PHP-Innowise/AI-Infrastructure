@@ -11,8 +11,30 @@ echo "==============="
 # changelog section; shared-core history lives in the repository-root
 # CHANGELOG.md.
 EDITION_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+ROOT_DIR=$EDITION_DIR
+# Installed, the accelerator, the project and its state are all ROOT_DIR.
+# Attached - a launcher lends this clone's edition to a project and names it
+# in ACCELERATOR_HOME - the project and the state directory are the
+# launcher's, so nothing is written into the clone or the project.
+PROJECT_DIR=$ROOT_DIR
+STATE_DIR=$ROOT_DIR
+accelerator_absolute() { case "$1" in /*|[A-Za-z]:[\\/]*) return 0 ;; esac; return 1; }
+if accelerator_absolute "${ACCELERATOR_STATE_DIR:-}" && accelerator_absolute "${ACCELERATOR_PROJECT_DIR:-}" \
+  && [ "$(cd "${ACCELERATOR_HOME:-/nonexistent}" 2>/dev/null && pwd -P)" = "$(cd "$ROOT_DIR" && pwd -P)" ]; then
+  PROJECT_DIR=$ACCELERATOR_PROJECT_DIR
+  STATE_DIR=$ACCELERATOR_STATE_DIR
+fi
+if [ "$STATE_DIR" != "$ROOT_DIR" ]; then
+  # Attached: describe the project the session works in, whatever the cwd.
+  cd "$PROJECT_DIR" 2>/dev/null || exit 0
+fi
 if [ -f "$EDITION_DIR/VERSION" ]; then
   echo "Accelerator version: $(tr -d '[:space:]' < "$EDITION_DIR/VERSION" 2>/dev/null)"
+fi
+
+if [ "$STATE_DIR" != "$ROOT_DIR" ]; then
+  echo "Accelerator: attached from $ROOT_DIR (nothing is installed in this project)."
+  echo "Accelerator state (Project Brain, Memory Bank, index): $STATE_DIR"
 fi
 
 # Loop detection is session-scoped; discard counters from earlier sessions.
@@ -64,7 +86,6 @@ grep -qi 'wordpress-plugin' composer.json 2>/dev/null && echo "WordPress shape: 
 grep -qi 'wordpress-theme' composer.json 2>/dev/null && echo "WordPress shape: Composer theme package"
 
 # Report metadata only; never index, retrieve, print, or inject record contents.
-ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 CONTEXT_CLI="$ROOT_DIR/memory-bank/scripts/context.py"
 
 # Validation results are cached per repository state so an unchanged checkout
@@ -76,7 +97,7 @@ CONTEXT_CLI="$ROOT_DIR/memory-bank/scripts/context.py"
 # and `context.py validate` stays authoritative. The directory name is
 # deliberately tool-neutral: the Claude, Cursor and Codex mirrors of this
 # hook share one cache per edition checkout.
-EDITION_KEY=$(printf '%s' "$ROOT_DIR" | cksum | cut -d' ' -f1)
+EDITION_KEY=$(printf '%s' "$STATE_DIR" | cksum | cut -d' ' -f1)
 VALIDATION_CACHE_DIR="${TMPDIR:-/tmp}/ai-accelerator-session-cache-$EDITION_KEY"
 VALIDATION_CACHE_KEY=""
 if git rev-parse --git-dir >/dev/null 2>&1; then
@@ -105,7 +126,7 @@ if command -v python3 >/dev/null 2>&1 && [ -f "$CONTEXT_CLI" ]; then
       INDEX_HEALTH="missing"
     elif [ "$INDEX_DOCUMENTS" = "0" ]; then
       INDEX_HEALTH="empty"
-    elif find AGENTS.md README.md CHANGELOG.md specs docs tasks memory-bank/chunks project-brain/dynamic project-brain/control .agents/skills .claude/skills .cursor/skills -type f -name "*.md" -newer "$INDEX_DB" -print -quit 2>/dev/null | grep -q .; then
+    elif find "$PROJECT_DIR/AGENTS.md" "$PROJECT_DIR/README.md" "$PROJECT_DIR/CHANGELOG.md" "$PROJECT_DIR/specs" "$PROJECT_DIR/docs" "$PROJECT_DIR/tasks" "$STATE_DIR/memory-bank/chunks" "$STATE_DIR/project-brain/dynamic" "$STATE_DIR/project-brain/control" "$ROOT_DIR/AGENTS.md" "$ROOT_DIR/.agents/skills" "$ROOT_DIR/.claude/skills" "$ROOT_DIR/.cursor/skills" -type f -name "*.md" -newer "$INDEX_DB" -print -quit 2>/dev/null | grep -q .; then
       INDEX_STALENESS="stale"
     else
       INDEX_STALENESS="current"
@@ -128,14 +149,18 @@ if command -v python3 >/dev/null 2>&1 && [ -f "$CONTEXT_CLI" ]; then
   fi
 fi
 
-if [ -f "memory-bank/README.md" ] && [ -f "memory-bank/INDEX.md" ]; then
+if [ -f "$ROOT_DIR/memory-bank/README.md" ] && [ -f "$STATE_DIR/memory-bank/INDEX.md" ]; then
   if command -v python3 >/dev/null 2>&1 && [ -f "$ROOT_DIR/memory-bank/scripts/validate.py" ]; then
     MEMORY_SUMMARY=$(cache_read memory-summary)
     if [ -z "$MEMORY_SUMMARY" ]; then
-      MEMORY_SUMMARY=$(python3 "$ROOT_DIR/memory-bank/scripts/validate.py" --summary "memory-bank" 2>/dev/null)
+      MEMORY_SUMMARY=$(python3 "$ROOT_DIR/memory-bank/scripts/validate.py" --summary "$STATE_DIR/memory-bank" 2>/dev/null)
       [ -n "$MEMORY_SUMMARY" ] && cache_write memory-summary "$MEMORY_SUMMARY"
     fi
-    echo "$MEMORY_SUMMARY Read memory-bank/README.md and INDEX.md before relevant durable-memory work."
+    if [ "$STATE_DIR" = "$ROOT_DIR" ]; then
+      echo "$MEMORY_SUMMARY Read memory-bank/README.md and INDEX.md before relevant durable-memory work."
+    else
+      echo "$MEMORY_SUMMARY Read $ROOT_DIR/memory-bank/README.md and $STATE_DIR/memory-bank/INDEX.md before relevant durable-memory work."
+    fi
   else
     echo "Memory bank: available (validation unavailable)."
   fi

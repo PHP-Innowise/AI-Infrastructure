@@ -29,6 +29,7 @@ from brain_runtime import (
     auto_compact,
     auto_promote,
     cancel_task,
+    ensure_attached_state,
     iter_records,
     close_task,
     compact,
@@ -97,6 +98,7 @@ from context_retrieval import (
     reusable_source_state,
     token_coverage,
 )
+import workspace_roots
 from validate import (
     PRIVATE_PATTERNS,
     SECRET_PATTERNS,
@@ -209,7 +211,9 @@ TICKET_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9]*-\d+")
 
 
 def default_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+    # The state root: this install, or ACCELERATOR_STATE_DIR when the
+    # accelerator is attached to a project from its own clone.
+    return workspace_roots.default_state_root()
 
 
 def default_database(repository: Path) -> Path:
@@ -475,12 +479,26 @@ def active_memory(path: Path, repository: Path) -> Optional[dict]:
 
 
 def git_ignored_paths(repository: Path, paths: list[str]) -> set[bytes]:
-    """Return untracked ignored candidates without reading their contents."""
+    """Return untracked ignored candidates without reading their contents.
+
+    Attached, only project keys are asked about: tooling keys are absolute
+    paths into the accelerator clone and state keys name the private state
+    directory, and neither belongs to the project's ignore rules.
+    """
+    if workspace_roots.is_attached(repository):
+        paths = [
+            path
+            for path in paths
+            if not Path(path).is_absolute() and not workspace_roots.is_state_key(path)
+        ]
     if not paths:
         return set()
     try:
         result = subprocess.run(
-            ["git", "-C", str(repository), "check-ignore", "--stdin", "-z"],
+            [
+                "git", "-C", str(workspace_roots.project_root(repository)),
+                "check-ignore", "--stdin", "-z",
+            ],
             input=b"".join(os.fsencode(path) + b"\0" for path in paths),
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -513,8 +531,8 @@ def collect_source_candidates(repository: Path) -> list[SourceCandidate]:
     the extra stat calls `is_file()`/`is_symlink()` would each spend.
     """
     candidates: list[SourceCandidate] = []
-    for layer, kind, pattern in SOURCE_PATTERNS:
-        for path in sorted(repository.glob(pattern)):
+    for layer, kind, pattern, base in source_scan_plan(repository):
+        for path in sorted(base.glob(pattern)):
             try:
                 status = os.lstat(path)
             except OSError:
@@ -526,12 +544,58 @@ def collect_source_candidates(repository: Path) -> list[SourceCandidate]:
                     layer,
                     kind,
                     path,
-                    path.relative_to(repository).as_posix(),
+                    workspace_roots.key_for(repository, base, path),
                     (status.st_mtime_ns, status.st_size),
                     pattern,
                 )
             )
     return candidates
+
+
+SKILL_TREE_DIRECTORIES = (".agents", ".claude", ".cursor", ".codex")
+
+
+def skill_key_parts(key: str) -> tuple[str, str]:
+    """A skill document's tool directory and its path inside that skills tree.
+
+    `.claude/skills/review/SKILL.md` gives `(".claude", "review/SKILL.md")`.
+    An attached tooling key is an absolute path, so the tree is found by its
+    last occurrence rather than by the first path segment.
+    """
+    found = ("", key)
+    best = -1
+    for directory in SKILL_TREE_DIRECTORIES:
+        marker = f"{directory}/skills/"
+        position = key.rfind("/" + marker)
+        start = position + 1 if position >= 0 else (0 if key.startswith(marker) else -1)
+        if start > best:
+            best = start
+            found = (directory, key[start + len(marker):])
+    return found
+
+
+def source_scan_plan(repository: Path) -> list[tuple[str, str, str, Path]]:
+    """Each source pattern with the root it is read from.
+
+    Installed, every root is the repository and the plan is SOURCE_PATTERNS
+    as written. Attached, policy and skills come from the accelerator clone
+    and also from the project (its own AGENTS.md or skills, if any), durable
+    memory from the state directory, and every other document from the
+    project, because the accelerator's own README, specs and changelog
+    describe the accelerator rather than the work.
+    """
+    layout = workspace_roots.roots(repository)
+    plan: list[tuple[str, str, str, Path]] = []
+    for layer, kind, pattern in SOURCE_PATTERNS:
+        if kind == "memory":
+            bases = (layout.state,)
+        elif layer == "procedural":
+            bases = (layout.tooling, layout.project)
+        else:
+            bases = (layout.project,)
+        for base in dict.fromkeys(bases):
+            plan.append((layer, kind, pattern, base))
+    return plan
 
 
 def _cache_entry_is_current(
@@ -611,9 +675,7 @@ def discover_documents(
             # the metadata primary key aborts the whole refresh.
             continue
         claimed.add(relative_path)
-        skill_key = (
-            relative_path.split("/skills/", maxsplit=1)[1] if kind == "skill" else None
-        )
+        skill_key = skill_key_parts(relative_path)[1] if kind == "skill" else None
         if skill_key is not None and skill_key in skill_keys:
             # A mirrored copy of an already-indexed skill. Only a copy that
             # passes validation claims the key, so a later copy can never win
@@ -717,7 +779,7 @@ def index_repository(
     # The candidate walk already statted every mirrored skill file, so the
     # skill-tree fingerprint is derived from it instead of a second tree walk.
     skill_stats = [
-        (relative.split("/", 1)[0], relative.split("/skills/", 1)[1], mtime_ns, size)
+        (*skill_key_parts(relative), mtime_ns, size)
         for _, kind, _, relative, (mtime_ns, size), _ in candidates
         if kind == "skill"
     ]
@@ -1886,7 +1948,7 @@ def codebase_map_status(
         return []
     status: list[dict[str, object]] = []
     for row in rows:
-        path = repository / row["path"]
+        path = workspace_roots.resolve(repository, row["path"])
         try:
             content = path.read_text(encoding="utf-8")
         except OSError:
@@ -2518,9 +2580,11 @@ def apply_governed_update(
 
 
 def git_output(repository: Path, arguments: list[str], label: str) -> bytes:
+    # Git always describes the project: attached, the state directory is not
+    # a checkout and the accelerator clone is not the work.
     try:
         result = subprocess.run(
-            ["git", "-C", str(repository), *arguments],
+            ["git", "-C", str(workspace_roots.project_root(repository)), *arguments],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             check=False,
@@ -2538,7 +2602,7 @@ def _readiness_git_probe(
     """Run a bounded Git metadata probe without making status fail."""
     try:
         result = subprocess.run(
-            ["git", "-C", str(repository), *arguments],
+            ["git", "-C", str(workspace_roots.project_root(repository)), *arguments],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
@@ -3375,7 +3439,7 @@ def record_completion_event(
             source
             for source in list(task.get("sources") or [])
             if isinstance(source, str)
-            and (repository / source.split("#", 1)[0]).is_file()
+            and workspace_roots.resolve(repository, source).is_file()
         ]
         event = create_record(
             repository,
@@ -4216,7 +4280,10 @@ def export_bundle(
 def _export_source_commit(repository: Path) -> Optional[str]:
     try:
         completed = subprocess.run(
-            ["git", "-C", str(repository), "rev-parse", "HEAD"],
+            [
+                "git", "-C", str(workspace_roots.project_root(repository)),
+                "rev-parse", "HEAD",
+            ],
             capture_output=True,
             text=True,
             check=False,
@@ -4752,6 +4819,12 @@ def main() -> int:
     repository = arguments.root.resolve()
 
     try:
+        problem = workspace_roots.configuration_error()
+        if problem is not None:
+            raise ContextError(problem)
+        # Attached, the state directory is created on first use; installed,
+        # this does nothing and a missing root stays an error.
+        ensure_attached_state(repository)
         if not repository.is_dir():
             raise ContextError(
                 f"Repository root must be an existing directory: {repository}"
@@ -5365,6 +5438,7 @@ def main() -> int:
                     "database": str(database),
                     "automatic_memory": automatic_memory_readiness(repository),
                     "consolidation": consolidation,
+                    "workspace": workspace_roots.describe(repository),
                 }
                 if arguments.json:
                     print(json.dumps(result, ensure_ascii=False))

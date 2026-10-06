@@ -58,7 +58,8 @@ BRAIN_INSPECT = r'''
 import json, sys
 from pathlib import Path
 root = Path(sys.argv[1])
-sys.path.insert(0, str(root / 'memory-bank/scripts'))
+# An attached accelerator's runtime lives in the clone, not beside its state.
+sys.path.insert(0, sys.argv[3] if len(sys.argv) > 3 else str(root / 'memory-bank/scripts'))
 from brain_runtime import (load_config, find_record, get_task, iter_records,
     iter_promotions, validate_record, validate_promotion_record, sources_are_fresh,
     promotion_content, promoted_source_ids, PROMOTABLE_STATES)
@@ -114,7 +115,7 @@ MEMORY_USE_CHECK = r'''
 import json, sys
 from pathlib import Path
 root = Path(sys.argv[1])
-sys.path.insert(0, str(root / 'memory-bank/scripts'))
+sys.path.insert(0, sys.argv[3] if len(sys.argv) > 3 else str(root / 'memory-bank/scripts'))
 from brain_runtime import load_config, promotable_records
 from context import memory_eligibility
 request = json.loads(sys.argv[2])
@@ -205,14 +206,31 @@ class KnowledgeManager:
         finally:
             self.lock.release()
 
+    def layout(self, project_id, _root=None):
+        """Where a view reads: `folder` holds the bank and Project Brain; an attached
+        accelerator adds `scripts` (its runtime in the clone), `sources` (the project
+        its records cite) and the `environment` that runtime reads its roots from."""
+        folder = Path(_root) if _root is not None else Path(self.sessions.project(project_id)['path'])
+        accelerators = getattr(self.sessions, 'accelerators', None)
+        attached = accelerators.knowledge(project_id, folder) if accelerators else None
+        if attached is None:
+            return {'folder': folder, 'sources': folder, 'scripts': None, 'environment': None, 'attached': None}
+        return {'folder': attached['state'], 'sources': attached['project'],
+                'scripts': attached['home'] / 'memory-bank/scripts', 'environment': attached['environment'],
+                'attached': {'edition': attached['edition'], 'home': str(attached['home']), 'state': str(attached['state'])}}
+
     def info(self, project_id, bank=None, *, _root=None):
-        listing = self.sessions.memory(project_id, bank=bank, **({'_root': _root} if _root is not None else {}))
+        layout = self.layout(project_id, _root)
+        project = layout['folder']
+        listing = self.sessions.memory(project_id, bank=bank, _root=project)
         selected = listing['bank_id']
         root = str(PurePosixPath(selected).parent) if selected else ''
         root = '' if root == '.' else root
-        project = Path(_root) if _root is not None else Path(self.sessions.project(project_id)['path'])
         prefix = root + '/' if root else ''
-        available = selected is not None and read_context(project, selected + '/scripts/context.py') is not None
+        if layout['scripts'] is not None:
+            available = selected is not None and (layout['scripts'] / 'context.py').is_file()
+        else:
+            available = selected is not None and read_context(project, selected + '/scripts/context.py') is not None
         brain_available = False
         if selected is not None:
             try:
@@ -235,11 +253,12 @@ class KnowledgeManager:
             if override:
                 mode = override if override in ('governed', 'lightweight') else None
         return {'project_id': project_id, 'banks': listing['banks'], 'bank_id': selected,
-                'runtime_available': available, 'brain_available': brain_available, 'root': root, 'mode': mode}
+                'runtime_available': available, 'brain_available': brain_available, 'root': root, 'mode': mode,
+                'attached': layout['attached']}
 
     def brain(self, project_id, bank=None, path=None, *, _root=None):
         info = self.info(project_id, bank, _root=_root)
-        project = Path(_root) if _root is not None else Path(self.sessions.project(project_id)['path'])
+        project = self.layout(project_id, _root)['folder']
         prefix = (info['root'] + '/' if info['root'] else '') + 'project-brain/'
         if path is not None:
             path = _path(path)
@@ -402,7 +421,7 @@ class KnowledgeManager:
             return arguments + ['--limit', '20' if action == 'search' else '3', '--json', '--', query]
         return arguments + ['--json']
 
-    def _execute(self, command, root):
+    def _execute(self, command, root, extra=None):
         read_fd, write_fd = os.pipe()
         process = None
         selector = process_runtime.PipeSelector()
@@ -410,6 +429,7 @@ class KnowledgeManager:
         try:
             environment = {key: value for key, value in os.environ.items() if key not in ('PYTHONPATH', 'PYTHONHOME')}
             environment['PYTHONDONTWRITEBYTECODE'] = '1'
+            environment.update(extra or {})
             process = process_runtime.launch_guarded(command, read_fd, lock_fd=self.sessions.runner_lock, cwd=root, env=environment, stdin=subprocess.DEVNULL,
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             self.process = process
@@ -481,8 +501,12 @@ class KnowledgeManager:
                         fs.close(descriptor)
         return stream.getvalue()
 
-    def _inspect_runtime(self, root, request):
-        code, stdout, _ = self._execute([sys.executable, '-c', BRAIN_INSPECT, str(root), json.dumps(request)], root)
+    def _inspect_runtime(self, root, request, layout=None):
+        attached = layout and layout['scripts'] is not None
+        command = [sys.executable, '-c', BRAIN_INSPECT, str(root), json.dumps(request)]
+        if attached:
+            command.append(str(layout['scripts']))
+        code, stdout, _ = self._execute(command, root, layout['environment'] if attached else None)
         try:
             result = json.loads(stdout)
             json.dumps(result, ensure_ascii=False, allow_nan=False).encode('utf-8')
@@ -499,10 +523,10 @@ class KnowledgeManager:
             info = self.info(project_id, bank, _root=_root)
             if not info['runtime_available'] or info['mode'] != 'governed':
                 raise SessionError('An installed governed Brain runtime is required.')
-            project = Path(_root) if _root is not None else Path(self.sessions.project(project_id)['path'])
-            root = project / info['root']
+            layout = self.layout(project_id, _root)
+            root = layout['folder'] / info['root']
             self._preflight(root)
-            return {**info, **self._inspect_runtime(root, {'task_id': task_id, 'task_only': task_only})}
+            return {**info, **self._inspect_runtime(root, {'task_id': task_id, 'task_only': task_only}, layout)}
 
     def memory_use_check(self, project_id, bank=None):
         """Run the runtime's eligibility rules for Memory use, under the non-blocking knowledge lock."""
@@ -512,10 +536,14 @@ class KnowledgeManager:
             info = self.info(project_id, bank)
             if not info['runtime_available']:
                 raise SessionError('The selected Memory Bank does not have an installed context runtime.')
-            root = Path(self.sessions.project(project_id)['path']) / info['root']
+            layout = self.layout(project_id)
+            root = layout['folder'] / info['root']
             self._preflight(root)
             brain = info['brain_available'] and info['mode'] == 'governed'
-            code, stdout, _ = self._execute([sys.executable, '-c', MEMORY_USE_CHECK, str(root), json.dumps({'brain': brain})], root)
+            command = [sys.executable, '-c', MEMORY_USE_CHECK, str(root), json.dumps({'brain': brain})]
+            if layout['scripts'] is not None:
+                command.append(str(layout['scripts']))
+            code, stdout, _ = self._execute(command, root, layout['environment'])
             try:
                 result = json.loads(stdout)
             except ValueError as error:
@@ -540,8 +568,8 @@ class KnowledgeManager:
             if action in ('start', 'brain-create', 'brain-update', 'complete', 'rebind',
                           'promote-propose', 'promote-review', 'promote-apply', 'promote-auto') and info['mode'] != 'governed':
                 raise SessionError('Project Brain editing requires the project to use governed mode.')
-            project = Path(_root) if _root is not None else Path(self.sessions.project(project_id)['path'])
-            root = project / info['root']
+            layout = self.layout(project_id, _root)
+            root = layout['folder'] / info['root']
             self._preflight(root)
             if action in ('retrieve', 'refresh'):
                 options = []
@@ -563,14 +591,15 @@ class KnowledgeManager:
                 export_id = str(uuid.uuid4())
                 destination = Path(self.temporary.name) / export_id
                 arguments.extend(['--destination', str(destination)])
-            command = [sys.executable, str(root / 'memory-bank/scripts/context.py'), '--root', str(root), *arguments]
+            scripts = layout['scripts'] or root / 'memory-bank/scripts'
+            command = [sys.executable, str(scripts / 'context.py'), '--root', str(root), *arguments]
             try:
                 if action in ('promote-propose', 'promote-apply'):
                     eligibility = self._inspect_runtime(root, {'check': True, **{
-                        field: data[field] for field in ('source_ids', 'promotion_id') if field in data}})
+                        field: data[field] for field in ('source_ids', 'promotion_id') if field in data}}, layout)
                     if eligibility.get('eligible') is not True:
                         raise SessionError('Promote only verified resolved findings or bugs, closed incidents, or accepted decisions with allowed privacy, reusable progress and unchanged sources. Tasks and session transcripts are not durable knowledge.')
-                code, stdout, stderr = self._execute(command, root)
+                code, stdout, stderr = self._execute(command, root, layout['environment'])
                 result = json.loads(stdout) if stdout.strip() else None
                 if not isinstance(result, (dict, list)):
                     result = None
