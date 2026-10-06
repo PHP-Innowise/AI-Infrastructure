@@ -16,12 +16,28 @@ arguments and never completes work.
 1. Resolve the repository root with `git rev-parse --show-toplevel`; stop safely
    if it fails.
 2. Read `project-brain/config/runtime.json` when present. If its mode is
-   `governed`, Project Brain is authoritative: do not derive a task from the
-   branch and do not mutate SQLite working state. Report `working: skipped`
-   with an actionable instruction to use `project-brain update` with the
-   caller-supplied task ID and expected revision, then stop.
-3. Continue only when lightweight mode was explicitly configured. Every
-   context command below must include global `--mode lightweight`.
+   `governed`, Project Brain is authoritative and the hooks already keep the
+   branch task; follow the Governed Workflow below, then stop.
+3. Continue with the Lightweight Workflow only when lightweight mode was
+   explicitly configured. Every context command there must include global
+   `--mode lightweight`.
+
+## Governed Workflow
+
+1. The task ID is `CONTEXT_TASK_ID`, otherwise
+   `git symbolic-ref --quiet --short HEAD`. Stop with an actionable
+   detached-HEAD error rather than inventing an ID.
+2. Run `python3 memory-bank/scripts/context.py turn --task-id <task> --flush --json`.
+   It flushes the turns the Stop hook buffered into the governed task and
+   creates the task when this is its first checkpoint.
+3. Write one concise sanitized line of what the checkpoint cannot see - the
+   goal, a decision, the next step - with
+   `python3 memory-bank/scripts/context.py update --task-id <task> --revision auto --progress "<summary>"`
+   and, when there is one, `--next-step "<step>"`. Never store raw diffs,
+   file bodies, prompts, responses, logs, or secrets; the runtime refuses
+   likely secrets and personal data.
+4. Report the task ID, whether it was created, the flushed turn and file
+   counts, and the new revision.
 
 ## Lightweight Workflow
 
@@ -55,4 +71,4 @@ arguments and never completes work.
 - MUST NOT run unscoped `git diff`, `--stat`, or `--numstat`.
 - MUST NOT run `complete`, `record`, or `clear`, create an episode, stage,
   commit, discard, or modify repository files.
-- MUST NOT create a second task authority in governed mode.
+- MUST NOT create a second task authority in governed mode: the branch task the hooks keep is the one task.

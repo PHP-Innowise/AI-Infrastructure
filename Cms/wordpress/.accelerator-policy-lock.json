@@ -51,7 +51,7 @@
     ".agents/skills/block-development/SKILL.md": "9c615b2b958fee04a008d142e1be776df5aafba70cc384784e021a0e58b1a40b",
     ".agents/skills/brainstorming/SKILL.md": "a05a6068e65f17b1757b5ebb55501bd395a819aac0d4791ac7bd8fa0bdd0db1d",
     ".agents/skills/browser-verify/SKILL.md": "89a0826c44c339e073ff5bb0614e85432d1c4b5a10fde727d34d293fb21ac7bc",
-    ".agents/skills/checkpoint/SKILL.md": "78aa70fe4cfd0d5e679b9fc92e9d7dc620e861f8ea6f71d3d876468ec4e0fef4",
+    ".agents/skills/checkpoint/SKILL.md": "7abd321d4496c02df000f1e4791895fa85520f91893c1320c70f8384e7187fd7",
     ".agents/skills/code-reviewer/SKILL.md": "d0781d110562f0c1a5ad48409ff97cde5ff17a14d9a2e7024a00885a77007d5e",
     ".agents/skills/codebase-mapper/SKILL.md": "292377350a7fe91a6db029170e6f2ec1008df167078ee53998a0cb9d44b063d9",
     ".agents/skills/coder-frontend/SKILL.md": "df852614ee74b92aeba43f921fe66e7a1e8ba108d553f0c7afa266a990433173",
@@ -66,7 +66,7 @@
     ".agents/skills/frontend-design/SKILL.md": "606c006ef0af72ca085e66ac8e5c2c4e3f372fe98f6ee3af68c108a443fbe64b",
     ".agents/skills/hooks-events/SKILL.md": "42cc545838192ede10cda4882ccdfa8128e03c8bdfa5812725ff54f40c9aec4d",
     ".agents/skills/memory-bank/SKILL.md": "c7d3679c33f9e133847aaec00558d37929a6f955f7d80d131e5e848e9a19f1e8",
-    ".agents/skills/memory/SKILL.md": "9fd5a69eb5a06280fbe8b51b94017933709fea54dfbceb9444794ec1432f5bf2",
+    ".agents/skills/memory/SKILL.md": "522b72ecc502d650a0df356138f804a2cdbc2c8c41b2422dfdcdc7c64d280e58",
     ".agents/skills/multisite/SKILL.md": "d7ceec27477660d9c11437258098ebe292ff2a4fac56afca4656a3de4dc3f116",
     ".agents/skills/performance-optimization/SKILL.md": "1d1bd80f5270eaec21df548a481a2cdc47daed735f6219a960cdbb18cffdf3fe",
     ".agents/skills/plugin-development/SKILL.md": "2bcbd5d9bbd72ebe7960f5ff30b93612f12116e5c74c73c52faf91345f97fa4b",
@@ -253,9 +253,9 @@
     ".cursor/rules/safety-and-verification.mdc": "48e9e227594e4eb3d5df2321bf6295a2da5c375170b96734410cd95ce0cd6f08",
     ".cursor/rules/subagent-policy.mdc": "b2200867b3141faedb982cb12cc58158015ef5d9294c0f8b193bb8b70f61f201",
     ".cursor/skills/skill-creator/SKILL.md": "f1bac11cf8ab0e6acb40196165aab0f8e87556a4e182ff00894b6ee11af3a2a5",
-    "AGENTS.md": "3b7bc5d0bb391150e3a8b685adbd4befeb58773612cf56923f1421c61c4b07d2"
+    "AGENTS.md": "a6587ce90c9556c9aa8a6ccdb06c4e7eb047da15f68a028edc0df5ef9dca6f14"
   },
-  "policy_digest": "65a19c8cf762726a542bf524e89ea36f63580a855e5082b035e5965bc93e27fc",
+  "policy_digest": "256b0883f827e8b98159ab6eac83f0a296dd5c99dee2a356b963ca1dba65b46d",
   "release": "2.0.0",
   "schema_version": 1
 }

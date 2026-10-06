@@ -54,7 +54,7 @@
     ".agents/skills/architecture-implementer/SKILL.md": "375c9f1fd992828156c9ac114cb6e3775452fc746d71ee7505e020f14f32e6e1",
     ".agents/skills/brainstorming/SKILL.md": "d95e4f097be616afb92a7dd80dc9081ce62a5644d9120500bce4ee77a1ee1325",
     ".agents/skills/browser-verify/SKILL.md": "3a8143c6e77a827b68fd176753f2058a17e9d6ed025e47069179b7b10db69f5d",
-    ".agents/skills/checkpoint/SKILL.md": "78aa70fe4cfd0d5e679b9fc92e9d7dc620e861f8ea6f71d3d876468ec4e0fef4",
+    ".agents/skills/checkpoint/SKILL.md": "7abd321d4496c02df000f1e4791895fa85520f91893c1320c70f8384e7187fd7",
     ".agents/skills/code-reviewer/SKILL.md": "7e9387a3d4b052e48739d9812a6dfde03f293c6cdb57bd79689fae556f97e412",
     ".agents/skills/codebase-mapper/SKILL.md": "b56db974f8af6915b2c376b0e206f36117f90b6138113c88759c56b434c0571e",
     ".agents/skills/coder-frontend/SKILL.md": "796a6d0733d6fbc7e4ecde3aeb21b458f29c95339748eefd14add90da0682115",
@@ -72,7 +72,7 @@
     ".agents/skills/form-validator-designer/SKILL.md": "fabaa544158db453920b022159952bf43c9e20db88f4bd6c32a1b118ccf26e02",
     ".agents/skills/frontend-design/SKILL.md": "8d06ed92875b27e12033e7109cc688879e5025d0bc949b1ed8740ad30d139d0c",
     ".agents/skills/memory-bank/SKILL.md": "86f48c476526850b7916f1654c77ab9e485f939ff6b9f8e789217754331d026e",
-    ".agents/skills/memory/SKILL.md": "9fd5a69eb5a06280fbe8b51b94017933709fea54dfbceb9444794ec1432f5bf2",
+    ".agents/skills/memory/SKILL.md": "522b72ecc502d650a0df356138f804a2cdbc2c8c41b2422dfdcdc7c64d280e58",
     ".agents/skills/messenger-designer/SKILL.md": "983c5e11276c12cc0e5b6ff52259fe1c8b47923611a2795353152cc2f2255590",
     ".agents/skills/performance-optimization/SKILL.md": "993f617a9cb76f7a922e7960cbf51a5ed2d06e7da4af484446ff75f99a587851",
     ".agents/skills/project-brain/SKILL.md": "2a2ecbec813290fe532b8af1cf0f53988b333c06f1209be6c391e9eb32eb885b",
@@ -159,7 +159,7 @@
     ".agents/skills/web-design-guidelines/SKILL.md": "24163cb29955de6c98af1183931a152948cdcf4dfa772c6ac39efbd83ecca191",
     ".agents/skills/writing-plans/SKILL.md": "bfc0a70a10b7ee77ec7d30cd44b27b0be10c90022fea5d2c917493d17d05aafd",
     ".claude/CLAUDE.md": "bf7730a5fdef92a5cd417424a2568d079d8f98a8a628e24c543c868b07d5329f",
-    ".claude/DOD.md": "d3d23e90e3174957b7fdcfa942f00f63738ed322230c2235d42581eb601cb510",
+    ".claude/DOD.md": "49b1c9c738b99a3941b74ee61cc2fdcd74403e4d8df41e4b30a5569aa120660e",
     ".claude/GOLDEN-PRINCIPLES.md": "2a72434d03ea9104cf5df7fa4ca3542948e7e47f77c8fe5b0e921e72b3ef24e7",
     ".claude/STABILIZATION.md": "212620fc831df336443c04dc83608d302942cc4108a0af2f755073664261127f",
     ".claude/agents/api-designer-agent.md": "dbba7e724326f83ee32cd0e584afedf8324458bfded674ed9774592821312de4",
@@ -264,9 +264,9 @@
     ".cursor/rules/safety-and-verification.mdc": "9d7f8114809d3c130290f9df3cc2116da47776c197d1ace5099be62523903b63",
     ".cursor/rules/subagent-policy.mdc": "b2200867b3141faedb982cb12cc58158015ef5d9294c0f8b193bb8b70f61f201",
     ".cursor/skills/skill-creator/SKILL.md": "85238e56099797fdd695cbc2cc65e6958e9ad7806a7e32121bd5a37ccd7e3323",
-    "AGENTS.md": "f4e6dcda94b800a9221afa0fa2a9cd28fada0ba9229a32b1e1a83f1eac0fcc9f"
+    "AGENTS.md": "74e151d88b792b070cff0320aaea46cc8feefc507190c7e1b3ae5b1f824a7904"
   },
-  "policy_digest": "d57334849c3f60dd1fd7590bb6045736172b7fb24be6a19228ad2a388737b5e9",
+  "policy_digest": "4644ebdcca1e3cb161b19a643d331eace424d026ba8f034dcbac57fa39338967",
   "release": "2.0.0",
   "schema_version": 1
 }
