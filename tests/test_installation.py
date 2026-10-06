@@ -451,6 +451,45 @@ class InventoryTest(unittest.TestCase):
                 self.assertIn("*.sh text eol=lf\n", attributes)
                 self.assertNotIn("-diff", attributes)
 
+    def test_reinstall_keeps_runtime_state_the_project_owns(self) -> None:
+        """A reinstall over a project that has used the accelerator must not
+        collide on, or reset, the state its runtime and team own."""
+        with tempfile.TemporaryDirectory(prefix="install seed ") as raw:
+            target = Path(raw).resolve()
+            run("git", "init", "--quiet", str(target))
+            command = (
+                sys.executable, str(INSTALLER), "--edition", "Laravel",
+                "--target", str(target), "--tool", "codex",
+            )
+            first = run(*command)
+            self.assertEqual(0, first.returncode, first.stderr)
+            started = run(
+                sys.executable, "memory-bank/scripts/context.py", "start",
+                "--task-id", "seed-only-smoke", "--goal", "Prove reinstall keeps state",
+                "--source", "AGENTS.md", cwd=target,
+            )
+            self.assertEqual(0, started.returncode, started.stderr)
+            counter = target / "tasks" / ".task-counter"
+            counter.write_text("7\n", encoding="utf-8")
+            manifest = target / "specs" / "MANIFEST.md"
+            manifest.write_text(manifest.read_text(encoding="utf-8") + "| team spec |\n", encoding="utf-8")
+            state = {
+                path: (target / path).read_bytes()
+                for path in ("tasks/.task-counter", "specs/MANIFEST.md", "project-brain/indexes/active.json")
+            }
+
+            for mode in ("--merge-existing", "--overwrite"):
+                with self.subTest(mode=mode):
+                    again = run(*command, mode)
+                    self.assertEqual(0, again.returncode, again.stderr)
+                    self.assertIn("KEPT\tshared\ttasks/.task-counter", again.stdout)
+                    for path, content in state.items():
+                        self.assertEqual(content, (target / path).read_bytes(), path)
+                    validated = run(
+                        sys.executable, "project-brain/scripts/validate.py", "--root", ".", cwd=target
+                    )
+                    self.assertEqual(0, validated.returncode, validated.stdout + validated.stderr)
+
     def test_every_claude_install_ships_the_policy_import(self) -> None:
         for edition in EDITION_PATHS:
             with self.subTest(edition=edition):
