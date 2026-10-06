@@ -268,6 +268,8 @@ jobs:
         # copies when it writes code. --require-php makes a runner that loses
         # its preinstalled php fail rather than report a silent pass.
         run: python3 scripts/check_php_snippets.py --require-php
+      - name: PHP snippet gate regression tests
+        run: python3 -m unittest tests.test_check_php_snippets
       - name: Context budget
         run: python3 scripts/context_budget.py --check
       # Stdlib policy check, following the context-budget precedent above: the

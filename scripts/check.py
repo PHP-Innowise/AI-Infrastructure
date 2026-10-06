@@ -509,6 +509,7 @@ def build_groups(root: Path = ROOT, base_ref: Optional[str] = None) -> List[Grou
                     "python3 scripts/check_php_snippets.py --require-php",
                     tools=("php",),
                 ),
+                unittests("PHP snippet gate regression tests", ["tests.test_check_php_snippets"]),
                 step("Context budget", "python3 scripts/context_budget.py --check"),
                 step("Stabilization rules are well-formed", "python3 scripts/check_stabilization.py"),
                 unittests("Stabilization validator regression tests", ["tests.test_check_stabilization"]),

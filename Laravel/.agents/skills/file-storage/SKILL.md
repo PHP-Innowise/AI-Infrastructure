@@ -65,11 +65,11 @@ Key points:
 use Illuminate\Support\Str;
 
 // Laravel-generated random name + original extension, no client input in the path
-$path = $request->file('file')->store('attachments', 'private');
+$path = $request->file('file')->store('attachments', 'local');
 
 // Or generate explicitly when you need control over the name/extension:
 $filename = Str::uuid().'.'.$request->file('file')->extension();
-$path = $request->file('file')->storeAs('attachments', $filename, 'private');
+$path = $request->file('file')->storeAs('attachments', $filename, 'local');
 ```
 
 Persist the original filename separately (e.g. an `original_name` column) if you need to display it to users — display it escaped through Blade's default `{{ }}`, never used to build a path.
@@ -86,26 +86,34 @@ Two mechanisms exist; use the one that matches the disk:
 Route::get('/files/{attachment}', DownloadAttachmentController::class)
     ->name('attachments.download')
     ->middleware('signed');
+```
 
-// app/Http/Controllers/DownloadAttachmentController.php
+```php
+// app/Http/Controllers/DownloadAttachmentController.php (uses Illuminate\Support\Facades\Gate)
 public function __invoke(Request $request, Attachment $attachment): StreamedResponse
 {
     abort_unless($request->hasValidSignature(), 403);
-    $this->authorize('view', $attachment);
+    Gate::authorize('view', $attachment);
 
-    return Storage::disk('private')->download($attachment->path, $attachment->original_name);
+    return Storage::disk('local')->download($attachment->path, $attachment->original_name);
 }
 ```
 
 Both mechanisms enforce expiration through the signature itself (a tampered or expired `expires`/`signature` query parameter fails verification), but that check must actually execute server-side (`hasValidSignature()` or the `signed` middleware) — do not treat "the link looks like a signed URL" as sufficient without the app verifying it on every request. A signed route without the `signed` middleware (or an explicit `hasValidSignature()` check) provides no protection at all.
 
-For a disk that doesn't natively support `temporaryUrl()`, override the generator once in a Service Provider to route through your signed controller instead of hand-rolling it per call site:
+For a disk that doesn't natively support `temporaryUrl()` (the Laravel 11+ `local` disk does, with `'serve' => true`), override the generator once in a Service Provider to route through a signed controller that takes the path, instead of hand-rolling it per call site:
 
 ```php
+// routes/web.php
+Route::get('/files/archive/{path}', ServeArchivedFileController::class)
+    ->where('path', '.*')
+    ->name('files.archive')
+    ->middleware('signed');
+
 // app/Providers/AppServiceProvider.php boot()
-Storage::disk('local')->buildTemporaryUrlsUsing(
-    fn (string $path, \DateTime $expiration, array $options) =>
-        URL::temporarySignedRoute('attachments.download', $expiration, array_merge($options, ['path' => $path]))
+Storage::disk('archive')->buildTemporaryUrlsUsing(
+    fn (string $path, \DateTimeInterface $expiration, array $options) =>
+        URL::temporarySignedRoute('files.archive', $expiration, array_merge($options, ['path' => $path]))
 );
 ```
 
@@ -115,10 +123,10 @@ Avoid `Storage::get($path)` for large files — it reads the entire file into me
 
 ```php
 // Streams directly to the client, sets Content-Type from the file
-return Storage::disk('private')->response($path);
+return Storage::disk('local')->response($path);
 
 // Same, but forces a download with Content-Disposition: attachment
-return Storage::disk('private')->download($path, $downloadName);
+return Storage::disk('local')->download($path, $downloadName);
 ```
 
 Use `Storage::response()`/`download()` (or `StreamedResponse` for programmatically generated content) whenever a file could plausibly exceed a few MB, and always when the disk is a remote/cloud disk where `get()` would otherwise buffer a full network round-trip in memory.
@@ -132,7 +140,7 @@ use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
 
 it('stores a validated attachment on the private disk', function () {
-    Storage::fake('private');
+    Storage::fake('local');
 
     $file = UploadedFile::fake()->create('report.pdf', 500, 'application/pdf');
 
@@ -140,11 +148,11 @@ it('stores a validated attachment on the private disk', function () {
         ->post('/attachments', ['file' => $file]);
 
     $response->assertRedirect();
-    Storage::disk('private')->assertExists(Attachment::first()->path);
+    Storage::disk('local')->assertExists(Attachment::first()->path);
 });
 
 it('rejects an oversized or wrong-type upload', function () {
-    Storage::fake('private');
+    Storage::fake('local');
 
     $file = UploadedFile::fake()->create('malware.exe', 20000);
 
@@ -152,7 +160,7 @@ it('rejects an oversized or wrong-type upload', function () {
         ->post('/attachments', ['file' => $file])
         ->assertInvalid(['file']);
 
-    Storage::disk('private')->assertDirectoryEmpty('attachments');
+    Storage::disk('local')->assertDirectoryEmpty('attachments');
 });
 ```
 

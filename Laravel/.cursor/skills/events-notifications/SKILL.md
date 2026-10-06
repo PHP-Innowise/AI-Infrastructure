@@ -87,7 +87,7 @@ final class SendOrderShippedNotification implements ShouldQueue
 }
 ```
 
-Register the pairing in `app/Providers/EventServiceProvider.php` (or via `#[AsListener]`/`Event::listen()` closures if the project relies on auto-discovery) and dispatch with `OrderShipped::dispatch($order)` from the Action once the transaction that shipped the order has committed.
+Laravel 11+ discovers listeners itself: a listener in `app/Listeners` whose `handle()` type-hints the event is registered automatically (`->withEvents(discover: [...])` in `bootstrap/app.php` adds other directories). Register only an undiscovered listener by hand, with `Event::listen()` in `AppServiceProvider::boot()`; registering a discovered one as well makes it run twice. Dispatch with `OrderShipped::dispatch($order)` from the Action once the transaction that shipped the order has committed (or make the event implement `ShouldDispatchAfterCommit`).
 
 ## Queued Vs Synchronous Listeners
 
