@@ -25,6 +25,13 @@ TOOLS = ("claude", "cursor", "codex")
 COMPONENTS = ("shared", *TOOLS)
 INVENTORY_DIR = ROOT / "install" / "inventories"
 ADDITIVE_FILES = {".gitattributes", ".gitignore"}
+# Files a project may already have whose accelerator content lives in one
+# replaceable managed block. `.claude/CLAUDE.md` carries the `@../AGENTS.md`
+# import: Claude Code stops reading AGENTS.md by itself as soon as any
+# CLAUDE.md exists, so the import is what loads the policy in a project that
+# has its own CLAUDE.md, and an existing `.claude/CLAUDE.md` keeps its
+# content with the import appended.
+MANAGED_POLICY_FILES = {"AGENTS.md", ".claude/CLAUDE.md"}
 # Files the accelerator's own runtime rewrites in this repository, which must
 # still install in their pristine state. A developer who has run a task here
 # carries a Brain index listing that task's records; those records are this
@@ -537,7 +544,7 @@ def install(
                 action = "unchanged" if merged == destination.read_bytes() else "merge"
                 resolutions[path] = (action, destination, merged)
                 continue
-            if merge_existing and path == "AGENTS.md":
+            if merge_existing and path in MANAGED_POLICY_FILES:
                 try:
                     merged = merge_agents_file(
                         destination.read_text(encoding="utf-8"),

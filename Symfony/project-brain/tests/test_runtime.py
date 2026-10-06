@@ -4553,6 +4553,27 @@ class WorkingStateCapsuleTest(RuntimeHarness):
             {"docs/b.md", "docs/c.md"}, retrieval._claude_imports(self.repository)
         )
 
+    def test_claude_reads_agents_md_itself_only_without_a_claude_md(self) -> None:
+        self.repository.joinpath("AGENTS.md").write_text("# Policy\n", encoding="utf-8")
+        self.assertIn("AGENTS.md", retrieval.host_loaded_paths(self.repository, "claude"))
+        self.repository.joinpath("CLAUDE.local.md").write_text("# Mine\n", encoding="utf-8")
+        self.assertNotIn(
+            "AGENTS.md", retrieval.host_loaded_paths(self.repository, "claude")
+        )
+
+    def test_shipped_claude_dir_import_loads_agents_md(self) -> None:
+        self.repository.joinpath("AGENTS.md").write_text("# Policy\n", encoding="utf-8")
+        self.repository.joinpath("CLAUDE.md").write_text("# Team notes\n", encoding="utf-8")
+        claude_dir = self.repository / ".claude"
+        claude_dir.mkdir()
+        claude_dir.joinpath("CLAUDE.md").write_text(
+            "Policy lives in AGENTS.md.\n\n@../AGENTS.md\n", encoding="utf-8"
+        )
+        loaded = retrieval.host_loaded_paths(self.repository, "claude")
+        self.assertIn("AGENTS.md", loaded)
+        self.assertIn(".claude/CLAUDE.md", loaded)
+        self.assertEqual({"AGENTS.md"}, retrieval._claude_imports(self.repository))
+
     def test_done_next_steps_can_leave_the_task(self) -> None:
         uuid = self.started()
         replaced = self.run_cli(

@@ -342,5 +342,37 @@ class RootAnchoredWiringRunsTest(WiringFixture):
         self.assertEqual(result.returncode, 127)
 
 
+class ClaudePolicyImportTest(unittest.TestCase):
+    """A Claude edition must import AGENTS.md from .claude/CLAUDE.md."""
+
+    def check(self, content=None, editions=("claude",)) -> list:
+        with tempfile.TemporaryDirectory() as raw:
+            target = Path(raw)
+            if content is not None:
+                (target / ".claude").mkdir()
+                (target / ".claude" / "CLAUDE.md").write_text(content, encoding="utf-8")
+            errors: list = []
+            validator.validate_claude_policy_import(target, list(editions), errors)
+            return errors
+
+    def test_import_on_its_own_line_passes(self) -> None:
+        self.assertEqual([], self.check("Policy lives in AGENTS.md.\n\n@../AGENTS.md\n"))
+
+    def test_missing_file_fails(self) -> None:
+        self.assertEqual(1, len(self.check(None)))
+
+    def test_prose_or_fenced_import_fails(self) -> None:
+        for content in (
+            "Read AGENTS.md before you start.\n",
+            "```\n@../AGENTS.md\n```\n",
+            "See @../AGENTS.md for policy.\n",
+        ):
+            with self.subTest(content=content):
+                self.assertEqual(1, len(self.check(content)))
+
+    def test_other_editions_are_not_checked(self) -> None:
+        self.assertEqual([], self.check(None, editions=("cursor", "codex")))
+
+
 if __name__ == "__main__":
     unittest.main()

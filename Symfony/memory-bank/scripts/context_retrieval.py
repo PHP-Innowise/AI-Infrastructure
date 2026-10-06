@@ -565,9 +565,14 @@ RETRIEVAL_ENTRY_POINTS = ("context", "retrieve", "refresh", "hook-context")
 # 88 of 114 and 150 of 158 Claude Code turns. Cursor is absent on purpose -
 # what it loads unprompted is its own `.cursor/rules`, which is not indexed.
 HOST_LOADED_INSTRUCTIONS = {
-    "claude": ("CLAUDE.md",),
+    "claude": ("CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md"),
     "codex": ("AGENTS.md",),
 }
+# Claude Code (v2.1.277+) reads AGENTS.md itself only while none of these
+# exists; any one of them makes it read the CLAUDE.md files instead, and
+# AGENTS.md then loads only through an `@` import - which is why every
+# edition ships `.claude/CLAUDE.md` importing `@../AGENTS.md`.
+CLAUDE_INSTRUCTION_FILES = ("CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md")
 # Claude Code also loads what CLAUDE.md imports with `@path`, recursively and
 # at most five hops deep; an import inside a code span or block is not one.
 CLAUDE_IMPORT_DEPTH = 5
@@ -2440,7 +2445,7 @@ def _claude_imports(repository: Path) -> set[str]:
     """
     root = repository.resolve()
     loaded: set[str] = set()
-    pending = [(root / "CLAUDE.md", 0)]
+    pending = [(root / name, 0) for name in CLAUDE_INSTRUCTION_FILES]
     while pending:
         path, depth = pending.pop()
         if depth >= CLAUDE_IMPORT_DEPTH:
@@ -2473,6 +2478,8 @@ def host_loaded_paths(repository: Path, host: str) -> set[str]:
     """Repository paths the host has already put in front of the model."""
     loaded = set(HOST_LOADED_INSTRUCTIONS.get(host, ()))
     if host == "claude":
+        if not any((repository / name).is_file() for name in CLAUDE_INSTRUCTION_FILES):
+            loaded.add("AGENTS.md")
         loaded |= _claude_imports(repository)
     return loaded
 

@@ -738,6 +738,42 @@ def validate_required_wiring(
                 )
 
 
+# The line policy-forge writes into `.claude/CLAUDE.md`. Claude Code reads
+# AGENTS.md by itself only while the project has no CLAUDE.md,
+# .claude/CLAUDE.md or CLAUDE.local.md (and only from v2.1.277), so in a
+# target that has one - Laravel Boost writes a CLAUDE.md - the shared policy
+# would never load without this import.
+CLAUDE_POLICY_IMPORT = "@../AGENTS.md"
+
+
+def validate_claude_policy_import(target: Path, editions: list, errors: list) -> None:
+    """A Claude edition must load AGENTS.md through `.claude/CLAUDE.md`."""
+    if "claude" not in editions:
+        return
+    path = target / ".claude" / "CLAUDE.md"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        errors.append(
+            "[claude] .claude/CLAUDE.md is missing; it must import "
+            f"{CLAUDE_POLICY_IMPORT}, or Claude Code skips AGENTS.md whenever "
+            "the project has a CLAUDE.md (policy-forge)"
+        )
+        return
+    fenced = False
+    for line in text.splitlines():
+        if line.lstrip().startswith(("```", "~~~")):
+            fenced = not fenced
+            continue
+        if not fenced and line.strip() == CLAUDE_POLICY_IMPORT:
+            return
+    errors.append(
+        f"[claude] .claude/CLAUDE.md does not import {CLAUDE_POLICY_IMPORT} on a "
+        "line of its own outside a code block, so Claude Code may never load "
+        "AGENTS.md (policy-forge)"
+    )
+
+
 def validate_memory_readiness(payload: object, errors: list) -> None:
     """Validate the dependency-free readiness contract emitted by context.py."""
     if not isinstance(payload, dict):
@@ -1146,6 +1182,7 @@ def main() -> int:
     validate_hooks(target, editions, files, errors)
     validate_hook_wiring(target, editions, files, errors)
     validate_required_wiring(target, editions, files, errors)
+    validate_claude_policy_import(target, editions, errors)
     validate_memory_bank(
         target,
         files,

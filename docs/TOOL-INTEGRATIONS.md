@@ -10,7 +10,7 @@ its native discovery model. Do not make one tool load another tool's adapters.
 | --- | --- | --- |
 | `AGENTS.md` | Shared | Enforceable project/stack policy used across tools |
 | `.agents/skills/` | Canonical skill edition | Skill workflows declared canonical by `project-brain/config/runtime.json`; Codex discovers them directly |
-| `.claude/` | Claude Code | Commands, agent wrappers, skill mirrors, `settings.json`, hooks, and reference documents |
+| `.claude/` | Claude Code | `CLAUDE.md` (the `@../AGENTS.md` import), commands, agent wrappers, skill mirrors, `settings.json`, hooks, and reference documents |
 | `.cursor/` | Cursor | Commands, agents, skill mirrors, `.mdc` rules, `hooks.json`, hooks, and reference documents |
 | `.codex/` | Codex | Trusted project config, hook wiring/scripts, and reference documents; not skills, commands, or agent wrappers |
 | `memory-bank/` | Shared | Reviewed durable knowledge plus the ignored local context database |
@@ -184,15 +184,22 @@ directory to keep it that way.
 ## Claude Code Activation
 
 1. Open the consuming project root, not the parent accelerator repository.
-2. Confirm `AGENTS.md`, `.claude/settings.json`, `.claude/commands/`,
-   `.claude/agents/`, `.claude/skills/`, and executable hook scripts are
-   present.
-3. Start a new Claude Code session. The session-start output should identify
+2. Confirm `AGENTS.md`, `.claude/CLAUDE.md`, `.claude/settings.json`,
+   `.claude/commands/`, `.claude/agents/`, `.claude/skills/`, and executable
+   hook scripts are present.
+3. Run `/context` and confirm `AGENTS.md` is listed under **Memory files**.
+   Claude Code reads `AGENTS.md` by itself only while the project has no
+   `CLAUDE.md`, `.claude/CLAUDE.md` or `CLAUDE.local.md`; the shipped
+   `.claude/CLAUDE.md` imports `@../AGENTS.md`, so the policy loads beside a
+   project's own `CLAUDE.md` (Laravel Boost writes one) and on Claude Code
+   versions that do not read `AGENTS.md` directly. An existing
+   `.claude/CLAUDE.md` gets the import appended by `--merge-existing`.
+4. Start a new Claude Code session. The session-start output should identify
    project/tooling markers and context validation status without printing
    record contents.
-4. Type `/` and confirm installed commands such as `/verify`, `/memory`, and
+5. Type `/` and confirm installed commands such as `/verify`, `/memory`, and
    `/project-brain` are visible.
-5. Inspect any permission or hook error rather than weakening the safety
+6. Inspect any permission or hook error rather than weakening the safety
    configuration globally.
 
 Use `.claude/settings.local.json` for personal hooks or overrides that should

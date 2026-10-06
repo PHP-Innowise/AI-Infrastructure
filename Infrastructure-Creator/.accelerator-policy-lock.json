@@ -38,7 +38,7 @@
     ".agents/skills/bootstrap-verifier/scripts/publish_staging.py": "f3d6fe428803bf9cd4987d9fe68af20d0429a509714921befb90d4daa78cff02",
     ".agents/skills/bootstrap-verifier/scripts/validate_content_review.py": "47e544546476dcf74cc97f00fffcedc82696106cfa94a95015bf7c5e15a1cd43",
     ".agents/skills/bootstrap-verifier/scripts/validate_flow_contracts.py": "aa84fdaa8461e99e12c4104108ef8316c79bf2ff25ca068c55870dcd926811b3",
-    ".agents/skills/bootstrap-verifier/scripts/validate_generated.py": "f9cb606923cac5706fdb4b974ef6a0df782e50258337c48715d8ed9b6de04218",
+    ".agents/skills/bootstrap-verifier/scripts/validate_generated.py": "3cbeb49bb21fcc1d51a19402f275d8a6f747ddd5ab744916e7aa5e2a960a4c38",
     ".agents/skills/bootstrap-verifier/scripts/validate_memory_content.py": "b2e75fdcd908494487d3f6f2f85bce813647ca4c6f90c595e05ceca583f682af",
     ".agents/skills/bootstrap-verifier/scripts/validate_plan_mutations.py": "a8c925e0b7979ba4004726834494fc6c88607d6b3e8a109f59960deb413cc354",
     ".agents/skills/bootstrap-verifier/scripts/validate_plan_review.py": "5592efabd9650913edfbbe2576599787303a62172a1182c7c5093b11a8efbb4b",
@@ -98,11 +98,11 @@
     ".agents/skills/memory-seed/assets/runtime-contract.json": "5d483ee6d62313dd61fae180f126d641a925792ca6b89d8c9c136a973361fcfe",
     ".agents/skills/memory-seed/assets/scripts/brain_runtime.py": "32da473f49d8f04d1bb835971d99055b00db1b472499fc774385237b61474d89",
     ".agents/skills/memory-seed/assets/scripts/context.py": "effd071662d2337035dee468991af105443f48991d66884abf0bab3d2b026478",
-    ".agents/skills/memory-seed/assets/scripts/context_retrieval.py": "579d0f62efa451529b958bb970b66e4741b413ae42dcf5daf3fd928cd1d2adf6",
+    ".agents/skills/memory-seed/assets/scripts/context_retrieval.py": "2e35729a065dc4ce979f769e6686c3c32ed90f6d23b2c163d2d7ccd9d1aca419",
     ".agents/skills/memory-seed/assets/scripts/telemetry.py": "f72cd8b6ac514cd941dd87404bee6d1539ccdcb7a8a046967cdb276e0a07c91f",
     ".agents/skills/memory-seed/assets/scripts/validate.py": "9ff417e61748520c86cd88bce64d7773ec4a243daf87cf3781d88f49d61d2f62",
     ".agents/skills/memory-seed/assets/templates/chunk.md": "172c3300e6c5f3ed7fd22a673f7681ec7649338bb50e64f178fe5792b49295ea",
-    ".agents/skills/policy-forge/SKILL.md": "31bd376c980687eea112abb47edfd18f13fa2b1e85ff61ad97cf9af78f7deda5",
+    ".agents/skills/policy-forge/SKILL.md": "b762db8f1091ab9898e2d478d758ba73255d9ae5db4988b2a23a2202cb4137d1",
     ".agents/skills/profile-synthesizer/SKILL.md": "76f4705fc5a2f0184aaa65c150b9706edc674f0e292657d8dc5f8d041ae3029b",
     ".agents/skills/profile-synthesizer/references/project-profile-schema.md": "95f05519ffa4293615423d8f0067db411bf1bc90d0c7d2947577cca266078500",
     ".agents/skills/security-compliance-scanner/SKILL.md": "8a2426f9fdac1516f9a6f0167b1af62ba9d185acac913c57f3a28040ce839519",
@@ -164,7 +164,7 @@
     ".cursor/rules/subagent-policy.mdc": "b2200867b3141faedb982cb12cc58158015ef5d9294c0f8b193bb8b70f61f201",
     "AGENTS.md": "4a87c3ba8c45a3d89f8018e043b7a0736b624b3bb1b481612b9ac064ae010634"
   },
-  "policy_digest": "96a386e5e59d32ff2a3709f8623e096e7889e3ded21c2d044856752485a563e4",
+  "policy_digest": "e52a56e0fc76df2d1095053ce5aadd5ef16ac103a11d050d885b460709f7b4c8",
   "release": "2.5.0",
   "schema_version": 1
 }

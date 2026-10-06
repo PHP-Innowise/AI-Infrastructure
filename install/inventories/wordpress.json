@@ -64,6 +64,7 @@
       "tasks/README.md"
     ],
     "claude": [
+      ".claude/CLAUDE.md",
       ".claude/DOD.md",
       ".claude/GOLDEN-PRINCIPLES.md",
       ".claude/STABILIZATION.md",

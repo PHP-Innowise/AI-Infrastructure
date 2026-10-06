@@ -401,6 +401,46 @@ class InventoryTest(unittest.TestCase):
             for path, digest in merged_digests.items():
                 self.assertEqual(digest, hashlib.sha256((target / path).read_bytes()).hexdigest())
 
+    def test_claude_install_imports_the_policy_beside_a_project_claude_md(self) -> None:
+        """Claude Code reads AGENTS.md itself only while no CLAUDE.md exists;
+        a project with its own CLAUDE.md (Laravel Boost writes one) would
+        otherwise never load the policy."""
+        with tempfile.TemporaryDirectory(prefix="install claude md ") as raw:
+            target = Path(raw).resolve()
+            (target / "CLAUDE.md").write_text("# Team notes\n", encoding="utf-8")
+            (target / ".claude").mkdir()
+            existing = "# Existing Claude notes\n\nUse PHP 8.3.\n"
+            (target / ".claude" / "CLAUDE.md").write_text(existing, encoding="utf-8")
+            command = (
+                sys.executable, str(INSTALLER), "--edition", "Laravel",
+                "--target", str(target), "--tool", "claude",
+            )
+
+            refused = run(*command, "--dry-run")
+            self.assertEqual(2, refused.returncode)
+            self.assertIn("COLLISION\tclaude\t.claude/CLAUDE.md", refused.stderr)
+
+            installed = run(*command, "--merge-existing")
+            self.assertEqual(0, installed.returncode, installed.stderr)
+            self.assertIn("MERGE\tclaude\t.claude/CLAUDE.md", installed.stdout)
+            merged = (target / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+            self.assertTrue(merged.startswith(existing.rstrip()))
+            self.assertIn("\n@../AGENTS.md\n", merged)
+            self.assertEqual("# Team notes\n", (target / "CLAUDE.md").read_text(encoding="utf-8"))
+
+            repeated = run(*command, "--merge-existing")
+            self.assertEqual(0, repeated.returncode, repeated.stderr)
+            self.assertIn("UNCHANGED\tclaude\t.claude/CLAUDE.md", repeated.stdout)
+
+    def test_every_claude_install_ships_the_policy_import(self) -> None:
+        for edition in EDITION_PATHS:
+            with self.subTest(edition=edition):
+                shipped = (ROOT / EDITION_PATHS[edition] / ".claude" / "CLAUDE.md").read_text(
+                    encoding="utf-8"
+                )
+                imports = [line for line in shipped.splitlines() if line.startswith("@")]
+                self.assertEqual(["@../AGENTS.md"], imports)
+
     def test_merge_existing_still_refuses_unsupported_collision_atomically(self) -> None:
         with tempfile.TemporaryDirectory(prefix="install unsupported merge ") as raw:
             target = Path(raw).resolve()

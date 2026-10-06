@@ -158,6 +158,7 @@
     ".agents/skills/wcag-accessibility/rules/semantic-table-markup.md": "d59ff1e862ef6d2b481c0aad2bfa616c71cdcc034212cb2ebb60f6106a5a2034",
     ".agents/skills/web-design-guidelines/SKILL.md": "24163cb29955de6c98af1183931a152948cdcf4dfa772c6ac39efbd83ecca191",
     ".agents/skills/writing-plans/SKILL.md": "bfc0a70a10b7ee77ec7d30cd44b27b0be10c90022fea5d2c917493d17d05aafd",
+    ".claude/CLAUDE.md": "bf7730a5fdef92a5cd417424a2568d079d8f98a8a628e24c543c868b07d5329f",
     ".claude/DOD.md": "0d1030596ab335e8e7624472368b29de87d64ef2346c4cf32524150ae8b00e4b",
     ".claude/GOLDEN-PRINCIPLES.md": "2a72434d03ea9104cf5df7fa4ca3542948e7e47f77c8fe5b0e921e72b3ef24e7",
     ".claude/STABILIZATION.md": "212620fc831df336443c04dc83608d302942cc4108a0af2f755073664261127f",
@@ -265,7 +266,7 @@
     ".cursor/skills/skill-creator/SKILL.md": "85238e56099797fdd695cbc2cc65e6958e9ad7806a7e32121bd5a37ccd7e3323",
     "AGENTS.md": "f4e6dcda94b800a9221afa0fa2a9cd28fada0ba9229a32b1e1a83f1eac0fcc9f"
   },
-  "policy_digest": "2902f50b3bd2fd73f1fcab804dbbe0e858114a3c5fff86c33bcab7f726fda23d",
+  "policy_digest": "452494bdf2e8922ded33b1e22518fb85694812a4804bfc656422b663021892e3",
   "release": "2.0.0",
   "schema_version": 1
 }

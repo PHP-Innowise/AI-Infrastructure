@@ -24,6 +24,7 @@ Into the required **generation root** (task staging during
 `infra-generate`/`infra-update`; never the evidence target directly), write:
 - `AGENTS.md` at the target ROOT - a SINGLE shared file (never per edition).
 - For each selected edition folder in `{.claude, .cursor, .codex}`: `<edition>/DOD.md`, `<edition>/GOLDEN-PRINCIPLES.md`, `<edition>/STABILIZATION.md` (identical copies duplicated into each selected edition).
+- When `.claude` is selected: `.claude/CLAUDE.md` with the line `@../AGENTS.md` (one explanatory sentence before it at most). Claude Code reads `AGENTS.md` by itself only while the project has no `CLAUDE.md`, `.claude/CLAUDE.md` or `CLAUDE.local.md`, so without the import a target with its own `CLAUDE.md` never loads the policy. If the target already has a `.claude/CLAUDE.md`, keep its content and append the import line; never replace the file.
 
 Append a generation log to `tasks/TASK-{N}/policy-forge-log.md` listing every file written and the profile lines each rule is grounded in.
 
@@ -53,7 +54,7 @@ Append a generation log to `tasks/TASK-{N}/policy-forge-log.md` listing every fi
    silently passing it.
 4. **Author `GOLDEN-PRINCIPLES.md`**: durable stack-specific non-negotiables, project-specific source authority, critical behavioral invariants, and secrets discipline.
 5. **Author `STABILIZATION.md`**: the error-to-rule loop the target uses to convert recurring mistakes into permanent rules.
-6. **Duplicate** `DOD.md`, `GOLDEN-PRINCIPLES.md`, `STABILIZATION.md` into every selected edition folder (byte-identical copies). Do NOT write into unselected editions.
+6. **Duplicate** `DOD.md`, `GOLDEN-PRINCIPLES.md`, `STABILIZATION.md` into every selected edition folder (byte-identical copies). Do NOT write into unselected editions. When `.claude` is selected, also write `.claude/CLAUDE.md` with the `@../AGENTS.md` import (see the naming convention); bootstrap-verifier fails a Claude edition without it.
 7. **Analyze commands before publication.** Run
    `bootstrap-verifier/scripts/analyze_commands.py --target <real-target>` to
    inventory target aliases without execution. Then analyze every command
