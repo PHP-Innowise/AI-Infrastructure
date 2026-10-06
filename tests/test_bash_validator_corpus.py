@@ -15,7 +15,8 @@ leak into editions they do not belong to.
 
 The hooks keep one generic section (parser, normaliser, git/rm/gh/composer/
 SQL/.env rules) byte-identical between explicit markers; that identity is
-asserted here too.
+asserted here too, and so is that parsing time grows linearly with the
+command (a long command must not push the hook past its timeout).
 
 Run from the repository root: python3 -m unittest tests.test_bash_validator_corpus
 """
@@ -27,6 +28,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -226,6 +228,49 @@ class CorpusBehaviourTest(unittest.TestCase):
                         category.startswith(case["category"]),
                         "{!r} is not a {!r} rule".format(category, case["category"]),
                     )
+
+
+class ParseCostTest(unittest.TestCase):
+    """The parser's time grows linearly with the command, so a long command
+    cannot push the hook past its 5 s timeout, which fails open. Measured
+    as a ratio (4x the input must cost well under 16x the time) so that a
+    slow machine does not fail it; the generic section is identical in
+    every copy, so one copy stands for all."""
+
+    HOOK = REPO_ROOT / "Laravel" / ".claude" / "hooks" / "bash-validator.sh"
+
+    @staticmethod
+    def dense(kind: str, n: int) -> str:
+        return {
+            "expansions in double quotes": 'python3 -c "' + "$a $b ${c} " * n + '"',
+            "ANSI-C quoted string": "printf $'" + "line\\n" * (n * 2) + "'",
+            "long word list": "ls " + "file.txt " * n,
+        }[kind]
+
+    def best_time(self, command: str) -> float:
+        times = []
+        for _ in range(2):
+            started = time.perf_counter()
+            result = run_hook(self.HOOK, ".claude", command)
+            times.append(time.perf_counter() - started)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        return min(times)
+
+    def test_parse_time_grows_linearly(self) -> None:
+        for kind in ("expansions in double quotes", "ANSI-C quoted string", "long word list"):
+            with self.subTest(kind=kind):
+                small = self.best_time(self.dense(kind, 2000))
+                large = self.best_time(self.dense(kind, 8000))
+                self.assertLess(large / small, 6.0, "4x the input took %.1fx the time" % (large / small))
+
+    def test_large_heredoc_write_passes_quickly(self) -> None:
+        body = "\n".join(
+            "    public function test%d(): void { $this->assertSame(%d, f(%d)); } // \"x\" 'y'" % (i, i, i)
+            for i in range(1500)
+        )
+        command = "cat > tests/Feature/BigTest.php <<'PHP'\n<?php\nclass BigTest {\n" + body + "\n}\nPHP"
+        self.assertGreater(len(command), 100_000)
+        self.assertLess(self.best_time(command), 2.5)
 
 
 class GenericSectionTest(unittest.TestCase):

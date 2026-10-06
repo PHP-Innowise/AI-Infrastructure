@@ -9,7 +9,11 @@
   ],
   "decisions": {
     "--force-with-lease": "Blocked. It still rewrites the remote branch; the lease only protects against overwriting commits the agent has not fetched. AGENTS.md forbids force-push without explicit user consent, and a hook cannot see consent, so the user runs it.",
-    "sandbox": "The validator guards against accidental destruction; it is not a sandbox. A script written to disk and run later, or text piped into a shell, is not inspected."
+    "sandbox": "The validator guards against accidental destruction; it is not a sandbox. A script written to disk and run later, or text piped into a shell, is not inspected.",
+    "delete-from": "DELETE with no WHERE, and TRUNCATE without TABLE, are refused only when a simple command of the input runs SQL text (mysql, psql, sqlite3, wp db query, dbal:run-sql, artisan tinker, ...). Elsewhere 'delete from the cart' is a test name, an issue title or a translation. DROP TABLE, TRUNCATE TABLE and an always-true WHERE (1=1, true, bare 1) stay refused everywhere, as before.",
+    "core.hooksPath": "Every git config write or unset of core.hooksPath is refused, also one that points the hooks at a project directory such as .githooks: the hook cannot tell enabling hooks from disabling them, so the user runs it.",
+    "launchers": "A quoted command line is checked as a command only when a known launcher (BV_LAUNCHERS: ssh, ddev, lando, vagrant, docker, kubectl, tmux, ...) receives it; a quoted argument of any other program is text.",
+    "nesting": "Nesting deeper than any real command (BV_MAX_NEST call frames) is refused as 'command too complex' instead of parsed: bash would overflow its stack and the hook would fail open."
   },
   "cases": [
     {
@@ -836,6 +840,363 @@
       "note": "lint"
     },
     {
+      "command": "bash -euo pipefail -c 'git push --force origin main'",
+      "expect": "block",
+      "editions": "all",
+      "note": "-euo takes pipefail as its value, -c still runs the string",
+      "category": "destructive command"
+    },
+    {
+      "command": "bash --noprofile --norc -eo pipefail -c 'git reset --hard'",
+      "expect": "block",
+      "editions": "all",
+      "note": "the GitHub Actions shell line"
+    },
+    {
+      "command": "bash -oe pipefail -c 'git reset --hard'",
+      "expect": "block",
+      "editions": "all",
+      "note": "o anywhere in a cluster takes the next word"
+    },
+    {
+      "command": "sh -euo pipefail -c 'git reset --hard'",
+      "expect": "block",
+      "editions": "all",
+      "note": "same for sh"
+    },
+    {
+      "command": "bash -euo pipefail <<'EOF'\ngit reset --hard origin/main\nEOF",
+      "expect": "block",
+      "editions": "all",
+      "note": "heredoc to a shell started with -euo pipefail"
+    },
+    {
+      "command": "bash -euo pipefail -c 'ls -la'",
+      "expect": "pass",
+      "editions": "all",
+      "note": "harmless -c string"
+    },
+    {
+      "command": "bash -euo pipefail scripts/run.sh",
+      "expect": "pass",
+      "editions": "all",
+      "note": "runs a script file, not stdin"
+    },
+    {
+      "command": "ssh deploy@prod 'cd /var/www/app && git reset --hard origin/main'",
+      "expect": "block",
+      "editions": "all",
+      "note": "quoted remote command",
+      "category": "destructive command"
+    },
+    {
+      "command": "ssh -t deploy@prod 'git push --force'",
+      "expect": "block",
+      "editions": "all",
+      "note": "quoted remote command after ssh options"
+    },
+    {
+      "command": "ssh deploy@prod <<'EOF'\ngit reset --hard\nEOF",
+      "expect": "block",
+      "editions": "all",
+      "note": "ssh with no remote command runs its stdin"
+    },
+    {
+      "command": "ssh host bash -s <<'EOF'\ngit reset --hard\nEOF",
+      "expect": "block",
+      "editions": "all",
+      "note": "remote shell reading the heredoc"
+    },
+    {
+      "command": "docker exec -i app bash <<< \"git reset --hard\"",
+      "expect": "block",
+      "editions": "all",
+      "note": "here-string to a shell in a container"
+    },
+    {
+      "command": "kubectl exec -i pod -- bash <<'EOF'\ngit push --force\nEOF",
+      "expect": "block",
+      "editions": "all",
+      "note": "heredoc to a shell in a pod"
+    },
+    {
+      "command": "ddev exec \"git push --force\"",
+      "expect": "block",
+      "editions": "all",
+      "note": "ddev exec runs the quoted command line"
+    },
+    {
+      "command": "vagrant ssh -c \"git reset --hard\"",
+      "expect": "block",
+      "editions": "all",
+      "note": "vagrant ssh -c runs the quoted command line"
+    },
+    {
+      "command": "ssh deploy@prod 'git commit --no-verify -am hotfix'",
+      "expect": "block",
+      "editions": "all",
+      "note": "hook bypass on the remote host"
+    },
+    {
+      "command": "git submodule foreach --recursive 'git reset --hard && git clean -fdx'",
+      "expect": "block",
+      "editions": "all",
+      "note": "foreach runs the command in every submodule"
+    },
+    {
+      "command": "ssh deploy@prod uptime <<'EOF'\ngit reset --hard\nEOF",
+      "expect": "pass",
+      "editions": "all",
+      "note": "the remote command is uptime; the heredoc is its input"
+    },
+    {
+      "command": "git submodule foreach 'git status'",
+      "expect": "pass",
+      "editions": "all",
+      "note": "harmless foreach"
+    },
+    {
+      "command": "kubectl apply -f - <<'EOF'\nkind: ConfigMap\nEOF",
+      "expect": "pass",
+      "editions": "all",
+      "note": "manifest on stdin, no shell"
+    },
+    {
+      "command": "notify-send 'build done: git push --force is blocked'",
+      "expect": "pass",
+      "editions": "all",
+      "note": "not a launcher: a quoted argument is text"
+    },
+    {
+      "command": "psql -c \"TRUNCATE users CASCADE\"",
+      "expect": "block",
+      "editions": "all",
+      "note": "TABLE is optional",
+      "category": "destructive SQL"
+    },
+    {
+      "command": "mysql -e \"TRUNCATE users\"",
+      "expect": "block",
+      "editions": "all",
+      "note": "TABLE is optional"
+    },
+    {
+      "command": "wp db query \"TRUNCATE wp_posts\"",
+      "expect": "block",
+      "editions": "all",
+      "note": "TABLE is optional, wp db query runs SQL"
+    },
+    {
+      "command": "dropdb app_test",
+      "expect": "block",
+      "editions": "all",
+      "note": "drops a PostgreSQL database",
+      "category": "destructive command"
+    },
+    {
+      "command": "mysqladmin -u root -f drop app",
+      "expect": "block",
+      "editions": "all",
+      "note": "drops a MySQL database"
+    },
+    {
+      "command": "mysql -e \"DELETE FROM sessions WHERE 1\"",
+      "expect": "block",
+      "editions": "all",
+      "note": "WHERE 1 is always true"
+    },
+    {
+      "command": "echo \"truncate the log before the release\"",
+      "expect": "pass",
+      "editions": "all",
+      "note": "prose, no SQL client"
+    },
+    {
+      "command": "psql -c \"DELETE FROM sessions WHERE 1 = id\"",
+      "expect": "pass",
+      "editions": "all",
+      "note": "a real row filter"
+    },
+    {
+      "command": "mysqladmin -u root status",
+      "expect": "pass",
+      "editions": "all",
+      "note": "read-only mysqladmin"
+    },
+    {
+      "command": "git config core.hooksPath /dev/null && git commit -m wip",
+      "expect": "block",
+      "editions": "all",
+      "note": "persistent hook bypass",
+      "category": "verification bypass"
+    },
+    {
+      "command": "git config --unset core.hooksPath",
+      "expect": "block",
+      "editions": "all",
+      "note": "drops the project's hooks path"
+    },
+    {
+      "command": "git --config-env=core.hooksPath=NOHOOKS commit -m x",
+      "expect": "block",
+      "editions": "all",
+      "note": "--config-env works like -c"
+    },
+    {
+      "command": "git config --get core.hooksPath",
+      "expect": "pass",
+      "editions": "all",
+      "note": "read only"
+    },
+    {
+      "command": "git config user.email dev@example.com",
+      "expect": "pass",
+      "editions": "all",
+      "note": "unrelated setting"
+    },
+    {
+      "command": "git push --force; ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( true ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) )",
+      "expect": "block",
+      "editions": "all",
+      "note": "nesting far past any real command is refused, not crashed on",
+      "category": "command too complex"
+    },
+    {
+      "command": "echo $($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($($(true))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))",
+      "expect": "block",
+      "editions": "all",
+      "note": "deep command substitution is refused, not crashed on",
+      "category": "command too complex"
+    },
+    {
+      "command": "( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ls ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) )",
+      "expect": "pass",
+      "editions": "all",
+      "note": "realistic nesting still parses"
+    },
+    {
+      "command": "grep DB_PASSWORD .env",
+      "expect": "block",
+      "editions": "all",
+      "note": "grep prints the matching secret lines",
+      "category": "secret exposure"
+    },
+    {
+      "command": "rg APP_KEY .env",
+      "expect": "block",
+      "editions": "all",
+      "note": "rg prints the matching secret lines"
+    },
+    {
+      "command": "awk -F= '/DB_/' .env",
+      "expect": "block",
+      "editions": "all",
+      "note": "awk prints the file"
+    },
+    {
+      "command": "cut -d= -f2 .env",
+      "expect": "block",
+      "editions": "all",
+      "note": "cut prints every value"
+    },
+    {
+      "command": "grep -rn \".env\" src/",
+      "expect": "pass",
+      "editions": "all",
+      "note": "the pattern is .env, the file is src/"
+    },
+    {
+      "command": "rg -l .env",
+      "expect": "pass",
+      "editions": "all",
+      "note": "the pattern is .env"
+    },
+    {
+      "command": "grep -q '^APP_KEY=' .env",
+      "expect": "pass",
+      "editions": "all",
+      "note": "-q prints nothing"
+    },
+    {
+      "command": "grep APP_ .env.example",
+      "expect": "pass",
+      "editions": "all",
+      "note": "the example file is readable"
+    },
+    {
+      "command": "vendor/bin/pest --filter \"it can delete from the cart\"",
+      "expect": "pass",
+      "editions": "all",
+      "note": "a test name, no SQL client"
+    },
+    {
+      "command": "gh issue create --title \"Users cannot delete from wishlist\"",
+      "expect": "pass",
+      "editions": "all",
+      "note": "an issue title"
+    },
+    {
+      "command": "sed -i 's/delete from the cart/remove from the cart/' lang/en/cart.php",
+      "expect": "pass",
+      "editions": "all",
+      "note": "a translation edit"
+    },
+    {
+      "command": "gh pr create --title \"Cart\" --body \"$(cat <<'EOF'\n## Summary\n- users can delete from the cart again\nEOF\n)\"",
+      "expect": "pass",
+      "editions": "all",
+      "note": "a PR body heredoc"
+    },
+    {
+      "command": "cat > tests/Feature/CartTest.php <<'PHP'\n<?php\nit('can delete from the cart', function () {\n    DB::statement('DELETE FROM cart_items');\n});\nPHP",
+      "expect": "pass",
+      "editions": "all",
+      "note": "a test file written from a heredoc"
+    },
+    {
+      "command": "echo \"DELETE FROM users;\" | mysql app",
+      "expect": "block",
+      "editions": "all",
+      "note": "SQL piped into a client",
+      "category": "destructive SQL"
+    },
+    {
+      "command": "docker compose exec db mysql -e \"DELETE FROM users\"",
+      "expect": "block",
+      "editions": "all",
+      "note": "SQL client in a container"
+    },
+    {
+      "command": "sed -Ei 's/^#?APP_DEBUG=.*/APP_DEBUG=true/' .env",
+      "expect": "pass",
+      "editions": "all",
+      "note": "in-place edit prints nothing"
+    },
+    {
+      "command": "sed -ni 's/a/b/p' .env",
+      "expect": "pass",
+      "editions": "all",
+      "note": "in-place edit prints nothing"
+    },
+    {
+      "command": "sed -ne p .env",
+      "expect": "block",
+      "editions": "all",
+      "note": "-n with a script prints the file"
+    },
+    {
+      "command": "git log -S '--no-verify' --oneline",
+      "expect": "pass",
+      "editions": "all",
+      "note": "a pickaxe search value"
+    },
+    {
+      "command": "git grep -n -e '--no-verify'",
+      "expect": "pass",
+      "editions": "all",
+      "note": "a git grep pattern"
+    },
+    {
       "command": "php artisan migrate:fresh",
       "expect": "block",
       "editions": [
@@ -1031,15 +1392,223 @@
     },
     {
       "command": "php artisan config:show logging",
-      "expect": "pass",
-      "editions": "all",
-      "note": "non-secret configuration"
+      "expect": "block",
+      "editions": [
+        "laravel",
+        "infrastructure-creator"
+      ],
+      "note": "config/logging.php holds LOG_SLACK_WEBHOOK_URL and PAPERTRAIL_URL"
     },
     {
       "command": "php artisan schema:dump",
       "expect": "pass",
       "editions": "all",
       "note": "schema dump"
+    },
+    {
+      "command": "ssh deploy@prod \"php artisan migrate:fresh --force\"",
+      "expect": "block",
+      "editions": [
+        "laravel",
+        "php-core",
+        "wordpress",
+        "infrastructure-creator"
+      ],
+      "note": "artisan through a quoted ssh command"
+    },
+    {
+      "command": "lando ssh -c \"php artisan migrate:fresh\"",
+      "expect": "block",
+      "editions": [
+        "laravel",
+        "php-core",
+        "wordpress",
+        "infrastructure-creator"
+      ],
+      "note": "artisan through lando ssh -c"
+    },
+    {
+      "command": "docker compose exec -T app bash <<'EOF'\nphp artisan migrate:fresh --force\nEOF",
+      "expect": "block",
+      "editions": [
+        "laravel",
+        "php-core",
+        "wordpress",
+        "infrastructure-creator"
+      ],
+      "note": "artisan in a heredoc to a container shell"
+    },
+    {
+      "command": "ddev exec \"php artisan migrate\"",
+      "expect": "pass",
+      "editions": "all",
+      "note": "harmless quoted command line"
+    },
+    {
+      "command": "php artisan --force db:seed",
+      "expect": "block",
+      "editions": [
+        "laravel",
+        "infrastructure-creator"
+      ],
+      "note": "option before the command name"
+    },
+    {
+      "command": "php artisan config:show --env production database",
+      "expect": "block",
+      "editions": [
+        "laravel",
+        "infrastructure-creator"
+      ],
+      "note": "--env takes the next word, database is the argument"
+    },
+    {
+      "command": "php artisan --pretend model:prune",
+      "expect": "pass",
+      "editions": "all",
+      "note": "--pretend before the command name still counts"
+    },
+    {
+      "command": "./vendor/bin/sail art migrate:fresh",
+      "expect": "block",
+      "editions": [
+        "laravel",
+        "php-core",
+        "wordpress",
+        "infrastructure-creator"
+      ],
+      "note": "Sail runs art as artisan",
+      "category": "destructive command"
+    },
+    {
+      "command": "sail a db:wipe --force",
+      "expect": "block",
+      "editions": [
+        "laravel",
+        "php-core",
+        "wordpress",
+        "infrastructure-creator"
+      ],
+      "note": "Sail runs a as artisan"
+    },
+    {
+      "command": "sail art env:decrypt",
+      "expect": "block",
+      "editions": [
+        "laravel",
+        "infrastructure-creator"
+      ],
+      "note": "Sail art alias, Laravel secret rule"
+    },
+    {
+      "command": "sail art migrate",
+      "expect": "pass",
+      "editions": "all",
+      "note": "harmless artisan command through the alias"
+    },
+    {
+      "command": "sail up -d",
+      "expect": "pass",
+      "editions": "all",
+      "note": "Sail without art/a"
+    },
+    {
+      "command": "cat .env.production",
+      "expect": "block",
+      "editions": [
+        "laravel",
+        "infrastructure-creator"
+      ],
+      "note": "Laravel keeps production secrets in .env.production"
+    },
+    {
+      "command": "cat .env.backup",
+      "expect": "block",
+      "editions": [
+        "laravel",
+        "infrastructure-creator"
+      ],
+      "note": "Laravel's .gitignore lists .env.backup"
+    },
+    {
+      "command": "cat .env.testing",
+      "expect": "pass",
+      "editions": "all",
+      "note": "Laravel's test environment file"
+    },
+    {
+      "command": "php artisan test --filter \"user can delete from wishlist\"",
+      "expect": "pass",
+      "editions": "all",
+      "note": "a test name, no SQL client"
+    },
+    {
+      "command": "php artisan tinker --execute \"DB::statement('DELETE FROM users')\"",
+      "expect": "block",
+      "editions": "all",
+      "note": "tinker runs the statement"
+    },
+    {
+      "command": "php artisan schema:d",
+      "expect": "pass",
+      "editions": "all",
+      "note": "schema:d resolves to schema:dump"
+    },
+    {
+      "command": "php artisan config:show services",
+      "expect": "block",
+      "editions": [
+        "laravel",
+        "infrastructure-creator"
+      ],
+      "note": "prints third-party API keys",
+      "category": "secret exposure"
+    },
+    {
+      "command": "php artisan config:show mail.mailers.smtp",
+      "expect": "block",
+      "editions": [
+        "laravel",
+        "infrastructure-creator"
+      ],
+      "note": "prints the SMTP password"
+    },
+    {
+      "command": "php artisan config:show session",
+      "expect": "pass",
+      "editions": "all",
+      "note": "non-secret configuration"
+    },
+    {
+      "command": "php artisan queue:flush",
+      "expect": "block",
+      "editions": [
+        "laravel",
+        "infrastructure-creator"
+      ],
+      "note": "deletes every failed job",
+      "category": "destructive command"
+    },
+    {
+      "command": "php artisan queue:clear redis --queue=emails",
+      "expect": "block",
+      "editions": [
+        "laravel",
+        "infrastructure-creator"
+      ],
+      "note": "deletes every pending job on a queue"
+    },
+    {
+      "command": "php artisan queue:forget 5",
+      "expect": "pass",
+      "editions": "all",
+      "note": "one failed job"
+    },
+    {
+      "command": "php artisan queue:failed",
+      "expect": "pass",
+      "editions": "all",
+      "note": "list only"
     },
     {
       "command": "bin/console d:d:d --force",
@@ -1194,6 +1763,155 @@
       "note": "one failed message"
     },
     {
+      "command": "bin/console secrets:list -r",
+      "expect": "block",
+      "editions": [
+        "symfony",
+        "infrastructure-creator"
+      ],
+      "note": "-r is the documented shortcut of --reveal",
+      "category": "secret exposure"
+    },
+    {
+      "command": "bin/console secrets:list -rv",
+      "expect": "block",
+      "editions": [
+        "symfony",
+        "infrastructure-creator"
+      ],
+      "note": "-r inside a short-option cluster"
+    },
+    {
+      "command": "bin/console --reveal secrets:list",
+      "expect": "block",
+      "editions": [
+        "symfony",
+        "infrastructure-creator"
+      ],
+      "note": "Symfony Console binds options placed before the command name"
+    },
+    {
+      "command": "bin/console --all messenger:failed:remove",
+      "expect": "block",
+      "editions": [
+        "symfony",
+        "infrastructure-creator"
+      ],
+      "note": "option before the command name"
+    },
+    {
+      "command": "bin/console --down doctrine:migrations:execute 'DoctrineMigrations\\Version1'",
+      "expect": "block",
+      "editions": [
+        "symfony",
+        "infrastructure-creator"
+      ],
+      "note": "option before the command name"
+    },
+    {
+      "command": "bin/console doctrine:migrations:migrate --em customer prev",
+      "expect": "block",
+      "editions": [
+        "symfony",
+        "infrastructure-creator"
+      ],
+      "note": "--em takes the next word, prev is the version"
+    },
+    {
+      "command": "bin/console doctrine:migrations:migrate -e prod prev",
+      "expect": "block",
+      "editions": [
+        "symfony",
+        "infrastructure-creator"
+      ],
+      "note": "-e takes the next word, prev is the version"
+    },
+    {
+      "command": "bin/console secrets:list -eprod",
+      "expect": "pass",
+      "editions": "all",
+      "note": "-e takes the rest of the cluster: env=prod, no reveal"
+    },
+    {
+      "command": "bin/console --append doctrine:fixtures:load",
+      "expect": "pass",
+      "editions": "all",
+      "note": "--append before the command name still counts"
+    },
+    {
+      "command": "bin/console doctrine:migrations:migrate 0 -n",
+      "expect": "block",
+      "editions": [
+        "symfony",
+        "infrastructure-creator"
+      ],
+      "note": "0 resolves like first"
+    },
+    {
+      "command": "bin/console doctrine:migrations:migrate current-2",
+      "expect": "block",
+      "editions": [
+        "symfony",
+        "infrastructure-creator"
+      ],
+      "note": "current-N resolves like prev"
+    },
+    {
+      "command": "bin/console doctrine:migrations:migrate current+1",
+      "expect": "pass",
+      "editions": "all",
+      "note": "current+1 goes up"
+    },
+    {
+      "command": "bin/console doctrine:migrations:migrate latest",
+      "expect": "pass",
+      "editions": "all",
+      "note": "latest goes up"
+    },
+    {
+      "command": "bin/console debug:dotenv",
+      "expect": "block",
+      "editions": [
+        "symfony",
+        "infrastructure-creator"
+      ],
+      "note": "prints every .env value",
+      "category": "secret exposure"
+    },
+    {
+      "command": "bin/console debug:container --env-vars",
+      "expect": "block",
+      "editions": [
+        "symfony",
+        "infrastructure-creator"
+      ],
+      "note": "prints resolved env var values"
+    },
+    {
+      "command": "bin/console debug:container --env-var=DATABASE_URL",
+      "expect": "block",
+      "editions": [
+        "symfony",
+        "infrastructure-creator"
+      ],
+      "note": "prints one resolved value"
+    },
+    {
+      "command": "APP_RUNTIME_ENV=prod php bin/console secrets:decrypt-to-local --force",
+      "expect": "block",
+      "editions": [
+        "symfony",
+        "infrastructure-creator"
+      ],
+      "note": "writes every decrypted secret into .env.prod.local"
+    },
+    {
+      "command": "bin/console debug:container --env=prod",
+      "expect": "pass",
+      "editions": "all",
+      "note": "--env is the environment, not --env-vars"
+    },
+    {
       "command": "php bin/cli.php db:wipe",
       "expect": "block",
       "editions": [
@@ -1244,6 +1962,84 @@
       "expect": "pass",
       "editions": "all",
       "note": "forward migration"
+    },
+    {
+      "command": "vendor/bin/doctrine-migrations migrate 0",
+      "expect": "block",
+      "editions": [
+        "php-core",
+        "infrastructure-creator"
+      ],
+      "note": "0 resolves like first"
+    },
+    {
+      "command": "vendor/bin/doctrine-migrations migrate current-1",
+      "expect": "block",
+      "editions": [
+        "php-core",
+        "infrastructure-creator"
+      ],
+      "note": "current-N resolves like prev"
+    },
+    {
+      "command": "vendor/bin/phinx migrate -t 0",
+      "expect": "block",
+      "editions": [
+        "php-core",
+        "infrastructure-creator"
+      ],
+      "note": "phinx migrates down to target 0"
+    },
+    {
+      "command": "vendor/bin/phinx migrate --target=0",
+      "expect": "block",
+      "editions": [
+        "php-core",
+        "infrastructure-creator"
+      ],
+      "note": "phinx migrates down to target 0"
+    },
+    {
+      "command": "vendor/bin/doctrine orm:schema-tool:drop --force --full-database",
+      "expect": "block",
+      "editions": [
+        "php-core",
+        "infrastructure-creator"
+      ],
+      "note": "the Doctrine ORM CLI drops the schema"
+    },
+    {
+      "command": "vendor/bin/phinx migrate -e production",
+      "expect": "pass",
+      "editions": "all",
+      "note": "phinx migrate up, -e takes production"
+    },
+    {
+      "command": "vendor/bin/doctrine orm:schema-tool:update --dump-sql",
+      "expect": "pass",
+      "editions": "all",
+      "note": "prints SQL only"
+    },
+    {
+      "command": "php vendor/bin/phpunit --filter Rollback",
+      "expect": "pass",
+      "editions": "all",
+      "note": "a test filter is not phinx rollback"
+    },
+    {
+      "command": "php vendor/bin/pest --group rollback",
+      "expect": "pass",
+      "editions": "all",
+      "note": "a test group is not phinx rollback"
+    },
+    {
+      "command": "php phinx.phar rollback",
+      "expect": "block",
+      "editions": [
+        "php-core",
+        "infrastructure-creator"
+      ],
+      "note": "phinx run from its phar"
     },
     {
       "command": "wp db clean --yes",
@@ -1423,6 +2219,21 @@
       "expect": "pass",
       "editions": "all",
       "note": "read-only"
+    },
+    {
+      "command": "rg DB_PASSWORD wp-config.php",
+      "expect": "block",
+      "editions": [
+        "wordpress",
+        "infrastructure-creator"
+      ],
+      "note": "rg prints the password line"
+    },
+    {
+      "command": "grep -rn wp-config.php .",
+      "expect": "pass",
+      "editions": "all",
+      "note": "wp-config.php is the search pattern"
     },
     {
       "command": "echo \"APP_KEY=base64:x\" >> .env",
