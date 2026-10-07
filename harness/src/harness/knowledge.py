@@ -429,6 +429,10 @@ class KnowledgeManager:
         try:
             environment = {key: value for key, value in os.environ.items() if key not in ('PYTHONPATH', 'PYTHONHOME')}
             environment['PYTHONDONTWRITEBYTECODE'] = '1'
+            # The runtime prints UTF-8 ('…' is in every capsule); on Windows a pipe
+            # otherwise takes the ANSI code page and every memory call failed.
+            environment['PYTHONUTF8'] = '1'
+            environment['PYTHONIOENCODING'] = 'utf-8'
             environment.update(extra or {})
             process = process_runtime.launch_guarded(command, read_fd, lock_fd=self.sessions.runner_lock, cwd=root, env=environment, stdin=subprocess.DEVNULL,
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -585,6 +589,11 @@ class KnowledgeManager:
                     if _host not in ('claude', 'codex', 'cursor', 'cli'):
                         raise SessionError('Invalid internal retrieval host.')
                     options.append('--host=' + _host)
+                    if action == 'refresh':
+                        # An unattended turn's message as the person wrote it: the
+                        # runtime cuts private data and pasted transcript prefixes
+                        # out instead of refusing the turn its memory.
+                        options.append('--sanitize')
                 arguments[1:1] = options
             export_id, destination = None, None
             if action == 'export':

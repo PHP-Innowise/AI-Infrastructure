@@ -8,17 +8,25 @@ accelerator's state for the project under this server's state directory, at
 `attached/<project id>`, where `scripts/accelerator_attach.py` finds the same
 memory from a terminal. A project with an installed accelerator keeps using
 its own files; attaching is for every other project.
+
+An installed copy is kept current instead: once per version of this clone,
+`install_accelerator.sync_installation` brings the project's untouched
+accelerator files and its runtime up to the clone, so every session in the
+project - including the native ones Harness never sees - runs today's
+memory. Nothing a person owns is written (see that function).
 """
 
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -27,18 +35,28 @@ from .sessions import SessionError, now, read_context
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / 'scripts'))
 import accelerator_attach as attach  # noqa: E402
+import install_accelerator as installer  # noqa: E402
 
 TABLE = '''CREATE TABLE IF NOT EXISTS project_accelerators (
     project_id TEXT PRIMARY KEY, edition TEXT NOT NULL, attached_at TEXT NOT NULL)'''
+# The clone version each installed project was last brought up to, and what
+# that sync did.
+SYNC_TABLE = '''CREATE TABLE IF NOT EXISTS accelerator_syncs (
+    project_id TEXT PRIMARY KEY, source TEXT NOT NULL, synced_at TEXT NOT NULL, report TEXT NOT NULL)'''
 INSTALLED_MARKER = 'memory-bank/scripts/context.py'
+# How long the clone's version is trusted before Git is asked again.
+SOURCE_VERSION_TTL = 30
 
 
 class Accelerators:
     def __init__(self, sessions):
         self.sessions = sessions
         self.lock = threading.Lock()
+        self.sync_lock = threading.Lock()
+        self._source = (0.0, None)
         with sessions.lock:
             sessions.db.execute(TABLE)
+            sessions.db.execute(SYNC_TABLE)
             sessions.db.commit()
 
     # -- what a project has --------------------------------------------------
@@ -75,6 +93,7 @@ class Accelerators:
                   'editions': list(attach.EDITIONS), 'home': None, 'state': str(self.state(project_id))}
         if path.is_dir() and self.installed(path):
             result['mode'] = 'installed'
+            result['sync'] = self.last_sync(project_id)
         elif edition:
             result['mode'] = 'attached'
             result['home'] = str(attach.edition_directory(edition))
@@ -128,6 +147,82 @@ class Accelerators:
                 self.attach(project_id, edition)
         except (SessionError, attach.AttachError, OSError):
             pass
+
+    # -- keeping an installed copy current -----------------------------------
+
+    def source_version(self) -> str:
+        """This clone's version: its commit, and a digest of any uncommitted
+        change to what an install copies, so a working clone counts too."""
+        checked, version = self._source
+        if version is not None and time.monotonic() - checked < SOURCE_VERSION_TTL:
+            return version
+        version = installer.source_commit(ROOT) or 'no-git'
+        try:
+            status = subprocess.run(
+                ['git', '-C', str(ROOT), 'status', '--porcelain', '-z', '--', 'install/inventories',
+                 *(str(path) for path in installer.EDITION_PATHS.values())],
+                stdin=subprocess.DEVNULL, capture_output=True, timeout=20)
+            if status.returncode == 0 and status.stdout:
+                version += '+' + hashlib.sha256(status.stdout).hexdigest()[:12]
+        except (OSError, subprocess.SubprocessError):
+            pass
+        self._source = (time.monotonic(), version)
+        return version
+
+    def keep_current(self, project_id) -> Optional[dict[str, Any]]:
+        """Sync an installed project to this clone, once per clone version.
+
+        Returns the sync report when one ran, else None. Never raises: a
+        project that cannot be synced keeps the copy it has, and the report
+        says why.
+        """
+        try:
+            path = Path(self.sessions.project(project_id)['path'])
+        except SessionError:
+            return None
+        if not path.is_dir() or not self.installed(path):
+            return None
+        version = self.source_version()
+        with self.sessions.lock:
+            row = self.sessions.db.execute(
+                'SELECT source FROM accelerator_syncs WHERE project_id=?', (project_id,)).fetchone()
+        if row and row['source'] == version:
+            return None
+        with self.sync_lock:
+            try:
+                report = installer.sync_installation(ROOT, path)
+            except (installer.InventoryError, OSError, ValueError) as error:
+                report = {'target': str(path), 'changed': [], 'kept': [], 'backups': [], 'error': str(error)}
+            with self.sessions.lock:
+                self.sessions.db.execute(
+                    'INSERT INTO accelerator_syncs(project_id,source,synced_at,report) VALUES (?,?,?,?) '
+                    'ON CONFLICT(project_id) DO UPDATE SET source=excluded.source,synced_at=excluded.synced_at,'
+                    'report=excluded.report',
+                    (project_id, version, now(), json.dumps(report, ensure_ascii=False)))
+                self.sessions.db.commit()
+        return report
+
+    def keep_all_current(self) -> None:
+        """Every registered installed project, at server start."""
+        for project_id in list(self.sessions.projects):
+            if self.sessions.stopping.is_set():
+                return
+            self.keep_current(project_id)
+
+    def last_sync(self, project_id) -> Optional[dict[str, Any]]:
+        with self.sessions.lock:
+            row = self.sessions.db.execute(
+                'SELECT source, synced_at, report FROM accelerator_syncs WHERE project_id=?', (project_id,)).fetchone()
+        if not row:
+            return None
+        try:
+            report = json.loads(row['report'])
+        except ValueError:
+            report = {}
+        return {'source': row['source'], 'synced_at': row['synced_at'],
+                'edition': report.get('edition'), 'release': report.get('release'),
+                'changed': len(report.get('changed') or []), 'kept': report.get('kept') or [],
+                'backups': report.get('backups') or [], 'error': report.get('error')}
 
     # -- a launch ------------------------------------------------------------
 

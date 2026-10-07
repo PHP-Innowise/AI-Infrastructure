@@ -774,6 +774,176 @@ class UntrackedSourceTest(unittest.TestCase):
             self.assertFalse((base / "install").exists())
 
 
+class InstallSyncTest(unittest.TestCase):
+    """An installed project follows the clone without anyone reinstalling.
+
+    On six real installations none carried the memory fixes of the week
+    before: the installer copies once and nothing ever updated the copy.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="install sync ")
+        self.addCleanup(self._tmp.cleanup)
+        base = Path(self._tmp.name)
+        # A clone of its own, so a test can publish a new release into it.
+        self.clone = base / "clone"
+        shutil.copytree(ROOT / "install" / "inventories", self.clone / "install" / "inventories")
+        shutil.copytree(ROOT / "Symfony", self.clone / "Symfony")
+        self.target = base / "project"
+        self.target.mkdir()
+        run("git", "init", "--quiet", str(self.target))
+        installed = run(
+            sys.executable, str(INSTALLER), "--source-root", str(self.clone),
+            "--edition", "Symfony", "--tool", "claude", "--tool", "codex",
+            "--target", str(self.target),
+        )
+        self.assertEqual(0, installed.returncode, installed.stderr)
+
+    def sync(self, *extra: str) -> dict:
+        result = run(
+            sys.executable, str(INSTALLER), "--source-root", str(self.clone),
+            "--sync", "--target", str(self.target), *extra,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        return json.loads(result.stdout)
+
+    def release(self, path: str, text: str) -> None:
+        source = self.clone / "Symfony" / path
+        source.write_text(source.read_text(encoding="utf-8") + text, encoding="utf-8")
+
+    def actions(self, report: dict) -> dict:
+        return {item["path"]: item["action"] for item in report["changed"]}
+
+    def kept(self, report: dict) -> dict:
+        return {item["path"]: item["reason"] for item in report["kept"]}
+
+    def test_a_fresh_install_is_already_current(self) -> None:
+        report = self.sync()
+        self.assertEqual(("Symfony", None), (report["edition"], report["error"]))
+        self.assertEqual([], report["changed"])
+        self.assertTrue((self.target / "memory-bank/local/accelerator-install.json").is_file())
+
+    def test_a_new_release_reaches_untouched_files_only(self) -> None:
+        self.sync()  # records what the install wrote
+        skill = ".agents/skills/memory/SKILL.md"
+        edited = ".agents/skills/checkpoint/SKILL.md"
+        self.release(skill, "\nNew release note.\n")
+        self.release(edited, "\nAnother release note.\n")
+        local = self.target / edited
+        local.write_text(local.read_text(encoding="utf-8") + "\nTeam rule.\n", encoding="utf-8")
+
+        report = self.sync()
+        self.assertEqual("updated", self.actions(report).get(skill))
+        self.assertIn("New release note.", (self.target / skill).read_text(encoding="utf-8"))
+        self.assertEqual("edited in the project", self.kept(report).get(edited))
+        self.assertIn("Team rule.", local.read_text(encoding="utf-8"))
+
+    def test_the_runtime_follows_the_release_over_a_local_edit(self) -> None:
+        runtime = "memory-bank/scripts/context.py"
+        local = self.target / runtime
+        local.write_text(local.read_text(encoding="utf-8") + "\n# local patch\n", encoding="utf-8")
+        report = self.sync()
+        self.assertEqual("updated over a local edit", self.actions(report).get(runtime))
+        self.assertEqual(
+            (self.clone / "Symfony" / runtime).read_bytes(), local.read_bytes()
+        )
+        backup = self.target / report["backups"][0]
+        self.assertTrue(backup.relative_to(self.target).as_posix().startswith(
+            "memory-bank/local/accelerator-sync/"
+        ))
+        self.assertIn("# local patch", backup.read_text(encoding="utf-8"))
+
+    def test_what_a_person_owns_is_never_written(self) -> None:
+        # Codex trusts hooks by the hash of their definitions, the project's
+        # Git history is the team's, and seeded state is the project's own.
+        hooks = self.target / ".codex/hooks.json"
+        hooks.write_text(hooks.read_text(encoding="utf-8").replace("\n", "\n ", 1), encoding="utf-8")
+        tracked = ".agents/skills/memory/SKILL.md"
+        run("git", "-C", str(self.target), "add", "--", tracked)
+        self.release(tracked, "\nRelease edit of a tracked file.\n")
+        runtime_config = self.target / "project-brain/config/runtime.json"
+        runtime_config.write_text('{"mode": "governed"}\n', encoding="utf-8")
+
+        report = self.sync()
+        kept = self.kept(report)
+        self.assertIn("re-approval", kept.get(".codex/hooks.json", ""))
+        self.assertIn("tracked", kept.get(tracked, ""))
+        self.assertNotIn("Release edit", (self.target / tracked).read_text(encoding="utf-8"))
+        self.assertEqual('{"mode": "governed"}\n', runtime_config.read_text(encoding="utf-8"))
+        self.assertNotIn("project-brain/config/runtime.json", self.actions(report))
+
+    def test_only_the_managed_policy_block_is_replaced(self) -> None:
+        agents = self.target / "AGENTS.md"
+        agents.write_text(
+            "# Project rules\n\nKeep this.\n\n<!-- BEGIN ACCELERATOR MANAGED POLICY -->\n"
+            "old policy\n<!-- END ACCELERATOR MANAGED POLICY -->\n",
+            encoding="utf-8",
+        )
+        report = self.sync()
+        self.assertEqual("managed block updated", self.actions(report).get("AGENTS.md"))
+        text = agents.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("# Project rules\n\nKeep this."))
+        self.assertNotIn("old policy", text)
+        self.assertIn((self.clone / "Symfony/AGENTS.md").read_text(encoding="utf-8").strip(), text)
+
+    def test_a_missing_policy_import_is_added_and_no_tool_is_installed_unasked(self) -> None:
+        (self.target / ".claude/CLAUDE.md").unlink()
+        report = self.sync()
+        self.assertEqual("added", self.actions(report).get(".claude/CLAUDE.md"))
+        self.assertIn("@../AGENTS.md", (self.target / ".claude/CLAUDE.md").read_text(encoding="utf-8"))
+        # Cursor was not installed, so the release does not install it (the
+        # shared component's .cursor/README.md is all an install puts there).
+        self.assertFalse((self.target / ".cursor/hooks.json").exists())
+        self.assertFalse((self.target / ".cursor/skills").exists())
+
+    def test_a_dry_run_writes_nothing(self) -> None:
+        runtime = self.target / "memory-bank/scripts/context.py"
+        runtime.write_text("# edited\n", encoding="utf-8")
+        report = self.sync("--dry-run")
+        self.assertTrue(report["dry_run"])
+        self.assertIn("memory-bank/scripts/context.py", self.actions(report))
+        self.assertEqual("# edited\n", runtime.read_text(encoding="utf-8"))
+        self.assertFalse((self.target / "memory-bank/local/accelerator-install.json").exists())
+
+    def test_a_folder_without_an_install_is_refused(self) -> None:
+        empty = Path(self._tmp.name) / "empty"
+        empty.mkdir()
+        result = run(
+            sys.executable, str(INSTALLER), "--source-root", str(self.clone),
+            "--sync", "--target", str(empty),
+        )
+        self.assertEqual(1, result.returncode)
+        self.assertEqual("not an installed accelerator", json.loads(result.stdout)["error"])
+
+    def test_released_history_identifies_an_untouched_old_copy(self) -> None:
+        # With no manifest yet - every install made before syncs existed - the
+        # clone's own history says whether a file is an untouched release.
+        log = run(
+            "git", "log", "--format=%H", "-n", "2", "--",
+            "Symfony/.agents/skills/memory/SKILL.md",
+        )
+        commits = log.stdout.split()
+        if log.returncode != 0 or len(commits) < 2:
+            self.skipTest("the clone has no older release of this file (shallow history)")
+        older = run("git", "show", f"{commits[1]}:Symfony/.agents/skills/memory/SKILL.md")
+        if older.stdout == (ROOT / "Symfony/.agents/skills/memory/SKILL.md").read_text(encoding="utf-8"):
+            self.skipTest("the older release is identical")
+        target = self.target / ".agents/skills/memory/SKILL.md"
+        target.write_text(older.stdout, encoding="utf-8")
+        sys.path.insert(0, str(ROOT / "scripts"))
+        try:
+            import install_accelerator
+        finally:
+            sys.path.pop(0)
+        report = install_accelerator.sync_installation(ROOT, self.target, dry_run=True)
+        self.assertEqual(
+            "updated",
+            {item["path"]: item["action"] for item in report["changed"]}.get(
+                ".agents/skills/memory/SKILL.md"
+            ),
+        )
+
+
 class CleanInstallTest(unittest.TestCase):
     def test_every_edition_and_tool_clean_install(self) -> None:
         baseline_status = source_status()

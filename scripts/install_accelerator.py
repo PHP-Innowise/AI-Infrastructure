@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import hashlib
 import json
 import os
 import shutil
 import stat
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -682,6 +684,300 @@ def install(
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Keeping an installed project current
+# ---------------------------------------------------------------------------
+
+# Where a synced project records what the accelerator last wrote, so the next
+# sync knows which files are still untouched. Ignored local state.
+SYNC_MANIFEST = "memory-bank/local/accelerator-install.json"
+SYNC_BACKUP_DIR = "memory-bank/local/accelerator-sync"
+SYNC_MANIFEST_SCHEMA = 1
+# The accelerator's runtime: code every memory fix lives in. A project that
+# runs an old copy gets none of them - on six real installations none carried
+# the fixes of the previous week - so a local edit here is backed up and
+# replaced rather than left to keep the project on the old behaviour.
+RUNTIME_SYNC_PATTERNS = (
+    "memory-bank/scripts/*.py",
+    "project-brain/scripts/*.py",
+    "project-brain/schemas/*.json",
+    ".claude/hooks/working-memory-*.sh",
+    ".codex/hooks/working-memory-*.sh",
+    ".cursor/hooks/working-memory-*.sh",
+)
+# Codex runs a project hook only while the stored hash of its definition
+# matches, so rewriting these switches every hook off until a person
+# re-approves them. They are reported, never rewritten.
+TRUST_BOUND_FILES = {".codex/hooks.json", ".codex/config.toml"}
+# Documentation an install copied as ACCELERATOR.md when the project had its
+# own README; not worth a write into the project.
+SYNC_SKIPPED_FILES = {"README.md"}
+# The fewest inventory files a folder must hold to count as an install of an
+# edition: one stray AGENTS.md is not an installation.
+SYNC_MINIMUM_PRESENT = 10
+
+
+def git_blob_id(data: bytes) -> str:
+    """The id Git gives these bytes, computed without Git."""
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def installed_edition(root: Path, target: Path) -> str | None:
+    """The edition whose inventory the target holds the most of, if any."""
+    counts = []
+    for edition in EDITIONS:
+        try:
+            data = load_inventory(edition, root)
+        except InventoryError:
+            continue
+        present = sum(
+            1
+            for paths in data["installed"].values()
+            for path in paths
+            if (target / PurePosixPath(path)).is_file()
+        )
+        counts.append((present, edition))
+    counts.sort(reverse=True)
+    if not counts or counts[0][0] < SYNC_MINIMUM_PRESENT:
+        return None
+    if len(counts) > 1 and counts[1][0] == counts[0][0]:
+        return None
+    return counts[0][1]
+
+
+def released_blob_ids(root: Path, edition: str) -> dict[str, set[str]] | None:
+    """Every blob each edition file has had in this clone's history.
+
+    An installed file whose bytes match one of them is an accelerator file
+    nobody edited, at whatever release it was installed. None without a Git
+    clone (a downloaded archive): then only the sync manifest can tell.
+    """
+    prefix = edition_path(edition).as_posix() + "/"
+    command = [
+        "git", "log", "--all", "--format=", "--raw", "--no-abbrev",
+        "--no-renames", "--", edition_path(edition).as_posix(),
+    ]
+    try:
+        result = subprocess.run(command, cwd=str(root), capture_output=True)
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    blobs: dict[str, set[str]] = {}
+    for line in result.stdout.decode("utf-8", "surrogateescape").splitlines():
+        if not line.startswith(":") or "\t" not in line:
+            continue
+        meta, path = line.split("\t", 1)
+        if not path.startswith(prefix):
+            continue
+        for blob in meta.split()[2:4]:
+            if blob.strip("0"):
+                blobs.setdefault(path[len(prefix):], set()).add(blob)
+    return blobs
+
+
+def tracked_paths(target: Path) -> set[str]:
+    """Files the project's own Git history holds; a sync never writes them."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(target), "ls-files", "-z"], capture_output=True
+        )
+    except OSError:
+        return set()
+    if result.returncode != 0:
+        return set()
+    return {
+        item.decode("utf-8", "surrogateescape")
+        for item in result.stdout.split(b"\0")
+        if item
+    }
+
+
+def is_runtime_file(path: str) -> bool:
+    return any(fnmatch.fnmatchcase(path, pattern) for pattern in RUNTIME_SYNC_PATTERNS)
+
+
+def source_commit(root: Path) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True
+        )
+    except OSError:
+        return None
+    return result.stdout.strip() or None if result.returncode == 0 else None
+
+
+def _write_atomically(path: Path, data: bytes, executable: bool) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.sync-{os.getpid()}")
+    try:
+        temporary.write_bytes(data)
+        if executable:
+            os.chmod(temporary, EXECUTABLE_INSTALL_MODE)
+        elif path.exists():
+            os.chmod(temporary, stat.S_IMODE(path.stat().st_mode))
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def sync_installation(
+    root: Path, target: Path, *, dry_run: bool = False, stamp: str | None = None
+) -> dict:
+    """Bring an installed project's accelerator files up to this clone.
+
+    Runs with no question asked, so it only writes what is safe without one:
+    files nobody edited (the bytes of some released version, or of what the
+    last sync wrote), files the release added to a component the project
+    has, and the managed blocks of AGENTS.md and .claude/CLAUDE.md. The
+    runtime is also replaced over a local edit, which is backed up first
+    under memory-bank/local. Never written: anything the project's Git
+    tracks, seeded state the project owns, and the Codex hook wiring, whose
+    trust a person granted. Each of those is reported instead.
+    """
+    report: dict = {
+        "target": str(target), "edition": None, "release": None, "changed": [],
+        "kept": [], "backups": [], "dry_run": dry_run, "error": None,
+    }
+    if not (target / "memory-bank/scripts/context.py").is_file():
+        report["error"] = "not an installed accelerator"
+        return report
+    edition = installed_edition(root, target)
+    if edition is None:
+        report["error"] = "the installed edition could not be determined"
+        return report
+    data = load_inventory(edition, root)
+    report.update(edition=edition, release=data["release"])
+    present = {
+        component
+        for component, paths in data["installed"].items()
+        if component == "shared"
+        or any((target / PurePosixPath(path)).is_file() for path in paths)
+    }
+    tracked = tracked_paths(target)
+    manifest_path = target / SYNC_MANIFEST
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        known = manifest.get("files") if isinstance(manifest, dict) else None
+        known = known if isinstance(known, dict) else {}
+    except (OSError, ValueError):
+        known = {}
+    history = released_blob_ids(root, edition)
+    executable_bits = source_executable_bits(root, edition)
+    stamp = stamp or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    written: dict[str, str] = {}
+
+    def keep(path: str, reason: str) -> None:
+        report["kept"].append({"path": path, "reason": reason})
+
+    def write(path: str, payload: bytes, action: str, executable: bool, backup: bool) -> None:
+        destination = target / PurePosixPath(path)
+        if backup and not dry_run:
+            saved = target / SYNC_BACKUP_DIR / stamp / PurePosixPath(path)
+            saved.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(destination, saved)
+            report["backups"].append(saved.relative_to(target).as_posix())
+        if not dry_run:
+            _write_atomically(destination, payload, executable)
+        report["changed"].append({"path": path, "action": action})
+        written[path] = git_blob_id(payload)
+
+    for component, path in selected_files(data, [c for c in TOOLS if c in present]):
+        if path in SEED_ONLY_PATHS or path in SYNC_SKIPPED_FILES:
+            continue
+        source_path = data["source_overrides"].get(path, path)
+        source = root / edition_path(edition) / PurePosixPath(source_path)
+        destination = target / PurePosixPath(path)
+        payload = source.read_bytes()
+        executable = installs_executable(path, source, source_path, executable_bits)
+        if destination.is_symlink() or (destination.exists() and not destination.is_file()):
+            keep(path, "not a regular file")
+            continue
+        exists = destination.is_file()
+        current = destination.read_bytes() if exists else None
+        if current == payload:
+            written[path] = git_blob_id(payload)
+            continue
+        if path in tracked:
+            keep(path, "tracked by the project's Git: update it through a commit")
+            continue
+        if path in TRUST_BOUND_FILES:
+            if exists:
+                keep(path, "Codex hook wiring: a change needs re-approval in Codex /hooks")
+                continue
+        if not exists:
+            write(path, payload, "added", executable, False)
+            continue
+        blob = git_blob_id(current)
+        pristine = known.get(path) == blob or (
+            history is not None and blob in history.get(source_path, set())
+        )
+        if path in MANAGED_POLICY_FILES:
+            text = current.decode("utf-8", "surrogateescape")
+            source_text = payload.decode("utf-8")
+            if AGENTS_BEGIN in text:
+                try:
+                    merged = merge_agents_file(text, source_text).encode("utf-8")
+                except (InventoryError, UnicodeError):
+                    keep(path, "managed block is malformed")
+                    continue
+                if merged != current:
+                    write(path, merged, "managed block updated", executable, False)
+                else:
+                    written[path] = git_blob_id(current)
+                continue
+            first = source_text.splitlines()[0] if source_text else ""
+            if pristine:
+                write(path, payload, "updated", executable, False)
+            elif first and text.startswith(first):
+                # The accelerator's own policy, edited in place: the edit is
+                # kept in the backup and the current policy goes live.
+                write(path, payload, "updated over a local edit", executable, True)
+            elif path == ".claude/CLAUDE.md":
+                write(
+                    path,
+                    merge_agents_file(text, source_text).encode("utf-8"),
+                    "import added",
+                    executable,
+                    False,
+                )
+            else:
+                keep(path, "the project's own file")
+            continue
+        if path in ADDITIVE_FILES:
+            keep(path, "the project's own file")
+            continue
+        if pristine:
+            write(path, payload, "updated", executable, False)
+        elif is_runtime_file(path):
+            write(path, payload, "updated over a local edit", executable, True)
+        else:
+            keep(path, "edited in the project")
+    if not dry_run:
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_atomically(
+            manifest_path,
+            (
+                json.dumps(
+                    {
+                        "schema": SYNC_MANIFEST_SCHEMA,
+                        "edition": edition,
+                        "release": data["release"],
+                        "source_commit": source_commit(root),
+                        "synced_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                        "files": {**known, **written},
+                    },
+                    indent=1,
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode("utf-8"),
+            False,
+        )
+    return report
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-root", type=Path, default=ROOT)
@@ -689,6 +985,12 @@ def parse_args() -> argparse.Namespace:
     mode.add_argument("--write-inventories", action="store_true")
     mode.add_argument("--verify-inventories", action="store_true")
     mode.add_argument("--edition", choices=EDITIONS)
+    mode.add_argument(
+        "--sync",
+        action="store_true",
+        help="bring the accelerator installed in --target up to this clone: "
+        "untouched files and the runtime only; prints a JSON report",
+    )
     parser.add_argument(
         "--inventory-out",
         type=Path,
@@ -706,8 +1008,8 @@ def parse_args() -> argparse.Namespace:
         help="safely merge supported root files and refuse all other conflicts",
     )
     args = parser.parse_args()
-    if args.edition and args.target is None:
-        parser.error("--target is required with --edition")
+    if (args.edition or args.sync) and args.target is None:
+        parser.error("--target is required with --edition and --sync")
     if args.inventory_out is not None and not args.write_inventories:
         parser.error("--inventory-out requires --write-inventories")
     return args
@@ -729,6 +1031,12 @@ def main() -> int:
             for edition in EDITIONS:
                 verify_inventory(root, edition)
             return 0
+        if args.sync:
+            report = sync_installation(
+                root, resolve_write_target(args.target), dry_run=args.dry_run
+            )
+            print(json.dumps(report, indent=1, ensure_ascii=False))
+            return 1 if report["error"] else 0
         tools = list(dict.fromkeys(args.tool or TOOLS))
         return install(
             root,

@@ -230,9 +230,12 @@ class TaskContext:
         if not response.get('ok'):
             raise SessionError(response.get('error') or 'Task context could not be retrieved.')
         capsule = response.get('result')
+        text = None
         if automatic:
             result = capsule if isinstance(capsule, dict) else {}
             capsule = result.get('capsule')
+            # The runtime's own render: what the prompt carries in place of the JSON.
+            text = result.get('capsule_text') if isinstance(result.get('capsule_text'), str) else None
             if not isinstance(capsule, dict):
                 warnings = [item for item in result.get('warnings') or [] if isinstance(item, str)]
                 raise SessionError('; '.join(warnings)[:500] or 'Task context could not be retrieved.')
@@ -242,7 +245,7 @@ class TaskContext:
         layout = self.knowledge.layout(session['project_id'], workspace)
         home = layout['attached']['home'] if layout['attached'] else None
         hashes = self._source_hashes(layout['folder'] / info['root'], capsule, home)
-        return capsule, hashes
+        return capsule, hashes, text
 
     def prepare(self, session):
         brain, options, workspace, info = self._bound(session)
@@ -273,8 +276,8 @@ class TaskContext:
                                task_id=record_id, task_only=True)['task']
         # An approved snapshot is shared provenance; a turn's own retrieval is not, and
         # one Git-tracked manifest per message would flood the project's history.
-        capsule, hashes = self._retrieve(session, options, workspace, task, info, not options.get('review'))
-        return {**options, **kept, 'context_id': str(uuid.uuid4()), 'capsule': capsule,
+        capsule, hashes, text = self._retrieve(session, options, workspace, task, info, not options.get('review'))
+        return {**options, **kept, 'context_id': str(uuid.uuid4()), 'capsule': capsule, 'capsule_text': text,
                 'task': task, 'source_hashes': hashes, 'approved': False}
 
     def ensure_fresh(self, session):
@@ -288,7 +291,7 @@ class TaskContext:
         if (task.get('id') != saved_task.get('id') or task.get('revision') != saved_task.get('revision')
                 or task.get('external_id') != options['task_id'] or task.get('status') in ('completed', 'cancelled')):
             raise SessionError('The linked task changed. Prepare and approve its context again.')
-        capsule, hashes = self._retrieve(session, options, workspace, task, info, True)
+        capsule, hashes, _ = self._retrieve(session, options, workspace, task, info, True)
         if hashes != brain.get('source_hashes') or self._material(capsule) != self._material(saved_capsule):
             raise SessionError('Task context sources changed. Prepare and approve the updated context before running.')
         return True
@@ -332,6 +335,7 @@ class TaskContext:
         if task.get('status') in ('completed', 'cancelled'):
             raise SessionError('The linked task is finished. Link an active task to save more.')
         saved = {'task': None, 'records': [], 'promotion': None}
+        immediate = []
         reason = (memory_draft.AUTOMATIC_REASON if automatic else 'Saved from a reviewed Harness session')
         try:
             if draft['progress'] or draft['next_steps']:
@@ -356,11 +360,18 @@ class TaskContext:
                                     reason=reason, **({'authority': 'verified'} if automatic else {}))
                 saved['records'].append({'id': closed.get('id'), 'type': closed.get('type'),
                                          'title': closed.get('title'), 'status': closed.get('status')})
+                # The runtime promotes a record on the update that resolves it.
+                at_once = closed.get('promotion') if isinstance(closed.get('promotion'), dict) else {}
+                immediate.extend(item for item in at_once.get('promoted') or [] if isinstance(item, dict))
             if saved['records']:
                 promotion = self._knowledge('run', session['project_id'], {'bank': options['bank'], 'action': 'promote-auto'},
                                             _root=workspace)
                 saved['promotion'] = (promotion['result'] if promotion.get('ok') and isinstance(promotion.get('result'), dict)
                                       else {'error': promotion.get('error') or 'Automatic promotion did not run.'})
+                if immediate:
+                    later = saved['promotion'].get('promoted') if isinstance(saved['promotion'].get('promoted'), list) else []
+                    saved['promotion'] = {**saved['promotion'], 'promoted': immediate + later}
+                    saved['promotion'].pop('error', None)
         except (SessionError, KeyError, TypeError) as error:
             message = str(error) if isinstance(error, SessionError) else 'The runtime returned an unexpected record.'
             return {'ok': False, 'saved': saved, 'skipped': skipped, 'error': message}

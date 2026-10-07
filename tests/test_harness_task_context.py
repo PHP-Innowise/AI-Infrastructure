@@ -240,8 +240,11 @@ class TaskContextTests(unittest.TestCase):
         self.assertEqual((False, brain["task"]["id"]), (brain["create"], brain["record_id"]))
         self.assertNotIn("Context prepared", json.dumps(store.events(sid)))
         received = json.loads(self.calls[0]["receipt"].read_text())
-        self.assertIn(sessions.BRAIN_CONTEXT_HEADER + json.dumps(brain["capsule"], ensure_ascii=False) + "\n\n",
-                      received["prompt"])
+        # The runtime's rendered capsule, not the JSON: working state first, then
+        # the passage that answers the message.
+        self.assertTrue(brain["capsule_text"].startswith("working: "), brain["capsule_text"])
+        self.assertIn(sessions.BRAIN_CONTEXT_HEADER + brain["capsule_text"] + "\n\n", received["prompt"])
+        self.assertNotIn('"categories"', received["prompt"])
         self.assertIn("requires one owner.", received["prompt"])
         self.assertIn(memory_draft.instruction(), received["prompt"])
         # The project's own read hook stands down for a turn whose capsule is already in the prompt.
@@ -288,7 +291,7 @@ class TaskContextTests(unittest.TestCase):
         self.assertEqual("Now check who owns the release path", brain["query"])
         self.assertEqual(2, len(self.calls))
         self.assertEqual("native-context-fixture", self.calls[1]["session_id"])
-        self.assertIn(json.dumps(brain["capsule"], ensure_ascii=False), self.calls[1]["prompt"])
+        self.assertIn(brain["capsule_text"], self.calls[1]["prompt"])
         # The agent restated its learning; this session already saved it.
         again = self.memory_events(store, sid)[-1]
         self.assertTrue(again["ok"], again)

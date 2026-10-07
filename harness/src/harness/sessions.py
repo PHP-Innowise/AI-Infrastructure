@@ -396,7 +396,7 @@ def reviewed(brain):
 
 def memory_notice(brain):
     """One line for the conversation: the project memory this turn's prompt carries."""
-    meter = capsule_meter(brain['capsule'])
+    meter = capsule_meter(brain['capsule'], brain.get('capsule_text'))
     items = meter['items']
     parts = [f'{count} {label}{"" if count == 1 else "s"}' for count, label in (
         (items['rules'], 'rule or doc excerpt'), (items['bank'], 'Memory Bank chunk'),
@@ -406,12 +406,26 @@ def memory_notice(brain):
             + f" ({meter['prompt_characters']:,} characters).")
 
 
-def capsule_meter(capsule):
+def accelerator_sync_notice(report):
+    """One line saying the project's accelerator was brought up to this clone."""
+    changed = len(report.get('changed') or [])
+    release = report.get('release')
+    text = f"This project's accelerator was brought up to {report.get('edition')}"
+    text += f" {release}" if release else ''
+    text += f": {changed} file(s) updated"
+    kept = len(report.get('kept') or [])
+    if kept:
+        text += f"; {kept} left as they are (edited in the project, tracked by its Git, or Codex hook wiring)"
+    return text + '.'
+
+
+def capsule_meter(capsule, text=None):
     """Exact character counts of a task capsule, measured the way the runtime caps it.
 
     The three kinds add up to the compact length. Items count once per copy: each
     appears in its layer, among the selected items and under its category, and the
-    last two views are the repeats.
+    last two views are the repeats. `text`, the runtime's rendered capsule, is what
+    the prompt carries when the runtime provides it.
     """
     def size(value):
         return len(json.dumps(value, ensure_ascii=False, separators=(',', ':')))
@@ -423,8 +437,22 @@ def capsule_meter(capsule):
             'items': counts, 'repeats': repeats,
             'dropped': {layer: omitted[layer] for layer in ('procedural', 'semantic', 'episodic')
                         if type(omitted.get(layer)) is int and omitted[layer] > 0},
-            # What each prepared turn's prompt carries: the header and the capsule with default separators.
-            'prompt_characters': len(BRAIN_CONTEXT_HEADER) + len(json.dumps(capsule, ensure_ascii=False)) + 2}
+            # What each prepared turn's prompt carries: the header and the rendered capsule, or the
+            # capsule as JSON with default separators from a runtime that renders none.
+            'prompt_characters': len(BRAIN_CONTEXT_HEADER) + len(capsule_prompt_text(capsule, text)) + 2}
+
+
+def capsule_prompt_text(capsule, text=None):
+    """What a turn's prompt carries for its capsule.
+
+    The runtime's rendered text when there is one: working state, then the project
+    knowledge with the passage that answers the request. The JSON it replaces held
+    every item three times and only a 32-word snippet of each, so most of what the
+    model was handed was repetition and the answer was usually not in it.
+    """
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+    return json.dumps(capsule, ensure_ascii=False)
 
 
 def read_context(root, name, limit=0):
@@ -559,6 +587,10 @@ class Sessions:
         # point to, lent from this clone; nothing is written into it.
         for key in list(self.projects):
             self.accelerators.auto_attach(key)
+        # A project with an installed accelerator is brought up to this clone
+        # in the background, so its native sessions run today's memory too.
+        threading.Thread(target=self._keep_accelerators_current, name='harness-accelerator-sync',
+                         daemon=True).start()
         self.launch_ids = {}
         from .results import Results
         self.results = Results(self)
@@ -567,6 +599,15 @@ class Sessions:
         # ponytail: one worker serializes project writes; add per-project scheduling only when needed.
         self.worker = threading.Thread(target=self._worker, name="harness-runner", daemon=True)
         self.worker.start()
+
+    def _keep_accelerators_current(self, project_ids=None):
+        for key in list(project_ids or self.projects):
+            if self.stopping.is_set():
+                return
+            try:
+                self.accelerators.keep_current(key)
+            except Exception:  # a sync never takes the server down
+                continue
 
     def _event(self, session_id, event):
         with self.lock:
@@ -594,7 +635,7 @@ class Sessions:
             result[field] = json.loads(result[field]) if result[field] else None
         result['budgets'] = result['budgets'] or {**DEFAULT_BUDGETS, 'seconds':self.timeout, 'usd': result['fleet']['budget_usd'] if result['fleet'] else None}
         result['agent_budget_plan']=agent_budget_plan(result)
-        result['capsule_meter'] = capsule_meter(result['brain']['capsule']) if isinstance(result['brain'], dict) and isinstance(result['brain'].get('capsule'), dict) else None
+        result['capsule_meter'] = capsule_meter(result['brain']['capsule'], result['brain'].get('capsule_text')) if isinstance(result['brain'], dict) and isinstance(result['brain'].get('capsule'), dict) else None
         result['context_last'] = self._context_last(sid)
         result['launch'] = self._launch_last(sid)
         result.pop('fleet_action', None)
@@ -747,6 +788,7 @@ class Sessions:
             self.db.commit()
             self.projects[key] = project
         self.accelerators.auto_attach(key)
+        threading.Thread(target=self._keep_accelerators_current, args=([key],), daemon=True).start()
         return {**project, 'available': True}
 
     def git(self, key):
@@ -1397,9 +1439,10 @@ class Sessions:
             parts['attachments'] = {'characters': len(listing), 'count': len(files)}
         if session.get('brain') and session['brain'].get('capsule'):
             capsule = session['brain']['capsule']
-            prefix += BRAIN_CONTEXT_HEADER + json.dumps(capsule, ensure_ascii=False) + '\n\n'
+            text = session['brain'].get('capsule_text')
+            prefix += BRAIN_CONTEXT_HEADER + capsule_prompt_text(capsule, text) + '\n\n'
             if isinstance(capsule, dict):
-                meter = capsule_meter(capsule)
+                meter = capsule_meter(capsule, text)
                 parts['capsule'] = {'characters': meter['characters'], 'inserted': meter['prompt_characters'], 'kinds': capsule_parts(capsule),
                                     'repeats': meter['repeats'], 'dropped': meter['dropped'], 'items': meter['items']}
         # Project context comes from memory: a turn whose prompt carries a capsule has what retrieval found
@@ -1488,6 +1531,12 @@ class Sessions:
         Retrieval failing costs the turn its memory, never the turn: the run goes ahead
         without a capsule and the conversation says why. None means the run was cancelled.
         """
+        try:
+            synced = self.accelerators.keep_current(session['project_id'])
+        except Exception:
+            synced = None
+        if synced and synced.get('changed') and not synced.get('error'):
+            self._event(sid, {'kind': 'memory', 'ok': True, 'text': accelerator_sync_notice(synced)})
         try:
             prepared, problem = context.prepare(session), None
         except Exception as error:

@@ -198,3 +198,67 @@ class AttachedAcceleratorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InstalledAcceleratorSyncTests(unittest.TestCase):
+    """A project with its own copy is kept at this clone's version by itself."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.project = self.root / "shop"
+        self.project.mkdir()
+        sys.path.insert(0, str(ROOT / "scripts"))
+        try:
+            import install_accelerator
+        finally:
+            sys.path.pop(0)
+        self.installer = install_accelerator
+        self.assertEqual(0, install_accelerator.install(ROOT, "Laravel", self.project, ["claude"], False, False, False))
+        discovery = patch.object(sessions.providers, "discover_providers", return_value=[])
+        discovery.start()
+        self.addCleanup(discovery.stop)
+        for name in ("_worker", "_keep_accelerators_current"):
+            stub = patch.object(sessions.Sessions, name, return_value=None)
+            stub.start()
+            self.addCleanup(stub.stop)
+        self.store = sessions.Sessions(self.root / "state", [self.project])
+        self.addCleanup(self.store.close)
+        self.project_id = next(iter(self.store.projects))
+
+    def test_an_installed_runtime_is_brought_up_to_the_clone_once_per_version(self):
+        runtime = self.project / "memory-bank/scripts/context.py"
+        runtime.write_text("# an old runtime\n", encoding="utf-8")
+        accelerators = self.store.accelerators
+        with patch.object(Accelerators, "source_version", return_value="release-1"):
+            report = accelerators.keep_current(self.project_id)
+            self.assertIsNone(report["error"])
+            self.assertIn("memory-bank/scripts/context.py", {item["path"] for item in report["changed"]})
+            self.assertEqual((ROOT / "Laravel/memory-bank/scripts/context.py").read_bytes(), runtime.read_bytes())
+            # The same clone version is not synced twice.
+            self.assertIsNone(accelerators.keep_current(self.project_id))
+        info = accelerators.get(self.project_id)
+        self.assertEqual("installed", info["mode"])
+        self.assertEqual(("release-1", "Laravel"), (info["sync"]["source"], info["sync"]["edition"]))
+        self.assertTrue(info["sync"]["backups"])
+        runtime.write_text("# edited again\n", encoding="utf-8")
+        with patch.object(Accelerators, "source_version", return_value="release-2"):
+            again = accelerators.keep_current(self.project_id)
+        self.assertIn("memory-bank/scripts/context.py", {item["path"] for item in again["changed"]})
+
+    def test_the_conversation_is_told_when_the_project_was_updated(self):
+        notice = sessions.accelerator_sync_notice({
+            "edition": "Laravel", "release": "2.0.0",
+            "changed": [{"path": "a", "action": "updated"}], "kept": [{"path": "b", "reason": "x"}]})
+        self.assertIn("brought up to Laravel 2.0.0: 1 file(s) updated", notice)
+        self.assertIn("1 left as they are", notice)
+
+    def test_an_attached_project_is_never_written(self):
+        other = self.root / "attached"
+        (other / "app").mkdir(parents=True)
+        (other / "composer.json").write_text(json.dumps({"require": {"laravel/framework": "^11.0"}}), encoding="utf-8")
+        project = self.store.add_project({"path": str(other)})
+        before = snapshot(other)
+        self.assertIsNone(self.store.accelerators.keep_current(project["id"]))
+        self.assertEqual(before, snapshot(other))
