@@ -544,7 +544,7 @@ assert.equal(nodes.at(-1).children.at(-1).textContent,'Done.\\n\\n[Memory draft:
     @unittest.skipUnless(shutil.which('node'), 'Composer command check requires Node')
     def test_composer_commands_open_at_the_start_like_the_clis_and_rank_like_claude_code(self):
         page = ui_script()
-        source = page[page.index('\nconst PAGE_COMMANDS'):page.index('\nconst composerCommands = ')]
+        source = page[page.index('\nconst NAVIGATION'):page.index('\nconst composerCommands = ')]
         script = """const assert = require('node:assert/strict');
 """ + source + r"""
 const at = (text, skills = false) => commandToken(text, text.length, skills);
@@ -577,14 +577,30 @@ assert.equal(pageCommand('/diff looks wrong','codex',null),null); assert.equal(p
 assert.equal(pageCommand('/compact now','claude',listed),null); assert.equal(pageCommand('Use /model','claude',listed),null);
 assert.deepEqual(pageCommand('/effort high','claude',null),{action:'effort',name:'effort',argument:'high'});
 assert.deepEqual(pageCommand('/diff','codex',null),{action:'diff',name:'diff',argument:''});
-assert.equal(pageCommand('/diff','claude',null),null); assert.equal(pageCommand('/init','codex',null),null);
+assert.equal(pageCommand('/init','codex',null),null);
+// Terminal-only commands open Harness views in every CLI; /memory waits for the list where a project may own it.
+assert.deepEqual(pageCommand('/diff','claude',null),{action:'diff',name:'diff',argument:''});
+assert.equal(pageCommand('/cost','claude',null),null); assert.deepEqual(pageCommand('/cost','codex',null),{action:'status',name:'cost',argument:''});
+assert.deepEqual(pageCommand('/resume','cursor',null),{action:'resume',name:'resume',argument:''});
+assert.equal(pageCommand('/memory','claude',null),null); assert.deepEqual(pageCommand('/memory','codex',null),{action:'memory',name:'memory',argument:''});
+assert.equal(pageCommand('/resume now','codex',null),null); assert.equal(pageCommand('/help me','claude',null),null);
+assert.equal(pageCommand('/memory','claude',[{name:'memory',kind:'native'}]),null);
+assert.deepEqual(pageCommand('/clear work','claude',listed),{action:'new',name:'clear',argument:'work'});
+// `@` opens the file search where a word starts, as the CLIs' composers do; an address is not a mention.
+assert.deepEqual(commandToken('Look at @src/Bil',16,false,true),{start:8,end:16,trigger:'@',query:'src/Bil'});
+assert.deepEqual(commandToken('Fix (@a) now',7,false,true),{start:5,end:7,trigger:'@',query:'a'});
+assert.deepEqual(commandToken('@READ more',3,false,true),{start:0,end:5,trigger:'@',query:'RE'});
+assert.equal(commandToken('mail me@host.com',16,false,true),null); assert.equal(commandToken('Look at @src',12,false,false),null);
+// A file gets a space after it; a folder does not, so what is inside it comes next.
+assert.deepEqual(insertCommand('Read @sr',{start:5,end:8,trigger:'@'},'src/',false),{replacement:'@src/',value:'Read @src/',caret:10});
+assert.deepEqual(insertCommand('Read @RE',{start:5,end:8,trigger:'@'},'README.md'),{replacement:'@README.md ',value:'Read @README.md ',caret:16});
 """
         subprocess.run([shutil.which('node'), '-e', script], check=True, capture_output=True, text=True)
 
     @unittest.skipUnless(shutil.which('node'), 'Composer command module check requires Node')
     def test_command_list_inserts_runs_and_acts_on_the_page_like_the_clis(self):
         page = ui_script()
-        source = page[page.index('\nconst PAGE_COMMANDS'):]
+        source = page[page.index('\nconst NAVIGATION'):]
         source = source[:source.index('\n})();') + 6]
         script = r"""const assert = require('node:assert/strict');
 const handlers = {};
@@ -594,7 +610,10 @@ const node = id => ({id, hidden:true, children:[], attributes:{}, dataset:{}, te
   focus() { document.activeElement = this; }, setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; },
   dispatchEvent(event) { for (const fn of handlers[this.id + ':' + event.type] || []) fn(event); }, click() { this.clicked = (this.clicked || 0) + 1; }});
 const nodes = Object.fromEntries(['prompt','skill-hints-panel','skill-hints','skill-hints-note','skill-hints-status','session-form','project','provider','workflow',
-  'workspace','existing-worktree','send','session-settings','session-settings-toggle','model-choice','thinking-effort'].map(id => [id, node(id)]));
+  'workspace','existing-worktree','send','session-settings','session-settings-toggle','model-choice','thinking-effort','composer-notice','history'].map(id => [id, node(id)]));
+nodes.history.querySelector = function () { return this.children[0] || null; };
+const viewGroups = {knowledge:['memory-use','brain','memory','context']}, lastViewInGroup = {}; let opened = null, menu = null;
+const openView = name => { opened = name; }, setMenu = open => { menu = open; };
 const $ = id => nodes[id]; const el = (tag, className, text) => ({...node(tag), className, textContent:text});
 const document = {activeElement:null, execCommand:() => false}; global.Event = class { constructor(type) { this.type = type; } };
 Object.assign(nodes.project,{value:'p1'}); Object.assign(nodes.provider,{value:'claude'}); Object.assign(nodes.workflow,{value:'native'}); Object.assign(nodes.workspace,{value:'project'});
@@ -653,6 +672,72 @@ const names = () => list.children.map(item => item.children[0].textContent + ite
   // A failing list is not fetched again on every key press inside the same token.
   nodes.provider.value = 'cursor'; failing = true; type(''); const before = requests; type('/x'); await settle(); type('/xy'); type('/xyz'); await settle();
   assert.equal(requests - before, 1); assert.match(nodes['skill-hints-note'].textContent, /could not be loaded/);
+})().catch(error => { console.error(error); process.exit(1); });
+"""
+        subprocess.run([shutil.which('node'), '-e', script], check=True, capture_output=True, text=True)
+
+    @unittest.skipUnless(shutil.which('node'), 'Composer mention check requires Node')
+    def test_at_searches_the_workspace_and_terminal_only_commands_open_harness_views(self):
+        page = ui_script()
+        source = page[page.index('\nconst NAVIGATION'):]
+        source = source[:source.index('\n})();') + 6]
+        script = r"""const assert = require('node:assert/strict');
+const handlers = {};
+const node = id => ({id, hidden:true, children:[], attributes:{}, dataset:{}, textContent:'', value:'', selectionStart:0, selectionEnd:0, disabled:false, options:[],
+  addEventListener(type, fn) { (handlers[id + ':' + type] ||= []).push(fn); }, setAttribute(name, value) { this.attributes[name] = String(value); },
+  removeAttribute(name) { delete this.attributes[name]; }, replaceChildren(...items) { this.children = items; }, append(...items) { this.children.push(...items); },
+  focus() { document.activeElement = this; }, setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; },
+  dispatchEvent(event) { for (const fn of handlers[this.id + ':' + event.type] || []) fn(event); }, click() {}});
+const nodes = Object.fromEntries(['prompt','skill-hints-panel','skill-hints','skill-hints-note','skill-hints-status','session-form','project','provider','workflow',
+  'workspace','existing-worktree','send','session-settings','session-settings-toggle','model-choice','thinking-effort','composer-notice','history'].map(id => [id, node(id)]));
+const $ = id => nodes[id]; const el = (tag, className, text) => ({...node(tag), className, textContent:text});
+nodes.history.querySelector = function () { return this.children[0] || null; };
+const document = {activeElement:null, execCommand:() => false}; global.Event = class { constructor(type) { this.type = type; } };
+Object.assign(nodes.project,{value:'p1'}); Object.assign(nodes.provider,{value:'codex'}); Object.assign(nodes.workflow,{value:'fleet-review'}); Object.assign(nodes.workspace,{value:'project'});
+const state = {selectedId:null, selected:null}; const fleetSelected = () => nodes.workflow.value === 'fleet-review', clashSelected = () => false, textError = error => error.message;
+const providerFor = id => ({name:{claude:'Claude Code',codex:'Codex'}[id]}); const newSession = () => {}, refreshModelChoices = () => {}, updateControls = () => {}, showError = () => {};
+let view = null, opened = null, menu = null, submitted = 0; const setView = name => { view = name; }, openView = name => { opened = name; }, setMenu = open => { menu = open; };
+const viewGroups = {knowledge:['memory-use','brain','memory','context']}, lastViewInGroup = {};
+nodes['session-form'].requestSubmit = () => { submitted++; };
+const searched = [];
+const api = async url => {
+  if (url.includes('/files')) { const query = new URL('http://h' + url).searchParams.get('q'); searched.push([url.split('?')[0], query]);
+    return {items:query === 'src/' ? [{path:'src/Totals.php',kind:'file'}] : [{path:'src/',kind:'folder'},{path:'README.md',kind:'file'}], truncated:false}; }
+  return {commands:[{name:'new',kind:'page',action:'new',hint:''},{name:'resume',kind:'page',action:'resume',hint:''},{name:'login',kind:'page',action:'login',hint:''},
+    {name:'memory',kind:'page',action:'memory',hint:''},{name:'help',kind:'page',action:'help',hint:''}],skills:[],error:null}; };
+const fire = (type, extra = {}) => { const event = {type, key:'', preventDefault() {}, stopPropagation() {}, ...extra}; for (const fn of handlers['prompt:' + type] || []) fn(event); return event; };
+const prompt = nodes.prompt, panel = nodes['skill-hints-panel'], list = nodes['skill-hints'], notice = nodes['composer-notice'];
+const type = value => { prompt.value = value; prompt.selectionStart = prompt.selectionEnd = value.length; fire('input'); };
+const pause = () => new Promise(resolve => setTimeout(resolve, 160));
+const names = () => list.children.map(item => item.children[0].textContent);
+""" + source + r"""
+(async () => {
+  // A Fleet draft takes no commands, but a path is text to every CLI: @ searches the project.
+  prompt.focus(); type('Review @'); await pause();
+  assert.equal(panel.hidden, false); assert.deepEqual(names(), ['@src/','@README.md']);
+  assert.deepEqual(searched.at(-1), ['/api/projects/p1/files', '']);
+  assert.equal(list.children[0].children[1].textContent, 'Folder');
+  type('/'); assert.equal(panel.hidden, true);
+  // Enter inserts a file and sends nothing; a folder stays open on what is inside it.
+  type('Review @RE'); await pause(); fire('keydown', {key:'ArrowDown'}); fire('keydown', {key:'Enter'});
+  assert.equal(prompt.value, 'Review @README.md '); assert.equal(submitted, 0); assert.equal(panel.hidden, true);
+  type('Review @'); await pause(); fire('keydown', {key:'Tab'}); assert.equal(prompt.value, 'Review @src/'); await pause();
+  assert.equal(panel.hidden, false); assert.deepEqual(names(), ['@src/Totals.php']); assert.deepEqual(searched.at(-1), ['/api/projects/p1/files', 'src/']);
+  // An open session searches its own workspace.
+  state.selectedId = 's1'; state.selected = {id:'s1', provider:'codex', workflow:'native'}; nodes.workflow.value = 'native';
+  type('Also @'); await pause(); assert.deepEqual(searched.at(-1), ['/api/sessions/s1/files', '']);
+  // Terminal-only commands open Harness views: /resume the session list, /memory Knowledge, /login says how to sign in.
+  type('/'); await pause();
+  assert.equal(composerCommands.intercept('/resume'), true); assert.match(notice.children[0], /No earlier sessions/);
+  nodes.history.children = [{focus() { document.activeElement = this; }, className:'history-item'}]; nodes.history.querySelector = function () { return this.children[0]; };
+  assert.equal(composerCommands.intercept('/resume'), true); assert.equal(document.activeElement, nodes.history.children[0]); assert.equal(menu, true);
+  assert.equal(composerCommands.intercept('/memory'), true); assert.equal(opened, 'memory-use');
+  prompt.focus(); assert.equal(composerCommands.intercept('/login'), true); assert.equal(notice.hidden, false);
+  assert.match(notice.children.join(''), /does not sign Codex in/);
+  type('x'); assert.equal(notice.hidden, true);
+  // /help shows the command list, as the CLIs do.
+  assert.equal(composerCommands.intercept('/help'), true); assert.equal(prompt.value, '/'); assert.equal(panel.hidden, false);
+  assert.deepEqual(names(), ['/new','/resume','/login','/memory','/help']);
 })().catch(error => { console.error(error); process.exit(1); });
 """
         subprocess.run([shutil.which('node'), '-e', script], check=True, capture_output=True, text=True)
@@ -784,7 +869,7 @@ assert.match(renderExistingWorktrees().error,/could not list/);
             status, data, _ = self.request(path + "?provider=claude", headers=token)
             self.assertEqual(status, 200)
             self.assertEqual((data["project_id"], data["provider"], data["skills"], data["error"]), (self.project_id, "claude", [], None))
-            self.assertEqual([(item["name"], item["kind"], item["action"]) for item in data["commands"]],
+            self.assertEqual([(item["name"], item["kind"], item["action"]) for item in data["commands"][:2]],
                              [("php-review", "native", None), ("clear", "page", "new")])
             self.assertEqual(probe.call_args.args[1], self.project)
             for invalid in (path, path + "?provider=claude&provider=codex", path + "?provider=unknown", path + "?provider=claude&extra=1",
@@ -796,7 +881,8 @@ assert.match(renderExistingWorktrees().error,/could not list/);
             sid = created["session"]["id"]
             self.assertEqual(self.request(f"/api/sessions/{sid}/commands")[0], 403)
             status, data, _ = self.request(f"/api/sessions/{sid}/commands", headers=token)
-            self.assertEqual((status, data["session_id"], [item["name"] for item in data["commands"]]), (200, sid, ["php-review", "clear"]))
+            self.assertEqual((status, data["session_id"], [item["name"] for item in data["commands"][:2]]), (200, sid, ["php-review", "clear"]))
+            self.assertEqual(data["commands"][2]["kind"], "page")  # then the Harness views
             self.assertEqual(self.request(f"/api/sessions/{sid}/commands?refresh=1", headers=token)[0], 400)
             self.assertEqual(self.request(f"/api/sessions/{'0' * 36}/commands", headers=token)[0], 400)
             # A restart inside a conversation is the page's New session; the API refuses it before anything runs.
@@ -911,6 +997,22 @@ assert.match(renderExistingWorktrees().error,/could not list/);
             self.assertEqual(self.request("/api/providers/sign-in?refresh=yes", headers=token)[0], 400)
         # The fixture Codex is unavailable: only Claude's CLI is asked.
         self.assertEqual([("claude", "/never-launched/fixture-claude")], [call.args for call in ask.call_args_list])
+
+    def test_file_search_needs_the_page_token_and_lists_the_workspace_by_name(self):
+        (self.project / "src").mkdir()
+        (self.project / "src" / "Totals.php").write_text("<?php\n", encoding="utf-8")
+        path = f"/api/projects/{self.project_id}/files"
+        self.assertEqual(self.request(path + "?q=tot")[0], 403)
+        token = {"X-Harness-Token": self.token}
+        status, data, _ = self.request(path + "?q=tot", headers=token)
+        self.assertEqual((status, data["project_id"], [item["path"] for item in data["items"]], data["truncated"]),
+                         (200, self.project_id, ["src/Totals.php"], False))
+        self.assertEqual([("src/", "folder")], [(item["path"], item["kind"]) for item in self.request(path + "?q=sr", headers=token)[1]["items"]][:1])
+        for invalid in (path + "?q=a&q=b", path + "?other=1", path + "?q=" + "x" * 301, path + "?worktree=" + "0" * 16,
+                        f"/api/projects/{'0' * 16}/files", f"/api/sessions/{'0' * 36}/files", f"/api/sessions/{'0' * 36}/files?worktree=x"):
+            with self.subTest(path=invalid):
+                self.assertEqual(self.request(invalid, headers=token)[0], 400)
+        self.assertEqual(self.request(f"/api/sessions/{'0' * 36}/files")[0], 403)
 
     def test_bootstrap_and_only_explicit_static_routes_are_served(self):
         status, boot, headers = self.request("/api/bootstrap")

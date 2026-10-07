@@ -312,6 +312,17 @@ class Handler(BaseHTTPRequestHandler):
                 if set(query) - {'provider', 'worktree'} or 'provider' not in query or any(len(values) != 1 for values in query.values()):
                     raise SessionError('Invalid command list request.')
                 self.reply(200, store.command_listing(path.split('/')[3], query['provider'][0], query.get('worktree', [None])[0]))
+            elif path.split('/')[1:3] in (['api', 'projects'], ['api', 'sessions']) and path.endswith('/files') and len(path.split('/')) == 5:
+                # The composer's @ search: a workspace's file names, so the page's token, as for commands.
+                if not self.token_ok():
+                    return
+                query = parse_qs(parsed.query, strict_parsing=True, keep_blank_values=True) if parsed.query else {}
+                allowed = {'q', 'worktree'} if path.startswith('/api/projects/') else {'q'}
+                if set(query) - allowed or any(len(values) != 1 for values in query.values()):
+                    raise SessionError('Invalid file search request.')
+                search = query.get('q', [''])[0]
+                self.reply(200, store.project_files(path.split('/')[3], search, query.get('worktree', [None])[0])
+                           if path.startswith('/api/projects/') else store.session_files(path.split('/')[3], search))
             elif path.startswith('/api/sessions/') and path.endswith('/commands') and len(path.split('/')) == 5:
                 if not self.token_ok():
                     return

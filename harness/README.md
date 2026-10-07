@@ -916,9 +916,54 @@ name.
   - `/init` asks for an `AGENTS.md` contributor guide.
   - `/new`, `/model`, `/diff` and `/status` act on the page.
 - **Cursor:** the list holds the project's Cursor skills. A message that starts with one gets a request line.
+- **Commands only a CLI's terminal has.** Print mode accepts none of these, so in every CLI they open the
+  Harness view that does the same. Each is marked *In the Harness* in the list:
+
+  | Command | Opens |
+  | --- | --- |
+  | `/status`, `/cost` | **Usage** of the open session |
+  | `/diff` | **Changes** of the open session |
+  | `/resume` | the session list in the sidebar, focused on the newest |
+  | `/memory` | **Knowledge**, on its last tab |
+  | `/login` | a line saying whether the CLI is signed in, and the command that signs it in |
+  | `/help` | this command list |
+
+  A command of the same name from the CLI or the project wins, alias included. So Claude Code's `/cost`,
+  an alias of its own `/usage`, goes to the CLI, and an accelerator's `/memory` still goes to Claude Code
+  or Cursor. Codex already had its own `/diff` and `/status`.
 
 Plan, Review, SDD, Fleet review and Clash write their own prompts. In those, `/` is plain text and no
 list opens. Command lists start the native CLIs, so their routes need the page's token, like changes.
+
+### File mentions with @
+
+`@` where a word starts opens a search of the session's files and folders, as in the CLIs' terminals, in
+every workflow and for every provider. An address such as `me@example.com` is not a mention. The search
+covers the workspace the agent works in: the project folder, a chosen existing worktree, or the open
+session's worktree. Inside Git it is the files Git lists, tracked and untracked but not ignored. Outside
+Git it is a walk that skips `node_modules`, `vendor` and tool caches. The folders come from the files they
+hold.
+
+Only names are read, never file contents, and a listing is reused for 30 seconds. A workspace with
+more than 50,000 files is searched in its first 50,000, and the list says so.
+
+Matches come in this order:
+
+1. a name that starts with the letters;
+2. a path with a word that does;
+3. a name, then a path, that contains them;
+4. a path that holds the letters in order.
+
+A query with a slash, such as `src/` or `src/bil`, first offers what is inside that folder, listed as a
+directory is. Tab or Enter inserts `@path`. A file gets a space after it and sends nothing. A folder
+stays open on what is inside it.
+
+The path goes to the CLI as written:
+- **Codex and Cursor:** the agent reads the file itself.
+- **Claude Code:** the CLI has its own `@` attachments. Whether it applies them in print mode is not
+  documented and was not checked here.
+
+The search runs Git in the workspace, so its routes need the page's token.
 
 ### Connect and prepare a project
 

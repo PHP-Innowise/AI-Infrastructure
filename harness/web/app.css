@@ -253,6 +253,8 @@ input[type="text"],.field input[type="number"],select { width:100%; }
 /* Skill hints open above the message, inside the composer's width; the list scrolls, the message stays in place. */
 .skill-hints { position:absolute; left:8px; right:8px; bottom:calc(100% + 4px); z-index:10; max-height:min(40vh,320px); overflow:auto; padding:4px; border:1px solid var(--field-line); border-radius:var(--radius); background:var(--paper); box-shadow:0 4px 16px var(--composer-shadow); }
 .skill-hints-list { list-style:none; margin:0; padding:0; }
+.composer-notice { color:var(--muted); font-size:var(--text-ui); margin:0 0 12px; overflow-wrap:anywhere; }
+.composer-notice code { font-family:var(--font-mono); }
 .skill-hint { display:flex; flex-direction:column; gap:2px; padding:8px 12px; border-radius:var(--radius-sm); cursor:pointer; }
 .skill-hint:hover { background:var(--hover); }
 .skill-hint[aria-selected="true"] { background:var(--purple-soft); }

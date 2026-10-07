@@ -777,8 +777,10 @@ class SessionTests(unittest.TestCase):
         manager = self.manager()
         key = next(iter(manager.projects))
         listing = manager.command_listing(key, "claude")
-        self.assertEqual([(item["name"], item["kind"]) for item in listing["commands"]],
+        self.assertEqual([(item["name"], item["kind"]) for item in listing["commands"][:3]],
                          [("php-review", "native"), ("compact", "native"), ("clear", "page")])
+        # Then the Harness views for what only the terminal offers.
+        self.assertEqual({"page"}, {item["kind"] for item in listing["commands"][3:]})
         for provider, worktree in (("unknown", None), ("claude", "0" * 16)):
             with self.subTest(provider=provider, worktree=worktree), self.assertRaises(sessions.SessionError):
                 manager.command_listing(key, provider, worktree)
@@ -792,7 +794,7 @@ class SessionTests(unittest.TestCase):
                       [event.get("text") for event in manager.events(sid)])
         ledger = manager.results.history(sid)["launches"][-1]["context"]["ledger"]
         self.assertEqual((ledger["message"], ledger["total"], ledger["instructions"]), (len(message), len(message), 0))
-        self.assertEqual([item["name"] for item in manager.session_commands(sid)["commands"]], ["php-review", "compact", "clear"])
+        self.assertEqual([item["name"] for item in manager.session_commands(sid)["commands"]][:3], ["php-review", "compact", "clear"])
 
         # A follow-up with attachments still names them: the person attached them to this message.
         manager.send(sid, "/compact keep the decisions", {"attachments": [{"name": "notes.txt", "data": "bm90ZXM="}]})
@@ -909,7 +911,8 @@ class SessionTests(unittest.TestCase):
         with self.assertRaisesRegex(sessions.SessionError, "no longer lists"):
             self.create(manager, workspace="existing-worktree", worktree_id=first)
         self.assertEqual(manager.list(), [])
-        self.assertEqual(manager.command_listing(key, "cursor", second)["commands"], [])
+        # That checkout holds no Cursor skill: only the Harness views are listed.
+        self.assertEqual([], [item for item in manager.command_listing(key, "cursor", second)["commands"] if item["kind"] != "page"])
         with self.assertRaises(sessions.SessionError):
             manager.command_listing(key, "cursor", first)
 

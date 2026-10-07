@@ -13,6 +13,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "harness" / "src"))
 from harness import commands
 from harness.sessions import SessionError
 
+NAVIGATION = [item["name"] for item in commands.NAVIGATION]
+
 FAKE_CLAUDE = r'''#!/usr/bin/env python3
 import json, os, sys, time
 log = os.environ["FAKE_LOG"]
@@ -109,9 +111,11 @@ class CommandCatalogTests(unittest.TestCase):
     def test_claude_lists_its_own_commands_from_one_initialize_request_without_a_turn(self):
         listing = self.catalog.listing("claude", self.project)
         self.assertIsNone(listing["error"])
-        self.assertEqual([(item["name"], item["kind"], item["action"]) for item in listing["commands"]], [
+        self.assertEqual([(item["name"], item["kind"], item["action"]) for item in listing["commands"][:5]], [
             ("php-review", "native", None), ("clear", "page", "new"), ("compact", "native", None),
             ("model", "page", "model"), ("unite-cms:init", "native", None)])
+        # Then what the terminal offers and print mode does not, as Harness views.
+        self.assertEqual([(item["name"], item["kind"]) for item in listing["commands"][5:]], [(name, "page") for name in NAVIGATION])
         clear = listing["commands"][1]
         self.assertEqual((clear["aliases"], clear["hint"], clear["builtin"]), (["reset", "new", "fresh"], "[name]", True))
         launch, request = self.entries()
@@ -151,7 +155,8 @@ class CommandCatalogTests(unittest.TestCase):
             with self.subTest(mode=mode), patch.dict(os.environ, {"FAKE_MODE": mode}):
                 catalog = commands.Catalog(self.store)
                 listing = catalog.listing("claude", self.project)
-                self.assertEqual(listing["commands"], [])
+                # The Harness views need no CLI; nothing else is listed.
+                self.assertEqual([item["name"] for item in listing["commands"]], NAVIGATION)
                 self.assertIn(message, listing["error"])
         with patch.dict(os.environ, {"FAKE_MODE": "hang"}), patch.object(commands, "PROBE_SECONDS", 1):
             started = time.monotonic()
@@ -192,8 +197,10 @@ class CommandCatalogTests(unittest.TestCase):
     def test_codex_skills_come_from_its_app_server_and_a_mention_anywhere_requests_them(self):
         listing = self.catalog.listing("codex", self.project)
         self.assertEqual([item["name"] for item in listing["skills"]], ["php-review", "advisor:review-workflow"])
+        # /status and /diff are already the Harness's own here; the other views follow.
         self.assertEqual([(item["name"], item["kind"]) for item in listing["commands"]],
-                         [("new", "page"), ("model", "page"), ("diff", "page"), ("status", "page"), ("init", "prompt")])
+                         [("new", "page"), ("model", "page"), ("diff", "page"), ("status", "page"), ("init", "prompt"),
+                          ("cost", "page"), ("resume", "page"), ("memory", "page"), ("login", "page"), ("help", "page")])
         exchange = [entry["stdin"] for entry in self.entries()]
         self.assertEqual([message.get("method") for message in exchange], ["initialize", "initialized", "skills/list"])
         self.assertEqual(exchange[2]["params"], {"cwds": [str(self.project)]})
@@ -219,7 +226,7 @@ class CommandCatalogTests(unittest.TestCase):
         (prompts / "nested").mkdir()
         (prompts / "nested" / "hidden.md").write_text("Not top level.\n")
         names = [item["name"] for item in self.catalog.listing("codex", self.project)["commands"]]
-        self.assertEqual(names[-2:], ["prompts:draftpr", "prompts:plain"])
+        self.assertEqual([name for name in names if name.startswith("prompts:")], ["prompts:draftpr", "prompts:plain"])
         route = self.catalog.route(self.session("codex"), '/prompts:draftpr FILES="a.php b.php" PR_TITLE=Fix urgent')
         self.assertEqual(route["text"], "Open a PR titled Fix for a.php b.php. Notes: urgent. Cost $5.")
         self.assertIn("expanded", route["notice"])
@@ -239,10 +246,22 @@ class CommandCatalogTests(unittest.TestCase):
         folder.mkdir(parents=True)
         (folder / "SKILL.md").write_text("---\nname: php-review\ndescription: Review.\nargument-hint: <path>\n---\n# Review\n")
         listing = self.catalog.listing("cursor", self.project)
-        self.assertEqual([(item["name"], item["kind"], item["hint"]) for item in listing["commands"]], [("php-review", "skill", "<path>")])
+        self.assertEqual([(item["name"], item["kind"], item["hint"]) for item in listing["commands"][:1]], [("php-review", "skill", "<path>")])
+        self.assertEqual([item["name"] for item in listing["commands"][1:]], NAVIGATION)
         route = self.catalog.route(self.session("cursor"), "/php-review src")
         self.assertEqual(([item["name"] for item in route["requests"]], route["mode"]), (["php-review"], "text"))
         self.assertEqual(self.catalog.route(self.session("cursor"), "Use /php-review later")["requests"], [])
+
+    def test_a_command_of_the_same_name_from_the_project_wins_over_a_harness_view(self):
+        # An accelerator's /memory, or any project command named like a view, stays the project's.
+        for name in ("memory", "status"):
+            folder = self.project / f".cursor/skills/{name}"
+            folder.mkdir(parents=True)
+            (folder / "SKILL.md").write_text(f"---\nname: {name}\ndescription: The project's own.\n---\n# {name}\n")
+        listing = self.catalog.listing("cursor", self.project)["commands"]
+        listed = {item["name"]: item["kind"] for item in listing}
+        self.assertEqual(("skill", "skill", "page"), (listed["memory"], listed["status"], listed["resume"]))
+        self.assertEqual(len(listed), len(listing))
 
     def test_frontmatter_reads_names_folded_descriptions_hints_and_flags(self):
         meta = commands.frontmatter("---\nname: php-review\ndescription: >-\n  Reviews PHP code\n  for defects.\n"

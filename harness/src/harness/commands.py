@@ -12,6 +12,10 @@ explicit request to load it. `/` at the start offers custom prompts (`/prompts:n
 them), `/init`, and `/new`, `/model`, `/diff` and `/status`, which act on the page.
 
 Cursor: `/` at the start lists the project's Cursor skills; a message that starts with one gets an explicit request.
+
+Every CLI: commands its terminal offers and its print mode does not (`/cost`, `/status`, `/resume`, `/memory`,
+`/login`, `/help`, `/diff`) open the Harness view that does the same (NAVIGATION). A command of the same name from
+the CLI or the project, such as an accelerator's `/memory`, wins.
 """
 from __future__ import annotations
 
@@ -60,6 +64,16 @@ CODEX_COMMANDS = (
     {'name': 'diff', 'description': "Show this session's changes", 'hint': '', 'action': 'diff'},
     {'name': 'status', 'description': "Show this session's usage", 'hint': '', 'action': 'status'},
     {'name': 'init', 'description': 'Create an AGENTS.md contributor guide for this repository', 'hint': '', 'action': None},
+)
+# What a CLI's terminal offers and its print mode does not: each opens the Harness view that does the same.
+NAVIGATION = (
+    {'name': 'status', 'description': "Show this session's usage: tokens, cost and time", 'hint': '', 'action': 'status'},
+    {'name': 'cost', 'description': "Show this session's tokens and cost", 'hint': '', 'action': 'status'},
+    {'name': 'diff', 'description': "Show this session's changes", 'hint': '', 'action': 'diff'},
+    {'name': 'resume', 'description': 'Open an earlier session from the list', 'hint': '', 'action': 'resume'},
+    {'name': 'memory', 'description': "Open this project's memory in Knowledge", 'hint': '', 'action': 'memory'},
+    {'name': 'login', 'description': 'Say whether the CLI is signed in, and how to sign it in', 'hint': '', 'action': 'login'},
+    {'name': 'help', 'description': 'List the commands available here', 'hint': '', 'action': 'help'},
 )
 INIT_PROMPT = ('Create an AGENTS.md file in the current directory: a short contributor guide for this repository titled '
                '"Repository Guidelines". If AGENTS.md already exists, leave it unchanged and say so. Describe how this '
@@ -385,6 +399,13 @@ class Catalog:
         return self._cached(('codex', executable, os.path.normcase(str(cwd))),
                             lambda: codex_skills(executable, cwd, self.sessions.runner_lock, self.sessions))
 
+    @staticmethod
+    def _navigation(commands):
+        """The Harness views for terminal-only commands, after the CLI's and the project's own: a name either
+        already uses is theirs."""
+        taken = {name for item in commands for name in [item['name'], *(item.get('aliases') or [])]}
+        return commands + [{**item, 'aliases': [], 'kind': 'page'} for item in NAVIGATION if item['name'] not in taken]
+
     def listing(self, provider, cwd, settings=None, project_id=None):
         """What the composer offers: `commands` after a leading `/`, `skills` after `$` (Codex).
         An accelerator attached to `project_id` adds its own, as the launch will."""
@@ -395,7 +416,7 @@ class Catalog:
             native, error = self.claude(cwd, settings or claude_settings(), extra=extra)
             commands = [{**item, 'kind': 'page' if item['name'] in CLAUDE_PAGE else 'native',
                          'action': CLAUDE_PAGE.get(item['name'])} for item in native]
-            return {'provider': provider, 'commands': commands, 'skills': [], 'error': error}
+            return {'provider': provider, 'commands': self._navigation(commands), 'skills': [], 'error': error}
         if provider == 'codex':
             skills, error = self.codex(cwd)
             commands = [{'name': item['name'], 'description': item['description'], 'hint': item['hint'], 'aliases': [],
@@ -405,7 +426,7 @@ class Catalog:
             listed = [{key: item[key] for key in ('name', 'description', 'path')} for item in skills]
             names = {item['name'] for item in listed}
             listed += [item for item in attached if item['name'] not in names]
-            return {'provider': provider, 'commands': commands, 'skills': listed, 'error': error}
+            return {'provider': provider, 'commands': self._navigation(commands), 'skills': listed, 'error': error}
         if provider == 'cursor':
             skills, _ = workspace_skills(cwd, provider)
             commands = [{'name': item['name'], 'description': item['description'], 'hint': item['hint'], 'aliases': [],
@@ -413,7 +434,7 @@ class Catalog:
             names = {item['name'] for item in commands}
             commands += [{'name': item['name'], 'description': item['description'], 'hint': '', 'aliases': [],
                           'kind': 'skill', 'action': None} for item in attached if item['name'] not in names]
-            return {'provider': provider, 'commands': commands, 'skills': [], 'error': None}
+            return {'provider': provider, 'commands': self._navigation(commands), 'skills': [], 'error': None}
         raise SessionError('Choose a provider.')
 
     @staticmethod

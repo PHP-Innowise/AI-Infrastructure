@@ -252,6 +252,7 @@ HARNESS_TESTS = (
     "tests.test_harness_clash",
     "tests.test_harness_accelerators",
     "tests.test_desktop_app",
+    "tests.test_harness_mentions",
 )
 
 # Branches that carry the native-Windows and System-orchestration work run

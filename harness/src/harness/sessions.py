@@ -551,6 +551,8 @@ class Sessions:
         self.attachments = Attachments(self)
         from .commands import Catalog
         self.catalog = Catalog(self)
+        from .mentions import Mentions
+        self.mentions = Mentions()
         from .accelerators import Accelerators
         self.accelerators = Accelerators(self)
         # A project with no accelerator of its own gets the edition its files
@@ -812,6 +814,19 @@ class Sessions:
         settings = claude_settings(session['agents_enabled'], session['agent_count'], session['thinking_effort'])
         return {'session_id': sid, **self.catalog.listing(session['provider'], self._workspace(session), settings,
                                                           project_id=session['project_id'])}
+
+    def project_files(self, key, query, worktree=None):
+        """The composer's `@` search before a session exists: the project folder's paths, or a listed worktree's."""
+        project = self.project(key)
+        root = Path(project['path']) if worktree is None else self._existing_workspace(project, {'worktree_id': worktree})[0]
+        return {'project_id': key, **self.mentions.search(root, query)}
+
+    def session_files(self, sid, query):
+        """The composer's `@` search in an open session: the paths of the workspace its agent works in."""
+        session = self.get(sid)
+        if any(session.get(name) for name in ('creator', 'system_run', 'system_discovery')):
+            return {'session_id': sid, 'items': [], 'truncated': False}
+        return {'session_id': sid, **self.mentions.search(self._workspace(session), query)}
 
     def _existing_workspace(self, project, data):
         """The listed worktree a new session runs in, chosen by its ID: the agent works in that checkout as it is."""
