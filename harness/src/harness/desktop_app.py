@@ -7,10 +7,12 @@ After cloning, run once from the clone:
     ./accelerator-app open         # what the icon runs: start the Harness if needed, open it in the browser
     ./accelerator-app status
     ./accelerator-app stop         # stop the Harness server
+    ./accelerator-app update       # what the page's Update button does: update the clone and restart
     ./accelerator-app uninstall    # remove the application entry; projects and memory stay
 
-Nothing is copied but the application entry and its icon: the entry runs this clone, so `git pull` updates
-the application. Per platform:
+Nothing is copied but the application entry and its icon: the entry runs this clone, so updating the clone
+updates the application. The page shows an Update button when the branch the clone follows moves on (updates.py).
+Per platform:
 
 - Linux: `~/.local/share/applications/ai-accelerator.desktop` and the hicolor icons, which GNOME, KDE and
   every XDG desktop list among the applications;
@@ -19,9 +21,10 @@ the application. Per platform:
 
 Started from a desktop the launcher has none of the shell's PATH additions - `~/.local/bin`, nvm, Homebrew -
 where the Claude, Codex and Cursor CLIs, and often Python itself, live. So the entry names the Python that
-ran `install` (ACCELERATOR_APP_PYTHON; the launcher falls back to python3 and python), `install` records the
-shell's PATH, and `open` puts that PATH in front of the desktop's own. Run `install` again after moving the
-clone or installing a new CLI.
+ran `install` (ACCELERATOR_APP_PYTHON; the launcher falls back to python3 and python). Before starting the
+server, `open` reads the PATH the user's login shell sets up today, as VS Code does for a desktop launch, so a
+CLI installed since `install` is found; the PATH `install` recorded is the fallback. A clone that was moved is
+followed: started once from its new folder, the launcher points the installed application there.
 
 Standard library only.
 """
@@ -66,6 +69,8 @@ EXEC_RESERVED = set(' \t\n"\'\\><~|&;$*?#()`')
 PYTHON_VARIABLE = 'ACCELERATOR_APP_PYTHON'
 URL_PATTERN = re.compile(r'(?:Started|Already running): (http://127\.0\.0\.1:\d+)')
 LOG_LIMIT = 256 * 1024
+SHELL_SECONDS = 10
+SHELL_MARK = '__HARNESS_PATH__'
 
 
 class AppError(Exception):
@@ -365,12 +370,13 @@ def uninstall_windows(registry=None) -> list[Path]:
 # ---------------------------------------------------------------------------
 # Install, uninstall, status
 
-def save_config() -> Path:
-    """Record what a desktop launch lacks: the installing shell's PATH."""
+def save_config(shell_path_now: Optional[str] = None) -> Path:
+    """Record what a desktop launch lacks: the shell's PATH, from the installing shell or as last read."""
     path = config_dir() / 'app.json'
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({'clone': str(ROOT), 'path': os.environ.get('PATH', ''),
-                                'installed_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}, indent=2) + '\n',
+    installed = load_config().get('installed_at') if shell_path_now else None
+    path.write_text(json.dumps({'clone': str(ROOT), 'path': shell_path_now or os.environ.get('PATH', ''),
+                                'installed_at': installed or time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}, indent=2) + '\n',
                     encoding='utf-8')
     return path
 
@@ -427,11 +433,32 @@ def installed_entry() -> Optional[Path]:
 # ---------------------------------------------------------------------------
 # Open: what a click on the icon runs
 
-def launch_environment(config: Optional[dict] = None) -> dict[str, str]:
+def shell_path(run=subprocess.run) -> Optional[str]:
+    """The PATH the user's login shell sets up, read as VS Code reads it for a desktop launch: the shell runs as an
+    interactive login shell and prints it between marks, so greetings and prompts around it do not matter. None on
+    Windows, without a shell, or when the shell fails or takes too long."""
+    shell = os.environ.get('SHELL', '')
+    if os.name == 'nt' or not shell or not Path(shell).is_file():
+        return None
+    script = (f'{shlex.quote(sys.executable)} -c "import os, sys; '
+              f"sys.stdout.write('{SHELL_MARK}' + os.environ.get('PATH', '') + '{SHELL_MARK}')\"")
+    try:
+        result = run([shell, '-ilc', script], stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                     timeout=SHELL_SECONDS, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = re.search(f'{SHELL_MARK}(.*?){SHELL_MARK}', result.stdout or '', re.S)
+    return match.group(1) if match and match.group(1) else None
+
+
+def launch_environment(config: Optional[dict] = None, fresh: Optional[str] = None) -> dict[str, str]:
+    """The environment a desktop launch starts the server in: the shell's PATH as read now, then the one `install`
+    recorded, then the desktop's own."""
     environment = dict(os.environ)
     recorded = (config if config is not None else load_config()).get('path')
-    if isinstance(recorded, str) and recorded:
-        parts = [part for part in (*recorded.split(os.pathsep), *environment.get('PATH', '').split(os.pathsep)) if part]
+    sources = (fresh, recorded if isinstance(recorded, str) else None, environment.get('PATH', ''))
+    parts = [part for source in sources if source for part in source.split(os.pathsep) if part]
+    if parts:
         environment['PATH'] = os.pathsep.join(dict.fromkeys(parts))
     return environment
 
@@ -476,17 +503,32 @@ def notify(message: str) -> None:
             pass
 
 
-def server(command: str, run=subprocess.run) -> subprocess.CompletedProcess:
+def server(command: str, run=subprocess.run, fresh: Optional[str] = None, timeout: int = 120) -> subprocess.CompletedProcess:
     # Run from the clone: `start` then registers no folder of its own, and the browser asks for a project.
     # CREATE_NO_WINDOW: a console Python started from the Start menu would otherwise flash a console window.
     extra = {'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {}
-    return run([sys.executable, str(SERVER), command], cwd=str(ROOT), env=launch_environment(),
-               stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120, check=False, **extra)
+    return run([sys.executable, str(SERVER), command], cwd=str(ROOT), env=launch_environment(fresh=fresh),
+               stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout, check=False, **extra)
 
 
-def open_app(run=subprocess.run, browser: Callable[..., bool] = webbrowser.open) -> int:
+def follow_moved_clone() -> Optional[str]:
+    """Started from a clone after the one the installed application runs was moved away: point the application
+    here. Another clone that still exists keeps the application."""
+    clone = load_config().get('clone')
+    if not isinstance(clone, str) or clone == str(ROOT) or (Path(clone) / LAUNCHER.name).is_file() or installed_entry() is None:
+        return None
+    install()
+    return clone
+
+
+def open_app(run=subprocess.run, browser: Callable[..., bool] = webbrowser.open, shell=shell_path) -> int:
     try:
-        result = server('start', run)
+        # A running server keeps its environment. A new one gets the shell's PATH as it is now, which then
+        # replaces the recorded one: a CLI installed since `install` is found.
+        fresh = shell(run) if server('status', run).returncode != 0 else None
+        if fresh and load_config():
+            save_config(fresh)
+        result = server('start', run, fresh)
     except (OSError, subprocess.SubprocessError) as error:
         notify(f'The accelerator could not start: {error}')
         return 1
@@ -510,16 +552,22 @@ def open_app(run=subprocess.run, browser: Callable[..., bool] = webbrowser.open)
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog='accelerator-app', description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('command', choices=('install', 'uninstall', 'open', 'status', 'stop'))
+    parser.add_argument('command', choices=('install', 'uninstall', 'open', 'status', 'stop', 'update'))
     options = parser.parse_args(argv)
     try:
+        if options.command not in ('install', 'uninstall'):
+            moved = follow_moved_clone()
+            if moved:
+                log(f'The application now runs {ROOT} (it ran {moved}).')
+                say(f'{APP_NAME} now runs this clone, {ROOT}; it ran {moved}.')
         if options.command == 'install':
             written = install()
             print(f'Installed {APP_NAME} from {ROOT}:')
             for path in written:
                 print(f'  {path}')
-            print(f'Find "{APP_NAME}" among your applications; it opens the accelerator in your browser. '
-                  'Run ./accelerator-app install again after moving the clone or installing a new CLI.')
+            print(f'Find "{APP_NAME}" among your applications; it opens the accelerator in your browser.')
+            print('It keeps itself current: when the branch this clone follows moves on, the page shows an Update button.')
+            print('Moved the clone? Start it once from the new folder (./accelerator-app open) and the application follows.')
             return 0
         if options.command == 'uninstall':
             removed = uninstall()
@@ -530,6 +578,12 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 0
         if options.command == 'open':
             return open_app()
+        if options.command == 'update':
+            result = server('update', timeout=600)
+            say((result.stdout or '').strip())
+            if result.returncode:
+                print((result.stderr or 'The update did not finish.').strip(), file=sys.stderr)
+            return result.returncode
         if options.command == 'status':
             entry = installed_entry()
             print(f'Application: {"installed at " + str(entry) if entry else "not installed (./accelerator-app install)"}')

@@ -742,6 +742,31 @@ const names = () => list.children.map(item => item.children[0].textContent);
 """
         subprocess.run([shutil.which('node'), '-e', script], check=True, capture_output=True, text=True)
 
+    @unittest.skipUnless(shutil.which('node'), 'Update button check requires Node')
+    def test_the_update_button_appears_while_an_update_waits_and_says_what_it_brings(self):
+        page = ui_script()
+        source = page[page.index('\nconst appUpdate = '):page.index('\nasync function loadAppUpdate(')]
+        script = """const assert = require('node:assert/strict');
+const fields = {'app-update':{hidden:true, disabled:false, textContent:'', title:''}, 'app-update-note':{textContent:''},
+  'app-update-banner':{hidden:true, classList:{on:false, toggle(name, value) { this.on = value; }}}};
+const $ = id => fields[id];
+""" + source + """
+const button = fields['app-update'], note = fields['app-update-note'], banner = fields['app-update-banner'];
+renderAppUpdate(); assert.equal(button.hidden,true); assert.equal(banner.hidden,true);
+appUpdate.status = {state:'available', detail:'2 new changes on origin/main.', commits:[{hash:'a',subject:'Add the cart'},{hash:'b',subject:'Add billing'}]};
+renderAppUpdate();
+assert.equal(button.hidden,false); assert.equal(button.textContent,'Update'); assert.equal(banner.hidden,true);
+assert.equal(button.title,'2 new changes on origin/main.\\n• Add the cart\\n• Add billing');
+appUpdate.pending = true; renderAppUpdate(); assert.equal(button.disabled,true); assert.equal(button.textContent,'Updating…');
+Object.assign(appUpdate,{pending:false, restarting:true, note:'Updated to def5678. The Harness is restarting; this page reloads by itself.'}); appUpdate.status = {state:'updated'}; renderAppUpdate();
+assert.equal(button.hidden,false); assert.equal(button.textContent,'Restarting…'); assert.equal(banner.hidden,false); assert.match(note.textContent,/reloads by itself/);
+// A clone with commits of its own is told why, and offered no button.
+Object.assign(appUpdate,{restarting:false, note:''}); appUpdate.status = {state:'diverged', detail:'Update it with Git.', commits:[]}; renderAppUpdate();
+assert.equal(button.hidden,true); assert.equal(note.textContent,'Update it with Git.');
+Object.assign(appUpdate,{failed:true, note:'2 runs are in progress'}); renderAppUpdate(); assert.equal(banner.classList.on,true);
+"""
+        subprocess.run([shutil.which('node'), '-e', script], check=True, capture_output=True, text=True)
+
     @unittest.skipUnless(shutil.which('node'), 'Worktree picker check requires Node')
     def test_worktree_picker_names_checkouts_and_never_chooses_one_for_the_person(self):
         page = ui_script()
@@ -997,6 +1022,47 @@ assert.match(renderExistingWorktrees().error,/could not list/);
             self.assertEqual(self.request("/api/providers/sign-in?refresh=yes", headers=token)[0], 400)
         # The fixture Codex is unavailable: only Claude's CLI is asked.
         self.assertEqual([("claude", "/never-launched/fixture-claude")], [call.args for call in ask.call_args_list])
+
+    def test_update_status_is_public_and_applying_needs_the_token_and_restarts_only_a_served_server(self):
+        status, boot, _ = self.request("/api/bootstrap")
+        self.assertIn(boot["update"]["state"], ("unknown", "current", "available", "diverged", "unavailable", "failed"))
+        with patch.object(self.server.updates, "poke", return_value={"state": "available", "behind": 2}) as poke:
+            self.assertEqual(self.request("/api/app/update?check=1")[:2], (200, {"state": "available", "behind": 2}))
+        poke.assert_called_once()
+        self.assertEqual(self.request("/api/app/update")[0], 200)
+        self.assertEqual(self.request("/api/app/update?check=yes")[0], 400)
+        self.assertEqual(self.request("/api/app/update", "POST", {})[0], 403)
+        applied = {"from": "abc1234", "to": "def5678", "changes": 2}
+        with patch.object(self.server.updates, "apply", return_value=dict(applied)), \
+                patch.object(web, "refresh_application", return_value=[]), patch.object(self.server, "restart") as restart:
+            status, data, _ = self.post("/api/app/update", {})
+            self.assertEqual((status, data), (202, {"ok": True, **applied, "application": [], "restarting": False}))
+            restart.assert_not_called()  # a server not started by serve cannot start itself again
+            self.server.relaunch_command = [sys.executable, str(Path(web.__file__).resolve()), "serve"]
+            self.assertEqual(self.post("/api/app/update", {})[1]["restarting"], True)
+            restart.assert_called_once()
+        from harness.updates import UpToDate
+        with patch.object(self.server.updates, "apply", side_effect=UpToDate("This clone is already up to date.")):
+            self.assertEqual(self.post("/api/app/update", {})[:2], (200, {"ok": True, "current": True, "restarting": False,
+                                                                        "detail": "This clone is already up to date."}))
+        with patch.object(self.server.updates, "apply", side_effect=sessions.SessionError("2 runs are in progress")):
+            self.assertEqual(self.post("/api/app/update", {})[:2], (400, {"error": "2 runs are in progress"}))
+        self.assertEqual(self.post("/api/app/update", {"x": 1})[0], 404)
+
+    def test_a_relaunch_starts_only_this_server_command(self):
+        state = self.root / "relaunch-state"
+        state.mkdir()
+        for command in ("not json", "[]", '["python3", "other.py", "serve"]', json.dumps([sys.executable, str(Path(web.__file__).resolve()), "stop"])):
+            with self.subTest(command=command), self.assertRaisesRegex(sessions.SessionError, "Invalid relaunch"):
+                web.relaunch(state, command)
+        command = json.dumps([sys.executable, str(Path(web.__file__).resolve()), "serve"])
+        with patch.object(web, "metadata", return_value={"port": 1}), patch.object(web, "spawn_server") as spawn:
+            with self.assertRaisesRegex(sessions.SessionError, "did not start again"):
+                web.relaunch(state, command, seconds=1)
+        spawn.assert_not_called()  # the old server never let go
+        with patch.object(web, "metadata", return_value=None), patch.object(web, "spawn_server", side_effect=[None, {"port": 1}]) as spawn:
+            self.assertTrue(web.relaunch(state, command, seconds=5))
+        self.assertEqual(2, spawn.call_count)  # the first attempt met the old server's lock
 
     def test_file_search_needs_the_page_token_and_lists_the_workspace_by_name(self):
         (self.project / "src").mkdir()

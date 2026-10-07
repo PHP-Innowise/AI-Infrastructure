@@ -263,38 +263,107 @@ class WindowsInstallTests(Isolated):
 
 
 class OpenTests(Isolated):
-    def test_a_click_starts_the_harness_from_the_clone_with_the_recorded_path(self):
-        app.save_config()
-        calls, opened = [], []
-        os.environ["PATH"] = "/usr/bin"  # what a desktop launch gets
+    def run_with(self, status=1, start="Started: http://127.0.0.1:8766\n"):
+        calls = []
 
         def run(command, **options):
             calls.append((command, options))
-            return subprocess.CompletedProcess(command, 0, "Started: http://127.0.0.1:8766\n", "")
+            if command[-1] == "status":
+                return subprocess.CompletedProcess(command, status, "Running" if status == 0 else "Stopped", "")
+            return subprocess.CompletedProcess(command, 0, start, "")
+        return run, calls
+
+    def test_a_click_starts_the_harness_with_the_shell_path_of_today_then_the_recorded_one(self):
+        app.save_config()
+        opened = []
+        os.environ["PATH"] = "/usr/bin"  # what a desktop launch gets
+        run, calls = self.run_with(status=1)
         printed = io.StringIO()
         with contextlib.redirect_stdout(printed):
-            self.assertEqual(0, app.open_app(run=run, browser=lambda url, new: opened.append((url, new)) or True))
+            self.assertEqual(0, app.open_app(run=run, browser=lambda url, new: opened.append((url, new)) or True,
+                                             shell=lambda run: "/home/u/.nvm/bin:/opt/agents/bin"))
         self.assertEqual("Opened http://127.0.0.1:8766/\n", printed.getvalue())
-        command, options = calls[0]
-        self.assertEqual([str(app.SERVER), "start"], command[1:])
+        self.assertEqual([[str(app.SERVER), "status"], [str(app.SERVER), "start"]], [command[1:] for command, _ in calls])
+        options = calls[1][1]
         self.assertEqual(str(app.ROOT), options["cwd"])
-        self.assertEqual(["/opt/agents/bin", "/usr/bin"], options["env"]["PATH"].split(os.pathsep))
+        self.assertEqual(["/home/u/.nvm/bin", "/opt/agents/bin", "/usr/bin"], options["env"]["PATH"].split(os.pathsep))
         self.assertEqual([("http://127.0.0.1:8766/", 2)], opened)
+        # The PATH read now replaces the recorded one; the install date stays.
+        recorded = json.loads((self.root / "config/ai-infrastructure-harness/app.json").read_text(encoding="utf-8"))
+        self.assertEqual("/home/u/.nvm/bin:/opt/agents/bin", recorded["path"])
 
-    def test_a_running_harness_is_reused(self):
-        run = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "Already running: http://127.0.0.1:9100 (stop before changing projects or options)\n", ""))
-        opened = []
+    def test_without_a_shell_answer_the_recorded_path_is_used(self):
+        app.save_config()
+        os.environ["PATH"] = "/usr/bin"
+        run, calls = self.run_with(status=1)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(0, app.open_app(run=run, browser=lambda url, new: opened.append(url) or True))
+            app.open_app(run=run, browser=lambda url, new: True, shell=lambda run: None)
+        self.assertEqual(["/opt/agents/bin", "/usr/bin"], calls[1][1]["env"]["PATH"].split(os.pathsep))
+
+    def test_a_running_harness_is_reused_without_asking_the_shell(self):
+        run, calls = self.run_with(status=0, start="Already running: http://127.0.0.1:9100 (stop before changing projects or options)\n")
+        opened, shell = [], mock.Mock()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0, app.open_app(run=run, browser=lambda url, new: opened.append(url) or True, shell=shell))
         self.assertEqual(["http://127.0.0.1:9100/"], opened)
+        shell.assert_not_called()
 
     def test_a_harness_that_does_not_start_is_reported_and_no_page_opens(self):
         run = mock.Mock(return_value=subprocess.CompletedProcess([], 1, "", "harness-server: Server could not start. See server.log.\n"))
         browser = mock.Mock()
-        self.assertEqual(1, app.open_app(run=run, browser=browser))
+        self.assertEqual(1, app.open_app(run=run, browser=browser, shell=lambda run: None))
         browser.assert_not_called()
         app.notify.assert_called_once()
         self.assertIn("Server could not start", app.notify.call_args.args[0])
+
+    def test_the_shell_path_is_read_between_marks_whatever_the_shell_prints_around_it(self):
+        seen = []
+
+        def run(command, **options):
+            seen.append((command, options))
+            return subprocess.CompletedProcess(command, 0, f"Welcome!\n{app.SHELL_MARK}/a:/b{app.SHELL_MARK}\n", "")
+        shell = shutil.which("sh") or "/bin/sh"
+        with mock.patch.dict(os.environ, {"SHELL": shell}):
+            self.assertEqual("/a:/b", app.shell_path(run))
+            command, options = seen[0]
+            self.assertEqual([shell, "-ilc"], command[:2])
+            self.assertEqual((subprocess.DEVNULL, app.SHELL_SECONDS), (options["stdin"], options["timeout"]))
+            self.assertIsNone(app.shell_path(lambda command, **options: subprocess.CompletedProcess(command, 0, "no marks", "")))
+            self.assertIsNone(app.shell_path(mock.Mock(side_effect=subprocess.TimeoutExpired("sh", 10))))
+        with mock.patch.dict(os.environ, {"SHELL": ""}):
+            self.assertIsNone(app.shell_path(run))
+
+    @unittest.skipIf(os.name == "nt", "reads a POSIX login shell")
+    def test_the_shell_path_comes_from_a_real_login_shell(self):
+        shell = shutil.which("bash") or shutil.which("sh")
+        with mock.patch.dict(os.environ, {"SHELL": shell}):
+            found = app.shell_path()
+        self.assertTrue(found)
+        self.assertNotIn(app.SHELL_MARK, found)
+
+    def test_a_moved_clone_takes_the_application_with_it(self):
+        app.install(refresh=False)
+        config = self.root / "config/ai-infrastructure-harness/app.json"
+        recorded = json.loads(config.read_text(encoding="utf-8"))
+        # The application still runs an existing clone: another clone started from elsewhere leaves it.
+        other = self.root / "other-clone"
+        other.mkdir()
+        (other / app.LAUNCHER.name).write_text("#!/bin/sh\n", encoding="utf-8")
+        config.write_text(json.dumps({**recorded, "clone": str(other)}), encoding="utf-8")
+        self.assertIsNone(app.follow_moved_clone())
+        # It ran a clone that is gone: started from here, it runs this one.
+        config.write_text(json.dumps({**recorded, "clone": str(self.root / "gone")}), encoding="utf-8")
+        self.assertEqual(str(self.root / "gone"), app.follow_moved_clone())
+        self.assertEqual(str(app.ROOT), json.loads(config.read_text(encoding="utf-8"))["clone"])
+        self.assertIsNone(app.follow_moved_clone())
+
+    def test_update_runs_through_the_server_and_says_what_happened(self):
+        run = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "Updated abc1234 → def5678 (2 changes).\nRestarted: http://127.0.0.1:8766\n", ""))
+        printed = io.StringIO()
+        with mock.patch.object(app, "server", side_effect=lambda command, timeout=120, **_: run(command)) as server, contextlib.redirect_stdout(printed):
+            self.assertEqual(0, app.main(["update"]))
+        self.assertEqual("update", server.call_args.args[0])
+        self.assertIn("Restarted: http://127.0.0.1:8766", printed.getvalue())
 
 
 @unittest.skipIf(os.name == "nt", "Windows runs the root launcher through Git Bash")

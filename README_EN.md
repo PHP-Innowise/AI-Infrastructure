@@ -74,9 +74,11 @@ applications: in the application menu of GNOME, KDE and other XDG desktops on
 Linux, in Launchpad and Spotlight on macOS, and in the Start menu and
 **Settings › Apps** on Windows. A click starts the Harness from the clone if it
 is not running and opens it in the browser. Only a shortcut and an icon are
-written to the system, so `git pull` in the clone updates the application too.
-`./accelerator-app uninstall` removes the application; projects and their
-memory stay. Details:
+written to the system, and the application updates itself: when `main` moves
+on, an **Update** button appears in the page header, and one click pulls the
+changes, refreshes the application and restarts it. Installing a new CLI needs
+no reinstall. `./accelerator-app uninstall` removes the application; projects
+and their memory stay. Details:
 [harness/README.md](harness/README.md#desktop-application).
 
 When a team wants the accelerator's files in the project's own Git history, use

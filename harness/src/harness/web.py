@@ -14,7 +14,7 @@ import sys
 import tempfile
 import threading
 import time
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlsplit, quote
 from urllib.request import Request, build_opener, ProxyHandler
 
@@ -32,6 +32,7 @@ from harness import process_runtime
 from harness.sessions import Sessions, SessionError, WORKFLOWS, MAX_AGENTS, DEFAULT_AGENT_COUNT, CONTEXT_EXCERPT_BYTES, fleet_runtime
 from harness import clash, sdd
 from harness.attachments import MAX_JSON_BYTES
+from harness.updates import UpToDate, Updates, refresh_application
 from harness.skills import SkillManager
 from harness.knowledge import KnowledgeBusy, KnowledgeManager
 from harness import memory_use
@@ -60,6 +61,9 @@ class HarnessServer(ThreadingHTTPServer):
             self.creator = CreatorManager(self.sessions)
             self.systems = SystemManager(self.sessions)
             self.discovery = DiscoveryManager(self.sessions, self.systems.editor)
+            # Updates restart this server; serve() names the command that starts it again.
+            self.updates = Updates(busy=self.running_count)
+            self.relaunch_command = None
             self.token = secrets.token_urlsafe(32)
             self.instance = secrets.token_hex(16)
             self.catalog_dir = tempfile.TemporaryDirectory(prefix='harness-catalog-')
@@ -85,8 +89,27 @@ class HarnessServer(ThreadingHTTPServer):
             self.server_close()
             raise
 
+    def running_count(self):
+        """Runs a restart would interrupt: queued and running sessions."""
+        return sum(1 for session in self.sessions.summaries() if session['status'] in ('queued', 'running'))
+
+    def restart(self):
+        """Hand over to a process that starts this server again on the updated code once it has stopped, then stop.
+        Without a relaunch command (a server not started by serve) it only reports that a restart is needed."""
+        if not self.relaunch_command:
+            return False
+        state = self.sessions.state_dir
+        command = [sys.executable, str(Path(__file__).resolve()), 'relaunch', '--state-dir', str(state),
+                   '--serve-command', json.dumps(self.relaunch_command)]
+        log_fd = fs.open(state / 'server.log', os.O_WRONLY | os.O_APPEND | os.O_CREAT | fs.O_NOFOLLOW, 0o600)
+        with os.fdopen(log_fd, 'ab') as log:
+            subprocess.Popen(command, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=log, stderr=log, **process_runtime.daemon_kwargs())
+        threading.Thread(target=self.shutdown, daemon=True).start()
+        return True
+
     def close(self):
         self.shutdown()
+        self.updates.close()
         self.skills.close()
         self.setup_manager.close()
         self.knowledge.close()
@@ -100,6 +123,7 @@ class HarnessServer(ThreadingHTTPServer):
             'projects': self.sessions.list_projects(),
             'providers': [{k: v for k, v in p.items() if k != 'executable'} for p in self.sessions.providers.values()],
             'workflows': WORKFLOWS, 'sdd_phases': sdd.PHASES, 'sessions': self.sessions.summaries(),
+            'update': self.updates.status(),
             'clash': {'workflows': list(clash.WORKFLOWS), 'stages': clash.STAGES, 'max_rounds': clash.MAX_ROUNDS, 'default_rounds': clash.DEFAULT_ROUNDS},
             'accelerators': [
                 {'id': 'kit1', 'name': 'Kit 1 · Infrastructure Creator', 'description': 'Scan, review, generate and apply a bespoke accelerator; update manifest-owned files.'},
@@ -339,6 +363,11 @@ class Handler(BaseHTTPRequestHandler):
                         or ('path' in query and 'bank' not in query)):
                     raise SessionError('Invalid memory request.')
                 self.reply(200, store.memory(path.split('/')[3], query.get('bank', [None])[0], query.get('path', [None])[0]))
+            elif path == '/api/app/update':
+                # `check=1`: a page came back and asks for a check if the last one is old.
+                if parsed.query not in ('', 'check=1'):
+                    raise SessionError('Invalid update request.')
+                self.reply(200, self.server.updates.poke() if parsed.query else self.server.updates.status())
             elif path == '/api/providers/sign-in':
                 # Asking starts the native CLIs (`claude auth status`, `codex login status`): the page's token, as for commands.
                 if not self.token_ok():
@@ -526,6 +555,17 @@ class Handler(BaseHTTPRequestHandler):
             elif path == '/api/shutdown' and not data:
                 self.reply(200, {'ok': True})
                 threading.Thread(target=self.server.shutdown, daemon=True).start()
+            elif path == '/api/app/update' and not data and not urlsplit(self.path).query:
+                try:
+                    result = self.server.updates.apply()
+                except UpToDate as current:
+                    self.reply(200, {'ok': True, 'current': True, 'restarting': False, 'detail': str(current)})
+                    return
+                result['application'] = refresh_application()
+                result['restarting'] = bool(self.server.relaunch_command)
+                self.reply(202, {'ok': True, **result})
+                if result['restarting']:
+                    self.server.restart()
             else:
                 self.error(404, 'Not found.')
         except KnowledgeBusy as error:
@@ -561,12 +601,79 @@ def metadata(state):
     return None
 
 
-def call_server(info, path='/api/health', body=None):
+def call_server(info, path='/api/health', body=None, timeout=2):
     request = Request(f"http://127.0.0.1:{info['port']}{path}",
                       data=json.dumps(body).encode() if body is not None else None,
                       headers={'Content-Type': 'application/json', 'X-Harness-Token': info['token']})
-    with build_opener(ProxyHandler({})).open(request, timeout=2) as response:
+    with build_opener(ProxyHandler({})).open(request, timeout=timeout) as response:
         return json.load(response)
+
+
+def spawn_server(command, state):
+    """Start `serve` detached and wait until it answers. None when it exited first (another server still held the
+    state directory)."""
+    log_fd = fs.open(state / 'server.log', os.O_WRONLY | os.O_APPEND | os.O_CREAT | fs.O_NOFOLLOW, 0o600)
+    with os.fdopen(log_fd, 'ab') as log:
+        process = subprocess.Popen(command, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=log, stderr=log, **process_runtime.daemon_kwargs())
+    for _ in range(175):
+        info = running(state)
+        if info:
+            return info
+        if process.poll() is not None:
+            return None
+        time.sleep(.2)
+    raise SessionError(f'Startup is still in progress. Check ./harness-server status and {state / "server.log"}.')
+
+
+def relaunch(state, serve_command, seconds=90):
+    """After an update the old server is stopping: start the same server again, on the new code, once it has let
+    go of the state directory."""
+    try:
+        command = json.loads(serve_command)
+    except ValueError:
+        command = None
+    if not (isinstance(command, list) and len(command) > 2 and all(isinstance(part, str) for part in command)
+            and command[2] == 'serve' and same_path(Path(command[1]), Path(__file__).resolve())):
+        raise SessionError('Invalid relaunch command.')
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if metadata(state) is None and spawn_server(command, state):
+            return True
+        time.sleep(.5)
+    raise SessionError(f'The server did not start again after the update. See {state / "server.log"}.')
+
+
+def update(state):
+    """`update` from a terminal: through the running server, which restarts itself, or directly in the clone."""
+    info = running(state)
+    if info is None:
+        try:
+            result = Updates().apply()
+        except UpToDate as current:
+            print(current)
+            return 0
+        for line in refresh_application():
+            print(line)
+        print(f"Updated {result['from']} → {result['to']} ({result['changes']} {'change' if result['changes'] == 1 else 'changes'}).")
+        return 0
+    try:
+        result = call_server(info, '/api/app/update', {}, timeout=300)
+    except HTTPError as error:
+        raise SessionError(json.loads(error.read() or b'{}').get('error') or f'The server refused the update ({error.code}).') from error
+    if result.get('current'):
+        print(result['detail'])
+        return 0
+    print(f"Updated {result['from']} → {result['to']} ({result['changes']} {'change' if result['changes'] == 1 else 'changes'}).")
+    if not result.get('restarting'):
+        print('Restart the server to use the new version.')
+        return 0
+    for _ in range(450):
+        current = running(state)
+        if current and current['instance'] != info['instance']:
+            print(f"Restarted: http://127.0.0.1:{current['port']}")
+            return 0
+        time.sleep(.2)
+    raise SessionError(f'The server did not come back after the update. See {state / "server.log"}.')
 
 
 def running(state):
@@ -593,6 +700,10 @@ def serve(args, state):
         state_fd = fs.open_target_directory(state)
         overrides = {name: getattr(args, name + '_bin') for name in ('claude', 'codex', 'cursor') if getattr(args, name + '_bin')}
         server = HarnessServer(('127.0.0.1', args.port), state, args.project or default_projects(), overrides, args.timeout)
+        # After an update the same command starts the server again, on the new code.
+        server.relaunch_command = [sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]]
+        if os.environ.get('HARNESS_UPDATE_CHECK', '1') != '0':
+            server.updates.start()
         info = {'pid': os.getpid(), 'port': server.server_port, 'instance': server.instance, 'token': server.token}
         temporary = 'server-' + secrets.token_hex(16)
         descriptor = fs.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | fs.O_NOFOLLOW, 0o600, dir_fd=state_fd)
@@ -607,6 +718,7 @@ def serve(args, state):
         server.serve_forever(poll_interval=.2)
     finally:
         if server:
+            server.updates.close()
             server.skills.close()
             server.setup_manager.close()
             server.knowledge.close()
@@ -633,13 +745,14 @@ def default_projects():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('start', 'serve', 'status', 'stop'), nargs='?', default='start')
+    parser.add_argument('command', choices=('start', 'serve', 'status', 'stop', 'update', 'relaunch'), nargs='?', default='start')
     parser.add_argument('--project', action='append', type=Path, help='Register an existing project; repeat for multiple projects (default: the current directory, unless it is this clone).')
     parser.add_argument('--port', type=int, default=8766)
     parser.add_argument('--state-dir', type=Path, default=default_state_dir())
     parser.add_argument('--timeout', type=int, default=900, help='Initial time budget for API requests without a budgets object (default: 900). Explicit null means no time limit.')
     for name in ('claude', 'codex', 'cursor'):
         parser.add_argument('--' + name + '-bin', help='Explicit native CLI executable path.')
+    parser.add_argument('--serve-command', help=argparse.SUPPRESS)
     args = parser.parse_args()
     try:
         for name in ('claude', 'codex', 'cursor'):
@@ -652,6 +765,11 @@ def main():
         if args.command == 'serve':
             serve(args, state)
             return 0
+        if args.command == 'relaunch':
+            relaunch(state, args.serve_command or '')
+            return 0
+        if args.command == 'update':
+            return update(state)
         info = running(state)
         if args.command == 'status':
             print(f"Running: http://127.0.0.1:{info['port']}" if info else 'Stopped')
@@ -676,18 +794,11 @@ def main():
         for name in ('claude', 'codex', 'cursor'):
             if getattr(args, name + '_bin'):
                 command.extend(['--' + name + '-bin', getattr(args, name + '_bin')])
-        log_fd = fs.open(state / 'server.log', os.O_WRONLY | os.O_APPEND | os.O_CREAT | fs.O_NOFOLLOW, 0o600)
-        with os.fdopen(log_fd, 'ab') as log:
-            process = subprocess.Popen(command, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=log, stderr=log, **process_runtime.daemon_kwargs())
-        for _ in range(175):
-            info = running(state)
-            if info:
-                print(f"Started: http://127.0.0.1:{info['port']}")
-                return 0
-            if process.poll() is not None:
-                raise SessionError(f'Server could not start. See {state / "server.log"}.')
-            time.sleep(.2)
-        raise SessionError(f'Startup is still in progress. Check ./harness-server status and {state / "server.log"}.')
+        info = spawn_server(command, state)
+        if info is None:
+            raise SessionError(f'Server could not start. See {state / "server.log"}.')
+        print(f"Started: http://127.0.0.1:{info['port']}")
+        return 0
     except (SessionError, OSError) as error:
         print(f'harness-server: {error}', file=sys.stderr)
         return 1

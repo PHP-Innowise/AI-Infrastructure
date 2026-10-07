@@ -348,24 +348,74 @@ applications:
 A click runs `./accelerator-app open`. If the server is not running, it starts
 it from the clone, as `./harness-server start` does, so the browser asks for a
 project folder. Then it opens the server in the default browser. The entry runs
-the clone itself, so `git pull` updates the application, and nothing else is
-copied. On Linux, the icon's menu also has **Stop the accelerator server**.
+the clone itself, and nothing else is copied. On Linux, the icon's menu also has
+**Stop the accelerator server**.
+
+#### Updates
+
+The application keeps itself current, as desktop applications do. The server
+checks the branch the clone follows, `main` on origin for a clone made to use
+the accelerator, when it starts and then hourly. It also checks when the page
+comes back after ten minutes away. Each check is one `git fetch` of that
+branch.
+
+While the clone lacks commits, an **Update** button sits at the right of the
+page header, on every page and at every width. Hovering over it shows the new
+commits.
+
+A click runs four steps:
+
+1. It fast-forwards the clone.
+2. It rewrites the installed application from it, because the icon or entry
+   may have changed.
+3. It restarts the server on the new code.
+4. It reloads the page.
+
+Projects attached to the clone take their edition from it, so they update with
+it.
+
+`./accelerator-app update` does the same from a terminal.
+
+Only a fast-forward is ever applied, and some states hold the update back:
+
+| State | What happens |
+| --- | --- |
+| The clone has commits of its own | The button gives way to a note: update it with Git. |
+| A local change is in the way | The update is refused and the clone is left as it was. |
+| Runs are in progress | The update waits until they finish or are stopped, because a restart would interrupt them. |
+| The clone is not on a branch that follows a remote | Nothing is offered, and the status says why. |
+
+To keep checks off, set `HARNESS_UPDATE_CHECK=0` in the server's environment.
+
+#### The environment of a desktop launch
 
 A desktop launch lacks the `PATH` additions of a shell profile, such as
-`~/.local/bin`, nvm or Homebrew, where the Claude, Codex and Cursor CLIs, and
-often Python itself, usually live. The application entry therefore names the
-Python that ran `install` (`ACCELERATOR_APP_PYTHON`; the launcher falls back to
-`python3` and `python`). `install` also records the installing shell's `PATH` in
-`app.json`, and `open` puts it in front of the desktop's own. The file is in
-`~/.config/ai-infrastructure-harness/` on Linux,
-`~/Library/Application Support/ai-infrastructure-harness/` on macOS and
-`%APPDATA%\ai-infrastructure-harness\` on Windows. Run `install` again after
-moving the clone or installing a new CLI. When the server cannot start, the
-reason appears as a desktop notification (a message box on Windows) and in
-`launcher.log` beside `app.json`.
+`~/.local/bin`, nvm or Homebrew. That is where the Claude, Codex and Cursor
+CLIs, and often Python itself, usually live. Three things make up for it:
+
+- The application entry names the Python that ran `install`
+  (`ACCELERATOR_APP_PYTHON`). The launcher falls back to `python3` and `python`.
+- Before it starts the server, `open` reads the `PATH` the login shell sets up
+  today, as VS Code does for a desktop launch. It runs `$SHELL -ilc` with a
+  10-second limit and reads the value between marks, so a greeting or prompt
+  around it does not matter. This works with bash, zsh and fish. A CLI
+  installed since `install` is therefore found without reinstalling.
+- The `PATH` read last is kept in `app.json`. It is the fallback when the shell
+  does not answer, put in front of the desktop's own. The file is in
+  `~/.config/ai-infrastructure-harness/` on Linux,
+  `~/Library/Application Support/ai-infrastructure-harness/` on macOS and
+  `%APPDATA%\ai-infrastructure-harness\` on Windows.
+
+If you move the clone, start it once from its new folder
+(`./accelerator-app open`), and the installed application follows it. A second
+clone leaves the application with the first one while the first still exists.
+
+When the server cannot start, the reason appears as a desktop notification (a
+message box on Windows) and in `launcher.log` beside `app.json`.
 
 ```bash
 ./accelerator-app status     # is the application installed, is the server running
+./accelerator-app update     # what the Update button does
 ./accelerator-app stop       # stop the server
 ./accelerator-app uninstall  # remove the application; projects, sessions and memory stay
 ```

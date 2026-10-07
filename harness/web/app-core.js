@@ -163,8 +163,52 @@ async function loadSignIn(refresh = false) {
   } catch (_) { /* Without an answer a run still reports a refused sign-in itself. */ }
   finally { signIn.pending = null; }
 }
-// Signing in happens in a terminal: ask again when the person comes back to this page.
-window.addEventListener('focus',() => loadSignIn(true));
+// Updates of this clone, offered as a desktop application offers them (updates.py): an Update button in the header
+// while the branch the clone follows has moved on. A click fast-forwards the clone and restarts the Harness, and
+// this page reloads itself on the new version.
+const appUpdate = {status:null, pending:false, restarting:false, instance:null, note:'', failed:false};
+function renderAppUpdate() {
+  const status = appUpdate.status || {}, button = $('app-update'), note = $('app-update-note');
+  const available = status.state === 'available', busy = appUpdate.pending || appUpdate.restarting;
+  button.hidden = !available && !busy; button.disabled = busy;
+  button.textContent = appUpdate.restarting ? 'Restarting…' : appUpdate.pending ? 'Updating…' : 'Update';
+  button.title = available ? [status.detail,...(status.commits || []).slice(0,10).map(commit => `• ${commit.subject}`)].join('\n') : '';
+  const text = appUpdate.note || (status.state === 'diverged' ? status.detail : ''), banner = $('app-update-banner');
+  if (note.textContent !== text) note.textContent = text;
+  banner.hidden = !text; banner.classList.toggle('error',appUpdate.failed);
+}
+async function loadAppUpdate(check = false) {
+  if (!state.bootstrap || state.authFailed || appUpdate.pending || appUpdate.restarting) return;
+  try { appUpdate.status = await api('/api/app/update' + (check ? '?check=1' : '')); renderAppUpdate(); } catch (_) { /* Asked again later. */ }
+  // A check fetches in the background: look again once it has had time to.
+  if (check) setTimeout(() => loadAppUpdate(false),8000);
+}
+async function waitForRestart() {
+  const deadline = Date.now() + 120000;
+  while (Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve,1000));
+    try { const health = await (await fetch('/api/health',{cache:'no-store'})).json(); if (health.instance && health.instance !== appUpdate.instance) { location.reload(); return; } }
+    catch (_) { /* Still restarting. */ }
+  }
+  Object.assign(appUpdate,{restarting:false,failed:true,note:'The Harness did not come back after the update. Start it again from the application icon.'}); renderAppUpdate();
+}
+async function applyAppUpdate() {
+  if (appUpdate.pending || appUpdate.restarting) return;
+  Object.assign(appUpdate,{pending:true,failed:false,note:''}); renderAppUpdate();
+  try {
+    appUpdate.instance = (await (await fetch('/api/health',{cache:'no-store'})).json()).instance;
+    const result = await api('/api/app/update',{method:'POST',body:{}});
+    if (result.current) { Object.assign(appUpdate,{pending:false,note:result.detail}); appUpdate.status = {...appUpdate.status,state:'current'}; renderAppUpdate(); return; }
+    Object.assign(appUpdate,{pending:false,restarting:result.restarting === true,note:result.restarting === true ? `Updated to ${result.to}. The Harness is restarting; this page reloads by itself.` : `Updated to ${result.to}. Restart the Harness to use it.`});
+    appUpdate.status = {...appUpdate.status,state:'updated'}; renderAppUpdate();
+    if (appUpdate.restarting) waitForRestart();
+  } catch (error) { Object.assign(appUpdate,{pending:false,failed:true,note:textError(error)}); renderAppUpdate(); }
+}
+$('app-update').addEventListener('click',applyAppUpdate);
+setInterval(() => loadAppUpdate(true),10 * 60 * 1000);
+// Signing in happens in a terminal: ask again when the person comes back to this page. An update check too, once
+// the last one is old.
+window.addEventListener('focus',() => { loadSignIn(true); loadAppUpdate(true); });
 document.addEventListener('visibilitychange',() => { if (document.visibilityState === 'visible') loadSignIn(true); });
 const CUSTOM_MODEL = '--custom--';
 const modelMetadata = (providerId = $('provider').value) => providerFor(providerId)?.model_options || {models:[],efforts:[],detail:''};
@@ -562,7 +606,7 @@ function updateFleetSettingsControls() {
 }
 const textError = error => error.message || 'The local runner could not complete this request.';
 function showError(id, message) { $(id).textContent = message || ''; $(id).hidden = !message; }
-function connectionError(error) { if ([401,403].includes(error.status)) state.authFailed = true; $('connection-message').textContent = state.authFailed ? 'The local connection token is no longer accepted. Reconnect before sending another request.' : 'The local runner is not responding. Check that it is still running, then reconnect.'; $('connection-banner').hidden = false; updateControls(); }
+function connectionError(error) { if (appUpdate.restarting) return; if ([401,403].includes(error.status)) state.authFailed = true; $('connection-message').textContent = state.authFailed ? 'The local connection token is no longer accepted. Reconnect before sending another request.' : 'The local runner is not responding. Check that it is still running, then reconnect.'; $('connection-banner').hidden = false; updateControls(); }
 async function api(path, options = {}) {
   // The token goes with every request: some reads (a CLI's command list) start native processes and require it.
   const headers = { Accept:'application/json', 'X-Harness-Token':state.bootstrap?.csrf || '' };
@@ -713,6 +757,7 @@ async function bootstrap() {
     if (!boot.csrf || !Array.isArray(boot.projects) || !Array.isArray(boot.providers)) throw new Error('The runner returned an incomplete workspace configuration.');
     state.bootstrap = boot; state.authFailed = false; state.sessions = boot.sessions || []; boot.workflows = boot.workflows || []; boot.accelerators = boot.accelerators || [];
     $('connection-banner').hidden = true; populateSettings(); renderHistory(); loadSignIn();
+    appUpdate.status = boot.update || null; renderAppUpdate(); loadAppUpdate(true);
     if (!sessionPreferencesReady) await restoreSessionPreferences();
     else if (state.selectedId) { stopPolling(); await pollSession(state.epoch); }
     let routed = false;

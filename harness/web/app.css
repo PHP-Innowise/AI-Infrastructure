@@ -31,6 +31,12 @@ svg { flex:none; }
 .brand { display:flex; align-items:center; gap:12px; padding:0 8px 24px; }
 .brand-logo { display:block; width:34px; height:34px; flex:none; }
 .brand-name { font-size:var(--text-body); font-weight:var(--weight-strong); line-height:var(--leading-ui); }
+/* An update of the clone, offered as desktop applications offer theirs. */
+.update-button { display:inline-flex; align-items:center; gap:8px; height:var(--control-height-sm); padding:0 12px; border:0; border-radius:var(--radius-lg); background:var(--purple); color:var(--paper); font:inherit; font-size:var(--text-ui); font-weight:var(--weight-strong); cursor:pointer; }
+.update-button::before { content:""; width:6px; height:6px; border-radius:50%; background:var(--paper); }
+.update-button:disabled { opacity:.75; cursor:progress; }
+.update-banner { border-color:var(--purple-line); color:var(--ink); background:var(--purple-tint); }
+.update-banner.error { border-color:var(--error-line); color:var(--error); background:var(--error-surface); }
 .project-switcher { display:flex; flex-direction:column; gap:4px; margin:0 0 12px; color:var(--muted); font-size:var(--text-ui); }
 .project-switcher select { width:100%; }
 [data-project-field] { display:none !important; }
