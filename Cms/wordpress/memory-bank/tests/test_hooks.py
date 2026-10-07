@@ -656,6 +656,68 @@ class HostDeliveredCapsuleTest(unittest.TestCase):
                     self.assertTrue(marker.exists())
 
 
+class ReadHookInputTest(unittest.TestCase):
+    """The read hook hands the prompt and the conversation id to the CLI."""
+
+    def run_hook(self, tool: str, payload: object, directory: Path):
+        root = directory / tool
+        hooks = root / MIRRORS[tool][0]
+        hooks.mkdir(parents=True, exist_ok=True)
+        shutil.copy(hook_path(tool, "working-memory-read.sh"), hooks)
+        argv_file = root / "argv.json"
+        cli = root / "memory-bank/scripts/context.py"
+        cli.parent.mkdir(parents=True, exist_ok=True)
+        cli.write_text(
+            "import json, pathlib, sys\n"
+            f"pathlib.Path({str(argv_file)!r}).write_text(json.dumps(sys.argv[1:]))\n"
+            "print('working: TASK-INPUT')\n",
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [BASH, str(hooks / "working-memory-read.sh")],
+            input=payload if isinstance(payload, str) else json.dumps(payload),
+            capture_output=True,
+            text=True,
+            env={**os.environ, "CONTEXT_TASK_ID": "TASK-INPUT",
+                 "CONTEXT_CAPSULE_DELIVERED": ""},
+            timeout=HOOK_TIMEOUT,
+        )
+        argv = json.loads(argv_file.read_text(encoding="utf-8")) if argv_file.exists() else None
+        return result, argv
+
+    def test_prompt_and_session_reach_the_cli_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hook-input-") as directory:
+            for tool in ("claude", "codex"):
+                with self.subTest(tool=tool):
+                    prompt = "cobalt allocation\nsecond line\n\n"
+                    result, argv = self.run_hook(
+                        tool, {"prompt": prompt, "session_id": "abc-123"}, Path(directory)
+                    )
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    # No banner: the capsule is the whole output.
+                    self.assertEqual("working: TASK-INPUT\n", result.stdout)
+                    self.assertEqual(prompt, argv[argv.index("--query") + 1])
+                    self.assertEqual("abc-123", argv[argv.index("--session-id") + 1])
+
+    def test_a_missing_or_unsafe_session_id_is_not_passed(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hook-input-") as directory:
+            for payload in (
+                {"prompt": "cobalt allocation"},
+                {"prompt": "cobalt allocation", "session_id": "a b; rm -rf /"},
+                {"prompt": "cobalt allocation", "session_id": 42},
+            ):
+                with self.subTest(payload=payload):
+                    _, argv = self.run_hook("claude", payload, Path(directory))
+                    self.assertNotIn("--session-id", argv)
+                    self.assertEqual("cobalt allocation", argv[argv.index("--query") + 1])
+
+    def test_malformed_input_still_refreshes_without_a_query(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hook-input-") as directory:
+            result, argv = self.run_hook("claude", "not json", Path(directory))
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(["refresh", "--host", "claude"], argv)
+
+
 class CursorCapsuleRenderTest(unittest.TestCase):
     """Functional render tests against a throwaway edition tree.
 

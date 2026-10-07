@@ -24,6 +24,7 @@
       "Bash(vendor/bin/rector:*)",
       "Bash(vendor/bin/phpbench:*)",
       "Bash(git:*)",
+      "Bash(python3 memory-bank/scripts/context.py:*)",
       "Bash(gh:*)",
       "Bash(ls:*)",
       "Bash(mkdir:*)",

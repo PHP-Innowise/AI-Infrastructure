@@ -353,7 +353,7 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
             "retrieve", "zorkmid plover", "--task-id", "TASK-WEAK", "--ephemeral",
         )
         self.assertEqual(0, rendered.returncode, rendered.stderr)
-        self.assertIn("weak-match: README.md", rendered.stdout)
+        self.assertRegex(rendered.stdout, r"README\.md — [^\n]*\(weak match\)")
 
         payload = self.run_cli(
             "retrieve", "zorkmid plover", "--task-id", "TASK-WEAK",
@@ -4225,48 +4225,80 @@ class ChunkSourceDigestTest(BankFixture):
         )
         self.assertEqual([], self.bank_errors())
 
-    def test_a_chunk_whose_source_changed_leaves_retrieval_with_that_reason(
+    def test_a_chunk_whose_source_changed_stays_flagged_for_checking(
         self,
     ) -> None:
+        # An edit to a cited file used to evict the chunk until someone ran
+        # bank-reverify by hand, and nobody did: 65 of 70 resolved findings on
+        # a real project were lost that way. The chunk now stays, ranked down
+        # and marked, and the reader checks the file it names.
         self.run_cli("bank-reverify", "--id", "MEM-20260101-aaaaaaaa")
         indexed = self.run_cli("index", "--json")
         self.assertEqual(0, indexed.returncode, indexed.stderr)
         self.start("TASK-DIGEST")
-        found = self.run_cli(
-            "retrieve", "cerulean rollout", "--task-id", "TASK-DIGEST",
-            "--ephemeral", "--json",
-        )
         chunk_path = "memory-bank/chunks/MEM-20260101-aaaaaaaa-old-rule.md"
-        self.assertIn(
-            chunk_path,
-            [item["path"] for item in json.loads(found.stdout)["selected"]],
-            found.stdout,
+        found = json.loads(
+            self.run_cli(
+                "retrieve", "cerulean rollout", "--task-id", "TASK-DIGEST",
+                "--ephemeral", "--json",
+            ).stdout
         )
+        fresh = {item["path"]: item for item in found["selected"]}
+        self.assertIn(chunk_path, fresh, found)
+        self.assertNotIn("source_changed", fresh[chunk_path])
 
         self.repository.joinpath("specs/authority.md").write_text(
             "# Authority\n\nThe cobalt authority rule was replaced.\n",
             encoding="utf-8",
         )
         self.assertEqual(0, self.run_cli("index", "--json").returncode)
-        after = self.run_cli(
-            "retrieve", "cerulean rollout", "--task-id", "TASK-DIGEST",
-            "--ephemeral", "--json",
+        capsule = json.loads(
+            self.run_cli(
+                "retrieve", "cerulean rollout", "--task-id", "TASK-DIGEST",
+                "--ephemeral", "--json",
+            ).stdout
         )
-        capsule = json.loads(after.stdout)
+        changed = {item["path"]: item for item in capsule["selected"]}
+        self.assertIn(chunk_path, changed, capsule)
+        self.assertEqual(
+            ["specs/authority.md"], changed[chunk_path]["source_changed"]
+        )
         manifest = json.loads(
             (self.repository / capsule["manifest"]).read_text(encoding="utf-8")
         )
-        self.assertNotIn(
-            chunk_path, [item["path"] for item in manifest["selected"]], manifest
+        listed = {item["path"]: item for item in manifest["selected"]}
+        self.assertTrue(listed[chunk_path]["source_changed"])
+        self.assertLess(
+            listed[chunk_path]["score"],
+            {item["path"]: item for item in json.loads(
+                (self.repository / found["manifest"]).read_text(encoding="utf-8")
+            )["selected"]}[chunk_path]["score"],
         )
-        # Not `stale`: a Brain record is refreshed by a revisioned mutation, a
-        # chunk by re-reading the source. The reason names which remedy applies.
+
+    def test_a_chunk_whose_source_is_gone_leaves_retrieval(self) -> None:
+        self.run_cli("bank-reverify", "--id", "MEM-20260101-aaaaaaaa")
+        self.assertEqual(0, self.run_cli("index", "--json").returncode)
+        chunk_path = "memory-bank/chunks/MEM-20260101-aaaaaaaa-old-rule.md"
+        self.repository.joinpath("specs/authority.md").unlink()
+        filtered, excluded = retrieval._runtime_filter(
+            self.repository,
+            [
+                {
+                    "path": chunk_path, "privacy": "team", "owner": "local",
+                    "authority": "verified", "kind": "memory",
+                    "lifecycle": "active",
+                    "source_hash": retrieval._content_hash(
+                        self.chunk.read_text(encoding="utf-8")
+                    ),
+                    "source_fingerprints": self.digests_of(self.chunk),
+                }
+            ],
+            {"allowed_privacy": ["team"], "allowed_authority": ["verified"],
+             "owners": ["*"]},
+        )
+        self.assertEqual([], filtered)
         self.assertEqual(
-            "source-changed",
-            {item["path"]: item["reason"] for item in manifest["excluded"]}.get(
-                chunk_path
-            ),
-            manifest["excluded"],
+            [{"path": chunk_path, "reason": "source-missing"}], excluded
         )
 
     def test_re_verifying_returns_the_chunk_to_retrieval(self) -> None:
@@ -4525,7 +4557,9 @@ class WorkingStateCapsuleTest(RuntimeHarness):
             return {item["path"] for item in payload["procedural"]}, manifest["excluded"]
 
         paths, _ = procedural("cli")
-        self.assertEqual({"AGENTS.md", "CLAUDE.md"}, paths)
+        # One procedural slot: the better of the two, both being candidates.
+        self.assertEqual(1, len(paths))
+        self.assertLessEqual(paths, {"AGENTS.md", "CLAUDE.md"})
         paths, excluded = procedural("claude")
         self.assertEqual(set(), paths)
         self.assertIn({"path": "CLAUDE.md", "reason": "host-loaded"}, excluded)
@@ -5899,8 +5933,11 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         self.assertEqual([], json.loads(self.run_cli("promote-auto", "--json").stdout)["promoted"])
 
     def test_turn_promotes_resolved_verified_knowledge_without_review(self) -> None:
-        self.enable_automatic_promotion()
+        # Resolved while promotion was off, so the turn boundary is what
+        # promotes it - the path every record written before promotion was
+        # switched on, or through the runtime API, still takes.
         record_id = self.accepted_decision()
+        self.enable_automatic_promotion()
         self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
 
         result = self.run_cli("turn", "--task-id", "feature/auto", "--flush", "--json")
@@ -5916,6 +5953,131 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         )
         # The bank itself must show which knowledge no human approved.
         self.assertIn("auto-promoted", chunk.read_text(encoding="utf-8"))
+
+    def test_turns_after_the_branch_task_closed_do_not_jam_the_boundary(self) -> None:
+        # Work on a branch went on after its task was completed. Every flush
+        # tried to reattach the closed task and failed, so the buffer grew and
+        # the promotion riding on the boundary never ran again.
+        self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
+        first = json.loads(
+            self.run_cli("turn", "--task-id", "feature/closed", "--flush", "--json").stdout
+        )
+        self.assertTrue(first["provisioned"])
+        current = json.loads(
+            self.run_cli("get", "--task-id", "feature/closed", "--json").stdout
+        )
+        done = self.run_cli(
+            "complete", "--task-id", "feature/closed",
+            "--revision", str(current["revision"]), "--outcome", "Done.",
+            "--verification", "checked by hand", "--source", "specs/authority.md",
+            "--json",
+        )
+        self.assertEqual(0, done.returncode, done.stderr)
+
+        record_id = self.accepted_decision()
+        self.enable_automatic_promotion()
+        self.repository.joinpath("app.txt").write_text("more work\n", encoding="utf-8")
+        after = self.run_cli("turn", "--task-id", "feature/closed", "--flush", "--json")
+        self.assertEqual(0, after.returncode, after.stderr)
+        payload = json.loads(after.stdout)
+        self.assertEqual(current["task_uuid"], payload["closed_task"])
+        self.assertEqual(1, payload["discarded_turns"])
+        self.assertEqual(0, payload["pending"])
+        self.assertEqual([record_id], [item["record_id"] for item in payload["promoted"]])
+
+    def test_the_resolving_update_promotes_at_once(self) -> None:
+        # Waiting for the turn boundary let the fix that resolved a finding
+        # edit the files it cites first, and the record was never promoted.
+        self.enable_automatic_promotion()
+        record = json.loads(
+            self.run_cli(
+                "brain-create", "decision", "--external-id", "TASK-NOW-D1",
+                "--title", "Cobalt rule is canonical",
+                "--source", "specs/authority.md", "--authority", "verified",
+                "--json",
+            ).stdout
+        )
+        accepted = self.run_cli(
+            "brain-update", "--record-id", record["id"], "--revision", "auto",
+            "--progress", "Cobalt applies to every request path, not only reads.",
+            "--transition", "accepted", "--reason", "Accepted", "--json",
+        )
+        self.assertEqual(0, accepted.returncode, accepted.stderr)
+        payload = json.loads(accepted.stdout)
+        self.assertEqual("accepted", payload["status"])
+        promoted = payload["promotion"]["promoted"]
+        self.assertEqual([record["id"]], [item["record_id"] for item in promoted])
+        self.assertTrue(
+            list((self.repository / "memory-bank/chunks").glob(
+                f"{promoted[0]['memory_id']}-*.md"
+            ))
+        )
+        # Nothing is left for the boundary to do.
+        self.assertEqual(
+            [], json.loads(self.run_cli("promote-auto", "--json").stdout)["promoted"]
+        )
+
+    def test_an_update_that_does_not_resolve_promotes_nothing(self) -> None:
+        self.enable_automatic_promotion()
+        record = json.loads(
+            self.run_cli(
+                "brain-create", "finding", "--external-id", "TASK-OPEN-F1",
+                "--title", "Open finding", "--source", "specs/authority.md",
+                "--authority", "verified", "--json",
+            ).stdout
+        )
+        updated = json.loads(
+            self.run_cli(
+                "brain-update", "--record-id", record["id"], "--revision", "auto",
+                "--progress", "Still investigating the cobalt guard.", "--json",
+            ).stdout
+        )
+        self.assertNotIn("promotion", updated)
+        self.assertEqual(
+            [], list((self.repository / "memory-bank/chunks").glob("MEM-*.md"))
+        )
+
+    def test_knowledge_whose_cited_file_changed_is_promoted_and_marked(self) -> None:
+        # Resolved, then the cited file was edited before promotion ran: the
+        # record used to be blocked for good. It is promoted with the digest
+        # taken when it was verified, and retrieval marks it for checking.
+        record_id = self.accepted_decision()
+        verified_digest = brain.fingerprint(self.repository, "specs/authority.md")
+        self.repository.joinpath("specs/authority.md").write_text(
+            "# Authority\n\nThe cobalt rule was rewritten after the decision.\n",
+            encoding="utf-8",
+        )
+        self.enable_automatic_promotion()
+        result = json.loads(self.run_cli("promote-auto", "--json").stdout)
+        self.assertEqual([record_id], [item["record_id"] for item in result["promoted"]])
+        chunk = next((self.repository / "memory-bank/chunks").glob(
+            f"{result['promoted'][0]['memory_id']}-*.md"
+        ))
+        metadata, _ = brain.parse_markdown_record(chunk)
+        self.assertIn(verified_digest, metadata["source_digests"])
+        self.assertEqual(0, self.run_cli("index", "--json").returncode)
+        self.start("TASK-MARKED")
+        capsule = json.loads(
+            self.run_cli(
+                "retrieve", "cobalt request path", "--task-id", "TASK-MARKED",
+                "--ephemeral", "--json",
+            ).stdout
+        )
+        marked = {
+            item["path"]: item.get("source_changed") for item in capsule["selected"]
+        }
+        chunk_path = chunk.relative_to(self.repository).as_posix()
+        self.assertEqual(["specs/authority.md"], marked.get(chunk_path), capsule)
+
+    def test_knowledge_whose_cited_file_is_gone_stays_blocked(self) -> None:
+        self.accepted_decision()
+        self.repository.joinpath("specs/authority.md").unlink()
+        self.enable_automatic_promotion()
+        result = json.loads(self.run_cli("promote-auto", "--json").stdout)
+        self.assertEqual([], result["promoted"])
+        self.assertIn(
+            "cited source changed", " ".join(item["reason"] for item in result["blocked"])
+        )
 
     def test_verified_finding_completes_the_real_memory_journey(self) -> None:
         self.enable_automatic_promotion()
@@ -5960,14 +6122,16 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         )
         self.assertEqual(0, resolved.returncode, resolved.stderr)
         self.assertEqual("resolved", json.loads(resolved.stdout)["status"])
+        # Promoted by the resolving update itself, not at the turn boundary.
+        promoted = json.loads(resolved.stdout)["promotion"]["promoted"]
+        self.assertEqual(1, len(promoted), promoted)
 
         self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
         flushed = self.run_cli(
             "turn", "--task-id", "TASK-MEMORY-E2E", "--flush", "--json"
         )
         self.assertEqual(0, flushed.returncode, flushed.stderr)
-        promoted = json.loads(flushed.stdout)["promoted"]
-        self.assertEqual(1, len(promoted), promoted)
+        self.assertEqual([], json.loads(flushed.stdout)["promoted"])
         self.assertEqual(finding["id"], promoted[0]["record_id"])
         memory_id = promoted[0]["memory_id"]
         chunk = next(
@@ -6450,12 +6614,14 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         # A resolved finding is both promotable and archivable. Promotion is
         # capped per run, so compaction can reach a record first; an archived
         # record must stay promotable or the knowledge is lost for good.
+        # Resolved before automation was on, so nothing was promoted at
+        # resolution and the capped boundary run has all seven to place.
+        for index in range(7):
+            self.resolved_finding(index)
         self.enable_automation(
             automatic_promotion=True, automatic_compaction=True,
             compaction_threshold=1,
         )
-        for index in range(7):
-            self.resolved_finding(index)
         self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
 
         first = json.loads(
@@ -6654,17 +6820,18 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         # the repository - a year after automatic promotion wrote the first.
         self.enable_automatic_promotion()
         self.resolved_finding(0)
-        self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
-        self.run_cli("turn", "--task-id", "feature/x", "--flush", "--json")
         self.age_chunk(next((self.repository / "memory-bank/chunks").glob("MEM-*.md")))
 
-        record_id = self.resolved_finding(1)
+        # Promoted by its own resolving update, past the overdue chunk.
+        self.resolved_finding(1)
+        self.assertEqual(
+            2, len(list((self.repository / "memory-bank/chunks").glob("MEM-*.md")))
+        )
         self.repository.joinpath("more.txt").write_text("more\n", encoding="utf-8")
         result = json.loads(
             self.run_cli("turn", "--task-id", "feature/x", "--flush", "--json").stdout
         )
         self.assertEqual([], result["promotion_failed"])
-        self.assertEqual([record_id], [item["record_id"] for item in result["promoted"]])
 
     def test_an_overdue_promoted_chunk_does_not_stop_compaction(self) -> None:
         # Compaction repoints the citation of a chunk promoted from a record it
@@ -7002,19 +7169,22 @@ class MultiMachineContinuityTest(RuntimeHarness):
         self.assertNotEqual(0, result.returncode)
         self.assertIn("completed", result.stderr)
 
-        # The automated flush hits the same wall — and because the Stop hook
-        # discards its output, the failure must reach the report instead.
+        # The automated flush does not reattach it either. It used to fail on
+        # every boundary and keep its buffer, so promotion and compaction never
+        # ran again; the turns after completion are now dropped, and the next
+        # capsule says so.
         self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
         turn = self.run_cli(
             "turn", "--task-id", "feature/finished", "--flush", "--json"
         )
-        self.assertNotEqual(0, turn.returncode)
+        self.assertEqual(0, turn.returncode, turn.stderr)
+        payload = json.loads(turn.stdout)
+        self.assertEqual(task["task_uuid"], payload["closed_task"])
+        self.assertFalse(payload["flushed"])
+        self.assertEqual(0, payload["pending"])
         report = json.loads(self.report_path().read_text(encoding="utf-8"))
-        self.assertIn(task["task_uuid"], report["error"])
-        self.assertIn("completed", report["error"])
         self.assertFalse(report["flushed"])
-        # The raw branch argv stays out of the failure report by design.
-        self.assertNotIn("task_id", report)
+        self.assertEqual(1, report["discarded_turns"])
 
         other = self.start("TASK-WITNESS")
         self.assertTrue(other["task_uuid"])
@@ -7023,7 +7193,7 @@ class MultiMachineContinuityTest(RuntimeHarness):
             "--task-id", "TASK-WITNESS", "--ephemeral",
         )
         self.assertEqual(0, text.returncode, text.stderr)
-        self.assertIn("Last turn: turn failed:", text.stdout)
+        self.assertIn("Last turn: this branch's task is closed", text.stdout)
 
 
 class AutoCheckpointFieldTest(RuntimeHarness):
@@ -7630,6 +7800,169 @@ class MetadataTelemetryTest(RuntimeHarness):
                         },
                     )
         self.assertEqual([], list(self.repository.glob("**/telemetry/*.json")))
+
+
+
+class DeliveryTest(RuntimeHarness):
+    """What a host actually puts in front of the model on each turn."""
+
+    def enable_automatic_promotion(self) -> None:
+        config = self.repository / "project-brain/config/runtime.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(
+            json.dumps({"mode": "governed", "automatic_promotion": True}),
+            encoding="utf-8",
+        )
+
+    def accept_money_decision(self) -> str:
+        self.repository.joinpath("src").mkdir(exist_ok=True)
+        self.repository.joinpath("src/Money.php").write_text(
+            "<?php\nfinal class Money {}\n", encoding="utf-8"
+        )
+        record = json.loads(
+            self.run_cli(
+                "brain-create", "decision", "--external-id", "DEC-MONEY",
+                "--title", "Store money as integer cents",
+                "--source", "src/Money.php", "--authority", "verified", "--json",
+            ).stdout
+        )
+        accepted = self.run_cli(
+            "brain-update", "--record-id", record["id"], "--revision", "auto",
+            "--progress",
+            "Totals and discounts are kept in integer cents; floats never hold "
+            "an amount, and rounding happens only when an amount is displayed.",
+            "--transition", "accepted", "--reason", "Agreed", "--json",
+        )
+        self.assertEqual(0, accepted.returncode, accepted.stderr)
+        return str(record["id"])
+
+    def refresh(self, query: str, *extra: str) -> dict:
+        result = self.run_cli(
+            "refresh", "--query", query, "--task-id", "TASK-DELIVER",
+            "--ephemeral", "--json", *extra,
+        )
+        self.assertIn(result.returncode, (0, 1), result.stderr)
+        return json.loads(result.stdout)
+
+    def test_the_capsule_carries_the_answer_not_a_pointer(self) -> None:
+        self.enable_automatic_promotion()
+        record_id = self.accept_money_decision()
+        self.start("TASK-DELIVER")
+        result = self.refresh("order totals rounding discount cents")
+        text = result["capsule_text"]
+        self.assertTrue(text.startswith("working: TASK-DELIVER"), text)
+        self.assertIn("rounding happens only when an amount is displayed", text)
+        # The promoted chunk and the record it came from said the same thing
+        # in two slots; the record yields to its chunk.
+        semantic = [item["path"] for item in result["capsule"]["semantic"]]
+        self.assertEqual(1, sum("store-money-as-integer-cents" in path for path in semantic), semantic)
+        self.assertNotIn(f"project-brain/dynamic/decisions/{record_id}.md", semantic)
+        manifest = json.loads(
+            (self.repository / result["capsule"]["manifest"]).read_text(encoding="utf-8")
+        )
+        self.assertIn(
+            {"path": f"project-brain/dynamic/decisions/{record_id}.md",
+             "reason": "promoted-to-chunk"},
+            manifest["excluded"],
+        )
+        self.assertLessEqual(len(text), context_cli.RENDERED_CAPSULE_LIMIT)
+
+    def test_a_conversation_is_not_handed_the_same_item_twice(self) -> None:
+        self.enable_automatic_promotion()
+        self.accept_money_decision()
+        self.start("TASK-DELIVER")
+        query = "order totals rounding discount cents"
+        first = self.refresh(query, "--session-id", "conversation-1")
+        handed = {item["path"] for item in first["capsule"]["selected"]}
+        self.assertTrue(handed)
+        second = self.refresh(query, "--session-id", "conversation-1")
+        self.assertEqual([], second["capsule"]["selected"])
+        self.assertEqual(len(handed), second["capsule"]["repeated"])
+        self.assertIn("handed earlier in this conversation", second["capsule_text"])
+        # The slots are not refilled with weaker candidates.
+        self.assertNotIn("memory (retrieved", second["capsule_text"])
+        # Another conversation is handed everything.
+        other = self.refresh(query, "--session-id", "conversation-2")
+        self.assertEqual(handed, {item["path"] for item in other["capsule"]["selected"]})
+        # After the novelty window the item comes back: a conversation that
+        # was compacted meanwhile no longer holds it.
+        for _ in range(retrieval.SESSION_NOVELTY_TURNS - 2):
+            self.refresh(query, "--session-id", "conversation-1")
+        again = self.refresh(query, "--session-id", "conversation-1")
+        self.assertEqual(handed, {item["path"] for item in again["capsule"]["selected"]})
+
+    def test_small_talk_retrieves_nothing(self) -> None:
+        self.enable_automatic_promotion()
+        self.accept_money_decision()
+        self.start("TASK-DELIVER")
+        for prompt in ("thanks, looks good", "ok continue", "спасибо, отлично"):
+            with self.subTest(prompt=prompt):
+                result = self.refresh(prompt)
+                self.assertEqual([], result["capsule"]["selected"])
+                self.assertNotIn("memory (retrieved", result["capsule_text"])
+
+    def test_an_automatic_prompt_is_cleaned_instead_of_refused(self) -> None:
+        self.enable_automatic_promotion()
+        self.accept_money_decision()
+        self.start("TASK-DELIVER")
+        prompt = (
+            "Order totals are off by a cent after a discount, see the log:\n"
+            "stderr: rounding mismatch for jane.doe@example.test\n"
+            "Customer id: 10492 called about it"
+        )
+        refused = self.run_cli(
+            "refresh", "--query", prompt, "--task-id", "TASK-DELIVER",
+            "--ephemeral", "--json",
+        )
+        self.assertNotEqual(0, refused.returncode)
+        self.assertEqual("", refused.stdout)
+        cleaned = self.run_cli(
+            "refresh", "--query", prompt, "--task-id", "TASK-DELIVER",
+            "--ephemeral", "--sanitize", "--json",
+        )
+        self.assertIn(cleaned.returncode, (0, 1), cleaned.stderr)
+        result = json.loads(cleaned.stdout)
+        self.assertIn("rounding happens only when an amount is displayed", result["capsule_text"])
+        manifest = (self.repository / result["capsule"]["manifest"]).read_text(encoding="utf-8")
+        for private in ("jane.doe", "example.test", "10492", "stderr"):
+            self.assertNotIn(private, manifest)
+            self.assertNotIn(private, result["capsule_text"])
+
+    def test_the_excerpt_is_the_section_that_matches(self) -> None:
+        content = (
+            "---\n{\"id\": \"x\"}\n---\n# Payments\n\nGeneral notes about payments.\n\n"
+            "## Refunds\n\nRefunds are issued to the original card within five days.\n\n"
+            "## Webhooks\n\nWebhook signatures rotate monthly.\n"
+        )
+        excerpt = context_cli.best_excerpt(content, {"refunds", "card"}, 200, "Payments")
+        self.assertTrue(excerpt.startswith("Refunds: Refunds are issued"), excerpt)
+        self.assertNotIn("Webhook", excerpt)
+        self.assertLessEqual(len(context_cli.best_excerpt(content, set(), 30)), 30)
+
+    def test_a_weak_tail_in_a_layer_is_left_out(self) -> None:
+        self.repository.joinpath("specs/quartz.md").write_text(
+            "# Quartz falcon\n\nThe quartz falcon dispatch rule. Quartz falcon "
+            "retries stop after three attempts.\n",
+            encoding="utf-8",
+        )
+        filler = " ".join(f"word{index}" for index in range(1500))
+        self.repository.joinpath("specs/long.md").write_text(
+            f"# Long\n\n{filler} quartz {filler} falcon {filler}\n",
+            encoding="utf-8",
+        )
+        for index in range(10):
+            self.repository.joinpath(f"specs/other-{index}.md").write_text(
+                f"# Other {index}\n\nunrelated text {index}.\n", encoding="utf-8"
+            )
+        self.assertEqual(0, self.run_cli("index", "--json").returncode)
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            candidates, _ = retrieval._candidates(connection, "quartz falcon")
+        finally:
+            connection.close()
+        paths = [item["path"] for item in candidates]
+        self.assertIn("specs/quartz.md", paths)
+        self.assertNotIn("specs/long.md", paths)
 
 
 if __name__ == "__main__":

@@ -424,7 +424,7 @@ That is not a ranking weakness to be tuned; it is a missing traversal.
 
 This is the number that justifies giving durable chunks a one-step link
 hydration, and it is why the semantic limit is not raised instead: widening
-2/3/1 would buy a larger lexical net, and the failure above is not a
+the layer limits would buy a larger lexical net, and the failure above is not a
 net-size problem.
 
 #### What was built, and what was not
@@ -546,6 +546,18 @@ on real requests an acceptable skill reaches the top two only 10 times out of
 `retrieval-report` reports the match-strength distribution and the most-selected
 paths over real turns. A remedy should be built when those two say what it
 should be — not before.
+
+**2026-10-07: one procedural slot, strong matches only.** New evidence decided
+it. Agents opened 0 of 148 skill pointers they were handed on real
+installations (every host loads its own skill catalogue and picks from it),
+and on 61 real first prompts with graded relevance a skill admitted on one rare
+word was useful once in 37 deliveries. The capsule now carries at most one
+procedural item and never a `distinctive` one. On those 61 prompts turns with a
+useful item rose from 29 to 33 and noise-only turns fell from 16 to 7 (against
+the same runtime with two slots). The price is the bench's skill-routing view:
+an acceptable skill reaches the capsule on Symfony golden-en .59 instead of
+.71, because the second slot is gone; the ranking itself (hit@1, hit@2) is
+unchanged, and so is the routing floor, which measures ranking.
 
 ### The retrieval gate
 
@@ -810,7 +822,7 @@ measurement.
 The internal category limits are policy 1,200, handoff 1,500, durable 3,500,
 dynamic 1,500, and evidence 2,000 estimated tokens. Candidate selection has an
 8,000-token target and a 12,000-token conflict ceiling. After ranking and
-policy filtering, the delivered capsule is independently capped at 2
+policy filtering, the delivered capsule is independently capped at 1
 procedural, 3 semantic, and 1 episodic item and 8,000 serialized characters.
 Snippets are deterministically shortened as needed.
 

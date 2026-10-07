@@ -28,7 +28,7 @@ from brain_runtime import (
     parse_markdown_record,
     record_is_eligible,
     render_current_state,
-    sources_are_fresh,
+    source_changes,
     utc_now,
     validate_handoff,
     validate_record,
@@ -46,7 +46,11 @@ BUDGETS = {
 TARGET_BUDGET = 8000
 HARD_BUDGET = 12000
 MAX_SNIPPET_CHARS = 1200
-CAPSULE_PROCEDURAL_LIMIT = 2
+# What a document whose cited file changed since verification keeps of its
+# relevance: it still ranks, below fresh knowledge of equal fit.
+SOURCE_CHANGED_WEIGHT = 0.5
+# One: see `procedural_ranked` in `retrieve`.
+CAPSULE_PROCEDURAL_LIMIT = 1
 CAPSULE_SEMANTIC_LIMIT = 3
 CAPSULE_EPISODIC_LIMIT = 1
 SKILL_EDITIONS = (".agents", ".claude", ".cursor", ".codex")
@@ -598,9 +602,65 @@ RETRIEVAL_GATE_DEFAULT = "shadow"
 # one row per task: nothing prunes index_state (it is upsert-only), so a key
 # per task would grow for the life of the database.
 LAST_RETRIEVAL_KEY = "last-retrieval"
+# What each conversation was already handed, so a later turn of the same
+# conversation does not hand it again: 48% of delivered items were repeats
+# within the hour on real installations, every one of them paid for again.
+# An item may come back after this many turns - a long conversation that was
+# compacted has lost it by then - and the map keeps the newest sessions only.
+SESSION_DELIVERIES_KEY = "session-deliveries"
+SESSION_NOVELTY_TURNS = 4
+SESSION_DELIVERIES_RETENTION = 50
+SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 LAST_RETRIEVAL_RETENTION = 200
 REFRESH_HEALTH_RETENTION = 500
 STOPWORD_DOCUMENT_RATIO = 0.5
+# Words that never count as evidence a document is relevant, in the two
+# languages the projects' prompts arrive in: function words and the words of
+# conversation ("thanks", "ok", "please", "need"). Rarity alone could not
+# tell them apart - a corpus that rarely says "thanks" made "thanks, looks
+# good" retrieve a review skill, a grader and the changelog. They still rank;
+# they just never admit a document, and a turn made of nothing else retrieves
+# nothing. Measured on the retrieval bench: documents injected on turns with
+# no relevant document fell from 3.25 to 2.70 per turn, recall unchanged.
+EVIDENCE_STOPWORDS = frozenset(
+    """
+    a about above after again against all am an and any are aren as at be
+    because been before being below between both but by can cannot could
+    couldn did didn do does doesn doing don down during each few for from
+    further had hadn has hasn have haven having he her here hers herself him
+    himself his how i if in into is isn it its itself just let me more most
+    mustn my myself no nor not now of off on once only or other ought our
+    ours ourselves out over own same shan she should shouldn so some such than
+    that the their theirs them themselves then there these they this those
+    through to too under until up very was wasn we were weren what when where
+    which while who whom why will with won would wouldn you your yours
+    yourself yourselves s t ll re ve d m o y also anything everything
+    something someone anyone please thanks thank ok okay yes yeah sure get got
+    make made want need like one two way thing things still again really
+    и в во не что он на я с со как а то все она так его но да ты к у же вы
+    за бы по только ее мне было вот от меня еще нет о из ему теперь когда
+    даже ну вдруг ли если уже или ни быть был него до вас нибудь опять уж
+    вам ведь там потом себя ничего ей может они тут где есть надо ней для мы
+    тебя их чем была сам чтоб без будто чего раз тоже себе под будет ж тогда
+    кто этот того потому этого какой совсем ним здесь этом один почти мой тем
+    чтобы нее сейчас были куда зачем всех никогда можно при наконец два об
+    другой хоть после над больше тот через эти нас про всего них какая много
+    разве три эту моя впрочем хорошо свою этой перед иногда лучше чуть том
+    нельзя такой им более всегда конечно всю между это эта мои давай
+    пожалуйста спасибо ок сделай сделать нужно какие
+    good great nice fine cool perfect awesome excellent done look looks
+    looking seems seem works working continue proceed go ahead lets right
+    correct thx cheers hi hello hey bye agreed approve approved lgtm
+    отлично супер класс готово продолжай продолжи продолжить дальше норм
+    нормально верно понятно ясно ага угу привет пока согласен
+    """.split()
+)
+# A candidate whose adjusted score is below this share of the best score in
+# its own layer is left out: a long tail of partial matches was most of what
+# off-topic turns delivered (0.55 fewer documents per such turn on the bench,
+# recall unchanged). Per layer, because project records score lower than the
+# skills they compete with and must not be cut by a skill's score.
+RELATIVE_SCORE_FLOOR = 0.3
 MIN_TOKEN_COVERAGE = 2
 DISTINCTIVE_DOCUMENT_RATIO = 0.1
 MAPPED_COMMIT_PATTERN = re.compile(r"^mapped_commit:\s*([0-9a-fA-F]{7,40})\s*$", re.M)
@@ -1737,6 +1797,11 @@ def token_document_frequencies(
     return result
 
 
+def evidence_tokens(tokens: list[str]) -> list[str]:
+    """The tokens that may count as evidence of relevance."""
+    return [token for token in tokens if token.casefold() not in EVIDENCE_STOPWORDS]
+
+
 def informative_tokens(
     connection: sqlite3.Connection, tokens: list[str]
 ) -> list[str]:
@@ -1884,8 +1949,12 @@ def _candidates(
     """
     ensure_metadata_tables(connection)
     tokens = informative_tokens(connection, query_tokens(query))
-    coverage, distinctive = token_coverage(connection, tokens)
-    minimum = required_coverage(tokens)
+    evidence = evidence_tokens(tokens)
+    if not evidence:
+        # Nothing in the request is about anything: "thanks", "ok, go on".
+        return [], {"informative_terms": 0, "distinctive_matches": 0, "top_score": None}
+    coverage, distinctive = token_coverage(connection, evidence)
+    minimum = required_coverage(evidence)
     rows = connection.execute(
         """
         SELECT
@@ -1923,6 +1992,15 @@ def _candidates(
     # Re-rank the BM25 window: the raw score breaks adjusted ties so the
     # ordering stays deterministic even when every weight is neutral.
     result.sort(key=lambda item: (-item["adjusted_score"], item["score"], item["path"]))
+    best_by_layer: dict[str, float] = {}
+    for item in result:
+        best_by_layer.setdefault(item["layer"], item["adjusted_score"])
+    result = [
+        item
+        for item in result
+        if item["adjusted_score"]
+        >= RELATIVE_SCORE_FLOOR * best_by_layer[item["layer"]]
+    ]
     # Rank is stamped here, on the lexically ranked list, rather than after
     # filtering: a position in the post-filter list says where a survivor
     # landed, not how well it answered the query, which is the only reading a
@@ -1930,7 +2008,7 @@ def _candidates(
     for position, item in enumerate(result, start=1):
         item["rank"] = position
     diagnostics = {
-        "informative_terms": len(tokens),
+        "informative_terms": len(evidence),
         # The count of candidates admitted on rarity alone rather than the
         # count of rare TERMS the roadmap asked for: `token_coverage` decides
         # rarity per token but returns paths, so a per-term figure does not
@@ -2028,6 +2106,52 @@ def _remember_retrieval(
         else:
             with connection:
                 store_index_state(connection, {LAST_RETRIEVAL_KEY: payload})
+    except sqlite3.Error:
+        return
+
+
+def _load_session_deliveries(connection: sqlite3.Connection) -> dict[str, Any]:
+    try:
+        raw = load_index_state(connection).get(SESSION_DELIVERIES_KEY)
+        stored = json.loads(raw) if raw else {}
+    except (sqlite3.Error, ValueError):
+        return {}
+    return stored if isinstance(stored, dict) else {}
+
+
+def _remember_session_deliveries(
+    connection: sqlite3.Connection,
+    session_id: str,
+    turn: int,
+    delivered: dict[str, list[Any]],
+    stored: dict[str, Any],
+) -> None:
+    """Record what the session holds: path -> [source hash, turn handed].
+
+    Best-effort, like the repeat record: losing it costs one repeated item,
+    the safe direction.
+    """
+    entry = stored.pop(session_id, None)
+    items = entry.get("items") if isinstance(entry, dict) else None
+    items = {
+        path: seen
+        for path, seen in (items or {}).items()
+        if isinstance(seen, list)
+        and len(seen) == 2
+        and isinstance(seen[1], int)
+        and turn - seen[1] < SESSION_NOVELTY_TURNS
+    }
+    items.update(delivered)
+    stored[session_id] = {"turn": turn, "items": items}
+    for stale in list(stored)[: max(0, len(stored) - SESSION_DELIVERIES_RETENTION)]:
+        stored.pop(stale, None)
+    payload = json.dumps(stored, separators=(",", ":"))
+    try:
+        if connection.in_transaction:
+            store_index_state(connection, {SESSION_DELIVERIES_KEY: payload})
+        else:
+            with connection:
+                store_index_state(connection, {SESSION_DELIVERIES_KEY: payload})
     except sqlite3.Error:
         return
 
@@ -2192,26 +2316,23 @@ def _runtime_filter(
             elif drift > limit:
                 reason = "map-drift"
         if reason is None and candidate["source_fingerprints"]:
-            fingerprints = candidate["source_fingerprints"]
-            fresh = sources_are_fresh(
-                repository,
-                {
-                    "sources": [item["path"] for item in fingerprints],
-                    "source_fingerprints": fingerprints,
-                },
+            changed, missing = source_changes(
+                repository, candidate["source_fingerprints"]
             )
-            if not fresh:
-                # Two names for one event, deliberately. `stale` has always
-                # meant a Brain record whose cited file moved on, and the
-                # runbook and its tests speak that word. A durable chunk is a
-                # different remedy: a record is refreshed by a revisioned
-                # mutation, a chunk by re-reading the source and calling
-                # `bank-reverify`, so a reader who sees `source-changed` is
-                # told which of the two they are holding.
-                reason = (
-                    "source-changed"
-                    if candidate["kind"] == "memory"
-                    else "stale"
+            if missing:
+                # The cited file is gone: there is nothing left to check the
+                # knowledge against, so it leaves retrieval.
+                reason = "source-missing"
+            elif changed:
+                # A cited file was edited after the knowledge was verified.
+                # Any edit used to evict it - a comment, a new method - and
+                # on a real project 65 of 70 resolved findings went that way.
+                # It stays, marked for checking and ranked below fresh
+                # knowledge; the reader decides whether it still holds.
+                candidate["source_changed"] = changed
+                candidate["adjusted_score"] = (
+                    float(candidate.get("adjusted_score") or 0.0)
+                    * SOURCE_CHANGED_WEIGHT
                 )
         if reason:
             excluded.append({"path": candidate["path"], "reason": reason})
@@ -2513,6 +2634,10 @@ def _public_item(item: dict[str, Any]) -> dict[str, Any]:
         # nothing on an ordinary turn, and on those turns it is the difference
         # between "your words found this" and "the file you named did".
         public["selection"] = item["selection"]
+    if item.get("source_changed"):
+        # The cited files edited since this knowledge was verified: the
+        # capsule says so next to it instead of silently dropping it.
+        public["source_changed"] = list(item["source_changed"])
     return public
 
 
@@ -2532,6 +2657,7 @@ def retrieve(
     host: str = "cli",
     entry_point: str = "retrieve",
     local_episodes: Optional[list[dict[str, Any]]] = None,
+    session_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """Assemble governed context and record the manifest that justifies it.
 
@@ -2595,6 +2721,10 @@ def retrieve(
         if layer not in matched_layers
     ]
     filtered, filter_excluded = _runtime_filter(repository, candidates, config)
+    # A candidate whose cited file changed kept a reduced score; ranking it
+    # again keeps fresh knowledge of equal fit ahead of it. Stable, so
+    # nothing else moves.
+    filtered.sort(key=lambda item: -float(item.get("adjusted_score") or 0.0))
     # Injected here and nowhere earlier. `matched_layers` and `no_match` above
     # are claims about the QUERY — the capsule's `no-match:` line and the
     # gate's `signals.no_match` both read them that way — and a path link is
@@ -2616,6 +2746,24 @@ def retrieve(
         # Ahead of the query's own matches, because `_apply_budgets` and the
         # per-layer ladder both honour input order and the caller named these.
         filtered = [*linked, *filtered]
+    # A promoted chunk and the record it was promoted from say the same thing,
+    # and both used to take a slot. The chunk is the durable form, so the
+    # record yields to it.
+    promoted_from = {
+        str(source.get("path"))
+        for item in filtered
+        if item.get("kind") == "memory"
+        for source in item.get("source_fingerprints") or []
+        if isinstance(source, dict)
+    }
+    if promoted_from:
+        kept = []
+        for item in filtered:
+            if item.get("kind", "").startswith("brain-") and item["path"] in promoted_from:
+                filter_excluded.append({"path": item["path"], "reason": "promoted-to-chunk"})
+            else:
+                kept.append(item)
+        filtered = kept
     known_ids = {
         item["record_id"] for item in filtered if item.get("record_id") is not None
     }
@@ -2679,8 +2827,14 @@ def retrieve(
             kept.append(item)
     filtered = kept
     selected, budget_excluded, usage, escalation_reason = _apply_budgets(filtered)
+    # Skills and policy, strong matches only: every host loads its own skill
+    # catalogue and picks from it, agents opened none of 148 skill pointers
+    # they were handed on real installations, and on 61 graded real prompts a
+    # skill admitted on one rare word was useful once in 37 deliveries.
     procedural_ranked = [
-        item for item in selected if item["category"] == "policy"
+        item
+        for item in selected
+        if item["category"] == "policy" and item.get("match") != "distinctive"
     ]
     # The semantic layer is built from categories and the episodic layer from
     # the layer column, and the two taxonomies overlap: `category_for` has no
@@ -2721,6 +2875,39 @@ def retrieve(
     if local_episode_selected and selected_tokens + local_episode_tokens > TARGET_BUDGET:
         local_episode_selected = []
         budget_excluded.append({"path": "local-episode", "reason": "budget"})
+    # The conversation already holds what it was handed in its last few turns:
+    # the same item at the same revision is not handed again. Its slot is not
+    # refilled - the next candidate down is weaker, and promoting it to fill
+    # the gap turned a repeat into noise - and the capsule says how many
+    # earlier items still apply.
+    session = (
+        session_id
+        if isinstance(session_id, str) and SESSION_ID_PATTERN.match(session_id)
+        else None
+    )
+    session_deliveries = _load_session_deliveries(connection) if session else {}
+    session_turn = 0
+    repeated: list[dict[str, Any]] = []
+    if session:
+        previous_entry = session_deliveries.get(session)
+        previous_entry = previous_entry if isinstance(previous_entry, dict) else {}
+        session_turn = int(previous_entry.get("turn") or 0) + 1
+        recent = previous_entry.get("items")
+        recent = recent if isinstance(recent, dict) else {}
+        fresh_selection = []
+        for item in capsule_selected:
+            seen = recent.get(item["path"])
+            if (
+                isinstance(seen, list)
+                and len(seen) == 2
+                and seen[0] == item["source_hash"]
+                and isinstance(seen[1], int)
+                and session_turn - seen[1] < SESSION_NOVELTY_TURNS
+            ):
+                repeated.append(item)
+            else:
+                fresh_selection.append(item)
+        capsule_selected = fresh_selection
     capsule_paths = {item["path"] for item in capsule_selected}
     layer_excluded = [
         {
@@ -2733,7 +2920,11 @@ def retrieve(
         }
         for item in selected
         if item["path"] not in capsule_paths
+        and item["path"] not in {entry["path"] for entry in repeated}
     ]
+    layer_excluded.extend(
+        {"path": item["path"], "reason": "delivered-this-session"} for item in repeated
+    )
     selected = capsule_selected
     # Decided here rather than earlier because `selection_identical_to_
     # previous_turn` is a claim about what the capsule delivers, and after the
@@ -2772,6 +2963,23 @@ def retrieve(
         # Remembered only for a turn that actually delivered, so the next turn
         # compares against the last real retrieval rather than against a skip.
         _remember_retrieval(connection, baseline_key, signature)
+    if session:
+        # A repeat keeps the turn it was first handed in: once that is
+        # SESSION_NOVELTY_TURNS behind, it is handed again, which is what a
+        # conversation compacted in the meantime needs.
+        _remember_session_deliveries(
+            connection,
+            session,
+            session_turn,
+            {
+                **{item["path"]: recent[item["path"]] for item in repeated},
+                **{
+                    item["path"]: [item["source_hash"], session_turn]
+                    for item in selected
+                },
+            },
+            session_deliveries,
+        )
     usage = {category: 0 for category in BUDGETS}
     for item in selected:
         usage[item["category"]] += item["estimated_tokens"]
@@ -2812,6 +3020,7 @@ def retrieve(
                     if item.get("selection")
                     else {}
                 ),
+                **({"source_changed": True} if item.get("source_changed") else {}),
                 # Everything a later gate needs to reason about this turn:
                 # how strongly it matched, and where it stood before any
                 # budget or layer limit applied.
@@ -2904,6 +3113,9 @@ def retrieve(
         # one means "memory has nothing here". Recorded before any budget or
         # policy filter runs; `excluded` in the manifest explains the rest.
         "no_match": no_match,
+        # Relevant items left out because this conversation was handed them
+        # in its last few turns; the rendered capsule says they still apply.
+        "repeated": len(repeated),
         "gate": gate,
         "token_estimates": usage,
         "manifest": manifest_path.relative_to(repository).as_posix(),

@@ -510,6 +510,80 @@ class ContextEngineTest(unittest.TestCase):
 
         self.assertNotIn("private probe detail", str(raised.exception))
 
+    def test_output_is_utf8_whatever_the_console_code_page(self) -> None:
+        self.repository.joinpath("specs/dash.md").write_text(
+            "# Dash — rule\n\nThe cerulean rule … holds.\n", encoding="utf-8"
+        )
+        self.assertEqual(0, self.run_context("index", "--json").returncode)
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--root", str(self.repository),
+             "--mode", "lightweight", "search", "cerulean"],
+            capture_output=True,
+            env={**__import__("os").environ, "PYTHONIOENCODING": "cp1252",
+                 "PYTHONUTF8": "0"},
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("Dash — rule".encode("utf-8"), result.stdout)
+
+    def test_ignored_accelerator_sources_stay_indexed(self) -> None:
+        # Installs keep the accelerator out of the client's history with
+        # ignore rules; the project's own ignored documents stay out.
+        self.repository.joinpath(".gitignore").write_text(
+            ".agents/\nAGENTS.md\nspecs/\nmemory-bank/\ndocs/\n",
+            encoding="utf-8",
+        )
+        skill = self.repository / ".agents/skills/lilac/SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("# Lilac\n\nThe lilac procedure.\n", encoding="utf-8")
+        self.repository.joinpath("AGENTS.md").write_text(
+            "# Policy\n\nThe saffron policy.\n", encoding="utf-8"
+        )
+        self.repository.joinpath("specs/teal.md").write_text(
+            "# Teal\n\nThe teal contract.\n", encoding="utf-8"
+        )
+        self.repository.joinpath("docs").mkdir()
+        self.repository.joinpath("docs/private.md").write_text(
+            "# Private\n\nThe umber note.\n", encoding="utf-8"
+        )
+
+        indexed = self.run_context("index", "--json")
+        self.assertEqual(0, indexed.returncode, indexed.stderr)
+        for term, path in (
+            ("lilac", ".agents/skills/lilac/SKILL.md"),
+            ("saffron", "AGENTS.md"),
+            ("teal", "specs/teal.md"),
+        ):
+            found = self.run_context("search", term, "--json")
+            self.assertEqual(
+                [path],
+                [item["path"] for item in json.loads(found.stdout)["documents"]],
+            )
+        private = self.run_context("search", "umber", "--json")
+        self.assertEqual([], json.loads(private.stdout)["documents"])
+
+    def test_folder_outside_a_repository_has_no_ignore_rules(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="context-no-git-") as folder:
+            root = Path(folder)
+            self.assertFalse(CONTEXT.inside_git_checkout(root))
+            self.assertEqual(set(), CONTEXT.git_ignored_paths(root, ["README.md"]))
+            with mock.patch.object(
+                CONTEXT.subprocess, "run", side_effect=OSError("no git")
+            ):
+                self.assertEqual(
+                    set(), CONTEXT.git_ignored_paths(root, ["README.md"])
+                )
+            root.joinpath("README.md").write_text(
+                "# Plain\n\nThe ochre folder.\n", encoding="utf-8"
+            )
+            indexed = subprocess.run(
+                [sys.executable, str(SCRIPT), "--root", folder, "--mode",
+                 "lightweight", "index", "--json"],
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(0, indexed.returncode, indexed.stderr)
+            self.assertEqual(1, json.loads(indexed.stdout)["documents"])
+
     def test_index_reports_invalid_utf8_and_preserves_previous_index(self) -> None:
         self.repository.joinpath("README.md").write_text(
             "# Project\n\nThe celadon rule remains searchable.\n",

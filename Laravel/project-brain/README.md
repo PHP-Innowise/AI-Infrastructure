@@ -48,7 +48,7 @@ Handoffs and manifests do not contain raw prompts, responses, hidden
 reasoning, or complete source bodies.
 
 Delivered Task Capsules are deterministic discovery aids: after ranking and
-policy filters they contain at most 2 procedural, 3 semantic, and 1 episodic
+policy filters they contain at most 1 procedural, 3 semantic, and 1 episodic
 item and no more than 8,000 serialized characters. Direct CLI queries are
 privacy-checked before any index or manifest is opened.
 

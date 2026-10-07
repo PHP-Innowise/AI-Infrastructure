@@ -102,7 +102,7 @@ citations without retrieving; both apply the full runtime filter.
 Category budgets are policy 1,200; handoff 1,500; durable 3,500; dynamic 1,500;
 evidence 2,000 estimated tokens. Internal candidate selection may escalate to
 its 12,000-token conflict ceiling, but the delivered capsule is always capped
-after ranking/filtering at 2 procedural, 3 semantic, 1 episodic item and 8,000
+after ranking/filtering at 1 procedural, 3 semantic, 1 episodic item and 8,000
 serialized characters. Every governed retrieval writes a manifest under
 `control/retrieval-manifests/`; automated `--ephemeral` retrieval writes the
 same metadata contract to ignored local state.

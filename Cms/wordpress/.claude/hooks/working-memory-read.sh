@@ -50,20 +50,35 @@ run() {
 # The prompt arrives as JSON on stdin and is passed to the CLI as-is: query
 # distillation (informative terms ranked by rarity in the index) lives in
 # context.py, which also rejects anything that looks like a secret or
-# personal data before the text can reach a query or a manifest.
+# personal data before the text can reach a query or a manifest. The
+# conversation's session id travels with it, so what this conversation was
+# handed in its last few turns is not handed again.
 # Keep the program in -c: a heredoc would occupy stdin and hide the prompt.
-QUERY=$(python3 -c '
+# Output: the session id, a newline, the prompt, and a final "\n." that keeps
+# command substitution from eating the prompt's own trailing newlines.
+HOOK_INPUT=$(python3 -c '
 import json
+import re
 import sys
 
 try:
-    prompt = json.load(sys.stdin).get("prompt", "")
-except (AttributeError, UnicodeDecodeError, ValueError):
-    prompt = ""
+    data = json.load(sys.stdin)
+except (UnicodeDecodeError, ValueError):
+    data = {}
+if not isinstance(data, dict):
+    data = {}
+prompt = data.get("prompt", "")
 if not isinstance(prompt, str):
     prompt = ""
-print(prompt)
+session = data.get("session_id", "")
+if not isinstance(session, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", session):
+    session = ""
+sys.stdout.write(session + "\n" + prompt + "\n.")
 ' 2>/dev/null)
+case "$HOOK_INPUT" in *$'\n'*) ;; *) HOOK_INPUT=$'\n\n.' ;; esac
+SESSION_ID=${HOOK_INPUT%%$'\n'*}
+QUERY=${HOOK_INPUT#*$'\n'}
+QUERY=${QUERY%$'\n.'}
 
 TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$PROJECT_DIR" branch --show-current 2>/dev/null)}"
 
@@ -73,7 +88,10 @@ TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$PROJECT_DIR" branch --show-current 2>/dev
 # ignored local state instead of shared Git history.
 ARGUMENTS=(refresh --host claude)
 if [ -n "$QUERY" ] && [ -n "$TASK_ID" ]; then
-  ARGUMENTS+=(--query "$QUERY" --task-id "$TASK_ID" --ephemeral)
+  # --sanitize: secrets, personal data and pasted transcript prefixes are cut
+  # out of the prompt, instead of the whole turn going without memory.
+  ARGUMENTS+=(--query "$QUERY" --task-id "$TASK_ID" --ephemeral --sanitize)
+  [ -n "$SESSION_ID" ] && ARGUMENTS+=(--session-id "$SESSION_ID")
 fi
 
 REPORT=$(run python3 "$CONTEXT_CLI" "${ARGUMENTS[@]}" 2>/dev/null)
@@ -92,8 +110,8 @@ fi
 
 [ -n "$REPORT" ] || exit 0
 
-echo "Memory refresh (retrieved context is not authoritative — verify the source)"
-echo "=========================================================================="
+# The capsule names itself: its memory section says the text is reference
+# data to check against the cited file, so no banner precedes it.
 echo "$REPORT"
 
 exit 0

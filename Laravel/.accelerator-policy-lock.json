@@ -71,7 +71,7 @@
     ".agents/skills/memory/SKILL.md": "522b72ecc502d650a0df356138f804a2cdbc2c8c41b2422dfdcdc7c64d280e58",
     ".agents/skills/package-developer/SKILL.md": "b9c7be611d20e6d2c6f455d21249fca58dbc7f3a73a79d716eba82f48428535e",
     ".agents/skills/performance-optimization/SKILL.md": "2f6a6f5210eb162b8dc9b2b8f0a34a37baaeeef41a0c8dcf24b6304cbdf6201f",
-    ".agents/skills/project-brain/SKILL.md": "5b520237feb9d4bc2b15fee154e175a9335e06cf1f24b1cf9329d5f5ff5b1ac2",
+    ".agents/skills/project-brain/SKILL.md": "19cee48c09d6517985c114f4b04734dd92dd1a2c7a0b518f0794493f3cfc465f",
     ".agents/skills/queues-jobs/SKILL.md": "5cc676032e47b6c259a77133cc01a929ce14b55691e3d5ce60a18650dfc5d451",
     ".agents/skills/refactorer/SKILL.md": "11af91fb73f8c30a68dbdbbe9a1c35b916fa324c4ca45770a57ea402106aaa97",
     ".agents/skills/reflect/SKILL.md": "b844b30fb15ca1c72bb9a638500ce37fdaf3b2f2d9fa4a46509cc632d7f0fb3a",
@@ -238,7 +238,7 @@
     ".claude/commands/test-generator.md": "dcfdebec04e49a2f58f3d7271bafcd5d81c1df142cb6da6ffd8001236760a84c",
     ".claude/commands/verify.md": "09f1de609dbf6db63a7688d26eb5f92a6dbed19838239f8630b662c83539c344",
     ".claude/commands/writing-plans.md": "183238cd9fe57613f955cc23496e149b2a3624e8a13b9cd5dd4a2051e915ac53",
-    ".claude/settings.json": "f0e0bf2502914a23a2512551fb67855d3dbe58b57adaaf93e4588b572bdecb99",
+    ".claude/settings.json": "d15c48a1167e09fa0dc8c8d4ae473ba9caa8f95af6975da539880ad7ed9d4891",
     ".claude/skills/SKILL FLOW.md": "cb232196c83923028fffeb49bc88433001b1c68d009664ec8b99cf44517186f6",
     ".claude/skills/skill-creator/SKILL.md": "f1bac11cf8ab0e6acb40196165aab0f8e87556a4e182ff00894b6ee11af3a2a5",
     ".codex/config.toml": "b5b55edf7a3ec408d6983cfe3ee958f4889ecd033c16b53d5c53948c4cee4112",
@@ -251,7 +251,7 @@
     ".cursor/skills/skill-creator/SKILL.md": "f1bac11cf8ab0e6acb40196165aab0f8e87556a4e182ff00894b6ee11af3a2a5",
     "AGENTS.md": "1155d595bf872af119dae88bf797051f00799ac8631606c0e48c059da26f424a"
   },
-  "policy_digest": "604958377de50f6ec5f282bf604e014fc3cfeeab076045ed851b8c2d58bcc50e",
+  "policy_digest": "5fd7389a2ceb9400ffd6c3116f84421c5479b64aa5daef3ad53dfe45ae09c3c7",
   "release": "2.0.0",
   "schema_version": 1
 }

@@ -27,6 +27,7 @@
       "Bash(npm:*)",
       "Bash(npx wp-env:*)",
       "Bash(git:*)",
+      "Bash(python3 memory-bank/scripts/context.py:*)",
       "Bash(gh:*)",
       "Bash(ls:*)",
       "Bash(mkdir:*)",
