@@ -1040,6 +1040,10 @@ assert.match(renderExistingWorktrees().error,/could not list/);
             restart.assert_not_called()  # a server not started by serve cannot start itself again
             self.server.relaunch_command = [sys.executable, str(Path(web.__file__).resolve()), "serve"]
             self.assertEqual(self.post("/api/app/update", {})[1]["restarting"], True)
+            # The reply goes out first and the restart is handed over after it.
+            deadline = time.monotonic() + 5
+            while not restart.called and time.monotonic() < deadline:
+                time.sleep(.01)
             restart.assert_called_once()
         from harness.updates import UpToDate
         with patch.object(self.server.updates, "apply", side_effect=UpToDate("This clone is already up to date.")):
