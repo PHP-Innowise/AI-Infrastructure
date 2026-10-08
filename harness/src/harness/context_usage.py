@@ -19,7 +19,9 @@ from .filesystem import fs
 # Live fill reaches the database at most this often, unless it moved by the share below.
 WRITE_SECONDS = 2.0
 WRITE_SHARE = .005
-CLI_FILES = {'claude': ('CLAUDE.md', '.claude/CLAUDE.md'), 'codex': ('AGENTS.md',), 'cursor': ()}
+# Instruction files each CLI loads by itself (Cursor's CLI reads the root AGENTS.md
+# and CLAUDE.md as rules), so the Harness never sends them again.
+CLI_FILES = {'claude': ('CLAUDE.md', '.claude/CLAUDE.md'), 'codex': ('AGENTS.md',), 'cursor': ('AGENTS.md', 'CLAUDE.md')}
 HOOK_FILES = {'claude': '.claude/settings.json', 'codex': '.codex/hooks.json', 'cursor': '.cursor/hooks.json'}
 CURSOR_RULE = '.cursor/rules/working-memory.mdc'
 

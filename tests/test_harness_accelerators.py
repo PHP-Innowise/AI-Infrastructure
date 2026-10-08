@@ -262,3 +262,182 @@ class InstalledAcceleratorSyncTests(unittest.TestCase):
         before = snapshot(other)
         self.assertIsNone(self.store.accelerators.keep_current(project["id"]))
         self.assertEqual(before, snapshot(other))
+
+
+class InstalledCodexHookTrustTests(unittest.TestCase):
+    """Only the accelerator's own hook definitions, running its own scripts, are approved."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.project = Path(temporary.name) / "shop"
+        (self.project / ".codex/hooks").mkdir(parents=True)
+        for name in ("working-memory-read.sh", "working-memory-write.sh", "local-context.sh"):
+            (self.project / ".codex/hooks" / name).write_bytes((LARAVEL / ".codex/hooks" / name).read_bytes())
+        (self.project / ".codex/hooks.json").write_bytes((LARAVEL / ".codex/hooks.json").read_bytes())
+        canonical = json.loads((LARAVEL / ".codex/hooks.json").read_text(encoding="utf-8"))["hooks"]
+        self.commands = {event: canonical[event][0]["hooks"][0]["command"]
+                         for event in ("SessionStart", "UserPromptSubmit", "Stop")}
+        self.requests = []
+        self.listing = []
+
+    def hook(self, key, event, command=None, status="untrusted", source="project", path=None):
+        return {"key": key, "eventName": event, "command": command or self.commands[event],
+                "currentHash": "sha256:" + key, "trustStatus": status, "source": source,
+                "sourcePath": str(path or self.project / ".codex/hooks.json")}
+
+    def app_server(self, executable, arguments, cwd, requests, timeout=60):
+        self.requests.append(requests)
+        if requests[0]["method"] == "hooks/list":
+            return [{"result": {"data": [{"hooks": self.listing}]}}]
+        return [{"result": {}}]
+
+    def trust(self):
+        import accelerator_attach
+        with patch.object(accelerator_attach, "_app_server", side_effect=self.app_server):
+            return accelerator_attach.trust_installed_codex_hooks("/never-executed/codex", "Laravel", self.project)
+
+    def test_the_accelerators_own_hooks_are_approved_and_nothing_else(self):
+        script = self.project / ".codex/hooks/local-context.sh"
+        script.write_bytes(script.read_bytes() + b"# a team's edit\n")
+        self.listing = [
+            self.hook("read", "UserPromptSubmit"),
+            self.hook("write", "Stop", status="trusted"),
+            self.hook("edited", "SessionStart"),
+            self.hook("team", "Stop", command="sh -c ./scripts/notify.sh"),
+            self.hook("user", "Stop", source="user", path=Path.home() / ".codex/hooks.json"),
+            self.hook("nested", "Stop", path=self.project / "packages/a/.codex/hooks.json"),
+        ]
+        self.assertEqual({"approved": 1, "already": 1, "left": ["edited", "team"]}, self.trust())
+        [_, written] = self.requests
+        self.assertEqual([{"keyPath": "hooks.state", "mergeStrategy": "upsert",
+                           "value": {"read": {"trusted_hash": "sha256:read"}}}], written[0]["params"]["edits"])
+
+    def test_nothing_is_written_when_every_hook_is_approved(self):
+        self.listing = [self.hook("read", "UserPromptSubmit", status="trusted")]
+        self.assertEqual({"approved": 0, "already": 1, "left": []}, self.trust())
+        self.assertEqual(1, len(self.requests))
+
+
+class InstalledCodexSyncTests(unittest.TestCase):
+    """Codex's hook wiring follows the clone only where the new wiring is approved in the same pass."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.project = self.root / "shop"
+        self.project.mkdir()
+        sys.path.insert(0, str(ROOT / "scripts"))
+        try:
+            import accelerator_attach
+            import install_accelerator
+        finally:
+            sys.path.pop(0)
+        self.attach = accelerator_attach
+        with patch("sys.stdout"):
+            self.assertEqual(0, install_accelerator.install(ROOT, "Laravel", self.project, ["codex"], False, False, False))
+        # The wiring an older release installed, untouched since.
+        self.hooks = self.project / ".codex/hooks.json"
+        self.old = b'{"hooks": {}}\n'
+        self.hooks.write_bytes(self.old)
+        manifest = self.project / install_accelerator.SYNC_MANIFEST
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        manifest.write_text(json.dumps({"schema": 1, "files": {
+            ".codex/hooks.json": install_accelerator.git_blob_id(self.old)}}), encoding="utf-8")
+        discovery = patch.object(sessions.providers, "discover_providers", return_value=[
+            {"id": "codex", "name": "codex", "available": True, "executable": "/never-executed/codex", "detail": ""}])
+        discovery.start()
+        self.addCleanup(discovery.stop)
+        for name in ("_worker", "_keep_accelerators_current"):
+            stub = patch.object(sessions.Sessions, name, return_value=None)
+            stub.start()
+            self.addCleanup(stub.stop)
+        environment = patch.dict(os.environ, {"HARNESS_CODEX_HOOK_TRUST": ""})
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.store = sessions.Sessions(self.root / "state", [self.project])
+        self.addCleanup(self.store.close)
+        self.project_id = next(iter(self.store.projects))
+
+    def keep_current(self, **trust):
+        with patch.object(self.attach, "trust_installed_codex_hooks", **trust) as approve, \
+                patch.object(Accelerators, "source_version", return_value="release-1"):
+            return self.store.accelerators.keep_current(self.project_id), approve
+
+    def test_the_new_wiring_is_written_and_approved_in_one_pass(self):
+        report, approve = self.keep_current(return_value={"approved": 6, "already": 0, "left": []})
+        approve.assert_called_once_with("/never-executed/codex", "Laravel", self.project)
+        self.assertEqual((LARAVEL / ".codex/hooks.json").read_bytes(), self.hooks.read_bytes())
+        self.assertIn(".codex/hooks.json", {item["path"] for item in report["changed"]})
+        self.assertIn("6 accelerator hook(s) approved for Codex", sessions.accelerator_sync_notice(report))
+        self.assertEqual(6, self.store.accelerators.get(self.project_id)["sync"]["codex_trust"]["approved"])
+
+    def test_wiring_codex_could_not_approve_goes_back(self):
+        report, _ = self.keep_current(side_effect=self.attach.AttachError("Codex could not list hooks."))
+        self.assertEqual(self.old, self.hooks.read_bytes())
+        self.assertNotIn(".codex/hooks.json", {item["path"] for item in report["changed"]})
+        self.assertIn("could not approve", {item["path"]: item["reason"] for item in report["kept"]}[".codex/hooks.json"])
+        self.assertEqual({"error": "Codex could not list hooks."}, report["codex_trust"])
+
+    def test_with_approval_turned_off_the_wiring_waits_for_a_person(self):
+        with patch.dict(os.environ, {"HARNESS_CODEX_HOOK_TRUST": "0"}):
+            report, approve = self.keep_current(return_value={"approved": 6, "already": 0, "left": []})
+        approve.assert_not_called()
+        self.assertEqual(self.old, self.hooks.read_bytes())
+        self.assertIn("re-approval", {item["path"]: item["reason"] for item in report["kept"]}[".codex/hooks.json"])
+        # Turned on again, the same clone version runs once more.
+        report, approve = self.keep_current(return_value={"approved": 6, "already": 0, "left": []})
+        approve.assert_called_once()
+        self.assertEqual((LARAVEL / ".codex/hooks.json").read_bytes(), self.hooks.read_bytes())
+
+
+class AttachedCodexHookTrustTests(unittest.TestCase):
+    """The hooks lent to an attached project are approved without a click; the project is never written."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.project = self.root / "shop"
+        (self.project / "app").mkdir(parents=True)
+        (self.project / "composer.json").write_text(json.dumps({"require": {"laravel/framework": "^11.0"}}), encoding="utf-8")
+        discovery = patch.object(sessions.providers, "discover_providers", return_value=[
+            {"id": "codex", "name": "codex", "available": True, "executable": "/never-executed/codex", "detail": ""}])
+        discovery.start()
+        self.addCleanup(discovery.stop)
+        for name in ("_worker", "_keep_accelerators_current"):
+            stub = patch.object(sessions.Sessions, name, return_value=None)
+            stub.start()
+            self.addCleanup(stub.stop)
+        environment = patch.dict(os.environ, {"HARNESS_CODEX_HOOK_TRUST": ""})
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.store = sessions.Sessions(self.root / "state", [self.project])
+        self.addCleanup(self.store.close)
+        self.project_id = next(iter(self.store.projects))
+        import accelerator_attach
+        self.attach = accelerator_attach
+
+    def test_untrusted_lent_hooks_are_approved_once_per_clone_version(self):
+        before = snapshot(self.project)
+        listed = [{"key": "a", "status": "untrusted"}, {"key": "b", "status": "trusted"}]
+        approved = [{"key": "a", "status": "trusted"}, {"key": "b", "status": "trusted"}]
+        with patch.object(self.attach, "codex_hook_trust", return_value=listed), \
+                patch.object(self.attach, "trust_codex_hooks", return_value=approved) as approve, \
+                patch.object(Accelerators, "source_version", return_value="release-1"):
+            report = self.store.accelerators.keep_current(self.project_id)
+            self.assertIsNone(self.store.accelerators.keep_current(self.project_id))
+        approve.assert_called_once_with("/never-executed/codex", "Laravel", self.project)
+        self.assertEqual({"approved": 1, "already": 1, "left": []}, report["codex_trust"])
+        self.assertEqual(before, snapshot(self.project))
+
+    def test_without_codex_there_is_nothing_to_keep_current(self):
+        self.store.providers["codex"] = {"id": "codex", "available": False, "executable": None}
+        with patch.object(self.attach, "codex_hook_trust") as listing:
+            self.assertIsNone(self.store.accelerators.keep_current(self.project_id))
+        listing.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

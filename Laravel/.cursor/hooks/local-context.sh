@@ -228,16 +228,18 @@ if [ -d "specs" ]; then
   echo "  Specs: $SPEC_COUNT"
 fi
 
-# Capsule delivery: Cursor has no UserPromptSubmit-equivalent event; the
-# stop hook maintains .cursor/rules/working-memory.mdc instead (the
-# documented exception to the metadata-only session banner - see
+# Capsule delivery: Cursor reads the Task Capsule from
+# .cursor/rules/working-memory.mdc, which the prompt and stop hooks maintain
+# (the documented exception to the metadata-only session banner - see
 # docs/TOOL-INTEGRATIONS.md). Re-render it here so a fresh session or a
 # branch switch does not serve the previous session's capsule. Nothing is
 # printed: the rule file is the only output.
 CAPSULE_BUDGET_SECONDS="${CONTEXT_HOOK_BUDGET:-5}"
 CAPSULE_TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$PROJECT_DIR" branch --show-current 2>/dev/null)}"
-# Attached, the rule folder is the shared clone's; see the stop hook.
+# Attached, the rule folder is the shared clone's; see the stop hook. Nor
+# when the host delivered the capsule in the prompt.
 [ "$STATE_DIR" = "$ROOT_DIR" ] || exit 0
+[ "${CONTEXT_CAPSULE_DELIVERED:-}" = "1" ] && exit 0
 RULES_DIR="$ROOT_DIR/.cursor/rules"
 RULE_FILE="$RULES_DIR/working-memory.mdc"
 CAPSULE=""

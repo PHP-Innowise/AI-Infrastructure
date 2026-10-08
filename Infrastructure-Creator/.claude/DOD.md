@@ -74,7 +74,7 @@ Pick the tier that matches the work performed. Higher tiers include all lower-ti
 - [ ] Every material adjacent owner and routing case survived into wrappers.
   `SKILL FLOW.md`, `flow-feature`, and `flow-review` match the canonical flow
   contract exactly, including required code-review/checkpoint stages.
-- [ ] Every generated hook script passes `bash -n` and carries the executable bit; the per-edition hook set is complete (four enforcement + working-memory pair; Cursor deliberately lacks `working-memory-read.sh`), and every wiring file references only existing executable scripts.
+- [ ] Every generated hook script passes `bash -n` and carries the executable bit; the per-edition hook set is complete (four enforcement + working-memory pair; Cursor's `working-memory-read.sh` runs on `beforeSubmitPrompt` and renders the working-memory rule), and every wiring file references only existing executable scripts.
 - [ ] The seeded `memory-bank/` passes its validator and matches section 12 (same count, concepts, and sources); the context-brain runtime (`context.py`, `brain_runtime.py`, `context_retrieval.py`, `validate.py`) and the `project-brain/` skeleton were copied verbatim with `runtime.json` substituted (`context.py status`/`validate` exit 0 in the target); the memory quartet skills were also generated and wrapped; any drift was reported.
 - [ ] `context.py status --json` reports task-identity and Git readiness
   truthfully as active, retrieval-only, or degraded. Explicit task identity

@@ -546,8 +546,8 @@ class LocalContextTest(FakeRepoMixin, unittest.TestCase):
 class WorkingMemoryRuleTest(unittest.TestCase):
     """Cursor's read path: hooks render the capsule into an alwaysApply rule.
 
-    Cursor has no UserPromptSubmit-equivalent event, so its mirrors of the
-    Stop and sessionStart hooks render the freshest Task Capsule into
+    Cursor's prompt-time event cannot add context to a prompt, so its mirrors
+    of the prompt, Stop and sessionStart hooks render the Task Capsule into
     .cursor/rules/working-memory.mdc instead (a MIRROR_RULES transformation,
     not drift). The rendered file is transient local state and must stay out
     of Git history.
@@ -575,7 +575,7 @@ class WorkingMemoryRuleTest(unittest.TestCase):
         calls = {
             "claude": ("working-memory-read.sh",),
             "codex": ("working-memory-read.sh",),
-            "cursor": self.RENDER_HOOKS,
+            "cursor": ("working-memory-read.sh", *self.RENDER_HOOKS),
         }
         for tool, hooks in calls.items():
             for hook in hooks:
@@ -718,6 +718,179 @@ class ReadHookInputTest(unittest.TestCase):
             self.assertEqual(["refresh", "--host", "claude"], argv)
 
 
+class CursorPromptHookTest(unittest.TestCase):
+    """Cursor's beforeSubmitPrompt hook: the prompt's capsule goes into the rule.
+
+    The event cannot add context to a prompt, only let it through or stop it,
+    so the hook renders the capsule for this prompt into the alwaysApply rule
+    and always answers "continue".
+    """
+
+    PAYLOAD = {
+        "prompt": "Order totals are off by a cent after a discount",
+        "conversation_id": "c-1",
+        "generation_id": "g-1",
+        "cursor_version": "2.9.1",
+        "hook_event_name": "beforeSubmitPrompt",
+    }
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="cursor-prompt-")
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name) / "edition"
+        hooks = self.root / ".cursor" / "hooks"
+        hooks.mkdir(parents=True)
+        shutil.copy2(hook_path("cursor", "working-memory-read.sh"), hooks)
+        self.root.joinpath(".cursor/hooks.json").write_text("{}", encoding="utf-8")
+        self.cli = self.root / "memory-bank" / "scripts" / "context.py"
+        self.cli.parent.mkdir(parents=True)
+        self.argv = self.root / "argv.json"
+        self.rule = self.root / ".cursor" / "rules" / "working-memory.mdc"
+
+    def stub(self, capsule_text: str = "working: TASK-P - fix rounding\n- memory a.md — A\n  answer text",
+             status: int = 0) -> None:
+        # Like the real CLI: JSON only when asked for, and a capsule only for
+        # a query; without one, refresh prints its layer report.
+        self.cli.write_text(
+            "import json, pathlib, sys\n"
+            f"pathlib.Path({str(self.argv)!r}).write_text(json.dumps(sys.argv[1:]))\n"
+            "if '--json' in sys.argv and '--query' in sys.argv:\n"
+            f"    print(json.dumps({{'capsule_text': {capsule_text!r}}}))\n"
+            "else:\n"
+            "    print('semantic: updated')\n"
+            f"sys.exit({status})\n",
+            encoding="utf-8",
+        )
+
+    def run_prompt_hook(self, payload, **env: str):
+        return subprocess.run(
+            [BASH, str(self.root / ".cursor/hooks/working-memory-read.sh")],
+            input=payload if isinstance(payload, str) else json.dumps(payload),
+            capture_output=True,
+            text=True,
+            cwd=str(self.root),
+            env={**os.environ, "CONTEXT_TASK_ID": "TASK-P", "CONTEXT_CAPSULE_DELIVERED": "", **env},
+            timeout=HOOK_TIMEOUT,
+        )
+
+    def test_the_prompts_capsule_goes_into_the_rule(self) -> None:
+        self.stub()
+        result = self.run_prompt_hook(self.PAYLOAD)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual({"continue": True}, json.loads(result.stdout))
+        rule = self.rule.read_text(encoding="utf-8")
+        self.assertIn("alwaysApply: true", rule)
+        self.assertIn("answer text", rule)
+        argv = json.loads(self.argv.read_text(encoding="utf-8"))
+        self.assertEqual(self.PAYLOAD["prompt"], argv[argv.index("--query") + 1])
+        for flag in ("--json", "--sanitize", "--ephemeral"):
+            self.assertIn(flag, argv)
+        self.assertEqual("cursor", argv[argv.index("--host") + 1])
+        # The rule is re-sent whole with every request: nothing in it may be
+        # left out as "handed earlier".
+        self.assertNotIn("--session-id", argv)
+
+    def test_the_rule_changes_only_when_a_prompt_brings_a_new_item(self) -> None:
+        # Cursor puts rules at the start of the context: a rule rewritten for
+        # every prompt would cost the conversation its cached prefix each time.
+        first = "working: TASK-P - fix rounding\n- memory a.md \u2014 A\n  first excerpt"
+        self.stub(first)
+        self.run_prompt_hook(self.PAYLOAD)
+        rendered = self.rule.read_text(encoding="utf-8")
+        for name, capsule in (
+            ("same item, another excerpt", "working: TASK-P - fix rounding\n- memory a.md \u2014 A\n  second excerpt"),
+            ("nothing retrieved", "working: TASK-P - fix rounding"),
+        ):
+            with self.subTest(case=name):
+                self.stub(capsule)
+                result = self.run_prompt_hook(self.PAYLOAD)
+                self.assertEqual({"continue": True}, json.loads(result.stdout))
+                self.assertEqual(rendered, self.rule.read_text(encoding="utf-8"))
+        self.stub("working: TASK-P - fix rounding\n- memory b.md \u2014 B\n  new excerpt")
+        self.run_prompt_hook(self.PAYLOAD)
+        self.assertIn("new excerpt", self.rule.read_text(encoding="utf-8"))
+        # Another task's rule is replaced whatever it holds.
+        self.stub(first)
+        self.run_prompt_hook(self.PAYLOAD, CONTEXT_TASK_ID="TASK-Q")
+        self.assertIn("(task: TASK-Q)", self.rule.read_text(encoding="utf-8"))
+
+    def test_every_exit_lets_the_prompt_through(self) -> None:
+        for name, setup, payload, env in (
+            ("runtime fails", lambda: self.stub(status=1, capsule_text=""), self.PAYLOAD, {}),
+            ("malformed input", self.stub, "not json", {}),
+            ("host delivered", self.stub, self.PAYLOAD, {"CONTEXT_CAPSULE_DELIVERED": "1"}),
+            ("broken render", lambda: self.stub(capsule_text="not a capsule"), self.PAYLOAD, {}),
+        ):
+            with self.subTest(case=name):
+                self.rule.unlink(missing_ok=True)
+                setup()
+                result = self.run_prompt_hook(payload, **env)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual({"continue": True}, json.loads(result.stdout))
+                self.assertFalse(self.rule.exists())
+
+    def test_the_prompts_rule_outlives_the_turn_but_not_the_task_or_the_session(self) -> None:
+        # When Cursor reads its rules before this hook has run, the rule the
+        # last prompt left is what the next request carries: the stop hook
+        # must not rebuild it from the task alone.
+        for name in ("working-memory-write.sh", "local-context.sh"):
+            shutil.copy2(hook_path("cursor", name), self.root / ".cursor/hooks")
+        self.cli.write_text(
+            "import json, sys\n"
+            "if '--json' in sys.argv and '--query' in sys.argv:\n"
+            "    print(json.dumps({'capsule_text': 'working: TASK-P - prompt capsule'}))\n"
+            "elif sys.argv[1:2] == ['hook-context']:\n"
+            "    print('working: TASK-P - branch capsule')\n",
+            encoding="utf-8",
+        )
+
+        def hook(name: str, task: str = "TASK-P") -> str:
+            result = subprocess.run(
+                [BASH, str(self.root / ".cursor/hooks" / name)], input=json.dumps(self.PAYLOAD),
+                capture_output=True, text=True, cwd=str(self.root), timeout=HOOK_TIMEOUT,
+                env={**os.environ, "CONTEXT_TASK_ID": task, "CONTEXT_CAPSULE_DELIVERED": ""},
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            return self.rule.read_text(encoding="utf-8")
+
+        self.assertIn("prompt capsule", hook("working-memory-read.sh"))
+        self.assertIn("prompt capsule", hook("working-memory-write.sh"))
+        self.assertIn("branch capsule", hook("working-memory-write.sh", task="TASK-Q"))
+        self.assertIn("prompt capsule", hook("working-memory-read.sh"))
+        self.assertIn("branch capsule", hook("local-context.sh"))
+
+    def test_the_claude_copies_stand_down_under_cursor_where_cursor_hooks_serve(self) -> None:
+        claude = self.root / ".claude" / "hooks"
+        claude.mkdir(parents=True)
+        for name in ("working-memory-read.sh", "working-memory-write.sh"):
+            shutil.copy2(hook_path("claude", name), claude)
+        marker = self.root / "cli-ran"
+        self.cli.write_text(
+            f"import pathlib\npathlib.Path({str(marker)!r}).write_text('ran')\nprint('working: X')\n",
+            encoding="utf-8",
+        )
+
+        def run(name: str, payload: dict) -> None:
+            marker.unlink(missing_ok=True)
+            subprocess.run(
+                [BASH, str(claude / name)], input=json.dumps(payload), capture_output=True,
+                text=True, cwd=str(self.root), timeout=HOOK_TIMEOUT,
+                env={**os.environ, "CONTEXT_TASK_ID": "TASK-P", "CONTEXT_CAPSULE_DELIVERED": ""},
+            )
+
+        claude_payload = {"prompt": "cobalt rule", "session_id": "s-1", "hook_event_name": "UserPromptSubmit"}
+        for name in ("working-memory-read.sh", "working-memory-write.sh"):
+            with self.subTest(hook=name):
+                run(name, self.PAYLOAD)
+                self.assertFalse(marker.exists(), "the Claude copy ran under Cursor")
+                run(name, claude_payload)
+                self.assertTrue(marker.exists(), "the Claude copy did not run under Claude Code")
+        # Without Cursor hooks of its own, Cursor is served by the Claude copies.
+        self.root.joinpath(".cursor/hooks.json").unlink()
+        run("working-memory-read.sh", self.PAYLOAD)
+        self.assertTrue(marker.exists())
+
+
 class CursorCapsuleRenderTest(unittest.TestCase):
     """Functional render tests against a throwaway edition tree.
 
@@ -823,6 +996,20 @@ class CursorCapsuleRenderTest(unittest.TestCase):
             renders.append(self.rule_file().read_text(encoding="utf-8"))
         self.assertEqual(renders[0], renders[1])
         self.assertEqual(renders[1], renders[2])
+
+    def test_no_rule_is_rendered_when_the_host_delivered_the_capsule(self) -> None:
+        # The Harness put this turn's capsule into the prompt; a rule built from
+        # the branch would deliver a second, staler one.
+        self.cli.write_text(self.STUB_CAPSULE, encoding="utf-8")
+        for hook in WorkingMemoryRuleTest.RENDER_HOOKS:
+            with self.subTest(hook=hook):
+                env = dict(os.environ, CONTEXT_TASK_ID=self.TASK_ID, CONTEXT_CAPSULE_DELIVERED="1")
+                result = subprocess.run(
+                    ["bash", str(self.hooks_dir / hook)], input="", capture_output=True,
+                    text=True, cwd=str(self.root), env=env, timeout=HOOK_TIMEOUT,
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertFalse(self.rule_file().exists())
 
     def test_session_start_renders_rule_without_printing_it(self) -> None:
         self.cli.write_text(self.STUB_CAPSULE, encoding="utf-8")

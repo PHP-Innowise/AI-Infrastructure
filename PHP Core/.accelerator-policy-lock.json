@@ -205,17 +205,17 @@
     ".claude/settings.json": "73181f5eeb627bbe6c41cc96f4f8f05b00d6d1972528779329a386fd43e94306",
     ".claude/skills/SKILL FLOW.md": "886a5eeebd80ce356d32442f137795f0bd73b564ff4e4c1c28e054846e86abf5",
     ".claude/skills/skill-creator/SKILL.md": "f1bac11cf8ab0e6acb40196165aab0f8e87556a4e182ff00894b6ee11af3a2a5",
-    ".codex/config.toml": "b5b55edf7a3ec408d6983cfe3ee958f4889ecd033c16b53d5c53948c4cee4112",
+    ".codex/config.toml": "fea3834e80f1870e19863c024f9ca4c1ec08eb2858fd95530e784d1785aff3da",
     ".codex/hooks.json": "62d7c3281a618e3344c9a8c541dc66b4496dc3761e4fb8006902578ed9ee073f",
-    ".cursor/hooks.json": "850254308d2f7c159282ccb1426487a70a491404430b62b5099ba2fcd7cdeb05",
+    ".cursor/hooks.json": "add576bc65582d578a76c6dc8a01d7fe69c9df8ad67b023626d8a379ccaccd6e",
     ".cursor/rules/accelerator-workflow.mdc": "ccd9981be92179bf32946b0110c5004d8af404e420ba868dbbf72d5586410cc4",
     ".cursor/rules/php-standards.mdc": "850700d4a40525eff2a559e30c7779f53c986312595d1804f728858e382ec436",
     ".cursor/rules/safety-and-verification.mdc": "5e8cb5bfd3d427836e521417a2a7e68bd1b3a00a25a1d174df61b29e5471344f",
     ".cursor/rules/subagent-policy.mdc": "b2200867b3141faedb982cb12cc58158015ef5d9294c0f8b193bb8b70f61f201",
     ".cursor/skills/skill-creator/SKILL.md": "f1bac11cf8ab0e6acb40196165aab0f8e87556a4e182ff00894b6ee11af3a2a5",
-    "AGENTS.md": "b6f66b0b5436a5d52d7016851b06f5380880fe519b2149f91980bc7d2085336c"
+    "AGENTS.md": "ff6fa6001d5d2c6a0bda3d2af6346f8e8613d712cb04f967260203ca999e5dd7"
   },
-  "policy_digest": "7a41103491ed88f3554b56d667d0cd9a3fec6f7b290f3a859cdc3f91d24eaeed",
+  "policy_digest": "2d2048fb26f249ea28a16c5c57733a25c1aa7bde555cbd3ddb7367edb9afc9fc",
   "release": "2.0.0",
   "schema_version": 1
 }

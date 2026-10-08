@@ -150,8 +150,8 @@ class MemoryIntegrationTest(unittest.TestCase):
         policy = REPOSITORY_ROOT.joinpath("AGENTS.md").read_text(encoding="utf-8")
         required_policy = (
             "Task Capsule",
-            "8,000 Unicode characters",
-            "two Procedural",
+            "3,600 characters",
+            "one Procedural",
             "three Semantic",
             "one Episodic",
             "MUST NOT pass the parent conversation",

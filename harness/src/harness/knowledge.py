@@ -50,6 +50,9 @@ ACTION_FIELDS = {
     'promote-apply': ('promotion_id',),
     'promote-auto': (),
     'export': ('include_archive', 'include_superseded'),
+    # The turn checkpoint a host's Stop hook runs; the Harness runs it for a
+    # provider whose headless mode fires no Stop event (Cursor).
+    'turn': ('task_id',),
 }
 
 # Run the installed runtime's own policy helpers in its guarded subprocess.
@@ -341,6 +344,7 @@ class KnowledgeManager:
             'brain-update': ('record_id', 'revision'), 'complete': ('task_id', 'revision', 'outcome'),
             'promote-propose': ('source_ids', 'title', 'content'),
             'promote-review': ('promotion_id', 'reviewer'), 'promote-apply': ('promotion_id',),
+            'turn': ('task_id',),
         }.get(action, ())
         if any(field not in data for field in required):
             raise SessionError('Required knowledge operation fields are missing.')

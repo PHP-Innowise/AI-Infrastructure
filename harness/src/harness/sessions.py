@@ -416,6 +416,9 @@ def accelerator_sync_notice(report):
     kept = len(report.get('kept') or [])
     if kept:
         text += f"; {kept} left as they are (edited in the project, tracked by its Git, or Codex hook wiring)"
+    trust = report.get('codex_trust') if isinstance(report.get('codex_trust'), dict) else {}
+    if trust.get('approved'):
+        text += f"; {trust['approved']} accelerator hook(s) approved for Codex"
     return text + '.'
 
 
@@ -1535,7 +1538,7 @@ class Sessions:
             synced = self.accelerators.keep_current(session['project_id'])
         except Exception:
             synced = None
-        if synced and synced.get('changed') and not synced.get('error'):
+        if synced and not synced.get('error') and (synced.get('changed') or (synced.get('codex_trust') or {}).get('approved')):
             self._event(sid, {'kind': 'memory', 'ok': True, 'text': accelerator_sync_notice(synced)})
         try:
             prepared, problem = context.prepare(session), None
@@ -1711,6 +1714,8 @@ class Sessions:
                 agents_enabled=session['agents_enabled'], agent_count=session['agent_count'],
                 thinking_effort=session['thinking_effort'], hook_events=provider == 'claude',
                 **({'budget_usd':budgets['usd']} if budgets['usd'] is not None else {}))
+            if provider == 'codex':
+                command = providers.codex_instruction_budget(command, Path(project))
             if provider == 'claude':
                 attachment_dirs = self.attachments.directories(sid)
                 if attachment_dirs:
@@ -2027,6 +2032,15 @@ class Sessions:
         # reviews its context before each turn; its draft is saved like any other.
         if outcome == 'completed' and native_launch and session['brain'] and not native_command:
             self._remember(sid)
+            if provider == 'cursor':
+                # Cursor's headless mode fires no stop hook, so the checkpoint its
+                # own hook would run - files touched, commits, the turn boundary
+                # that promotion and compaction ride on - runs here, unless the
+                # hook did fire this run.
+                try:
+                    self._task_context(wait=MEMORY_WAIT).checkpoint(self.get(sid), since=launch_started_at)
+                except Exception:
+                    pass
         # Record the closing event before the terminal status: readers that wait for
         # the status to settle must see the complete event history.
         self._event(sid, {"kind": "status", "outcome": outcome,

@@ -685,6 +685,29 @@ def build_command(provider: str, executable: str, project: Path, prompt: str,
     return command
 
 
+# Codex reads the AGENTS.md chain only up to project_doc_max_bytes, 32 KiB by
+# default. A project's own AGENTS.md with the accelerator's policy block after
+# it passes that, and the policy, coming last, was what got cut.
+CODEX_DOC_DEFAULT = 32768
+CODEX_DOC_BUDGET = 131072
+
+
+def codex_instruction_budget(command: list[str], project: Path) -> list[str]:
+    """Raise Codex's AGENTS.md budget for this launch when the project needs it."""
+    size = 0
+    for name in ("AGENTS.override.md", "AGENTS.md"):
+        try:
+            size = (project / name).stat().st_size
+        except OSError:
+            continue
+        break
+    if size <= CODEX_DOC_DEFAULT or "exec" not in command:
+        return command
+    at = command.index("exec")
+    budget = max(CODEX_DOC_BUDGET, size + CODEX_DOC_DEFAULT)
+    return [*command[:at], "-c", f"project_doc_max_bytes={budget}", *command[at:]]
+
+
 def _text(value) -> str:
     return value if isinstance(value, str) else ""
 

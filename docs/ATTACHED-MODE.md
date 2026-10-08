@@ -90,8 +90,10 @@ project.
 Codex runs a hook only after its definition was approved once; the approval is
 a hash under `hooks.state` in `~/.codex/config.toml`, the same record Codex's own
 `/hooks` review writes. A session-flag hook has no `/hooks` entry to review, so
-**Sessions › Project › Trust accelerator hooks in Codex** (or
-`accelerator_attach.py trust-codex-hooks`) records the edition's seven hooks.
+the Harness records the edition's seven hooks by itself, once per version of the
+clone, when Codex is available (`HARNESS_CODEX_HOOK_TRUST=0` turns that off);
+**Sessions › Project › Trust accelerator hooks in Codex** and
+`accelerator_attach.py trust-codex-hooks` record them on request.
 Moving the clone changes the commands and needs a new approval; a `git pull`
 that edits only hook scripts does not. Without the approval Codex still gets the
 policy and skills; only the hooks (session banner, automatic memory, command

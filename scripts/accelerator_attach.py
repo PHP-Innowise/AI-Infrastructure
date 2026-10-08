@@ -487,6 +487,76 @@ def trust_codex_hooks(executable: str, edition: str, project: Path, repository: 
     return codex_hook_trust(executable, edition, project, repository)
 
 
+def codex_hook_script(command: str) -> Optional[str]:
+    """The hook script a Codex hook command runs: its last `*.sh` word."""
+    match = re.search(r"([A-Za-z0-9._-]+\.sh)\W*$", command.strip())
+    return match.group(1) if match else None
+
+
+def trust_installed_codex_hooks(executable: str, edition: str, project: Path,
+                                repository: Path = REPOSITORY) -> dict[str, Any]:
+    """Approve the accelerator's own hooks in an installed project, in the user's Codex config.
+
+    Codex runs a project hook only after its definition was approved, by hash,
+    and an installed accelerator's memory hooks never ran in projects nobody
+    approved them in (0 of 39 sessions on one real project). This approves a
+    definition only when it is one this clone's edition ships - the same event
+    and command - and the script it runs is byte-identical to the clone's:
+    the accelerator's own code, which the person installed. A team's own hook,
+    an edited definition or an edited script is left for review in /hooks.
+    """
+    home = edition_directory(edition, repository)
+    canonical = json.loads((home / ".codex" / "hooks.json").read_text(encoding="utf-8"))
+    shipped = {
+        (str(event).lower(), handler.get("command"))
+        for event, groups in (canonical.get("hooks") or {}).items()
+        for group in groups or []
+        for handler in (group.get("hooks") or [])
+        if isinstance(handler, dict)
+    }
+    hooks_file = (project / ".codex" / "hooks.json").resolve()
+    [listing] = _app_server(executable, [], project,
+                            [{"method": "hooks/list", "params": {"cwds": [str(project)]}}])
+    if "error" in listing:
+        raise AttachError("Codex could not list hooks.")
+    pending: dict[str, dict[str, str]] = {}
+    already = 0
+    left: list[str] = []
+    for scope in (listing.get("result") or {}).get("data") or []:
+        for hook in scope.get("hooks") or []:
+            if hook.get("source") != "project":
+                continue
+            try:
+                if Path(str(hook.get("sourcePath") or "")).resolve() != hooks_file:
+                    continue
+            except OSError:
+                continue
+            command = str(hook.get("command") or "")
+            script = codex_hook_script(command)
+            mine = script is not None and (str(hook.get("eventName") or "").lower(), command) in shipped
+            if mine:
+                local = project / ".codex" / "hooks" / script
+                source = home / ".codex" / "hooks" / script
+                try:
+                    mine = (local.is_file() and not local.is_symlink()
+                            and local.read_bytes() == source.read_bytes())
+                except OSError:
+                    mine = False
+            if not mine:
+                left.append(str(hook.get("key")))
+            elif hook.get("trustStatus") == "trusted":
+                already += 1
+            elif isinstance(hook.get("key"), str) and isinstance(hook.get("currentHash"), str):
+                pending[hook["key"]] = {"trusted_hash": hook["currentHash"]}
+    if pending:
+        [written] = _app_server(executable, [], project, [{"method": "config/batchWrite", "params": {
+            "edits": [{"keyPath": "hooks.state", "mergeStrategy": "upsert", "value": pending}]}}])
+        if "error" in written:
+            raise AttachError("Codex did not record the hook approvals: "
+                              f"{written['error'].get('message', 'unknown error')}")
+    return {"approved": len(pending), "already": already, "left": left}
+
+
 # ---------------------------------------------------------------------------
 # Cursor Agent
 

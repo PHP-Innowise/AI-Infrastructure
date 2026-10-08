@@ -872,6 +872,48 @@ class InstallSyncTest(unittest.TestCase):
         self.assertEqual('{"mode": "governed"}\n', runtime_config.read_text(encoding="utf-8"))
         self.assertNotIn("project-brain/config/runtime.json", self.actions(report))
 
+    def test_codex_wiring_is_rewritten_only_for_a_caller_that_approves_it_again(self) -> None:
+        self.sync()  # records what the install wrote
+        wiring = ".codex/hooks.json"
+        self.release(wiring, "\n")
+        released = (self.clone / "Symfony" / wiring).read_bytes()
+        self.assertIn("re-approval", self.kept(self.sync()).get(wiring, ""))
+        self.assertNotEqual(released, (self.target / wiring).read_bytes())
+
+        report = self.sync("--rewire-codex")
+        self.assertEqual("updated", self.actions(report).get(wiring))
+        self.assertEqual(released, (self.target / wiring).read_bytes())
+
+        # A team's own edit stays, approval or not.
+        local = self.target / wiring
+        local.write_text(local.read_text(encoding="utf-8") + " ", encoding="utf-8")
+        self.release(wiring, "\n")
+        report = self.sync("--rewire-codex")
+        self.assertEqual("edited in the project", self.kept(report).get(wiring))
+
+    def test_codex_project_settings_follow_the_release(self) -> None:
+        # Not trust-bound: Codex approves hook definitions, not this file. It
+        # carries the AGENTS.md budget the policy needs to be read whole.
+        self.sync()
+        config = ".codex/config.toml"
+        self.release(config, "\n# release note\n")
+        report = self.sync()
+        self.assertEqual("updated", self.actions(report).get(config))
+        self.assertIn("project_doc_max_bytes", (self.target / config).read_text(encoding="utf-8"))
+        local = self.target / config
+        local.write_text(local.read_text(encoding="utf-8") + "model = \"team\"\n", encoding="utf-8")
+        self.release(config, "# another note\n")
+        self.assertEqual("edited in the project", self.kept(self.sync()).get(config))
+        self.assertIn('model = "team"', local.read_text(encoding="utf-8"))
+
+    def test_rewiring_codex_needs_a_sync(self) -> None:
+        result = run(
+            sys.executable, str(INSTALLER), "--source-root", str(self.clone),
+            "--edition", "Symfony", "--rewire-codex", "--target", str(self.target), "--dry-run",
+        )
+        self.assertEqual(2, result.returncode)
+        self.assertIn("--rewire-codex requires --sync", result.stderr)
+
     def test_only_the_managed_policy_block_is_replaced(self) -> None:
         agents = self.target / "AGENTS.md"
         agents.write_text(

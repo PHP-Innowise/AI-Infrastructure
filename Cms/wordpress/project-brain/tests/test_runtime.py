@@ -712,7 +712,7 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
         )
 
     def test_hook_query_comes_from_the_task_not_the_branch_name(self) -> None:
-        # Cursor has no prompt-submit event, so its one automatic memory entry
+        # A hook without a prompt (Cursor's stop and session-start renders)
         # hands over a branch name. Retrieving on the slug asks memory about
         # the word "main"; the task behind it is what the turn is actually
         # about.

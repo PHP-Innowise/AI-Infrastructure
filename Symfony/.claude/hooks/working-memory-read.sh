@@ -14,6 +14,9 @@
 
 set -u
 
+# Output: plain text on stdout, which Claude Code and Codex add to the
+# prompt as context.
+
 # A host that puts this turn's Task Capsule into the prompt itself sets
 # CONTEXT_CAPSULE_DELIVERED=1; the Harness does, retrieved for the message
 # alone. A second capsule here would be distilled from that whole prompt and
@@ -39,6 +42,13 @@ BUDGET_SECONDS="${CONTEXT_HOOK_BUDGET:-5}"
 command -v python3 > /dev/null 2>&1 || exit 0
 [ -f "$CONTEXT_CLI" ] || exit 0
 
+HOOK_STDIN=$(cat)
+# Cursor also runs the Claude Code hooks it finds. Where this project has its
+# own Cursor hooks they serve the session; this copy stands down.
+case "$HOOK_STDIN" in
+  *'"cursor_version"'*) [ -f "$ROOT_DIR/.cursor/hooks.json" ] && exit 0 ;;
+esac
+
 run() {
   if command -v timeout > /dev/null 2>&1; then
     timeout "$BUDGET_SECONDS" "$@"
@@ -56,7 +66,7 @@ run() {
 # Keep the program in -c: a heredoc would occupy stdin and hide the prompt.
 # Output: the session id, a newline, the prompt, and a final "\n." that keeps
 # command substitution from eating the prompt's own trailing newlines.
-HOOK_INPUT=$(python3 -c '
+HOOK_INPUT=$(printf '%s' "$HOOK_STDIN" | python3 -c '
 import json
 import re
 import sys

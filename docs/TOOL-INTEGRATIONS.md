@@ -79,7 +79,7 @@ The same safety goals are adapted to each client's event schema:
 | Shell safety | `PreToolUse` for Bash | `beforeShellExecution` | `PreToolUse` |
 | File naming | `PreToolUse` for Write/Edit | `afterFileEdit` | `PreToolUse` |
 | Edit-loop detection | `PostToolUse` for Edit | `afterFileEdit` | `PostToolUse` |
-| Task Capsule into the prompt | `UserPromptSubmit` | `stop`/`sessionStart` render an `alwaysApply` rule | `UserPromptSubmit` |
+| Task Capsule into the prompt | `UserPromptSubmit` | `beforeSubmitPrompt` renders the prompt's capsule into an `alwaysApply` rule (`sessionStart` renders the branch's, and so does `stop` unless the rule holds the prompt's) | `UserPromptSubmit` |
 | Turn checkpoint at turn end | `Stop` | `stop` | `Stop` |
 
 ## Automatic Memory Support by Tool
@@ -89,41 +89,63 @@ capability that is not universal.
 
 | | Claude Code | Codex | Cursor |
 | --- | --- | --- | --- |
-| Capsule retrieved into each prompt | yes (fresh) | yes (fresh) | **yes, one turn stale** (rendered `alwaysApply` rule) |
+| Capsule retrieved into each prompt | yes (fresh) | yes (fresh) | **yes, through a rule** rendered from the prompt (same turn when Cursor reads its rules after the hook, else the next; not verified on a live client) |
 | Turn change set buffered and flushed | yes | yes | yes |
 | Explicit `context.py retrieve` / `memory` | yes | yes | yes |
 
-Cursor cannot receive the capsule at prompt time. Its nearest event,
-`beforeSubmitPrompt`, returns `{"continue": true|false, "user_message": "..."}`
-- it can allow or block a submission but cannot add context to the prompt, so
-a hook that printed a capsule would produce output the client discards. This
-is a client capability limit, not an installation fault, and
-`working-memory-read.sh` is therefore not shipped in `.cursor/hooks/`.
+Cursor cannot add context to a prompt from a hook. Its prompt-time event,
+`beforeSubmitPrompt`, receives the prompt but answers only
+`{"continue": true|false, "user_message": "..."}`; `sessionStart` can return
+`additional_context`, but Cursor applies it racily and often not to the first
+message, and `postToolUse` context is discarded for built-in tools. The one
+channel Cursor sends with every request is an `alwaysApply` rule, so the
+capsule is delivered through `.cursor/rules/working-memory.mdc`:
 
-The read path on Cursor is served through a rule file instead: the Cursor
-mirrors of `working-memory-write.sh` (after the turn checkpoint) and
-`local-context.sh` (at session start, so a fresh session or branch switch does
-not retain the previous session's render) put the most recently rendered
-capsule in `.cursor/rules/working-memory.mdc` - an `alwaysApply` rule Cursor
-attaches to every prompt. During an active session it is intentionally one turn
-stale; it is not a fresh prompt-submit capsule. The file states that staleness
-("as of end of previous turn"), is replaced atomically only when a render
-succeeds, and is ignored local state (each edition's `.gitignore` lists it). This is a
-declared MIRROR_RULES transformation of the canonical hooks (the
-`_WM_DELIVERY_*` constants in `memory-bank/scripts/context_retrieval.py`),
-not drift: `scripts/build_mirrors.py --check` verifies it.
+- The Cursor mirror of `working-memory-read.sh` runs on `beforeSubmitPrompt`.
+  It retrieves for the prompt (`refresh --host cursor --sanitize --json`, with
+  no `--session-id`: the rule is re-sent whole, so nothing in it may be left
+  out as already handed), writes the rule atomically, and answers
+  `{"continue": true}` on every exit path - memory never holds a prompt back.
+  Cursor puts rules at the start of the model's context, so a rule rewritten
+  for every prompt would cost the conversation its cached prefix each time;
+  the hook replaces it only when the prompt retrieved an item the rule does
+  not hold yet (a follow-up on the same documents, or small talk, leaves it).
+  Whether the request that triggered it already carries the new rule depends
+  on when Cursor reads its rules, which has not been verified on a live client;
+  at worst the rule is one prompt behind.
+- The Cursor mirror of `working-memory-write.sh` renders the branch's capsule
+  into the same rule after the turn checkpoint, unless the rule holds the
+  prompt hook's capsule for the same task: rebuilt from the task alone it would
+  lose what was retrieved for the latest prompt, which is what the next request
+  carries when Cursor reads its rules before the hook runs. The Cursor mirror of
+  `local-context.sh` always renders it at session start, so a fresh session or
+  a branch switch does not keep the previous session's render.
+- Every render stands down when `CONTEXT_CAPSULE_DELIVERED=1`: the Harness has
+  put the capsule into the prompt already.
+
+The rule is replaced atomically only when a render succeeds and is ignored
+local state (each edition's `.gitignore` lists it). These are declared
+MIRROR_RULES transformations of the canonical hooks (the `_WM_DELIVERY_*` and
+`_WM_PROMPT_*` constants in `memory-bank/scripts/context_retrieval.py`), not
+drift: `scripts/build_mirrors.py --check` verifies them.
+
+Cursor also runs the Claude Code hooks it finds (third-party hooks are on by
+default and every matching hook from every source runs). The Claude copies of
+`working-memory-read.sh` and `working-memory-write.sh` therefore stand down when
+their payload carries `cursor_version` and the project has `.cursor/hooks.json`;
+running both doubled every checkpoint and wrote retrievals nobody received.
 
 Continuity is unaffected: `stop` runs at turn end without prompt access, so
 the record is written exactly as on the other two clients. Retrieval on
 Cursor can also be explicit - run `context.py retrieve` or the `memory`
 command when a task needs prior context sharper than the rendered rule.
 
-The two clients also differ in what the capsule was retrieved *for*. Claude
-Code and Codex pass the user's prompt, so the query is the request. Cursor's
-hook has no prompt to pass and supplies the task identifier, which is usually
-a branch name - and a branch name tokenized into a query asks memory about the
-word `main`. The governed path therefore builds Cursor's query from the task
-behind the identifier: its goal, manual progress, next steps and file stems,
+What the capsule is retrieved *for*: Claude Code, Codex and Cursor's prompt
+hook pass the user's prompt, so the query is the request. Cursor's `stop` and
+`sessionStart` renders have no prompt and supply the task identifier, which is
+usually a branch name - and a branch name tokenized into a query asks memory
+about the word `main`. The governed path therefore builds that query from the
+task behind the identifier: its goal, manual progress, next steps and file stems,
 the same enrichment the lightweight path already performed. The automatic
 checkpoint is deliberately excluded (turn counts and a timestamp carry no
 topic and would change the query on every flush), and so is an
@@ -138,10 +160,9 @@ CLI call defaults to `cli`. Retrieval manifest version 3 records that `host`
 beside the `entry_point`. The repeat gate scopes its baseline to task, host, and
 entry point, so one client's prompt hook cannot suppress another client's turn.
 
-So the difference is one turn of freshness, not one order of query quality:
-treat the editions as equivalent in policy, skills, and enforcement, and as
-differing in when the capsule was rendered - Claude Code and Codex retrieve
-per-prompt, Cursor reads the rule rendered at the previous turn boundary.
+Treat the editions as equivalent in policy, skills, and enforcement; they
+differ in how the capsule arrives - on stdout of the prompt hook for Claude
+Code and Codex, through the rule the prompt hook rewrites for Cursor.
 
 The installed scripts:
 
@@ -237,9 +258,16 @@ project.
 2. Confirm `.codex/config.toml` contains:
 
    ```toml
+   project_doc_max_bytes = 131072
+
    [features]
    hooks = true
    ```
+
+   Codex reads the AGENTS.md chain only up to `project_doc_max_bytes` (32 KiB
+   by default). A project's own AGENTS.md with the accelerator's policy block
+   after it passes that, and the policy, coming last, is what gets cut; the
+   Harness also passes the larger budget to its Codex launches.
 
 3. Confirm `.agents/skills/`, `.codex/hooks.json`, and executable hook scripts
    are present.
@@ -247,7 +275,14 @@ project.
    `memory`, or `project-brain`.
 5. Review and trust the hooks in `/hooks`. Codex records trust against each
    hook definition's hash, so a hook whose command changed in an update is
-   skipped until it is trusted again.
+   skipped until it is trusted again. The Harness does this for every project
+   it serves: once per version of its clone it approves, in the user's Codex
+   config, each hook definition that is exactly one the edition ships and runs
+   a script byte-identical to the clone's - the accelerator's own code. A
+   team's own hook or an edited script is left for review in `/hooks`; it
+   rewrites an installed project's `.codex/hooks.json` to the current wiring
+   only when it can approve it in the same step, and puts the old wiring back
+   otherwise. `HARNESS_CODEX_HOOK_TRUST=0` turns the approval off.
 6. Start a new session and confirm the metadata-only session hook runs.
 
 The shipped config does not require an MCP server. Do not add the commented

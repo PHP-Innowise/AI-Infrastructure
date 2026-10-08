@@ -14,6 +14,13 @@ An installed copy is kept current instead: once per version of this clone,
 accelerator files and its runtime up to the clone, so every session in the
 project - including the native ones Harness never sees - runs today's
 memory. Nothing a person owns is written (see that function).
+
+Codex runs a project's hooks only after their definitions were approved, so
+the accelerator's memory hooks never ran where nobody approved them in /hooks.
+With Codex available, the same pass approves the accelerator's own hook
+definitions - installed or lent - in the user's Codex config, the record
+Codex's own review writes; a team's hook or an edited one is left for review.
+HARNESS_CODEX_HOOK_TRUST=0 turns this off.
 """
 
 from __future__ import annotations
@@ -169,30 +176,56 @@ class Accelerators:
         self._source = (time.monotonic(), version)
         return version
 
-    def keep_current(self, project_id) -> Optional[dict[str, Any]]:
-        """Sync an installed project to this clone, once per clone version.
+    def codex_for_trust(self) -> Optional[str]:
+        """The Codex CLI to approve the accelerator's hooks with, or None.
 
-        Returns the sync report when one ran, else None. Never raises: a
-        project that cannot be synced keeps the copy it has, and the report
-        says why.
+        HARNESS_CODEX_HOOK_TRUST=0 turns the approval off; the hooks then wait
+        for a person's review in Codex's /hooks, as they do outside the Harness.
+        """
+        if os.environ.get('HARNESS_CODEX_HOOK_TRUST', '').strip().lower() in ('0', 'off', 'false', 'no'):
+            return None
+        provider = self.sessions.providers.get('codex') or {}
+        # Only the CLI discovery verified: the approvals go into that CLI's config.
+        if not provider.get('available') or not provider.get('executable'):
+            return None
+        return provider['executable']
+
+    def keep_current(self, project_id) -> Optional[dict[str, Any]]:
+        """Bring a project's accelerator up to this clone, once per clone version.
+
+        Installed: the project's accelerator files are synced, and the Codex
+        hooks among them - whose wiring may be rewritten only when they can be
+        approved again - are approved for Codex. Attached: nothing is written
+        into the project, and the hooks the launches lend it are approved.
+        Returns the report when one ran, else None. Never raises: a project that
+        cannot be synced keeps what it has, and the report says why.
         """
         try:
             path = Path(self.sessions.project(project_id)['path'])
         except SessionError:
             return None
-        if not path.is_dir() or not self.installed(path):
+        if not path.is_dir():
             return None
-        version = self.source_version()
+        installed = self.installed(path)
+        codex = self.codex_for_trust()
+        edition = None if installed else self._edition(project_id)
+        # Attached, nothing is ever written into the project: the one thing to
+        # keep current is Codex's approval of the hooks the launches lend it.
+        if not installed and not (edition and codex):
+            return None
+        version = self.source_version() + ('+codex' if codex else '')
         with self.sessions.lock:
             row = self.sessions.db.execute(
                 'SELECT source FROM accelerator_syncs WHERE project_id=?', (project_id,)).fetchone()
         if row and row['source'] == version:
             return None
         with self.sync_lock:
-            try:
-                report = installer.sync_installation(ROOT, path)
-            except (installer.InventoryError, OSError, ValueError) as error:
-                report = {'target': str(path), 'changed': [], 'kept': [], 'backups': [], 'error': str(error)}
+            if installed:
+                report = self._sync_installed(path, codex)
+            else:
+                report = {'target': str(path), 'edition': edition, 'release': None, 'changed': [], 'kept': [],
+                          'backups': [], 'error': None}
+                report['codex_trust'] = self._trust_attached(codex, edition, path)
             with self.sessions.lock:
                 self.sessions.db.execute(
                     'INSERT INTO accelerator_syncs(project_id,source,synced_at,report) VALUES (?,?,?,?) '
@@ -200,6 +233,48 @@ class Accelerators:
                     'report=excluded.report',
                     (project_id, version, now(), json.dumps(report, ensure_ascii=False)))
                 self.sessions.db.commit()
+        return report
+
+    @staticmethod
+    def _trust_attached(codex: str, edition: str, path: Path) -> dict[str, Any]:
+        def untrusted(hooks):
+            return sum(1 for hook in hooks if hook['status'] not in ('trusted', 'managed'))
+        try:
+            hooks = attach.codex_hook_trust(codex, edition, path)
+            before = untrusted(hooks)
+            if before:
+                hooks = attach.trust_codex_hooks(codex, edition, path)
+            return {'approved': before - untrusted(hooks), 'already': len(hooks) - before, 'left': [
+                hook['key'] for hook in hooks if hook['status'] not in ('trusted', 'managed')]}
+        except (attach.AttachError, OSError, ValueError) as error:
+            return {'error': str(error)}
+
+    def _sync_installed(self, path: Path, codex: Optional[str]) -> dict[str, Any]:
+        hooks = path / '.codex' / 'hooks.json'
+        try:
+            before = hooks.read_bytes() if hooks.is_file() and not hooks.is_symlink() else None
+        except OSError:
+            before = None
+        try:
+            report = installer.sync_installation(ROOT, path, rewire_codex=codex is not None and before is not None)
+        except (installer.InventoryError, OSError, ValueError) as error:
+            return {'target': str(path), 'changed': [], 'kept': [], 'backups': [], 'error': str(error)}
+        if codex and before is not None and report.get('edition') and not report.get('error'):
+            try:
+                report['codex_trust'] = attach.trust_installed_codex_hooks(codex, report['edition'], path)
+            except (attach.AttachError, OSError, ValueError) as error:
+                report['codex_trust'] = {'error': str(error)}
+                # Rewired but not approved, the hooks would stop running: the
+                # wiring Codex already approved goes back.
+                try:
+                    if hooks.read_bytes() != before:
+                        hooks.write_bytes(before)
+                        report['changed'] = [item for item in report['changed']
+                                             if item.get('path') != '.codex/hooks.json']
+                        report['kept'].append({'path': '.codex/hooks.json',
+                                               'reason': 'Codex could not approve the new wiring; the old one stays'})
+                except OSError:
+                    pass
         return report
 
     def keep_all_current(self) -> None:
@@ -222,7 +297,8 @@ class Accelerators:
         return {'source': row['source'], 'synced_at': row['synced_at'],
                 'edition': report.get('edition'), 'release': report.get('release'),
                 'changed': len(report.get('changed') or []), 'kept': report.get('kept') or [],
-                'backups': report.get('backups') or [], 'error': report.get('error')}
+                'backups': report.get('backups') or [], 'error': report.get('error'),
+                'codex_trust': report.get('codex_trust')}
 
     # -- a launch ------------------------------------------------------------
 

@@ -274,12 +274,22 @@ class FullMirrorParityTest(ParityFixture):
         # hooks README: each tool documents its own registration model.
         self.write(repository, ".claude/hooks/README.md", "settings.json\n")
         self.write(repository, ".cursor/hooks/README.md", "hooks.json\n")
-        # working-memory-read.sh: Cursor has no prompt-submit hook event.
-        self.write(repository, ".claude/hooks/working-memory-read.sh", HOOK_CANON)
         code, payload = self.parity(repository)
         self.assertEqual(0, code, payload)
         self.assertEqual([], payload["mirror_drift"])
         self.assertEqual([], payload["drift"])
+
+    def test_the_cursor_read_hook_is_mirrored_like_any_other(self) -> None:
+        # Cursor runs it on beforeSubmitPrompt; a mirror without it renders no
+        # memory for the prompt being answered.
+        repository = self.build_edition()
+        self.write(repository, ".claude/hooks/working-memory-read.sh", HOOK_CANON)
+        code, payload = self.parity(repository)
+        self.assertEqual(1, code)
+        self.assertEqual(
+            "missing from mirror",
+            self.drift_by_path(payload)[".cursor/hooks/working-memory-read.sh"]["reason"],
+        )
 
     def test_framework_keyed_exemption_applies_only_to_that_framework(self) -> None:
         rewritten = "---\nname: skill-creator\ndescription: rewritten\n---\nCursor.\n"

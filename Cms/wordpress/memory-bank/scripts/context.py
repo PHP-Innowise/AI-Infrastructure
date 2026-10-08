@@ -2371,9 +2371,9 @@ def hook_capsule_query(
 ) -> tuple[str, str]:
     """The query the hook should ask with, and where it came from.
 
-    Cursor has no prompt-submit event, so its only automatic memory entry
-    supplies a task identifier - usually a branch name - and the governed path
-    then tokenized that slug and retrieved on it. A branch called `main` asks
+    A hook without a prompt - Cursor's stop and session-start renders -
+    supplies only a task identifier, usually a branch name, and the governed
+    path then tokenized that slug and retrieved on it. A branch called `main` asks
     memory for documents about the word "main"; `chore/accelerator-hardening`
     asks for a release skill. The enrichment `build_capsule_query` already
     performs for the lightweight path is applied here instead, so the question

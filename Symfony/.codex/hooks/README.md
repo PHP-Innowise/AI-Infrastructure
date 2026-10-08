@@ -54,9 +54,9 @@ The read hook exits without a capsule when `CONTEXT_CAPSULE_DELIVERED=1`: a
 host that already put this turn's capsule into the prompt sets it (the Harness
 does), and the Stop hook still checkpoints the task.
 
-The read hook carries `additionalContextLimit: 4000`. A Task Capsule is capped
-at 8,000 Unicode characters, which exceeds the 2,500-token default and would
-otherwise be truncated mid-capsule. Lower it if your Codex version accounts
+The read hook carries `additionalContextLimit: 4000`. The capsule it prints is
+capped at 3,600 characters (the JSON packet at 8,000), and the 2,500-token
+default could still truncate one dense with code mid-capsule. Lower it if your Codex version accounts
 tokens differently than this estimate.
 
 Codex tool identifiers and payload keys may still differ from Claude Code. Both

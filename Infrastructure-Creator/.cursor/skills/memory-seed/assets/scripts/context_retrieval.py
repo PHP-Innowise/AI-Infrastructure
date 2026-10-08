@@ -168,18 +168,26 @@ _WM_DELIVERY_STOP = r'''# Capsule delivery: this client receives the Task Capsul
 # through working-memory-read.sh, so the turn checkpoint above is all that
 # runs here.
 '''
-_WM_DELIVERY_STOP_CURSOR = r'''# Capsule delivery: Cursor has no UserPromptSubmit-equivalent event, so
-# working-memory-read.sh is not shipped in .cursor/hooks. The read path is
-# served here instead: after the turn checkpoint, the freshest Task Capsule
-# is rendered into an alwaysApply Cursor rule, which Cursor attaches to
-# every prompt of the next turn. The file is ignored local state, one turn
-# stale by design, and replaced only when a fresh render succeeds.
+_WM_DELIVERY_STOP_CURSOR = r'''# Capsule delivery: Cursor's prompt-time event (beforeSubmitPrompt) cannot
+# add context to a prompt, so Cursor reads the Task Capsule from an
+# alwaysApply rule, which it sends with every request. working-memory-read.sh
+# renders the rule for each prompt; here, after the turn checkpoint, the
+# branch's capsule replaces any rule that hook did not render for this task
+# (an install without it, a prompt without a task, a switched branch). The
+# file is ignored local state, replaced only when a fresh render succeeds.
 # Attached, .cursor/rules is the shared clone's own rule folder, which every
 # project using the clone reads; the attaching launcher delivers the capsule
-# in the prompt instead.
+# in the prompt instead. A host that put the capsule into the prompt itself
+# (the Harness) gets no second, branch-built one.
 [ "$STATE_DIR" = "$ROOT_DIR" ] || exit 0
+[ "${CONTEXT_CAPSULE_DELIVERED:-}" = "1" ] && exit 0
 RULES_DIR="$ROOT_DIR/.cursor/rules"
 RULE_FILE="$RULES_DIR/working-memory.mdc"
+# The prompt hook's rule for this task holds what was retrieved for the
+# conversation's latest prompt. Rebuilt here from the task alone it would lose
+# that, and when Cursor reads its rules before the prompt hook has run, it is
+# what the next request carries.
+grep -qxF "Session context retrieved for a recent prompt (task: $TASK_ID)." "$RULE_FILE" 2>/dev/null && exit 0
 CAPSULE_STATUS=1
 if command -v timeout > /dev/null 2>&1; then
   CAPSULE=$(timeout "$BUDGET_SECONDS" python3 "$CONTEXT_CLI" hook-context \
@@ -226,19 +234,118 @@ elif [ "$CAPSULE_STATUS" -eq 0 ] && [ -n "$CAPSULE" ] && mkdir -p "$RULES_DIR" 2
   fi
 fi
 '''
+# Cursor runs the Claude Code hooks it finds as well as its own. The two
+# working-memory hooks of the Claude copy recognize Cursor's payload (it
+# carries `cursor_version`, which Claude Code never sends - an environment
+# variable could leak into a Claude Code session started from Cursor's
+# terminal) and stand down where the project has its own Cursor hooks: running
+# both doubled every checkpoint and wrote retrievals nobody received. The
+# Cursor and Codex mirrors drop the check - they are the hooks that serve.
+_WM_THIRD_PARTY = r'''# Cursor also runs the Claude Code hooks it finds. Where this project has its
+# own Cursor hooks they serve the session; this copy stands down.
+case "$HOOK_STDIN" in
+  *'"cursor_version"'*) [ -f "$ROOT_DIR/.cursor/hooks.json" ] && exit 0 ;;
+esac
+'''
+# Cursor's prompt-time hook is beforeSubmitPrompt: it receives the prompt, but
+# its output can only let the prompt through or stop it, never add context.
+# The Cursor mirror of the read hook therefore always answers "continue" and
+# renders the capsule for this prompt into the alwaysApply rule, which Cursor
+# sends with every request.
+_WM_PROMPT_PREAMBLE = r'''# Output: plain text on stdout, which Claude Code and Codex add to the
+# prompt as context.
+'''
+_WM_PROMPT_PREAMBLE_CURSOR = r'''# Output: Cursor reads this hook's stdout as JSON and holds the prompt until
+# the hook answers, so every exit path answers "continue" - memory never
+# blocks a prompt. The capsule itself goes into the alwaysApply rule below.
+trap 'printf "{\"continue\": true}\n"' EXIT
+'''
+_WM_PROMPT_SESSION = r'''  [ -n "$SESSION_ID" ] && ARGUMENTS+=(--session-id "$SESSION_ID")
+'''
+_WM_PROMPT_SESSION_CURSOR = r'''  # The rule is re-sent whole with every request, so nothing may be left out
+  # of it as "handed earlier": no --session-id. JSON, for capsule_text.
+  ARGUMENTS+=(--json)
+'''
+_WM_DELIVERY_PROMPT = r'''[ -n "$REPORT" ] || exit 0
+
+# The capsule names itself: its memory section says the text is reference
+# data to check against the cited file, so no banner precedes it.
+echo "$REPORT"
+'''
+_WM_DELIVERY_PROMPT_CURSOR = r'''# Capsule delivery: the rule is rendered from this prompt before the request
+# leaves - in the same turn when Cursor reads its rules after this hook, on
+# the next prompt otherwise. Cursor puts rules at the start of the model's
+# context, so every change costs the conversation its cached prefix: the rule
+# is replaced only when this prompt retrieved an item it does not hold yet.
+# Attached, .cursor/rules is the shared clone's own folder; the launcher
+# delivers the capsule in the prompt instead.
+[ "$STATE_DIR" = "$ROOT_DIR" ] || exit 0
+[ -n "$REPORT" ] || exit 0
+RULES_DIR="$ROOT_DIR/.cursor/rules"
+RULE_FILE="$RULES_DIR/working-memory.mdc"
+RULE_HEADER="Session context retrieved for a recent prompt (task: $TASK_ID)."
+CAPSULE=$(printf '%s' "$REPORT" | python3 -c '
+import json
+import sys
+
+try:
+    text = json.load(sys.stdin).get("capsule_text") or ""
+except (AttributeError, ValueError):
+    text = ""
+if not isinstance(text, str) or not text.startswith("working:"):
+    sys.exit(0)
+
+
+def items(capsule):
+    return {line.split(" \u2014 ")[0] for line in capsule.splitlines() if line.startswith("- ")}
+
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        held = handle.read()
+except (OSError, UnicodeError):
+    held = ""
+# The rule this hook wrote for the task already holds every item this prompt
+# retrieved - or the prompt retrieved none.
+if sys.argv[2] in held.splitlines() and items(text) <= items(held):
+    sys.exit(0)
+sys.stdout.write(text)
+' "$RULE_FILE" "$RULE_HEADER" 2>/dev/null)
+[ -n "$CAPSULE" ] || exit 0
+if mkdir -p "$RULES_DIR" 2>/dev/null; then
+  TMP_RULE=$(mktemp "$RULES_DIR/.working-memory.XXXXXX" 2>/dev/null || true)
+  if [ -n "$TMP_RULE" ]; then
+    {
+      printf -- '---\n'
+      printf 'description: Working memory - current-branch session context\n'
+      printf 'alwaysApply: true\n'
+      printf -- '---\n\n'
+      printf '# Working Memory (auto-rendered)\n\n'
+      printf '%s\n' "$RULE_HEADER"
+      printf 'Retrieved context is not authoritative - verify the source.\n\n'
+      printf '%s\n' '```'
+      printf '%s\n' "$CAPSULE"
+      printf '%s\n' '```'
+    } > "$TMP_RULE" 2>/dev/null && mv -f "$TMP_RULE" "$RULE_FILE" 2>/dev/null
+    rm -f "$TMP_RULE" 2>/dev/null
+  fi
+fi
+'''
 _WM_DELIVERY_SESSION = r'''# Capsule delivery: this client receives the Task Capsule at prompt time
 # through working-memory-read.sh; session start reports metadata only.
 '''
-_WM_DELIVERY_SESSION_CURSOR = r'''# Capsule delivery: Cursor has no UserPromptSubmit-equivalent event; the
-# stop hook maintains .cursor/rules/working-memory.mdc instead (the
-# documented exception to the metadata-only session banner - see
+_WM_DELIVERY_SESSION_CURSOR = r'''# Capsule delivery: Cursor reads the Task Capsule from
+# .cursor/rules/working-memory.mdc, which the prompt and stop hooks maintain
+# (the documented exception to the metadata-only session banner - see
 # docs/TOOL-INTEGRATIONS.md). Re-render it here so a fresh session or a
 # branch switch does not serve the previous session's capsule. Nothing is
 # printed: the rule file is the only output.
 CAPSULE_BUDGET_SECONDS="${CONTEXT_HOOK_BUDGET:-5}"
 CAPSULE_TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$PROJECT_DIR" branch --show-current 2>/dev/null)}"
-# Attached, the rule folder is the shared clone's; see the stop hook.
+# Attached, the rule folder is the shared clone's; see the stop hook. Nor
+# when the host delivered the capsule in the prompt.
 [ "$STATE_DIR" = "$ROOT_DIR" ] || exit 0
+[ "${CONTEXT_CAPSULE_DELIVERED:-}" = "1" ] && exit 0
 RULES_DIR="$ROOT_DIR/.cursor/rules"
 RULE_FILE="$RULES_DIR/working-memory.mdc"
 CAPSULE=""
@@ -361,11 +468,19 @@ MIRROR_RULES: dict[str, Any] = {
                         # _WM_DELIVERY_* constants above).
                         [_WM_DELIVERY_STOP, _WM_DELIVERY_STOP_CURSOR],
                         [_WM_DELIVERY_SESSION, _WM_DELIVERY_SESSION_CURSOR],
+                        # The read hook runs on beforeSubmitPrompt and renders
+                        # this prompt's capsule into the rule (see the
+                        # _WM_PROMPT_* constants above).
+                        [
+                            "# Hook type: UserPromptSubmit",
+                            "# Cursor hook event: beforeSubmitPrompt",
+                        ],
+                        ["--host claude", "--host cursor"],
+                        [_WM_PROMPT_PREAMBLE, _WM_PROMPT_PREAMBLE_CURSOR],
+                        [_WM_PROMPT_SESSION, _WM_PROMPT_SESSION_CURSOR],
+                        [_WM_DELIVERY_PROMPT, _WM_DELIVERY_PROMPT_CURSOR],
+                        [_WM_THIRD_PARTY, ""],
                     ],
-                    # Cursor has no UserPromptSubmit-equivalent hook event, so
-                    # the read half of automatic memory is deliberately absent
-                    # from the Cursor mirror.
-                    "skip": ["working-memory-read.sh"],
                 },
                 ".codex/hooks": {
                     "transform": "copy",
@@ -399,6 +514,7 @@ MIRROR_RULES: dict[str, Any] = {
                             "consider using /debugger.",
                             "consider using systematic-debugger.",
                         ],
+                        [_WM_THIRD_PARTY, ""],
                     ],
                 },
             },

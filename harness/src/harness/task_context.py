@@ -377,6 +377,24 @@ class TaskContext:
             return {'ok': False, 'saved': saved, 'skipped': skipped, 'error': message}
         return {'ok': True, 'saved': saved, 'skipped': skipped, 'error': None}
 
+    def checkpoint(self, session, since=None):
+        """Run the turn checkpoint for a provider whose headless mode fires no Stop hook.
+
+        `since` is when the run started: a turn report written after it means a
+        Stop hook did fire and ran the checkpoint, and a second one would count
+        the turn twice. Returns None then.
+        """
+        _, options, workspace, info = self._bound(session)
+        if since is not None:
+            layout = self.knowledge.layout(session['project_id'], workspace)
+            report = layout['folder'] / info['root'] / 'memory-bank' / 'local' / 'last-turn-report.json'
+            try:
+                if report.stat().st_mtime >= since:
+                    return None
+            except OSError:
+                pass
+        return self._call(session, options, workspace, 'turn', task_id=options['task_id'])
+
     def run(self, session, data):
         _, options, workspace, _ = self._bound(session)
         if not isinstance(data, dict) or data.get('action') not in SCOPED_ACTIONS:

@@ -1032,10 +1032,19 @@ through `developer_instructions` and session hooks, Cursor Agent through
 `--plugin-dir` - and Knowledge, Memory use and session memory work on the
 accelerator's state for the project in this server's state directory
 (`attached/<project id>`). The **Project** chip's panel shows the folder, the clone
-and the state directory, switches or detaches the edition, and for Codex records
-the one-time hook approval (**Trust accelerator hooks in Codex**). A project with
-an installed accelerator keeps using its own files. See
+and the state directory, switches or detaches the edition, and shows the Codex
+hook approval (**Trust accelerator hooks in Codex** records it again). A project
+with an installed accelerator keeps using its own files. See
 [docs/ATTACHED-MODE.md](../docs/ATTACHED-MODE.md).
+
+Either way the server keeps the project at this clone's version by itself: once
+per version of the clone - at start, on registration and before a session's
+memory - it brings an installed copy's untouched files and memory runtime up to
+the clone (`scripts/install_accelerator.py --sync`), and, with Codex available,
+approves the accelerator's own Codex hooks in your Codex config, the record
+Codex's `/hooks` review writes; a team's own or edited hook is left for that
+review. The conversation says what changed. Set `HARNESS_CODEX_HOOK_TRUST=0` in
+the server's environment to leave the approval to `/hooks`.
 
 The folder browser navigates local folders, or takes an absolute path
 directly. The folder picker provides Home, Parent folder,

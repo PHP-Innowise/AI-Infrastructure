@@ -706,9 +706,11 @@ RUNTIME_SYNC_PATTERNS = (
     ".cursor/hooks/working-memory-*.sh",
 )
 # Codex runs a project hook only while the stored hash of its definition
-# matches, so rewriting these switches every hook off until a person
-# re-approves them. They are reported, never rewritten.
-TRUST_BOUND_FILES = {".codex/hooks.json", ".codex/config.toml"}
+# matches, so rewriting this switches every hook off until it is approved
+# again. It is rewritten only for a caller that re-approves the accelerator's
+# own definitions right after (the Harness, `rewire_codex=True`); otherwise it
+# is reported and left alone.
+TRUST_BOUND_FILES = {".codex/hooks.json"}
 # Documentation an install copied as ACCELERATOR.md when the project had its
 # own README; not worth a write into the project.
 SYNC_SKIPPED_FILES = {"README.md"}
@@ -823,7 +825,12 @@ def _write_atomically(path: Path, data: bytes, executable: bool) -> None:
 
 
 def sync_installation(
-    root: Path, target: Path, *, dry_run: bool = False, stamp: str | None = None
+    root: Path,
+    target: Path,
+    *,
+    dry_run: bool = False,
+    stamp: str | None = None,
+    rewire_codex: bool = False,
 ) -> dict:
     """Bring an installed project's accelerator files up to this clone.
 
@@ -833,8 +840,9 @@ def sync_installation(
     has, and the managed blocks of AGENTS.md and .claude/CLAUDE.md. The
     runtime is also replaced over a local edit, which is backed up first
     under memory-bank/local. Never written: anything the project's Git
-    tracks, seeded state the project owns, and the Codex hook wiring, whose
-    trust a person granted. Each of those is reported instead.
+    tracks, seeded state the project owns, and - unless `rewire_codex` says
+    the caller re-approves it - the Codex hook wiring, whose trust is a hash
+    of its definitions. Each of those is reported instead.
     """
     report: dict = {
         "target": str(target), "edition": None, "release": None, "changed": [],
@@ -902,10 +910,9 @@ def sync_installation(
         if path in tracked:
             keep(path, "tracked by the project's Git: update it through a commit")
             continue
-        if path in TRUST_BOUND_FILES:
-            if exists:
-                keep(path, "Codex hook wiring: a change needs re-approval in Codex /hooks")
-                continue
+        if path in TRUST_BOUND_FILES and exists and not rewire_codex:
+            keep(path, "Codex hook wiring: a change needs re-approval in Codex /hooks")
+            continue
         if not exists:
             write(path, payload, "added", executable, False)
             continue
@@ -997,6 +1004,12 @@ def parse_args() -> argparse.Namespace:
         help="with --write-inventories, write the generated inventories to this "
         "directory instead of the checkout's install/inventories",
     )
+    parser.add_argument(
+        "--rewire-codex",
+        action="store_true",
+        help="with --sync, also update an untouched .codex/hooks.json; Codex then "
+        "runs the hooks only after they are approved again in /hooks",
+    )
     parser.add_argument("--target", type=Path)
     parser.add_argument("--tool", action="append", choices=TOOLS)
     parser.add_argument("--dry-run", action="store_true")
@@ -1012,6 +1025,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--target is required with --edition and --sync")
     if args.inventory_out is not None and not args.write_inventories:
         parser.error("--inventory-out requires --write-inventories")
+    if args.rewire_codex and not args.sync:
+        parser.error("--rewire-codex requires --sync")
     return args
 
 
@@ -1033,7 +1048,10 @@ def main() -> int:
             return 0
         if args.sync:
             report = sync_installation(
-                root, resolve_write_target(args.target), dry_run=args.dry_run
+                root,
+                resolve_write_target(args.target),
+                dry_run=args.dry_run,
+                rewire_codex=args.rewire_codex,
             )
             print(json.dumps(report, indent=1, ensure_ascii=False))
             return 1 if report["error"] else 0

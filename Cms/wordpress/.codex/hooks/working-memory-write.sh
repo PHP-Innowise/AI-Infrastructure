@@ -35,6 +35,8 @@ FLUSH_AFTER="${CONTEXT_FLUSH_AFTER:-5}"
 command -v python3 > /dev/null 2>&1 || exit 0
 [ -f "$CONTEXT_CLI" ] || exit 0
 
+HOOK_STDIN=$(cat 2>/dev/null)
+
 TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$PROJECT_DIR" branch --show-current 2>/dev/null)}"
 [ -n "$TASK_ID" ] || exit 0
 

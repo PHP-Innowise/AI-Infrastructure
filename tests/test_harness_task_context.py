@@ -47,6 +47,20 @@ print(json.dumps({"type": "turn.completed"}), flush=True)
 '''
 
 
+FAKE_CURSOR = r'''
+import json, os, pathlib, sys
+receipt = pathlib.Path(sys.argv[1])
+receipt.write_text(json.dumps({"cwd": os.getcwd(), "prompt": sys.stdin.read(),
+                              "task_id": os.environ.get("CONTEXT_TASK_ID"),
+                              "delivered": os.environ.get("CONTEXT_CAPSULE_DELIVERED")}))
+print(json.dumps({"type": "system", "subtype": "init", "session_id": "native-cursor-fixture"}), flush=True)
+print(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+    {"type": "text", "text": "Checked the rule."}]}}), flush=True)
+print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                  "session_id": "native-cursor-fixture", "result": "Checked the rule."}), flush=True)
+'''
+
+
 class TaskContextTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -258,6 +272,31 @@ class TaskContextTests(unittest.TestCase):
         self.assertEqual(memory_draft.summary("missing"), memory[1]["text"])
         with self.assertRaisesRegex(sessions.SessionError, "for each message by itself"):
             store.prepare_context(sid, "cobalt allocation")
+
+    def test_a_cursor_turn_gets_the_checkpoint_its_headless_mode_skips(self):
+        # cursor-agent --print fires no stop hook, so nothing else would record
+        # the turn the agent just worked.
+        self.fake.write_text(FAKE_CURSOR)
+        report = self.project / "memory-bank/local/last-turn-report.json"
+        with patch.object(sessions.providers, "discover_providers", return_value=[
+                {"id": "cursor", "name": "Offline fixture", "available": True, "executable": str(self.fake)}]):
+            store = self.manager()
+        sid = store.create(self.automatic(store, provider="cursor"))["id"]
+        session = self.wait_status(store, sid, "completed")
+        self.assertEqual(session["brain"]["task_id"], json.loads(report.read_text(encoding="utf-8"))["task_id"])
+        # When the hook did fire this run, its checkpoint stands.
+        written = report.stat().st_mtime
+        context = store._task_context(wait=5)
+        self.assertIsNone(context.checkpoint(session, since=written))
+        self.assertEqual(written, report.stat().st_mtime)
+        self.assertEqual(session["brain"]["task_id"], context.checkpoint(session, since=written + 1)["task_id"])
+
+    def test_a_codex_turn_leaves_the_checkpoint_to_its_stop_hook(self):
+        report = self.project / "memory-bank/local/last-turn-report.json"
+        store = self.manager()
+        sid = store.create(self.automatic(store))["id"]
+        self.wait_status(store, sid, "completed")
+        self.assertFalse(report.exists())
 
     def test_an_unattended_run_saves_its_draft_and_each_follow_up_retrieves_for_its_message(self):
         from harness import memory_draft

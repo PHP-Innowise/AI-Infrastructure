@@ -35,6 +35,8 @@ FLUSH_AFTER="${CONTEXT_FLUSH_AFTER:-5}"
 command -v python3 > /dev/null 2>&1 || exit 0
 [ -f "$CONTEXT_CLI" ] || exit 0
 
+HOOK_STDIN=$(cat 2>/dev/null)
+
 TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$PROJECT_DIR" branch --show-current 2>/dev/null)}"
 [ -n "$TASK_ID" ] || exit 0
 
@@ -46,18 +48,26 @@ else
     --task-id "$TASK_ID" --flush-after "$FLUSH_AFTER" > /dev/null 2>&1
 fi
 
-# Capsule delivery: Cursor has no UserPromptSubmit-equivalent event, so
-# working-memory-read.sh is not shipped in .cursor/hooks. The read path is
-# served here instead: after the turn checkpoint, the freshest Task Capsule
-# is rendered into an alwaysApply Cursor rule, which Cursor attaches to
-# every prompt of the next turn. The file is ignored local state, one turn
-# stale by design, and replaced only when a fresh render succeeds.
+# Capsule delivery: Cursor's prompt-time event (beforeSubmitPrompt) cannot
+# add context to a prompt, so Cursor reads the Task Capsule from an
+# alwaysApply rule, which it sends with every request. working-memory-read.sh
+# renders the rule for each prompt; here, after the turn checkpoint, the
+# branch's capsule replaces any rule that hook did not render for this task
+# (an install without it, a prompt without a task, a switched branch). The
+# file is ignored local state, replaced only when a fresh render succeeds.
 # Attached, .cursor/rules is the shared clone's own rule folder, which every
 # project using the clone reads; the attaching launcher delivers the capsule
-# in the prompt instead.
+# in the prompt instead. A host that put the capsule into the prompt itself
+# (the Harness) gets no second, branch-built one.
 [ "$STATE_DIR" = "$ROOT_DIR" ] || exit 0
+[ "${CONTEXT_CAPSULE_DELIVERED:-}" = "1" ] && exit 0
 RULES_DIR="$ROOT_DIR/.cursor/rules"
 RULE_FILE="$RULES_DIR/working-memory.mdc"
+# The prompt hook's rule for this task holds what was retrieved for the
+# conversation's latest prompt. Rebuilt here from the task alone it would lose
+# that, and when Cursor reads its rules before the prompt hook has run, it is
+# what the next request carries.
+grep -qxF "Session context retrieved for a recent prompt (task: $TASK_ID)." "$RULE_FILE" 2>/dev/null && exit 0
 CAPSULE_STATUS=1
 if command -v timeout > /dev/null 2>&1; then
   CAPSULE=$(timeout "$BUDGET_SECONDS" python3 "$CONTEXT_CLI" hook-context \

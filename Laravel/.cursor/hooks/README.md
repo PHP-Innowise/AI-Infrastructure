@@ -9,9 +9,14 @@ These hooks are registered in `.cursor/hooks.json` (schema `version: 1`). Each i
 **Purpose:** Prints project metadata at session start: git branch, Composer/PHP/Laravel/tooling markers, Livewire/Inertia detection, framework/structure, governed or lightweight mode, index health/staleness, active binding count, Project Brain validation status, and Memory Bank validation summary. The banner never prints/injects record contents; this Cursor copy additionally re-renders `.cursor/rules/working-memory.mdc` silently (see the capsule section below).
 **Return:** Always `0` (informational only).
 
+### beforeSubmitPrompt: Working-Memory Read
+**Script:** `working-memory-read.sh`
+**Purpose:** Retrieves for the prompt being submitted (`refresh --host cursor --query <prompt> --sanitize --json`) and renders the capsule into `.cursor/rules/working-memory.mdc` before the request leaves (see the capsule section below). Writes no task state. Stands down when the host already put the capsule into the prompt (`CONTEXT_CAPSULE_DELIVERED=1`, the Harness).
+**Return:** Always `0` with `{"continue": true}` on stdout - memory never blocks a prompt.
+
 ### stop: Working-Memory Write
 **Script:** `working-memory-write.sh`
-**Purpose:** Buffers this turn's change set and flushes it to the authoritative task on a boundary. Reads Git porcelain metadata only; sensitive-looking paths and the runtime's own churn are excluded. The first flush provisions the task if it does not exist, so no manual `start` is required; an existing task is never overwritten. After the checkpoint, this Cursor copy renders the freshest Task Capsule into `.cursor/rules/working-memory.mdc` (see the capsule section below).
+**Purpose:** Buffers this turn's change set and flushes it to the authoritative task on a boundary. Reads Git porcelain metadata only; sensitive-looking paths and the runtime's own churn are excluded. The first flush provisions the task if it does not exist, so no manual `start` is required; an existing task is never overwritten. After the checkpoint, this Cursor copy renders the branch's Task Capsule into `.cursor/rules/working-memory.mdc` unless the prompt hook rendered it for this task (see the capsule section below).
 **Return:** Always `0` (a failed checkpoint must never surface as a turn error).
 **Flush boundary:** `CONTEXT_FLUSH_AFTER` turns, default 5.
 
@@ -51,7 +56,7 @@ These hooks are registered in `.cursor/hooks.json` (schema `version: 1`). Each i
 | Claude Code (`.claude/settings.json`) | Cursor (`.cursor/hooks.json`) |
 |---|---|
 | `SessionStart` | `sessionStart` |
-| `UserPromptSubmit` | **No equivalent** - the capsule is rendered into an `alwaysApply` rule instead; see below |
+| `UserPromptSubmit` | `beforeSubmitPrompt` - it cannot add context, so the capsule is rendered into an `alwaysApply` rule; see below |
 | `Stop` | `stop` |
 | `PreToolUse` matcher `Bash` | `beforeShellExecution` |
 | `PreToolUse` matcher `Write\|Edit` | `afterFileEdit` (post-edit; warns rather than blocks pre-write) |
@@ -67,24 +72,32 @@ Notes:
 
 ## How the Task Capsule reaches Cursor
 
-The read half of automatic memory cannot run at prompt time on this tool.
-Cursor's nearest event, `beforeSubmitPrompt`, returns
-`{"continue": true|false, "user_message": "..."}`: it can allow or block a
-submission, but it cannot add context to the prompt. Emitting a capsule from
-it would produce output the client discards, so `working-memory-read.sh` is
-absent from `.cursor/hooks/` rather than present and unwired.
+Cursor's prompt-time event, `beforeSubmitPrompt`, receives the prompt but
+returns only `{"continue": true|false, "user_message": "..."}`: it can allow or
+block a submission, not add context to it. The capsule therefore arrives
+through `.cursor/rules/working-memory.mdc`, an `alwaysApply` rule Cursor sends
+with every request:
 
-The capsule arrives through a rule file instead. The Cursor copies of
-`working-memory-write.sh` (after the turn checkpoint) and `local-context.sh`
-(at session start, so a fresh session or a branch switch never serves the
-previous session's capsule) render the freshest capsule into
-`.cursor/rules/working-memory.mdc`, an `alwaysApply` rule Cursor attaches to
-every prompt. The rendered file is one turn stale by design and says so in
-its header ("as of end of previous turn"); it is replaced atomically and only
-when a fresh render succeeds, and it is ignored local state (this edition's
-`.gitignore` lists it). This divergence from the canonical `.claude/hooks`
-scripts is a declared MIRROR_RULES transformation (the `_WM_DELIVERY_*`
-constants in `memory-bank/scripts/context_retrieval.py`), verified by
+- `working-memory-read.sh` (`beforeSubmitPrompt`) retrieves for the prompt and
+  renders that capsule into the rule before the request leaves - in the same
+  turn when Cursor reads its rules after the hook, on the next prompt
+  otherwise. Cursor puts rules at the start of the model's context, where a
+  change costs the conversation its cached prefix, so the rule is replaced
+  only when the prompt retrieved an item it does not hold yet. Its header
+  says "retrieved for a recent prompt".
+- `working-memory-write.sh` (`stop`) renders the branch's capsule after the
+  turn checkpoint, unless the rule holds the prompt hook's capsule for the same
+  task; `local-context.sh` (`sessionStart`) always does, so a fresh session or
+  a branch switch never serves the previous session's capsule.
+
+The rule is replaced atomically and only when a fresh render succeeds, and it
+is ignored local state (this edition's `.gitignore` lists it). Cursor also
+runs the Claude Code hooks it finds; the Claude copies of the two
+working-memory hooks recognize Cursor's payload and stand down while this
+folder's hooks serve. These Cursor copies differ from the canonical
+`.claude/hooks` scripts by declared MIRROR_RULES transformations (the
+`_WM_DELIVERY_*` and `_WM_PROMPT_*` constants in
+`memory-bank/scripts/context_retrieval.py`), verified by
 `scripts/build_mirrors.py --check` - not drift.
 
 Explicit retrieval still works on Cursor: run `context.py retrieve` (or the

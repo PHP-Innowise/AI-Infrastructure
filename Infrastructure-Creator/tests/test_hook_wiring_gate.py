@@ -252,9 +252,10 @@ class RootAnchoredWiringTest(WiringFixture):
                 validator.validate_required_wiring(self.target, [edition], self.files, errors)
                 self.assertEqual(len(errors), 1, errors)
                 self.assertIn(f"does not wire {SCRIPT}", errors[0])
-        # hook-forge step 9's two documented gaps.
+        # hook-forge step 9's documented gap.
         self.assertNotIn("subagent-dispatch.sh", validator.WIRED_HOOKS["codex"])
-        self.assertNotIn("working-memory-read.sh", validator.WIRED_HOOKS["cursor"])
+        # Cursor's read hook is wired to beforeSubmitPrompt and renders the rule.
+        self.assertIn("working-memory-read.sh", validator.WIRED_HOOKS["cursor"])
 
     def test_this_editions_own_wiring_passes_the_gate(self) -> None:
         """The generator ships the same forms it requires of a target.

@@ -172,6 +172,7 @@
 .cursor/hooks/local-context.sh -diff linguist-generated=true
 .cursor/hooks/loop-detection.sh -diff linguist-generated=true
 .cursor/hooks/subagent-dispatch.sh -diff linguist-generated=true
+.cursor/hooks/working-memory-read.sh -diff linguist-generated=true
 .cursor/hooks/working-memory-write.sh -diff linguist-generated=true
 .cursor/skills/SKILL?FLOW.md -diff linguist-generated=true
 .cursor/skills/api-designer/SKILL.md -diff linguist-generated=true

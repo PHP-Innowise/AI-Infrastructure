@@ -952,5 +952,36 @@ class ActivityEventTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             providers.activity_events("command", {"type": "result"})
 
+class CodexInstructionBudgetTests(unittest.TestCase):
+    """Codex stops reading the AGENTS.md chain at 32 KiB, and the accelerator's policy comes last."""
+
+    def launch(self, files):
+        with tempfile.TemporaryDirectory() as folder:
+            project = Path(folder)
+            for name, size in files.items():
+                (project / name).write_text("x" * size, encoding="utf-8")
+            command = providers.build_command("codex", "/bin/codex", project, "hello")
+            return command, providers.codex_instruction_budget(command, project)
+
+    def test_a_policy_past_the_default_budget_is_read_whole(self):
+        command, raised = self.launch({"AGENTS.md": 40_000})
+        at = raised.index("exec")
+        self.assertEqual(["-c", "project_doc_max_bytes=131072"], raised[at - 2:at])
+        self.assertEqual(command, raised[:at - 2] + raised[at:])
+        _, larger = self.launch({"AGENTS.md": 200_000})
+        self.assertIn(f"project_doc_max_bytes={200_000 + 32768}", larger)
+
+    def test_the_override_file_is_the_one_codex_reads(self):
+        _, raised = self.launch({"AGENTS.override.md": 40_000, "AGENTS.md": 10})
+        self.assertIn("project_doc_max_bytes=131072", raised)
+        command, kept = self.launch({"AGENTS.override.md": 10, "AGENTS.md": 40_000})
+        self.assertEqual(command, kept)
+
+    def test_a_small_policy_or_another_command_is_left_alone(self):
+        command, kept = self.launch({"AGENTS.md": 1_000})
+        self.assertEqual(command, kept)
+        self.assertEqual(["codex", "resume"], providers.codex_instruction_budget(["codex", "resume"], Path("/nonexistent")))
+
+
 if __name__ == "__main__":
     unittest.main()

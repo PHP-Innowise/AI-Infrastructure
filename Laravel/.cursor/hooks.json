@@ -7,6 +7,12 @@
         "timeout": 15
       }
     ],
+    "beforeSubmitPrompt": [
+      {
+        "command": ".cursor/hooks/working-memory-read.sh",
+        "timeout": 8
+      }
+    ],
     "subagentStart": [
       {
         "command": ".cursor/hooks/subagent-gate.sh",

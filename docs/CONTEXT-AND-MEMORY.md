@@ -1167,11 +1167,12 @@ The split is deliberate. At prompt time nothing has happened yet, so there is
 no delta to record; a request is the right moment to *read*. The delta exists
 at the end of a turn, which is the right moment to *write*.
 
-Cursor has no `UserPromptSubmit` equivalent, so its read half is delivered
-differently: the Cursor mirrors of the `stop` and `sessionStart` hooks render
-the most recently available capsule into the `alwaysApply` rule
-`.cursor/rules/working-memory.mdc` - ignored local state, one turn stale by
-design and labeled as such ("as of end of previous turn"). See
+Cursor cannot add context to a prompt from a hook, so its read half arrives
+through the `alwaysApply` rule `.cursor/rules/working-memory.mdc`: the Cursor
+mirror of `working-memory-read.sh` runs on `beforeSubmitPrompt`, renders the
+capsule for the prompt into the rule and lets the prompt through; the
+`sessionStart` mirror renders the branch's capsule, and the `stop` mirror does
+too unless the rule holds the prompt's capsule for the same task. See
 `docs/TOOL-INTEGRATIONS.md` for the mechanism and its MIRROR_RULES
 declaration.
 

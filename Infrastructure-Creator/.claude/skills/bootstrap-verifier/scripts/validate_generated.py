@@ -13,8 +13,8 @@ Checks:
     resolves to a skill/agent that actually exists in the same edition.
   - Every selected edition root exists and no unselected edition root exists.
   - Every hook script passes `bash -n` and carries the executable bit, and the
-    expected hook set is complete per edition (working-memory-read.sh is
-    deliberately absent from Cursor - it has no prompt-time hook event).
+    expected hook set is complete per edition (Cursor's working-memory-read.sh
+    runs on beforeSubmitPrompt and must answer {"continue": true}).
   - Every flow command's stages name agents that were generated, no parallel
     stage holds two write-capable agents (the gate runs those one at a time),
     and a multi-stage flow declares at least one checkpoint.
@@ -115,11 +115,12 @@ RUNTIME_SCRIPTS = (
     "workspace_roots.py",
 )
 
-# Hook contract per edition. Cursor deliberately lacks working-memory-read.sh:
-# it has no UserPromptSubmit-equivalent event to wire it to. Its read path is
-# the alwaysApply rule .cursor/rules/working-memory.mdc that the Cursor
-# copies of working-memory-write.sh and local-context.sh render instead
-# (hook-forge step 6). subagent-gate.sh is present in every edition but is
+# Hook contract per edition. Cursor's working-memory-read.sh runs on
+# beforeSubmitPrompt, which cannot add context to a prompt: it renders the
+# capsule for the prompt into the alwaysApply rule
+# .cursor/rules/working-memory.mdc, as the Cursor copies of
+# working-memory-write.sh and local-context.sh do at the end of a turn and at
+# session start (hook-forge step 6). subagent-gate.sh is present in every edition but is
 # tool-owned - each edition ships a variant matching its host's gate
 # contract, so byte-identity across editions is NOT expected for it.
 BASE_HOOKS = (
@@ -135,7 +136,7 @@ BASE_HOOKS = (
 )
 REQUIRED_HOOKS = {
     "claude": BASE_HOOKS + ("working-memory-read.sh",),
-    "cursor": BASE_HOOKS,
+    "cursor": BASE_HOOKS + ("working-memory-read.sh",),
     "codex": BASE_HOOKS + ("working-memory-read.sh",),
 }
 
@@ -517,16 +518,19 @@ def validate_hooks(target: Path, editions: list, files: dict, errors: list) -> N
             expected_rel = f"{hooks_rel}/{expected}"
             if not is_owned(files, expected_rel):
                 errors.append(f"[{edition}] required hook is not manifest-owned: {expected_rel}")
-        read_hook_rel = f"{hooks_rel}/working-memory-read.sh"
-        if edition == "cursor" and is_owned(files, read_hook_rel):
-            errors.append(
-                "[cursor] working-memory-read.sh generated, but Cursor has no "
-                "prompt-time hook event to run it (documented divergence)"
-            )
         if edition == "cursor":
-            # Cursor's read path: the stop and sessionStart hooks must render
-            # the capsule into the alwaysApply working-memory rule.
-            for renderer in ("working-memory-write.sh", "local-context.sh"):
+            # Cursor's read path: the prompt, stop and sessionStart hooks must
+            # render the capsule into the alwaysApply working-memory rule, and
+            # the prompt hook must always let the prompt through.
+            read_hook = target / hooks_rel / "working-memory-read.sh"
+            if is_owned(files, f"{hooks_rel}/working-memory-read.sh") and '"continue": true' not in read_hook.read_text(
+                encoding="utf-8", errors="replace"
+            ).replace('\\"', '"'):
+                errors.append(
+                    f"[cursor] {hooks_rel}/working-memory-read.sh does not answer "
+                    '{"continue": true} to beforeSubmitPrompt'
+                )
+            for renderer in ("working-memory-read.sh", "working-memory-write.sh", "local-context.sh"):
                 renderer_rel = f"{hooks_rel}/{renderer}"
                 if not is_owned(files, renderer_rel):
                     continue  # already reported as a missing required hook
