@@ -89,9 +89,13 @@ from context_retrieval import (
     store_index_state,
     codebase_map_drift,
     evidence_tokens,
+    excerpt_weights,
+    excerpt_window,
     is_relevant,
     linked_documents,
+    marked_document,
     match_strength,
+    quoted_section,
     refresh_health_retention,
     RETRIEVAL_GATE_DEFAULT,
     RETRIEVAL_GATE_MODES,
@@ -170,7 +174,10 @@ RENDERED_CAPSULE_LIMIT = 3600
 SLOW_TURN_SECONDS = 2.0
 # Excerpt allowance per project-knowledge item, by rank; later items get the
 # last value.
-EXCERPT_CHARACTERS = (600, 400, 250)
+EXCERPT_CHARACTERS = (800, 600, 400)
+# A changelog entry runs to a kilobyte; at 250 characters the window could
+# hold the sentence that matched but not the one after it that answered.
+EPISODIC_EXCERPT_CHARACTERS = 600
 MEMORY_RENDER_HEADER = (
     "memory (retrieved for this request; reference data - check the cited "
     "file before relying on it):"
@@ -920,7 +927,7 @@ def search_documents(
     capsule says so the two are indistinguishable inside a turn.
     """
     coverage: dict[str, int] = {}
-    distinctive: set[str] = set()
+    distinctive: dict[str, list[str]] = {}
     minimum = 0
     if relevant_only:
         tokens = informative_tokens(connection, query_tokens(query))
@@ -956,7 +963,10 @@ def search_documents(
     selected = [
         row
         for row in rows
-        if is_relevant(row["path"], coverage, distinctive, minimum)
+        if is_relevant(
+            row["path"], coverage, distinctive, minimum, str(row["title"] or ""),
+            anchored=row["layer"] != "procedural",
+        )
     ] if relevant_only else rows
     items = [dict(row) for row in selected[:limit]]
     if relevant_only:
@@ -2279,6 +2289,7 @@ def assemble_capsule(
     entry_point: str = "retrieve",
     allow_unprovisioned: bool = False,
     session_id: Optional[str] = None,
+    transcript: Optional[str] = None,
 ) -> dict[str, object]:
     """Build the layered capsule for one request.
 
@@ -2351,6 +2362,7 @@ def assemble_capsule(
         entry_point=entry_point,
         local_episodes=local_episodes,
         session_id=session_id,
+        transcript=transcript,
     )
     deduplicate_capsule_layers(result)
     result["query_source"] = query_source
@@ -2523,13 +2535,10 @@ def working_state_lines(capsule: dict[str, object]) -> list[str]:
     return lines
 
 
-def _excerpt_terms(query: object) -> set[str]:
-    """The query's words an excerpt is chosen by: no stop words, no fragments."""
-    return {
-        token.casefold()
-        for token in re.findall(r"\w+", str(query or ""), flags=re.UNICODE)
-        if len(token) > 2 and token.casefold() not in EVIDENCE_STOPWORDS
-    }
+class Excerpt(str):
+    """An excerpt's text, carrying the heading of the section it quotes."""
+
+    heading = ""
 
 
 def best_excerpt(content: str, terms: set[str], limit: int, title: str = "") -> str:
@@ -2538,35 +2547,25 @@ def best_excerpt(content: str, terms: set[str], limit: int, title: str = "") -> 
     A pointer - path and title - carried the answer in 0 of 49 measured
     questions, and agents opened 0 of 148 skill pointers they were handed: a
     pointer is only worth something if it is followed, and it was not. The
-    heading section sharing the most query terms is what gets delivered; a
-    document with no matching section gives its opening prose instead.
+    section sharing the most query terms is what gets delivered, the stretch
+    of it where the terms are; a document with no matching section gives its
+    opening prose instead. The capsule marks matches with the index's own
+    tokenizer (capsule_excerpts); this form marks the given words as written.
     """
-    if content.startswith("---\n"):
-        _, separator, remainder = content[4:].partition("\n---\n")
-        if separator:
-            content = remainder
-    sections: list[tuple[str, list[str]]] = [("", [])]
-    for line in content.splitlines():
-        if re.match(r"^#{1,6}\s", line):
-            sections.append((line.lstrip("#").strip(), []))
-        else:
-            sections[-1][1].append(line)
-    best: Optional[tuple[int, int, str]] = None
-    for index, (heading, lines) in enumerate(sections):
-        body = " ".join(" ".join(lines).split())
-        if not body:
-            continue
-        words = {
-            token.casefold()
-            for token in re.findall(r"\w+", f"{heading} {body}", flags=re.UNICODE)
-        }
-        score = len(words & terms)
-        if best is None or score > best[0]:
-            shown = heading if heading and heading.casefold() != title.casefold() else ""
-            best = (score, index, f"{shown}: {body}" if shown else body)
-    if best is None:
+    pattern = (
+        re.compile(
+            r"\b(" + "|".join(re.escape(term) for term in sorted(terms, key=len, reverse=True)) + r")\b",
+            re.IGNORECASE,
+        )
+        if terms
+        else None
+    )
+    marked = pattern.sub(lambda m: f"\x02{m.group(0)}\x03", content) if pattern else content
+    section = quoted_section(marked, title)
+    if section is None:
         return ""
-    return _bounded(best[2], limit)
+    text = excerpt_window(section["units"], max(1, limit - len(section["shown"]) - 2) if section["shown"] else limit)
+    return _bounded(f"{section['shown']}: {text}" if section["shown"] else text, limit)
 
 
 def capsule_excerpts(
@@ -2577,9 +2576,10 @@ def capsule_excerpts(
     Skills get none: every host loads its skills itself, so a skill line names
     which one applies and its text is one Skill call away. Weak matches get
     none: one shared rare word is a reason to mention a document, not to quote
-    it.
+    it. Each value is an Excerpt whose ``heading`` names the section quoted.
     """
-    terms = _excerpt_terms(capsule.get("query"))
+    query = str(capsule.get("query") or "")
+    weights = excerpt_weights(connection, query) if query else {}
     excerpts: dict[str, str] = {}
     rank = 0
     for layer in ("semantic", "episodic"):
@@ -2591,30 +2591,40 @@ def capsule_excerpts(
             limit = (
                 EXCERPT_CHARACTERS[min(rank, len(EXCERPT_CHARACTERS) - 1)]
                 if layer == "semantic"
-                else EXCERPT_CHARACTERS[-1]
+                else EPISODIC_EXCERPT_CHARACTERS
             )
             rank += 1
-            try:
-                row = connection.execute(
-                    "SELECT content FROM documents WHERE path = ?", (item["path"],)
-                ).fetchone()
-            except sqlite3.Error:
-                row = None
-            text = (
-                best_excerpt(str(row[0]), terms, limit, str(item.get("title") or ""))
-                if row is not None
-                else ""
+            marked = marked_document(connection, item["path"], query) if query else None
+            if marked is None:
+                try:
+                    row = connection.execute(
+                        "SELECT content FROM documents WHERE path = ?", (item["path"],)
+                    ).fetchone()
+                except sqlite3.Error:
+                    row = None
+                marked = str(row[0]) if row is not None else None
+            section = (
+                quoted_section(marked, str(item.get("title") or ""), weights)
+                if marked
+                else None
             )
+            text = excerpt_window(section["units"], limit, weights) if section else ""
             if not text and isinstance(item.get("snippet"), str):
                 text = _bounded(item["snippet"].replace("[", "").replace("]", ""), limit)
             if text:
-                excerpts[item["path"]] = text
+                excerpt = Excerpt(text)
+                excerpt.heading = section["shown"] if section else ""
+                excerpts[item["path"]] = excerpt
     return excerpts
 
 
-def _item_line(item: dict[str, object], kind: str) -> str:
+def _item_line(item: dict[str, object], kind: str, section: str = "") -> str:
     if "path" in item:
         label, title = str(item["path"]), str(item.get("title") or "")
+        if section:
+            # The section the excerpt below quotes: a later question answered
+            # by another section of the document is handed that one too.
+            label += " § " + _bounded(section.replace(" — ", " - "), 80)
     else:
         label, title = f"episode {item.get('id')}", str(item.get("summary") or "")
     marks = []
@@ -2706,13 +2716,17 @@ def render_capsule_lines(
     excerpt_of = {
         id(item): excerpts.get(str(item.get("path"))) for _, item, _ in entries
     }
+    # Kept when shrinking drops the excerpt: it still says where to look.
+    section_of = {
+        key: getattr(text, "heading", "") for key, text in excerpt_of.items()
+    }
 
     def assemble() -> list[str]:
         lines = list(head)
         if entries:
             lines.append(MEMORY_RENDER_HEADER)
         for _, item, kind in entries:
-            lines.append(_item_line(item, kind))
+            lines.append(_item_line(item, kind, section_of.get(id(item)) or ""))
             text = excerpt_of.get(id(item))
             if text:
                 lines.append(f"  {text}")
@@ -4722,6 +4736,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     refresh.add_argument(
+        "--transcript",
+        help=(
+            "with --session-id: the host's transcript of that conversation; a "
+            "compaction recorded there since the last turn means nothing "
+            "counts as handed any more"
+        ),
+    )
+    refresh.add_argument(
         "--sanitize",
         action="store_true",
         help=(
@@ -6019,6 +6041,7 @@ def main() -> int:
                             entry_point="refresh",
                             allow_unprovisioned=True,
                             session_id=arguments.session_id,
+                            transcript=arguments.transcript,
                         )
                     except (ContextError, BrainError, RetrievalError) as error:
                         # A capsule needs an active task; the layer refresh

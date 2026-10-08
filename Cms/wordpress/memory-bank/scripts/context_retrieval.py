@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import sqlite3
 import subprocess
@@ -261,6 +262,7 @@ _WM_PROMPT_PREAMBLE_CURSOR = r'''# Output: Cursor reads this hook's stdout as JS
 trap 'printf "{\"continue\": true}\n"' EXIT
 '''
 _WM_PROMPT_SESSION = r'''  [ -n "$SESSION_ID" ] && ARGUMENTS+=(--session-id "$SESSION_ID")
+  [ -n "$SESSION_ID" ] && [ -n "$TRANSCRIPT" ] && ARGUMENTS+=(--transcript "$TRANSCRIPT")
 '''
 _WM_PROMPT_SESSION_CURSOR = r'''  # The rule is re-sent whole with every request, so nothing may be left out
   # of it as "handed earlier": no --session-id. JSON, for capsule_text.
@@ -1946,17 +1948,18 @@ def informative_tokens(
 
 def token_coverage(
     connection: sqlite3.Connection, tokens: list[str]
-) -> tuple[dict[str, int], set[str]]:
+) -> tuple[dict[str, int], dict[str, list[str]]]:
     """Count distinct query terms per document, and note distinctive matches.
 
     Counting terms equally punishes exactly the wrong document. A focused note
     that contains only the one term that matters scores 1, while a document
     sharing two unremarkable words scores 2 — so the answer loses to the noise.
-    A term rare in this corpus is treated as evidence on its own.
+    A term rare in this corpus may be evidence on its own; ``distinctive``
+    maps each document to the rare terms it matched, for is_relevant to judge.
     """
     total = connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0] or 1
     coverage: dict[str, int] = {}
-    distinctive: set[str] = set()
+    distinctive: dict[str, list[str]] = {}
     for token in tokens:
         try:
             rows = connection.execute(
@@ -1968,21 +1971,49 @@ def token_coverage(
         for row in rows:
             coverage[row[0]] = coverage.get(row[0], 0) + 1
             if rare:
-                distinctive.add(row[0])
+                distinctive.setdefault(row[0], []).append(token)
     return coverage, distinctive
 
 
-def is_relevant(
-    path: str, coverage: dict[str, int], distinctive: set[str], minimum: int
-) -> bool:
-    """A document qualifies on distinctive evidence or on breadth of match.
+# A term that names one thing: a ticket, version or record number, a class,
+# method or constant name.
+_ANCHOR_SHAPE = re.compile(r"\d|[a-z][A-Z]|^[A-Z][a-z]+[A-Z]|_")
 
-    Admitting a distinctive single match lets some noise back in on queries no
-    document covers. That is the cheaper error: a spurious result wastes a
-    slot, while a hidden one denies the agent an answer the project already
-    holds.
+
+def is_anchor(token: str, where: Iterable[str] = ()) -> bool:
+    """Whether a query term names something rather than being a word that is
+    merely rare here: an identifier-shaped term, or a word of the document's
+    own path or title (``where``, casefolded words)."""
+    return bool(_ANCHOR_SHAPE.search(token)) or token.casefold() in set(where)
+
+
+def is_relevant(
+    path: str,
+    coverage: dict[str, int],
+    distinctive: dict[str, list[str]],
+    minimum: int,
+    title: str = "",
+    *,
+    anchored: bool = True,
+) -> bool:
+    """A document qualifies on breadth of match, or on one rare term that names
+    something.
+
+    A rare word alone used to admit a document, and in an index of a hundred
+    documents a word in ten of them is rare: on 61 real prompts such matches
+    were noise in six of seven judged cases. One rare term that is an anchor -
+    a number, an identifier from code, a word of the document's own path or
+    title - still admits it, because a spurious result wastes a slot while a
+    hidden one denies the agent an answer the project already holds.
+    ``anchored=False`` skips the anchor test - for skills, which a capsule
+    never delivers on a weak match and which explicit retrieval still ranks.
     """
-    return path in distinctive or coverage.get(path, 0) >= minimum
+    if coverage.get(path, 0) >= minimum:
+        return True
+    if not anchored:
+        return path in distinctive
+    where = re.findall(r"\w+", f"{path} {title}".casefold())
+    return any(is_anchor(token, where) for token in distinctive.get(path, ()))
 
 
 def match_strength(path: str, coverage: dict[str, int], minimum: int) -> str:
@@ -2011,6 +2042,333 @@ def required_coverage(tokens: list[str]) -> int:
     merely mentions a word from it.
     """
     return MIN_TOKEN_COVERAGE if len(tokens) >= MIN_TOKEN_COVERAGE else 1
+
+
+# The part of a document a capsule quotes. A capsule that names a document
+# helps only if the text it carries holds the answer: the section sharing the
+# most terms with the request was chosen by literal words and then cut to its
+# opening characters, so a plural in the request picked the wrong section and
+# an answer at the end of the right one was cut off.
+EXCERPT_MARK_OPEN = "\x02"
+EXCERPT_MARK_CLOSE = "\x03"
+_EXCERPT_MARKED = re.compile("\x02(.*?)\x03", re.S)
+_EXCERPT_HEADING = re.compile(r"^#{1,6}\s")
+_EXCERPT_LIST_ITEM = re.compile(r"^(?:[-*+]|\d+[.)])\s|^\|")
+_EXCERPT_SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=\S)")
+
+
+def _excerpt_term(word: str) -> str:
+    """One form per word, for counting distinct query terms in a passage.
+
+    The marks come from the index's own Porter tokenizer, so "sessions" is
+    marked for a request about a "session"; counting the marked words as
+    written would score the two as different terms.
+    """
+    word = word.casefold()
+    for suffix in ("ing", "ed", "es", "s"):
+        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+            return word[: -len(suffix)]
+    return word
+
+
+def _unmarked(text: str) -> str:
+    return _EXCERPT_MARKED.sub(r"\1", text)
+
+
+def marked_document(
+    connection: sqlite3.Connection, path: str, query: str
+) -> Optional[str]:
+    """The document's text with every match of the query marked, or None.
+
+    FTS5 marks the matches with the same tokenizer retrieval matched them by,
+    so the excerpt is chosen by exactly the words that selected the document.
+    """
+    try:
+        tokens = evidence_tokens(informative_tokens(connection, query_tokens(query)))
+    except RetrievalError:
+        return None
+    if not tokens:
+        return None
+    try:
+        row = connection.execute(
+            "SELECT highlight(documents, 5, ?, ?) FROM documents "
+            "WHERE documents MATCH ? AND path = ?",
+            (
+                EXCERPT_MARK_OPEN,
+                EXCERPT_MARK_CLOSE,
+                " OR ".join(f'"{token}"' for token in tokens),
+                path,
+            ),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    return str(row[0]) if row is not None and row[0] is not None else None
+
+
+def _excerpt_sections(text: str) -> list[tuple[str, list[str]]]:
+    if text.startswith("---\n"):
+        _, separator, remainder = text[4:].partition("\n---\n")
+        if separator:
+            text = remainder
+    sections: list[tuple[str, list[str]]] = [("", [])]
+    for line in text.splitlines():
+        if _EXCERPT_HEADING.match(line):
+            sections.append((line.lstrip("#").strip(), []))
+        else:
+            sections[-1][1].append(line)
+    return sections
+
+
+def _excerpt_units(lines: list[str]) -> list[str]:
+    """Sentences in order - of paragraphs, list items and table rows: what a
+    window moves by. A changelog entry is one list item a kilobyte and more
+    long, so a window that moved by items could only cut one."""
+    units: list[str] = []
+    block: list[str] = []
+
+    def flush() -> None:
+        if block:
+            text = " ".join(" ".join(block).split())
+            units.extend(part for part in _EXCERPT_SENTENCE_END.split(text) if part)
+            block.clear()
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            flush()
+        elif _EXCERPT_LIST_ITEM.match(stripped):
+            flush()
+            block.append(stripped)
+            if stripped.startswith("|"):
+                flush()
+        else:
+            block.append(stripped)
+    flush()
+    return units
+
+
+def excerpt_weights(connection: sqlite3.Connection, query: str) -> dict[str, float]:
+    """What a match of each query term says about a passage, by its rarity.
+
+    A real prompt runs to a thousand characters and shares a dozen words
+    with every long section; counting matched terms picked the changelog
+    entry with the most common words in it, not the one naming the ticket.
+    """
+    try:
+        tokens = evidence_tokens(informative_tokens(connection, query_tokens(query)))
+    except RetrievalError:
+        return {}
+    if not tokens:
+        return {}
+    try:
+        total = connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0] or 1
+    except sqlite3.Error:
+        return {}
+    frequencies = token_document_frequencies(connection, tokens)
+    weights: dict[str, float] = {}
+    for token in tokens:
+        frequency = frequencies.get(token) or 1
+        weight = max(0.05, math.log((total + 1) / (frequency + 0.5)))
+        key = _excerpt_term(token)
+        weights[key] = max(weights.get(key, 0.0), weight)
+    return weights
+
+
+def _excerpt_score(
+    units: list[str], weights: Optional[dict[str, float]] = None
+) -> tuple[float, int]:
+    found = [word for unit in units for word in _EXCERPT_MARKED.findall(unit)]
+    terms = {_excerpt_term(word) for word in found}
+    if weights:
+        floor = min(weights.values())
+        value = sum(weights.get(term, floor) for term in terms)
+    else:
+        value = float(len(terms))
+    return round(value, 6), len(found)
+
+
+def section_slug(heading: str) -> str:
+    slug = re.sub(r"[^\w\s-]", "", heading.casefold(), flags=re.UNICODE)
+    return re.sub(r"[\s_]+", "-", slug).strip("-")[:60]
+
+
+def quoted_section(
+    text: str, title: str = "", weights: Optional[dict[str, float]] = None
+) -> Optional[dict[str, Any]]:
+    """The section an excerpt quotes: the one carrying most of the query.
+
+    ``text`` is a marked document (see marked_document) or plain text, which
+    has no marks and yields the opening prose. Returns the heading (empty for
+    the prose before the first heading), its slug, the section's units, and a
+    hash of the section's text - what a conversation was handed, for not
+    handing it again.
+    """
+    sections = _excerpt_sections(text)
+    best: Optional[tuple[tuple[float, int], int]] = None
+    first_with_body: Optional[int] = None
+    for index, (heading, lines) in enumerate(sections):
+        units = _excerpt_units(lines)
+        if not units:
+            continue
+        if first_with_body is None:
+            first_with_body = index
+        score = _excerpt_score([heading, *units], weights)
+        if best is None or score > best[0]:
+            best = (score, index)
+    if best is None or first_with_body is None:
+        return None
+    index = best[1] if best[0][0] > 0 else first_with_body
+    heading, lines = sections[index]
+    units = _excerpt_units(lines)
+    plain_heading = " ".join(_unmarked(heading).split())
+    digest = hashlib.sha256(
+        "\n".join([plain_heading, *(_unmarked(unit) for unit in units)]).encode("utf-8")
+    ).hexdigest()[:16]
+    return {
+        "heading": plain_heading,
+        "slug": section_slug(plain_heading),
+        "units": units,
+        "hash": digest,
+        "shown": plain_heading if plain_heading.casefold() != title.casefold() else "",
+    }
+
+
+def excerpt_window(
+    units: list[str], limit: int, weights: Optional[dict[str, float]] = None
+) -> str:
+    """The stretch of a section that carries most of the query, within limit.
+
+    Whole sentences and list items, starting where the matches are rather
+    than at the top; a list item keeps the line that introduces it, which is
+    where its condition usually is. Elided text is shown as an ellipsis.
+    """
+    plain = [_unmarked(unit) for unit in units]
+    whole = " ".join(plain)
+    if len(whole) <= limit:
+        return whole
+    budget = max(1, limit - 4)
+    best: Optional[tuple[tuple[float, int], int, int]] = None
+    for start in range(len(units)):
+        end, size = start, 0
+        while end < len(units) and size + len(plain[end]) + (1 if end > start else 0) <= budget:
+            size += len(plain[end]) + (1 if end > start else 0)
+            end += 1
+        score = _excerpt_score(units[start : max(end, start + 1)], weights)
+        # Of equal windows the one starting at the match wins: what follows a
+        # matching sentence - the rest of a changelog entry, the steps after
+        # a heading line - is what the window is for.
+        if best is None or score >= best[0]:
+            best = (score, start, end)
+    assert best is not None
+    _, start, end = best
+    if start > 0 and plain[start - 1].endswith(":"):
+        lead = len(plain[start - 1]) + 1
+        size = sum(len(part) + 1 for part in plain[start:end]) - 1
+        while end > start and size + lead > budget:
+            end -= 1
+            size -= len(plain[end]) + 1
+        if size + lead <= budget:
+            start -= 1
+    if end <= start:
+        # One unit longer than the window: cut it around its first match.
+        unit = units[start]
+        opening = unit.find(EXCERPT_MARK_OPEN)
+        text = _unmarked(unit)
+        offset = len(_unmarked(unit[:opening])) if opening >= 0 else 0
+        left = max(0, offset - budget // 3)
+        if left:
+            space = text.rfind(" ", 0, left + 1)
+            left = space + 1 if space > 0 else left
+        piece = text[left : left + budget]
+        if left + budget < len(text):
+            space = piece.rfind(" ")
+            piece = piece[:space] if space > budget // 2 else piece
+        prefix = "… " if left or start else ""
+        suffix = " …" if left + len(piece) < len(text) or start + 1 < len(units) else ""
+        return (prefix + piece.strip() + suffix)[:limit]
+    text = " ".join(plain[start:end])
+    return ("… " if start else "") + text + (" …" if end < len(units) else "")
+
+
+def delivery_identity(
+    connection: sqlite3.Connection, item: dict[str, Any], query: str
+) -> tuple[str, str]:
+    """What handing this item gives a conversation: (key, revision).
+
+    A quoted item is the section its excerpt comes from, so a later question
+    answered by another section of the same document still gets it; anything
+    else - a skill, a weak match, a document with no matching section - is
+    the document at its revision.
+    """
+    path = str(item["path"])
+    revision = str(item.get("source_hash") or "")
+    if item.get("layer") == "procedural" or item.get("match") == "distinctive":
+        return path, revision
+    marked = marked_document(connection, path, query)
+    section = (
+        quoted_section(marked, str(item.get("title") or ""), excerpt_weights(connection, query))
+        if marked
+        else None
+    )
+    if section is None:
+        return path, revision
+    return f"{path}#{section['slug']}", section["hash"]
+
+
+# A host that compacts a conversation writes a record into the transcript it
+# names to the hook: Claude Code a compact_boundary, Codex a compacted record.
+# After one, the conversation holds a summary of what it was handed, so
+# nothing counts as handed any more. A gap too large to scan is treated the
+# same way: handing an item twice is the safe error.
+COMPACTION_MARKERS = (b'"subtype":"compact_boundary"', b'"type":"compacted"')
+TRANSCRIPT_SCAN_BYTES = 8 * 1024 * 1024
+
+
+def transcript_compacted(
+    entry: dict[str, Any], transcript: Optional[str]
+) -> tuple[bool, Optional[dict[str, Any]]]:
+    """Whether the conversation was compacted since its last turn, and the
+    transcript position to compare against next turn."""
+    if not transcript:
+        return False, None
+    try:
+        path = Path(transcript)
+        if not path.is_absolute() or path.is_symlink() or not path.is_file():
+            return False, None
+        size = path.stat().st_size
+    except (OSError, ValueError):
+        return False, None
+    file_key = hashlib.sha256(
+        str(path).encode("utf-8", "surrogateescape")
+    ).hexdigest()[:16]
+    state = {"file": file_key, "offset": size}
+    previous = entry.get("transcript")
+    if (
+        not isinstance(previous, dict)
+        or previous.get("file") != file_key
+        or not isinstance(previous.get("offset"), int)
+    ):
+        return False, state
+    start = previous["offset"]
+    if size < start or size - start > TRANSCRIPT_SCAN_BYTES:
+        return True, state
+    try:
+        with path.open("rb") as handle:
+            # From the start of the line that was being written last turn, if
+            # one was; a record completed before then was seen then.
+            begin = start
+            if start > 0:
+                back = min(start, 65536)
+                handle.seek(start - back)
+                before = handle.read(back)
+                if not before.endswith(b"\n"):
+                    newline = before.rfind(b"\n")
+                    begin = start - back + newline + 1 if newline >= 0 else start - back
+            handle.seek(begin)
+            chunk = handle.read(size - begin)
+    except OSError:
+        return False, state
+    return any(marker in chunk for marker in COMPACTION_MARKERS), state
 
 
 def _estimate_tokens(value: str) -> int:
@@ -2090,7 +2448,10 @@ def _candidates(
     ).fetchall()
     result = []
     for row in rows:
-        if not is_relevant(row["path"], coverage, distinctive, minimum):
+        if not is_relevant(
+            row["path"], coverage, distinctive, minimum, str(row["title"] or ""),
+            anchored=row["layer"] != "procedural",
+        ):
             continue
         item = dict(row)
         item["snippet"] = str(item["snippet"])[:MAX_SNIPPET_CHARS]
@@ -2241,14 +2602,19 @@ def _remember_session_deliveries(
     turn: int,
     delivered: dict[str, list[Any]],
     stored: dict[str, Any],
+    transcript: Optional[dict[str, Any]] = None,
+    *,
+    reset: bool = False,
 ) -> None:
-    """Record what the session holds: path -> [source hash, turn handed].
+    """Record what the session holds: key -> [revision, turn handed].
 
-    Best-effort, like the repeat record: losing it costs one repeated item,
-    the safe direction.
+    The key is the document, or the section a quoted excerpt came from (see
+    delivery_identity). ``reset`` drops what earlier turns were handed: the
+    host compacted the conversation since. Best-effort, like the repeat
+    record: losing it costs one repeated item, the safe direction.
     """
     entry = stored.pop(session_id, None)
-    items = entry.get("items") if isinstance(entry, dict) else None
+    items = entry.get("items") if isinstance(entry, dict) and not reset else None
     items = {
         path: seen
         for path, seen in (items or {}).items()
@@ -2259,6 +2625,8 @@ def _remember_session_deliveries(
     }
     items.update(delivered)
     stored[session_id] = {"turn": turn, "items": items}
+    if transcript is not None:
+        stored[session_id]["transcript"] = transcript
     for stale in list(stored)[: max(0, len(stored) - SESSION_DELIVERIES_RETENTION)]:
         stored.pop(stale, None)
     payload = json.dumps(stored, separators=(",", ":"))
@@ -2774,6 +3142,7 @@ def retrieve(
     entry_point: str = "retrieve",
     local_episodes: Optional[list[dict[str, Any]]] = None,
     session_id: Optional[str] = None,
+    transcript: Optional[str] = None,
 ) -> dict[str, Any]:
     """Assemble governed context and record the manifest that justifies it.
 
@@ -3004,19 +3373,26 @@ def retrieve(
     session_deliveries = _load_session_deliveries(connection) if session else {}
     session_turn = 0
     repeated: list[dict[str, Any]] = []
+    delivery_keys: dict[str, tuple[str, str]] = {}
+    transcript_position: Optional[dict[str, Any]] = None
     if session:
         previous_entry = session_deliveries.get(session)
         previous_entry = previous_entry if isinstance(previous_entry, dict) else {}
         session_turn = int(previous_entry.get("turn") or 0) + 1
         recent = previous_entry.get("items")
         recent = recent if isinstance(recent, dict) else {}
+        compacted, transcript_position = transcript_compacted(previous_entry, transcript)
+        if compacted:
+            recent = {}
         fresh_selection = []
         for item in capsule_selected:
-            seen = recent.get(item["path"])
+            key, revision = delivery_identity(connection, item, query)
+            delivery_keys[item["path"]] = (key, revision)
+            seen = recent.get(key)
             if (
                 isinstance(seen, list)
                 and len(seen) == 2
-                and seen[0] == item["source_hash"]
+                and seen[0] == revision
                 and isinstance(seen[1], int)
                 and session_turn - seen[1] < SESSION_NOVELTY_TURNS
             ):
@@ -3088,13 +3464,22 @@ def retrieve(
             session,
             session_turn,
             {
-                **{item["path"]: recent[item["path"]] for item in repeated},
                 **{
-                    item["path"]: [item["source_hash"], session_turn]
+                    delivery_keys[item["path"]][0]: recent[delivery_keys[item["path"]][0]]
+                    for item in repeated
+                },
+                **{
+                    delivery_keys[item["path"]][0]: [
+                        delivery_keys[item["path"]][1],
+                        session_turn,
+                    ]
                     for item in selected
+                    if item["path"] in delivery_keys
                 },
             },
             session_deliveries,
+            transcript_position,
+            reset=compacted,
         )
     usage = {category: 0 for category in BUDGETS}
     for item in selected:

@@ -353,7 +353,10 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
             "retrieve", "zorkmid plover", "--task-id", "TASK-WEAK", "--ephemeral",
         )
         self.assertEqual(0, rendered.returncode, rendered.stderr)
-        self.assertRegex(rendered.stdout, r"README\.md — [^\n]*\(weak match\)")
+        # "plover" names the document it matched - it is its title - and so
+        # admits it alone; "zorkmid" is merely a rare word in the README.
+        self.assertRegex(rendered.stdout, r"specs/plover\.md — [^\n]*\(weak match\)")
+        self.assertNotIn("README.md", rendered.stdout)
 
         payload = self.run_cli(
             "retrieve", "zorkmid plover", "--task-id", "TASK-WEAK",
@@ -366,13 +369,14 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
             for item in capsule[layer]
             if "path" in item
         }
-        self.assertEqual("distinctive", strengths.get("README.md"), capsule)
+        self.assertEqual("distinctive", strengths.get("specs/plover.md"), capsule)
+        self.assertNotIn("README.md", strengths)
         manifest = json.loads(
             (self.repository / capsule["manifest"]).read_text(encoding="utf-8")
         )
         self.assertEqual(
             "distinctive",
-            {item["path"]: item["match"] for item in manifest["selected"]}["README.md"],
+            {item["path"]: item["match"] for item in manifest["selected"]}["specs/plover.md"],
             manifest,
         )
 
@@ -7938,6 +7942,120 @@ class DeliveryTest(RuntimeHarness):
         self.assertTrue(excerpt.startswith("Refunds: Refunds are issued"), excerpt)
         self.assertNotIn("Webhook", excerpt)
         self.assertLessEqual(len(context_cli.best_excerpt(content, set(), 30)), 30)
+
+    def write_auth_guide(self) -> None:
+        filler = " ".join(
+            ["The session store keeps one record per login and expires it on a schedule."] * 12
+        )
+        self.repository.joinpath("specs").mkdir(exist_ok=True)
+        self.repository.joinpath("specs/auth.md").write_text(
+            "# Auth guide\n\n## Sessions\n\n"
+            f"{filler} To revoke every session of a user, call SessionStore::purge "
+            "after the password reset.\n\n"
+            "## Recovery codes\n\nRecovery codes are single-use: a used code is struck "
+            "from the list, and after the third the user prints a new set.\n",
+            encoding="utf-8",
+        )
+        self.repository.joinpath("specs/cleanup.md").write_text(
+            "# Cleanup\n\n## Login\n\nA session starts at login.\n\n"
+            "## Nightly job\n\nSessions are purged nightly by the cleanup job.\n",
+            encoding="utf-8",
+        )
+        for index in range(6):
+            self.repository.joinpath(f"specs/other-{index}.md").write_text(
+                f"# Other {index}\n\nunrelated text {index}.\n", encoding="utf-8"
+            )
+
+    def test_the_excerpt_is_the_stretch_that_answers(self) -> None:
+        # The right section, but its answer sat past the first 600 characters.
+        self.write_auth_guide()
+        self.start("TASK-DELIVER")
+        text = self.refresh("how do I revoke sessions after a password reset")["capsule_text"]
+        self.assertIn("specs/auth.md § Sessions", text)
+        self.assertIn("SessionStore::purge after the password reset", text)
+
+    def test_the_excerpt_matches_words_as_the_index_does(self) -> None:
+        # The request says "session", the answering section "Sessions": the
+        # index matched them, the excerpt counted them as different words.
+        self.write_auth_guide()
+        self.start("TASK-DELIVER")
+        text = self.refresh("when does a session get purged")["capsule_text"]
+        self.assertIn("specs/cleanup.md § Nightly job", text)
+        self.assertIn("purged nightly by the cleanup job", text)
+
+    def test_another_section_of_a_handed_document_is_still_handed(self) -> None:
+        self.write_auth_guide()
+        self.start("TASK-DELIVER")
+        first = self.refresh("how do I revoke sessions after a password reset", "--session-id", "c-1")
+        self.assertIn("specs/auth.md § Sessions", first["capsule_text"])
+        again = self.refresh("revoke the sessions after a password reset", "--session-id", "c-1")
+        self.assertNotIn("specs/auth.md", again["capsule_text"])
+        other = self.refresh("what happens to used recovery codes", "--session-id", "c-1")
+        self.assertIn("specs/auth.md § Recovery codes", other["capsule_text"])
+        self.assertIn("struck from the list", other["capsule_text"])
+
+    def test_a_compacted_conversation_is_handed_its_memory_again(self) -> None:
+        self.write_auth_guide()
+        self.start("TASK-DELIVER")
+        # A folder of its own: parallel suites share the repository's parent.
+        folder = tempfile.TemporaryDirectory(prefix="transcript-")
+        self.addCleanup(folder.cleanup)
+        transcript = Path(folder.name) / "transcript.jsonl"
+        transcript.write_text('{"type":"user"}\n', encoding="utf-8")
+        query = "how do I revoke sessions after a password reset"
+        conversation = ("--session-id", "c-1", "--transcript", str(transcript))
+        self.assertIn("SessionStore::purge", self.refresh(query, *conversation)["capsule_text"])
+
+        def append(record: str) -> None:
+            with transcript.open("a", encoding="utf-8") as handle:
+                handle.write(record + "\n")
+
+        append('{"type":"assistant"}')
+        self.assertNotIn("SessionStore::purge", self.refresh(query, *conversation)["capsule_text"])
+        # Claude Code's compaction record, then Codex's.
+        for record in (
+            '{"type":"system","subtype":"compact_boundary","content":"Conversation compacted"}',
+            '{"timestamp":"2026-10-08T10:00:00Z","type":"compacted","payload":{}}',
+        ):
+            with self.subTest(record=record):
+                append(record)
+                self.assertIn("SessionStore::purge", self.refresh(query, *conversation)["capsule_text"])
+                self.assertNotIn("SessionStore::purge", self.refresh(query, *conversation)["capsule_text"])
+
+    def test_one_rare_word_admits_a_document_only_when_it_names_something(self) -> None:
+        # In a small index most words are rare; one of them shared with the
+        # request is not evidence unless it is an identifier or the document's
+        # own subject.
+        specs = self.repository / "specs"
+        specs.mkdir(exist_ok=True)
+        specs.joinpath("weather.md").write_text(
+            "# Weather\n\nThe falcon flew over the harbour.\n", encoding="utf-8")
+        specs.joinpath("exporter.md").write_text(
+            "# Exports\n\nOrderExporter writes one line per order.\n", encoding="utf-8")
+        specs.joinpath("ticket.md").write_text(
+            "# Release notes\n\nShipped the fix for ticket 4711.\n", encoding="utf-8")
+        specs.joinpath("falcon.md").write_text(
+            "# Falcon dispatch\n\nRoutes are assigned nightly.\n", encoding="utf-8")
+        specs.joinpath("cobalt.md").write_text(
+            "# Cobalt\n\nCobalt budgets are reviewed monthly.\n", encoding="utf-8")
+        # Enough documents for a word in two of them to count as rare.
+        for index in range(24):
+            specs.joinpath(f"filler-{index}.md").write_text(
+                f"# Filler {index}\n\nunrelated text {index}.\n", encoding="utf-8")
+        self.assertEqual(0, self.run_cli("index", "--json").returncode)
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            def admitted(query: str) -> set[str]:
+                candidates, _ = retrieval._candidates(connection, query)
+                return {item["path"] for item in candidates}
+
+            # Two informative terms, so one alone is a weak match.
+            self.assertNotIn("specs/weather.md", admitted("falcon cobalt"))
+            self.assertIn("specs/falcon.md", admitted("falcon cobalt"))
+            self.assertIn("specs/exporter.md", admitted("OrderExporter cobalt"))
+            self.assertIn("specs/ticket.md", admitted("4711 cobalt"))
+        finally:
+            connection.close()
 
     def test_a_weak_tail_in_a_layer_is_left_out(self) -> None:
         self.repository.joinpath("specs/quartz.md").write_text(

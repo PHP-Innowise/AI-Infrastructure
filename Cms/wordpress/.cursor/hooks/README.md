@@ -88,7 +88,8 @@ with every request:
   turn when Cursor reads its rules after the hook, on the next prompt
   otherwise. Cursor puts rules at the start of the model's context, where a
   change costs the conversation its cached prefix, so the rule is replaced
-  only when the prompt retrieved an item it does not hold yet. Its header
+  only when the prompt retrieved an item - a document section - it does not
+  hold yet. Its header
   says "retrieved for a recent prompt".
 - `working-memory-write.sh` (`stop`) renders the branch's capsule after the
   turn checkpoint, unless the rule holds the prompt hook's capsule for the same

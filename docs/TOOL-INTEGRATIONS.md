@@ -109,7 +109,8 @@ capsule is delivered through `.cursor/rules/working-memory.mdc`:
   Cursor puts rules at the start of the model's context, so a rule rewritten
   for every prompt would cost the conversation its cached prefix each time;
   the hook replaces it only when the prompt retrieved an item the rule does
-  not hold yet (a follow-up on the same documents, or small talk, leaves it).
+  not hold yet - a document, or another section of one it holds (a follow-up
+  on the same sections, or small talk, leaves it).
   Whether the request that triggered it already carries the new rule depends
   on when Cursor reads its rules, which has not been verified on a live client;
   at worst the rule is one prompt behind.

@@ -711,6 +711,27 @@ class ReadHookInputTest(unittest.TestCase):
                     self.assertNotIn("--session-id", argv)
                     self.assertEqual("cobalt allocation", argv[argv.index("--query") + 1])
 
+    def test_the_transcript_travels_with_the_conversation(self) -> None:
+        # Where a compaction since the last turn shows; only with a session id,
+        # and only an absolute path.
+        with tempfile.TemporaryDirectory(prefix="hook-input-") as directory:
+            transcript = str(Path(directory) / "conversation.jsonl")
+            for tool in ("claude", "codex"):
+                with self.subTest(tool=tool):
+                    _, argv = self.run_hook(tool, {"prompt": "cobalt allocation", "session_id": "abc-123",
+                                                   "transcript_path": transcript}, Path(directory))
+                    self.assertEqual(transcript, argv[argv.index("--transcript") + 1])
+                    self.assertEqual("cobalt allocation", argv[argv.index("--query") + 1])
+            for payload in (
+                {"prompt": "cobalt allocation", "transcript_path": transcript},
+                {"prompt": "cobalt allocation", "session_id": "abc-123", "transcript_path": "relative.jsonl"},
+                {"prompt": "cobalt allocation", "session_id": "abc-123", "transcript_path": ["x"]},
+            ):
+                with self.subTest(payload=payload):
+                    _, argv = self.run_hook("claude", payload, Path(directory))
+                    self.assertNotIn("--transcript", argv)
+                    self.assertEqual("cobalt allocation", argv[argv.index("--query") + 1])
+
     def test_malformed_input_still_refreshes_without_a_query(self) -> None:
         with tempfile.TemporaryDirectory(prefix="hook-input-") as directory:
             result, argv = self.run_hook("claude", "not json", Path(directory))
@@ -809,6 +830,10 @@ class CursorPromptHookTest(unittest.TestCase):
         self.stub("working: TASK-P - fix rounding\n- memory b.md \u2014 B\n  new excerpt")
         self.run_prompt_hook(self.PAYLOAD)
         self.assertIn("new excerpt", self.rule.read_text(encoding="utf-8"))
+        # Another section of a document the rule holds is new, too.
+        self.stub("working: TASK-P - fix rounding\n- memory b.md \u00a7 Refunds \u2014 B\n  refund excerpt")
+        self.run_prompt_hook(self.PAYLOAD)
+        self.assertIn("refund excerpt", self.rule.read_text(encoding="utf-8"))
         # Another task's rule is replaced whatever it holds.
         self.stub(first)
         self.run_prompt_hook(self.PAYLOAD, CONTEXT_TASK_ID="TASK-Q")

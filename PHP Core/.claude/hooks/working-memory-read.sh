@@ -62,12 +62,15 @@ run() {
 # context.py, which also rejects anything that looks like a secret or
 # personal data before the text can reach a query or a manifest. The
 # conversation's session id travels with it, so what this conversation was
-# handed in its last few turns is not handed again.
+# handed in its last few turns is not handed again, and so does the path of
+# its transcript, where a compaction since the last turn shows.
 # Keep the program in -c: a heredoc would occupy stdin and hide the prompt.
-# Output: the session id, a newline, the prompt, and a final "\n." that keeps
-# command substitution from eating the prompt's own trailing newlines.
+# Output: the session id, the transcript path, the prompt, one per line, and
+# a final "\n." that keeps command substitution from eating the prompt's own
+# trailing newlines.
 HOOK_INPUT=$(printf '%s' "$HOOK_STDIN" | python3 -c '
 import json
+import os
 import re
 import sys
 
@@ -83,11 +86,16 @@ if not isinstance(prompt, str):
 session = data.get("session_id", "")
 if not isinstance(session, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", session):
     session = ""
-sys.stdout.write(session + "\n" + prompt + "\n.")
+transcript = data.get("transcript_path", "")
+if not isinstance(transcript, str) or len(transcript) > 4096 or "\n" in transcript or not os.path.isabs(transcript):
+    transcript = ""
+sys.stdout.write(session + "\n" + transcript + "\n" + prompt + "\n.")
 ' 2>/dev/null)
-case "$HOOK_INPUT" in *$'\n'*) ;; *) HOOK_INPUT=$'\n\n.' ;; esac
+case "$HOOK_INPUT" in *$'\n'*$'\n'*) ;; *) HOOK_INPUT=$'\n\n\n.' ;; esac
 SESSION_ID=${HOOK_INPUT%%$'\n'*}
-QUERY=${HOOK_INPUT#*$'\n'}
+HOOK_REST=${HOOK_INPUT#*$'\n'}
+TRANSCRIPT=${HOOK_REST%%$'\n'*}
+QUERY=${HOOK_REST#*$'\n'}
 QUERY=${QUERY%$'\n.'}
 
 TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$PROJECT_DIR" branch --show-current 2>/dev/null)}"
@@ -102,6 +110,7 @@ if [ -n "$QUERY" ] && [ -n "$TASK_ID" ]; then
   # out of the prompt, instead of the whole turn going without memory.
   ARGUMENTS+=(--query "$QUERY" --task-id "$TASK_ID" --ephemeral --sanitize)
   [ -n "$SESSION_ID" ] && ARGUMENTS+=(--session-id "$SESSION_ID")
+  [ -n "$SESSION_ID" ] && [ -n "$TRANSCRIPT" ] && ARGUMENTS+=(--transcript "$TRANSCRIPT")
 fi
 
 REPORT=$(run python3 "$CONTEXT_CLI" "${ARGUMENTS[@]}" 2>/dev/null)

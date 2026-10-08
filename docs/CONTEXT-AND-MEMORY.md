@@ -618,14 +618,52 @@ than half the corpus are dropped as noise — measured against the index rather
 than a stopword list, so it adapts to the languages a repository documents
 itself in. A document then qualifies either by containing two distinct query
 terms, or by containing one term rare enough in this corpus to be evidence on
-its own.
+its own - provided that term names something: it is shaped like an identifier
+(a digit, `CamelCase`, `snake_case`: a ticket or version number, a class or
+constant name) or it is a word of the document's own path or title.
 
 That second route matters more than it looks. Counting terms equally punishes
 exactly the wrong document: a focused note containing only the rare term that
 matters scores one, while filler sharing two unremarkable words scores two and
 takes the slot. Admitting a distinctive single match lets some noise back in on
 queries no document covers, which is the cheaper error — a spurious result
-wastes a slot, a hidden one denies an answer the project already holds.
+wastes a slot, a hidden one denies an answer the project already holds. The
+anchor condition came from measurement: in an index of about a hundred
+documents a word in ten of them is "rare", and on 61 real first prompts the
+single-word matches without an anchor were noise in six of seven judged cases.
+Requiring the anchor removed 14 of 186 delivered items there without losing a
+useful one.
+
+### What a capsule quotes
+
+A delivered project-knowledge item carries text, not just a pointer, and the
+text is chosen to hold the answer:
+
+- The document's matches are marked by FTS5 `highlight()` with the index's own
+  tokenizer, so a request about a "session" finds the section that says
+  "Sessions" - the words that selected the document choose its excerpt.
+- Each matched term counts by its rarity in the index. A real prompt shares a
+  dozen common words with every long section; the entry naming the ticket or
+  the component is the one worth quoting.
+- The section with the most weight is chosen, and within it a window of whole
+  sentences that starts where the matches are - a changelog entry runs to a
+  kilobyte, and its answer is usually the sentence after the one that matched.
+  A list item keeps the line that introduces it. Elided text shows as `…`.
+- Windows are 800, 600 and 400 characters by rank, 600 for a history item; the
+  rendered capsule stays under 3,600.
+- The item line names the section: `- memory specs/auth.md § Sessions — Auth`.
+
+On the 61 graded prompts, with the passages that carry each useful document's
+value labelled, the delivered text held such a passage for 20 of 36 delivered
+useful documents instead of 12, in 14 turns instead of 11.
+
+A conversation is not handed the same thing twice within four turns
+(`refresh --session-id`), and "the same thing" is the section an excerpt came
+from at its revision: a later question answered by another section of a
+document already handed gets that section. A host that compacts a conversation
+records it in the transcript the hook is given (`--transcript`): Claude Code
+writes a `compact_boundary` record, Codex a `compacted` one. After one, nothing
+counts as handed any more, because the conversation holds a summary of it.
 
 Both admissions used to arrive looking identical, so the capsule names which
 one applied. A document that carried the required number of distinct query
