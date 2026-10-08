@@ -27,7 +27,7 @@ from brain_runtime import (
     parse_markdown_record,
     record_is_eligible,
     render_current_state,
-    sources_are_fresh,
+    source_changes,
     utc_now,
     validate_handoff,
     validate_record,
@@ -45,6 +45,9 @@ BUDGETS = {
 TARGET_BUDGET = 8000
 HARD_BUDGET = 12000
 MAX_SNIPPET_CHARS = 1200
+# What a document whose cited file changed since verification keeps of its
+# relevance: it still ranks, below fresh knowledge of equal fit.
+SOURCE_CHANGED_WEIGHT = 0.5
 CAPSULE_PROCEDURAL_LIMIT = 2
 CAPSULE_SEMANTIC_LIMIT = 3
 CAPSULE_EPISODIC_LIMIT = 1
@@ -2177,26 +2180,23 @@ def _runtime_filter(
             elif drift > limit:
                 reason = "map-drift"
         if reason is None and candidate["source_fingerprints"]:
-            fingerprints = candidate["source_fingerprints"]
-            fresh = sources_are_fresh(
-                repository,
-                {
-                    "sources": [item["path"] for item in fingerprints],
-                    "source_fingerprints": fingerprints,
-                },
+            changed, missing = source_changes(
+                repository, candidate["source_fingerprints"]
             )
-            if not fresh:
-                # Two names for one event, deliberately. `stale` has always
-                # meant a Brain record whose cited file moved on, and the
-                # runbook and its tests speak that word. A durable chunk is a
-                # different remedy: a record is refreshed by a revisioned
-                # mutation, a chunk by re-reading the source and calling
-                # `bank-reverify`, so a reader who sees `source-changed` is
-                # told which of the two they are holding.
-                reason = (
-                    "source-changed"
-                    if candidate["kind"] == "memory"
-                    else "stale"
+            if missing:
+                # The cited file is gone: there is nothing left to check the
+                # knowledge against, so it leaves retrieval.
+                reason = "source-missing"
+            elif changed:
+                # A cited file was edited after the knowledge was verified.
+                # Any edit used to evict it - a comment, a new method - and
+                # on a real project 65 of 70 resolved findings went that way.
+                # It stays, marked for checking and ranked below fresh
+                # knowledge; the reader decides whether it still holds.
+                candidate["source_changed"] = changed
+                candidate["adjusted_score"] = (
+                    float(candidate.get("adjusted_score") or 0.0)
+                    * SOURCE_CHANGED_WEIGHT
                 )
         if reason:
             excluded.append({"path": candidate["path"], "reason": reason})
@@ -2493,6 +2493,10 @@ def _public_item(item: dict[str, Any]) -> dict[str, Any]:
         # nothing on an ordinary turn, and on those turns it is the difference
         # between "your words found this" and "the file you named did".
         public["selection"] = item["selection"]
+    if item.get("source_changed"):
+        # The cited files edited since this knowledge was verified: the
+        # capsule says so next to it instead of silently dropping it.
+        public["source_changed"] = list(item["source_changed"])
     return public
 
 
@@ -2575,6 +2579,10 @@ def retrieve(
         if layer not in matched_layers
     ]
     filtered, filter_excluded = _runtime_filter(repository, candidates, config)
+    # A candidate whose cited file changed kept a reduced score; ranking it
+    # again keeps fresh knowledge of equal fit ahead of it. Stable, so
+    # nothing else moves.
+    filtered.sort(key=lambda item: -float(item.get("adjusted_score") or 0.0))
     # Injected here and nowhere earlier. `matched_layers` and `no_match` above
     # are claims about the QUERY — the capsule's `no-match:` line and the
     # gate's `signals.no_match` both read them that way — and a path link is
@@ -2792,6 +2800,7 @@ def retrieve(
                     if item.get("selection")
                     else {}
                 ),
+                **({"source_changed": True} if item.get("source_changed") else {}),
                 # Everything a later gate needs to reason about this turn:
                 # how strongly it matched, and where it stood before any
                 # budget or layer limit applied.

@@ -575,6 +575,33 @@ def sources_are_fresh(repository: Path, record: dict[str, Any]) -> bool:
     return True
 
 
+def source_changes(
+    repository: Path, fingerprints: Any
+) -> tuple[list[str], list[str]]:
+    """Cited paths whose digest moved on, and cited paths that are gone.
+
+    `sources_are_fresh` answers yes or no; a reader deciding what to do with
+    knowledge needs to tell an edited citation (the knowledge may still hold;
+    check it) from a deleted one (nothing is left to check it against).
+    """
+    changed: list[str] = []
+    missing: list[str] = []
+    for item in fingerprints if isinstance(fingerprints, list) else []:
+        path = item.get("path") if isinstance(item, dict) else None
+        expected = item.get("sha256") if isinstance(item, dict) else None
+        if not isinstance(path, str) or not isinstance(expected, str):
+            missing.append(str(path))
+            continue
+        try:
+            current = fingerprint(repository, path)["sha256"]
+        except BrainError:
+            missing.append(path)
+            continue
+        if current != expected:
+            changed.append(path)
+    return changed, missing
+
+
 def _require_string(record: dict[str, Any], key: str) -> None:
     if not isinstance(record.get(key), str) or not record[key].strip():
         raise BrainError(f"{key} must be a non-empty string")
@@ -1459,6 +1486,23 @@ def rebuild_indexes(repository: Path) -> None:
     atomic_json(archive_path, archived)
 
 
+def stale_records(repository: Path) -> list[str]:
+    """Records whose cited source changed after they were written.
+
+    Reported beside validation, not as a failure of it: the record is intact
+    and retrieval marks it for checking.
+    """
+    stale = []
+    for path, record, _ in iter_records(repository, include_archive=True):
+        try:
+            fresh = sources_are_fresh(repository, record)
+        except (BrainError, OSError):
+            continue
+        if not fresh:
+            stale.append(str(path))
+    return stale
+
+
 def validate_repository(
     repository: Path, *, check_freshness: bool = True
 ) -> list[str]:
@@ -1466,8 +1510,8 @@ def validate_repository(
 
     ``check_freshness=False`` leaves out one rule: a record whose cited source
     changed after it was written. That is the source moving on, not the record
-    breaking - retrieval already excludes such a record as `stale` and
-    promotion already refuses it - and no write can cause or cure it.
+    breaking - retrieval serves such a record marked for checking, and only a
+    deleted citation keeps it out - and no write can cause or cure it.
     Compaction passes it: with the rule in, the first edit to any file a record
     cites, such as the living spec behind an accepted decision, refused every
     compaction from then on.
@@ -2094,7 +2138,11 @@ def promotion_content(record: dict[str, Any]) -> Optional[str]:
 
 
 def promotion_eligibility_error(
-    repository: Path, record: dict[str, Any], config: dict[str, Any]
+    repository: Path,
+    record: dict[str, Any],
+    config: dict[str, Any],
+    *,
+    allow_changed_sources: bool = False,
 ) -> Optional[str]:
     promotable = PROMOTABLE_STATES.get(record["type"])
     if promotable is None:
@@ -2115,6 +2163,26 @@ def promotion_eligibility_error(
         return f"record content contains {found}"
     if sources_are_fresh(repository, record):
         return None
+    if allow_changed_sources:
+        # The automatic path promotes knowledge whose cited files were edited
+        # after it was verified: the chunk keeps the digests taken at
+        # verification, so retrieval serves it marked "source changed"
+        # instead of the bank never learning it. On a real project 59 of 70
+        # resolved findings were blocked here for good, because promotion ran
+        # days after the fix that resolved them had edited the cited files.
+        # A deleted citation, or one the record never digested, still blocks.
+        expected = {
+            source.split("#", 1)[0]
+            for source in digestible_sources(record.get("sources"))
+        }
+        digested = {
+            item.get("path")
+            for item in record.get("source_fingerprints") or []
+            if isinstance(item, dict)
+        }
+        _, missing = source_changes(repository, record.get("source_fingerprints"))
+        if expected <= digested and not missing:
+            return None
     stale = [
         item["path"]
         for item in record["source_fingerprints"]
@@ -2129,7 +2197,11 @@ def promotion_eligibility_error(
 
 
 def promotable_records(
-    repository: Path, config: dict[str, Any]
+    repository: Path,
+    config: dict[str, Any],
+    *,
+    allow_changed_sources: bool = False,
+    only: Optional[set[str]] = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     """Return promotable records, and the ones a rule held back.
 
@@ -2154,12 +2226,16 @@ def promotable_records(
             validate_record(record)
         except BrainError:
             continue
+        if only is not None and record["id"] not in only:
+            continue
         if record["id"] in already:
             continue
         if record["status"] not in PROMOTABLE_STATES.get(record["type"], set()):
             continue
         content = promotion_content(record)
-        reason = promotion_eligibility_error(repository, record, config)
+        reason = promotion_eligibility_error(
+            repository, record, config, allow_changed_sources=allow_changed_sources
+        )
         if reason is not None:
             blocked.append({"record_id": record["id"], "reason": reason})
             continue
@@ -2269,11 +2345,19 @@ def bank_duplicate_ratio(config: dict[str, Any]) -> float:
     return ratio if 0.0 < ratio <= 1.0 else BANK_DUPLICATE_RATIO
 
 
-def auto_promote(repository: Path, *, owner: str, limit: int = 5) -> dict[str, Any]:
+def auto_promote(
+    repository: Path,
+    *,
+    owner: str,
+    limit: int = 5,
+    only: Optional[set[str]] = None,
+) -> dict[str, Any]:
     """Promote resolved, verified knowledge into durable memory without review.
 
     Every applied chunk is tagged `auto-promoted` and its promotion names no
     reviewer, so the absence of human approval stays visible in both stores.
+    `only` restricts the run to the named records - the resolving update
+    promotes its own record at once instead of waiting for a turn boundary.
     """
     config = load_config(repository)
     if not config.get("automatic_promotion"):
@@ -2288,6 +2372,8 @@ def auto_promote(repository: Path, *, owner: str, limit: int = 5) -> dict[str, A
     # Creating a second one would leave the first orphaned forever.
     for promotion_id, proposal in stalled_automatic_promotions(repository):
         source = proposal["source_records"][0]
+        if only is not None and source["id"] not in only:
+            continue
         try:
             if proposal["status"] == "proposed":
                 auto_review_promotion(repository, promotion_id)
@@ -2303,7 +2389,9 @@ def auto_promote(repository: Path, *, owner: str, limit: int = 5) -> dict[str, A
             }
         )
 
-    candidates, blocked = promotable_records(repository, config)
+    candidates, blocked = promotable_records(
+        repository, config, allow_changed_sources=True, only=only
+    )
     # Re-read on every iteration rather than once before the loop: a single
     # flush promotes up to `limit` records, so the batch case - one review
     # producing several findings that say the same thing - is exactly the one
@@ -2838,6 +2926,11 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
         # merging it here would put code paths under `chunk_source_digests`,
         # where the next edit evicts the chunk as `source-changed`.
         inherited: list[str] = []
+        # The digests each cited file had when the record was verified. A
+        # chunk digests what its knowledge was checked against, not what the
+        # files hold today, or promotion would launder an edit that happened
+        # after verification into a "fresh" citation.
+        verified_digests: dict[str, dict[str, str]] = {}
         for source in proposal["source_records"]:
             current_path, current, _ = find_record(
                 repository, source["id"], include_archive=True
@@ -2850,9 +2943,14 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
                 or current["revision"] != source["revision"]
             ):
                 raise BrainError(f"Promotion source revision changed: {source['id']}")
-            ineligible = promotion_eligibility_error(repository, current, config)
+            ineligible = promotion_eligibility_error(
+                repository, current, config, allow_changed_sources=automatic
+            )
             if ineligible is not None:
                 raise BrainError(f"Promotion source is not eligible: {ineligible}")
+            for item in current.get("source_fingerprints") or []:
+                if isinstance(item, dict) and isinstance(item.get("path"), str):
+                    verified_digests[item["path"]] = item
             for cited in current.get("sources") or []:
                 if not isinstance(cited, str):
                     continue
@@ -2911,9 +3009,13 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
         # year or more and carried no such check at all, so a promoted
         # conclusion outlived any means of noticing that the record it was
         # drawn from had moved on.
-        metadata["source_digests"] = chunk_source_digests(
-            repository, metadata["sources"]
-        )
+        metadata["source_digests"] = [
+            {"path": entry["path"], "sha256": verified_digests[entry["path"]]["sha256"]}
+            if entry["path"] in verified_digests
+            and isinstance(verified_digests[entry["path"]].get("sha256"), str)
+            else entry
+            for entry in chunk_source_digests(repository, metadata["sources"])
+        ]
         heading = f"# {proposal['title']}"
         content = proposal["content"].strip()
         chunk = render_markdown_record(

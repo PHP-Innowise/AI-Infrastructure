@@ -230,6 +230,11 @@ class KnowledgeTests(unittest.TestCase):
 
     def test_durable_promotion_requires_eligible_sources_independent_review_and_pinned_revision(self):
         self.install()
+        # The reviewed path is the one a project takes with automatic promotion
+        # off; with it on, the accepting update promotes the record at once.
+        config = self.project / "project-brain/config/runtime.json"
+        settings = json.loads(config.read_text(encoding="utf-8"))
+        config.write_text(json.dumps({**settings, "automatic_promotion": False}), encoding="utf-8")
 
         def decision(identifier, authority="verified", privacy="team"):
             record = self.run_action("brain-create", record_type="decision", external_id=identifier,

@@ -23,6 +23,7 @@ from brain_runtime import (
     MESSAGE_BODY_LIMIT,
     MESSAGE_TYPES,
     TASK_PHASE_INPUTS,
+    PROMOTABLE_STATES,
     TERMINAL_STATES,
     append_message,
     atomic_json,
@@ -56,6 +57,7 @@ from brain_runtime import (
     rollback_created_record,
     review_promotion,
     apply_promotion,
+    stale_records,
     restore_record_state,
     snapshot_record_state,
     update_record,
@@ -2039,6 +2041,12 @@ def summarize_last_turn(report: dict[str, object]) -> Optional[str]:
     error = report.get("error")
     if isinstance(error, str) and error:
         parts.append(f"turn failed: {error}")
+    if count("discarded_turns"):
+        parts.append(
+            f"this branch's task is closed: {count('discarded_turns')} turn(s) "
+            "after its completion were not recorded; start a new task to keep "
+            "further work"
+        )
     for label, key in (
         ("promotion blocked", "promotion_blocked"),
         ("promotion failed", "promotion_failed"),
@@ -2429,7 +2437,45 @@ def print_capsule(capsule: dict[str, object]) -> None:
         for item in items:
             label = item["path"] if "path" in item else f"episode {item['id']}"
             title = item["title"] if "title" in item else item["summary"]
-            print(f"  {label} — {title}")
+            changed = item.get("source_changed")
+            # Knowledge whose cited file was edited after it was verified is
+            # still served, so the reader checks it rather than never seeing it.
+            mark = (
+                " (cited file changed since this was verified: "
+                + ", ".join(str(path) for path in changed[:3])
+                + " — check it before relying on this)"
+                if isinstance(changed, list) and changed
+                else ""
+            )
+            print(f"  {label} — {title}{mark}")
+
+
+def promote_on_resolution(
+    repository: Path, record: dict[str, object], owner: str
+) -> Optional[dict[str, object]]:
+    """Promote a record the moment it reaches a promotable state.
+
+    Promotion used to wait for the turn boundary, five turns and often days
+    after the resolving update. By then the fix that resolved the finding had
+    edited the files it cites, and the record never became durable memory:
+    on a real project 2 of 70 resolved findings were ever served. Promoting on
+    the resolving update digests the citations while they still say what was
+    verified. A failure here never undoes the update; it is reported.
+    """
+    states = PROMOTABLE_STATES.get(str(record.get("type")))
+    if (
+        states is None
+        or record.get("status") not in states
+        or record.get("authority") != "verified"
+    ):
+        return None
+    try:
+        return auto_promote(repository, owner=owner, only={str(record["id"])})
+    except (BrainError, OSError) as error:
+        return {
+            "enabled": True, "promoted": [], "blocked": [], "skipped": 0,
+            "failed": [{"record_id": str(record.get("id")), "reason": str(error)}],
+        }
 
 
 def revision_argument(value: str) -> object:
@@ -3231,6 +3277,25 @@ def rebind_governed_task(
     return {**governed_task_view(record), "already_bound": False}
 
 
+def closed_task_record(
+    connection: sqlite3.Connection, repository: Path, task_id: str
+) -> Optional[str]:
+    """The id of this task id's completed or cancelled record, if that is all
+    there is: no live binding, and a terminal Brain record of the same name."""
+    try:
+        governed_binding(connection, task_id)
+        return None
+    except ContextError:
+        pass
+    try:
+        record = get_record(repository, task_id)
+    except BrainError:
+        return None
+    if record.get("type") == "task" and record.get("status") in TERMINAL_STATES:
+        return str(record["id"])
+    return None
+
+
 def ensure_working_task(
     connection: sqlite3.Connection,
     repository: Path,
@@ -3838,6 +3903,22 @@ def flush_turn_deltas(
     elif commits:
         checkpoint += f" {commits} commit(s) on this branch."
     files = files[:file_limit]
+    closed = closed_task_record(connection, repository, task_id) if mode != "lightweight" else None
+    if closed is not None:
+        # The branch's task was completed and work went on: every flush tried
+        # to reattach the closed task, failed, and kept the buffer - so the
+        # turn boundary, and the promotion and compaction that ride on it,
+        # never ran again. The turns after completion belong to no task;
+        # they are dropped and said so, and maintenance proceeds.
+        with connection:
+            connection.executemany(
+                "DELETE FROM turn_deltas WHERE id = ?",
+                [(row["id"],) for row in pending],
+            )
+        return {
+            "revision": None, "files_omitted": 0, "provisioned": False,
+            "rebound": None, "closed_task": closed, "discarded_turns": len(pending),
+        }
     ensured = ensure_working_task(connection, repository, task_id, mode, owner)
     if mode == "lightweight":
         result = update_working_task(
@@ -3938,13 +4019,17 @@ def run_turn(
         "files": len(files),
         "excluded": path_excluded,
         "pending": 0 if flushed else buffered,
-        "flushed": flushed is not None,
+        "flushed": flushed is not None and not flushed.get("closed_task"),
         "revision": flushed.get("revision") if flushed else None,
         "files_omitted": flushed.get("files_omitted") if flushed else 0,
         "provisioned": bool(flushed and flushed.get("provisioned")),
         # The UUID of the pre-existing record the flush restored the local
         # binding to — the second-machine signal. None on an ordinary flush.
         "rebound": flushed.get("rebound") if flushed else None,
+        # The completed task the buffered turns were meant for, when the
+        # branch went on after completion; those turns were dropped.
+        "closed_task": flushed.get("closed_task") if flushed else None,
+        "discarded_turns": flushed.get("discarded_turns", 0) if flushed else 0,
         "completion_candidates": completion_candidates,
         "promoted": promotion["promoted"],
         "promotion_failed": promotion["failed"],
@@ -3968,6 +4053,8 @@ def run_turn(
             "pending": result["pending"],
             "provisioned": result["provisioned"],
             "rebound": result["rebound"],
+            "closed_task": result["closed_task"],
+            "discarded_turns": result["discarded_turns"],
             "completion_candidates": [
                 str(item["task_id"]) for item in completion_candidates
             ],
@@ -3997,6 +4084,11 @@ def run_turn(
     if not arguments.json:
         if result["rebound"]:
             print(f"binding restored to existing task: {result['rebound']}")
+        if result["closed_task"]:
+            print(
+                f"task {task_id} is closed: {result['discarded_turns']} turn(s) "
+                "after its completion were not recorded"
+            )
         for item in completion_candidates:
             print(
                 "completion candidate (explicit complete required): "
@@ -5213,12 +5305,20 @@ def main() -> int:
                         reason=arguments.reason,
                         replace_next_steps=arguments.replace_next_steps,
                     )
+                promotion = promote_on_resolution(repository, result, owner)
                 if arguments.json:
-                    print(json.dumps(result, ensure_ascii=False))
+                    print(json.dumps(
+                        {**result, "promotion": promotion} if promotion else result,
+                        ensure_ascii=False,
+                    ))
                 else:
                     print(
                         f"Project Brain {result['type']} updated: {result['id']}."
                     )
+                    for item in (promotion or {}).get("promoted", []):
+                        print(f"Promoted to durable memory: {item['memory_id']}.")
+                    for item in (promotion or {}).get("blocked", []):
+                        print(f"warning: not promoted: {item['reason']}")
                 return 0
 
             if arguments.command == "brain-get":
@@ -5726,15 +5826,24 @@ def main() -> int:
                 return 0
 
             if arguments.command == "validate":
-                errors = validate_repository(repository)
-                result = {"valid": not errors, "errors": errors}
+                # A record whose cited file changed is intact: retrieval serves
+                # it marked for checking. It is listed, and does not fail the
+                # project the way a broken record does.
+                errors = validate_repository(repository, check_freshness=False)
+                stale = stale_records(repository)
+                result = {"valid": not errors, "errors": errors, "stale": stale}
                 if arguments.json:
                     print(json.dumps(result, ensure_ascii=False))
-                elif errors:
+                else:
                     for error in errors:
                         print(error)
-                else:
-                    print("Project Brain validation passed.")
+                    if not errors:
+                        print("Project Brain validation passed.")
+                    for path in stale:
+                        print(
+                            f"Warning: {path}: a cited source changed after the "
+                            "record was written; retrieval marks it for checking"
+                        )
                 return 0 if not errors else 1
 
             if arguments.command == "parity":
