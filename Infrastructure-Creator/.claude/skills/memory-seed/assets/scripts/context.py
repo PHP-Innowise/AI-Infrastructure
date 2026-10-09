@@ -39,6 +39,7 @@ from brain_runtime import (
     create_promotion,
     create_record,
     create_task,
+    dynamic_path,
     get_record,
     get_task,
     load_config,
@@ -3797,6 +3798,12 @@ def complete_governed_task(
             event = record_completion_event(
                 repository, task, outcome, verification, owner
             )
+            if event is not None:
+                # The snapshot predates the event, so it has no entry for it;
+                # marked absent, the restore below removes it with the rest
+                # rather than leave "Completed" beside a reopened task.
+                created = dynamic_path(repository, {"type": "event", "id": event})
+                snapshot[created] = None
             connection.commit()
         except Exception:
             connection.rollback()
