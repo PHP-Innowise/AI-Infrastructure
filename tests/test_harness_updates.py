@@ -58,6 +58,7 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(git(self.other, "rev-parse", "HEAD"), git(self.clone, "rev-parse", "HEAD"))
         self.assertTrue((self.clone / "Cart.php").is_file())
         self.assertEqual("updated", self.updates.status()["state"])
+        self.updates.resume()  # what a server that does not restart does
         with self.assertRaisesRegex(SessionError, "already up to date"):
             self.updates.apply()
 
@@ -85,10 +86,38 @@ class UpdateTests(unittest.TestCase):
 
     def test_runs_in_progress_hold_the_update_back(self):
         self.publish("Billing.php", "<?php\n", "Add billing")
-        busy = updates.Updates(self.clone, busy=lambda: 2)
+        released = []
+        busy = updates.Updates(self.clone, hold=lambda: 2, release=lambda: released.append(True))
         with self.assertRaisesRegex(SessionError, "2 runs are in progress"):
             busy.apply()
         self.assertNotEqual(git(self.other, "rev-parse", "HEAD"), git(self.clone, "rev-parse", "HEAD"))
+        self.assertEqual([], released)  # nothing was held, so nothing is let go
+
+    def test_new_runs_stay_held_from_the_busy_check_until_the_restart_or_a_failure(self):
+        calls = []
+        held = updates.Updates(self.clone, hold=lambda: calls.append("hold") or 0, release=lambda: calls.append("release"))
+        # Already current, diverged, or local changes in the way: the update fails and runs may start again.
+        with self.assertRaises(updates.UpToDate):
+            held.apply()
+        self.assertEqual(["hold", "release"], calls)
+        self.publish("README.md", "Second\n", "Rewrite the readme")
+        (self.clone / "README.md").write_text("My notes\n", encoding="utf-8")
+        with self.assertRaisesRegex(SessionError, "clone is unchanged"):
+            held.apply()
+        self.assertEqual(["hold", "release"] * 2, calls)
+        (self.clone / "README.md").write_text("First\n", encoding="utf-8")
+        # Applied: the hold outlives apply() for the restart the caller hands over to, and a second update is refused
+        # without touching it.
+        calls.clear()
+        held.apply()
+        self.assertEqual(["hold"], calls)
+        with self.assertRaisesRegex(SessionError, "restarting"):
+            held.apply()
+        self.assertEqual(["hold"], calls)
+        # A server that does not restart lets runs start again, once.
+        held.resume()
+        held.resume()
+        self.assertEqual(["hold", "release"], calls)
 
     def test_a_clone_that_follows_nothing_or_cannot_reach_its_remote_says_why(self):
         git(self.clone, "checkout", "-q", "-b", "experiment")

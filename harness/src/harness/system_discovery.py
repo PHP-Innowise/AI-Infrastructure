@@ -337,6 +337,7 @@ class DiscoveryManager:
         if not items(draft['services'], 50):
             raise SessionError('Choose at least one service folder first (up to 50 per scan).')
         with self.sessions.lock:
+            self.sessions.admit()
             if self.sessions.jobs.full() or self.sessions.stopping.is_set():
                 raise SessionError('The run queue is full or the server is stopping.')
             current = self.editor.load({'project_id': draft['project_id'], 'config_path': draft['config_path']})

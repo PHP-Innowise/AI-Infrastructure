@@ -1053,6 +1053,95 @@ assert.match(renderExistingWorktrees().error,/could not list/);
             self.assertEqual(self.post("/api/app/update", {})[:2], (400, {"error": "2 runs are in progress"}))
         self.assertEqual(self.post("/api/app/update", {"x": 1})[0], 404)
 
+    def gated_update(self, merge_code=0):
+        """The server's update with an available change and a merge that waits at a barrier: a request sent while it
+        waits arrives between the update's busy check and its merge."""
+        updates = self.server.updates
+        merging, finish = threading.Event(), threading.Event()
+
+        def git(*args, **kwargs):
+            if args[0] == "merge":
+                merging.set()
+                finish.wait(10)
+                return subprocess.CompletedProcess(args, merge_code, "", "error: Your local changes would be overwritten by merge")
+            return subprocess.CompletedProcess(args, 0, "def5678\n", "")
+        available = {"state": "available", "detail": "1 new change on origin/main.", "checked_at": None, "behind": 1,
+                     "ahead": 0, "commits": [], "branch": "main", "upstream": "origin/main", "version": "abc1234"}
+        stack = contextlib.ExitStack()
+        stack.enter_context(patch.object(updates, "_compute", return_value=available))
+        stack.enter_context(patch.object(updates, "_git", side_effect=git))
+        stack.enter_context(patch.object(web, "refresh_application", return_value=[]))
+        self.addCleanup(stack.close)
+        self.addCleanup(finish.set)
+        answer = {}
+        applying = threading.Thread(target=lambda: answer.update(reply=self.post("/api/app/update", {})[:2]), daemon=True)
+        applying.start()
+        self.assertTrue(merging.wait(5), "the update never reached its merge")
+
+        def done():
+            finish.set()
+            applying.join(5)
+            return answer["reply"]
+        return done
+
+    def test_an_update_holds_new_runs_back_from_its_busy_check_through_the_restart(self):
+        status, created, _ = self.post("/api/sessions", self.options(provider="claude"))
+        self.assertEqual(201, status)
+        sid, store = created["session"]["id"], self.server.sessions
+        with store.lock:
+            store.db.execute("UPDATE sessions SET status='completed',native_session_id='fixture-native' WHERE id=?", (sid,))
+            store.db.commit()
+        self.server.relaunch_command = [sys.executable, str(Path(web.__file__).resolve()), "serve"]
+        refused = (400, {"error": web.HOLD_REASON})
+        with patch.object(self.server, "restart", return_value=True) as restart:
+            finish = self.gated_update()
+            # Between the busy check and the merge, a new session and a follow-up are refused, not queued for the
+            # restart to interrupt.
+            self.assertEqual(refused, self.post("/api/sessions", self.options(provider="claude"))[:2])
+            self.assertEqual(refused, self.post(f"/api/sessions/{sid}/messages", {"prompt": "Continue"})[:2])
+            status, applied = finish()
+            self.assertEqual((202, True), (status, applied["restarting"]))
+            restart.assert_called_once()
+            # The hold outlives the reply until this server has stopped; a second update does not lift it.
+            self.assertEqual(refused, self.post("/api/sessions", self.options(provider="claude"))[:2])
+            status, again, _ = self.post("/api/app/update", {})
+            self.assertEqual(400, status)
+            self.assertIn("restarting", again["error"])
+            self.assertEqual(refused, self.post("/api/sessions", self.options(provider="claude"))[:2])
+        # Nothing was queued that the restart would turn into interrupted.
+        self.assertEqual([(sid, "completed")], [(item["id"], item["status"]) for item in store.summaries()])
+
+    def test_an_update_that_fails_or_does_not_restart_lets_new_runs_start_again(self):
+        def start_and_stop():
+            status, created, _ = self.post("/api/sessions", self.options(provider="claude"))
+            self.assertEqual(201, status)
+            self.assertEqual(200, self.post(f"/api/sessions/{created['session']['id']}/cancel", {})[0])
+        refused = (400, {"error": web.HOLD_REASON})
+        # The merge fails: refused while it runs, admitted once it has failed.
+        finish = self.gated_update(merge_code=1)
+        self.assertEqual(refused, self.post("/api/sessions", self.options(provider="claude"))[:2])
+        status, failed = finish()
+        self.assertEqual(400, status)
+        self.assertIn("clone is unchanged", failed["error"])
+        start_and_stop()
+        # Nothing to apply.
+        with patch.object(self.server.updates, "_compute", return_value={**self.server.updates.status(), "state": "current"}):
+            self.assertEqual(200, self.post("/api/app/update", {})[0])
+        start_and_stop()
+        # Applied by a server that cannot restart itself: it keeps the old code running, and runs.
+        self.server.relaunch_command = None
+        finish = self.gated_update()
+        self.assertEqual(refused, self.post("/api/sessions", self.options(provider="claude"))[:2])
+        status, applied = finish()
+        self.assertEqual((202, False), (status, applied["restarting"]))
+        status, created, _ = self.post("/api/sessions", self.options(provider="claude"))
+        self.assertEqual(201, status)
+        # A queued run holds the update back, and the refused update holds nothing back.
+        status, busy, _ = self.post("/api/app/update", {})
+        self.assertEqual((400, "1 run is in progress, and updating restarts the Harness. Let them finish or stop them, then update."),
+                         (status, busy["error"]))
+        self.assertEqual(201, self.post("/api/sessions", self.options(provider="claude"))[0])
+
     def test_a_relaunch_starts_only_this_server_command(self):
         state = self.root / "relaunch-state"
         state.mkdir()
@@ -2375,6 +2464,53 @@ assert.deepEqual([percentText(1, 1000), percentText(0, 10), percentText(5, 0)], 
 assert.equal(contextLaunchLine({kind: 'fleet', context: {ledger, agents: 5}}).textContent, 'Memory prefix ≈\u00a04.1k sent to 5 agents');
 assert.equal(contextLaunchLine({kind: 'clash', context: {ledger, agents: 2}}).textContent, 'Memory prefix ≈\u00a04.1k sent to 2 agents');
 assert.deepEqual([contextLaunchLine({kind: 'native', context: {ledger, agents: 1}}), contextLaunchLine({kind: 'fleet', context: null})], [null, null]);
+""")
+
+    def test_the_context_view_draws_again_when_anything_it_shows_changes(self):
+        page = ui_script()
+        source = page[page.index("// Sessions › Usage › Context"):page.index("\n$('context-meter').addEventListener")]
+        self.run_node(page[page.index("\nconst numberText"):page.index("\nfunction numberNode(")]
+                      + page[page.index("\nconst plural"):page.index("\nconst reasonLabel")]
+                      + "\nconst window = {matchMedia: () => ({matches: false, addEventListener() {}})};"
+                      + "\nconst el = (tag, className, text) => ({tag, className, textContent: text ?? '',"
+                      + " append(...parts) { this.textContent += parts.map(part => part.textContent ?? part).join(''); }});"
+                      + "\nconst numberNode = value => ({textContent: value.text});"
+                      + "\nconst nodes = {}, $ = id => nodes[id] ||= {hidden: false, textContent: '', firstChild: id === 'context-usage' ? {} : null};"
+                      + "\nconst state = {selectedId: 's1'}, memoryClock = {time: {format: () => '10:00'}};\n" + source, r"""
+// The real view down to what it draws; the legend records the details it would show under Everything else.
+const drawn = [];
+renderContextHeadline = renderContextBar = renderContextTurns = renderContextTable = () => {};
+renderContextLegend = (turn, turns, index) => drawn.push(contextDetails('rest', turn, turns, index).map(node => node.textContent).join(' | '));
+let status = 'running';
+const context = {provider: 'claude', agents: 1, hooks: {installed: true, measured: true, bytes: null}, cli_files: [],
+  ledger: {message: 20, instructions: 300, total: 2000, attachments: null, capsule: null, excerpts: []}};
+const fill = {start: 30000, end: 30000, peak: 30000, calls: 1, window: 200000, compactions: [], cache_share: null, hooks: {brain: 360, bank: 0, rules: 0}};
+const draw = () => {
+  const before = drawn.length;
+  renderContextUsage({launches: [{id: 'l1', kind: 'native', status, started_at: '2026-10-09T10:00:00+00:00', settings: {provider: 'claude'},
+                                  context: structuredClone({...context, fill})}]});
+  return drawn.length > before;
+};
+assert.deepEqual([draw(), draw()], [true, false]);
+// A second hook's output arrived before the next model call: only the hook memory changed.
+fill.hooks = {brain: 360, bank: 3600, rules: 720};
+assert.deepEqual([draw(), draw()], [true, false]);
+assert.match(drawn.at(-1), /Hook memory ≈.*Memory bank 3,600, Rules & docs 720 characters/);
+// A memory follow-up after the turn adds its prompt to the ledger; nothing else changes.
+context.ledger = {...context.ledger, instructions: 650, total: 2350};
+assert.equal(draw(), true);
+assert.notEqual(drawn.at(-1), drawn.at(-2));
+for (const change of [() => { fill.peak = 41000; }, () => { fill.start = 29000; }, () => { fill.compactions = [{pre: 150000, post: null, call: 1}]; },
+                      () => { fill.compactions = [{pre: 150000, post: 29000, call: 1}]; }, () => { status = 'completed'; }]) {
+  change();
+  assert.deepEqual([draw(), draw()], [true, false], String(change));
+}
+// A turn's column is built again when anything it draws changed, its numbers inside a compaction included.
+const column = changes => contextColumnKey(contextTurn({id: 'l1', kind: 'native', status, started_at: '2026-10-09T10:00:00+00:00', settings: {provider: 'claude'},
+                                                         context: {...context, fill: {...fill, ...changes}}}, 1));
+const keys = [column({}), column({peak: 160000}), column({start: 28000}), column({compactions: [{pre: 170000, post: 29000, call: 1}]}), column({end: 31000})];
+assert.equal(new Set(keys).size, keys.length);
+assert.equal(column({}), keys[0]);
 """)
 
     def test_keyed_render_keeps_open_nodes_across_polls(self):

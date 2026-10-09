@@ -1,5 +1,6 @@
 """Usage › Context: per-launch integers for what fills the context window, and how much of it is memory."""
 
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -14,7 +15,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "harness/src"))
 from harness import context_usage, providers, sessions
-from harness.context_usage import ContextTracker, capsule_text_parts, codex_fill
+from harness.context_usage import CodexFill, ContextTracker, capsule_text_parts
 
 # A runtime from before excerpts printed each item as '  path — title' under its layer.
 HOOK_TEXT = ("working: T-1 — Retry webhooks\nLast turn: tests passed\nsemantic:\n"
@@ -129,6 +130,10 @@ records = [{"type": "session_meta", "payload": {"id": "native-context", "cwd": s
         "last_token_usage": {"input_tokens": 999999}}}},
     count(38616), count(52000), {"type": "compacted", "timestamp": at(0), "payload": {"message": ""}}, count(21000), count(26000),
     {"type": "event_msg", "timestamp": at(0), "payload": {"type": "token_count", "info": None, "rate_limits": {}}}]
+if config["behavior"] == "long-codex":
+    # More tool output than the 4 MiB the Harness reads from the rollout's end, then the launch's last call.
+    records += [{"type": "response_item", "timestamp": at(0), "payload": {"type": "function_call_output", "output": "x" * 4096}}] * 1100
+    records.append(count(30000))
 rollout.write_text("".join(json.dumps(record) + "\n" for record in records))
 with sqlite3.connect(home / "state_5.sqlite") as db:
     db.execute("CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT)")
@@ -211,13 +216,13 @@ class ContextTrackerTests(unittest.TestCase):
         line = lambda record, seconds=0: json.dumps({"timestamp": (now + timedelta(seconds=seconds)).isoformat(), **record})
         count = lambda fill, seconds=0: line({"type": "event_msg", "payload": {"type": "token_count", "info": {
             "model_context_window": 258400, "last_token_usage": {"input_tokens": fill}}}}, seconds)
-        tail = "\n".join([count(999999, -7200), count(38616), count(52000), line({"type": "compacted", "payload": {}}),
-                          count(21000), "not json", count(26000), count(777777, 7200)])
-        fill = codex_fill(tail, now.timestamp() - 60, now.timestamp() + 60)
+        fill = CodexFill(now.timestamp() - 60, now.timestamp() + 60)
+        for record in [count(999999, -7200), count(38616), count(52000), line({"type": "compacted", "payload": {}}),
+                       count(21000), "not json", count(26000), count(777777, 7200)]:
+            fill.feed(record)
         self.assertEqual({"start": 38616, "end": 26000, "peak": 52000, "calls": 4, "window": 258400,
-                          "compactions": [{"pre": 52000, "post": 21000, "call": 2}]}, fill)
-        self.assertIsNone(codex_fill("", 0, 1))
-        self.assertIsNone(codex_fill(None, 0, 1))
+                          "compactions": [{"pre": 52000, "post": 21000, "call": 2}]}, fill.snapshot())
+        self.assertIsNone(CodexFill(0, 1).snapshot())
 
     def test_live_writes_wait_two_seconds_unless_the_fill_moved_half_a_percent(self):
         tracker = ContextTracker("claude")
@@ -382,6 +387,53 @@ class ContextLaunchTests(unittest.TestCase):
                           "compactions": [{"pre": 52000, "post": 21000, "call": 2}], "hooks": None}, context["fill"])
         self.assertEqual(({"installed": True, "measured": False, "bytes": None}, [{"name": "AGENTS.md", "bytes": 7}]),
                          (context["hooks"], context["cli_files"]))
+
+    def test_a_codex_launch_longer_than_the_rollout_tail_keeps_its_start_peak_calls_and_compactions(self):
+        # The first calls and the compaction lie before the last 4 MiB of the rollout, which is all the tail read
+        # after the launch holds; only the live reads saw them, and they stay.
+        self.behavior = "long-codex"
+        manager = self.manager()
+        session, launches = self.run_session(manager, provider="codex", project_context=False)
+        self.assertEqual("completed", session["status"])
+        self.assertGreater((self.root / "codex-home/sessions/rollout-native-context.jsonl").stat().st_size, 4 * 1024 * 1024)
+        fill = launches[0]["context"]["fill"]
+        self.assertEqual({"start": 38616, "end": 30000, "peak": 52000, "calls": 5, "window": 258400, "cache_share": .8,
+                          "compactions": [{"pre": 52000, "post": 21000, "call": 2}], "hooks": None}, fill)
+        self.assertEqual({"fill": 30000, "window": 258400, "compacted": True},
+                         {key: session["context_last"][key] for key in ("fill", "window", "compacted")})
+        self.assertEqual([52000], [event["compaction"]["pre"] for event in manager.events(session["id"]) if "compaction" in event])
+
+    def test_a_settled_codex_fill_extends_the_live_reads_by_place_in_the_file(self):
+        home = self.root / "codex-home"
+        (home / "sessions").mkdir(parents=True)
+        rollout = home / "sessions" / "rollout-long.jsonl"
+        now = datetime.now(timezone.utc)
+        record = lambda kind, payload: json.dumps({"type": kind, "timestamp": now.isoformat(), "payload": payload})
+        count = lambda fill: record("event_msg", {"type": "token_count", "info": {"model_context_window": 258400,
+                                                                                    "last_token_usage": {"input_tokens": fill}}})
+        output = record("response_item", {"type": "function_call_output", "output": "x" * 4096})
+        mebibyte = (1024 * 1024) // (len(output) + 1)
+        meta = json.dumps({"type": "session_meta", "payload": {"id": "native-long", "cwd": str(self.project), "source": "exec"}})
+        # 25,000 sits where both the live reads and the tail reach; 30,000 and the last line, which has no newline,
+        # only the tail reaches.
+        lines = [meta, count(100000), record("compacted", {}), count(20000), *[output] * (2 * mebibyte), count(25000),
+                 *[output] * (2 * mebibyte), count(30000), *[output] * mebibyte]
+        rollout.write_text("\n".join(lines) + "\n" + count(31000))
+        with closing(sqlite3.connect(home / "state_5.sqlite")) as db:
+            db.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT)")
+            db.execute("INSERT INTO threads VALUES (?,?,?)", ("native-long", str(rollout), str(self.project)))
+            db.commit()
+        with patch.object(context_usage.CodexLive, "LIMIT", 1024 * 1024), patch.object(context_usage.CodexLive, "SETTLE_READS", 2):
+            live = context_usage.CodexLive(self.project, now.timestamp() - 1)
+            self.assertTrue(live.poll("native-long"))
+            self.assertEqual((100000, 20000, 2), tuple(live.fill.snapshot()[key] for key in ("start", "end", "calls")))
+            self.assertTrue(live.settle("native-long", time.time()))
+        # Three reads of 1 MiB stop short of the 5 MiB rollout, and its last 4 MiB begin before they stopped.
+        size = rollout.stat().st_size
+        self.assertTrue(size - 4 * 1024 * 1024 < live.offset < size, (size, live.offset))
+        self.assertEqual([100000, 20000, 25000, 30000, 31000], live.fill.fills)
+        self.assertEqual({"start": 100000, "end": 31000, "peak": 100000, "calls": 5, "window": 258400,
+                          "compactions": [{"pre": 100000, "post": 20000, "call": 1}]}, live.fill.snapshot())
 
     def test_codex_fill_grows_while_the_launch_runs(self):
         self.behavior = "slow-codex"

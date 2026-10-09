@@ -621,8 +621,8 @@ class LaunchTests(unittest.TestCase):
                          (receipt['steps'], receipt['opened'], receipt['plan'], receipt['limited']))
 
     def test_codex_compaction_dividers_follow_the_live_rollout_not_the_tail(self):
-        # The live reader's list only grows; the tail read after the launch is the rollout's last 4 MiB and may begin
-        # inside a long launch, so its list can start one compaction later. Dividers must not be matched to it by position.
+        # The live reader's list only grows, also through the reads that settle it once the launch has ended (with the
+        # rollout's last 4 MiB, which may begin inside a long launch, one compaction later): one divider per compaction.
         c1, c2, c3 = ({'pre': pre, 'post': 1000, 'call': call} for pre, call in ((150001, 3), (150002, 7), (150003, 12)))
 
         class Live:
@@ -635,15 +635,17 @@ class LaunchTests(unittest.TestCase):
                 self.reads, self.offset = self.reads + 1, self.offset + 100
                 return True
 
+            def settle(self, native_id, until):
+                changed = False
+                while self.poll(native_id):
+                    changed = True
+                return changed
+
             def snapshot(self):
                 return {'start': 1, 'end': 2, 'peak': 3, 'calls': 12, 'window': 200000, 'compactions': list(self.lists[self.reads - 1])}
 
-        shifted = {'start': 1, 'end': 2, 'peak': 3, 'calls': 9, 'window': 200000,
-                   'compactions': [{**c2, 'call': 4}, {**c3, 'call': 9}]}
         with mock.patch.object(sessions.providers, 'discover_providers', return_value=[{'id': 'codex', 'available': True, 'executable': str(self.fake)}]), \
-                mock.patch.object(sessions.context_usage, 'CodexLive', Live), \
-                mock.patch.object(sessions.context_usage, 'codex_fill', return_value=shifted), \
-                mock.patch.object(sessions.providers, 'codex_rollout_tail', return_value='tail'):
+                mock.patch.object(sessions.context_usage, 'CodexLive', Live):
             store = sessions.Sessions(self.root / 'codex-state', [self.project], timeout=120)
             self.addCleanup(store.close)
             self.script.write_text('\n'.join(json.dumps(event) for event in (

@@ -32,7 +32,7 @@ from harness import process_runtime
 from harness.sessions import Sessions, SessionError, WORKFLOWS, MAX_AGENTS, DEFAULT_AGENT_COUNT, CONTEXT_EXCERPT_BYTES, fleet_runtime
 from harness import clash, sdd
 from harness.attachments import MAX_JSON_BYTES
-from harness.updates import UpToDate, Updates, refresh_application
+from harness.updates import HOLD_REASON, UpToDate, Updates, refresh_application
 from harness.skills import SkillManager
 from harness.knowledge import KnowledgeBusy, KnowledgeManager
 from harness import memory_use
@@ -61,8 +61,9 @@ class HarnessServer(ThreadingHTTPServer):
             self.creator = CreatorManager(self.sessions)
             self.systems = SystemManager(self.sessions)
             self.discovery = DiscoveryManager(self.sessions, self.systems.editor)
-            # Updates restart this server; serve() names the command that starts it again.
-            self.updates = Updates(busy=self.running_count)
+            # Updates restart this server; serve() names the command that starts it again. From its check that no
+            # run is queued or running to that restart, an update holds new runs back.
+            self.updates = Updates(hold=lambda: self.sessions.hold_runs(HOLD_REASON), release=self.sessions.release_runs)
             self.relaunch_command = None
             self.token = secrets.token_urlsafe(32)
             self.instance = secrets.token_hex(16)
@@ -89,10 +90,6 @@ class HarnessServer(ThreadingHTTPServer):
             self.server_close()
             raise
 
-    def running_count(self):
-        """Runs a restart would interrupt: queued and running sessions."""
-        return sum(1 for session in self.sessions.summaries() if session['status'] in ('queued', 'running'))
-
     def restart(self):
         """Hand over to a process that starts this server again on the updated code once it has stopped, then stop.
         Without a relaunch command (a server not started by serve) it only reports that a restart is needed."""
@@ -106,6 +103,16 @@ class HarnessServer(ThreadingHTTPServer):
             subprocess.Popen(command, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=log, stderr=log, **process_runtime.daemon_kwargs())
         threading.Thread(target=self.shutdown, daemon=True).start()
         return True
+
+    def finish_update(self, restart):
+        """After an applied update: restart on the new code, new runs still held back until this server has stopped,
+        or let them start again when it does not restart."""
+        restarted = False
+        try:
+            restarted = bool(restart) and self.restart()
+        finally:
+            if not restarted:
+                self.updates.resume()
 
     def close(self):
         self.shutdown()
@@ -561,11 +568,14 @@ class Handler(BaseHTTPRequestHandler):
                 except UpToDate as current:
                     self.reply(200, {'ok': True, 'current': True, 'restarting': False, 'detail': str(current)})
                     return
-                result['application'] = refresh_application()
-                result['restarting'] = bool(self.server.relaunch_command)
-                self.reply(202, {'ok': True, **result})
-                if result['restarting']:
-                    self.server.restart()
+                # New runs stay held back until the restart, which follows the reply and happens even when the
+                # page went away meanwhile; a server that does not restart lets them start again.
+                try:
+                    result['application'] = refresh_application()
+                    result['restarting'] = bool(self.server.relaunch_command)
+                    self.reply(202, {'ok': True, **result})
+                finally:
+                    self.server.finish_update(result.get('restarting'))
             else:
                 self.error(404, 'Not found.')
         except KnowledgeBusy as error:

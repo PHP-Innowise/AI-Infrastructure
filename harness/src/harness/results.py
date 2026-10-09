@@ -229,6 +229,7 @@ class Results:
         argv=self.check_command(data); store=self.sessions
         with store.lock:
             session=store.get(sid)
+            store.admit()
             if session['status'] in ACTIVE or store.stopping.is_set() or store.jobs.full():
                 raise SessionError('Wait for the current launch or queue to finish.')
             check={'id':str(uuid.uuid4()),'session_id':sid,**data,'argv':argv,**metadata,
@@ -248,6 +249,7 @@ class Results:
         with store.lock:
             session=store.get(sid)
             if session['creator']: raise SessionError('Creator runs its canonical checks at its own checkpoints.')
+            store.admit()
             if session['status'] in ACTIVE or store.stopping.is_set() or store.jobs.full():
                 raise SessionError('Wait for the current launch or queue to finish.')
             snapshot=self.snapshot(sid)
